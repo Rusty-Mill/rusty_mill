@@ -97,6 +97,10 @@ pub enum RequestKind {
     CountEdges,
     /// Protocol 22, ADR-0060.
     WriteBatch,
+    /// Protocol 23, ADR-0064.
+    Metrics,
+    /// Protocol 24, ADR-0065.
+    Backup,
 }
 
 impl RequestKind {
@@ -134,6 +138,8 @@ impl RequestKind {
             Request::Page { .. } => RequestKind::Page,
             Request::CountEdges { .. } => RequestKind::CountEdges,
             Request::WriteBatch { .. } => RequestKind::WriteBatch,
+            Request::Metrics => RequestKind::Metrics,
+            Request::Backup { .. } => RequestKind::Backup,
         }
     }
 }

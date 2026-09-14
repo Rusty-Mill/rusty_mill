@@ -9,6 +9,7 @@
 //! `client` feature and compiles none of this file. See `super`'s own
 //! module docs for the server's contract; this file is its body.
 
+use super::metrics::{ConnectionMetricsGuard, ServerMetrics};
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
@@ -21,7 +22,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -93,6 +94,17 @@ pub enum ReplaceIfOutcome {
     Replaced,
     NotFound,
     GuardFailed,
+}
+
+/// What [`ConnectionStore::backup`] copied (`BAK-FR-001`, ADR-0065) — the
+/// same shape [`crate::generic::CompactionReport`] uses for a
+/// filesystem-facing operator report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackupReport {
+    /// Files copied into the target directory.
+    pub files: u64,
+    /// Total bytes copied.
+    pub bytes: u64,
 }
 
 pub trait ConnectionStore: Send + Sync {
@@ -414,6 +426,20 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `BAK-FR-001` (ADR-0065, protocol 24): copy every file this
+    /// table's on-disk stack owns into `target_dir` (already resolved,
+    /// confinement-checked, and not yet at its final name — see
+    /// `handle_connection`'s own `Request::Backup` arm), under the
+    /// store's write lock so no concurrent write can land mid-copy. The
+    /// default answers `Unsupported`: an adapter built with no known
+    /// data directory (scratch-mode binaries, and any adapter that never
+    /// calls its own `with_backup_source`). A copy failure is
+    /// [`ErrorCode::Storage`]; the caller removes a partial `target_dir`
+    /// on any `Err`.
+    fn backup(&self, _target_dir: &Path) -> Result<BackupReport, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// This domain's schema, for a client that doesn't know it at compile
     /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
     /// knows its own field/relation shape unconditionally, no store access
@@ -462,6 +488,48 @@ pub trait ConnectionStore: Send + Sync {
         updates: &[TransactionOp],
         read_set: &[(RecordId, FieldRef, ScanValue)],
     ) -> Result<(), (usize, ErrorCode)>;
+}
+
+/// `BAK-FR-006` (ADR-0065): every file a table's on-disk stack owns
+/// shares one base path — `<dir>/memories.mmap`, `<dir>/memories.mmap.records`,
+/// `<dir>/memories.mmap.inserts`, `<dir>/memories.mmap.relations`,
+/// `<dir>/memories.mmap.<label>.edges`, and so on, every companion this
+/// crate has ever added or will add sharing that one prefix
+/// (`crate::generic::mmap_store::blob_path`,
+/// `crate::generic::insert_log::log_path`, `crate::generic::store`'s own
+/// label-manifest/edge-blob helpers). Rather than a `ConnectionStore`
+/// implementor enumerating its own stack's exact file set by type — real
+/// duplication of knowledge `crate::generic::query::Compact`'s own
+/// per-layer implementations already carry, and silently incomplete the
+/// day a future round adds one more companion file — this copies every
+/// entry in `base`'s directory whose name starts with `base`'s own file
+/// name, unconditionally. `target_dir` is created if missing; a file
+/// that already exists there (a caller error, since `handle_connection`
+/// always passes a fresh temporary directory) is overwritten.
+pub(crate) fn copy_table_files(base: &Path, target_dir: &Path) -> io::Result<BackupReport> {
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let stem = base.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{}: no file name to match companions against",
+                base.display()
+            ),
+        )
+    })?;
+    let stem = stem.to_string_lossy();
+    std::fs::create_dir_all(target_dir)?;
+    let mut report = BackupReport::default();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(stem.as_ref()) {
+            let bytes = std::fs::copy(entry.path(), target_dir.join(&name))?;
+            report.files += 1;
+            report.bytes += bytes;
+        }
+    }
+    Ok(report)
 }
 
 /// One message per [`ErrorCode`] variant — shared by [`err_response`] (a
@@ -1262,6 +1330,54 @@ fn err_response(code: ErrorCode) -> Response {
     }
 }
 
+/// `BAK-FR-004`–`006` (ADR-0065): resolve, confine, and execute one
+/// `Request::Backup` — kept out of `dispatch` (unlike `Compact`) because
+/// it needs [`ServeOptions::backup_root`], which a store-generic
+/// `dispatch(store, req)` has no way to reach — the same reason
+/// `Use`/`Delete`/`Join` bypass `dispatch` for `tables`-level routing,
+/// just for `options` instead of `tables`.
+///
+/// The target directory is never observed in a partial state: copying
+/// happens into a fresh, process-unique temporary directory under
+/// `root` (any leftover from a prior crash at the same name is removed
+/// first), and only a successful [`ConnectionStore::backup`] is
+/// followed by one atomic [`std::fs::rename`] onto the real name. An
+/// *existing* target — empty or not — is refused outright rather than
+/// risked against `std::fs::rename`'s own platform-specific "destination
+/// already exists" behavior (POSIX and Windows disagree on replacing a
+/// directory); a caller who wants to retry a name removes the old
+/// backup first.
+fn handle_backup(store: &dyn ConnectionStore, options: &ServeOptions, name: &str) -> Response {
+    let Some(root) = options.backup_root() else {
+        return err_response(ErrorCode::Unsupported);
+    };
+    // `BAK-FR-004`: a single path component, checked before any I/O —
+    // the server never honors a caller-supplied absolute path or a `..`
+    // component.
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return err_response(ErrorCode::Malformed);
+    }
+    let target = root.join(name);
+    if target.exists() {
+        return err_response(ErrorCode::Storage);
+    }
+    let tmp = root.join(format!(".backup-tmp-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let result = match store.backup(&tmp) {
+        Ok(report) => std::fs::rename(&tmp, &target)
+            .map(|()| Response::BackedUp {
+                files: report.files,
+                bytes: report.bytes,
+            })
+            .map_err(|_| ErrorCode::Storage),
+        Err(code) => Err(code),
+    };
+    result.unwrap_or_else(|code| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        err_response(code)
+    })
+}
+
 /// `ACC-FR-001`: a dispatched request's outcome *shape*, for the access
 /// log — exhaustive over every `Response` variant, never its content.
 /// `NotFound`/`NoParent` are `Ok` (a normal outcome, per this crate's own
@@ -1289,7 +1405,9 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Tables { .. }
         | Response::Compacted { .. }
         | Response::Count { .. }
-        | Response::BatchResults { .. } => access::Outcome::Ok,
+        | Response::BatchResults { .. }
+        | Response::Metrics { .. }
+        | Response::BackedUp { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1337,6 +1455,15 @@ pub struct ServeOptions {
     /// second `serve` parameter — `None` is plaintext, exactly [`serve`]'s
     /// behavior before this field existed (`TLS-FR-008`).
     tls: Option<TlsConfig>,
+    /// `MET-FR-002` (ADR-0064): always-on process-wide counters — not an
+    /// `Option`, unlike every sink above, since rendering them costs
+    /// nothing and needs no operator opt-in.
+    metrics: ServerMetrics,
+    /// `BAK-FR-003` (ADR-0065): the confinement boundary every
+    /// `Request::Backup` target must resolve under. `None` (the
+    /// default) answers every `Backup` request `Unsupported` —
+    /// zero new filesystem-write surface unless an operator opts in.
+    backup_root: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ServeOptions {
@@ -1379,6 +1506,14 @@ impl std::fmt::Debug for ServeOptions {
                     "none"
                 },
             )
+            .field(
+                "backup_root",
+                &if self.backup_root.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+            )
             .finish()
     }
 }
@@ -1400,6 +1535,8 @@ impl ServeOptions {
             rate_limit: None,
             access_log: None,
             tls: None,
+            metrics: ServerMetrics::new(),
+            backup_root: None,
         }
     }
 
@@ -1475,6 +1612,8 @@ impl ServeOptions {
             rate_limit: None,
             access_log: None,
             tls: None,
+            metrics: ServerMetrics::new(),
+            backup_root: None,
         }
     }
 
@@ -1494,6 +1633,28 @@ impl ServeOptions {
     /// The configured `TlsConfig`, or `None` for plaintext.
     pub fn tls(&self) -> Option<&TlsConfig> {
         self.tls.as_ref()
+    }
+
+    /// `MET-FR-002` (ADR-0064): the process-wide counters this
+    /// `ServeOptions`' `Arc` shares across every connection thread —
+    /// always present, never an `Option`.
+    pub fn metrics(&self) -> &ServerMetrics {
+        &self.metrics
+    }
+
+    /// `BAK-FR-003` (ADR-0065): every `Request::Backup` target must
+    /// resolve to a descendant of `root` — opt-in; unset, every `Backup`
+    /// request answers `Unsupported` server-wide, the identical
+    /// "closed unless configured" posture `SERVER_TXN_JOURNAL_PATH`
+    /// already established for the transaction journal.
+    pub fn with_backup_root(mut self, root: PathBuf) -> Self {
+        self.backup_root = Some(root);
+        self
+    }
+
+    /// The configured backup root, or `None`.
+    pub(crate) fn backup_root(&self) -> Option<&Path> {
+        self.backup_root.as_deref()
     }
 
     /// No tokens *and* no certificate classes configured — `AUTH-FR-007`:
@@ -2207,6 +2368,15 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
                 message: error_message(code).to_string(),
             },
         },
+        // `MET-FR-005` (ADR-0064): process-wide state `handle_connection`
+        // owns (it needs `ServeOptions`, which a store-generic `dispatch`
+        // has no way to reach) — the `Hello`/`Authenticate` precedent.
+        // Reaching this arm at all never happens in the real dispatch
+        // loop.
+        Request::Metrics => err_response(ErrorCode::Unsupported),
+        // `BAK-FR-001` (ADR-0065): same story — `handle_backup` needs
+        // `ServeOptions::backup_root`, which `dispatch` cannot reach.
+        Request::Backup { .. } => err_response(ErrorCode::Unsupported),
     }
 }
 
@@ -2434,6 +2604,11 @@ fn handle_connection(
         },
     ));
     let _disconnect = DisconnectAudit { sink, peer };
+    // `MET-FR-002` (ADR-0064): the matching close runs on every return
+    // path via `Drop`, the identical guard shape `_disconnect` above
+    // already uses.
+    options.metrics().record_connection_opened();
+    let _metrics_guard = ConnectionMetricsGuard(options.metrics());
 
     // `PROTO-FR-004`: only the very first frame may be a `Hello`. Since
     // protocol 3 the negotiated version is kept too (`SESS-FR-006`): the
@@ -2572,6 +2747,7 @@ fn handle_connection(
                     | Request::Compact
                     | Request::ReplaceIf { .. }
                     | Request::WriteBatch { .. }
+                    | Request::Backup { .. }
             )
         {
             sink.record(&audit::AuditEvent::now(
@@ -2769,6 +2945,20 @@ fn handle_connection(
             Request::WriteBatch { ref ops, .. } if ops.len() > MAX_BATCH_OPS => {
                 err_response(ErrorCode::Malformed)
             }
+            // `MET-FR-005` (ADR-0064): a read — no `SessionOpen` gate,
+            // unlike every write above (harmless mid-session; never
+            // reaches `ConnectionStore` at all).
+            Request::Metrics if negotiated < 23 => err_response(ErrorCode::Malformed),
+            Request::Metrics => Response::Metrics {
+                text: options.metrics().render(),
+            },
+            // `BAK-FR-001` (ADR-0065): the same two gates every other
+            // operator write uses (`Compact`'s precedent), at 24; the
+            // real work is `handle_backup`'s; it needs `options`, which
+            // `dispatch` cannot reach.
+            Request::Backup { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
+            Request::Backup { .. } if negotiated < 24 => err_response(ErrorCode::Malformed),
+            Request::Backup { name } => handle_backup(store, options, &name),
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes
@@ -2804,6 +2994,11 @@ fn handle_connection(
             other => dispatch(store, other),
         };
         let resp = downgrade_for_version(resp, negotiated);
+        // `MET-FR-003` (ADR-0064): the identical call site `AccessEvent`
+        // is recorded at — one increment per dispatched request.
+        options
+            .metrics()
+            .record_request(matches!(outcome_of(&resp), access::Outcome::Ok));
         // `ACC-FR-004`: after the audit log's own recording for this path
         // (if any — the gates above already returned), one access event
         // per dispatched request, before the response is sent.
