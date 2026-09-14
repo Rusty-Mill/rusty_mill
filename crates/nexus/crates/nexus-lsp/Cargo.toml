@@ -9,6 +9,7 @@ description = "Nexus LSP host — spawns external Language Server Protocol serve
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }
+rusty_url = { path = "../../../rusty_url" }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

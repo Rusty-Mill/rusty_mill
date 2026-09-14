@@ -27,7 +27,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use nexus_kernel::{IpcDispatcher, IpcError, IpcFuture};
+use nexus_kernel::{Capability, IpcDispatcher, IpcError, IpcFuture};
 
 /// Write-once cell holding the core-plugin fallback dispatcher.
 ///
@@ -117,6 +117,62 @@ impl IpcDispatcher for CompositeIpcDispatcher {
         self.fallback
             .get()
             .and_then(|fb| fb.dispatch_async(caller_plugin_id, target_plugin_id, command_id, args))
+    }
+
+    /// Union of both delegates' static caller-capability requirements for
+    /// this target/command, so a wrapper caller can't dodge whichever
+    /// delegate would have gated the call had it been reached directly.
+    /// [`FixedDispatcher`]-style leaf dispatchers usually answer from only
+    /// one side; deduped union degrades to "prefer the non-empty answer"
+    /// whenever the other side is empty.
+    fn required_caller_caps(&self, target_plugin_id: &str, command_id: &str) -> Vec<Capability> {
+        let mut caps = self
+            .primary
+            .required_caller_caps(target_plugin_id, command_id);
+        if let Some(fb) = self.fallback.get() {
+            for cap in fb.required_caller_caps(target_plugin_id, command_id) {
+                if !caps.contains(&cap) {
+                    caps.push(cap);
+                }
+            }
+        }
+        caps
+    }
+
+    /// Args-aware counterpart of [`Self::required_caller_caps`] — same
+    /// deduped-union strategy over both delegates.
+    fn required_caller_caps_for_args(
+        &self,
+        target_plugin_id: &str,
+        command_id: &str,
+        args: &serde_json::Value,
+    ) -> Vec<Capability> {
+        let mut caps =
+            self.primary
+                .required_caller_caps_for_args(target_plugin_id, command_id, args);
+        if let Some(fb) = self.fallback.get() {
+            for cap in fb.required_caller_caps_for_args(target_plugin_id, command_id, args) {
+                if !caps.contains(&cap) {
+                    caps.push(cap);
+                }
+            }
+        }
+        caps
+    }
+
+    /// `true` if either delegate marks this target/command internal-only —
+    /// a wrapper must not be a way to reach a handler that would have been
+    /// rejected had the caller gone straight to whichever delegate owns it.
+    fn is_handler_internal_only(&self, target_plugin_id: &str, command_id: &str) -> bool {
+        if self
+            .primary
+            .is_handler_internal_only(target_plugin_id, command_id)
+        {
+            return true;
+        }
+        self.fallback
+            .get()
+            .is_some_and(|fb| fb.is_handler_internal_only(target_plugin_id, command_id))
     }
 }
 
@@ -222,5 +278,64 @@ mod tests {
             .dispatch("com.test.caller", "com.x", "do", &serde_json::json!({}))
             .unwrap();
         assert_eq!(out, serde_json::json!({ "from": "late" }));
+    }
+
+    /// A dispatcher whose caller-cap/internal-only gating answers are
+    /// fixed, independent of `dispatch`'s own success/failure — mirrors a
+    /// real `SharedPluginLoader` handler registered with `add_cap_requirement`
+    /// / `mark_internal_only`.
+    struct GatedDispatcher {
+        caps: Vec<Capability>,
+        internal_only: bool,
+    }
+
+    impl IpcDispatcher for GatedDispatcher {
+        fn dispatch(
+            &self,
+            _caller: &str,
+            _t: &str,
+            _c: &str,
+            _a: &serde_json::Value,
+        ) -> Result<serde_json::Value, IpcError> {
+            Ok(serde_json::json!({ "from": "gated" }))
+        }
+
+        fn required_caller_caps(
+            &self,
+            _target_plugin_id: &str,
+            _command_id: &str,
+        ) -> Vec<Capability> {
+            self.caps.clone()
+        }
+
+        fn is_handler_internal_only(&self, _target_plugin_id: &str, _command_id: &str) -> bool {
+            self.internal_only
+        }
+    }
+
+    #[test]
+    fn fallback_gating_is_not_silently_dropped() {
+        // Regression for finding 1: a `CompositeIpcDispatcher` wrapping a
+        // fallback that marks `com.x::do` internal-only and requiring
+        // `Capability::ProcessSpawn` must surface that through its own
+        // `required_caller_caps_for_args`/`is_handler_internal_only`
+        // rather than silently inheriting `IpcDispatcher`'s empty/false
+        // leaf-dispatcher defaults.
+        let cell = FallbackCell::new();
+        cell.set(Arc::new(GatedDispatcher {
+            caps: vec![Capability::ProcessSpawn],
+            internal_only: true,
+        }));
+        let composite = CompositeIpcDispatcher::new(ok("primary"), cell);
+
+        assert!(composite.is_handler_internal_only("com.x", "do"));
+        assert_eq!(
+            composite.required_caller_caps_for_args("com.x", "do", &serde_json::json!({})),
+            vec![Capability::ProcessSpawn]
+        );
+        assert_eq!(
+            composite.required_caller_caps("com.x", "do"),
+            vec![Capability::ProcessSpawn]
+        );
     }
 }

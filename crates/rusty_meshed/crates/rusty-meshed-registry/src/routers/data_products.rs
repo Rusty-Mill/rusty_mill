@@ -191,6 +191,9 @@ async fn list(state: Arc<AppState>, req: Request) -> Response {
         }
         None => 100,
     };
+    if limit < 0 {
+        return detail_error(StatusCode::UNPROCESSABLE_ENTITY, "limit must be >= 0");
+    }
     if limit > 100 {
         return detail_error(StatusCode::UNPROCESSABLE_ENTITY, "limit must be <= 100");
     }
@@ -693,6 +696,15 @@ mod tests {
         let state = temp_state();
         let mut request = req(Method::Get, "/data-products", Json::object());
         request.query.push(("limit".to_string(), "101".to_string()));
+        let response = router((*state).clone()).dispatch(request).await;
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[rusty_tokio::test]
+    async fn list_limit_rejects_negative_values() {
+        let state = temp_state();
+        let mut request = req(Method::Get, "/data-products", Json::object());
+        request.query.push(("limit".to_string(), "-1".to_string()));
         let response = router((*state).clone()).dispatch(request).await;
         assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
     }

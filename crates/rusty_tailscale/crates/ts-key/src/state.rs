@@ -6,7 +6,6 @@
 //! per-daemon, not portable.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::{DiscoPrivate, MachinePrivate, NodePrivate};
@@ -101,15 +100,8 @@ impl NodeState {
         };
         let json = serde_json::to_string_pretty(&raw).expect("state serializes");
 
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&path).map_err(io_err)?;
-        f.write_all(json.as_bytes()).map_err(io_err)?;
+        let secret = rusty_crypto_key::SecretBytes::new(json.into_bytes());
+        secret.save_to_file(&path).map_err(io_err)?;
         Ok(())
     }
 }
@@ -151,6 +143,59 @@ mod tests {
             NodeState::load_or_generate(&dir),
             Err(StateError::Corrupt { .. })
         ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_replaces_via_rename_not_in_place_truncate() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = std::env::temp_dir().join(format!("ts-key-rename-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        NodeState::generate().save(&dir).unwrap();
+        let path = dir.join(STATE_FILE);
+        let ino_before = fs::metadata(&path).unwrap().ino();
+
+        NodeState::generate().save(&dir).unwrap();
+        let ino_after = fs::metadata(&path).unwrap().ino();
+
+        // An in-place truncate-and-write keeps the same inode, so a
+        // concurrent reader could observe a half-written file. A
+        // temp-file-then-rename swap always produces a fresh inode at
+        // `path`, so a concurrent reader only ever sees a complete old or
+        // complete new file, never a partial one.
+        assert_ne!(
+            ino_before, ino_after,
+            "save() must replace the state file via atomic rename, not in-place truncate"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_tightens_permissions_on_preexisting_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("ts-key-perm-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join(STATE_FILE);
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        NodeState::generate().save(&dir).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "save() must tighten permissions to 0600 even when the file pre-existed with looser permissions"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

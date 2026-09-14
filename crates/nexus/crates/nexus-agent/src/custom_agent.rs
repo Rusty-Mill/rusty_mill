@@ -24,6 +24,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::tool_registry::Capability;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -172,6 +174,13 @@ pub struct ToolsSection {
 pub struct ManifestToolPolicy {
     allowed: std::collections::HashSet<String>,
     denied: std::collections::HashSet<String>,
+    /// Capability-level denials — a tool whose `required_capabilities`
+    /// (looked up in [`crate::AgentToolRegistry::global`]) intersects
+    /// this set is rejected regardless of name-based `allowed`/`denied`.
+    /// Populated by [`Self::from_capability_restriction`] (skill
+    /// `restrictions` gap-closing fix); empty for a manifest-only
+    /// policy built via [`Self::from_manifest`].
+    denied_capabilities: std::collections::HashSet<Capability>,
     /// Slug of the contributing manifest — used to build a clear
     /// rejection message ("denied by `<slug>`'s [tools] manifest")
     /// without forcing the caller to thread the slug separately.
@@ -186,7 +195,30 @@ impl ManifestToolPolicy {
         Self {
             allowed: manifest.tools.allowed.iter().cloned().collect(),
             denied: manifest.tools.denied.iter().cloned().collect(),
+            denied_capabilities: std::collections::HashSet::new(),
             slug: manifest.slug.clone(),
+        }
+    }
+
+    /// Build a policy from a skill's folded `restrictions` block
+    /// (`com.nexus.skills::invoke` gap-closing fix — capability gate
+    /// drop). `denied_capabilities` blocks any registered tool whose
+    /// `required_capabilities` includes one of these regardless of
+    /// its name; `allowed_tools` narrows to an explicit name
+    /// allow-list the same way a manifest's `[tools].allowed` does.
+    /// `label` identifies the contributing skill(s) in rejection
+    /// messages.
+    #[must_use]
+    pub fn from_capability_restriction(
+        denied_capabilities: std::collections::HashSet<Capability>,
+        allowed_tools: Vec<String>,
+        label: String,
+    ) -> Self {
+        Self {
+            allowed: allowed_tools.into_iter().collect(),
+            denied: std::collections::HashSet::new(),
+            denied_capabilities,
+            slug: label,
         }
     }
 
@@ -206,6 +238,21 @@ impl ManifestToolPolicy {
                 slug = self.slug,
             ));
         }
+        if !self.denied_capabilities.is_empty() {
+            if let Some(spec) = crate::AgentToolRegistry::global().lookup(tool_name) {
+                if let Some(cap) = spec
+                    .required_capabilities
+                    .iter()
+                    .find(|cap| self.denied_capabilities.contains(*cap))
+                {
+                    return Err(format!(
+                        "tool '{tool_name}' denied by '{slug}' restrictions (requires capability '{cap}')",
+                        slug = self.slug,
+                        cap = cap.as_str(),
+                    ));
+                }
+            }
+        }
         if !self.allowed.is_empty() && !self.allowed.contains(tool_name) {
             return Err(format!(
                 "tool '{tool_name}' not in '{slug}' [tools].allowed list",
@@ -215,13 +262,13 @@ impl ManifestToolPolicy {
         Ok(())
     }
 
-    /// `true` when both lists are empty — the policy is a no-op and
-    /// the caller can skip wrapping the dispatcher altogether. Tiny
-    /// optimisation; mainly here so the wrap site has a clear "skip
-    /// the indirection" branch.
+    /// `true` when there is nothing to enforce — the policy is a
+    /// no-op and the caller can skip wrapping the dispatcher
+    /// altogether. Tiny optimisation; mainly here so the wrap site
+    /// has a clear "skip the indirection" branch.
     #[must_use]
     pub fn is_noop(&self) -> bool {
-        self.allowed.is_empty() && self.denied.is_empty()
+        self.allowed.is_empty() && self.denied.is_empty() && self.denied_capabilities.is_empty()
     }
 }
 
@@ -931,6 +978,61 @@ text = "p"
         // Read passes (no allow filter); write denied.
         assert!(p.check("read_file").is_ok());
         assert!(p.check("write_file").is_err());
+    }
+
+    // ── gap-closing fix — ManifestToolPolicy::from_capability_restriction ──────
+
+    #[test]
+    fn capability_restriction_denies_tools_requiring_denied_capability() {
+        crate::seed_default_tools();
+        let p = ManifestToolPolicy::from_capability_restriction(
+            std::collections::HashSet::from([Capability::TerminalExecute]),
+            Vec::new(),
+            "skill restrictions".to_string(),
+        );
+        assert!(!p.is_noop());
+        // Requires TerminalExecute — denied.
+        let err = p.check("terminal_run_saved").unwrap_err();
+        assert!(err.contains("denied"));
+        assert!(err.contains("terminal.execute"));
+        // Requires FileSystemWrite only — untouched by this restriction.
+        assert!(p.check("write_file").is_ok());
+    }
+
+    #[test]
+    fn capability_restriction_narrows_via_allowed_tools() {
+        crate::seed_default_tools();
+        let p = ManifestToolPolicy::from_capability_restriction(
+            std::collections::HashSet::new(),
+            vec!["read_file".to_string()],
+            "skill restrictions".to_string(),
+        );
+        assert!(p.check("read_file").is_ok());
+        assert!(p.check("write_file").is_err());
+    }
+
+    #[test]
+    fn capability_restriction_empty_is_noop() {
+        let p = ManifestToolPolicy::from_capability_restriction(
+            std::collections::HashSet::new(),
+            Vec::new(),
+            "skill restrictions".to_string(),
+        );
+        assert!(p.is_noop());
+        assert!(p.check("terminal_run_saved").is_ok());
+    }
+
+    #[test]
+    fn capability_restriction_ignores_unregistered_tool_names() {
+        // A tool the global registry doesn't know about (e.g. a
+        // session-local `todo`) can't be capability-checked; it must
+        // fall through rather than panicking or false-denying.
+        let p = ManifestToolPolicy::from_capability_restriction(
+            std::collections::HashSet::from([Capability::TerminalExecute]),
+            Vec::new(),
+            "skill restrictions".to_string(),
+        );
+        assert!(p.check("todo").is_ok());
     }
 
     // ── ManifestPolicyGate decision matrix ─────────────────────────────────────

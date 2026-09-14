@@ -672,7 +672,17 @@ impl LlmBackend {
         let mut chunks: Vec<Value> = Vec::new();
         let mut usage = Usage::default();
 
-        for (event, data) in parser.push(&bytes) {
+        let events = match parser.push(&bytes) {
+            Ok(events) => events,
+            Err(err) => {
+                tracing::warn!(%err, "reading the provider response failed");
+                return error(
+                    StatusCode::BAD_GATEWAY,
+                    "the provider response was too large or truncated",
+                );
+            }
+        };
+        for (event, data) in events {
             match &mut translator {
                 Some(translator) => chunks.extend(translator.event(&event, &data)),
                 None => {
@@ -768,7 +778,14 @@ impl LlmBackend {
                     // OpenAI-compatible: the frames are already what the
                     // client expects, so they go straight through and usage is
                     // read from the trailing chunk if the provider sends one.
-                    for (_, data) in parser.push(&chunk) {
+                    let events = match parser.push(&chunk) {
+                        Ok(events) => events,
+                        Err(err) => {
+                            tracing::warn!(provider, %err, "provider stream buffer overflowed");
+                            break;
+                        }
+                    };
+                    for (_, data) in events {
                         if let Some(usage) = translate::openai_usage(&data)
                             && !reported
                         {
@@ -780,7 +797,14 @@ impl LlmBackend {
                     continue;
                 };
 
-                for (event, data) in parser.push(&chunk) {
+                let events = match parser.push(&chunk) {
+                    Ok(events) => events,
+                    Err(err) => {
+                        tracing::warn!(provider, %err, "provider stream buffer overflowed");
+                        break;
+                    }
+                };
+                for (event, data) in events {
                     for chunk in translator.event(&event, &data) {
                         yield Ok(Frame::data(Bytes::from(stream::frame(&chunk))));
                     }

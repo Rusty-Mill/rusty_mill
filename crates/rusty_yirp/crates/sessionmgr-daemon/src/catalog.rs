@@ -57,7 +57,18 @@ pub fn write_session(root: &Path, session: &Session) -> Result<()> {
     std::fs::write(&temp_path, encoded)
         .map_err(|e| Error::io("writing a session record", temp_path.clone(), e))?;
     std::fs::rename(&temp_path, &final_path)
-        .map_err(|e| Error::io("replacing a session record", final_path, e))
+        .map_err(|e| Error::io("replacing a session record", final_path.clone(), e))?;
+    // The record's own body -- launch `command: Vec<String>` and all --
+    // is exactly what `sessionmgr-daemon/src/hooks/dispatch.rs` already
+    // treats as sensitive, so it must not be world-readable regardless
+    // of the ambient umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::io("restricting a session record's permissions", final_path, e))?;
+    }
+    Ok(())
 }
 
 /// Reads one session record.
@@ -179,6 +190,16 @@ pub fn append_transcript(root: &Path, id: &SessionId, event: &SessionEvent) -> R
         .append(true)
         .open(&path)
         .map_err(|e| Error::io("opening a transcript", path.clone(), e))?;
+    // Every byte a session printed or received lands here, so it gets
+    // the same 0o600 treatment as `state.json` -- reapplied on every
+    // call, not only on first creation, so a transcript left loose by a
+    // pre-fix run is tightened the next time anything is appended.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::io("restricting a transcript's permissions", path.clone(), e))?;
+    }
     file.write_all(line.as_bytes())
         .map_err(|e| Error::io("appending to a transcript", path, e))
 }
@@ -419,5 +440,62 @@ mod tests {
         assert!(read_transcript(&root.0, &SessionId::new(1, 1))
             .expect("read")
             .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_data_is_written_owner_only_regardless_of_umask() {
+        // `state.json` holds the full launch `command: Vec<String>` and
+        // `transcript.jsonl` holds every byte the session ever printed
+        // or received -- `sessionmgr-daemon/src/hooks/dispatch.rs`
+        // already treats this exact data as sensitive. Under a default
+        // `umask 022`, unhardened `create_dir_all`/`write` would leave
+        // the directory `0o755` and the files `0o644`, readable by any
+        // other user on a shared host. This must hold regardless of the
+        // ambient umask, so it asserts the exact mode rather than "not
+        // world-readable".
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempRoot::new("permissions");
+        let s = session();
+        write_session(&root.0, &s).expect("write");
+        append_transcript(
+            &root.0,
+            &s.id,
+            &SessionEvent::Output {
+                data: b"secret output".to_vec(),
+            },
+        )
+        .expect("append");
+
+        let dir_mode = std::fs::metadata(paths::session_dir(&root.0, &s.id))
+            .expect("stat session dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "session dir mode is {dir_mode:o}, want 0o700"
+        );
+
+        let state_mode = std::fs::metadata(paths::session_state(&root.0, &s.id))
+            .expect("stat state.json")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            state_mode, 0o600,
+            "state.json mode is {state_mode:o}, want 0o600"
+        );
+
+        let transcript_mode = std::fs::metadata(paths::session_transcript(&root.0, &s.id))
+            .expect("stat transcript.jsonl")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            transcript_mode, 0o600,
+            "transcript.jsonl mode is {transcript_mode:o}, want 0o600"
+        );
     }
 }

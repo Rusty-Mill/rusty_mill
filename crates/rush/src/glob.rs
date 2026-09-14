@@ -21,6 +21,8 @@
 //! `crates/rusty_regx/docs/GLOB_DESIGN.md` (issue #20) for the engine's
 //! design and roadmap toward covering the rest.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -207,7 +209,7 @@ pub fn match_component(pattern: &str, name: &str) -> bool {
     }
     let p: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = name.chars().collect();
-    matches(&p, 0, &s, 0)
+    matches(&p, 0, &s, 0, &RefCell::new(HashMap::new()))
 }
 
 /// Whether `pattern` contains an unescaped extglob opener (`@(`, `?(`,
@@ -231,7 +233,20 @@ fn has_extglob_opener(pattern: &str) -> bool {
 
 /// The hand-rolled fallback matcher — see [`match_component`]'s doc
 /// comment for when this runs instead of `rusty_regx::Glob`.
-fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
+///
+/// `memo` caches this function's own result at each extglob dispatch point
+/// below, keyed by the pattern slice's address plus `pi`/`si` (alternatives
+/// are matched against their own separate arrays via `match_extglob`'s
+/// `alt_matches`, so the address disambiguates them from the top-level
+/// pattern and from each other) — see `match_extglob`'s doc comment for why
+/// this is needed beyond the `*`/`+` arms' own internal memoization.
+fn matches(
+    p: &[char],
+    mut pi: usize,
+    s: &[char],
+    mut si: usize,
+    memo: &RefCell<ExtglobMemo>,
+) -> bool {
     loop {
         if pi == p.len() {
             return si == s.len();
@@ -247,7 +262,13 @@ fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
             && crate::vars::shopt("extglob")
             && let Some((alts, rest)) = parse_extglob(p, pi + 1)
         {
-            return match_extglob(p[pi], &alts, p, rest, s, si);
+            let key = (p.as_ptr() as usize, pi, si);
+            if let Some(&cached) = memo.borrow().get(&key) {
+                return cached;
+            }
+            let result = match_extglob(p[pi], &alts, p, rest, s, si, memo);
+            memo.borrow_mut().insert(key, result);
+            return result;
         }
         match p[pi] {
             '*' => {
@@ -262,7 +283,7 @@ fn matches(p: &[char], mut pi: usize, s: &[char], mut si: usize) -> bool {
                 }
                 let mut k = si;
                 loop {
-                    if matches(p, npi, s, k) {
+                    if matches(p, npi, s, k, memo) {
                         return true;
                     }
                     if k == s.len() {
@@ -360,6 +381,10 @@ fn parse_extglob(p: &[char], open: usize) -> Option<(Vec<Vec<char>>, usize)> {
     None
 }
 
+/// A cache of `matches(p, pi, s, si)` results, keyed by the pattern
+/// slice's address plus `pi`/`si`.
+type ExtglobMemo = HashMap<(usize, usize, usize), bool>;
+
 /// Match one extglob group (`kind` is its prefix character) followed by
 /// the rest of the pattern (`p[rest..]`) against `s[si..]`. Alternatives
 /// are full glob patterns themselves (nesting recurses naturally); every
@@ -375,55 +400,87 @@ fn match_extglob(
     rest: usize,
     s: &[char],
     si: usize,
+    memo: &RefCell<ExtglobMemo>,
 ) -> bool {
-    let alt_matches =
-        |from: usize, to: usize| alts.iter().any(|alt| matches(alt, 0, &s[from..to], 0));
+    let alt_matches = |from: usize, to: usize| {
+        alts.iter()
+            .any(|alt| matches(alt, 0, &s[from..to], 0, memo))
+    };
     match kind {
-        '@' => (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k)),
+        // `@`/`?`/`!` try every split point and recurse on the tail via
+        // `matches`, the same "try every split point, recurse on the tail"
+        // shape as the `*`/`+` reachability search below — and the same
+        // adversarial-nesting DoS applies to it: chained or nested
+        // `@(...)`/`?(...)`/`!(...)` groups revisit the same (pattern
+        // position, string position) state through every distinct
+        // split-point path that reaches it, without caching — O(n^m) in
+        // the number of chained groups for adversarial input (a fuzzed
+        // chain of `!(...)` groups measured over 270k redundant calls and
+        // 100+ ms at just 10 chained groups, growing too fast to finish at
+        // 15). `matches`'s own `memo` parameter (threaded through here)
+        // caches each `matches(p, rest, s, k)` state the first time it's
+        // resolved, same as `*`/`+`'s `reach_memo` does for its own
+        // internal chunk-position states below.
+        '@' => (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k, memo)),
         '?' => {
-            matches(p, rest, s, si)
-                || (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k))
+            matches(p, rest, s, si, memo)
+                || (si..=s.len()).any(|k| alt_matches(si, k) && matches(p, rest, s, k, memo))
         }
-        '!' => (si..=s.len()).any(|k| !alt_matches(si, k) && matches(p, rest, s, k)),
+        '!' => (si..=s.len()).any(|k| !alt_matches(si, k) && matches(p, rest, s, k, memo)),
         // `*` / `+`: repetitions. Try the tail at every point reachable by
         // consuming zero (`*` only) or more alternative-matched chunks.
         //
         // `from` (with `min_done` always true past the first step) is
-        // memoized: without it, this is plain graph reachability over
-        // `0..=s.len()` positions explored by unbounded backtracking, which
-        // revisits the same `from` through every distinct chunk-split path
-        // that reaches it — exponential in `s.len()` for adversarial
-        // patterns (e.g. nested `*(...)`/`?(...)` fuzzed input that hung a
-        // fuzz run for 30 minutes). Caching each `from` the first time it's
-        // resolved caps total work at O(s.len()^2 * alt-match cost).
+        // memoized in `reach_memo`: without it, this is plain graph
+        // reachability over `0..=s.len()` positions explored by unbounded
+        // backtracking, which revisits the same `from` through every
+        // distinct chunk-split path that reaches it — exponential in
+        // `s.len()` for adversarial patterns (e.g. nested `*(...)`/`?(...)`
+        // fuzzed input that hung a fuzz run for 30 minutes). Caching each
+        // `from` the first time it's resolved caps total work at
+        // O(s.len()^2 * alt-match cost).
         '*' | '+' => {
-            fn reachable(
-                alt_matches: &dyn Fn(usize, usize) -> bool,
-                p: &[char],
+            // Bundles the recursion's invariant context (everything that
+            // never changes across calls) so `reachable` itself only takes
+            // the arguments that actually vary — keeps it under clippy's
+            // too-many-arguments threshold without changing behavior.
+            struct ReachCtx<'a> {
+                alt_matches: &'a dyn Fn(usize, usize) -> bool,
+                p: &'a [char],
                 rest: usize,
-                s: &[char],
+                s: &'a [char],
+                memo: &'a RefCell<ExtglobMemo>,
+            }
+            fn reachable(
+                ctx: &ReachCtx,
                 from: usize,
                 min_done: bool,
-                memo: &mut [Option<bool>],
+                reach_memo: &mut [Option<bool>],
             ) -> bool {
-                if min_done && let Some(cached) = memo[from] {
+                if min_done && let Some(cached) = reach_memo[from] {
                     return cached;
                 }
-                if min_done && matches(p, rest, s, from) {
-                    memo[from] = Some(true);
+                if min_done && matches(ctx.p, ctx.rest, ctx.s, from, ctx.memo) {
+                    reach_memo[from] = Some(true);
                     return true;
                 }
                 // Consume one more non-empty alternative-matched chunk.
-                let result = ((from + 1)..=s.len()).any(|k| {
-                    alt_matches(from, k) && reachable(alt_matches, p, rest, s, k, true, memo)
-                });
+                let result = ((from + 1)..=ctx.s.len())
+                    .any(|k| (ctx.alt_matches)(from, k) && reachable(ctx, k, true, reach_memo));
                 if min_done {
-                    memo[from] = Some(result);
+                    reach_memo[from] = Some(result);
                 }
                 result
             }
-            let mut memo = vec![None; s.len() + 1];
-            reachable(&alt_matches, p, rest, s, si, kind == '*', &mut memo)
+            let mut reach_memo = vec![None; s.len() + 1];
+            let ctx = ReachCtx {
+                alt_matches: &alt_matches,
+                p,
+                rest,
+                s,
+                memo,
+            };
+            reachable(&ctx, si, kind == '*', &mut reach_memo)
         }
         _ => false,
     }
@@ -631,6 +688,31 @@ mod tests {
         assert!(
             start.elapsed().as_secs() < 5,
             "match_component took too long: pathological backtracking regressed"
+        );
+    }
+
+    /// Sibling regression to `nested_star_extglob_does_not_blow_up` above,
+    /// but for the `@`/`?`/`!` arms instead of `*`/`+`: chained `!(...)`
+    /// groups, each with two differently-sized alternatives, matched
+    /// against a string that can never satisfy the trailing literal. Every
+    /// split point in each group is a candidate (almost none of them are
+    /// ruled out by `!`'s "does NOT match" semantics), so without
+    /// `matches`'s own memoization the same (pattern position, string
+    /// position) state gets re-explored through every distinct upstream
+    /// split-point path that reaches it — O(n^m) in the number of chained
+    /// groups. Pre-fix this measured 270k+ redundant `match_extglob` calls
+    /// and 100+ ms at just 10 chained groups, and didn't finish at 15
+    /// within a 60s budget; must resolve near-instantly post-fix.
+    #[test]
+    fn chained_negation_extglob_does_not_blow_up() {
+        let groups = 40;
+        let pattern: String = "!(a|aa)".repeat(groups) + "Z";
+        let subject = "a".repeat(groups * 2);
+        let start = std::time::Instant::now();
+        let _ = match_component(&pattern, &subject);
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "match_component took too long: chained @/?/! backtracking regressed"
         );
     }
 

@@ -1010,11 +1010,16 @@ fn map_client_err(e: LspClientError) -> PluginError {
     }
 }
 
+/// Convert a routing `path` argument to an LSP `file://` URI. Passes
+/// through unchanged if `path` already looks like a URI (some callers
+/// pass a pre-formed one); otherwise delegates to
+/// [`crate::uri::path_to_file_uri`] for RFC 3986-correct percent-encoding
+/// (spaces, `#`, `?`, non-ASCII bytes) — see that module's doc comment.
 fn file_uri_from_path(path: &str) -> String {
     if path.starts_with("file://") {
         path.to_string()
     } else {
-        format!("file://{path}")
+        crate::uri::path_to_file_uri(std::path::Path::new(path))
     }
 }
 
@@ -1182,6 +1187,27 @@ disabled = true
     fn file_uri_passthrough_on_already_uri() {
         assert_eq!(file_uri_from_path("file:///tmp/x.rs"), "file:///tmp/x.rs");
         assert_eq!(file_uri_from_path("/tmp/x.rs"), "file:///tmp/x.rs");
+    }
+
+    #[test]
+    fn file_uri_from_path_percent_encodes_space_and_hash() {
+        #[cfg(unix)]
+        let dir = "/tmp";
+        #[cfg(windows)]
+        let dir = r"C:\temp";
+
+        // Pre-fix, `format!("file://{path}")` left the space and `#`
+        // literal in the URI; a spec-compliant parser would treat `#` as
+        // the start of a fragment and truncate "v2.rs".
+        let space_path = format!("{dir}/my file.rs");
+        let uri = file_uri_from_path(&space_path);
+        assert!(!uri.contains(' '), "space must be percent-encoded: {uri}");
+        assert!(uri.contains("%20"), "expected %20 in {uri}");
+
+        let hash_path = format!("{dir}/utils#v2.rs");
+        let uri = file_uri_from_path(&hash_path);
+        assert!(!uri.contains('#'), "# must be percent-encoded: {uri}");
+        assert!(uri.contains("%23"), "expected %23 in {uri}");
     }
 
     #[test]

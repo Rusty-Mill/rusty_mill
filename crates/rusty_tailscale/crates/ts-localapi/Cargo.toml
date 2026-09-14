@@ -15,6 +15,14 @@ rusty_http = { workspace = true, features = ["tokio"] }
 tracing.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Raw `socket`/`bind`/`chmod`/`listen` steps in `bind()`'s Unix backend --
+# `std`/`tokio`'s `UnixListener::bind` binds *and* starts listening in one
+# call, so narrowing the socket file's mode has to happen by hand, in
+# between `bind` and `listen`, to close the TOCTOU window a `bind`-then-
+# `chmod` ordering leaves open.
+libc = { workspace = true }
+
 [dev-dependencies]
 # Independent HTTP/1.1 client for tests/roundtrip.rs -- proves real interop
 # with a totally separate implementation, not just this crate against

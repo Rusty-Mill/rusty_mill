@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rp_core::{
     ChatChunk, ChatMessage, ChatMessageDelta, ChatRequest, ChatResponse, ChatStream, Choice,
     ChunkChoice, ContentPart, EmbeddingData, EmbeddingsRequest, EmbeddingsResponse,
@@ -44,7 +45,30 @@ impl GeminiProvider {
         self
     }
 
+    /// Characters that must be percent-encoded when a caller-supplied
+    /// `model` string is spliced into this single path segment: ASCII
+    /// controls/space plus every character with structural meaning in a
+    /// URL (`/` a path separator, `?`/`#` starting the query/fragment, `%`
+    /// the escape character itself, and the remaining `gen-delims`). This
+    /// keeps `model` confined to exactly one path segment, so it can't
+    /// truncate the `:{method}` suffix, escape into the query string, or
+    /// address a different `v1beta` endpoint -- see finding 22 of
+    /// `CODEX-MONOREPO-REVIEW-2026-09-14-round7.md`.
     fn endpoint(&self, model: &str, method: &str) -> String {
+        const PATH_SEGMENT: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'%')
+            .add(b'/')
+            .add(b'<')
+            .add(b'>')
+            .add(b'?')
+            .add(b'`')
+            .add(b'\\')
+            .add(b'{')
+            .add(b'}');
+        let model = utf8_percent_encode(model, PATH_SEGMENT);
         format!("{}/v1beta/models/{model}:{method}", self.base_url)
     }
 }
@@ -1259,6 +1283,48 @@ mod tests {
         assert_eq!(
             contents[0].parts,
             vec![json!({"inlineData": {"mimeType": "audio/wav", "data": "aGVsbG8="}})]
+        );
+    }
+
+    // --- endpoint --------------------------------------------------------
+
+    #[test]
+    fn endpoint_percent_encodes_a_model_containing_a_path_separator() {
+        let provider = GeminiProvider::new("https://example.com", "key");
+        let url = provider.endpoint("foo/bar", "generateContent");
+        assert_eq!(
+            url,
+            "https://example.com/v1beta/models/foo%2Fbar:generateContent"
+        );
+    }
+
+    #[test]
+    fn endpoint_percent_encodes_a_model_containing_a_query_delimiter() {
+        let provider = GeminiProvider::new("https://example.com", "key");
+        let url = provider.endpoint("gemini?evil=1", "generateContent");
+        assert_eq!(
+            url,
+            "https://example.com/v1beta/models/gemini%3Fevil=1:generateContent"
+        );
+    }
+
+    #[test]
+    fn endpoint_percent_encodes_a_model_containing_a_fragment_delimiter() {
+        let provider = GeminiProvider::new("https://example.com", "key");
+        let url = provider.endpoint("gemini#frag", "generateContent");
+        assert_eq!(
+            url,
+            "https://example.com/v1beta/models/gemini%23frag:generateContent"
+        );
+    }
+
+    #[test]
+    fn endpoint_leaves_a_well_formed_model_untouched() {
+        let provider = GeminiProvider::new("https://example.com", "key");
+        let url = provider.endpoint("gemini-1.5-pro", "generateContent");
+        assert_eq!(
+            url,
+            "https://example.com/v1beta/models/gemini-1.5-pro:generateContent"
         );
     }
 }
