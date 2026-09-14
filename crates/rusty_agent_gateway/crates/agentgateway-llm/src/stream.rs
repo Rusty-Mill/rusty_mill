@@ -398,9 +398,31 @@ pub struct EventParser {
     buffer: String,
 }
 
+/// Failure to keep parsing a stream: the buffered, unresolved event grew past
+/// [`crate::MAX_RESPONSE_BYTES`] before a blank-line separator ever arrived.
+///
+/// Every other buffered path in this crate ([`crate::read_capped`], used by
+/// `buffered`/`guarded_stream`/error handling) enforces the same cap by hand
+/// because `reqwest::Response` has no `Limited` wrapper of its own. The true
+/// streaming path forwards bytes as they arrive rather than buffering the
+/// whole response, but [`EventParser::buffer`](EventParser) still accumulates
+/// unbounded state of its own: a provider that never emits the blank-line
+/// terminator would otherwise grow it for the life of the connection.
+#[derive(Debug, thiserror::Error)]
+#[error("the streamed response's buffered event exceeded {0} bytes without a terminator")]
+pub struct EventTooLarge(pub u64);
+
 impl EventParser {
     /// Feed a chunk of the response body, returning any complete events.
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<(String, Value)> {
+    ///
+    /// Errors once the buffered, still-incomplete event would exceed
+    /// [`crate::MAX_RESPONSE_BYTES`] -- mirroring [`crate::read_capped`], which
+    /// checks before extending its own buffer rather than after, so the cap is
+    /// never transiently exceeded.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<(String, Value)>, EventTooLarge> {
+        if self.buffer.len() as u64 + bytes.len() as u64 > crate::MAX_RESPONSE_BYTES {
+            return Err(EventTooLarge(crate::MAX_RESPONSE_BYTES));
+        }
         self.buffer.push_str(&String::from_utf8_lossy(bytes));
         let mut events = Vec::new();
 
@@ -417,7 +439,7 @@ impl EventParser {
             }
         }
 
-        events
+        Ok(events)
     }
 }
 
@@ -579,10 +601,13 @@ mod tests {
         assert!(
             parser
                 .push(b"event: message_start\ndata: {\"mes")
+                .expect("partial event must not error")
                 .is_empty()
         );
 
-        let events = parser.push(b"sage\": {\"id\": \"m\"}}\n\n");
+        let events = parser
+            .push(b"sage\": {\"id\": \"m\"}}\n\n")
+            .expect("completed event must not error");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "message_start");
         assert_eq!(events[0].1["message"]["id"], "m");
@@ -591,7 +616,9 @@ mod tests {
     #[test]
     fn several_events_in_one_chunk_all_come_out() {
         let mut parser = EventParser::default();
-        let events = parser.push(b"event: a\ndata: {\"n\": 1}\n\nevent: b\ndata: {\"n\": 2}\n\n");
+        let events = parser
+            .push(b"event: a\ndata: {\"n\": 1}\n\nevent: b\ndata: {\"n\": 2}\n\n")
+            .expect("well-formed events must not error");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].0, "a");
         assert_eq!(events[1].1["n"], 2);
@@ -602,9 +629,39 @@ mod tests {
         // Both spellings appear in the wild, and knowing only one buffers a
         // whole stream that never arrives.
         let mut parser = EventParser::default();
-        let events = parser.push(b"event: a\r\ndata: {\"n\": 1}\r\n\r\n");
+        let events = parser
+            .push(b"event: a\r\ndata: {\"n\": 1}\r\n\r\n")
+            .expect("well-formed CRLF event must not error");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1["n"], 1);
+    }
+
+    #[test]
+    fn push_errors_once_an_unresolved_event_exceeds_the_cap() {
+        // A provider that streams SSE content without ever emitting the
+        // blank-line terminator must not grow `EventParser::buffer` without
+        // bound -- this is the same cap `read_capped` enforces on every other
+        // buffered path in the crate.
+        let mut parser = EventParser::default();
+        let chunk = vec![b'a'; 1024 * 1024];
+        let mut pushed = 0u64;
+        let mut error = None;
+        while pushed <= crate::MAX_RESPONSE_BYTES {
+            match parser.push(&chunk) {
+                Ok(events) => assert!(events.is_empty(), "no separator was ever sent"),
+                Err(err) => {
+                    error = Some(err);
+                    break;
+                }
+            }
+            pushed += chunk.len() as u64;
+        }
+        assert_eq!(
+            error
+                .expect("push must error before the buffer grows unbounded")
+                .0,
+            crate::MAX_RESPONSE_BYTES
+        );
     }
 
     #[test]
@@ -937,7 +994,9 @@ mod gemini_tests {
     fn the_parser_hands_gemini_frames_over_with_no_event_name() {
         // Gemini's SSE carries `data:` only, where Anthropic names each event.
         let mut parser = EventParser::default();
-        let events = parser.push(b"data: {\"candidates\": [{\"index\": 0}]}\n\n");
+        let events = parser
+            .push(b"data: {\"candidates\": [{\"index\": 0}]}\n\n")
+            .expect("well-formed Gemini frame must not error");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "", "no event name");
         assert_eq!(events[0].1["candidates"][0]["index"], 0);

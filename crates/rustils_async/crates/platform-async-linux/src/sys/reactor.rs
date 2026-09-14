@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::Waker;
 use std::thread::JoinHandle;
 
@@ -66,6 +66,7 @@ impl EpollReactor {
         // SAFETY: `raw` is a freshly returned, valid, otherwise-unowned
         // descriptor from the call above; wrapped exactly once.
         let epoll_fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let epoll_fd_raw = epoll_fd.as_raw_fd();
 
         let reactor = Arc::new(Self {
             epoll_fd,
@@ -74,10 +75,23 @@ impl EpollReactor {
             handle: Mutex::new(None),
         });
 
-        let worker = Arc::clone(&reactor);
+        // The background thread gets a `Weak`, never an owned `Arc`:
+        // an owned `Arc` held for the thread's whole life (the old
+        // bug here — monorepo review finding 27) makes
+        // `Arc::strong_count` structurally unable to reach zero while
+        // the thread runs, so `Drop` (the only thing that stops the
+        // thread) could never fire. `shutdown` is cloned out
+        // independently — it is the thread's actual, low-latency exit
+        // signal, checked before every `epoll_wait`; `weak` is only
+        // upgraded afterward, briefly, to reach the registry. `epoll_fd`
+        // is likewise passed in as a raw descriptor rather than through
+        // `self`, since it must stay usable for `epoll_wait` regardless
+        // of the `Arc`'s strong count (see `run`'s doc comment).
+        let shutdown = reactor.shutdown.clone();
+        let worker = Arc::downgrade(&reactor);
         let handle = std::thread::Builder::new()
             .name("rustils-async-epoll-reactor".to_owned())
-            .spawn(move || worker.run())
+            .spawn(move || Self::run(worker, epoll_fd_raw, shutdown))
             .map_err(|e| {
                 PlatformError::new(
                     ErrorKind::Other,
@@ -176,18 +190,33 @@ impl EpollReactor {
             .len()
     }
 
-    fn run(self: Arc<Self>) {
+    /// The background thread's loop body. Takes a [`Weak`] — never an
+    /// owned `Arc` — for the reasons documented in [`Self::new`]:
+    /// holding a strong reference for the thread's entire life would
+    /// make it structurally impossible for `Arc::strong_count` to ever
+    /// reach zero, so `Drop` (which triggers `shutdown` and joins this
+    /// thread) could never run. `epoll_fd` and `shutdown` are passed
+    /// in independently of `self` so the blocking `epoll_wait` call
+    /// below never needs a successful upgrade: `epoll_fd` stays open
+    /// until `Drop` has joined this thread (the field is only dropped
+    /// after `Drop::drop` returns), and `shutdown` is this thread's
+    /// actual, immediately observable stop signal. `weak` is upgraded
+    /// only afterward, briefly, to reach the shared registry when
+    /// there are events to deliver — and dropped again before the
+    /// next `epoll_wait` call, so it is never held across a block.
+    fn run(weak: Weak<Self>, epoll_fd: RawFd, shutdown: ShutdownSignal) {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; MAX_EVENTS];
         loop {
-            if self.shutdown.is_triggered() {
+            if shutdown.is_triggered() {
                 return;
             }
-            // SAFETY: `self.epoll_fd` is valid; `events` is a live,
-            // correctly sized buffer the kernel writes up to
-            // `MAX_EVENTS` entries into, matching the length passed.
+            // SAFETY: `epoll_fd` is valid for the reason documented
+            // above; `events` is a live, correctly sized buffer the
+            // kernel writes up to `MAX_EVENTS` entries into, matching
+            // the length passed.
             let n = unsafe {
                 libc::epoll_wait(
-                    self.epoll_fd.as_raw_fd(),
+                    epoll_fd,
                     events.as_mut_ptr(),
                     MAX_EVENTS as libc::c_int,
                     REACTOR_TICK_MS,
@@ -203,14 +232,27 @@ impl EpollReactor {
                 // further this thread can do but stop.
                 return;
             }
-            let mut registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());
+            if n == 0 {
+                // Plain tick, nothing ready: skip the upgrade entirely
+                // so this thread holds no strong reference at all for
+                // the common case, leaving `Arc::strong_count` free to
+                // reach zero the moment every external `Arc` is gone.
+                continue;
+            }
+            let Some(this) = weak.upgrade() else {
+                // Every external `Arc` is already gone and `Drop` is
+                // running (or has run) on some other thread; nothing
+                // left to deliver these events to.
+                return;
+            };
+            let mut registry = this.registry.lock().unwrap_or_else(|p| p.into_inner());
             for event in &events[..n as usize] {
                 let fd = event.u64 as RawFd;
                 if let Some((ready, waker)) = registry.remove(&fd) {
                     ready.store(true, Ordering::Release);
                     drop(registry);
                     waker.wake();
-                    registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());
+                    registry = this.registry.lock().unwrap_or_else(|p| p.into_inner());
                 }
             }
         }
@@ -221,7 +263,55 @@ impl Drop for EpollReactor {
     fn drop(&mut self) {
         self.shutdown.trigger();
         if let Some(handle) = self.handle.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = handle.join();
+            if handle.thread().id() == std::thread::current().id() {
+                // `drop` is running on the reactor's own background
+                // thread: the strong reference that just hit zero was
+                // the transient one `run` upgrades to reach the
+                // registry (see `run`'s doc comment) — this thread is
+                // already unwinding out of `run` and about to return.
+                // Joining here would be a self-join deadlock (a thread
+                // cannot wait on its own completion), so just detach
+                // the handle instead of blocking on it.
+                drop(handle);
+            } else {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for monorepo review finding 27: `run` used to
+    /// take `self: Arc<Self>` by value and hold that strong reference
+    /// for its entire life. That made `Arc::strong_count` structurally
+    /// unable to reach zero while the thread ran, so `Drop::drop` (the
+    /// only thing that calls `shutdown.trigger()` and joins the
+    /// thread) could never execute — every `EpollReactor` and its
+    /// background thread leaked for the life of the process no matter
+    /// how many external `Arc`s were dropped.
+    #[test]
+    fn dropping_every_external_arc_actually_tears_down_the_reactor() {
+        for _ in 0..4 {
+            let reactor = EpollReactor::new().expect("construct reactor");
+            assert_eq!(
+                Arc::strong_count(&reactor),
+                1,
+                "the background thread must not hold its own strong Arc \
+                 reference to the reactor it belongs to"
+            );
+
+            let weak = Arc::downgrade(&reactor);
+            drop(reactor);
+            assert!(
+                weak.upgrade().is_none(),
+                "EpollReactor was not actually dropped once every external \
+                 Arc went away -- its background thread must still be \
+                 holding a strong reference, leaking both the reactor and \
+                 its thread"
+            );
         }
     }
 }

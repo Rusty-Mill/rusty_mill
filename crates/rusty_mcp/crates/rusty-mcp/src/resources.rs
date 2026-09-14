@@ -456,10 +456,16 @@ impl UriTemplate {
                         }
                     };
 
-                    if value.is_empty() || value.contains('/') {
+                    // Decode before rejecting: a raw `%2f`/`%2F` is a literal
+                    // `/` once decoded, and decoding must happen before the
+                    // traversal guard runs or an encoded slash would sail
+                    // through the check and only become a path separator
+                    // downstream, defeating the guard entirely.
+                    let decoded = percent_decode(value);
+                    if decoded.is_empty() || decoded.contains('/') {
                         return None;
                     }
-                    params.insert(name.clone(), percent_decode(value));
+                    params.insert(name.clone(), decoded);
                 }
             }
         }
@@ -621,6 +627,24 @@ mod tests {
             .match_uri("db://tables/my%20table")
             .expect("should match");
         assert_eq!(params.get("table").map(String::as_str), Some("my table"));
+    }
+
+    #[test]
+    fn a_variable_never_crosses_a_percent_encoded_slash() {
+        // Same guard as `a_variable_never_crosses_a_slash`, but the traversal
+        // is hidden behind `%2f`/`%2F` so it only becomes a literal `/`
+        // after percent-decoding. The rejection check must run on the
+        // decoded value, or the encoded slash sails through undetected.
+        assert!(
+            template("file:///logs/{name}.log")
+                .match_uri("file:///logs/..%2f..%2fetc%2fpasswd.log")
+                .is_none()
+        );
+        assert!(
+            template("file:///logs/{name}.log")
+                .match_uri("file:///logs/..%2F..%2Fetc%2Fpasswd.log")
+                .is_none()
+        );
     }
 
     #[tokio::test]

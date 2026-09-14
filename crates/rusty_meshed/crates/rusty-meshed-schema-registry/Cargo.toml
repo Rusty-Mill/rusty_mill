@@ -8,6 +8,7 @@ repository = "https://github.com/baileyrd/rusty_mill"
 publish = false
 
 [dependencies]
+percent-encoding = "2"
 rusty_err = { path = "../../../rusty_err" }
 rusty_request = { path = "../../../rusty_request" }
 

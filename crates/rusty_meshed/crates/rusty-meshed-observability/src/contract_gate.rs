@@ -11,6 +11,7 @@
 //! assert_schema_compatible(registry_url, producer_avro_schema, &subject).await?;
 //! ```
 
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use rusty_err::Error;
 use rusty_request::{Client, Json};
 
@@ -34,6 +35,34 @@ pub enum ContractGateError {
     Incompatible(String, String),
 }
 
+/// The set of characters percent-encoded when a caller-supplied
+/// `contract_subject` is spliced into a single path segment of a
+/// Schema Registry request URL: ASCII controls/space plus every
+/// character with structural meaning in a URL (`/` a path separator,
+/// `?`/`#` starting the query/fragment, `%` the escape character
+/// itself, and the remaining `gen-delims`/backslash). This keeps a
+/// caller-supplied `contract_subject` (built from `consumer_group`/
+/// `producer_subject`) confined to exactly one path segment, so it
+/// can't introduce an extra segment, escape into the query string, or
+/// address a different subject than the one the caller passed in.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'{')
+    .add(b'}');
+
+fn encode_path_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
+
 /// Builds the contract subject name following the platform naming
 /// convention: `{consumer_group}.contracts.{producer_subject}`. Pure
 /// naming-convention function, no I/O -- separates consumer contract
@@ -52,7 +81,10 @@ pub async fn register_consumer_contract(
     contract_subject: &str,
     avro_schema_str: &str,
 ) -> Result<i64, ContractGateError> {
-    let url = format!("{registry_url}/subjects/{contract_subject}/versions");
+    let url = format!(
+        "{registry_url}/subjects/{}/versions",
+        encode_path_segment(contract_subject)
+    );
     let mut body = Json::object();
     body.insert("schemaType", "AVRO");
     body.insert("schema", avro_schema_str);
@@ -77,8 +109,10 @@ pub async fn assert_schema_compatible(
     producer_schema_str: &str,
     contract_subject: &str,
 ) -> Result<(), ContractGateError> {
-    let url =
-        format!("{registry_url}/compatibility/subjects/{contract_subject}/versions?verbose=true");
+    let url = format!(
+        "{registry_url}/compatibility/subjects/{}/versions?verbose=true",
+        encode_path_segment(contract_subject)
+    );
     let mut body = Json::object();
     body.insert("schemaType", "AVRO");
     body.insert("schema", producer_schema_str);
@@ -204,6 +238,26 @@ mod tests {
             "/subjects/test-consumer.contracts.order-events-value/versions"
         );
         assert!(request.body.contains("\"schemaType\":\"AVRO\""));
+        assert_eq!(id, 7);
+    }
+
+    #[rusty_tokio::test]
+    async fn register_consumer_contract_percent_encodes_subject_with_slash_or_query() {
+        let (url, server) = start_fake_server(200, r#"{"id": 7}"#);
+        let contract_subject = contract_subject_name("billing/service", "order?events-value");
+        let id = register_consumer_contract(&url, &contract_subject, "{}")
+            .await
+            .unwrap();
+
+        let request = server.await.unwrap();
+        assert_eq!(request.method, "POST");
+        // '/' and '?' inside consumer_group/producer_subject must be
+        // percent-encoded so they can't splice an extra path segment
+        // or a query string into the request.
+        assert_eq!(
+            request.target,
+            "/subjects/billing%2Fservice.contracts.order%3Fevents-value/versions"
+        );
         assert_eq!(id, 7);
     }
 

@@ -4,6 +4,6 @@ import type { Capability } from "./Capability";
 /**
  * An immutable set of capabilities granted to a plugin.
  *
- * Internally a bitmask over the `Capability` discriminant for O(1) contains.
+ * Internally a `HashSet<Capability>` for O(1) amortized contains.
  */
 export type CapabilitySet = Array<Capability>;

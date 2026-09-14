@@ -34,20 +34,23 @@ impl AwkProgram {
     /// Runs this program: `BEGIN` rules once, then `lines` fed through the
     /// main rules one record at a time, then `END` rules once. `field_sep`
     /// is awk's `FS` (`" "` for the default whitespace-splitting behavior).
-    /// Calls `emit` once per output line, in order.
+    /// Calls `emit` once per output line, in order. Returns an error if a
+    /// field/`NF` assignment would grow the field count past the
+    /// interpreter's bound.
     pub fn run<'a>(
         &self,
         lines: impl Iterator<Item = &'a str>,
         field_sep: &str,
         mut emit: impl FnMut(&str),
-    ) {
+    ) -> Result<(), String> {
         let mut interp = Interp::new(field_sep);
-        interp.run_begin(&self.program, &mut emit);
+        interp.run_begin(&self.program, &mut emit)?;
         for line in lines {
             interp.set_record(line);
-            interp.run_main_rules(&self.program, &mut emit);
+            interp.run_main_rules(&self.program, &mut emit)?;
         }
-        interp.run_end(&self.program, &mut emit);
+        interp.run_end(&self.program, &mut emit)?;
+        Ok(())
     }
 }
 
@@ -58,7 +61,8 @@ mod tests {
     fn run(script: &str, input: &[&str], fs: &str) -> Vec<String> {
         let prog = AwkProgram::parse(script).unwrap();
         let mut out = Vec::new();
-        prog.run(input.iter().copied(), fs, |l| out.push(l.to_string()));
+        prog.run(input.iter().copied(), fs, |l| out.push(l.to_string()))
+            .unwrap();
         out
     }
 
@@ -191,5 +195,27 @@ mod tests {
 
         let out = run(r#"{n = 10; n -= 3; n *= 2; n /= 2; print n}"#, &["x"], " ");
         assert_eq!(out, vec!["7"]);
+    }
+
+    #[test]
+    fn oversized_field_index_assignment_errors_instead_of_resizing() {
+        // A crafted `$(huge)=x` must not attempt a multi-gigabyte
+        // `Vec::resize`; it should surface a clean interpreter error.
+        let prog = AwkProgram::parse(r#"{$1000000000 = "x"}"#).unwrap();
+        let mut out = Vec::new();
+        let result = prog.run(["a b"].into_iter(), " ", |l| out.push(l.to_string()));
+        assert!(result.is_err());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn oversized_nf_assignment_errors_instead_of_resizing() {
+        // A crafted `NF=huge` must not attempt a multi-gigabyte
+        // `Vec::resize`; it should surface a clean interpreter error.
+        let prog = AwkProgram::parse(r#"{NF = 5000000000}"#).unwrap();
+        let mut out = Vec::new();
+        let result = prog.run(["a b"].into_iter(), " ", |l| out.push(l.to_string()));
+        assert!(result.is_err());
+        assert!(out.is_empty());
     }
 }

@@ -8,13 +8,14 @@
 //! and the [`google.rpc.Status`](https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto)
 //! JSON shape for errors (spec Section 11.6).
 //!
-//! `axum`'s router (`matchit`) treats `:` as "start of a named parameter"
-//! *anywhere* it appears in a route pattern string, not only at the start
-//! of a segment - so `/message:send` cannot be registered as a literal
-//! route. The message and per-task-action endpoints below instead capture
-//! the whole segment with an ordinary named param and split on `:` inside
-//! the handler; a colon has no special meaning when matching an *actual*
-//! request path against an already-compiled param.
+//! Prior to axum 0.8 (`matchit` 0.7), the router treated `:` as "start of
+//! a named parameter" *anywhere* it appeared in a route pattern string,
+//! not only at the start of a segment - so `/message:send` couldn't be
+//! registered as a literal route. `matchit` 0.8 (path params now written
+//! `{param}` instead of `:param`) relaxed that, but the message and
+//! per-task-action endpoints below still capture the whole segment with
+//! an ordinary named param and split on `:` inside the handler, kept
+//! unchanged for consistency with every other dynamic-segment route here.
 //!
 //! Every route is registered twice: once as-is, and once again nested
 //! under a `/{tenant}` path prefix (the proto's `additional_bindings`,
@@ -69,35 +70,35 @@ pub(crate) fn build_rest_router(engine: Arc<Engine>) -> Router {
         // (a single top-level dynamic segment, disambiguated by value
         // inside `message_action`); see the module docs for why they
         // can't be written as literal patterns.
-        .route("/:action", post(message_action))
+        .route("/{action}", post(message_action))
         .route("/tasks", get(list_tasks))
-        .route("/tasks/:id", get(get_task_or_subscribe).post(task_action))
+        .route("/tasks/{id}", get(get_task_or_subscribe).post(task_action))
         .route(
-            "/tasks/:id/pushNotificationConfigs",
+            "/tasks/{id}/pushNotificationConfigs",
             post(create_push_notification_config).get(list_push_notification_configs),
         )
         .route(
-            "/tasks/:id/pushNotificationConfigs/:config_id",
+            "/tasks/{id}/pushNotificationConfigs/{config_id}",
             get(get_push_notification_config).delete(delete_push_notification_config),
         )
         .route("/extendedAgentCard", get(get_extended_agent_card))
         // The proto's `additional_bindings`: every route above, again
         // nested under a `/{tenant}` path prefix.
-        .route("/:tenant/:action", post(message_action_tenant))
-        .route("/:tenant/tasks", get(list_tasks_tenant))
+        .route("/{tenant}/{action}", post(message_action_tenant))
+        .route("/{tenant}/tasks", get(list_tasks_tenant))
         .route(
-            "/:tenant/tasks/:id",
+            "/{tenant}/tasks/{id}",
             get(get_task_or_subscribe_tenant).post(task_action_tenant),
         )
         .route(
-            "/:tenant/tasks/:id/pushNotificationConfigs",
+            "/{tenant}/tasks/{id}/pushNotificationConfigs",
             post(create_push_notification_config_tenant).get(list_push_notification_configs_tenant),
         )
         .route(
-            "/:tenant/tasks/:id/pushNotificationConfigs/:config_id",
+            "/{tenant}/tasks/{id}/pushNotificationConfigs/{config_id}",
             get(get_push_notification_config_tenant).delete(delete_push_notification_config_tenant),
         )
-        .route("/:tenant/extendedAgentCard", get(get_extended_agent_card_tenant))
+        .route("/{tenant}/extendedAgentCard", get(get_extended_agent_card_tenant))
         .with_state(engine)
 }
 
@@ -207,7 +208,6 @@ async fn require_auth(
 /// this binding can produce is deliberately *not* shaped like.
 struct A2aJson<T>(T);
 
-#[async_trait::async_trait]
 impl<T, S> FromRequest<S> for A2aJson<T>
 where
     T: serde::de::DeserializeOwned,
@@ -233,7 +233,6 @@ fn json_rejection_to_a2a(rejection: JsonRejection) -> A2aError {
 /// response - see [`A2aJson`].
 struct A2aQuery<T>(T);
 
-#[async_trait::async_trait]
 impl<T, S> FromRequestParts<S> for A2aQuery<T>
 where
     T: serde::de::DeserializeOwned,

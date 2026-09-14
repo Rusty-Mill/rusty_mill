@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 Do **not** open a public issue. Report privately via
 [GitHub Security Advisories](https://github.com/baileyrd/rusty_agent_gateway/security/advisories/new),
-or reach <fill in — team alias or individual> directly if advisories aren't set up on this repo yet.
+or reach baileyrd@gmail.com directly if advisories aren't set up on this repo yet.
 
 Include: what you found, affected version/commit, reproduction steps or PoC, and
 impact as you understand it.

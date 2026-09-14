@@ -22,7 +22,7 @@
 //! | 12 | `vitality_report` | `{ limit? }`         | Active memories ranked by vitality |
 //! | 13 | `recall` | `{ query, limit? }`           | Hybrid FTS + vector recall (RRF)  |
 //! | 14 | `vector_sync` | `{ limit? }`             | Backfill memory embeddings        |
-//! | 15 | `sync`   | `{ hub_url, secret, node_id }` | Push/pull with a memory hub      |
+//! | 15 | `sync`   | `{ hub_url, secret, node_id, allow_private_hub? }` | Push/pull with a memory hub |
 //! | 16 | `wiki_compile` | `{ topic, query?, limit? }` | Synthesize a wiki page from memories |
 //! | 17 | `wiki_read` | `{ topic }`                | Read a wiki page's Markdown      |
 //! | 18 | `wiki_list` | `{}`                       | List wiki pages                  |

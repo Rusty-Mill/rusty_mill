@@ -32,6 +32,7 @@ pub mod core_plugin;
 pub mod ipc;
 pub mod pool;
 mod transport;
+mod uri;
 
 pub use client::{LspClient, LspClientError, OpenDocument};
 pub use config::{

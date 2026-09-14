@@ -22,6 +22,20 @@ const INDEX_VERSION: u32 = 2;
 /// + a 2-byte flags field.
 const ENTRY_FIXED_LEN: usize = 4 * 10 + SHA1_DIGEST_LEN + 2;
 
+/// Caps a claimed index-header entry `count` at however many fixed-size
+/// entries could actually fit in `content_len` remaining bytes.
+///
+/// `count` comes straight from the index file's own header and is fully
+/// attacker-controlled: the file's only integrity check is a non-keyed
+/// SHA-1 over its own bytes, which never bounds the claimed count. Without
+/// this cap, a crafted ~32-byte file claiming `count = u32::MAX` would
+/// drive an unbounded `Vec::with_capacity` allocation before any per-entry
+/// bounds check ever runs.
+fn capped_entry_count(count: usize, content_len: usize) -> usize {
+    let max_possible_entries = content_len.saturating_sub(12) / ENTRY_FIXED_LEN;
+    count.min(max_possible_entries)
+}
+
 /// Regular, non-executable file mode (git's own encoding: object-type
 /// nibble `1000` plus Unix permission bits).
 pub const MODE_REGULAR: u32 = 0o100644;
@@ -178,7 +192,7 @@ impl Index {
             return Err(IndexError::ChecksumMismatch);
         }
 
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::with_capacity(capped_entry_count(count, content_len));
         let mut cursor = 12;
         for _ in 0..count {
             if cursor + ENTRY_FIXED_LEN > content_len {
@@ -356,5 +370,38 @@ mod tests {
         assert_eq!(back, index);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capped_entry_count_bounds_a_huge_bogus_count() {
+        // `count` comes straight off a crafted index file's own header and
+        // is fully attacker-controlled (the file's only integrity check is
+        // a non-keyed SHA-1 over its own bytes, which never bounds the
+        // claimed count). A 12-byte-header-only file has room for exactly
+        // zero real entries, so a claimed `count` of u32::MAX must be
+        // capped down to 0, not passed straight through to
+        // `Vec::with_capacity`.
+        let capped = capped_entry_count(u32::MAX as usize, 12);
+        assert_eq!(capped, 0);
+    }
+
+    #[test]
+    fn huge_bogus_entry_count_is_rejected_without_unbounded_allocation() {
+        // Minimal well-formed header (DIRC, version 2) with `count` set to
+        // the max u32 -- fully attacker-controlled, and only ever checked
+        // against a non-keyed SHA-1 over the file's own bytes, so a
+        // crafted file can claim any count it likes. A naive
+        // `Vec::with_capacity(count)` before any per-entry bounds check
+        // would try to allocate space for ~4 billion fixed-size entries.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(DIRC_MAGIC);
+        bytes.extend_from_slice(&INDEX_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        let checksum = sha1(&bytes);
+        bytes.extend_from_slice(&checksum);
+
+        // Must return a parse error instead of attempting an allocation
+        // sized off the attacker-controlled count.
+        assert_eq!(Index::from_bytes(&bytes), Err(IndexError::Truncated));
     }
 }

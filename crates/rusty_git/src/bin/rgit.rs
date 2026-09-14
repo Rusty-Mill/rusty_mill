@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let new_text = String::from_utf8_lossy(&new_content);
                 print!(
                     "{}",
-                    rusty_diff::format_unified_diff(&e.path, &e.path, &old_text, &new_text)
+                    rusty_diff::format_unified_diff(&e.path, &e.path, &old_text, &new_text)?
                 );
                 printed_any = true;
             }
