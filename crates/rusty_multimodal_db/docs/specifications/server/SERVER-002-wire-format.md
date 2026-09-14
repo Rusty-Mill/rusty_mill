@@ -1,7 +1,8 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.11.0 (protocol version 22 — `SERVER-001` v0.50.0, `WBT-FR-005`,
-  ADR-0060; 0.10.0 was protocol 21, ADR-0057; 0.9.0 protocol 20, ADR-0055; 0.8.0 protocol 19, ADR-0054; 0.7.0 protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
+- Version: 0.13.0 (protocol version 24 — `SERVER-001` v0.54.0, `BAK-FR-006`,
+  ADR-0065; 0.12.0 was protocol 23, `SERVER-001` v0.53.0, `MET-FR-004`,
+  ADR-0064; 0.11.0 protocol 22, ADR-0060; 0.10.0 was protocol 21, ADR-0057; 0.9.0 protocol 20, ADR-0055; 0.8.0 protocol 19, ADR-0054; 0.7.0 protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
   ADR-0050; 0.4.0 protocol 15, ADR-0049; 0.3.0 protocol 14, ADR-0047;
   0.2.0 protocol 13, ADR-0046; 0.1.0 protocol 12, `ECO-FR-004`,
   ADR-0043)
@@ -92,13 +93,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 22 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `16 00 00 00` (22).
+- `Request::Hello { protocol_version: 24 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `18 00 00 00` (24).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 22
+## 5. Types at protocol version 24
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -218,6 +219,8 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 29 | `Page` | `order_by: FieldRef`, `after: Option<(ScanValue, RecordId)>`, `limit: u64` | 20 | `Rows` |
 | 30 | `CountEdges` | `relation: String` | 21 | `Count` |
 | 31 | `WriteBatch` | `ops: Vec<WriteOp>`, `atomic: bool` | 22 | `BatchResults`, or `TransactionFailed` (atomic abort) |
+| 32 | `Metrics` | — | 23 | `Metrics` |
+| 33 | `Backup` | `name: String` | 24 | `BackedUp` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -247,6 +250,8 @@ server does not know closes the connection with no reply (§6.3).
 | 18 | `Compacted` | `records: u64`, `slots_reclaimed: u64`, `log_entries_folded: u64`, `edge_logs_folded: u64` | 18 |
 | 19 | `Count` | `count: u64` | 21 |
 | 20 | `BatchResults` | `results: Vec<WriteResult>` | 22 |
+| 21 | `Metrics` | `text: String` | 23 |
+| 22 | `BackedUp` | `files: u64`, `bytes: u64` | 24 |
 
 ## 6. Connection lifecycle
 
@@ -527,6 +532,27 @@ Each item names the `SERVER-001` requirement that owns it.
    below 22 or for a batch of more than `MAX_BATCH_OPS` (4096) ops. A
    domain with no runtime write answers every op `Failed(Unsupported)`
    (pipelined) or aborts `Unsupported` (atomic). (`FR-060`)
+21. **`Metrics`** (23) — a bounded, fixed set of process-wide atomic
+   counters (requests total/ok/err, connections total/active, uptime),
+   rendered as Prometheus text exposition format, answered `Metrics
+   { text }`. Gated as a **read**: any authenticated class, not
+   restricted to read-write — the first request answerable regardless
+   of class. Never overlaid by a session, never read-set-tracked
+   (process-wide, not table data). `Malformed` below 23. (`FR-063`)
+22. **`Backup`** (24) — a live, lock-consistent snapshot copy of the
+   selected table's on-disk files, under its write lock, into
+   `name` (a single path component — `/`, `\`, `.`, and `..` refused
+   before any I/O) resolved against the server's own configured
+   `SERVER_BACKUP_ROOT`; answered `BackedUp { files, bytes }` with what
+   was copied. `Unsupported` when the server has no backup root
+   configured or the selected table has no known data directory;
+   `Storage` for a target name that already exists, or an I/O failure
+   mid-copy (nothing left half-written — the copy lands in a temporary
+   directory first, moved into place only on full success). An
+   operator's write: `Unauthorized` for a read-only token, `SessionOpen`
+   while a session is open, `Malformed` below 24. Restore needs no
+   request of its own: the produced directory is a complete, portable
+   store directory a fresh server can open directly. (`FR-064`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -575,6 +601,8 @@ An unknown bit for the negotiated version is `Malformed`.
 | 20 | v0.45.0 | `Page` (29) |
 | 21 | v0.47.0 | `CountEdges` (30), `Count` (19) |
 | 22 | v0.50.0 | `WriteBatch` (31), `BatchResults` (20) |
+| 23 | v0.53.0 | `Metrics` (32), `Metrics` response (21) |
+| 24 | v0.54.0 | `Backup` (33), `BackedUp` (22) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -586,7 +614,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -614,12 +642,31 @@ any line differs from the pins, so the file cannot drift.
 `Request/*` line and decodes every `Response/*` line with version ≤ *N*
 byte-for-byte**, and re-encodes what it decoded to the same bytes.
 `clients/python/tests/test_vectors.py` is that check for the reference
-client; it needs only `python3`. The live half —
+client; it needs only `python3` (any CPython 3 — verified in this
+session against CPython 3.14). The live half —
 `tests/server_python_client.rs` — drives the reference client against a
-real server at 22 and at a hand-negotiated 10.
+real server at 24 and at a hand-negotiated 10.
 
 ## 10. Change history
 
+- 0.13.0 (`SERVER-001` v0.54.0, ADR-0065, `BAK-FR-006`): protocol
+  version 24 — `Request::Backup` (33), `Response::BackedUp` (22); §4's
+  `Hello` example, §5 header, §5.6, §5.7, §7 item 22, §8 row 24 and
+  rule 3's list; fixture at 70 vectors (`Request/Backup`,
+  `Response/BackedUp`); the reference Python client gains `backup`. A
+  real, pre-existing bug found and fixed in the same change (unrelated
+  to this round's own wire addition): the reference client's
+  `WriteBatch` dataclass (added at 0.11.0) never declared its `atomic`
+  field, so every `WriteBatch` decode raised `TypeError` — never caught
+  before because `tests/server_python_client.rs`'s own verification
+  needs `python3` on `PATH`, absent in every session that touched this
+  file until this one found `python` (CPython 3.14) works too.
+- 0.12.0 (`SERVER-001` v0.53.0, ADR-0064, `MET-FR-004`): protocol
+  version 23 — `Request::Metrics` (32), `Response::Metrics` (21); §4's
+  `Hello` example, §5 header, §5.6, §5.7, §7 item 21, §8 row 23 and
+  rule 3's list (unaffected — `Metrics` carries no `SessionOpen` gate to
+  add); fixture at 68 vectors (`Request/Metrics`, `Response/Metrics`);
+  the reference Python client gains `metrics`.
 - 0.11.0 (`SERVER-001` v0.50.0, ADR-0060, `WBT-FR-005`): protocol version
   22 — `Request::WriteBatch` (31), `Response::BatchResults` (20), the
   `WriteOp` and `WriteResult` enums; §4's `Hello` example, §5 header,
