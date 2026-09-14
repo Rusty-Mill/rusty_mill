@@ -183,8 +183,21 @@ fn upgrade_if_version_1(log: &Path, tag: &str) -> Result<(), DurabilityError> {
     let mut tmp = log.as_os_str().to_owned();
     tmp.push(".upgrade");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, &image)?;
-    std::fs::File::open(&tmp)?.sync_data()?;
+    // Sync on the same handle the write went through — `sync_data`/
+    // `sync_all` calls `FlushFileBuffers` on Windows, which requires a
+    // handle opened with write access; a `std::fs::write` followed by a
+    // separate `File::open` (read-only by default) reopen would fail
+    // there with `PermissionDenied` even though the write itself
+    // succeeded. Matches `durability::record_blob`'s own
+    // write-to-temp-then-rename pattern.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    file.write_all(&image)?;
+    file.sync_data()?;
+    drop(file);
     std::fs::rename(&tmp, log)?;
     Ok(())
 }
