@@ -105,12 +105,18 @@ not a guess.
   text, gated as a read at the version gate. The audit log
   (`ADR-0029`) and access log (`ADR-0031`) still separately record
   admission/auth/request events to a file. Still absent: request
-  latency histograms, queue depth, journal size, cache/index stats, or
-  any HTTP `/metrics` endpoint — `Metrics` is answered over the
-  existing binary wire protocol, not scraped by Prometheus directly.
-  (The Prometheus-text metrics the differential test suite exercises
-  belong to the *consumer's* hub layer, `rusty_remind_me`, not this
-  crate.)
+  latency histograms, queue depth, journal size, cache/index stats.
+  **Now built**: an opt-in HTTP `/metrics` listener
+  (`SERVER-METRICS-HTTP`, `ADR-0069`, `SERVER-001` v0.57.0/FR-069) —
+  `SERVER_METRICS_HTTP_ADDR` binds a second, independent
+  `TcpListener` answering a stock Prometheus scrape (`GET /metrics
+  HTTP/1.1`) with the identical `ServerMetrics::render()` text,
+  unchanged; absent by default, no endpoint auth in this round (a
+  named, accepted tradeoff — see `ADR-0069`). `Metrics` over the
+  existing binary wire protocol is untouched and still works exactly
+  as before. (The Prometheus-text metrics the differential test suite
+  exercises belong to the *consumer's* hub layer, `rusty_remind_me`,
+  not this crate.)
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing
