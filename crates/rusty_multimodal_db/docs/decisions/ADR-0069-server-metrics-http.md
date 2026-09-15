@@ -1,6 +1,7 @@
 # ADR-0069: Server Metrics HTTP Endpoint — `GET /metrics` Directly Scrapeable by Prometheus
 
-- Status: **Proposed** (2026-09-15), design only. See
+- Status: **Accepted, option (a)** (2026-09-15) — the owner picked
+  option (a) as recommended. See
   `docs/design/SERVER-METRICS-HTTP-DESIGN.md` for the full design.
 - Date: 2026-09-15
 - Deciders: baileyrd
@@ -118,3 +119,7 @@ proposed; **(b)** same listener, bearer-token-gated; **(c)** decline.
 ## Acceptance and implementation
 
 - 2026-09-15: proposed, design only.
+- 2026-09-15: the owner picked option (a) — the `rusty_http`-based
+  listener, no endpoint auth, as recommended. Implementation delegated
+  to Codex (`codex-build`), independently inspected by Claude before
+  merge.

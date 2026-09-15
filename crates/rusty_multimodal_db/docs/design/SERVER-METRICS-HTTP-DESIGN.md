@@ -1,7 +1,9 @@
-# Server Metrics HTTP Endpoint: `GET /metrics` Directly Scrapeable by Prometheus (Proposed)
+# Server Metrics HTTP Endpoint: `GET /metrics` Directly Scrapeable by Prometheus (Accepted)
 
-- Status: **Proposed** (2026-09-15, `ADR-0069`), design only — no source
-  file touched.
+- Status: **Accepted, option (a)** (2026-09-15, `ADR-0069`) — the owner
+  picked option (a): the `rusty_http`-based listener, no endpoint auth,
+  as recommended. Implementation delegated to Codex via `codex-build`,
+  independently inspected by Claude before merge.
 - Related: `docs/FUTURE-GROWTH.md`'s "Operational maturity" section,
   Metrics/observability bullet ("Still absent: ... any HTTP `/metrics`
   endpoint — `Metrics` is answered over the existing binary wire
@@ -417,8 +419,17 @@ existing status banner naming the configured address, matching how
 2. A server started with `SERVER_METRICS_HTTP_ADDR` set opens a second
    port; `curl`/a raw `TcpStream` sending `GET /metrics HTTP/1.1\r\n
    Host: x\r\n\r\n` receives `200 OK`, `Content-Type: text/plain;
-   version=0.0.4`, and a body identical to what `Request::Metrics`
-   returns over the existing wire for the same live counters.
+   version=0.0.4`, and a body carrying real Prometheus text for all six
+   counters that reflects the live `ServerMetrics` state (proven by
+   driving real traffic first and observing the rendered counts move
+   accordingly). **Not** asserted as byte-identical to a same-instant
+   `Request::Metrics` response: `render()` is called before the
+   `Metrics` request that triggered it is itself counted
+   (`options.metrics().render()` precedes `record_request` in
+   `handle_connection`), and `dogserver_uptime_seconds` can differ
+   across a wall-clock second boundary between two independent reads —
+   scraping and the wire protocol observe the identical underlying
+   atomics, not necessarily identical rendered strings at every instant.
 3. Any other method or path on the same port answers `404`, never a
    panic, never a hang.
 4. A malformed HTTP request (garbage bytes, a head that never
@@ -435,12 +446,11 @@ existing status banner naming the configured address, matching how
 ## Verification plan
 
 `cargo test --all-features` (new `src/server/serve.rs` unit/
-integration coverage for `handle_metrics_http_connection`'s route
-match and error paths; a new `tests/server_metrics_http_integration.rs`
-— a real second `TcpListener`, a real HTTP/1.1 request over a raw
-`TcpStream`, asserting the response body matches
-`Request::Metrics`'s own text for the identical live counters, plus
-the 404/malformed-request cases); confirm every existing
+integration coverage for the new module's route match and error paths;
+a new `tests/server_metrics_http_integration.rs` — a real second
+`TcpListener`, a real HTTP/1.1 request over a raw `TcpStream`,
+asserting the rendered body reflects live traffic driven against the
+same server, plus the 404/malformed-request cases); confirm every
 `tests/server_metrics_integration.rs` case and every other integration
 suite passes unmodified (no wire-protocol change); `cargo tree -p
 rusty_multimodal_db --all-features` diffed against the pre-round
