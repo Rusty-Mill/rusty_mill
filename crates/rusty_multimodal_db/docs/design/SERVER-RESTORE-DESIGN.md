@@ -1,9 +1,10 @@
-# Server Restore Tooling: a Real `restore_backup` CLI Closing `ADR-0065`'s Own "Restore Needs No New Code" Claim (Accepted)
+# Server Restore Tooling: a Real `restore_backup` CLI Closing `ADR-0065`'s Own "Restore Needs No New Code" Claim (Implemented)
 
-- Status: **Accepted, option (a)** (2026-09-15, `ADR-0070`) — the owner
-  picked option (a): the `restore_backup` CLI, as recommended.
-  Implementation delegated to Codex via `codex-build`, independently
-  inspected by Claude before merge.
+- Status: **Accepted as designed and implemented** (2026-09-15,
+  `ADR-0070`) — option (a), the `restore_backup` CLI, implemented in
+  this frozen Codex work-order round. See `ADR-0070`'s own "Acceptance
+  and implementation" section for the implementation and verification
+  record; independent provider review follows this advisory handoff.
 - Related: `docs/FUTURE-GROWTH.md`'s "Operational maturity" section,
   Backup/restore bullet ("Still absent: any `RESTORE` request or
   documented restore procedure — a backup is a portable, copy-safe
@@ -409,19 +410,19 @@ already used for `migrate_memory_v1_to_v2`.
 
 ## Traceability
 
-- Roadmap: `SERVER-RESTORE-DESIGN` (this document, `Proposed`),
-  `SERVER-RESTORE` (implementation, not started).
+- Roadmap: `SERVER-RESTORE-DESIGN` (this document, `Implemented`),
+  `SERVER-RESTORE` (implementation, `Implemented`).
 - `docs/FUTURE-GROWTH.md`'s Backup/restore bullet updated once
   implemented — "any `RESTORE` request or documented restore
   procedure" moves from "still absent" to named, bounded, and built,
   the identical treatment `ADR-0064`/`ADR-0065`/`ADR-0069` each already
   received on this same page.
 
-## Open questions
+## Open questions — resolved during implementation
 
 - **Should the tool also accept `Dog`, for the future binary
   `ADR-0065`'s own implementation note #2 names as not-yet-shipped?**
-  Recommendation: no — building restore support for a domain with no
+  **Resolved: no** — building restore support for a domain with no
   durable binary today is speculative generality ahead of a real call
   site, the same reasoning `ADR-0065` itself already used to leave
   `Dog`'s own `with_backup_source` uncalled by any shipped binary.
@@ -430,15 +431,21 @@ already used for `migrate_memory_v1_to_v2`.
 - **Should a successful restore also print a diff against the backup's
   own record count if one was already visible** (e.g., from a prior
   `Request::Metrics` or `Backup`'s own reported file/byte counts)?
-  Recommendation: no — the verification reopen's own record count is
+  **Resolved: no** — the verification reopen's own record count is
   the real proof; a diff against a number the operator would have to
   have separately recorded is a nice-to-have with no clear consumer,
   left for a future round if a real operator asks for one.
 - **Should `restore_backup` be a real installed binary
   (`src/bin/restore_backup.rs`) rather than a `cargo run --example`
-  target?** Recommendation: an example, matching
+  target?** **Resolved: an example**, matching
   `migrate_memory_v1_to_v2`'s own precedent exactly — this crate's own
   established convention for an operator tool that is not one of the
-  four production server binaries. Left for the implementation to
-  resolve if a real objection surfaces — a mechanical detail, not a
-  design fork the owner needs to weigh.
+  four production server binaries. The CLI and regression tests include
+  one main-less support module via `#[path]`, with no new library code.
+
+## Change history
+
+- 2026-09-15: initial proposal, design only.
+- 2026-09-15: the owner picked option (a); implemented the same
+  session. See `ADR-0070`'s own "Acceptance and implementation"
+  section for the full record.

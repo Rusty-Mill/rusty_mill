@@ -1,7 +1,7 @@
 # ADR-0070: Server Restore Tooling — a Real `restore_backup` CLI
 
-- Status: **Accepted, option (a)** (2026-09-15) — the owner picked
-  option (a) as recommended. See
+- Status: **Accepted as designed and implemented** (2026-09-15) — the
+  owner picked option (a) as recommended. See
   `docs/design/SERVER-RESTORE-DESIGN.md` for the full design.
 - Date: 2026-09-15
 - Deciders: baileyrd
@@ -48,7 +48,7 @@ restart happens.
 
 ## Decision
 
-**Recommended: option (a)** — a new example CLI,
+**Accepted and implemented: option (a)** — a new example CLI,
 `examples/restore_backup.rs`, invoked `cargo run --example
 restore_backup -- <backup_dir> <target_stem> <memory|entity|relation>`.
 Copies every file from a `Request::Backup`-produced directory into a
@@ -97,7 +97,8 @@ again), every requirement, and every acceptance criterion are in
 - This is a bounded, additive operator tool, sized like `ADR-0066`
   itself, not `ADR-0010`'s original protocol-defining tier — the class
   of decision `WORKFLOW.md` requires design-first, owner-accepted
-  before implementation, which is why this is a proposal, not code.
+  before implementation; the owner accepted option (a) before this
+  implementation round.
 
 ## Considered options
 
@@ -120,3 +121,112 @@ The owner's shorthand: **(a)** the CLI, as proposed; **(b)** a wire
 - 2026-09-15: the owner picked option (a) — the `restore_backup` CLI,
   as recommended. Implementation delegated to Codex (`codex-build`),
   independently inspected by Claude before merge.
+- 2026-09-15: implemented in the frozen Codex work-order round;
+  advisory handoff for independent review, with no commit, push, or
+  publication. Files: `examples/restore_backup.rs`,
+  `examples/support/restore_backup_lib.rs`, `tests/restore_backup.rs`,
+  `Cargo.toml`, `docs/design/SERVER-RESTORE-DESIGN.md`, and
+  `docs/decisions/ADR-0070-server-restore.md`.
+  - `RST-FR-001`–`006`: the thin example parses exactly three
+    positional arguments, stages every backup file, renames each file
+    separately, verifies through the selected public portable opener,
+    and prints the file count, real `AllIds` record count, target stem,
+    `SERVER_DATA_DIR`, and restart instruction. Existing target-prefix
+    entries are refused before copying; failed verification retains
+    the copied files and carries the original `DurabilityError`.
+  - Implementation details: an additional `InstallIo` variant names
+    final-rename/directory failures separately from staging failures.
+    Temporary names use PID plus an invocation counter and exclusive
+    `create_dir`; a stale name is skipped for a fresh one rather than
+    deleting a pre-existing directory. Per-file atomicity is unchanged.
+    The test target has no `required-features`; its five live-socket
+    tests use `#[cfg(feature = "server")]`, while five offline tests
+    also compile and run without a Cargo feature. The example needs
+    no feature, and no dependency, lockfile, library, existing test,
+    protocol, specification, or Python-client file was changed.
+  - `tests/restore_backup.rs`: **10/10 passed**. Three domain round
+    trips seed real production stores, start live servers with a
+    `SERVER_BACKUP_ROOT`-equivalent option, request `Backup` through
+    `SchemaDrivenClient`, and independently reopen the restored files.
+    Whole-record `PartialEq` checks every field of every original
+    record (including Unicode, ordered string lists, sync fields, and
+    soft-delete timestamps); Memory mentions and Entity relation
+    edges are also checked. Each round trip retries and proves refusal
+    with unchanged target bytes and a fresh record reopen; source
+    backup bytes remain unchanged. Entity covers sibling-table
+    coexistence; Relation covers a nested, initially missing target.
+    Two more live fixtures prove staging-copy failure removes staging
+    and preserves the target, and wrong-domain verification carries
+    the real schema-tag `DurabilityError` while retaining every copied
+    file. Five offline tests cover exact domain parsing, companion-only
+    prefix refusal before reading a missing backup, missing-backup
+    cleanup, empty backups for all three domains, and a target without
+    a filename.
+  - Proof from the monorepo root on Windows, all exit codes **0**:
+    `cargo fmt -p rusty_multimodal_db -- --check`;
+    `cargo clippy -p rusty_multimodal_db --all-features --tests --bins --lib --example restore_backup -- -D warnings`;
+    `cargo test -p rusty_multimodal_db --all-features --no-fail-fast`.
+    Baseline: **769 passed**; final: **779 passed**; both **0 failed,
+    0 ignored**. Library **535 → 535**, integrations **227 → 237**,
+    binary tests **4 → 4**, doctests **3 → 3**. Every existing target's
+    count is unchanged (table below). Cargo emitted existing ignored
+    non-root-profile notices for five workspace manifests; Clippy
+    emitted no lint diagnostics. Bundled DuckDB compiled successfully
+    for both test and Clippy builds; no proof command was narrowed.
+  - Real by-hand verification: `cargo run -p rusty_multimodal_db
+    --example restore_backup -- <real-backup>/nightly
+    <fresh-target>/memories.mmap memory`, with no Cargo features,
+    restored **4 files, 2 records** from a baseline
+    `server_backup_integration` wire-produced fixture and printed the
+    actual target stem, `SERVER_DATA_DIR`, and restart instruction.
+    A separate `CARGO_TARGET_DIR` under this checkout's `target/`
+    avoided Clippy's build lock; no source configuration changed.
+    The compiled CLI also returned **1** for missing arguments,
+    case-mismatched `Memory`, and a repeated target, printing useful
+    usage/refusal errors. Repeated against a nested fresh destination
+    after the final source edit, again **4 files, 2 records**, exit **0**.
+
+### Exact proof counts
+
+The baseline command discovered targets before the new files were added;
+every pre-existing source and integration test stayed unmodified. Counts
+are passing tests, with zero failures or ignored tests in every row. The
+new target did not exist in the baseline.
+
+| Target | Before | After |
+| --- | ---: | ---: |
+| `src/lib.rs` | 535 | 535 |
+| `src/bin/crash_safety_harness.rs` | 0 | 0 |
+| `src/bin/crash_writer.rs` | 0 | 0 |
+| `src/bin/dog_server.rs` | 4 | 4 |
+| `src/bin/entity_server.rs` | 0 | 0 |
+| `src/bin/memory_server.rs` | 0 | 0 |
+| `src/bin/multiprocess_harness.rs` | 0 | 0 |
+| `src/bin/multiprocess_writer.rs` | 0 | 0 |
+| `src/bin/reminder_server.rs` | 0 | 0 |
+| `tests/cross_backend.rs` | 7 | 7 |
+| `tests/generic_production_integration.rs` | 1 | 1 |
+| `tests/mmap_record_identity_keying.rs` | 4 | 4 |
+| `tests/production_integration.rs` | 1 | 1 |
+| `tests/restore_backup.rs` | — | 10 |
+| `tests/schema_migration.rs` | 3 | 3 |
+| `tests/server_auth_integration.rs` | 14 | 14 |
+| `tests/server_backup_integration.rs` | 5 | 5 |
+| `tests/server_client_only.rs` | 2 | 2 |
+| `tests/server_dog_integration.rs` | 13 | 13 |
+| `tests/server_employee_integration.rs` | 5 | 5 |
+| `tests/server_entity_integration.rs` | 19 | 19 |
+| `tests/server_hub_differential.rs` | 7 | 7 |
+| `tests/server_memory_integration.rs` | 13 | 13 |
+| `tests/server_metrics_http_integration.rs` | 5 | 5 |
+| `tests/server_metrics_integration.rs` | 3 | 3 |
+| `tests/server_order_integration.rs` | 3 | 3 |
+| `tests/server_protocol_version.rs` | 18 | 18 |
+| `tests/server_python_client.rs` | 1 | 1 |
+| `tests/server_reminder_integration.rs` | 11 | 11 |
+| `tests/server_replication_integration.rs` | 5 | 5 |
+| `tests/server_schema_driven_client.rs` | 7 | 7 |
+| `tests/server_sql_integration.rs` | 40 | 40 |
+| `tests/server_tls_integration.rs` | 18 | 18 |
+| `tests/server_transaction_integration.rs` | 22 | 22 |
+| `doctests` | 3 | 3 |
