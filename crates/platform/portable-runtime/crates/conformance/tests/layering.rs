@@ -75,17 +75,23 @@ fn permitted_dependencies(layer: Layer) -> &'static [&'static str] {
 /// model below is a claim about *this* group, not about crates that were
 /// never part of it. Without the filter, `every_workspace_member_is_assigned_a_layer`
 /// would demand a layer for every unrelated crate in the monorepo.
-const GROUP_PREFIX: &str = "crates/rusty_test/";
+const GROUP_PREFIX: &str = "crates/platform/portable-runtime/";
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR is crates/rusty_test/crates/conformance; the
-    // monorepo workspace root is four up (it was two up when this crate
-    // group was its own standalone workspace).
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(4)
-        .expect("workspace root is four levels above this crate")
-        .to_path_buf()
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let candidate = dir.join("Cargo.toml");
+        if candidate.exists() {
+            if let Ok(text) = std::fs::read_to_string(&candidate) {
+                if text.contains("[workspace]") {
+                    return dir;
+                }
+            }
+        }
+        if !dir.pop() {
+            panic!("could not locate workspace root starting from CARGO_MANIFEST_DIR");
+        }
+    }
 }
 
 /// Reads this crate group's `members` out of the workspace manifest.

@@ -483,3 +483,119 @@ something looks off) and committed it as the prep/baseline commit before
 delegating. Captured a pre-move `cargo metadata --all-features --locked`
 snapshot at `C:\tmp\phase1-metadata.json` for the post-move
 dependency-graph-identity check.
+
+### Round 1 — blocked by environment, not the spec
+
+Codex's build (session `01a0a6ca-7d69-7cb3-8d52-3a30d71ca443`, exit 0,
+120s) never got to apply anything: `git mv` failed with a Windows
+permission error creating `.git/worktrees/rusty_mill-adr0003-phase1/
+index.lock`. That file lives *outside* the worktree's own directory for
+a linked `git worktree` (it's under the main checkout's `.git/`), so it
+sits outside Codex's sandbox root regardless of how permissive the
+sandbox is *inside* the worktree — an environment/tooling limitation,
+not something the spec could have avoided. Cleaned up the empty
+directories Codex's blocked attempt left behind before proceeding.
+
+Disposition: performed every move in `PHASE-1-SPEC.md`'s tables myself
+directly (`git mv` for 18 crate directories + each family's shared
+docs/CI files, `git rm` for the 2 stale nested workspace manifests) —
+mechanical, zero judgment calls, matches the spec's tables exactly.
+Verified before committing: `git status --short` showed 234 renames +
+2 deletions, nothing else; every rename in `git status -M` at 100%
+similarity. Committed as its own commit (`10c074f59`) so the move is a
+clean, separately-reviewable unit from the content edits still to come.
+Verified `git log --follow` traces history through the rename for two
+spot-checked files (`platform/Cargo.toml`, `conformance/tests/
+layering.rs`) — reaches back to pre-merge commits (`9973c73d4`,
+`af3a383b9`), confirming history survived.
+
+Updated `PHASE-1-SPEC.md` with a "Status" section marking the move done
+and scoping the next build round to only the remaining content edits
+(root `Cargo.toml`, `layering.rs`, `README.md`), so a resumed/fresh
+build wouldn't re-attempt `git mv` against the same permission wall.
+Committed (`279425569`) and launched a fresh build against that base.
+
+### Round 2 — succeeded (with one legitimately-flagged spec gap)
+
+Codex's build (session `01a0a6ce-218b-7d33-8df0-a530e2ab7062`, exit 0,
+216s) applied all three content edits and ran what proof it could
+(`python3` was unexpectedly unavailable in its sandbox this round — ran
+it myself instead, see Inspect below). It flagged, correctly, that my
+own acceptance criterion's blanket grep sweep (for `"crates/rustils/"`
+etc. across every tracked file) would fail even on a fully-correct
+build, because it also matches: (a) the deliberately-still-old
+`coreutils`/`coreutils-async` paths in root `Cargo.toml` and
+`README.md` (correct — those two crates don't move until Phase 4), and
+(b) `docs/adr/0001-consolidate-crates-into-workspace.md`, a historical
+document citing old paths as history, which the spec's exemption list
+missed (it named `docs/adr/0003...`, `CHANGELOG.md` and
+`PLAN-REVIEW-LOG.md` but not ADR-0001 or `RELEASE_NOTES.md`, both of
+which the *original* ADR-0003 text already exempts). Codex proposed
+adding grep exceptions rather than editing any of these files — correct
+call, deferred to the host rather than applied unilaterally.
+
+## Inspect — Phase 1 — 2026-09-15
+
+Independent inspection by the coordinating Claude host, same rationale
+as prior phases for not spinning up a separate fresh-CLI session.
+
+- Re-ran the same blanket grep myself, properly excluding
+  `docs/adr/0003-workspace-layout-by-layer.md`, `CHANGELOG.md`,
+  `PLAN-REVIEW-LOG.md`, and (newly identified) `RELEASE_NOTES.md`,
+  `CODEX-MONOREPO-REVIEW*.md`, `docs/adr/0001*`, and `PHASE-1-SPEC.md`
+  itself. Categorized every remaining hit by hand, one by one: all of
+  them are either a historical document properly describing past state,
+  my own spec file's before→after tables, or a legitimate
+  `coreutils`/`coreutils-async` reference that is supposed to still
+  point at the old path this phase. **Zero unexplained hits** — the
+  build has no missed reference; the spec's acceptance criterion was
+  just too blunt.
+- `git status --short`: exactly the 3 intended files modified
+  (`Cargo.toml`, `README.md`, `layering.rs`), nothing else, confirming
+  Codex didn't touch anything beyond its scoped edits on top of the
+  host's move commit.
+- Read the full `Cargo.toml` diff: 18 member-path entries, 12
+  `[workspace.dependencies]` path entries, and the 1 `exclude` entry all
+  updated to the correct new paths, `coreutils`/`coreutils-async`
+  correctly untouched; `git diff --numstat` shows 31/31 (pure swap, no
+  stray edits).
+- Read the full `README.md` diff: exactly 18 rows changed (`git diff
+  --numstat` 18/18), both the link target and the backtick path on each;
+  `coreutils`/`coreutils-async` rows correctly untouched.
+- Read the full `layering.rs` diff: `GROUP_PREFIX` updated, and
+  `workspace_root()` replaced with the exact walk-up-until-`[workspace]`
+  pattern copied from the Nexus guards, matching the spec's instruction
+  precisely.
+- Ran the proof commands myself (Codex's `python3` was unavailable this
+  round): `python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+  -v` → 58 passed; `check_workspace_deps.py` and
+  `check_workspace_layers.py` against fresh metadata → both exit 0 (the
+  latter re-validates every layer/family assignment against the *actual*
+  post-move manifest directories — a strong signal the move landed each
+  crate where the ADR says it belongs).
+- **Dependency-graph identity**, compared by package name rather than
+  resolve-node id (node ids embed the manifest path, which the move
+  necessarily changes, so a name-keyed comparison is the correct
+  invariant here): 1443 distinct package names before and after, **0**
+  with a changed dependency or feature set.
+- Ran the one test whose own logic changed, not just its build:
+  `cargo test -p conformance --test layering` — all 4 tests pass from
+  the new location, including `every_workspace_member_is_assigned_a_layer`,
+  which specifically exercises the new dynamic `workspace_root()`.
+- Compiled a representative sample directly (`cargo check -p platform -p
+  platform-linux -p winargv -p coreutils -p coreutils-async`) — all five
+  succeed, including the two crates that stayed behind at their old path
+  while consuming the now-moved platform crates via `workspace = true`,
+  the strongest end-to-end confirmation the split works as designed.
+
+No findings beyond the spec's own grep-criterion gap, which is closed
+by inspection rather than a code change (nothing needed fixing; the
+criterion needed narrowing).
+
+### Outcome
+Phase 1 build **verified correct** — 18 crates + family-level files
+moved (mixed authorship: host performed `git mv`/`git rm`, Codex
+performed the content edits; both inspected by the host, matching the
+build reference's mixed-authorship logging requirement). Ready to
+commit the remaining edits, open a PR, and expect a large but partial
+CI matrix (the 18 moved crates plus their dependents).

@@ -60,11 +60,11 @@ members = [
     "crates/rusty_hister/crates/rusty-hister-crawler",
     "crates/rusty_hister/crates/rusty-hister-server",
     "crates/rusty_hister/crates/rusty-hister-mcp",
-    "crates/rustils_async/crates/reactor-core",
-    "crates/rustils_async/crates/platform-async",
-    "crates/rustils_async/crates/platform-async-mock",
-    "crates/rustils_async/crates/platform-async-linux",
-    "crates/rustils_async/crates/threading",
+    "crates/platform/rustils_async/crates/reactor-core",
+    "crates/platform/rustils_async/crates/platform-async",
+    "crates/platform/rustils_async/crates/platform-async-mock",
+    "crates/platform/rustils_async/crates/platform-async-linux",
+    "crates/platform/rustils_async/crates/threading",
     "crates/rustils_async/crates/coreutils-async",
     "crates/rusty_wire",
     "crates/rusty_std",
@@ -113,21 +113,21 @@ members = [
     "crates/rusty_whisper",
     "crates/rusty_rdp",
     "crates/rusty_voice",
-    "crates/rustils/crates/platform",
-    "crates/rustils/crates/platform-mock",
-    "crates/rustils/crates/platform-parity",
-    "crates/rustils/crates/platform-linux",
-    "crates/rustils/crates/platform-windows",
-    "crates/rustils/crates/platform-bsd",
-    "crates/rustils/crates/winargv",
+    "crates/platform/rustils/crates/platform",
+    "crates/platform/rustils/crates/platform-mock",
+    "crates/platform/rustils/crates/platform-parity",
+    "crates/platform/rustils/crates/platform-linux",
+    "crates/platform/rustils/crates/platform-windows",
+    "crates/platform/rustils/crates/platform-bsd",
+    "crates/platform/rustils/crates/winargv",
     "crates/rustils/crates/coreutils",
     "crates/rusty_croc",
-    "crates/rusty_test/crates/contract",
-    "crates/rusty_test/crates/compat",
-    "crates/rusty_test/crates/conformance",
-    "crates/rusty_test/tools/stat-tool",
-    "crates/rusty_test/tools/proc-runner",
-    "crates/rusty_test/tools/pty-shell",
+    "crates/platform/portable-runtime/crates/contract",
+    "crates/platform/portable-runtime/crates/compat",
+    "crates/platform/portable-runtime/crates/conformance",
+    "crates/platform/portable-runtime/tools/stat-tool",
+    "crates/platform/portable-runtime/tools/proc-runner",
+    "crates/platform/portable-runtime/tools/pty-shell",
     "crates/rusty_inventrory/crates/inventory-core",
     "crates/rusty_inventrory/crates/inventory-cli",
     "crates/rusty_inventrory/crates/inventory-tauri",
@@ -257,7 +257,7 @@ exclude = [
     "crates/rusty_libc/bench",
     "crates/rusty_tls/fuzz",
     "crates/rusty_lsp/fuzz",
-    "crates/rustils/fuzz",
+    "crates/platform/rustils/fuzz",
     "crates/rusty_croc/fuzz",
     "crates/rusty_key/desktop/src-tauri",
     # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
@@ -297,8 +297,8 @@ authors = ["rusty_search contributors"]
 publish = false
 
 [workspace.dependencies]
-platform-async = { path = "crates/rustils_async/crates/platform-async" }
-platform-async-linux = { path = "crates/rustils_async/crates/platform-async-linux" }
+platform-async = { path = "crates/platform/rustils_async/crates/platform-async" }
+platform-async-linux = { path = "crates/platform/rustils_async/crates/platform-async-linux" }
 rpath = { path = "crates/rpath", version = "0.1.0" }
 rush = { path = "crates/rush" }
 rusty-db = { path = "crates/rusty_db/rusty_db" }
@@ -427,13 +427,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # `"0.1.0"`, so rustils' own eight crates keep literal `[package]` fields
 # instead of `field.workspace = true`. Only its *dependencies* are hoisted
 # here. `thiserror` is already hoisted above for rusty_db's own use.
-platform = { path = "crates/rustils/crates/platform" }
-platform-mock = { path = "crates/rustils/crates/platform-mock" }
-platform-parity = { path = "crates/rustils/crates/platform-parity" }
-platform-linux = { path = "crates/rustils/crates/platform-linux" }
-platform-windows = { path = "crates/rustils/crates/platform-windows" }
-platform-bsd = { path = "crates/rustils/crates/platform-bsd" }
-winargv = { path = "crates/rustils/crates/winargv" }
+platform = { path = "crates/platform/rustils/crates/platform" }
+platform-mock = { path = "crates/platform/rustils/crates/platform-mock" }
+platform-parity = { path = "crates/platform/rustils/crates/platform-parity" }
+platform-linux = { path = "crates/platform/rustils/crates/platform-linux" }
+platform-windows = { path = "crates/platform/rustils/crates/platform-windows" }
+platform-bsd = { path = "crates/platform/rustils/crates/platform-bsd" }
+winargv = { path = "crates/platform/rustils/crates/winargv" }
 libc = "0.2"
 
 # Hoisted from rusty_test's own former `[workspace.dependencies]` (its
@@ -443,9 +443,9 @@ libc = "0.2"
 # "2.0" while this root already pins "1" for rusty_db/rustils, so
 # `contract` keeps a literal `thiserror = "2"` of its own rather than
 # forcing a major bump on unrelated crates.
-contract = { path = "crates/rusty_test/crates/contract" }
-compat = { path = "crates/rusty_test/crates/compat" }
-conformance = { path = "crates/rusty_test/crates/conformance" }
+contract = { path = "crates/platform/portable-runtime/crates/contract" }
+compat = { path = "crates/platform/portable-runtime/crates/compat" }
+conformance = { path = "crates/platform/portable-runtime/crates/conformance" }
 cap-std = "4.0"
 portable-pty = "0.9"
 dirs = "6.0"

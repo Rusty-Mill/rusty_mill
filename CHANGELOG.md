@@ -9,6 +9,28 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0003 Phase 1 implemented: `rustils` and `rustils_async` split —
+  their 7+5 platform crates (plus `winargv`) moved to
+  `crates/platform/rustils{,_async}/crates/`, while `coreutils`/
+  `coreutils-async` stay at their current path until Phase 4 (already
+  consuming the moved crates via `workspace = true`, a direct payoff of
+  Phase 0b, so no manifest edit was needed for either); `rusty_test`
+  moved and renamed to `crates/platform/portable-runtime/` intact. Two
+  stale pre-merge nested `[workspace]` manifests deleted
+  (`crates/rustils/Cargo.toml`, `crates/rustils_async/Cargo.toml`).
+  Root `Cargo.toml` (18 member paths, 12 `[workspace.dependencies]`
+  paths, 1 `exclude` entry) and `README.md` (18 crate-table rows)
+  updated to match; `conformance`'s `layering.rs` test fixed to derive
+  its workspace root dynamically instead of a now-incorrect fixed
+  ancestor depth. Mixed authorship: the host performed the `git mv`
+  (Codex's sandbox can't write outside a linked worktree's own
+  directory, where a worktree's git index lives), Codex applied the
+  manifest/source/doc edits; both inspected by the host. Verified
+  behavior-neutral: dependency graph identical before/after by package
+  name, `cargo check` on a representative sample (including the two
+  crates left behind) succeeds, `git log --follow` confirms history
+  survived every rename. Built by Codex (`/codex-build`), independently
+  inspected (`PLAN-REVIEW-LOG.md`).
 - ADR-0003 Phase 0b implemented: 241 cross-family relative `path`
   dependency entries across 83 member manifests hoisted to
   `dep.workspace = true`, backed by 40 new (plus 12 pre-existing)
