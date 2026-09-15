@@ -9,7 +9,9 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
-use super::{copy_table_files, BackupReport, ConnectionStore};
+use super::{
+    copy_table_files, read_table_files, BackupReport, ConnectionStore, ReadTableFilesError,
+};
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::production::{AllIds, TransactionalStore};
 use crate::record::DogRecord;
@@ -222,6 +224,19 @@ where
         let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
         TransactionalStore::with_exclusive(&self.store, |_| copy_table_files(base, target_dir))
             .map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `RPL-FR-003` (ADR-0067): [`ConnectionStore::backup`]'s reading
+    /// twin — the identical `backup_source`/write-lock story, reading
+    /// bytes instead of copying files.
+    fn fetch_snapshot(&self) -> Result<Vec<(String, Vec<u8>)>, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        TransactionalStore::with_exclusive(&self.store, |_| read_table_files(base)).map_err(|e| {
+            match e {
+                ReadTableFilesError::TooLarge => ErrorCode::TooLarge,
+                ReadTableFilesError::Io => ErrorCode::Storage,
+            }
+        })
     }
 
     fn filter_eq(&self, _field: FieldRef, _value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {

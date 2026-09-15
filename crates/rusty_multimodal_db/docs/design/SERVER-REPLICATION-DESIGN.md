@@ -1,7 +1,10 @@
-# Server Replication, Round One: `Request::FetchSnapshot` — a Network-Transferable, Lock-Consistent Full Copy (Proposed)
+# Server Replication, Round One: `Request::FetchSnapshot` — a Network-Transferable, Lock-Consistent Full Copy (Implemented)
 
-- Status: **Proposed** (2026-09-14, `ADR-0067`), design only — no
-  source file touched.
+- Status: **Accepted as designed and implemented** (2026-09-14,
+  `ADR-0067`) — implemented in the same session the design was
+  proposed. See `ADR-0067`'s own "Acceptance and implementation"
+  section for the full implementation record, real corrections found
+  along the way, and what's proven.
 - Related: `docs/FUTURE-GROWTH.md`'s "Replication/high availability"
   bullet (the gap this round starts closing — explicitly named there
   as "realistically a multi-round effort, not a single ADR"), `ADR-0065`
@@ -244,6 +247,12 @@ name"), `Response::Snapshot { files: Vec<(String, Vec<u8>)> }` (or a
 multi-frame streaming shape — see Open questions), `PROTOCOL_VERSION`
 24 → 25.
 
+> **As implemented** (see Open questions — resolved): `Request::FetchSnapshot`
+> is fieldless (no `name`); the dispatch arm needs no `handle_fetch_snapshot`
+> special-case — unlike `Backup`, it needs no `ServeOptions` access
+> beyond the `Replication`-class check already performed earlier in
+> `handle_connection`, so it goes through the generic `dispatch` loop.
+
 `src/server/serve.rs`: `ConnectionStore::fetch_snapshot(&self) ->
 Result<Vec<(String, Vec<u8>)>, ErrorCode>` (default `Unsupported`);
 a `handle_fetch_snapshot` dispatch arm gated on the new `Replication`
@@ -331,25 +340,37 @@ not silently skip it.
 ## Acceptance criteria
 
 1. No `Replication` token configured: every `FetchSnapshot` answers
-   `Unauthorized` before any file is touched.
+   `Unauthorized` before any file is touched. **Proven:**
+   `fetch_snapshot_is_unauthorized_with_no_configured_replication_token`.
 2. A `ReadWrite`-only token (no `Replication` token presented):
    `FetchSnapshot` answers `Unauthorized` — proves `ReadWrite` alone
    never grants this capability, directly closing `ADR-0065`'s own
-   named objection to option (c).
+   named objection to option (c). **Proven:**
+   `fetch_snapshot_is_unauthorized_for_a_read_write_token` (and, for
+   completeness, `..._for_a_read_only_token`).
 3. A valid `Replication` token: `FetchSnapshot` returns every file the
    table owns, byte-for-byte identical to what `Backup` would have
    copied to local disk in the same instant (proven by comparing
    against a `Backup` taken back to back, or by writing the fetched
    bytes to disk and reopening via `open_..._production_stack_portable`
    with the identical record set — the same flagship proof `ADR-0065`
-   used).
+   used). **Proven:**
+   `fetch_snapshot_produces_a_reopenable_directory_with_the_identical_records`.
 4. A table exceeding the named size ceiling is refused before any
-   bytes are read, not partially streamed.
-5. `FetchSnapshot` below protocol version 25 is `Malformed`.
+   bytes are read, not partially streamed. **Proven:**
+   `fetch_snapshot_refuses_a_table_over_the_size_ceiling`.
+5. `FetchSnapshot` below protocol version 25 is `Malformed`. **Proven:**
+   the `Request::FetchSnapshot if negotiated < 25` gate in
+   `handle_connection`, exercised by `driver.py`'s hand-negotiated
+   version-10 exercise in `tests/server_python_client.rs`
+   (`fetch_snapshot` answers `unsupported` client-side, rule 4).
 6. `Dog` is mechanically capable (`fetch_snapshot` implemented where
    `TransactionalStore` already gives exclusive access) but no shipped
    binary wires a `Replication` token to it, matching `Backup`'s own
-   precedent for a non-durable binary.
+   precedent for a non-durable binary. **Implemented as designed:**
+   `DogConnectionStore::fetch_snapshot` exists; `dog_server.rs` wires
+   no `SERVER_AUTH_REPLICATION_TOKEN` (it has no `SERVER_BACKUP_ROOT`
+   either — the same precedent, unchanged by this round).
 
 ## Verification plan
 
@@ -364,49 +385,40 @@ clean.
 
 ## Traceability
 
-- Roadmap: `SERVER-REPLICATION-DESIGN` (this document, `Proposed`),
-  `SERVER-REPLICATION` (implementation, not started).
+- Roadmap: `SERVER-REPLICATION-DESIGN` (this document, `Implemented`),
+  `SERVER-REPLICATION` (implementation, `Implemented`).
 - `docs/FUTURE-GROWTH.md`'s "Replication/high availability" bullet
-  updated once implemented, matching the "Partly built since this was
-  written" treatment `Backup`/`Metrics`/schema migration each
-  received — explicitly still absent afterward: continuous shipping,
-  failover, promotion, write forwarding (see Non-goals).
+  updated to the "Partly built since this was written" treatment
+  `Backup`/`Metrics`/schema migration each received — explicitly
+  still absent: continuous shipping, failover, promotion, write
+  forwarding (see Non-goals, all unchanged by this round).
 
-## Open questions
+## Open questions — resolved during implementation
 
-- **Does `FetchSnapshot` need a `name` field at all**, given it never
-  chooses a server-local write target the way `Backup`'s `name` does?
-  Recommendation: drop it — `FetchSnapshot` answers for "this table,
-  now," with no caller-chosen string at all, removing even the
-  reduced path-confinement question `Backup` needed. Named as open
-  since it is a real, if small, shape decision the owner should see
-  named rather than silently defaulted.
+- **Does `FetchSnapshot` need a `name` field at all?** **Resolved: no.**
+  Implemented exactly as the recommendation above — `Request::FetchSnapshot`
+  is fieldless; it answers for "this table, now," with no caller-chosen
+  string at all.
 - **`TokenClass::Replication` as a third enum variant, or a separate
-  `AuthConfig` field?** A new enum variant touches every existing
-  `match` on `TokenClass` (a compile-time-enforced, not silently
-  incomplete, audit of every such site — arguably the safer shape);
-  a separate field is more additive-looking but risks a site checking
-  `TokenClass` alone missing the new gate entirely. Recommendation:
-  the enum variant, for the compile-time completeness guarantee, named
-  here since it is the one change this round makes to an
-  already-`Accepted`, multiply-implemented type (`ADR-0012`).
+  `AuthConfig` field?** **Resolved: the enum variant**, exactly as
+  recommended — `TokenClass::Replication` is a third
+  `#[derive(..., PartialEq, Eq)]` variant, so every existing `match`
+  on `TokenClass` (`ServeOptions::check`, the `ReadOnly`-blocks-writes
+  gate, `Debug`) is compiler-forced to account for it.
 - **The exact wire framing for a potentially large, multi-file
-  payload** — one `Response::Snapshot` with every file's bytes inline
-  (simplest, but the existing 16 MiB frame cap, `src/server/
-  framing.rs`, may not fit a real table's full byte set) versus a
-  bounded sequence of frames (more machinery, no cap problem). Left
-  for the owner/implementation to resolve against the 16 MiB cap's own
-  real number — recommendation: name a real `MAX_SNAPSHOT_BYTES` well
-  under the frame cap for this round, deferring a true
-  multi-frame/chunked shape to a follow-up if a real table's size ever
-  needs it (matching this crate's own "don't build for a size nobody
-  has yet" discipline, e.g. `ShardedStore`'s fixed shard count).
-- **Should `MAX_SNAPSHOT_BYTES` be operator-configurable (a
-  `ServeOptions` field) or a fixed constant this round?** Recommendation:
-  a fixed, generous constant for the first round (matching `MAX_BATCH_OPS`'s
-  own precedent — a named constant, not yet configurable, revisited if
-  a real deployment needs it), named here rather than silently decided.
+  payload?** **Resolved: one `Response::Snapshot` with every file's
+  bytes inline**, exactly as recommended — no multi-frame/chunked
+  shape this round; `MAX_SNAPSHOT_BYTES` (8 MiB) sits comfortably
+  under `MAX_FRAME_BYTES` (16 MiB), so a snapshot at the ceiling
+  always fits in one frame.
+- **Should `MAX_SNAPSHOT_BYTES` be operator-configurable?**
+  **Resolved: no — a fixed constant this round**, exactly as
+  recommended, matching `MAX_BATCH_OPS`'s own "nobody has asked for a
+  different number yet" precedent.
 
 ## Change history
 
 - 2026-09-14: initial proposal, design only.
+- 2026-09-14: the owner picked option (a); implemented the same
+  session. See `ADR-0067`'s own "Acceptance and implementation"
+  section for the full record.

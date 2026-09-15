@@ -101,6 +101,8 @@ pub enum RequestKind {
     Metrics,
     /// Protocol 24, ADR-0065.
     Backup,
+    /// Protocol 25, ADR-0067.
+    FetchSnapshot,
 }
 
 impl RequestKind {
@@ -140,6 +142,7 @@ impl RequestKind {
             Request::WriteBatch { .. } => RequestKind::WriteBatch,
             Request::Metrics => RequestKind::Metrics,
             Request::Backup { .. } => RequestKind::Backup,
+            Request::FetchSnapshot => RequestKind::FetchSnapshot,
         }
     }
 }

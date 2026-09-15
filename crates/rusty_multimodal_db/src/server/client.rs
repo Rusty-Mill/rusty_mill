@@ -2195,6 +2195,29 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// A network-transferable, lock-consistent snapshot of every file
+    /// the selected table's on-disk stack owns (`RPL-FR-001`/`RPL-FR-004`,
+    /// ADR-0067, protocol 25) — `(file name, bytes)` pairs, ready to
+    /// write into a fresh directory on this side of the wire.
+    /// `Server(Unauthorized, _)` unless this connection authenticated
+    /// with the server's `SERVER_AUTH_REPLICATION_TOKEN`, distinct from
+    /// every `ReadOnly`/`ReadWrite` token — `ADR-0067` reopens
+    /// `ADR-0065`'s own declined "ship bytes over the wire" option only
+    /// behind this separate, opt-in credential. `Server(TooLarge, _)`
+    /// when the table's on-disk size exceeds the server's configured
+    /// ceiling, refused before any byte is read. [`ClientError::Unsupported`]`("fetch_snapshot")`
+    /// below 25, with no frame sent (rule 4).
+    pub fn fetch_snapshot(&mut self) -> Result<Vec<(String, Vec<u8>)>, ClientError> {
+        if self.server_protocol_version() < 25 {
+            return Err(ClientError::Unsupported("fetch_snapshot"));
+        }
+        match self.roundtrip(Request::FetchSnapshot)? {
+            Response::Snapshot { files } => Ok(files),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Snapshot")),
+        }
+    }
+
     /// Add one edge between two records under a symmetric relation label
     /// (`LNK-FR-012`, ADR-0047, protocol 14). `Ok(())` whether the edge is
     /// new or was already present — insert-or-ignore, so a retry is

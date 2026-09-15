@@ -187,6 +187,20 @@ def main() -> int:
             print(f"backup_bytes_positive={'yes' if size > 0 else 'no'}")
         except UnsupportedError as e:
             print(f"backup=unsupported:{e}")
+
+        # Protocol 25 (RPL-FR-002): FetchSnapshot needs a separate
+        # replication credential this driver's connection never holds
+        # (it authenticates, if at all, as ReadWrite) -- proves the
+        # refusal path only. The genuine success path (a real snapshot
+        # copy over the wire) is covered on the Rust side,
+        # tests/server_replication_integration.rs.
+        try:
+            c.fetch_snapshot()
+            print("fetch_snapshot=ok")
+        except ServerError as e:
+            print(f"fetch_snapshot={e.code.name}")
+        except UnsupportedError as e:
+            print(f"fetch_snapshot=unsupported:{e}")
     return 0
 
 

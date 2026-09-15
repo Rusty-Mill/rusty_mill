@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.13.0 (protocol version 24 — `SERVER-001` v0.54.0, `BAK-FR-006`,
+- Version: 0.14.0 (protocol version 25 — `SERVER-001` v0.55.0, `RPL-FR-006`,
+  ADR-0067; 0.13.0 was protocol 24, `SERVER-001` v0.54.0, `BAK-FR-006`,
   ADR-0065; 0.12.0 was protocol 23, `SERVER-001` v0.53.0, `MET-FR-004`,
   ADR-0064; 0.11.0 protocol 22, ADR-0060; 0.10.0 was protocol 21, ADR-0057; 0.9.0 protocol 20, ADR-0055; 0.8.0 protocol 19, ADR-0054; 0.7.0 protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
   ADR-0050; 0.4.0 protocol 15, ADR-0049; 0.3.0 protocol 14, ADR-0047;
@@ -93,13 +94,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 24 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `18 00 00 00` (24).
+- `Request::Hello { protocol_version: 25 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `19 00 00 00` (25).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 24
+## 5. Types at protocol version 25
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -113,12 +114,12 @@ unmarked is version 1.
 
 ### 5.2 Fieldless enums (a `u32` index)
 
-| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | |
-| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | |
-| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | |
-| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) |
+| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | | | |
+| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | | | |
+| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | | | |
+| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) | `TooLarge` (25) |
 
 ### 5.3 `ScanValue` — a field's value
 
@@ -221,6 +222,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 31 | `WriteBatch` | `ops: Vec<WriteOp>`, `atomic: bool` | 22 | `BatchResults`, or `TransactionFailed` (atomic abort) |
 | 32 | `Metrics` | — | 23 | `Metrics` |
 | 33 | `Backup` | `name: String` | 24 | `BackedUp` |
+| 34 | `FetchSnapshot` | — | 25 | `Snapshot` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -252,6 +254,7 @@ server does not know closes the connection with no reply (§6.3).
 | 20 | `BatchResults` | `results: Vec<WriteResult>` | 22 |
 | 21 | `Metrics` | `text: String` | 23 |
 | 22 | `BackedUp` | `files: u64`, `bytes: u64` | 24 |
+| 23 | `Snapshot` | `files: Vec<(String, Vec<u8>)>` | 25 |
 
 ## 6. Connection lifecycle
 
@@ -553,6 +556,23 @@ Each item names the `SERVER-001` requirement that owns it.
    while a session is open, `Malformed` below 24. Restore needs no
    request of its own: the produced directory is a complete, portable
    store directory a fresh server can open directly. (`FR-064`)
+23. **`FetchSnapshot`** (25) — a full, lock-consistent snapshot of the
+   selected table's on-disk files, streamed back on this connection —
+   the identical file set item 22's `Backup` would copy, read into the
+   response instead of copied to a server-local path; answered
+   `Snapshot { files }` with every file's name and full bytes.
+   `Unsupported` from an adapter with no known data directory (the same
+   condition `Backup` answers `Unsupported` for); `TooLarge` when the
+   selected table's on-disk size exceeds a server-side named ceiling
+   (`MAX_SNAPSHOT_BYTES`), checked before any file is read — nothing
+   partially streamed. Gated behind a **separate, distinct token
+   class** — `Replication` — never satisfied by a read-only or
+   read-write token; a server with no such token configured answers
+   `Unauthorized` for every connection, no matter its class. `Malformed`
+   below 25; `SessionOpen` while a session is open. This directly
+   reopens, under a narrower gate, a shape §6.2's token classes had
+   never allowed before: bytes returned over the wire rather than
+   written to a server-local path. (`FR-067`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -603,6 +623,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 22 | v0.50.0 | `WriteBatch` (31), `BatchResults` (20) |
 | 23 | v0.53.0 | `Metrics` (32), `Metrics` response (21) |
 | 24 | v0.54.0 | `Backup` (33), `BackedUp` (22) |
+| 25 | v0.55.0 | `FetchSnapshot` (34), `Snapshot` (23), `ErrorCode::TooLarge` (14) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -614,7 +635,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -645,11 +666,24 @@ byte-for-byte**, and re-encodes what it decoded to the same bytes.
 client; it needs a CPython 3 interpreter (`python3` or `python`,
 whichever is found — see `tests/server_python_client.rs`'s own
 `python_binary`; verified in this session against CPython 3.14). The
-live half — `tests/server_python_client.rs` — drives the reference
-client against a real server at 24 and at a hand-negotiated 10.
+  live half — `tests/server_python_client.rs` — drives the reference
+  client against a real server at 25 and at a hand-negotiated 10.
 
 ## 10. Change history
 
+- 0.14.0 (`SERVER-001` v0.55.0, ADR-0067, `RPL-FR-006`): protocol
+  version 25 — `Request::FetchSnapshot` (34), `Response::Snapshot` (23),
+  `ErrorCode::TooLarge` (14), and a third token class (`Replication`,
+  §6.2 — never satisfied by a read-only or read-write token); §4's
+  `Hello` example, §5 header, §5.2, §5.6, §5.7, §7 item 23, §8 row 25
+  and rule 3's list; fixture at 73 vectors (`Request/FetchSnapshot`,
+  `Response/Snapshot`, `Response/Err(TooLarge)`); the reference Python
+  client gains `fetch_snapshot`. This reopens, under a new opt-in
+  credential nobody holds unless explicitly configured, a wire shape
+  `SERVER-001` `ADR-0065` had previously declined outright (bytes
+  returned directly to the client rather than written server-side) —
+  named explicitly in `ADR-0067`'s own Context, not silently
+  reintroduced.
 - 0.13.0 (`SERVER-001` v0.54.0, ADR-0065, `BAK-FR-006`): protocol
   version 24 — `Request::Backup` (33), `Response::BackedUp` (22); §4's
   `Hello` example, §5 header, §5.6, §5.7, §7 item 22, §8 row 24 and

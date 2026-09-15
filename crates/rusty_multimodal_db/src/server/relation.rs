@@ -15,8 +15,9 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    copy_table_files, page_by_scan, page_key, predicate_matches, validate_predicate, BackupReport,
-    ConnectionStore, DeleteOutcome, InsertOutcome, PageRow, ReplaceIfOutcome, ReplaceOutcome,
+    copy_table_files, page_by_scan, page_key, predicate_matches, read_table_files,
+    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, PageRow,
+    ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{Delete, GetById, Insert, Replace, UpdateField};
@@ -620,6 +621,18 @@ impl ConnectionStore for RelationConnectionStore {
         self.store
             .with_exclusive(|_| copy_table_files(base, target_dir))
             .map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `RPL-FR-003` (ADR-0067): [`ConnectionStore::backup`]'s reading
+    /// twin — see `DogConnectionStore::fetch_snapshot`.
+    fn fetch_snapshot(&self) -> Result<Vec<(String, Vec<u8>)>, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        self.store
+            .with_exclusive(|_| read_table_files(base))
+            .map_err(|e| match e {
+                ReadTableFilesError::TooLarge => ErrorCode::TooLarge,
+                ReadTableFilesError::Io => ErrorCode::Storage,
+            })
     }
 
     /// `REL-FR-003`: a *table of edges* has no edge layer of its own —
