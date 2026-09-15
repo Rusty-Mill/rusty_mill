@@ -13,6 +13,42 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 Phase 1: rustils/rustils_async split, rusty_test → portable-runtime
+**2026-09-15** · spec [`PHASE-1-SPEC.md`](PHASE-1-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+Third implementation slice of ADR-0003, and the first with actual
+directory moves. Mixed authorship: Codex's sandbox can't write
+`.git/worktrees/<name>/index.lock` (outside a linked worktree's own
+directory tree), so the host performed the `git mv`/`git rm` step
+directly and Codex applied the manifest/source/doc edits on top; both
+halves inspected by the host.
+
+- **Changed:** 7 `rustils` crates (`platform`, `platform-bsd`,
+  `platform-linux`, `platform-mock`, `platform-parity`,
+  `platform-windows`, `winargv`) and 5 `rustils_async` crates
+  (`platform-async`, `platform-async-linux`, `platform-async-mock`,
+  `reactor-core`, `threading`) moved to `crates/platform/rustils{,_async}/
+  crates/`. `coreutils`/`coreutils-async` stay at their current path
+  until Phase 4 — both already depended on every moved crate via
+  `workspace = true` (a direct payoff of Phase 0b's hoisting), so
+  neither needed a manifest edit.
+- **Changed:** `rusty_test` moved and renamed to `crates/platform/
+  portable-runtime/` intact (6 crates, no split).
+- **Removed:** two stale pre-merge nested `[workspace]` manifests,
+  `crates/rustils/Cargo.toml` and `crates/rustils_async/Cargo.toml`.
+- **Fixed:** `conformance`'s `layering.rs` test hardcoded a
+  `crates/rusty_test/` prefix and a fixed 4-level `ancestors()` walk to
+  find the workspace root — both only correct before this move. Now
+  derives its group prefix from the new path and walks up dynamically
+  until it finds the `[workspace]` manifest, matching the pattern
+  already used by Nexus's own test guards.
+- **Verified:** dependency graph identical before/after (compared by
+  package name, since node ids embed the manifest path); `cargo test -p
+  conformance --test layering` passes from the new location; `cargo
+  check` succeeds on a representative sample including the two crates
+  left behind; `git log --follow` confirms history survived every
+  rename (234 renames at 100% similarity, 2 deletions, nothing else).
+
 ## ADR-0003 Phase 0b: hoist cross-family path dependencies
 **2026-09-15** · spec [`PHASE-0B-SPEC.md`](PHASE-0B-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 
