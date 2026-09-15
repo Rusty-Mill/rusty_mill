@@ -24,7 +24,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 # The workspace's own dependency-free base64 (RFC 4648 standard alphabet),
 # for the wire message's byte fields; replaced the external `base64` crate.
-rusty_base64 = { path = "../rusty_base64" }
+rusty_base64 = { workspace = true }
 num-bigint = "0.4"
 num-traits = "0.2"
 p256 = { version = "0.13", features = ["arithmetic"] }

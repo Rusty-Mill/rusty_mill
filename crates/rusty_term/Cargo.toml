@@ -77,11 +77,11 @@ rusty_gpu = { path = "../rusty_gpu", version = "0.1.0", optional = true }
 # Scrollback-search regex mode (in-house engine: zero-dep, linear-time POSIX
 # ERE on a Pike VM — no backtracking, so a user-supplied pattern can't hang
 # the search). Optional: only the windowed front-end has a search UI.
-rusty_regx = { path = "../rusty_regx", version = "0.5.0", optional = true }
+rusty_regx = { workspace = true, optional = true }
 # `web-bridge`'s WebSocket handshake needs SHA-1 (RFC 6455 §1.3); shared
 # with rusty_git's object hashing rather than a second hand-rolled copy —
 # see rusty_git/src/sha1.rs's doc comment.
-rusty_sha1 = { path = "../rusty_sha1", version = "0.1.0", optional = true }
+rusty_sha1 = { workspace = true, optional = true }
 # Also used directly (via `Face`) for GSUB ligature shaping (src/gui/shape.rs)
 # and color-emoji CBDT/sbix bitmap strikes (src/gui/font.rs) — rusty_font
 # covers glyph outline rasterization but has no OpenType-layout or bitmap-
@@ -126,7 +126,7 @@ windows-sys = { version = "0.59", features = [
 # through windows-sys directly (ConPTY/DWM/hotkeys aren't in rusty_win32's
 # scope), so this is a second Windows FFI layer for one function, not a
 # wholesale switch.
-rusty_win32 = { path = "../rusty_win32", version = "0.1.0", features = ["std"] }
+rusty_win32 = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 # The core test suite exercises the search's regex mode without the `gui`
@@ -138,4 +138,4 @@ rusty_win32 = { path = "../rusty_win32", version = "0.1.0", features = ["std"] }
 # machine, but worth knowing if `cargo test` is ever run somewhere
 # deliberately offline/air-gapped: it'll fail at dependency resolution,
 # not at a test, which can look confusing out of context.
-rusty_regx = { path = "../rusty_regx", version = "0.5.0" }
+rusty_regx = { workspace = true }

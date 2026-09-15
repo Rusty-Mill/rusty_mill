@@ -12,13 +12,13 @@ layer = "apps"
 
 [dependencies]
 percent-encoding = "2"
-rusty_err = { path = "../../../rusty_err" }
-rusty_sqlite = { path = "../../../rusty_sqlite" }
-rusty_kafka = { path = "../../../rusty_kafka" }
-rusty_json = { path = "../../../rusty_json" }
-rusty_request = { path = "../../../rusty_request" }
-rusty_tokio = { path = "../../../rusty_tokio" }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_err = { workspace = true }
+rusty_sqlite = { workspace = true }
+rusty_kafka = { workspace = true }
+rusty_json = { workspace = true }
+rusty_request = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_uuid = { workspace = true }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]
@@ -26,5 +26,5 @@ rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 # network access to a real one in this environment). "rusty-tokio"
 # feature gates rusty_http's AsyncTransport, used to read/write raw
 # HTTP/1.1 messages over a local rusty_tokio TcpListener.
-rusty_http = { path = "../../../rusty_http", features = ["rusty-tokio"] }
-rusty_wire = { path = "../../../rusty_wire" }
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
+rusty_wire = { workspace = true }

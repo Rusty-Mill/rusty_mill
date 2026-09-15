@@ -36,7 +36,7 @@ rmcp = { version = "3.1", default-features = false, features = [
 ] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Pagination cursors are base64 so clients treat them as opaque.
-rusty_base64 = { path = "../../../rusty_base64" }
+rusty_base64 = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "signal", "net"] }
 tokio-util = { version = "0.7", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
@@ -47,7 +47,7 @@ thiserror = "2"
 tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-rusty_url = { path = "../../../rusty_url" }
+rusty_url = { workspace = true }
 tower-layer = "0.3"
 # `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }

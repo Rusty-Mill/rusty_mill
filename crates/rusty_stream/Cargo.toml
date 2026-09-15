@@ -21,4 +21,4 @@ rusty_tokio = { path = "../rusty_tokio", features = [
 # Writer byte-cursor primitives rather than a redundant hand-rolled one.
 # Now a path dependency on the sibling crate merged into this same
 # workspace.
-rusty_wire = { path = "../rusty_wire" }
+rusty_wire = { workspace = true }

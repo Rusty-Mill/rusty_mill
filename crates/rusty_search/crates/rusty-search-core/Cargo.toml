@@ -18,7 +18,7 @@ rusty_serde = { workspace = true }
 # BoxError (used by SearchError::Backend) is the anyhow::Error analog,
 # Send + Sync unconditionally so it satisfies async-trait's Send futures
 # - see rusty_search#25.
-rusty_err = { path = "../../../rusty_err" }
+rusty_err.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

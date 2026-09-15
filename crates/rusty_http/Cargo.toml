@@ -24,7 +24,7 @@ layer = "libs"
 # on the sibling crate merged into this same workspace, so its
 # `AsyncRead`/`AsyncWrite` trait identity is unified with every other
 # consumer in the workspace by construction -- no rev-pinning needed.
-rusty_tokio = { path = "../rusty_tokio", optional = true }
+rusty_tokio = { workspace = true, optional = true }
 # Optional (see the `tokio` feature below): a second async adapter,
 # alongside `rusty-tokio`'s, driving the sans-IO core over real crates.io
 # tokio's `AsyncRead`/`AsyncWrite` instead -- for a consumer (`rusty_tail`)

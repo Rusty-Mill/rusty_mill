@@ -13,15 +13,15 @@ categories = ["command-line-utilities", "multimedia"]
 layer = "apps"
 
 [dependencies]
-rusty-whisper = { path = "../rusty_whisper" }
-rusty_audio = { path = "../rusty_audio" }
-rusty_std = { path = "../rusty_std" }
-rusty_tokio = { path = "../rusty_tokio" }
-rusty_json = { path = "../rusty_json" }
-rusty_err = { path = "../rusty_err" }
-rusty_gui = { path = "../rusty_gui" }
-rusty_gpu = { path = "../rusty_gpu" }
-rusty_font = { path = "../rusty_font" }
+rusty-whisper = { workspace = true }
+rusty_audio = { workspace = true }
+rusty_std = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_json = { workspace = true }
+rusty_err = { workspace = true }
+rusty_gui = { workspace = true }
+rusty_gpu = { workspace = true }
+rusty_font = { workspace = true }
 
 [features]
 default = []

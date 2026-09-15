@@ -34,7 +34,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 # per target below. Was rev-pinned per rustils' docs/versioning.md §3
 # while rustils was a sibling repo; it is a workspace sibling now
 # (`crates/rustils`), so these are path dependencies.
-platform = { path = "../rustils/crates/platform" }
+platform = { workspace = true }
 # Optional (see the `rusty-tokio` feature below): the async adapter drives
 # the same sans-IO `rustls::ClientConnection` over `rusty_tokio`'s own
 # `AsyncRead`/`AsyncWrite` traits and reactor, the way the mission's
@@ -44,7 +44,7 @@ platform = { path = "../rustils/crates/platform" }
 # rusty_rdp's own pinning convention for its `platform` dependency
 # (rustils' docs/versioning.md §3: a bare SHA carries the same guarantee
 # as a tag).
-rusty_tokio = { path = "../rusty_tokio", version = "0.2.0", optional = true }
+rusty_tokio = { workspace = true, version = "0.2.0", optional = true }
 # The AEAD primitives under the hand-rolled record layer (see the
 # `handrolled-engine` feature, and docs/adr/0002-*.md §6). The engine
 # hand-rolls the *protocol*; AES-GCM and ChaCha20-Poly1305 stay `ring`,
@@ -60,29 +60,29 @@ ring = { version = "0.17", optional = true }
 # own `coreutils` uses. `TrustPolicy::System` is the only caller; every
 # other `TrustPolicy` variant is pure rustls and target-independent.
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux = { path = "../rustils/crates/platform-linux" }
+platform-linux = { workspace = true }
 
 # Mirrors of the above, so the trust-anchor corpus test can reach the OS store
 # the same way the library does. Same crates, same pins — a dev-dependency on
 # a crate that is already a dependency adds an edge for the test target, not a
 # second copy in the graph.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-platform-linux = { path = "../rustils/crates/platform-linux" }
+platform-linux = { workspace = true }
 
 [target.'cfg(windows)'.dev-dependencies]
-platform-windows = { path = "../rustils/crates/platform-windows" }
+platform-windows = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dev-dependencies]
-platform-bsd = { path = "../rustils/crates/platform-bsd" }
+platform-bsd = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-platform-windows = { path = "../rustils/crates/platform-windows" }
+platform-windows = { workspace = true }
 
 # The gate is textually rustils' own `platform-bsd` gate: every OS whose
 # trust store is either Security.framework (macOS) or a PEM bundle (the
 # rest).
 [target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dependencies]
-platform-bsd = { path = "../rustils/crates/platform-bsd" }
+platform-bsd = { workspace = true }
 
 [features]
 # Enables `AsyncTlsStream`, the async counterpart to `TlsStream`. Off by
@@ -128,7 +128,7 @@ ring = "0.17"
 # hand-written rejection test can find that; only certificates that already
 # exist can. Reached exactly the way `src/trust.rs` reaches them, rather than
 # by reimplementing store discovery in a test.
-platform = { path = "../rustils/crates/platform" }
+platform = { workspace = true }
 
 [lints.rust]
 unsafe_code = "forbid"

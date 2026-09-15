@@ -21,13 +21,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # URL validation for egress (scheme/host/port); the workspace's own `url`
 # port replaced the external crate. `reqwest` still pulls external `url`
 # transitively -- this only retires the direct edge.
-rusty_url = { path = "../../../rusty_url" }
+rusty_url.workspace = true
 # Direct rusqlite pin retired in favor of rusty_sqlite, this workspace's
 # sovereignty wrapper crate (a pure `pub use rusqlite;` re-export); it
 # already pins rusqlite 0.39 workspace-wide for the same
 # `links = "sqlite3"` / stable-toolchain reasons this crate used to
 # explain here directly -- see crates/rusty_sqlite/Cargo.toml.
-rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_sqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

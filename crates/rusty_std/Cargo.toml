@@ -15,14 +15,14 @@ layer = "foundation"
 [dependencies]
 # rusty_libc/rusty_win32 are now siblings in this same workspace -- plain
 # path dependencies.
-rusty_libc = { path = "../rusty_libc", optional = true }
-rusty_win32 = { path = "../rusty_win32", optional = true }
+rusty_libc = { workspace = true, optional = true }
+rusty_win32 = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { path = "../rusty_libc" }
+rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { path = "../rusty_win32" }
+rusty_win32 = { workspace = true }
 
 [features]
 default = []

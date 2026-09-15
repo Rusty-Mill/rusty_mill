@@ -353,14 +353,14 @@ subtle = "2"
 # retired to a plain path dependency now that this crate itself lives in that same workspace as
 # `crates/rusty_tls` — the same-workspace-source rule ADR-0002 (root `docs/adr/`) requires, and
 # the same swap `rusty_yirp`'s `sessionmgr-pty` and `nexus-rush` made on their own merges.
-rusty_tls = { path = "../rusty_tls", optional = true }
+rusty_tls = { workspace = true, optional = true }
 # New as of the server metrics HTTP work (ADR-0069, `SERVER-METRICS-HTTP-DESIGN.md`):
 # HTTP/1.1 head parsing and response writing for the opt-in scrape listener — this owner's
 # own ecosystem message layer, matching ADR-0014's `rusty_tls` reuse instead of a raw
 # dependency or hand-rolled parser. Its sync `Read`/`Write` adapter fits the existing
 # thread-per-connection model; default features add no transitive dependency or runtime.
 # A plain sibling path, like `rusty_tls` above; `dep:`-gated under `server` only.
-rusty_http = { path = "../rusty_http", optional = true }
+rusty_http = { workspace = true, optional = true }
 # External-database comparison benchmark (benches/external_db.rs, ADR-0015) — never used by this
 # crate's own library code, only by that one bench target, but declared here rather than under
 # `[dev-dependencies]` specifically because Cargo does not support optional dev-dependencies:

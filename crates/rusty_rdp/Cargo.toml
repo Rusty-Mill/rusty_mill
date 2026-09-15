@@ -58,13 +58,13 @@ rusty_tls = { path = "../rusty_tls", optional = true }
 # `rustils` is now a merged sibling in this workspace -- plain path
 # dependency (previously a pinned git rev), same as every other pin
 # retired in this series.
-platform = { path = "../rustils/crates/platform", optional = true }
-rusty_wire = { path = "../rusty_wire" }
+platform = { workspace = true, optional = true }
+rusty_wire = { workspace = true }
 # BigUint and SHA-256, previously hand-rolled locally, unified with
 # rusty_oauth's near-identical independent implementations of the same
 # primitives. Same "not an opaque external crate" exception as `platform`
 # above -- a workspace sibling, not a third-party dependency.
-rusty_rsa = { path = "../rusty_rsa" }
+rusty_rsa = { workspace = true }
 # Test-only, despite living in [dependencies] rather than
 # [dev-dependencies]: Cargo doesn't allow dev-dependencies to be
 # optional, so this is the only way to keep it out of the default
@@ -73,7 +73,7 @@ rusty_rsa = { path = "../rusty_rsa" }
 # fetch_tgt_with_csprng/fetch_ap_req_with_csprng against a real (if
 # mock) Csprng — never re-exported, never a runtime dependency of the
 # shipped library.
-platform-mock = { path = "../rustils/crates/platform-mock", optional = true }
+platform-mock = { workspace = true, optional = true }
 # Example-only, same reasoning as platform-mock above: `[[example]]`
 # targets pull from [dependencies], not [dev-dependencies] (which can't
 # be optional), so this is how `examples/serve.rs` gets a concrete
@@ -82,7 +82,7 @@ platform-mock = { path = "../rustils/crates/platform-mock", optional = true }
 # non-Linux targets (`#![cfg(target_os = "linux")]` at its root) rather
 # than a compile error, so `serve`'s own non-Linux fallback path builds
 # cleanly everywhere this pin resolves.
-platform-linux = { path = "../rustils/crates/platform-linux", optional = true }
+platform-linux = { workspace = true, optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP

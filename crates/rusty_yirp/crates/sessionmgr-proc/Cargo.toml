@@ -20,7 +20,7 @@ rusty_tokio = { workspace = true }
 # Session-id entropy from the OS CSPRNG (`/dev/urandom` / `BCryptGenRandom`),
 # via the workspace's one dependency-free copy of that plumbing rather than
 # this crate's own former per-platform arms.
-rusty_rand = { path = "../../../rusty_rand" }
+rusty_rand = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Direct, small FFI for the things `rusty_tokio::process::Command` has no

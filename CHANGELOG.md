@@ -9,6 +9,21 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0003 Phase 0b implemented: 241 cross-family relative `path`
+  dependency entries across 83 member manifests hoisted to
+  `dep.workspace = true`, backed by 40 new (plus 12 pre-existing)
+  `[workspace.dependencies]` entries at root — makes Phases 1-4's moves
+  a root-`Cargo.toml`-only edit for these entries instead of touching
+  every member manifest again. 6 entries deliberately excluded and left
+  as direct `path` dependencies: Cargo rejects `default-features = false`
+  on a `workspace = true` dependency unless the workspace-level entry
+  also disables default features, and lowering a shared root default to
+  satisfy one minority consumer would change behavior for every other
+  consumer of that crate — not a safe mechanical hoist. Verified
+  behavior-neutral by diffing the full resolved dependency graph
+  (`cargo metadata`, both with and without `--all-features`) before and
+  after: 0 changed nodes in either mode. Built by Codex
+  (`/codex-build`), independently inspected (`PLAN-REVIEW-LOG.md`).
 - ADR-0003 Phase 0a implemented: every one of the 239 workspace members
   now carries a `[package.metadata.rusty_mill] layer` field
   (`foundation`/`platform`/`libs`/`apps`/`tools`, per the ADR's Appendix

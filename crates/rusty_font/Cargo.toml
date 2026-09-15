@@ -16,9 +16,9 @@ layer = "libs"
 # rusty_wire, rusty_simd and rusty_std are all workspace members now --
 # plain path dependencies, per ATLAS-RWC-0050 (same-workspace first-party
 # dependencies must resolve to the workspace copy, not a remote source).
-rusty_wire = { path = "../rusty_wire" }
-rusty_simd = { path = "../rusty_simd" }
-rusty_std = { path = "../rusty_std" }
+rusty_wire = { workspace = true }
+rusty_simd = { workspace = true }
+rusty_std = { workspace = true }
 
 [features]
 default = []

@@ -13,9 +13,9 @@ categories = ["text-processing", "no-std"]
 layer = "foundation"
 
 [dependencies]
-rusty_regx = { path = "../rusty_regx" }
-rusty_json = { path = "../rusty_json" }
-rusty_std = { path = "../rusty_std" }
+rusty_regx = { workspace = true }
+rusty_json = { workspace = true }
+rusty_std = { workspace = true }
 
 [features]
 default = []

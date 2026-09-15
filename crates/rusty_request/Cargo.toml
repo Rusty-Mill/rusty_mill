@@ -18,7 +18,7 @@ layer = "libs"
 # different revs) -- a workspace `path` dependency resolves that same
 # concern by construction: there's only ever one `rusty_tokio` in the
 # build graph.
-rusty_tokio = { path = "../rusty_tokio" }
+rusty_tokio = { workspace = true }
 rusty_tls = { path = "../rusty_tls", features = [
     "rusty-tokio",
 ] }
@@ -38,10 +38,10 @@ rustls-pki-types = "1"
 # Exponential backoff math + Retry-After delta-seconds parsing, shared
 # with rusty-acp's own RetryPolicy. Retry *eligibility* (which statuses,
 # methods, errors) stays here -- only the delay computation moved.
-rusty_retry = { path = "../rusty_retry" }
+rusty_retry = { workspace = true }
 # RFC 7617 Basic auth's `base64(username:password)`. This crate carried its
 # own encode-only copy until the workspace's shared implementation existed.
-rusty_base64 = { path = "../rusty_base64" }
+rusty_base64 = { workspace = true }
 # `Value` + JSON parser/writer for `.json()`/`Response::json()`. This crate
 # carried its own hand-rolled copy (deliberately no `serde`) until
 # `rusty_json` grew a serde-free `Value` surface of its own;

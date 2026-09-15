@@ -11,17 +11,17 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rusty_err = { path = "../../../rusty_err" }
-rusty_http = { path = "../../../rusty_http", features = ["rusty-tokio"] }
-rusty_tokio = { path = "../../../rusty_tokio" }
-rusty_sqlite = { path = "../../../rusty_sqlite" }
-rusty_json = { path = "../../../rusty_json" }
-rusty_kafka = { path = "../../../rusty_kafka" }
-rusty_request = { path = "../../../rusty_request" }
+rusty_err = { workspace = true }
+rusty_http = { workspace = true, features = ["rusty-tokio"] }
+rusty_tokio = { workspace = true }
+rusty_sqlite = { workspace = true }
+rusty_json = { workspace = true }
+rusty_kafka = { workspace = true }
+rusty_request = { workspace = true }
 rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-governance = { path = "../rusty-meshed-governance" }
 rusty-meshed-observability = { path = "../rusty-meshed-observability" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]
-rusty_wire = { path = "../../../rusty_wire" }
+rusty_wire = { workspace = true }

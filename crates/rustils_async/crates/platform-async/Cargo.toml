@@ -15,7 +15,7 @@ layer = "platform"
 # layer above. Was a rev-pinned git dependency while `rustils` lived in
 # its own repo; it is a workspace sibling now (`crates/rustils`), so this
 # is a path dependency like every other in-tree crate.
-platform = { path = "../../../rustils/crates/platform" }
+platform = { workspace = true }
 
 [lints.rust]
 unsafe_code = "warn"

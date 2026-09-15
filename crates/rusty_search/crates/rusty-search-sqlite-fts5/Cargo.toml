@@ -23,8 +23,8 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 # itself (`rusty_sqlite::rusqlite`), so this is the crate's only sqlite
 # dependency line - see rusty_search#17.
 rusty_sqlite = { path = "../../../rusty_sqlite" }
-rusty_time = { path = "../../../rusty_time" }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_time.workspace = true
+rusty_uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

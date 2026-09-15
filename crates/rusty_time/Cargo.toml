@@ -14,7 +14,7 @@ layer = "foundation"
 
 [dependencies]
 # rusty_std is now a sibling in this same workspace -- plain path dependency.
-rusty_std = { path = "../rusty_std" }
+rusty_std = { workspace = true }
 
 [features]
 default = []

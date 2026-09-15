@@ -19,9 +19,9 @@ rusty_serde = { workspace = true }
 # `.json()`/`resp.json()` convenience methods, so this stays alongside
 # rusty_serde rather than being replaced by it - see convert.rs.
 serde_json = { workspace = true }
-rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
+rusty_request = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["sync"] }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_uuid.workspace = true
 # Used to percent-encode caller-supplied index/id path segments before they
 # are spliced into an HTTP request path (see `delete_path` in lib.rs) -
 # same crate/version `rusty_mcp` already uses for the same purpose.

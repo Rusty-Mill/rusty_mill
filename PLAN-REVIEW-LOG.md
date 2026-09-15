@@ -255,3 +255,162 @@ commit/push/publish) or by the host. Ready for the host to commit, open
 a PR, and — per the known-cost note in `PHASE-0A-SPEC.md` — expect the
 full CI build/test/clippy/cross-compile matrix to run, since every one
 of the 239 manifests changed.
+
+PR #222 opened, full CI matrix green (clippy × 2 OS, test × 6 shards,
+cross-compile, npm build, all passed), merged by the user at `aa9e32b6a`.
+
+## Build — Phase 0b — 2026-09-15
+
+User set a session goal ("after merge continue until fulfilled") to
+carry the ADR-0003 migration through its remaining phases without
+stopping to ask at each one; this and subsequent phase entries proceed
+under that standing authorization rather than a fresh per-phase ask,
+unless something genuinely needs a human decision (see the "stop and
+report" cases called out in each phase's spec).
+
+Computed the Phase 0b cross-family entry set independently, twice: once
+before Phase 0a merged (247 entries / 85 manifests / 53 targets, 13
+already hoisted / 40 new), and again fresh against the post-merge base
+commit `aa9e32b6a` in a new worktree (`../rusty_mill-adr0003-phase0b`,
+branch `claude/adr-0003-phase0b-2026-09-15`) — identical numbers both
+times. Cross-checked against the ADR's own historical estimate (128/85/
+257): the 85-manifest count matches exactly both times; the entry count
+is off by 10 (247 vs 257), most likely a minor counting-methodology
+difference against a script that was never committed to the repo, not a
+correctness issue — the manifest-level count (which manifests actually
+need edits) is what matters for scoping the work, and it matches
+exactly. Verified zero version-constraint disagreements and zero
+root-relative-path inconsistencies across all entries for the same
+target crate — a clean set with no ambiguous cases to resolve by hand.
+Notable finding: 13 of the 53 distinct target crates already have a
+`[workspace.dependencies]` entry at root (this workspace has already
+been partially, organically hoisted over time) — only 40 need a new
+entry.
+
+Wrote `PHASE-0B-DATA.json` (the exact 247-entry set, machine-readable)
+and `PHASE-0B-SPEC.md` (the work order, built to use that data file as
+ground truth rather than asking Codex to rediscover it) and committed
+both as the prep/baseline commit before delegating (`e1c8520cc`).
+
+### Round 1 — blocked, not a defect in the spec's discipline
+
+Codex's build (session `01a0a68c-21ab-75e1-b2d3-766acb8c2c3d`, exit 0,
+303s) applied all 247 edits, then hit a real Cargo restriction running
+its proof commands: `default-features = false` cannot be set on a
+`workspace = true` dependency unless the workspace-level entry itself
+also disables default features. `rush`'s dependency on `rusty_lines`
+(one of the 247) does exactly that. Codex correctly stopped, reported
+the blocker with full detail, proposed but did **not** apply a fix
+(changing root `rusty_lines` to `default-features = false` and
+compensating at `rusty_boot`), and left the working tree available for
+review rather than forcing something through — exactly the discipline
+`PHASE-0B-SPEC.md` asked for on any case needing a human call.
+
+Investigated directly: found the *complete* set by scanning every one of
+the 247 entries for `extra_keys["default-features"] is False` — exactly
+6 (not just the one Codex's proof run happened to hit first: `rush`→
+`rusty_lines`, `rusty_ansder`→`rusty_wire`, `rusty_oauth`→`rusty_json`,
+`rusty_request`→`rusty_json`, `rusty_rag`→`rusty_simd`, `rusty_uuid`→
+`rusty_serde`). Rejected Codex's proposed fix (lowering a shared root
+default to satisfy one minority consumer changes behavior for every
+*other* consumer of that crate — a real semantic decision, not a safe
+mechanical hoist, and the ADR gave Phase 0b no mandate to make that
+call). Chose instead to exclude exactly those 6 entries from the hoist,
+leaving each as an unchanged direct `path` dependency — checked first
+that none of the 5 affected target crates would lose *all* their
+cross-family consumers by doing so (they don't: `rusty_serde` drops out
+of scope entirely since `rusty_uuid` was its only cross-family consumer,
+`rusty_lines` and `rusty_simd` still get a root entry because
+`rusty_boot`/other consumers remain, `rusty_wire` and `rusty_json` were
+already-hoisted targets unaffected either way).
+
+Reset the worktree to the clean prep baseline (`e1c8520cc`, discarding
+Codex's blocked partial edits — all of it was this session's own
+just-attempted work, nothing to preserve) and regenerated
+`PHASE-0B-DATA.json` v2 against that same baseline: **241 entries to
+hoist / 83 manifests touched / 52 distinct targets (12 already hoisted,
+40 needing a new root entry) / 6 entries excluded with a documented
+reason**, `targets_already_hoisted`/`targets_needing_new_entry` counts
+verified against the *pre-Codex-edit* root `Cargo.toml` specifically
+(the first pass at this recomputation accidentally checked against
+Codex's already-modified working tree and produced nonsense — caught and
+fixed before writing the final file). Updated `PHASE-0B-SPEC.md` to
+document the v2 data file, the exclusion rule, and the reason, and
+resumed the same build session with this fix.
+
+Attempting `--resume` on the round-1 build result failed fast:
+`claudex-loop: Checkout changed since the previous build. Inspect
+intervening work before continuing.` — correct behavior, since the
+worktree had just been reset and re-committed to a new baseline
+(`192da737a`) out from under that session's recorded fingerprint.
+`--resume` is for iterating on the *same* baseline in response to
+findings, not for a host-advanced baseline; switched to a fresh (not
+resumed) `build` call against `192da737a` instead, relying on
+`PHASE-0B-SPEC.md` v2 being fully self-contained rather than on
+conversational continuity with the round-1 session.
+
+### Round 2 — succeeded
+
+Codex's build (session `01a0a694-c334-7462-9027-49d5f766df69`, exit 0,
+310s) applied 241 hoists across 83 manifests, added 40 root entries,
+left the 6 exclusions untouched, deleted `PHASE-0B-DATA.json` as
+instructed, and reported its own dependency-graph-identity check passed.
+
+## Inspect — Phase 0b — 2026-09-15
+
+Independent inspection by the coordinating Claude host, same rationale
+as Phase 0a for not spinning up a separate fresh-CLI session (full
+programmatic coverage achieved directly below, not a sample).
+
+- `git status --short`: exactly 85 changed paths (83 manifests + root
+  `Cargo.toml` + `PHASE-0B-DATA.json` deletion), **zero** renames.
+- `git diff --numstat` over all 83 touched manifests: added-lines equals
+  deleted-lines on **every single one** — confirmed programmatically,
+  not sampled — meaning every touched manifest is a pure
+  `path = "..."` → `workspace = true` line swap, nothing else changed.
+- All 6 excluded entries individually verified by reading the actual
+  lines: `rush`'s `rusty_lines` (still `path = "../rusty_lines",
+  version = "0.4.0", default-features = false`, byte-identical to
+  before), `rusty_oauth`'s and `rusty_request`'s `rusty_json` (both
+  still `path = "..."`, `default-features = false` intact), `rusty_uuid`'s
+  `rusty_serde` (still `path = "../rusty_serde/rusty_serde"`), and
+  `rusty_ansder`/`rusty_rag` — the two manifests whose *only*
+  cross-family entry was excluded — confirmed to have **zero** diff at
+  all (`git diff --stat` empty for both), meaning they were correctly
+  left out of the 83 touched files entirely.
+- Read the full root `Cargo.toml` diff: exactly 40 new lines in a single
+  insertion block inside the existing `[workspace.dependencies]` table,
+  alphabetically placed, no reordering or reformatting of any existing
+  entry; `version` present only on the entries whose *remaining* (post-
+  exclusion) consumers actually specified one (confirms the version-hoist
+  logic re-evaluated against the post-exclusion consumer set, not the
+  original 247 — `rusty_lines`'s only `version` mention came from the
+  now-excluded `rush` entry, and correctly carries no `version` in its
+  new root entry).
+- **Dependency-graph identity, both modes** (the strongest correctness
+  gate specified): diffed `cargo metadata --format-version=1
+  --all-features --locked` before vs. after — 1701 nodes both times, 0
+  added, 0 removed, **0** with a changed resolved-`deps` or
+  resolved-`features` tuple. Repeated with plain `cargo metadata
+  --format-version=1 --locked` (no `--all-features`, the more sensitive
+  check for the excluded `default-features`/`optional` entries,
+  generated by temporarily `git stash`-ing the Phase 0b diff to get a
+  true "before" snapshot from the exact same worktree rather than a
+  separately-cloned one) — 1394 nodes both times, again **0** changed.
+  This is byte-for-byte confirmation the hoist has zero build-behavior
+  effect in either feature-resolution mode.
+- Ran the proof commands myself: `python3 -m unittest discover -s
+  .github/scripts -p 'test_*.py' -v` → 58 passed (script untouched by
+  this phase, as expected); `check_workspace_deps.py` and
+  `check_workspace_layers.py` against fresh metadata → both exit 0 (the
+  former needs `PYTHONUTF8=1` on this Windows host for the same
+  pre-existing, CI-irrelevant locale reason noted in the Phase 0a
+  inspection).
+
+No findings.
+
+### Outcome
+Phase 0b build **verified correct** as of the worktree branch
+`claude/adr-0003-phase0b-2026-09-15`. Ready to commit, open a PR, and —
+per `PHASE-0B-SPEC.md`'s known-cost note — expect a partial (not full)
+CI matrix scoped to the 83 touched manifests and their dependents.

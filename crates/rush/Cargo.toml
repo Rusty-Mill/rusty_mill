@@ -15,7 +15,7 @@ layer = "apps"
 # the crate's leftmost-first semantics, differentially tested against it.
 # Pinned to the v0.4.0 release commit (see rusty_regx's CHANGELOG) so
 # engine updates are deliberate version bumps, not a floating branch.
-rusty_regx = { path = "../rusty_regx", version = "0.5.0" }
+rusty_regx = { workspace = true }
 # The line editor (formerly src/editor.rs, extracted to its own crate):
 # raw-mode terminal, emacs + vi keymaps, kill ring, undo, history search,
 # bracketed paste, $RPS1 right prompt. rush drives it through its `Hooks`
@@ -23,7 +23,7 @@ rusty_regx = { path = "../rusty_regx", version = "0.5.0" }
 rusty_lines = { path = "../rusty_lines", version = "0.4.0", default-features = false }
 # Path translation/normalization for MSYS2/Git Bash/POSIX-style paths on
 # Windows. Not yet wired into any call site.
-rpath = { path = "../rpath", version = "0.1.0" }
+rpath = { workspace = true }
 
 # Unix job control (signals, wait, process groups, fds, rlimit) goes through
 # the `sys` facade. The backend is target-driven (see the cfgs in
@@ -34,7 +34,7 @@ rpath = { path = "../rpath", version = "0.1.0" }
 
 # Linux: rusty_libc is the default backend; libc only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { path = "../rusty_libc", version = "0.0.1", optional = true }
+rusty_libc = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 
 # Other Unix (macOS/BSD): the libc backend is the only option (rusty_libc is
@@ -48,7 +48,7 @@ libc = "0.2"
 # std::process::Child's thread handle for the suspend-then-assign-to-job
 # sequencing that needs).
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { path = "../rusty_win32", version = "0.1.0", features = ["std"] }
+rusty_win32 = { workspace = true, features = ["std"] }
 
 # The integration tests drive the built binary and also make a few syscalls of
 # their own, so they always need libc.

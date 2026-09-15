@@ -13,7 +13,7 @@ layer = "apps"
 
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
-rusty_json = { path = "../../../rusty_json" }
+rusty_json.workspace = true
 # HTML parsing/CSS-selector querying and HTML sanitizing for the built-in
 # extractors that need real HTML parsing (most of the remaining ones) — no
 # first-party `rusty_*` crate covers either; see

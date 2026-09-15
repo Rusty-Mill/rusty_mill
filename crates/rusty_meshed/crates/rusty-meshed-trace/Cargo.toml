@@ -11,12 +11,12 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rusty_err = { path = "../../../rusty_err" }
+rusty_err = { workspace = true }
 # Scenario files are TOML (per the spec); rusty_codec's own TOML parser
 # is the workspace's sovereign one -- the same "no crates.io `toml`"
 # stance the rest of the rusty-meshed-* family takes with rusty_json
 # over serde_json.
-rusty_codec = { path = "../../../rusty_codec" }
-rusty_json = { path = "../../../rusty_json" }
+rusty_codec = { workspace = true }
+rusty_json = { workspace = true }
 
 [dev-dependencies]

@@ -25,7 +25,7 @@ hkdf.workspace = true
 rusty_http = { workspace = true, features = ["tokio"] }
 # Standard base64 for the `X-Tailscale-Handshake` header; replaced this
 # crate's own encode-only copy (see DESIGN.md's dependency table).
-rusty_base64 = { path = "../../../rusty_base64" }
+rusty_base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

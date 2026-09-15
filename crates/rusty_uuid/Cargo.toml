@@ -10,7 +10,7 @@ repository = "https://github.com/baileyrd/rusty_uuid"
 layer = "foundation"
 
 [dependencies]
-rusty_rand = { path = "../rusty_rand" }
+rusty_rand = { workspace = true }
 
 [features]
 # Serialize/Deserialize via this workspace's own dependency-free `rusty_serde`

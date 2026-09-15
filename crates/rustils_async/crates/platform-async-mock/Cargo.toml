@@ -13,8 +13,8 @@ layer = "platform"
 [dependencies]
 # `rustils` is a workspace sibling (`crates/rustils`) -- path dependency,
 # matching platform-async's own.
-platform = { path = "../../../rustils/crates/platform" }
-platform-mock = { path = "../../../rustils/crates/platform-mock" }
+platform = { workspace = true }
+platform-mock = { workspace = true }
 platform-async = { path = "../platform-async" }
 
 [lints.rust]
