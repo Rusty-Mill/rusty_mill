@@ -599,3 +599,53 @@ performed the content edits; both inspected by the host, matching the
 build reference's mixed-authorship logging requirement). Ready to
 commit the remaining edits, open a PR, and expect a large but partial
 CI matrix (the 18 moved crates plus their dependents).
+
+## CI failure — PR #224 — 2026-09-15
+
+Full CI ran (root `Cargo.toml`'s member/`workspace.dependencies` *path*
+edits are not a pure addition, so `cargo_toml_diff.py` correctly
+classified this as unsafe and forced the full sweep, not just the moved
+crates' dependents — expected, matches the CI header comment's own
+documented policy). Two independent failures surfaced, investigated
+separately:
+
+**1. `dependency policy` job failed — a real bug this phase exposed, not
+introduced.** `generate_workspace_map.py --verify docs/WORKSPACE-MAP.md`
+reported staleness. Root cause: `check_workspace_layers.py`'s
+`package_family()` (written in Phase 0a, before any crate had moved)
+takes the *second* path component after `crates/` as the family. Before
+this phase, every member lived at `crates/<family>/...`, so that was
+correct. Now that `platform-linux` etc. live at
+`crates/platform/rustils/crates/platform-linux`, the second component is
+`platform` — the *layer*, not the family — so the function silently
+started returning the layer name instead. This doesn't affect
+`check_workspace_layers.py`'s own violation detection this phase (the
+cross-family apps check only fires between `apps`-layer crates, and none
+of the 18 moved crates are `apps`-layer), so the 0-violations result I
+verified earlier was still correct — but it does mean the same bug would
+have **silently disabled the cross-family apps check entirely** once
+Phase 4 moves `apps`-layer crates under `crates/apps/...` too (every
+`apps` crate would collapse into one fake family named `apps`,
+permanently zero cross-family findings possible). Caught now instead,
+before it could hide a real Phase 4 violation. Fixed `package_family()`
+to skip the layer-name component when present (`parts[1] in LAYER_ORDER
+=> family = parts[2]`), added 3 unit tests covering the moved,
+single-crate-under-layer, and not-yet-moved shapes (61 tests total, up
+from 58), regenerated `docs/WORKSPACE-MAP.md` with the corrected family
+values, and reran `--verify` (exit 0).
+
+**2. 3 `test (windows-latest, ...)` shards failed — pre-existing
+flakiness, unrelated to this PR.** Two failures, both in
+`sessionmgr-daemon::worktree_lifecycle` (`closing_with_discard_throws_
+the_worktree_and_branch_away`, `two_worktree_sessions_on_one_repo_are_
+independent`), each already retried twice by nextest before failing a
+third time (`TRY 3 FAIL`); two *other*, different tests in the same run
+(`rusty_tls`'s async TLS tests) were marked `FLAKY 2/3` (passed on
+retry) in the same job. Checked `sessionmgr-daemon`'s dependency graph
+directly: zero direct or transitive dependency on any of the 18 moved
+crates (`rusty_tokio`, `serde`, `serde_json`, `sessionmgr-*` siblings,
+`ureq`, `thiserror`, `embed-manifest` — nothing in `rustils`/
+`rustils_async`/`portable-runtime`). This is Windows-CI git-worktree
+timing flakiness in an unrelated crate family, surfaced only because the
+root-`Cargo.toml` path edit forced the full sweep. Re-running the failed
+jobs rather than treating this as a Phase 1 regression.
