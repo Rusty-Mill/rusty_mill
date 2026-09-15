@@ -126,10 +126,38 @@ files edited, tests run or work delegated. This follow-up focused on
 prior-finding closure; dependency counts and the complete graph were not
 independently regenerated.
 
+## Round 4 — 2026-09-15
+
+Before merging PR #221, the host made two purely cosmetic post-approval
+fixes to the ADR text (cleaned up a shell-escaping artifact in the
+Phase 4 `rg` command example; reflowed two paragraphs with a mid-sentence
+line-wrap artifact — no wording, claim, fix, or file list changed). This
+changed the file's SHA256, invalidating the round-3 approval record.
+`runner.py check` confirmed the mismatch mechanically before this round
+ran.
+
+- Session id: 01a0a645-761d-7713-8e5d-bbf3baf3c283 (resumed)
+- Plan SHA256: 227e9a404f7c13e235fdb3754cfa13c2764446d53d89442e11f18fbf9e3a7247
+- Verdict: **APPROVED**
+- Summary: the command cleanup and paragraph reflow preserve the
+  approved migration requirements; R1 and R2 remain closed.
+
 ### Outcome
 ADR-0003 is **APPROVED** by independent Codex review as of plan SHA256
-`03786b690b5265f146ea1c78678498fd168d992d1e1029523a32f2b5c7124d6d`.
-Approval is bound to that exact plan path and hash — any further edit to
-the ADR requires another review round. No implementation is authorized by
-this approval; it covers the plan only (Phase 3 build/inspect was not
-requested or run this session).
+`227e9a404f7c13e235fdb3754cfa13c2764446d53d89442e11f18fbf9e3a7247` (the
+exact content merged to `main` in PR #221). Approval is bound to that
+exact plan path and hash — any further edit to the ADR requires another
+review round. No implementation is authorized by this approval; it
+covers the plan only.
+
+## Build — Phase 0a — 2026-09-15
+
+User authorized implementation, scoped to Phase 0a only (metadata +
+checker + generated map; zero directory moves) after being asked to
+choose a scope given the ADR's own phased, multi-PR migration plan. See
+`PHASE-0A-SPEC.md` for the derived, scoped build work order — it is a
+narrower restatement of ADR-0003's own "Phase 0a in detail" section, not
+independently re-reviewed as its own document, so the build runs under
+`--unreviewed-spec` per the shared build reference (design review already
+covers this text via the ADR approval above; this only scopes execution
+to a subset of it and does not add new requirements).
