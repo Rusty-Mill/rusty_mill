@@ -1609,6 +1609,10 @@ pub struct ServeOptions {
     /// `Option`, unlike every sink above, since rendering them costs
     /// nothing and needs no operator opt-in.
     metrics: ServerMetrics,
+    /// `MHTTP-FR-001` (ADR-0069): an already-bound, opt-in HTTP scrape
+    /// listener. Taken by `serve_tables` before sharing the options;
+    /// `None` opens no second listener and preserves the wire-only default.
+    metrics_http: Option<TcpListener>,
     /// `BAK-FR-003` (ADR-0065): the confinement boundary every
     /// `Request::Backup` target must resolve under. `None` (the
     /// default) answers every `Backup` request `Unsupported` —
@@ -1700,6 +1704,7 @@ impl ServeOptions {
             access_log: None,
             tls: None,
             metrics: ServerMetrics::new(),
+            metrics_http: None,
             backup_root: None,
             replication_token: None,
         }
@@ -1778,6 +1783,7 @@ impl ServeOptions {
             access_log: None,
             tls: None,
             metrics: ServerMetrics::new(),
+            metrics_http: None,
             backup_root: None,
             replication_token: std::env::var("SERVER_AUTH_REPLICATION_TOKEN").ok(),
         }
@@ -1806,6 +1812,17 @@ impl ServeOptions {
     /// always present, never an `Option`.
     pub fn metrics(&self) -> &ServerMetrics {
         &self.metrics
+    }
+
+    /// `MHTTP-FR-001` (ADR-0069): serve `GET /metrics` on this separate,
+    /// already-bound listener when `serve`/`serve_tables` starts. The
+    /// caller handles bind failures, just as for the wire listener.
+    /// Opt-in: unset, no second listener is opened. HTTP reads the same
+    /// counters without incrementing them and has no TLS or authentication
+    /// gate (`MHTTP-FR-002`/`005`, accepted option (a)).
+    pub fn with_metrics_http(mut self, listener: TcpListener) -> Self {
+        self.metrics_http = Some(listener);
+        self
     }
 
     /// `BAK-FR-003` (ADR-0065): every `Request::Backup` target must
@@ -3314,8 +3331,9 @@ pub fn serve_tables(
     listener: TcpListener,
     tables: Vec<(String, Arc<dyn ConnectionStore>)>,
     primary: usize,
-    options: ServeOptions,
+    mut options: ServeOptions,
 ) {
+    let metrics_listener = options.metrics_http.take();
     assert!(
         primary < tables.len(),
         "serve_tables: primary {primary} is not one of the {} tables",
@@ -3323,6 +3341,10 @@ pub fn serve_tables(
     );
     let tables = Arc::new(tables);
     let options = Arc::new(options);
+    if let Some(listener) = metrics_listener {
+        let options = Arc::clone(&options);
+        thread::spawn(move || super::metrics_http::serve_metrics_http(listener, options));
+    }
     for incoming in listener.incoming() {
         let stream = match incoming {
             Ok(s) => s,
@@ -3445,6 +3467,18 @@ fn link_across(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `MHTTP-FR-001`: neither default constructor opens an HTTP port;
+    /// only the builder supplies a caller-owned listener.
+    #[test]
+    fn metrics_http_is_absent_until_a_listener_is_supplied() {
+        assert!(ServeOptions::default().metrics_http.is_none());
+        assert!(ServeOptions::new(None, None).metrics_http.is_none());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let options = ServeOptions::default().with_metrics_http(listener);
+        assert_eq!(options.metrics_http.unwrap().local_addr().unwrap(), addr);
+    }
 
     /// `MTLS-FR-004`: `TlsConfig::from_env`'s decision table, driven
     /// through the factored `from_env_values` so no real environment

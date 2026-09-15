@@ -1,9 +1,10 @@
-# Server Metrics HTTP Endpoint: `GET /metrics` Directly Scrapeable by Prometheus (Accepted)
+# Server Metrics HTTP Endpoint: `GET /metrics` Directly Scrapeable by Prometheus (Implemented)
 
-- Status: **Accepted, option (a)** (2026-09-15, `ADR-0069`) — the owner
+- Status: **Accepted as designed and implemented** (2026-09-15,
+  `ADR-0069`, Codex HTTP metrics implementation round) — the owner
   picked option (a): the `rusty_http`-based listener, no endpoint auth,
-  as recommended. Implementation delegated to Codex via `codex-build`,
-  independently inspected by Claude before merge.
+  as recommended. Independent inspection by Claude remains the next
+  review step before merge.
 - Related: `docs/FUTURE-GROWTH.md`'s "Operational maturity" section,
   Metrics/observability bullet ("Still absent: ... any HTTP `/metrics`
   endpoint — `Metrics` is answered over the existing binary wire
@@ -459,34 +460,37 @@ lockfile to confirm no unexpected transitive dependency; `cargo fmt`/
 
 ## Traceability
 
-- Roadmap: `SERVER-METRICS-HTTP-DESIGN` (this document, `Proposed`),
-  `SERVER-METRICS-HTTP` (implementation, not started).
+- Roadmap: `SERVER-METRICS-HTTP-DESIGN` (this document, `Implemented`),
+  `SERVER-METRICS-HTTP` (implementation, `Implemented`).
 - `docs/FUTURE-GROWTH.md`'s Metrics/observability bullet updated once
   implemented — "any HTTP `/metrics` endpoint" moves from "still
   absent" to named, bounded, and built, the identical treatment every
   other "Operational maturity" item already received.
 
-## Open questions
+## Open questions — resolved during implementation
 
 - **Should `server`'s feature gate list `rusty_http` directly, or
   should `client` gain it too** (in case a future round wants an HTTP
-  client-side capability, e.g. a health-check helper)? Recommendation:
-  `server`-only for this round — nothing client-side needs `rusty_http`
-  yet, and adding it to `client` unconditionally would grow the
-  `client`-alone build's dependency footprint for a capability that
-  does not exist yet (`ECO-FR-001`'s own "the client half only" scoping
-  precedent).
+  client-side capability, e.g. a health-check helper)? **Resolved:
+  `server`-only**, exactly as recommended — `server = ["client",
+  "dep:rusty_http"]`; `client` needs no HTTP type or dependency
+  (`ECO-FR-001`'s own "the client half only" scoping precedent).
 - **Should `memory_server.rs` (the one binary using `serve_tables`
   directly, with more than one table) get its own distinct env var, or
   share the exact same `SERVER_METRICS_HTTP_ADDR` name every other
-  binary uses?** Recommendation: the same name — the metrics endpoint
-  is process-wide, not per-table, matching `ServerMetrics` itself being
-  one instance per `serve_tables` call regardless of table count.
+  binary uses?** **Resolved: the same `SERVER_METRICS_HTTP_ADDR` name
+  in all four binaries**, exactly as recommended — the endpoint reads
+  one process-wide `ServerMetrics` per `serve_tables` call regardless
+  of table count.
 - **Is a `404` body worth a small, fixed plain-text message (e.g. "not
   found") instead of empty**, for a human accidentally hitting the
-  wrong path in a browser? Recommendation: empty is fine — this
-  endpoint's only real client is Prometheus's own scraper, which never
-  renders a body on a non-2xx response; a future round can add a
-  friendlier message if a real operator asks for one. Left for the
-  implementation to resolve — a mechanical detail, not a design fork
-  the owner needs to weigh.
+  wrong path in a browser? **Resolved: empty**, exactly as recommended
+  and required by `MHTTP-FR-002`; `Content-Length: 0` and
+  `Connection: close` make the response explicit.
+
+## Change history
+
+- 2026-09-15: initial proposal, design only.
+- 2026-09-15: the owner picked option (a); implemented the same
+  session. See `ADR-0069`'s own "Acceptance and implementation"
+  section for the full record.

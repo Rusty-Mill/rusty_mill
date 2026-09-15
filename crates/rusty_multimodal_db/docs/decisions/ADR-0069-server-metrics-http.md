@@ -1,7 +1,7 @@
 # ADR-0069: Server Metrics HTTP Endpoint — `GET /metrics` Directly Scrapeable by Prometheus
 
-- Status: **Accepted, option (a)** (2026-09-15) — the owner picked
-  option (a) as recommended. See
+- Status: **Accepted as designed and implemented** (2026-09-15) —
+  option (a), Codex HTTP metrics implementation round. See
   `docs/design/SERVER-METRICS-HTTP-DESIGN.md` for the full design.
 - Date: 2026-09-15
 - Deciders: baileyrd
@@ -123,3 +123,56 @@ proposed; **(b)** same listener, bearer-token-gated; **(c)** decline.
   listener, no endpoint auth, as recommended. Implementation delegated
   to Codex (`codex-build`), independently inspected by Claude before
   merge.
+- 2026-09-15: implemented in the bounded Codex work order; independent
+  review pending, not committed or merged. Files: `Cargo.toml`,
+  `src/server/metrics_http.rs`, `src/server/serve.rs`,
+  `src/server/mod.rs`, `src/bin/dog_server.rs`,
+  `src/bin/memory_server.rs`, `src/bin/reminder_server.rs`,
+  `src/bin/entity_server.rs`, `tests/server_metrics_http_integration.rs`,
+  `docs/design/SERVER-METRICS-HTTP-DESIGN.md`, this
+  `docs/decisions/ADR-0069-server-metrics-http.md`, and the workspace
+  root `Cargo.lock` (one mechanical dependency-list addition).
+  `Cargo.toml` adds `rusty_http = { path = "../rusty_http", optional =
+  true }`, with default features, under `server` only — the
+  `ADR-0014` ecosystem-reuse precedent, no new transitive dependency.
+  `ServeOptions::with_metrics_http` takes an already-bound listener;
+  `serve_tables` takes it before `Arc::new(options)` and starts its
+  independent accept thread (`MHTTP-FR-001`/`004`). All four binaries
+  bind `SERVER_METRICS_HTTP_ADDR` when set, report the configured
+  address, and fail at startup if binding fails (`MHTTP-FR-006`).
+  `metrics_http.rs` uses `SyncTransport` for one request per connection:
+  `GET /metrics` returns the shared `render()` text with exact byte
+  length and Prometheus content type, all other methods/paths an empty
+  `404`, and bad heads no reply (`MHTTP-FR-002`/`004`). HTTP accepts and
+  requests never increment the wire counters; no TLS/auth gate is
+  applied to HTTP (`MHTTP-FR-005`, accepted option (a)).
+  - Six new unit tests: five in `metrics_http.rs` cover response headers,
+    verbatim counter text with bounded uptime, no counter mutation,
+    method/path rejection, and malformed/oversized/truncated heads with
+    no reply or handler panic; one in `serve.rs` covers the absent-by-
+    default listener and opt-in builder (`MHTTP-FR-001`/`002`/`004`).
+  - Five new integration tests in `server_metrics_http_integration.rs`
+    cover unchanged default wire behavior, live nonzero wire counters
+    exposed over HTTP, repeated scrapes that leave counters unchanged,
+    empty `404`s, bad heads followed by successful requests on both
+    listeners, and fatal invalid-address startup in all four binaries.
+    Numeric comparisons with the immediately following wire `Metrics`
+    exclude uptime and account for rendering before self-counting.
+  - Proof from the workspace root: `cargo fmt -p rusty_multimodal_db --
+    --check`, `cargo clippy -p rusty_multimodal_db --all-features --tests
+    --bins --lib -- -D warnings`, and `cargo test -p rusty_multimodal_db
+    --all-features --no-fail-fast` all passed. Before: 529 library,
+    222 integration, 4 binary, and 3 doc tests (758 total). After:
+    535 library, 227 integration, 4 binary, and 3 doc tests (769 total),
+    no failures or ignored tests; every existing integration target's
+    count is unchanged. `cargo tree` confirms only `rusty_http`'s
+    default feature, with no new transitive dependency; `Cargo.lock`
+    adds only its name to this crate's dependency list.
+  - No design corrections or deviations were needed. The explicit
+    `ServeOptions::new`/`from_env` constructors initialize the new field
+    to `None` as well as the derived `Default`; binary env matches return
+    unchanged `options` when unset, matching their existing builder
+    chains. Existing integration test files and the wire protocol are
+    unchanged. The three open questions are resolved as recommended in
+    the design document; cross-project status/roadmap/traceability
+    updates remain with the independent reviewer.

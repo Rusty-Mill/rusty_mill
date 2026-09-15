@@ -165,6 +165,17 @@ fn main() {
         Some(tls) => auth.with_tls(tls),
         None => auth,
     };
+    // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
+    // a separate, opt-in scrape listener; a bind failure is fatal at startup.
+    let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {
+        Ok(addr) => {
+            let listener = TcpListener::bind(&addr)
+                .expect("binding SERVER_METRICS_HTTP_ADDR for the HTTP metrics listener");
+            eprintln!("entity_server metrics HTTP listening on {addr} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
+            options.with_metrics_http(listener)
+        }
+        Err(_) => options,
+    };
     eprintln!(
         "entity_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0037; do not expose beyond a trusted network unless auth and TLS are both configured)",
         if options.is_configured() { "configured" } else { "NOT configured" },
