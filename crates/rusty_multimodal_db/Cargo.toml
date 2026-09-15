@@ -231,6 +231,17 @@ name = "schema_migration"
 [[example]]
 name = "migrate_memory_v1_to_v2"
 
+# `ADR-0070`: offline restore needs only the public generic constructors.
+# The shared main-less module stays under examples/support/ so Cargo
+# does not discover it as a separate example, like the migration above.
+[[example]]
+name = "restore_backup"
+
+# No required-features: offline checks run by default; real socket-backed
+# Backup fixtures are cfg(server) tests within this same target.
+[[test]]
+name = "restore_backup"
+
 # `crash_writer`/`crash_safety_harness` (the crash-safety diagnosis
 # harness) build `Order`/`Customer` datasets via `generic::order_customer`
 # and use `bench_support::fresh_temp_dir` — both research-gated. Explicit

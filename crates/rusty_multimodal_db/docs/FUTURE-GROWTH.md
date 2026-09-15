@@ -68,11 +68,21 @@ not a guess.
   Wired into `memory_server.rs` (the one binary with real
   `SERVER_DATA_DIR` durability); `DogConnectionStore::backup` is
   mechanically capable but no shipped binary calls it yet. Still
-  absent: any `RESTORE` request or documented restore procedure — a
-  backup is a portable, copy-safe directory (`STORAGE-014`–`016`), so
-  "restore" today means manually pointing a server's data directory at
-  the backup and restarting it, not a request or tool that does that
-  for you.
+  absent: any wire `RESTORE` request or automated/live restore.
+  **Now built**: a real offline CLI
+  (`SERVER-RESTORE`, `ADR-0070`, `STORAGE-020` v0.1.0,
+  `examples/restore_backup.rs`) — copies a `Request::Backup`-produced
+  directory into a fresh target, crash-safely (staged, then each file
+  renamed into place — per-file atomic, not one whole-group swap, a
+  named limitation since the target may already hold sibling tables'
+  own files), refusing an existing target outright, and verifies the
+  result via a real reopen through the domain's own portable
+  production constructor. Restore is architecturally an offline,
+  directory-level, "copy then restart" operation for this crate's
+  mmap-backed server model, not a live wire one — a `Request::Restore`
+  would still need a subsequent process restart to take effect (see
+  `ADR-0070`'s own Context), so this stays the whole story unless a
+  future round finds a real need for wire-reachable restore.
 * **Replication/high availability.** *Partly built since this was
   written:* `Request::FetchSnapshot`/`Response::Snapshot`
   (`ADR-0067`, protocol 25) streams a full, lock-consistent copy of a
