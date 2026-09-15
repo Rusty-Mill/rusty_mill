@@ -73,11 +73,30 @@ not a guess.
   "restore" today means manually pointing a server's data directory at
   the backup and restarting it, not a request or tool that does that
   for you.
-* **Replication/high availability.** Zero — no primary/replica concept,
-  no write-ahead shipping beyond the per-adapter crash-recovery journal
-  (`ADR-0025`/`0026`/`0063`, which never leaves the one process), no
-  failover. A single process owning a single directory is the only
-  deployment shape this crate has ever had.
+* **Replication/high availability.** *Partly built since this was
+  written:* `Request::FetchSnapshot`/`Response::Snapshot`
+  (`ADR-0067`, protocol 25) streams a full, lock-consistent copy of a
+  table's files back over the wire — `Backup`'s reading twin, reusing
+  its `with_exclusive` lock and `copy_table_files` file-enumeration
+  unchanged — gated behind a new, distinct `TokenClass::Replication`
+  never satisfied by `ReadOnly`/`ReadWrite`; refuses `TooLarge` before
+  any byte is read if the table exceeds `MAX_SNAPSHOT_BYTES` (8 MiB).
+  Wired into `memory_server.rs` (`SERVER_AUTH_REPLICATION_TOKEN`);
+  `DogConnectionStore::fetch_snapshot` is mechanically capable but no
+  shipped binary calls it yet, the same standing gap `Backup` already
+  has there. Still absent, explicitly: no continuous or incremental
+  shipping — every fetch is a full snapshot, and the per-adapter
+  crash-recovery journal (`ADR-0025`/`0026`/`0063`) stays unsuited to
+  tailing, confirmed by reading it directly (aggressive
+  checkpoint-then-truncate, no acknowledgment concept, entries only
+  replay against an already-identical starting snapshot); no automatic
+  failover or promotion — a refreshed replica is a manually-promoted
+  cold standby only; no write forwarding — a replica never proxies
+  writes to a primary; no cluster membership, gossip, or consensus; no
+  replica-refresh daemon shipped by this crate — an operator's own
+  script fetches, writes to local disk, and restarts a second
+  `memory_server` pointed at it (`Backup`'s own "restore needs no new
+  code" precedent).
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
   (`ADR-0064`, protocol 23) renders a bounded, fixed set of

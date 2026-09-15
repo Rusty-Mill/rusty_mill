@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 24
+PROTOCOL_VERSION = 25
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -71,6 +71,7 @@ class ErrorCode(IntEnum):
     Duplicate = 11
     Storage = 12
     GuardFailed = 13
+    TooLarge = 14
 
 
 # ---- ScanValue (enum family) ----
@@ -660,12 +661,23 @@ class Backup:
     name: str
 
 
+
+@_variant(34, [])
+class FetchSnapshot:
+    """RPL-FR-001, ADR-0067, protocol 25: a full, lock-consistent
+    snapshot of this table's files, streamed back on this connection.
+    Gated behind a separate replication credential — never satisfied
+    by a ReadOnly or ReadWrite token."""
+
+    pass
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
-    WriteBatch, Metrics, Backup,
+    WriteBatch, Metrics, Backup, FetchSnapshot,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -677,7 +689,9 @@ REQUEST_INTRODUCED_AT = {
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
     ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22, Metrics: 23, Backup: 24,
+    FetchSnapshot: 25,
 }
+
 
 
 # ---- Response (enum family, indices 0..16) ----
@@ -844,10 +858,23 @@ class BackedUp:
     bytes: int
 
 
+@_variant(23, [("files", ("vec", ("tuple", "str", ("vec", "u8"))))])
+class Snapshot:
+    """RPL-FR-001, ADR-0067. Answers `FetchSnapshot` on success: every
+    file this table owns, by name, with its full bytes."""
+
+    files: Tuple[Tuple[str, bytes], ...]
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "files", tuple((name, bytes(data)) for name, data in self.files)
+        )
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
-    BatchResults, MetricsResp, BackedUp,
+    BatchResults, MetricsResp, BackedUp, Snapshot,
 ]
 
 

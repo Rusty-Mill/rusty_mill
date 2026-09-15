@@ -79,6 +79,7 @@
 //! | 22 | `SERVER-001` v0.50.0 | + [`Request::WriteBatch`] (31) and [`Response::BatchResults`] (20) — `WBT-FR-001`, ADR-0060: a batch of the five runtime writes (`Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link`, as [`WriteOp`]) for the connection's table, applied in order under one write-lock acquisition, answered one [`WriteResult`] per op. `atomic: false` pipelined (each op stands on its own); `atomic: true` precondition- and isolation-atomic — nothing applies unless every op validates, else all apply, an abort reported by [`Response::TransactionFailed`] (reused). Not crash-atomic across the batch (a storage batch marker is the named follow-on). A write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, server-gated `Malformed` below 22 or over `MAX_BATCH_OPS` ops. No new `ErrorCode`. ADR-0060 |
 //! | 23 | `SERVER-001` v0.53.0 | + [`Request::Metrics`] (32) and [`Response::Metrics`] (21) — `MET-FR-001`, ADR-0064: a bounded, fixed set of process-wide atomic counters (requests total/ok/error, connections accepted/active, uptime), rendered as Prometheus text exposition format — no new dependency, no second listener. Gated as a **read**, but not restricted to `ReadWrite` — the first request answerable by any authenticated class, since observing process health is not a data write. `Malformed` below 23 (rule 3); never overlaid by a session, never read-set-tracked (process-wide data, not table data). No new `ErrorCode`. ADR-0064 |
 //! | 24 | `SERVER-001` v0.54.0 | + [`Request::Backup`] (33) and [`Response::BackedUp`] (22) — `BAK-FR-001`, ADR-0065: a live, lock-consistent snapshot copy of the connection's table files into an opt-in, server-configured `SERVER_BACKUP_ROOT`-relative directory named by `name` (a single path component — `/`, `\`, and `..` refused before any I/O, `BAK-FR-004`), under the table's write lock (`Compact`'s own precedent). Answered [`Response::BackedUp`] with the files/bytes copied; `Unsupported` when `SERVER_BACKUP_ROOT` is unconfigured or the adapter has no known data directory (`Dog`'s bespoke store when built without one, `Order`/`Employee`); `Storage` for an existing non-empty target or an I/O failure mid-copy (the partial target removed, never left half-written). An operator's write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, `Malformed` below 24. No new `ErrorCode`. ADR-0065 |
+//! | 25 | `SERVER-001` v0.55.0 | + [`Request::FetchSnapshot`] (34), [`Response::Snapshot`] (23), and [`ErrorCode::TooLarge`] (14) — `RPL-FR-001`, ADR-0067: a full, lock-consistent snapshot of the connection's table's files, streamed back over the wire — every companion file's name and bytes, the same file set [`Request::Backup`] already enumerates, reused unchanged. Gated behind a new [`TokenClass::Replication`], never satisfied by `ReadOnly`/`ReadWrite` — the whole point: a shape [`Request::Backup`]'s own design once considered and declined ("a new bulk-exfiltration primitive") is safe now because nothing short of a separately-provisioned credential can ever reach it. `TooLarge` refuses a table whose on-disk size exceeds [`MAX_SNAPSHOT_BYTES`] before any byte is read. `Malformed` below 25 (rule 3). ADR-0067 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -113,7 +114,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -162,6 +163,18 @@ pub const MAX_BATCH_OPS: usize = 4096;
 /// whatever went untracked. A constant, not a config, matching
 /// [`MAX_STAGED_OPS`]'s own precedent.
 pub const MAX_TRACKED_READS: usize = 4096;
+
+/// The most bytes one [`Request::FetchSnapshot`] may answer with, summed
+/// across every file in the table's stack (`RPL-FR-007`, ADR-0067) — a
+/// bound on how much this process ever buffers for one request, well
+/// under [`super::framing::MAX_FRAME_BYTES`] (16 MiB) to leave headroom
+/// for the response's own `bincode` framing (file names, counts). A
+/// table whose on-disk size exceeds this is refused
+/// [`ErrorCode::TooLarge`] before any file is read — checked by total
+/// size first, never a partial read that then gets discarded. A
+/// constant, not a config, matching [`MAX_BATCH_OPS`]'s own precedent:
+/// nobody has reported needing a different number yet.
+pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A record's id — every domain this crate has ever used is `Uuid`-keyed.
 pub type RecordId = Uuid;
@@ -557,6 +570,11 @@ pub enum ErrorCode {
     /// and it is not `NotFound`. Only ever answers a `ReplaceIf`, which a
     /// connection below 19 cannot send, so it needs no downgrade.
     GuardFailed,
+    /// Protocol 25 (`RPL-FR-007`, ADR-0067). [`Request::FetchSnapshot`]'s
+    /// table exceeds [`MAX_SNAPSHOT_BYTES`] — refused before any file is
+    /// read, nothing sent. Only ever answers a `FetchSnapshot`, which a
+    /// connection below 25 cannot send, so it needs no downgrade.
+    TooLarge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -966,6 +984,22 @@ pub enum Request {
     Backup {
         name: String,
     },
+    /// Protocol 25 (`RPL-FR-001`, ADR-0067,
+    /// `docs/design/SERVER-REPLICATION-DESIGN.md`): a full,
+    /// lock-consistent snapshot of this table's files, streamed back on
+    /// this connection — every companion file `Backup`'s own
+    /// `copy_table_files` enumeration would copy, read into the response
+    /// instead. Answered [`Response::Snapshot`]; `Unsupported` from an
+    /// adapter with no known data directory (the same condition
+    /// `Backup` answers `Unsupported` for); `TooLarge` when the table's
+    /// on-disk size exceeds [`MAX_SNAPSHOT_BYTES`], checked before any
+    /// file is read. Gated behind a new [`super::serve::TokenClass::
+    /// Replication`] — never satisfied by `ReadOnly` or `ReadWrite`, so
+    /// this answers `Unauthorized` on every connection unless the
+    /// server was configured with a separate replication credential no
+    /// other class ever grants. `Malformed` below 25; `SessionOpen`
+    /// while a session is open.
+    FetchSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1100,6 +1134,13 @@ pub enum Response {
         files: u64,
         bytes: u64,
     },
+    /// Protocol 25 (`RPL-FR-001`, ADR-0067). Answers
+    /// [`Request::FetchSnapshot`] on success: every file this table owns,
+    /// by name, with its full bytes. Only ever answers a gated request,
+    /// so it needs no `downgrade_for_version` arm.
+    Snapshot {
+        files: Vec<(String, Vec<u8>)>,
+    },
 }
 
 #[cfg(test)]
@@ -1142,6 +1183,7 @@ mod tests {
             "WriteBatch" | "BatchResults" => 22,
             "Metrics" => 23,
             "Backup" | "BackedUp" => 24,
+            "FetchSnapshot" | "Snapshot" | "Err(TooLarge)" => 25,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1513,6 +1555,14 @@ mod tests {
                 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // name len
                 b'n', b'i', b'g', b'h', b't', b'l', b'y',
             ],
+        );
+        // Protocol 25 (`RPL-FR-001`, ADR-0067): `FetchSnapshot` at 34 —
+        // no fields, the same fieldless shape `Metrics`/`ListTables`
+        // already establish.
+        assert_golden(
+            "FetchSnapshot",
+            &Request::FetchSnapshot,
+            &[0x22, 0x00, 0x00, 0x00],
         );
         // Protocol 20 (`PAG-FR-004`, ADR-0055): `Page` at 29 — field tag,
         // `Some((I64 2000, id))`, limit.
@@ -1971,6 +2021,23 @@ mod tests {
                 &[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // bytes: 4096
             ]),
         );
+        // Protocol 25 (`RPL-FR-001`, ADR-0067): `Snapshot` at 23 — one
+        // `(String, Vec<u8>)` pair, the same length-then-bytes shape
+        // every `String`/`Vec` field already establishes, nested.
+        assert_golden_eq(
+            "Snapshot",
+            &Response::Snapshot {
+                files: vec![("memories.mmap".to_string(), vec![0xde, 0xad, 0xbe, 0xef])],
+            },
+            &bytes(&[
+                &[0x17, 0x00, 0x00, 0x00],                         // Snapshot
+                &LEN1,                                             // files: one pair
+                &[0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // name len
+                b"memories.mmap",
+                &[0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // bytes len
+                &[0xde, 0xad, 0xbe, 0xef],
+            ]),
+        );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
         assert_golden_eq(
             "Compacted",
@@ -2019,6 +2086,8 @@ mod tests {
             (ErrorCode::Storage, 0x0c),
             // Protocol 19 (`GRD-FR-005`): `GuardFailed` at 13.
             (ErrorCode::GuardFailed, 0x0d),
+            // Protocol 25 (`RPL-FR-007`, ADR-0067): `TooLarge` at 14.
+            (ErrorCode::TooLarge, 0x0e),
         ] {
             assert_golden_eq(
                 &format!("Err({code:?})"),
@@ -2037,8 +2106,9 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 24 is the one that added
-    /// `Request::Backup`/`Response::BackedUp` (23 `Request::Metrics`/
+    /// module docs' table — version 25 is the one that added
+    /// `Request::FetchSnapshot`/`Response::Snapshot` and `ErrorCode::TooLarge`
+    /// (24 `Request::Backup`/`Response::BackedUp`, 23 `Request::Metrics`/
     /// `Response::Metrics`, 22 `Request::WriteBatch`/`Response::BatchResults`
     /// (21 `Request::CountEdges`/`Response::Count`, 20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
@@ -2052,7 +2122,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+        assert_eq!(PROTOCOL_VERSION, 25);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

@@ -66,6 +66,19 @@
 //! Always on, no configuration: any authenticated connection may call
 //! `Request::Metrics` for a bounded set of process-wide counters as
 //! Prometheus text.
+//!
+//! # Replication snapshots — `SERVER_AUTH_REPLICATION_TOKEN` (ADR-0067)
+//!
+//! Opt-in, and only meaningful with `SERVER_BACKUP_ROOT`'s own
+//! prerequisite — a durable table (`SERVER_DATA_DIR`) — also true (the
+//! same file set `Request::Backup` would copy). Set
+//! `SERVER_AUTH_REPLICATION_TOKEN=<token>` and a connection presenting
+//! it authenticates at `TokenClass::Replication`, the *only* class
+//! `Request::FetchSnapshot` accepts — never granted by
+//! `SERVER_AUTH_READ_WRITE_TOKEN`/`SERVER_AUTH_READ_ONLY_TOKEN`, even
+//! together. `FetchSnapshot` streams every file this table owns back
+//! over the connection, up to `MAX_SNAPSHOT_BYTES`. Unset, every
+//! `FetchSnapshot` request answers `Unauthorized`.
 
 use rusty_multimodal_db::generic::entity::{
     create_entity_production_stack, open_or_create_entity_production_stack, Entity,
@@ -287,8 +300,16 @@ fn main() {
         None => options,
     };
     let backup_rooted = std::env::var_os("SERVER_BACKUP_ROOT").is_some();
+    // `SERVER_AUTH_REPLICATION_TOKEN` (ADR-0067, `RPL-FR-002`): opt-in —
+    // unset, every `Request::FetchSnapshot` answers `Unauthorized`
+    // server-wide, no new network-egress surface at all.
+    let options = match std::env::var("SERVER_AUTH_REPLICATION_TOKEN") {
+        Ok(token) => options.with_replication_token(token),
+        Err(_) => options,
+    };
+    let replication_tokened = std::env::var_os("SERVER_AUTH_REPLICATION_TOKEN").is_some();
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -301,6 +322,7 @@ fn main() {
         if rate_limited { "configured" } else { "lockout only (default)" },
         if access_logged { "configured" } else { "NOT configured" },
         if backup_rooted { "configured" } else { "NOT configured" },
+        if replication_tokened { "configured" } else { "NOT configured" },
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary

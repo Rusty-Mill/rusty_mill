@@ -241,6 +241,14 @@ fn the_python_reference_client_speaks_the_protocol_at_24_and_at_10() {
         get("backup_files")
     );
     assert_eq!(get("backup_bytes_positive"), "yes");
+    // `RPL-FR-002` (ADR-0067): `FetchSnapshot` from Python — this
+    // driver's server has no `replication_token` configured
+    // (`start_server`), so the connection authenticates at `ReadWrite`
+    // (`AUTH-FR-007`'s no-tokens-configured default) and the gate
+    // refuses it `Unauthorized`, proving `ADR-0065`'s own declined
+    // "ship bytes over the wire" option stays closed unless a
+    // *separate* credential is configured.
+    assert_eq!(get("fetch_snapshot"), "Unauthorized");
 
     // A hand-negotiated version 10: the FR-042 three-field shape, no
     // aliases, no relation list, no join — rule 3 seen from Python.
@@ -300,6 +308,11 @@ fn the_python_reference_client_speaks_the_protocol_at_24_and_at_10() {
         get("backup").starts_with("unsupported"),
         "rule 4: no Backup below 24 — {}",
         get("backup")
+    );
+    assert!(
+        get("fetch_snapshot").starts_with("unsupported"),
+        "rule 4: no FetchSnapshot below 25 — {}",
+        get("fetch_snapshot")
     );
 
     // The Python client's write is real: the Rust client sees 42.

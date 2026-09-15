@@ -469,6 +469,22 @@ class Client:
             return reply.files, reply.bytes
         raise ProtocolError(type(reply).__name__)
 
+    def fetch_snapshot(self) -> List[Tuple[str, bytes]]:
+        """A network-transferable, lock-consistent snapshot of every
+        file the selected table's on-disk stack owns (RPL-FR-001,
+        ADR-0067, protocol 25) — ``(file name, bytes)`` pairs. Requires
+        a connection authenticated with the server's separate
+        replication credential — ``ServerError`` with
+        ``ErrorCode.Unauthorized`` on any ``ReadOnly``/``ReadWrite``
+        token, the same class ``ADR-0065`` declined to open this on.
+        ``ErrorCode.TooLarge`` when the table's on-disk size exceeds the
+        server's configured ceiling. Below 25, ``UnsupportedError`` with
+        no frame sent."""
+        reply = self._roundtrip(p.FetchSnapshot())
+        if isinstance(reply, p.Snapshot):
+            return list(reply.files)
+        raise ProtocolError(type(reply).__name__)
+
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
         """Add one edge under a symmetric relation label (LNK-FR-012,
         protocol 14). Returns normally whether the edge is new or already

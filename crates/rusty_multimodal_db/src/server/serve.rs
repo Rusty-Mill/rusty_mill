@@ -14,8 +14,8 @@ use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
     Request, Response, ScanValue, Selection, TransactionOp, WriteOp, WriteResult, MAX_BATCH_OPS,
-    MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
-    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    MAX_SNAPSHOT_BYTES, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION,
+    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
 use std::cell::RefCell;
@@ -440,6 +440,23 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `RPL-FR-003`/`RPL-FR-007` (ADR-0067, protocol 25): read every file
+    /// this table's on-disk stack owns into memory and return it as
+    /// `(file name, bytes)` pairs, under the store's write lock (the
+    /// same [`ConnectionStore::backup`] takes) so the read is
+    /// lock-consistent with a concurrent write, never a partial mix of
+    /// before/after bytes. The default answers `Unsupported` — the
+    /// identical "no known data directory, no feature" posture
+    /// [`ConnectionStore::backup`] already established; an adapter that
+    /// implements `backup` also implements this over the same
+    /// `backup_source`. `ErrorCode::TooLarge` if the table's total
+    /// on-disk size exceeds [`super::protocol::MAX_SNAPSHOT_BYTES`],
+    /// checked before any byte is read; `ErrorCode::Storage` for any
+    /// other read failure.
+    fn fetch_snapshot(&self) -> Result<Vec<(String, Vec<u8>)>, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// This domain's schema, for a client that doesn't know it at compile
     /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
     /// knows its own field/relation shape unconditionally, no store access
@@ -532,6 +549,73 @@ pub(crate) fn copy_table_files(base: &Path, target_dir: &Path) -> io::Result<Bac
     Ok(report)
 }
 
+/// [`copy_table_files`]'s failure — a plain `io::Error` uses `Storage`
+/// for every failure kind, which cannot distinguish "this table is too
+/// big to snapshot" (`ErrorCode::TooLarge`, refuse and try a real
+/// backup instead) from "a file could not be read" (`ErrorCode::Storage`,
+/// retry or investigate the disk). [`read_table_files`] returns this
+/// instead so its caller can tell them apart. The underlying `io::Error`
+/// is deliberately not carried — [`ConnectionStore::backup`]'s own
+/// `io::Result` is discarded the same way at its own call site; neither
+/// error is logged or surfaced to a client (`AUTH-FR-005`'s "never echo
+/// internal detail back over the wire" posture, extended here to local
+/// filesystem paths).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadTableFilesError {
+    Io,
+    TooLarge,
+}
+
+impl From<io::Error> for ReadTableFilesError {
+    fn from(_: io::Error) -> Self {
+        ReadTableFilesError::Io
+    }
+}
+
+/// `RPL-FR-003`/`RPL-FR-007` (ADR-0067): [`copy_table_files`]'s reading
+/// twin — every file `base`'s on-disk stack owns (the identical
+/// starts-with-`base`'s-file-name match), read into memory as
+/// `(file name, bytes)` pairs instead of copied to a target directory.
+/// Every matched file's size is summed from its metadata and checked
+/// against [`super::protocol::MAX_SNAPSHOT_BYTES`] **before any file's
+/// bytes are read** (`RPL-FR-007`'s acceptance criterion: a table over
+/// the ceiling is refused, never partially streamed) — `TooLarge` short-
+/// circuits the whole call the moment the running total would exceed
+/// the ceiling, so a huge single companion file is caught exactly as
+/// early as many small ones would be.
+pub(crate) fn read_table_files(base: &Path) -> Result<Vec<(String, Vec<u8>)>, ReadTableFilesError> {
+    let parent = base.parent().unwrap_or_else(|| Path::new("."));
+    let stem = base.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{}: no file name to match companions against",
+                base.display()
+            ),
+        )
+    })?;
+    let stem = stem.to_string_lossy();
+    let mut matched = Vec::new();
+    let mut total_bytes: u64 = 0;
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(stem.as_ref()) {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(entry.metadata()?.len());
+        if total_bytes > MAX_SNAPSHOT_BYTES {
+            return Err(ReadTableFilesError::TooLarge);
+        }
+        matched.push((name.to_string_lossy().into_owned(), entry.path()));
+    }
+    let mut files = Vec::with_capacity(matched.len());
+    for (name, path) in matched {
+        files.push((name, std::fs::read(path)?));
+    }
+    Ok(files)
+}
+
 /// One message per [`ErrorCode`] variant — shared by [`err_response`] (a
 /// single request's failure) and `dispatch`'s `Request::Transaction` arm
 /// (a batch operation's failure, `Response::TransactionFailed`), so both
@@ -557,6 +641,9 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::Storage => "the record could not be made durable; nothing was written",
         ErrorCode::GuardFailed => {
             "the guard did not hold against the stored record; nothing was written"
+        }
+        ErrorCode::TooLarge => {
+            "this table's on-disk size exceeds the snapshot size limit; nothing was read"
         }
     }
 }
@@ -1407,7 +1494,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Count { .. }
         | Response::BatchResults { .. }
         | Response::Metrics { .. }
-        | Response::BackedUp { .. } => access::Outcome::Ok,
+        | Response::BackedUp { .. }
+        | Response::Snapshot { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1423,6 +1511,16 @@ fn outcome_of(resp: &Response) -> access::Outcome {
 pub enum TokenClass {
     ReadOnly,
     ReadWrite,
+    /// `RPL-FR-002` (ADR-0067): the one class [`Request::FetchSnapshot`]
+    /// ever accepts — never granted by the no-tokens-configured
+    /// `ReadWrite` bootstrap default (`AUTH-FR-007`), and never matched
+    /// by a `read_only_token`/`read_write_token` even if an operator
+    /// configures both. A server with no `replication_token` configured
+    /// answers every `FetchSnapshot` `Unauthorized`, the same "opt-in,
+    /// zero new surface by default" posture `SERVER_BACKUP_ROOT`
+    /// established for local-disk backup — this is that same posture
+    /// for network-transferable snapshots.
+    Replication,
 }
 
 /// Which tokens (if any) this server instance accepts, and what
@@ -1464,6 +1562,12 @@ pub struct ServeOptions {
     /// default) answers every `Backup` request `Unsupported` —
     /// zero new filesystem-write surface unless an operator opts in.
     backup_root: Option<PathBuf>,
+    /// `RPL-FR-002` (ADR-0067): the one credential
+    /// [`TokenClass::Replication`] is ever granted for — distinct from
+    /// `read_only_token`/`read_write_token`, so a `ReadWrite` client
+    /// never automatically holds it. `None` (the default) answers every
+    /// `Request::FetchSnapshot` `Unauthorized` server-wide.
+    replication_token: Option<String>,
 }
 
 impl std::fmt::Debug for ServeOptions {
@@ -1514,6 +1618,14 @@ impl std::fmt::Debug for ServeOptions {
                     "none"
                 },
             )
+            .field(
+                "replication_token",
+                &if self.replication_token.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+            )
             .finish()
     }
 }
@@ -1537,6 +1649,7 @@ impl ServeOptions {
             tls: None,
             metrics: ServerMetrics::new(),
             backup_root: None,
+            replication_token: None,
         }
     }
 
@@ -1614,6 +1727,7 @@ impl ServeOptions {
             tls: None,
             metrics: ServerMetrics::new(),
             backup_root: None,
+            replication_token: std::env::var("SERVER_AUTH_REPLICATION_TOKEN").ok(),
         }
     }
 
@@ -1657,16 +1771,33 @@ impl ServeOptions {
         self.backup_root.as_deref()
     }
 
+    /// `RPL-FR-002` (ADR-0067): the one credential
+    /// [`TokenClass::Replication`] is ever granted for — distinct from
+    /// `read_only_token`/`read_write_token`. Unset, every
+    /// `Request::FetchSnapshot` answers `Unauthorized` server-wide, no
+    /// new surface at all — the identical "opt-in, zero new surface by
+    /// default" posture [`ServeOptions::with_backup_root`] already
+    /// established for local-disk backup.
+    pub fn with_replication_token(mut self, token: String) -> Self {
+        self.replication_token = Some(token);
+        self
+    }
+
     /// No tokens *and* no certificate classes configured — `AUTH-FR-007`:
     /// every connection behaves exactly as it did before this feature
-    /// existed, and `Authenticate` becomes a no-op success. Since
-    /// `CLS-FR-003` (ADR-0028) a certificates-only deployment (classes,
-    /// no tokens) is also "configured": an admitted certificate not in
-    /// the map starts unauthenticated rather than falling back to
-    /// `ReadWrite` — the safe direction, see `SERVER-MTLS-CLASS-DESIGN.md`.
+    /// existed, and `Authenticate` becomes a no-op success. `replication_token`
+    /// counts as a configured token too (`RPL-FR-002`): a server with
+    /// only it set still requires every connection to authenticate
+    /// before anything, the same posture a `read_only_token`-only
+    /// server already has. Since `CLS-FR-003` (ADR-0028) a
+    /// certificates-only deployment (classes, no tokens) is also
+    /// "configured": an admitted certificate not in the map starts
+    /// unauthenticated rather than falling back to `ReadWrite` — the
+    /// safe direction, see `SERVER-MTLS-CLASS-DESIGN.md`.
     pub fn is_configured(&self) -> bool {
         self.read_only_token.is_some()
             || self.read_write_token.is_some()
+            || self.replication_token.is_some()
             || !self.certificate_classes.is_empty()
     }
 
@@ -1687,6 +1818,11 @@ impl ServeOptions {
         if let Some(read_only) = &self.read_only_token {
             if bool::from(read_only.as_bytes().ct_eq(token.as_bytes())) {
                 result = Some(TokenClass::ReadOnly);
+            }
+        }
+        if let Some(replication) = &self.replication_token {
+            if bool::from(replication.as_bytes().ct_eq(token.as_bytes())) {
+                result = Some(TokenClass::Replication);
             }
         }
         result
@@ -2377,6 +2513,14 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // `BAK-FR-001` (ADR-0065): same story — `handle_backup` needs
         // `ServeOptions::backup_root`, which `dispatch` cannot reach.
         Request::Backup { .. } => err_response(ErrorCode::Unsupported),
+        // `RPL-FR-003` (ADR-0067): unlike `Backup`, this needs no
+        // `ServeOptions` access beyond the `TokenClass::Replication`
+        // gate `handle_connection` already checked before dispatching —
+        // so, unlike `Backup`, it goes through the generic loop.
+        Request::FetchSnapshot => match store.fetch_snapshot() {
+            Ok(files) => Response::Snapshot { files },
+            Err(code) => err_response(code),
+        },
     }
 }
 
@@ -2764,6 +2908,30 @@ fn handle_connection(
             continue;
         }
 
+        // `RPL-FR-002` (ADR-0067): `FetchSnapshot` is the one request
+        // that requires `TokenClass::Replication` specifically — refused
+        // for `ReadOnly` *and* `ReadWrite` both, the opposite shape from
+        // the `ReadOnly`-blocks-writes gate just above (that one blocks
+        // one class from many requests; this one blocks many classes
+        // from one request). This is why `TokenClass::Replication`
+        // cannot be folded into a boolean flag on `ReadWrite` — the
+        // match above already proves at compile time that no future
+        // `TokenClass` variant is silently exempted here.
+        if matches!(req, Request::FetchSnapshot) && class != TokenClass::Replication {
+            sink.record(&audit::AuditEvent::now(
+                peer,
+                audit::AuditKind::Refused {
+                    class: Some(class),
+                    request: audit::RequestKind::of(&req),
+                    code: ErrorCode::Unauthorized,
+                },
+            ));
+            if !send_response(&mut writer, &err_response(ErrorCode::Unauthorized)) {
+                return;
+            }
+            continue;
+        }
+
         // `ACC-FR-004`: everything from here on is a dispatched request —
         // past `Hello`/`Authenticate` (handled above) and the
         // unauthenticated/`ReadOnly` gates (also above, each its own
@@ -2959,6 +3127,15 @@ fn handle_connection(
             Request::Backup { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::Backup { .. } if negotiated < 24 => err_response(ErrorCode::Malformed),
             Request::Backup { name } => handle_backup(store, options, &name),
+            // `RPL-FR-002` (ADR-0067): a read, not a write — no
+            // `SessionOpen` gate (`Metrics`'s precedent) — but still
+            // `Malformed` below the protocol version that introduced it.
+            // The `TokenClass::Replication` gate ran earlier, above; the
+            // real work is `dispatch`'s own `Request::FetchSnapshot` arm
+            // (reached via the `other => dispatch(store, other)` fallback
+            // below), since — unlike `Backup` — it needs no `options`
+            // access this match arm would otherwise have to thread through.
+            Request::FetchSnapshot if negotiated < 25 => err_response(ErrorCode::Malformed),
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes
@@ -4682,6 +4859,33 @@ mod tests {
     fn is_configured_is_true_with_only_a_certificate_class() {
         let auth = ServeOptions::default().with_certificate_class(vec![1], TokenClass::ReadOnly);
         assert!(auth.is_configured());
+    }
+
+    /// `RPL-FR-002`: a replication-token-only `ServeOptions` (no
+    /// read-only/read-write tokens, no certificates) is `is_configured()`
+    /// too — the same "any credential configured closes the anonymous
+    /// `ReadWrite` default" posture a `read_only_token`-only server
+    /// already has, so `Authenticate` is a real gate, not a no-op, the
+    /// moment an operator sets `SERVER_AUTH_REPLICATION_TOKEN` alone.
+    #[test]
+    fn is_configured_is_true_with_only_a_replication_token() {
+        let auth = ServeOptions::default().with_replication_token("repl-secret".to_string());
+        assert!(auth.is_configured());
+    }
+
+    /// `RPL-FR-002`: `check` classes a token matching `replication_token`
+    /// as `TokenClass::Replication`, distinct from every other
+    /// configured token — even one that happens to share a slot's exact
+    /// bytes with another class would still classify by which slot
+    /// actually matched (here, none do, since the three tokens differ).
+    #[test]
+    fn check_classes_a_replication_token_distinctly() {
+        let mut auth = ServeOptions::new(Some("ro-secret".into()), Some("rw-secret".into()));
+        auth = auth.with_replication_token("repl-secret".to_string());
+        assert_eq!(auth.check("repl-secret"), Some(TokenClass::Replication));
+        assert_eq!(auth.check("ro-secret"), Some(TokenClass::ReadOnly));
+        assert_eq!(auth.check("rw-secret"), Some(TokenClass::ReadWrite));
+        assert_eq!(auth.check("unknown"), None);
     }
 
     /// `CLS-FR-006`: `Debug` prints counts per class, never a configured
