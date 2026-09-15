@@ -1,7 +1,9 @@
-# Server Restore Tooling: a Real `restore_backup` CLI Closing `ADR-0065`'s Own "Restore Needs No New Code" Claim (Proposed)
+# Server Restore Tooling: a Real `restore_backup` CLI Closing `ADR-0065`'s Own "Restore Needs No New Code" Claim (Accepted)
 
-- Status: **Proposed** (2026-09-15, `ADR-0070`), design only — no source
-  file touched.
+- Status: **Accepted, option (a)** (2026-09-15, `ADR-0070`) — the owner
+  picked option (a): the `restore_backup` CLI, as recommended.
+  Implementation delegated to Codex via `codex-build`, independently
+  inspected by Claude before merge.
 - Related: `docs/FUTURE-GROWTH.md`'s "Operational maturity" section,
   Backup/restore bullet ("Still absent: any `RESTORE` request or
   documented restore procedure — a backup is a portable, copy-safe
@@ -103,15 +105,20 @@ and their design docs, as they stand at `SERVER-001` v0.57.0:
   target directory) — a restore of that directory back into a fresh
   data directory needs no renaming, no per-file logic, just a whole-
   directory copy.
-- **`handle_backup`'s own crash-safety shape is the template to
-  mirror, not reinvent**: copy into a fresh, process-unique temporary
-  directory first; only a fully successful copy is followed by one
-  atomic `std::fs::rename` onto the real target name; an *existing*
-  target (empty or not) is refused outright rather than risked against
-  `std::fs::rename`'s own platform-specific "destination exists"
-  behavior. A restore tool copying *from* a backup directory *into* a
-  fresh target directory has the identical shape and the identical
-  reason to use it.
+- **`handle_backup`'s own crash-safety shape is the template to adapt,
+  not reinvent, with one real difference named up front**: it copies
+  into a fresh, process-unique temporary directory first, then one
+  atomic `std::fs::rename` swaps the *whole temporary directory* onto
+  the real target name — legal because a backup's target is a brand
+  new directory name nobody else uses. A restore's target is
+  `target_stem`'s parent directory, which already exists (or is
+  created once) and may already hold *other* tables' own files
+  side by side — there is no single fresh name to swap onto as a
+  group. `RST-FR-003` adapts the same "stage everything first, touch
+  real names only after every file is ready" principle to that
+  constraint: stage every file, then move each one into place
+  individually (per-file atomic, not one whole-group swap) — see
+  `RST-FR-003`'s own named limitation.
 - **A live, in-process `Request::Restore` is architecturally unsound
   for this crate's own server model, not just unbuilt.** Every
   `ConnectionStore` this crate ships is `Arc`-shared across every
@@ -143,26 +150,50 @@ and their design docs, as they stand at `SERVER-001` v0.57.0:
 
 ## Requirements
 
-- `RST-FR-001` **A new example binary, `examples/restore_backup.rs`**,
-  invoked `cargo run --example restore_backup -- <backup_dir>
-  <target_stem> <domain>` — `backup_dir` a `SERVER_BACKUP_ROOT/<name>`
-  directory a prior `Request::Backup` produced, `target_stem` the
-  `<dir>/<table>.mmap`-shaped path a server binary will later be
-  pointed at (matching `SERVER_DATA_DIR`'s own per-table stem
-  convention), `domain` one of `memory`/`entity`/`relation` (naming
-  which portable-open constructor verifies the result). No new
-  `src/` library module — every primitive this tool calls already
-  exists and is already `pub`.
+- `RST-FR-001` **A new `examples/support/restore_backup_lib.rs` (no
+  `main`, matching `migrate_memory_v1_to_v2_lib.rs`'s own precedent
+  exactly — the logic a test file can call directly without spawning
+  a subprocess) plus a thin `examples/restore_backup.rs` CLI wrapper**
+  that parses argv and calls it, invoked `cargo run --example
+  restore_backup -- <backup_dir> <target_stem> <domain>` —
+  `backup_dir` a `SERVER_BACKUP_ROOT/<name>` directory a prior
+  `Request::Backup` produced, `target_stem` the `<dir>/<table>.mmap`-
+  shaped path a server binary will later be pointed at (matching
+  `SERVER_DATA_DIR`'s own per-table stem convention), `domain` one of
+  `memory`/`entity`/`relation` (naming which portable-open constructor
+  verifies the result). No new `src/` library module — every
+  primitive this tool calls already exists and is already `pub`; the
+  support file is included via `#[path]` by both the CLI and
+  `tests/restore_backup.rs`, exactly as `tests/schema_migration.rs`
+  already does for `migrate_memory_v1_to_v2_lib.rs`.
 - `RST-FR-002` **Copies every file in `backup_dir` into `target_stem`'s
   parent directory, preserving each file's own name unchanged** — no
   per-file logic, no format transformation; a backup directory already
   holds exactly one table's own companion files, matching
   `RST-FR-001`'s domain argument.
-- `RST-FR-003` **Crash-safe via `handle_backup`'s own established
-  shape**: copy into a fresh, process-unique temporary directory
-  first; only a fully successful copy triggers files being placed at
-  their real final names; a partial copy on any I/O failure leaves the
-  real target names untouched, not a half-restored directory.
+- `RST-FR-003` **Crash-safe per file, staged before any real name is
+  touched**: every file in `backup_dir` is first copied into one
+  fresh, process-unique temporary directory beside `target_stem`'s
+  parent (mirroring `handle_backup`'s own "stage everything, verify
+  the whole set copied, only then touch real names" shape). Only once
+  *every* file has staged successfully does the tool move each staged
+  file into `target_stem`'s parent directory via `std::fs::rename`
+  (one call per file — same-filesystem rename is atomic per file,
+  matching `STORAGE-014`'s own companion-file write discipline).
+  **Named limitation, not hidden**: unlike `handle_backup`'s own
+  single-directory swap (the whole backup lands under one name in one
+  rename), a restore's target is an *existing* directory potentially
+  already holding sibling tables' own files, so there is no single
+  name this tool can rename onto atomically as a group — the staging
+  phase guarantees every file is fully readable and written before
+  any real name changes, but a hard kill between two of the final
+  per-file renames can still leave a *partial* set of real files
+  behind. `RST-FR-004`'s refusal on any existing file makes that safe
+  to detect and retry: a partially-restored target is visibly
+  incomplete (some but not all of the domain's own files present),
+  the operator removes what is there and reruns. A pre-copy failure
+  (anything before the staging phase completes) leaves the real
+  target names completely untouched, no partial set ever appears.
 - `RST-FR-004` **Refuses to touch a target that already has any file
   matching `target_stem`'s own file-name prefix** — the identical
   "an existing target is refused outright, never silently overwritten"
@@ -188,16 +219,19 @@ and their design docs, as they stand at `SERVER-001` v0.57.0:
 
 ## Considered options
 
-- **(a) A real CLI, `examples/restore_backup.rs`, as scoped above —
+- **(a) A real CLI, `examples/restore_backup.rs` plus
+  `examples/support/restore_backup_lib.rs`, as scoped above —
   recommended.** Directly proves `ADR-0065`'s own "restore needs no
   new code" claim by actually exercising it, with the missing
   operator-facing piece (safe copy, existing-target refusal, real
   verification via reopen) built once rather than left as a manual,
   undocumented sequence of shell commands. Zero new `src/` library
-  code, zero new dependency, zero wire/protocol change — the identical
-  tier `ADR-0066` already established and the owner already accepted
-  for the adjacent "another offline, directory-level maintenance
-  operation" question.
+  code (the support file lives under `examples/`, not `src/`, the
+  same non-published-library placement `ADR-0066`'s own migration
+  tooling already uses), zero new dependency, zero wire/protocol
+  change — the identical tier `ADR-0066` already established and the
+  owner already accepted for the adjacent "another offline,
+  directory-level maintenance operation" question.
 - **(b) A `Request::Restore { name }` wire operation**, gated like
   `Backup`/`Compact`, copying a `SERVER_BACKUP_ROOT`-relative backup
   into the live table's own `backup_source` directory under its write
@@ -231,31 +265,56 @@ stays the whole story.
 
 ## Proposed shape
 
-`examples/restore_backup.rs` (new; no `main`-less `examples/support/`
-split is needed here, unlike `ADR-0066`'s migration tool — this round
-adds no new type or conversion function, only a thin CLI wrapper
-around already-`pub` library primitives, so there is nothing to share
-with a test file the way `migrate_memory_v1_to_v2_lib.rs` is shared):
+`examples/support/restore_backup_lib.rs` (new, no `main` — mirroring
+`migrate_memory_v1_to_v2_lib.rs`'s own shape exactly) exposes the
+testable orchestration, called by both the thin CLI and the test file:
 
 ```rust
+pub enum Domain { Memory, Entity, Relation }
+
+pub struct RestoreReport { pub files: u64 /* , … */ }
+
+#[derive(Debug)]
+pub enum RestoreError { /* existing target, staging I/O failure,
+                           reopen failure (carries the DurabilityError) */ }
+
+// RST-FR-002/003: stage every backup_dir file into one temp
+// directory first; only once every file has staged successfully,
+// rename each staged file individually into target_stem's parent
+// (per-file atomic, not one whole-group atomic swap — see
+// RST-FR-003's own named limitation).
+// RST-FR-004: refuse outright if any file already exists at
+// target_stem's own prefix, before any copy begins.
+// RST-FR-005: open_{memory,entity,relation}_production_stack_portable
+//   (target_stem) — a real reopen, reported to the operator.
+pub fn restore(
+    backup_dir: &std::path::Path,
+    target_stem: &std::path::Path,
+    domain: Domain,
+) -> Result<RestoreReport, RestoreError> {
+    // …
+}
+```
+
+`examples/restore_backup.rs` (new; thin — parses argv, maps `domain`'s
+string to `Domain`, calls `restore`, and — `RST-FR-006` — prints the
+exact next step on `Ok`, or the error on `Err`, then
+`std::process::exit(1)`):
+
+```rust
+#[path = "support/restore_backup_lib.rs"]
+mod restore_backup;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let [_, backup_dir, target_stem, domain] = args.as_slice() else {
         eprintln!("usage: restore_backup <backup_dir> <target_stem> <memory|entity|relation>");
         std::process::exit(1);
     };
-    // RST-FR-002/003/004: crash-safe whole-directory copy, mirroring
-    // handle_backup's own temp-dir-then-atomic-rename shape, refusing
-    // an existing target outright.
-    // RST-FR-005: open_{memory,entity,relation}_production_stack_portable
-    //   (target_stem) — a real reopen, reported to the operator.
-    // RST-FR-006: print the SERVER_DATA_DIR-shaped next step.
+    // parse `domain`, call `restore_backup::restore(..)`, report the
+    // result (RST-FR-006 on success; the error, verbatim, on failure).
 }
 ```
-
-`server`-gated (`required-features = ["server"]` in `Cargo.toml`'s
-`[[example]]` entry) — the portable-open constructors it calls are
-already `server`-gated themselves.
 
 ## Data/state and invariants
 
@@ -276,9 +335,14 @@ already `server`-gated themselves.
 - An existing file already at `target_stem`'s own prefix: refused
   before any copy, `RST-FR-004`, process exits non-zero naming the
   conflicting path.
-- A mid-copy I/O failure: the temporary directory is removed, the real
-  target names are left completely untouched — `RST-FR-003`'s
-  guarantee, mirroring `handle_backup`'s own.
+- A pre-staging failure (anything before every file has copied into
+  the temporary directory): the temporary directory is removed, the
+  real target names are left completely untouched.
+- A hard kill between two of the final per-file renames: a partial set
+  of real files at the target — a named, not hidden, limitation
+  (`RST-FR-003`); `RST-FR-004`'s refusal on any existing file makes
+  this safe to detect (some but not all expected files present) and
+  retry after the operator removes what is there.
 - A restored directory that fails to reopen (`RST-FR-005`): the exact
   `DurabilityError` is printed, the copied files are left in place
   (not deleted) for the operator to inspect directly, process exits
@@ -311,10 +375,11 @@ already `server`-gated themselves.
 3. Running the tool a second time against the same `target_stem`
    refuses outright (`RST-FR-004`) — no file at the target is
    overwritten, silently or otherwise.
-4. A mid-copy failure (simulated: a read-only target directory, or an
-   injected I/O error) leaves the real target names completely
-   untouched — no partial restore ever becomes visible under the real
-   name.
+4. A pre-staging failure (simulated: an unreadable file inside
+   `backup_dir`, or an injected I/O error during the staging copy)
+   leaves the real target names completely untouched — no file ever
+   becomes visible under a real name unless every file staged
+   successfully first.
 5. A `backup_dir` whose contents do not actually form a valid
    `{memory,entity,relation}` stack (e.g., an empty directory, or a
    different domain's files) is copied, then the verification reopen
@@ -336,9 +401,11 @@ the test can assert against, mirroring `ADR-0066`'s own
 directory, output inspected directly (not just the automated suite),
 matching `ADR-0066`'s own "verified against a real fixture" bar;
 `cargo fmt -p rusty_multimodal_db -- --check`/`cargo clippy -p
-rusty_multimodal_db --all-features --tests --bins --lib -- -D
-warnings` clean (the new example target included explicitly, since
-this crate's own `clippy` checkpoint skips `--all-targets`).
+rusty_multimodal_db --all-features --tests --bins --lib --example
+restore_backup -- -D warnings` clean — `--example restore_backup`
+added explicitly (`--tests --bins --lib` alone does not lint example
+targets), the identical extension `ADR-0066`'s own implementation
+already used for `migrate_memory_v1_to_v2`.
 
 ## Traceability
 

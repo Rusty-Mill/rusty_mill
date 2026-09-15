@@ -1,6 +1,7 @@
 # ADR-0070: Server Restore Tooling — a Real `restore_backup` CLI
 
-- Status: **Proposed** (2026-09-15), design only. See
+- Status: **Accepted, option (a)** (2026-09-15) — the owner picked
+  option (a) as recommended. See
   `docs/design/SERVER-RESTORE-DESIGN.md` for the full design.
 - Date: 2026-09-15
 - Deciders: baileyrd
@@ -51,12 +52,14 @@ restart happens.
 `examples/restore_backup.rs`, invoked `cargo run --example
 restore_backup -- <backup_dir> <target_stem> <memory|entity|relation>`.
 Copies every file from a `Request::Backup`-produced directory into a
-fresh target directory, crash-safely (a temp directory first, one
-atomic rename onto the real names — `handle_backup`'s own established
-shape, mirrored for the restore direction), refusing outright if any
-file already exists at the target (the same "an existing target is
-refused, never silently overwritten" posture `handle_backup` already
-has). Verifies the result by actually reopening it through the named
+fresh target directory: every file stages into one temp directory
+first, and only once every file has staged successfully is each moved
+individually into its real name via `std::fs::rename` (per-file
+atomic, mirroring `STORAGE-014`'s own companion-file write discipline
+— see the design doc's own named limitation on group atomicity),
+refusing outright if any file already exists at the target (the same
+"an existing target is refused, never silently overwritten" posture
+`handle_backup` already has). Verifies the result by actually
 domain's own `open_{memory,entity,relation}_production_stack_portable`
 — a real production code path, not a byte-count proxy — and prints the
 exact next step (point a server binary's `SERVER_DATA_DIR` at the
@@ -114,3 +117,6 @@ The owner's shorthand: **(a)** the CLI, as proposed; **(b)** a wire
 ## Acceptance and implementation
 
 - 2026-09-15: proposed, design only.
+- 2026-09-15: the owner picked option (a) — the `restore_backup` CLI,
+  as recommended. Implementation delegated to Codex (`codex-build`),
+  independently inspected by Claude before merge.
