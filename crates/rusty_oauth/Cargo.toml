@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["oauth", "oauth2", "pkce", "jwt", "authentication"]
 categories = ["authentication", "web-programming"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty_base64 = { path = "../rusty_base64" }
 rusty_rand = { path = "../rusty_rand" }

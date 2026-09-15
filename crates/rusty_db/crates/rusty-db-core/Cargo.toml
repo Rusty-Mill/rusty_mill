@@ -6,6 +6,9 @@ license = "MIT"
 repository = "https://github.com/baileyrd/rusty_db"
 description = "Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db)"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty_tokio = { workspace = true }
 rusty_wire = { workspace = true }

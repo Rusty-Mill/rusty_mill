@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Typed context construction pipeline for Nexus AI sessions"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-memory = { path = "../nexus-memory" }
 nexus-plugin-api = { path = "../nexus-plugin-api" }

@@ -7,6 +7,9 @@ rust-version = "1.75"
 publish = false
 license = "MIT"
 
+[package.metadata.rusty_mill]
+layer = "platform"
+
 [dependencies]
 # One source of truth for the sync types this workspace builds an async
 # layer above. Was a rev-pinned git dependency while `rustils` lived in

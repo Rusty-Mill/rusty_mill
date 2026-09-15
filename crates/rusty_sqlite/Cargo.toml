@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_sqlite"
 authors = ["rusty_sqlite contributors"]
 readme = "README.md"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # Bumped from 0.31 (-> libsqlite3-sys ^0.28.0), then again from 0.32.1
 # (-> libsqlite3-sys ^0.30.1): same `links = "sqlite3"` uniqueness

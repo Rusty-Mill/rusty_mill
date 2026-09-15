@@ -11,6 +11,9 @@ repository = "https://github.com/baileyrd/rusty_multimodal_db"
 license = "MIT"
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [lib]
 name = "rusty_multimodal_db"
 path = "src/lib.rs"

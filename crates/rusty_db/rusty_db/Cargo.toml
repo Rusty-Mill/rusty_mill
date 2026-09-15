@@ -6,6 +6,9 @@ license = "MIT"
 repository = "https://github.com/baileyrd/rusty_db"
 description = "A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty-db-core.workspace = true
 rusty-db-derive = { workspace = true, optional = true }

@@ -7,6 +7,9 @@ rust-version = "1.75"
 publish = false
 license = "MIT"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 platform.workspace = true
 # `rusty_regx` and `rpath` are now sibling crates in this same workspace

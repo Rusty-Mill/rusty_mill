@@ -7,6 +7,9 @@ license = "MIT"
 repository = "https://github.com/baileyrd/rusty_llama"
 readme = "README.md"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 cudarc = { version = "0.19", optional = true, default-features = false }
 rusty_simd = { path = "../rusty_simd" }

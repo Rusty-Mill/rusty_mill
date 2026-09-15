@@ -7,6 +7,9 @@ license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Model Context Protocol transports for the Rust ADK: serve ADK tools, or consume an MCP server's"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = ["stdio", "http", "client"]
 # Serve tools over stdio (newline-delimited JSON-RPC).

@@ -12,6 +12,9 @@ license = "MIT"
 # cdylib on demand:
 #   cargo rustc --lib --release --target wasm32-unknown-unknown --crate-type cdylib
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 # GGUF container support (read models + convert .bin -> .gguf). Off by
 # default: whisper.cpp has no official whisper-GGUF schema yet, so the

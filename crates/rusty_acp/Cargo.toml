@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["acp", "agent", "protocol", "ai", "interoperability"]
 categories = ["web-programming", "api-bindings", "asynchronous"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = ["client", "server"]
 client = ["dep:reqwest", "dep:eventsource-stream", "dep:futures-util", "dep:tokio", "dep:rusty_retry"]

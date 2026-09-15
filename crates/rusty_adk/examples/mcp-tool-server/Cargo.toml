@@ -7,6 +7,9 @@ license = "Apache-2.0"
 publish = false
 description = "Serves Rust ADK tools over MCP, so ADK agents in any language can call them"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty-adk = { path = "../../crates/rusty-adk" }
 serde_json.workspace = true

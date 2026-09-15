@@ -7,6 +7,9 @@ license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Model abstraction and provider connectors for the Rust ADK"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = ["gemini", "anthropic"]
 # Shared HTTP plumbing for the live provider connectors.

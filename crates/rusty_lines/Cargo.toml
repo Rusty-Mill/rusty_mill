@@ -12,6 +12,9 @@ categories = ["command-line-interface"]
 # dependency. See docs/RELEASING.md.
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # Display-column widths for the render engine — Unicode tables only.
 unicode-width = "0.2"

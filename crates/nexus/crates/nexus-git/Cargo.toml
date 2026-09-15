@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus git integration: read-only status, diff, blame, log via libgit2"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 git2 = { workspace = true }
 thiserror = "2.0"

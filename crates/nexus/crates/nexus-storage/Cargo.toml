@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus storage engine: forge layout, atomic writes, SQLite index, markdown parsing, file watching, Tantivy search"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }

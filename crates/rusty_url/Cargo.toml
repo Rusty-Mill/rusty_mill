@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["url", "parser", "whatwg"]
 categories = ["parser-implementations", "web-programming"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 idna = "1"
 

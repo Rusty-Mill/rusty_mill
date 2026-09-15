@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_tls"
 # Every dependency here is written up (rustils' `docs/behavior/*.md` style):
 # add nothing without a comment justifying it, per the ecosystem's
 # dependency-justification convention.
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # The one dependency this crate exists to wrap. `default-features = false`
 # to make the choices explicit rather than inherit whatever rustls' defaults

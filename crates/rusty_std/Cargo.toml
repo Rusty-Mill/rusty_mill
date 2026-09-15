@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_std"
 keywords = ["std", "no-std", "sovereign", "kernel", "libc"]
 categories = ["no-std", "os"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 # rusty_libc/rusty_win32 are now siblings in this same workspace -- plain
 # path dependencies.

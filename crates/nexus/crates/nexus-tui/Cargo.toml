@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus IDE — terminal UI"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [[bin]]
 name = "nexus-tui"
 path = "src/main.rs"

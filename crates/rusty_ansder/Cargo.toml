@@ -13,6 +13,9 @@ categories = ["encoding"]
 # rusty_simd/rusty_regx/rusty_json/rusty_std dependencies that came with
 # it, none of which this crate's own DER code ever used -- moved to
 # ../rusty_rag.
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 rusty_wire = { path = "../rusty_wire", default-features = false }
 

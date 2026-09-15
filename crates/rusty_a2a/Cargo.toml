@@ -8,6 +8,9 @@ repository = "https://github.com/baileyrd/rusty_a2a"
 keywords = ["a2a", "agent", "protocol", "agent2agent"]
 categories = ["network-programming", "asynchronous"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

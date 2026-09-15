@@ -7,6 +7,9 @@ license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Session, artifact, and memory service implementations for the Rust ADK"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = []
 # A durable SessionService backed by SQLite. `bundled` compiles SQLite itself,

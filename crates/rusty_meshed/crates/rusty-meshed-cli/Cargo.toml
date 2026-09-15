@@ -7,6 +7,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mill"
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [[bin]]
 name = "meshed"
 path = "src/main.rs"

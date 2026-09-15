@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus unified AI/agent event loop (BL-134, ADR 0028): task scheduler, typed AiEvent channel, dedicated worker pool."
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugin-api = { path = "../nexus-plugin-api" }

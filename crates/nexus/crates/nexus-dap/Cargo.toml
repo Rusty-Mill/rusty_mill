@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus DAP host — spawns external Debug Adapter Protocol adapters and bridges them to the kernel IPC bus"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }

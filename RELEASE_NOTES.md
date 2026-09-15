@@ -13,6 +13,38 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 Phase 0a: workspace layer metadata, CI checker, generated map
+**2026-09-15** · spec [`PHASE-0A-SPEC.md`](PHASE-0A-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+First implementation slice of ADR-0003 (the `crates/` layer
+reorganization), scoped to Phase 0a only — metadata and tooling, zero
+directory moves — after the owner was asked to pick a scope given the
+ADR's own multi-PR migration plan. Built by Codex (`/codex-build`) from a
+host-derived work order restating the ADR's "Phase 0a in detail" section;
+independently inspected by the host, which does not delegate to Codex
+what Codex itself just built.
+
+- **Added:** `[package.metadata.rusty_mill] layer` on all 239 workspace
+  members, matching ADR-0003 Appendix B exactly (verified by a direct
+  cross-check, not just the new checker's own pass: 0 mismatches, 0
+  missing, 0 extras).
+- **Added:** `.github/scripts/check_workspace_layers.py` (+ tests) —
+  fails CI on a member with no/invalid layer, an edge to a higher layer,
+  or an `apps`-layer crate depending on another family's `apps` crate
+  (`tools`-layer callers, e.g. `rusty_boot`→`rush`, are exempt by
+  construction). Wired into the existing `dependency-policy` job.
+- **Added:** `.github/scripts/generate_workspace_map.py` (+ tests) and
+  the generated `docs/WORKSPACE-MAP.md` (239 rows: layer, family, crate,
+  description, dependents count), with a `--verify` mode wired into the
+  same CI job to fail on drift.
+- **Changed:** `README.md`'s hand-maintained "How the crates relate"
+  narrative (885 lines) replaced with a pointer to the generated map; the
+  crate table and "History" section are untouched.
+- Known cost, not a defect: because every one of the 239 manifests
+  changed, `affected_crates.py` marks the whole workspace as affected, so
+  this PR's CI run is the full build/test/clippy/cross-compile matrix,
+  not the lightweight subset a docs-only PR gets.
+
 ## ADR-0003 revised after independent Codex review
 **2026-09-15** · plan [`docs/adr/0003-workspace-layout-by-layer.md`](docs/adr/0003-workspace-layout-by-layer.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 

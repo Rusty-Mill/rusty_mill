@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = []
 memory = ["dep:rusty-search-memory"]

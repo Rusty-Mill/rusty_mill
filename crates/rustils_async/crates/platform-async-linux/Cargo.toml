@@ -7,6 +7,9 @@ rust-version = "1.75"
 publish = false
 license = "MIT"
 
+[package.metadata.rusty_mill]
+layer = "platform"
+
 [dependencies]
 # `rustils` is a workspace sibling (`crates/rustils`) -- path dependency,
 # matching platform-async's own.

@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pure Rust implementation of Git object model, index, refs, and CLI binary"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty_diff = { path = "../rusty_diff" }
 rpath = { path = "../rpath" }

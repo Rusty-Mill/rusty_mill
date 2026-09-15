@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus link-preview subsystem: best-effort OG/Twitter-card metadata fetch for canvas link nodes"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-plugins = { path = "../nexus-plugins" }
 serde = { workspace = true }

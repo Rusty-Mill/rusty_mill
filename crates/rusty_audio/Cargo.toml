@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_audio"
 keywords = ["audio", "pcm", "wasapi", "alsa", "no-std"]
 categories = ["multimedia", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty_std = { path = "../rusty_std" }
 

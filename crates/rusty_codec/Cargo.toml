@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_codec"
 keywords = ["toml", "bincode", "codec", "encoder", "no-std"]
 categories = ["encoding", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 rusty_wire = { path = "../rusty_wire" }
 rusty_std = { path = "../rusty_std" }

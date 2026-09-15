@@ -11,6 +11,9 @@ repository = "https://github.com/baileyrd/rusty_kafka"
 # per the platform's sovereignty convention rather than wrapping an
 # external crate, matching rusty_http/rusty_tls/rusty_sqlite's own
 # "own the protocol" pattern in this workspace.
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty_wire = { path = "../rusty_wire" }
 rusty_tokio = { path = "../rusty_tokio" }

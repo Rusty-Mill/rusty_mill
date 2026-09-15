@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Operation-based CRDT layer for collaborative editing (BL-074, PRD-08 §8)"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 serde       = { workspace = true }
 serde_json  = { workspace = true }

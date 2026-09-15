@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_err"
 keywords = ["error", "context", "derive", "no-std"]
 categories = ["rust-patterns", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 # rusty_std is now a sibling in this same workspace -- plain path dependency.
 rusty_std = { path = "../rusty_std" }

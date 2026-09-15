@@ -13,6 +13,9 @@ categories = ["network-programming"]
 # meant to be depended on -- same convention as rusty_homelab_mcp.
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [[bin]]
 name = "rusty_fedora_agent"
 path = "src/main.rs"

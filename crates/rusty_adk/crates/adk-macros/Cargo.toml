@@ -7,6 +7,9 @@ license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_adk"
 description = "Procedural macros for the Rust ADK: #[adk_tool]"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [lib]
 proc-macro = true
 

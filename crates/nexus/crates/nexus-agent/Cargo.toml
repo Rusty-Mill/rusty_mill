@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus agent system: Agent trait, Plan/Step types, and PlanExecutor driving tool calls through kernel IPC (PRD-15 scaffold)"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }

@@ -6,6 +6,9 @@ rust-version = "1.85"
 description = "Proc-macro #[derive(RustyJson)] attribute for rusty_json"
 license = "MIT OR Apache-2.0"
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [lib]
 proc-macro = true
 

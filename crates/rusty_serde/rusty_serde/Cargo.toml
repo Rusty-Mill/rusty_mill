@@ -5,6 +5,9 @@ edition = "2021"
 description = "A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format."
 license = "MIT"
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [features]
 default = ["derive"]
 derive = ["rusty_serde_derive"]

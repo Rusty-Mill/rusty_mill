@@ -13,6 +13,9 @@ repository = "https://github.com/baileyrd/rusty_http"
 # even those stay optional so a sync-only consumer pulls in nothing extra.
 # Per the ecosystem's dependency-justification convention (see rusty_tls's
 # Cargo.toml): nothing gets added here without a comment justifying it.
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # Optional (see the `rusty-tokio` feature below): the async adapter drives
 # the sans-IO core over `rusty_tokio`'s own `AsyncRead`/`AsyncWrite` traits

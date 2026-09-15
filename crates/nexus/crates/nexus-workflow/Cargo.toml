@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus workflow subsystem: .workflow.toml parser + typed model + registry (PRD-16 scaffold)"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }

@@ -7,6 +7,9 @@ license = "MIT"
 description = "A terminal emulator written from scratch in Rust, with a deliberately small dependency surface."
 repository = "https://github.com/baileyrd/rusty_term"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = []
 # The runtime is always tokio (a single async reactor on every platform); see

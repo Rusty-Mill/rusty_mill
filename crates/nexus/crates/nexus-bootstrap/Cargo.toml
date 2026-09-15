@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus runtime bootstrap: assembles kernel, plugin loader, and core plugins for CLI/TUI invokers"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [features]
 # Enables JSON-Schema emission for the Phase 4 WI-36 pilot IPC types via
 # the `ipc_schema_emit` integration test. Off by default so normal builds

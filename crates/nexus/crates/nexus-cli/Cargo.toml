@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus IDE — headless CLI"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [[bin]]
 name = "nexus"
 path = "src/main.rs"

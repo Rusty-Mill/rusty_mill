@@ -11,6 +11,9 @@ readme = "README.md"
 keywords = ["opnsense", "firewall", "homelab", "networking"]
 categories = ["api-bindings", "asynchronous"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # See rusty_proxmox's Cargo.toml for why the `tokio` feature is required
 # rather than optional: this crate runs under a real tokio runtime.

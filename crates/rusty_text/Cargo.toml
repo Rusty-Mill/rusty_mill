@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pure Rust stream editing (sed) and pattern scanning/processing (awk) engines"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 rusty_regx = { path = "../rusty_regx" }
 rpath = { path = "../rpath" }

@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["regex", "posix", "ere"]
 categories = ["text-processing"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 # Intentionally empty: zero runtime dependencies is a core goal.
 

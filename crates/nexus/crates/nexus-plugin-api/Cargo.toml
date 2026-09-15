@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Stable plugin contract for Nexus — capability types, IPC abstractions, event types, and the versioned plugin ABI"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [features]
 # Emit TypeScript bindings into `packages/nexus-extension-api/src/generated/`.
 # Off by default so normal Rust builds don't pull ts-rs / schemars. Enable with

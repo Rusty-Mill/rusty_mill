@@ -11,6 +11,9 @@ description = "Bundled POSIX-ish shell for Nexus sandboxed terminal sessions: an
 
 # The library is the embeddable/testable shell core — it never calls
 # `std::process::exit`. The thin binary owns the single exit and the REPL.
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [lib]
 name = "nexus_rush"
 path = "src/lib.rs"

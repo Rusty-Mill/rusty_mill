@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["json", "serialization", "no_std"]
 categories = ["encoding", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [lib]
 name = "rusty_json"
 path = "src/lib.rs"
