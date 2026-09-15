@@ -147,6 +147,8 @@
 //! `client` and adds the rest (the `serve` submodule, re-exported here so
 //! every pre-split path still resolves). `rusty_tls` is the one
 //! dependency both halves share, for the client side of TLS.
+//! The server-only `metrics_http` submodule serves the opt-in HTTP scrape
+//! listener against the same process-wide counters (`ADR-0069`).
 
 #[cfg(feature = "server")]
 pub mod access;
@@ -174,6 +176,8 @@ pub mod memory;
 /// [`Request::Metrics`].
 #[cfg(feature = "server")]
 pub mod metrics;
+#[cfg(feature = "server")]
+mod metrics_http;
 #[cfg(all(feature = "server", feature = "research"))]
 pub mod order;
 mod pem;

@@ -12988,6 +12988,7 @@ dependencies = [
  "rcgen",
  "redb",
  "rusqlite",
+ "rusty_http",
  "rusty_tls",
  "serde",
  "sha2 0.10.9",
