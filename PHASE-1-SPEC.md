@@ -1,5 +1,25 @@
 # Work order: ADR-0003 Phase 1 (platform/: rustils split, rustils_async split, rusty_test → portable-runtime)
 
+## Status: the `git mv` step is already done — read this first
+
+A prior build attempt against this same spec hit an environment
+limitation: Codex's sandbox cannot write to `.git/worktrees/<name>/
+index.lock`, which for a linked `git worktree` lives *outside* the
+worktree's own directory tree, so `git mv` failed with a permission
+error before any file moved. The host performed every move in "What
+moves" below directly (verified: 234 renames at 100% similarity, 2
+deletions, `git log --follow` traces history through each rename) and
+committed it as its own commit. **Do not attempt any `git mv`, file
+move, or file deletion — it is already done and committed.** Your job
+now is only the remaining content edits: root `Cargo.toml`, `layering.rs`,
+and `README.md`, exactly as described below (those sections are
+unchanged from the original spec and still apply as written — the move
+tables further down are reference material confirming what already
+moved, not instructions to re-execute). Sanity-check the move landed
+where this spec says it should (paths, no leftovers besides `coreutils`/
+`coreutils-async`) as part of your own verification, and report anything
+that looks wrong rather than trying to fix it by moving files yourself.
+
 Source of truth: `docs/adr/0003-workspace-layout-by-layer.md` — the
 family split rule table, the migration plan's Phase 1 row, "What each
 move phase touches besides `git mv`", and Appendix B (`layer-map`) for
@@ -214,14 +234,15 @@ family paths.
 
 ## Acceptance criteria
 
-- `git status` after your changes shows the 18 crate directories plus
-  every family-level file above as renames (`R`, ideally high similarity
-  — content is unchanged, only the path moved), the 2 stale nested
-  `Cargo.toml` files as deletions, and exactly the file edits named above
-  (root `Cargo.toml`, `layering.rs`, `README.md`) — nothing else.
+- The moves are already committed (see "Status" above) — your own
+  `git status` should show only the content edits: root `Cargo.toml`,
+  `layering.rs`, `README.md` modified, nothing else. If you see anything
+  beyond those three files changed, stop and report rather than revert
+  or "fix" it yourself.
 - `git log --follow -- crates/platform/rustils/crates/platform/Cargo.toml`
   (and spot-check one or two more) still shows history from before the
-  move.
+  move — already verified by the host, re-check briefly as part of your
+  own confirmation.
 - `cargo metadata --format-version=1 --all-features --locked` succeeds
   from the new layout.
 - **Dependency-graph identity**: diff `cargo metadata --format-version=1
