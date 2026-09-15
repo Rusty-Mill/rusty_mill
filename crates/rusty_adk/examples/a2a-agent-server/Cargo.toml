@@ -7,6 +7,9 @@ license = "Apache-2.0"
 publish = false
 description = "Serves a Rust ADK agent over A2A, so agents in any language can talk to it"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty-adk = { path = "../../crates/rusty-adk", features = ["a2a"] }
 adk-a2a.workspace = true

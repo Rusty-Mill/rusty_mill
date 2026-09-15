@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_font"
 keywords = ["font", "truetype", "rasterizer", "ttf", "no-std"]
 categories = ["text-processing", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # rusty_wire, rusty_simd and rusty_std are all workspace members now --
 # plain path dependencies, per ATLAS-RWC-0050 (same-workspace first-party

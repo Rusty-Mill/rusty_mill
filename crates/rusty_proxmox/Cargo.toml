@@ -11,6 +11,9 @@ readme = "README.md"
 keywords = ["proxmox", "pve", "homelab", "virtualization"]
 categories = ["api-bindings", "asynchronous"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # rusty_request is a sibling in this same workspace -- a plain path
 # dependency, same convention as every other in-workspace consumer. The

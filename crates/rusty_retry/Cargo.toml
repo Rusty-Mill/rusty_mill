@@ -5,6 +5,9 @@ edition = "2021"
 description = "Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller."
 license = "MIT OR Apache-2.0"
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 
 [dev-dependencies]

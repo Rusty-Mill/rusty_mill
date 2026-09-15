@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_jinja"
 keywords = ["jinja", "template", "chat", "llm", "no-std"]
 categories = ["text-processing", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 rusty_regx = { path = "../rusty_regx" }
 rusty_json = { path = "../rusty_json" }

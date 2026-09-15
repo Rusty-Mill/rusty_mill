@@ -6,6 +6,9 @@ rust-version = "1.88"
 license = "MIT"
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 rk-config.workspace = true
 serde.workspace = true

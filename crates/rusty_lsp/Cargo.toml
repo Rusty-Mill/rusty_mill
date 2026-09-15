@@ -10,6 +10,9 @@ repository = "https://github.com/baileyrd/rusty_lsp"
 keywords = ["lsp", "language-server", "async", "tokio", "jsonrpc"]
 categories = ["development-tools", "asynchronous"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

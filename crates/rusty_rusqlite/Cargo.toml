@@ -6,6 +6,9 @@ description = "Pure-Rust, from-scratch SQLite reimplementation aiming for rusqli
 license = "UNLICENSED"
 repository = "https://github.com/baileyrd/rusty_-rusqlite"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 
 [lib]

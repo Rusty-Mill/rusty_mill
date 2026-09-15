@@ -11,6 +11,9 @@ keywords = ["adk", "agent", "llm", "ai", "workflow"]
 categories = ["asynchronous", "api-bindings"]
 readme = "../../README.md"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 default = ["macros", "mcp", "models"]
 # The #[adk_tool] attribute macro.

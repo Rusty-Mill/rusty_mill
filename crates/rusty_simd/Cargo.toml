@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_simd"
 keywords = ["simd", "avx2", "dequantization", "gguf", "no-deps"]
 categories = ["science", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 
 [features]

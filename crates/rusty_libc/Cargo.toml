@@ -14,6 +14,9 @@ categories = ["no-std", "os::linux-apis"]
 keywords = ["syscall", "linux", "no-std", "libc"]
 
 # No dependencies: this crate exists precisely to avoid the `libc` FFI crate.
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 
 [features]

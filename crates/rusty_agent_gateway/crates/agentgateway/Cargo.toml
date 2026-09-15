@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_agent_gateway"
 authors = ["rusty_agent_gateway contributors"]
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [[bin]]
 name = "agentgateway"
 path = "src/main.rs"

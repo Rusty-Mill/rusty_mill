@@ -5,6 +5,9 @@ edition = "2021"
 description = "An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http."
 license = "MIT"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # rusty_tokio, rusty_tls, and rusty_http are now siblings in this same
 # workspace -- plain path dependencies. All three used to be pinned `git`

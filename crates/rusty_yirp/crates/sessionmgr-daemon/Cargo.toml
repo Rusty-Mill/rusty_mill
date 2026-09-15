@@ -7,6 +7,9 @@ rust-version = "1.88"
 license = "MIT"
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [lib]
 # A real `[lib]` alongside the `[[bin]]`, following `rusty_prime_agent`'s
 # split for the same reason: internal wire handling and path layout must

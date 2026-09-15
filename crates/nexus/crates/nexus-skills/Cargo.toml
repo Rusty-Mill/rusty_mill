@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus skills subsystem: .skill.md parser + registry + activation (PRD-13 scaffold)"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 serde = { workspace = true }
 serde_norway = { workspace = true }

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus audio subsystem: STT + TTS provider traits with local / provider-routed / platform backends (BL-117)"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }

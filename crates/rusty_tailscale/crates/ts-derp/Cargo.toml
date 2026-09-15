@@ -6,6 +6,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_tailscale"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 ts-types.workspace = true
 ts-key.workspace = true

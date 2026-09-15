@@ -5,6 +5,9 @@ edition = "2021"
 description = "Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio."
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # rusty_tokio is merged into this workspace at crates/rusty_tokio, which
 # already carries `uring_global_driver` (issue #256) -- a workspace path

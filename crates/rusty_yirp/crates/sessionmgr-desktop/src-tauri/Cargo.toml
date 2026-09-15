@@ -6,6 +6,9 @@ rust-version = "1.88"
 license = "MIT"
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [lib]
 # Tauri's own convention: `main.rs` is a thin shim calling `run()` here,
 # so mobile targets (which need a `cdylib`/`staticlib` entry point, not a

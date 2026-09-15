@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus database support library: property types, validation, formula language, CSV import/export. No SQL — SQL-backed query/schema lives in nexus-storage::bases."
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-types = { path = "../nexus-types" }
 nexus-plugins = { path = "../nexus-plugins" }

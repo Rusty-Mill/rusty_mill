@@ -8,6 +8,9 @@ rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_mcp"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"

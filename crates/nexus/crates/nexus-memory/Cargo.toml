@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "AI-native memory layer for Nexus: episodic, semantic, and procedural stores"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-plugin-api = { path = "../nexus-plugin-api" }
 nexus-kernel = { path = "../nexus-kernel" }

@@ -7,6 +7,9 @@ license = "Apache-2.0"
 publish = false
 description = "End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [features]
 # Use a real model when GOOGLE_API_KEY or ANTHROPIC_API_KEY is set.
 live = []

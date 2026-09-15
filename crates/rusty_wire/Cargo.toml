@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_wire"
 keywords = ["wire", "cursor", "byte-cursor", "no-deps", "endian"]
 categories = ["encoding", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 
 [features]

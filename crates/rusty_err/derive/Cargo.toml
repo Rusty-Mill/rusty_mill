@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_err"
 keywords = ["error", "derive", "proc-macro"]
 categories = ["rust-patterns"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [lib]
 proc-macro = true
 

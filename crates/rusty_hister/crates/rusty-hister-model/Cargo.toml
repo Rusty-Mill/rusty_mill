@@ -8,6 +8,9 @@ repository = "https://github.com/Rusty-Mill/rusty_mill"
 authors = ["rusty_hister contributors"]
 publish = false
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
 rusty_rand = { path = "../../../rusty_rand" }

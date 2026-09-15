@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_ansi"
 keywords = ["ansi", "vt100", "terminal", "parser", "no-deps"]
 categories = ["text-processing", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 unicode-width = "0.2"
 

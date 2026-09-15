@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_time"
 keywords = ["time", "datetime", "date", "iso8601", "no-std"]
 categories = ["date-and-time", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 # rusty_std is now a sibling in this same workspace -- plain path dependency.
 rusty_std = { path = "../rusty_std" }

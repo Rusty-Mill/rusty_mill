@@ -9,6 +9,23 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0003 Phase 0a implemented: every one of the 239 workspace members
+  now carries a `[package.metadata.rusty_mill] layer` field
+  (`foundation`/`platform`/`libs`/`apps`/`tools`, per the ADR's Appendix
+  B mapping); a new CI checker
+  (`.github/scripts/check_workspace_layers.py`, wired into the existing
+  `dependency-policy` job) fails a PR that adds a member without a
+  layer, a dependency edge to a higher layer, or (for an `apps`-layer
+  caller) a cross-family dependency on another `apps` crate; and a
+  generated `docs/WORKSPACE-MAP.md`
+  (`.github/scripts/generate_workspace_map.py`) replaces the
+  hand-maintained "How the crates relate" narrative in `README.md`,
+  checked for staleness in the same CI job. Zero directory moves, zero
+  crate/dependency/source edits — metadata and tooling only. Built by
+  Codex (`/codex-build`), independently inspected (`PLAN-REVIEW-LOG.md`):
+  every member's layer cross-checked against Appendix B by hand (0
+  mismatches), every manifest diff confirmed pure-addition (0
+  deletions).
 - ADR-0003 (`docs/adr/0003-workspace-layout-by-layer.md`, status
   Proposed): organize `crates/` into `foundation/`, `platform/`, `libs/`,
   `apps/` and `tools/` layer directories, with a per-crate

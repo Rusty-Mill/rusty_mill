@@ -14,6 +14,9 @@ categories = ["science"]
 # used `rusty_simd`, not the `rusty_wire`/`rusty_regx`/`rusty_json`/
 # `rusty_std` also declared there, none of which this module's source
 # actually referenced.
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty_simd = { path = "../rusty_simd", default-features = false }
 

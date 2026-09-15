@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_config"
 keywords = ["config", "ini", "parser", "kv", "no-deps"]
 categories = ["config", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 
 [features]

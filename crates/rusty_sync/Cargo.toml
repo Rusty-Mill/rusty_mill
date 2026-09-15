@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_sync"
 keywords = ["sync", "spinlock", "channel", "ringbuffer", "no-std"]
 categories = ["concurrency", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 rusty_std = { path = "../rusty_std" }
 

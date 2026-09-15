@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "Nexus security fuzz targets (BL-103). Stable-Rust smoke runner; libFuzzer/cargo-fuzz integration is operator-side."
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugin-api = { workspace = true }

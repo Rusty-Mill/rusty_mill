@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_gpu"
 keywords = ["gpu", "framebuffer", "rasterizer", "graphics", "no-std"]
 categories = ["graphics", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # rusty_simd and rusty_std are workspace members -- plain path
 # dependencies, per ATLAS-RWC-0050 (same-workspace first-party

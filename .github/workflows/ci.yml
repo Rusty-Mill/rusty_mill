@@ -95,6 +95,8 @@ jobs:
           cache-targets: false
       - run: cargo metadata --format-version=1 --all-features > /tmp/metadata.json
       - run: python3 .github/scripts/check_workspace_deps.py /tmp/metadata.json
+      - run: python3 .github/scripts/check_workspace_layers.py /tmp/metadata.json
+      - run: python3 .github/scripts/generate_workspace_map.py /tmp/metadata.json --verify docs/WORKSPACE-MAP.md
 
   plan:
     name: plan (affected crates)

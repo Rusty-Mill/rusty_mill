@@ -7,6 +7,9 @@ rust-version = "1.82"
 license = "MIT"
 repository = "https://github.com/baileyrd/rusty_inventrory"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

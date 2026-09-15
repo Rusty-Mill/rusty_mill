@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 description = "Headless VT engine for Nexus: a GUI-free, l13-free in-tree port of baileyrd/rusty_term's core/ (VT parser + grid + scrollback + OSC 133 command tracking), for server-side terminal screen introspection (RFC 0003 Track B). No GUI, no in-band channel."
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [features]
 # Command-tracking (OSC 133 prompt/command/exit-code marks) and the
 # terminal-introspection surface. In upstream rusty_term this feature also

@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Nexus theming engine: CSS variable registry, theme packages, resolution cascade, CSS snippets"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }

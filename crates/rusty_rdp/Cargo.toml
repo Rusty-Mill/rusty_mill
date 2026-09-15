@@ -21,6 +21,9 @@ categories = ["network-programming", "encoding"]
 # taking it behind its own opt-in feature (mirroring `tls`'s shape exactly)
 # doesn't compromise the dependency-free ethos the way a real third-party
 # networking framework would.
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # Still a direct dependency for the server-side TLS path
 # (`accept_tls`/`accept_tls_nla`, `TlsServerStream`) -- rusty_tls has no

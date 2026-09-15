@@ -11,6 +11,9 @@ readme = "README.md"
 keywords = ["fedora", "systemd", "homelab", "dnf"]
 categories = ["api-bindings", "asynchronous"]
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 # rusty_opnsense/rusty_proxmox both run under a real tokio runtime and
 # require the "tokio" feature rather than leaving it optional -- same

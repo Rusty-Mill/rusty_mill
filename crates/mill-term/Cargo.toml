@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement)"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
 rpath = { path = "../rpath" }
 # The actual terminal host: mill-term drives rusty_term::runtime::run

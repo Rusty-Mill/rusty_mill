@@ -8,6 +8,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Sovereign zero-dependency HTTP JSON remote cloud search provider for rusty_search"
 
+[package.metadata.rusty_mill]
+layer = "libs"
+
 [dependencies]
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }

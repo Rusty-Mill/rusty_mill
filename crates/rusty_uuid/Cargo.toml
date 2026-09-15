@@ -6,6 +6,9 @@ description = "Minimal, dependency-free UUID v4 generation"
 license = "MIT"
 repository = "https://github.com/baileyrd/rusty_uuid"
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 rusty_rand = { path = "../rusty_rand" }
 

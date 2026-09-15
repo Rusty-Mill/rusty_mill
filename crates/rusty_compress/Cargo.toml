@@ -9,6 +9,9 @@ repository = "https://github.com/baileyrd/rusty_compress"
 keywords = ["compress", "deflate", "gzip", "lzma", "sans-io"]
 categories = ["compression", "no-std"]
 
+[package.metadata.rusty_mill]
+layer = "foundation"
+
 [dependencies]
 
 [features]
