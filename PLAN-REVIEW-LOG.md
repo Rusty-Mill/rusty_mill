@@ -290,4 +290,50 @@ entry.
 Wrote `PHASE-0B-DATA.json` (the exact 247-entry set, machine-readable)
 and `PHASE-0B-SPEC.md` (the work order, built to use that data file as
 ground truth rather than asking Codex to rediscover it) and committed
-both as the prep/baseline commit before delegating.
+both as the prep/baseline commit before delegating (`e1c8520cc`).
+
+### Round 1 — blocked, not a defect in the spec's discipline
+
+Codex's build (session `01a0a68c-21ab-75e1-b2d3-766acb8c2c3d`, exit 0,
+303s) applied all 247 edits, then hit a real Cargo restriction running
+its proof commands: `default-features = false` cannot be set on a
+`workspace = true` dependency unless the workspace-level entry itself
+also disables default features. `rush`'s dependency on `rusty_lines`
+(one of the 247) does exactly that. Codex correctly stopped, reported
+the blocker with full detail, proposed but did **not** apply a fix
+(changing root `rusty_lines` to `default-features = false` and
+compensating at `rusty_boot`), and left the working tree available for
+review rather than forcing something through — exactly the discipline
+`PHASE-0B-SPEC.md` asked for on any case needing a human call.
+
+Investigated directly: found the *complete* set by scanning every one of
+the 247 entries for `extra_keys["default-features"] is False` — exactly
+6 (not just the one Codex's proof run happened to hit first: `rush`→
+`rusty_lines`, `rusty_ansder`→`rusty_wire`, `rusty_oauth`→`rusty_json`,
+`rusty_request`→`rusty_json`, `rusty_rag`→`rusty_simd`, `rusty_uuid`→
+`rusty_serde`). Rejected Codex's proposed fix (lowering a shared root
+default to satisfy one minority consumer changes behavior for every
+*other* consumer of that crate — a real semantic decision, not a safe
+mechanical hoist, and the ADR gave Phase 0b no mandate to make that
+call). Chose instead to exclude exactly those 6 entries from the hoist,
+leaving each as an unchanged direct `path` dependency — checked first
+that none of the 5 affected target crates would lose *all* their
+cross-family consumers by doing so (they don't: `rusty_serde` drops out
+of scope entirely since `rusty_uuid` was its only cross-family consumer,
+`rusty_lines` and `rusty_simd` still get a root entry because
+`rusty_boot`/other consumers remain, `rusty_wire` and `rusty_json` were
+already-hoisted targets unaffected either way).
+
+Reset the worktree to the clean prep baseline (`e1c8520cc`, discarding
+Codex's blocked partial edits — all of it was this session's own
+just-attempted work, nothing to preserve) and regenerated
+`PHASE-0B-DATA.json` v2 against that same baseline: **241 entries to
+hoist / 83 manifests touched / 52 distinct targets (12 already hoisted,
+40 needing a new root entry) / 6 entries excluded with a documented
+reason**, `targets_already_hoisted`/`targets_needing_new_entry` counts
+verified against the *pre-Codex-edit* root `Cargo.toml` specifically
+(the first pass at this recomputation accidentally checked against
+Codex's already-modified working tree and produced nonsense — caught and
+fixed before writing the final file). Updated `PHASE-0B-SPEC.md` to
+document the v2 data file, the exclusion rule, and the reason, and
+resumed the same build session with this fix.

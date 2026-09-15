@@ -1,5 +1,5 @@
 {
-  "computed_against_commit": "aa9e32b6a",
+  "computed_against_commit": "e1c8520cc",
   "entries": [
     {
       "member": "adk-a2a",
@@ -289,19 +289,6 @@
       "root_relative_path": "crates/rusty_regx",
       "extra_keys": {
         "version": "0.5.0"
-      }
-    },
-    {
-      "member": "rush",
-      "manifest_path": "crates/rush/Cargo.toml",
-      "section": "dependencies",
-      "dep_key": "rusty_lines",
-      "target_crate": "rusty_lines",
-      "member_path_value": "../rusty_lines",
-      "root_relative_path": "crates/rusty_lines",
-      "extra_keys": {
-        "version": "0.4.0",
-        "default-features": false
       }
     },
     {
@@ -1253,18 +1240,6 @@
       "extra_keys": {}
     },
     {
-      "member": "rusty_ansder",
-      "manifest_path": "crates/rusty_ansder/Cargo.toml",
-      "section": "dependencies",
-      "dep_key": "rusty_wire",
-      "target_crate": "rusty_wire",
-      "member_path_value": "../rusty_wire",
-      "root_relative_path": "crates/rusty_wire",
-      "extra_keys": {
-        "default-features": false
-      }
-    },
-    {
       "member": "rusty_audio",
       "manifest_path": "crates/rusty_audio/Cargo.toml",
       "section": "dependencies",
@@ -1971,21 +1946,6 @@
       "extra_keys": {}
     },
     {
-      "member": "rusty_oauth",
-      "manifest_path": "crates/rusty_oauth/Cargo.toml",
-      "section": "dependencies",
-      "dep_key": "rusty_json",
-      "target_crate": "rusty_json",
-      "member_path_value": "../rusty_json",
-      "root_relative_path": "crates/rusty_json",
-      "extra_keys": {
-        "default-features": false,
-        "features": [
-          "std"
-        ]
-      }
-    },
-    {
       "member": "rusty_opnsense",
       "manifest_path": "crates/rusty_opnsense/Cargo.toml",
       "section": "dependencies",
@@ -2039,18 +1999,6 @@
         "features": [
           "std"
         ]
-      }
-    },
-    {
-      "member": "rusty_rag",
-      "manifest_path": "crates/rusty_rag/Cargo.toml",
-      "section": "dependencies",
-      "dep_key": "rusty_simd",
-      "target_crate": "rusty_simd",
-      "member_path_value": "../rusty_simd",
-      "root_relative_path": "crates/rusty_simd",
-      "extra_keys": {
-        "default-features": false
       }
     },
     {
@@ -2138,21 +2086,6 @@
       "member_path_value": "../rusty_base64",
       "root_relative_path": "crates/rusty_base64",
       "extra_keys": {}
-    },
-    {
-      "member": "rusty_request",
-      "manifest_path": "crates/rusty_request/Cargo.toml",
-      "section": "dependencies",
-      "dep_key": "rusty_json",
-      "target_crate": "rusty_json",
-      "member_path_value": "../rusty_json",
-      "root_relative_path": "crates/rusty_json",
-      "extra_keys": {
-        "default-features": false,
-        "features": [
-          "std"
-        ]
-      }
     },
     {
       "member": "rusty_std",
@@ -2465,20 +2398,6 @@
       "extra_keys": {}
     },
     {
-      "member": "rusty_uuid",
-      "manifest_path": "crates/rusty_uuid/Cargo.toml",
-      "section": "dependencies",
-      "dep_key": "rusty_serde",
-      "target_crate": "rusty_serde",
-      "member_path_value": "../rusty_serde/rusty_serde",
-      "root_relative_path": "crates/rusty_serde/rusty_serde",
-      "extra_keys": {
-        "version": "0.1.0",
-        "optional": true,
-        "default-features": false
-      }
-    },
-    {
       "member": "rusty_voice",
       "manifest_path": "crates/rusty_voice/Cargo.toml",
       "section": "dependencies",
@@ -2639,6 +2558,95 @@
       "extra_keys": {}
     }
   ],
+  "excluded_entries": [
+    {
+      "member": "rush",
+      "manifest_path": "crates/rush/Cargo.toml",
+      "section": "dependencies",
+      "dep_key": "rusty_lines",
+      "target_crate": "rusty_lines",
+      "member_path_value": "../rusty_lines",
+      "root_relative_path": "crates/rusty_lines",
+      "extra_keys": {
+        "version": "0.4.0",
+        "default-features": false
+      },
+      "excluded_reason": "Cargo rejects `default-features = false` on a `workspace = true` dependency when the workspace-level entry doesn't itself disable default features. All other consumers of this target crate need defaults on, so the root entry keeps default-features implicit/true; this one consumer's entry is left as a direct `path` dependency, unhoisted, as a deliberate documented exception -- not a bug, and not something to retry with a different approach."
+    },
+    {
+      "member": "rusty_ansder",
+      "manifest_path": "crates/rusty_ansder/Cargo.toml",
+      "section": "dependencies",
+      "dep_key": "rusty_wire",
+      "target_crate": "rusty_wire",
+      "member_path_value": "../rusty_wire",
+      "root_relative_path": "crates/rusty_wire",
+      "extra_keys": {
+        "default-features": false
+      },
+      "excluded_reason": "Cargo rejects `default-features = false` on a `workspace = true` dependency when the workspace-level entry doesn't itself disable default features. All other consumers of this target crate need defaults on, so the root entry keeps default-features implicit/true; this one consumer's entry is left as a direct `path` dependency, unhoisted, as a deliberate documented exception -- not a bug, and not something to retry with a different approach."
+    },
+    {
+      "member": "rusty_oauth",
+      "manifest_path": "crates/rusty_oauth/Cargo.toml",
+      "section": "dependencies",
+      "dep_key": "rusty_json",
+      "target_crate": "rusty_json",
+      "member_path_value": "../rusty_json",
+      "root_relative_path": "crates/rusty_json",
+      "extra_keys": {
+        "default-features": false,
+        "features": [
+          "std"
+        ]
+      },
+      "excluded_reason": "Cargo rejects `default-features = false` on a `workspace = true` dependency when the workspace-level entry doesn't itself disable default features. All other consumers of this target crate need defaults on, so the root entry keeps default-features implicit/true; this one consumer's entry is left as a direct `path` dependency, unhoisted, as a deliberate documented exception -- not a bug, and not something to retry with a different approach."
+    },
+    {
+      "member": "rusty_rag",
+      "manifest_path": "crates/rusty_rag/Cargo.toml",
+      "section": "dependencies",
+      "dep_key": "rusty_simd",
+      "target_crate": "rusty_simd",
+      "member_path_value": "../rusty_simd",
+      "root_relative_path": "crates/rusty_simd",
+      "extra_keys": {
+        "default-features": false
+      },
+      "excluded_reason": "Cargo rejects `default-features = false` on a `workspace = true` dependency when the workspace-level entry doesn't itself disable default features. All other consumers of this target crate need defaults on, so the root entry keeps default-features implicit/true; this one consumer's entry is left as a direct `path` dependency, unhoisted, as a deliberate documented exception -- not a bug, and not something to retry with a different approach."
+    },
+    {
+      "member": "rusty_request",
+      "manifest_path": "crates/rusty_request/Cargo.toml",
+      "section": "dependencies",
+      "dep_key": "rusty_json",
+      "target_crate": "rusty_json",
+      "member_path_value": "../rusty_json",
+      "root_relative_path": "crates/rusty_json",
+      "extra_keys": {
+        "default-features": false,
+        "features": [
+          "std"
+        ]
+      },
+      "excluded_reason": "Cargo rejects `default-features = false` on a `workspace = true` dependency when the workspace-level entry doesn't itself disable default features. All other consumers of this target crate need defaults on, so the root entry keeps default-features implicit/true; this one consumer's entry is left as a direct `path` dependency, unhoisted, as a deliberate documented exception -- not a bug, and not something to retry with a different approach."
+    },
+    {
+      "member": "rusty_uuid",
+      "manifest_path": "crates/rusty_uuid/Cargo.toml",
+      "section": "dependencies",
+      "dep_key": "rusty_serde",
+      "target_crate": "rusty_serde",
+      "member_path_value": "../rusty_serde/rusty_serde",
+      "root_relative_path": "crates/rusty_serde/rusty_serde",
+      "extra_keys": {
+        "version": "0.1.0",
+        "optional": true,
+        "default-features": false
+      },
+      "excluded_reason": "Cargo rejects `default-features = false` on a `workspace = true` dependency when the workspace-level entry doesn't itself disable default features. All other consumers of this target crate need defaults on, so the root entry keeps default-features implicit/true; this one consumer's entry is left as a direct `path` dependency, unhoisted, as a deliberate documented exception -- not a bug, and not something to retry with a different approach."
+    }
+  ],
   "distinct_target_crates": [
     "platform",
     "platform-async",
@@ -2677,7 +2685,6 @@
     "rusty_request",
     "rusty_retry",
     "rusty_rsa",
-    "rusty_serde",
     "rusty_sha1",
     "rusty_simd",
     "rusty_sqlite",
@@ -2703,7 +2710,6 @@
     "rusty-mcp",
     "rusty_http",
     "rusty_json",
-    "rusty_serde",
     "rusty_std",
     "rusty_tls",
     "rusty_tokio",
@@ -2750,5 +2756,90 @@
     "rusty_vulkan",
     "rusty_win32",
     "rusty_wiremock"
+  ],
+  "manifests_touched": [
+    "adk-a2a",
+    "adk-core",
+    "adk-sessions",
+    "agentgateway",
+    "agentgateway-auth",
+    "agentgateway-core",
+    "coreutils",
+    "coreutils-async",
+    "inventory-core",
+    "mill-term",
+    "nexus-lsp",
+    "platform-async",
+    "platform-async-linux",
+    "platform-async-mock",
+    "platform-linux",
+    "platform-windows",
+    "rk-feed",
+    "rp-router",
+    "rush",
+    "rusty-acp",
+    "rusty-croc",
+    "rusty-hister-core",
+    "rusty-hister-extractor",
+    "rusty-hister-model",
+    "rusty-mcp",
+    "rusty-meshed-cli",
+    "rusty-meshed-core",
+    "rusty-meshed-domains",
+    "rusty-meshed-governance",
+    "rusty-meshed-observability",
+    "rusty-meshed-registry",
+    "rusty-meshed-schema-registry",
+    "rusty-meshed-sdk",
+    "rusty-meshed-trace",
+    "rusty-search-algolia",
+    "rusty-search-azure-search",
+    "rusty-search-core",
+    "rusty-search-elasticsearch",
+    "rusty-search-meilisearch",
+    "rusty-search-opensearch",
+    "rusty-search-solr",
+    "rusty-search-sqlite-fts5",
+    "rusty-search-tantivy",
+    "rusty-whisper",
+    "rusty_a2a",
+    "rusty_audio",
+    "rusty_boot",
+    "rusty_codec",
+    "rusty_err",
+    "rusty_fedora",
+    "rusty_font",
+    "rusty_git",
+    "rusty_gpu",
+    "rusty_gui",
+    "rusty_homelab_mcp",
+    "rusty_http",
+    "rusty_jinja",
+    "rusty_kafka",
+    "rusty_lines",
+    "rusty_llama",
+    "rusty_lsp",
+    "rusty_multimodal_db",
+    "rusty_oauth",
+    "rusty_opnsense",
+    "rusty_proxmox",
+    "rusty_rdp",
+    "rusty_request",
+    "rusty_std",
+    "rusty_stream",
+    "rusty_sync",
+    "rusty_term",
+    "rusty_term_l13",
+    "rusty_text",
+    "rusty_time",
+    "rusty_tls",
+    "rusty_tokio",
+    "rusty_uuid",
+    "rusty_voice",
+    "rusty_vulkan",
+    "rusty_wiremock",
+    "sessionmgr-proc",
+    "sessionmgr-protocol",
+    "ts-control"
   ]
 }
