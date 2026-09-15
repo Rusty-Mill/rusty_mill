@@ -315,6 +315,40 @@ pub trait ConnectionStore: Send + Sync {
             .collect()
     }
 
+    /// `FPG-FR-003`/`FPG-FR-004` (ADR-0068, protocol 26): one ordered
+    /// keyset page over only the rows every predicate in `filter`
+    /// matches — [`Self::page`]'s own contract plus a `WHERE`-shaped
+    /// filter. `dispatch` has already validated `order_by`/`after`/
+    /// `limit` (`validate_page`'s checks) and every `filter` predicate
+    /// (`validate_predicate`, `Request::Query`'s own rule). The default
+    /// answers every domain correctly: [`Self::scan_all`], keep only
+    /// rows [`predicate_matches`] every predicate for (the identical
+    /// filter step `Request::Query`'s own [`evaluate_query`] uses), then
+    /// [`page_rows`] over that already-filtered, already-materialized
+    /// subset — one full scan per request, the same worst-case ceiling
+    /// `Query` already has today for the identical filter.
+    /// `Memory`/`Relation`'s `Ordered` index (`ADR-0059`) is not
+    /// consulted here — this default gives up its speed advantage for a
+    /// filtered request, the [`Self::page`]-fast-path's own unfiltered
+    /// case is untouched. A trait method, not inlined in `dispatch`
+    /// (unlike `Query`), so a future round can override it for a domain
+    /// that can narrow candidates more cheaply, the same shape
+    /// [`Self::page`] already established.
+    fn filtered_page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+        filter: &[Predicate],
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        let filtered: Vec<PageRow> = self
+            .scan_all()
+            .into_iter()
+            .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
+            .collect();
+        Ok(page_rows(filtered, order_by, after, limit))
+    }
+
     /// `CNT-FR-002` (ADR-0057, protocol 21): how many edges this table
     /// holds under `relation`, each undirected edge once, a cross-table
     /// label included. `Malformed` for a label the table has no relation
@@ -829,6 +863,24 @@ fn validate_page(
         return Err(ErrorCode::Malformed);
     }
     Ok(())
+}
+
+/// `FPG-FR-002` (ADR-0068): `Request::FilteredPage`'s validation, before
+/// any scan — composed from the two existing checks, not a new rule
+/// set: [`validate_page`]'s four checks over `order_by`/`after`/`limit`,
+/// then every `filter` predicate through [`validate_predicate`] (the
+/// identical check `Request::Query`'s own filter already uses).
+fn validate_filtered_page(
+    schema: &DomainSchema,
+    order_by: FieldRef,
+    after: Option<&(ScanValue, RecordId)>,
+    limit: u64,
+    filter: &[Predicate],
+) -> Result<(), ErrorCode> {
+    validate_page(schema, order_by, after, limit)?;
+    filter
+        .iter()
+        .try_for_each(|p| validate_predicate(schema, p))
 }
 
 /// The sort key one row contributes to a page: its `order_by` value as
@@ -2521,6 +2573,27 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(files) => Response::Snapshot { files },
             Err(code) => err_response(code),
         },
+        // `FPG-FR-002`/`FPG-FR-003` (ADR-0068): `Page`'s own
+        // validate-then-scan shape, composed with `Query`'s filter
+        // validation. Gated in `handle_connection` like `Page`.
+        Request::FilteredPage {
+            order_by,
+            after,
+            limit,
+            filter,
+        } => match validate_filtered_page(
+            &store.describe(),
+            order_by,
+            after.as_ref(),
+            limit,
+            &filter,
+        ) {
+            Ok(()) => match store.filtered_page(order_by, after, limit as usize, &filter) {
+                Ok(rows) => Response::Rows { rows },
+                Err(code) => err_response(code),
+            },
+            Err(code) => err_response(code),
+        },
     }
 }
 
@@ -3136,6 +3209,11 @@ fn handle_connection(
             // below), since — unlike `Backup` — it needs no `options`
             // access this match arm would otherwise have to thread through.
             Request::FetchSnapshot if negotiated < 25 => err_response(ErrorCode::Malformed),
+            // `FPG-FR-007` (ADR-0068): a read, `Page`'s own gate shape —
+            // no `SessionOpen` gate, `Malformed` below the protocol
+            // version that introduced it. Falls through to `dispatch`'s
+            // own `Request::FilteredPage` arm via the `other =>` fallback.
+            Request::FilteredPage { .. } if negotiated < 26 => err_response(ErrorCode::Malformed),
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes

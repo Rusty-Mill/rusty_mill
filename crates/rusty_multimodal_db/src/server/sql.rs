@@ -47,17 +47,18 @@
 //! The right table name is *not* checked against the left here — the
 //! client refuses a different one until ADR-0045 lands.
 //!
-//! # `ORDER BY` (`OBY-FR-001`–`002`, ADR-0061, protocol 20 reused)
+//! # `ORDER BY` (`OBY-FR-001`–`002`, ADR-0061; `FPG-FR-005`, ADR-0068)
 //!
-//! `ORDER BY <field>` compiles to the existing `Request::Page`
+//! `ORDER BY <field>` alone compiles to the existing `Request::Page`
 //! (`ADR-0055`) instead of `Request::Query` — one field, `U32`/`I64`
-//! only, ascending only — see
-//! `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md`. Refused at parse time,
-//! never silently unordered or unfiltered: combined with `WHERE`
-//! (`OrderByWithFilter` — `Page` takes no filter argument), with `JOIN`
-//! (`OrderByWithJoin` — `JOIN`'s own Non-goal), or with `GROUP BY`/an
-//! aggregate column (`OrderByWithAggregate` — grouped output is not the
-//! raw per-record field `Page` walks).
+//! only, ascending only — see `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md`.
+//! `ORDER BY <field> WHERE ...` compiles to `Request::FilteredPage`
+//! instead (`ADR-0068`, protocol 26) — the identical field/ordering
+//! rules, plus every `WHERE` predicate. Still refused at parse time,
+//! never silently unordered: combined with `JOIN` (`OrderByWithJoin` —
+//! `JOIN`'s own Non-goal) or with `GROUP BY`/an aggregate column
+//! (`OrderByWithAggregate` — grouped output is not the raw per-record
+//! field `Page`/`FilteredPage` walk).
 //!
 //! `*` is only ever valid as `COUNT`'s own argument (`COUNT(*)`); every
 //! other `agg_fn` requires a plain field `ident` — `SUM(*)` and
@@ -198,9 +199,6 @@ pub(crate) enum SqlParseError {
     /// `FROM t JOIN t` with no aliases (or the same alias twice) — the
     /// two sides cannot be told apart.
     AmbiguousQualifiers(String),
-    /// `ORDER BY` combined with `WHERE` — `Request::Page` takes no
-    /// filter argument. `OBY-FR-002`, ADR-0061.
-    OrderByWithFilter,
     /// `ORDER BY` combined with `JOIN` — `JOIN`'s own Non-goal.
     /// `OBY-FR-002`, ADR-0061.
     OrderByWithJoin,
@@ -256,9 +254,6 @@ impl fmt::Display for SqlParseError {
                     f,
                     "{name:?} names both sides of the JOIN; give each side a distinct alias"
                 )
-            }
-            SqlParseError::OrderByWithFilter => {
-                write!(f, "ORDER BY cannot be combined with WHERE")
             }
             SqlParseError::OrderByWithJoin => {
                 write!(f, "ORDER BY cannot be combined with JOIN")
@@ -727,16 +722,15 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
     Ok(query)
 }
 
-/// `OBY-FR-002`, ADR-0061: `ORDER BY` may not be combined with `WHERE`
-/// (`Request::Page` takes no filter), `JOIN` (`JOIN`'s own Non-goal), or
-/// `GROUP BY`/an aggregate column (grouped output is not the raw field
-/// `Page` walks).
+/// `OBY-FR-002`, ADR-0061; `FPG-FR-005`, ADR-0068: `ORDER BY` may not be
+/// combined with `JOIN` (`JOIN`'s own Non-goal) or `GROUP BY`/an
+/// aggregate column (grouped output is not the raw field `Page`/
+/// `FilteredPage` walk). Combined with `WHERE` it compiles to
+/// `Request::FilteredPage` instead of `Request::Page` — no longer
+/// refused here since ADR-0068.
 fn validate_order_by(query: &ParsedQuery) -> Result<(), SqlParseError> {
     if query.order_by.is_none() {
         return Ok(());
-    }
-    if !query.conditions.is_empty() {
-        return Err(SqlParseError::OrderByWithFilter);
     }
     if query.join.is_some() {
         return Err(SqlParseError::OrderByWithJoin);
@@ -1185,11 +1179,14 @@ mod tests {
     }
 
     #[test]
-    fn order_by_with_where_is_a_syntax_error() {
-        assert_eq!(
-            parse("SELECT * FROM memory WHERE age > 3 ORDER BY updated_at"),
-            Err(SqlParseError::OrderByWithFilter)
-        );
+    fn order_by_composes_with_where() {
+        // `FPG-FR-005`, ADR-0068: `ORDER BY` combined with `WHERE` now
+        // parses instead of `OrderByWithFilter` — see
+        // `SchemaDrivenClient::query_ordered`'s compile step.
+        let q = parse("SELECT * FROM memory WHERE age > 3 ORDER BY updated_at").unwrap();
+        assert_eq!(q.order_by, Some("updated_at".into()));
+        assert_eq!(q.conditions.len(), 1);
+        assert_eq!(q.conditions[0].op, CompareOp::Gt);
     }
 
     #[test]

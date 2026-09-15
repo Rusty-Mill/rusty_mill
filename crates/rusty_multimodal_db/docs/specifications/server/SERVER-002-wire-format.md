@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.14.0 (protocol version 25 — `SERVER-001` v0.55.0, `RPL-FR-006`,
+- Version: 0.15.0 (protocol version 26 — `SERVER-001` v0.56.0, `FPG-FR-005`,
+  ADR-0068; 0.14.0 was protocol 25, `SERVER-001` v0.55.0, `RPL-FR-006`,
   ADR-0067; 0.13.0 was protocol 24, `SERVER-001` v0.54.0, `BAK-FR-006`,
   ADR-0065; 0.12.0 was protocol 23, `SERVER-001` v0.53.0, `MET-FR-004`,
   ADR-0064; 0.11.0 protocol 22, ADR-0060; 0.10.0 was protocol 21, ADR-0057; 0.9.0 protocol 20, ADR-0055; 0.8.0 protocol 19, ADR-0054; 0.7.0 protocol 18, ADR-0052; 0.6.0 protocol 17, ADR-0051; 0.5.0 protocol 16,
@@ -94,13 +95,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 25 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `19 00 00 00` (25).
+- `Request::Hello { protocol_version: 26 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1a 00 00 00` (26).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 25
+## 5. Types at protocol version 26
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -223,6 +224,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 32 | `Metrics` | — | 23 | `Metrics` |
 | 33 | `Backup` | `name: String` | 24 | `BackedUp` |
 | 34 | `FetchSnapshot` | — | 25 | `Snapshot` |
+| 35 | `FilteredPage` | `order_by: FieldRef`, `after: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `Page`'s three fields plus a `WHERE`-shaped filter | 26 | `Rows` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -573,6 +575,22 @@ Each item names the `SERVER-001` requirement that owns it.
    reopens, under a narrower gate, a shape §6.2's token classes had
    never allowed before: bytes returned over the wire rather than
    written to a server-local path. (`FR-067`)
+24. **`FilteredPage`** (26) — `Page`'s own contract (item 18's, one
+   ordered keyset page: sorted ascending by `order_by`, the id as the
+   tie-break, strictly after `after`, at most `limit` rows) plus
+   `filter: Vec<Predicate>` — only the rows every predicate matches,
+   the identical `Predicate`/`CompareOp` rules item 8's `Query` filter
+   already uses. Answered `Rows { rows }` (reused unchanged — the
+   identical shape `Page`/`Query` already answer with). `UnknownField`/
+   `Malformed` for `order_by`/`after`/`limit` (`Page`'s own rules,
+   before any scan); `UnknownField`/`Malformed` for each `filter`
+   predicate (`Query`'s own rules). Evaluated by a full table scan,
+   filtered, then sorted and paged — the same worst-case cost `Query`
+   already has today for the identical filter; the unfiltered `Page`
+   item 18 describes is untouched by this request and keeps whatever
+   faster path a given server build gives it. A read: no `SessionOpen`
+   gate, not restricted to a read-write token. `Malformed` below 26.
+   (`FR-068`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -624,6 +642,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 23 | v0.53.0 | `Metrics` (32), `Metrics` response (21) |
 | 24 | v0.54.0 | `Backup` (33), `BackedUp` (22) |
 | 25 | v0.55.0 | `FetchSnapshot` (34), `Snapshot` (23), `ErrorCode::TooLarge` (14) |
+| 26 | v0.56.0 | `FilteredPage` (35) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -635,7 +654,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25, `FilteredPage` below 26); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -667,9 +686,25 @@ client; it needs a CPython 3 interpreter (`python3` or `python`,
 whichever is found — see `tests/server_python_client.rs`'s own
 `python_binary`; verified in this session against CPython 3.14). The
   live half — `tests/server_python_client.rs` — drives the reference
-  client against a real server at 25 and at a hand-negotiated 10.
+  client against a real server at 26 and at a hand-negotiated 10.
 
 ## 10. Change history
+
+- 0.15.0 (`SERVER-001` v0.56.0, ADR-0068, `FPG-FR-005`): protocol
+  version 26 — `Request::FilteredPage` (35), answered `Response::Rows`
+  (reused, no new response variant) — `Page`'s three fields
+  (`order_by`, `after`, `limit`) plus `filter: Vec<Predicate>`, the
+  identical `WHERE`-shaped filter `Query` already carries; §4's `Hello`
+  example, §5 header, §5.6, §7 item 24, §8 row 26 and rule 3's list;
+  fixture at 74 vectors (`Request/FilteredPage`); the reference Python
+  client gains `filtered_page`. Closes the SQL-parity gap `ADR-0061`
+  left open — `WHERE` combined with `ORDER BY` now compiles to one
+  request instead of a parse-time refusal (`docs/FUTURE-GROWTH.md`'s
+  own "still absent" item). No new `ErrorCode`; evaluated by one
+  shared default (full scan, filtered, then paged) correct for every
+  domain — `Memory`/`Relation`'s `Ordered` index gives this request no
+  speed advantage this round, a named cost, not a correctness gap; the
+  unfiltered `Page` fast path is untouched.
 
 - 0.14.0 (`SERVER-001` v0.55.0, ADR-0067, `RPL-FR-006`): protocol
   version 25 — `Request::FetchSnapshot` (34), `Response::Snapshot` (23),

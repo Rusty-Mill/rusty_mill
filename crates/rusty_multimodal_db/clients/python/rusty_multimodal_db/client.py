@@ -361,6 +361,39 @@ class Client:
             return [(rid, self._named(fields)) for rid, fields in reply.rows]
         raise ProtocolError(type(reply).__name__)
 
+    def filtered_page(
+        self,
+        order_by: str,
+        where: Sequence[Tuple[str, p.CompareOp, Any]] = (),
+        after: Optional[Tuple[Any, uuid.UUID]] = None,
+        limit: int = 100,
+    ) -> List[Tuple[uuid.UUID, List[Tuple[str, Any]]]]:
+        """One ordered keyset page over only the rows every ``where``
+        predicate matches (FPG-FR-006, ADR-0068, protocol 26) —
+        ``page``'s own contract plus a filter, in the identical
+        ``(field, op, value)`` shape ``query``'s own ``where`` takes.
+        A non-numeric ``order_by`` or a zero ``limit`` is
+        ``UnsupportedError`` with no frame sent; below 26 likewise."""
+        need = p.REQUEST_INTRODUCED_AT[p.FilteredPage]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(
+                f"FilteredPage needs protocol {need}, negotiated {self.server_protocol_version}"
+            )
+        descriptor = self.field(order_by)
+        if descriptor.value_kind not in (p.ValueKind.U32, p.ValueKind.I64):
+            raise UnsupportedError(f"page order on {order_by!r}, a {descriptor.value_kind.name} field")
+        if limit <= 0:
+            raise UnsupportedError("page limit must be at least 1")
+        cursor = None
+        if after is not None:
+            value, record_id = after
+            cursor = (_to_scan_value(descriptor.value_kind, value), record_id)
+        filter_ = tuple(self._predicates(where))
+        reply = self._roundtrip(p.FilteredPage(descriptor.tag, cursor, limit, filter_))
+        if isinstance(reply, p.Rows):
+            return [(rid, self._named(fields)) for rid, fields in reply.rows]
+        raise ProtocolError(type(reply).__name__)
+
     def count_edges(self, relation: str) -> int:
         """How many edges the selected table holds under ``relation``
         (CNT-FR-004, protocol 21): each undirected edge once, a cross-table

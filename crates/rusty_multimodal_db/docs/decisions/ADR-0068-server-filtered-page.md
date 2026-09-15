@@ -1,6 +1,6 @@
 # ADR-0068: Combining `WHERE` with `ORDER BY` — `Request::FilteredPage`
 
-- Status: **Proposed** (2026-09-14), design only. See
+- Status: **Accepted / Implemented** (2026-09-15). See
   `docs/design/SERVER-FILTERED-PAGE-DESIGN.md` for the full design.
 - Date: 2026-09-14
 - Deciders: baileyrd
@@ -105,3 +105,45 @@ The owner's shorthand: **(a)** the new request variant, as proposed;
 ## Acceptance and implementation
 
 - 2026-09-14: proposed, design only.
+- 2026-09-14: owner selected option (a) — `Request::FilteredPage`,
+  server-side filtering, as recommended.
+- 2026-09-15: implemented and merged. `PROTOCOL_VERSION` 26,
+  `Request::FilteredPage` (35) answered `Response::Rows` (reused);
+  `ConnectionStore::filtered_page` (default: `scan_all` → filter via
+  `predicate_matches` → `page_rows`) and `validate_filtered_page`
+  (`validate_page` + per-predicate `validate_predicate`, composed, no
+  new checks) in `serve.rs`; `sql.rs`'s `OrderByWithFilter` exclusion
+  removed, `WHERE` + `ORDER BY` now compiles to `FilteredPage`;
+  `client.rs` gains `fetch_filtered_page`, `query_ordered` routes
+  through it exactly when `conditions` is non-empty, the unfiltered
+  path untouched. Two real corrections found during implementation,
+  not deviations from the accepted decision:
+  - The design's `FPG-FR-004` text ("default `Unsupported`... even
+    though this round's one shared default answers every domain") was
+    self-contradictory — copied from the opt-in-capability pattern
+    (`backup`/`compact`) out of habit. Implemented as written in the
+    design's own "Proposed shape" code sample instead: `filtered_page`
+    is a trait method with a *working* default (`page`'s own
+    precedent, not `Unsupported`), so a future round can still override
+    it for a domain with a cheaper path, but every domain answers
+    correctly today with zero overrides.
+  - The design's Non-goals claimed "no Python client change,"
+    reasoning from `ADR-0061`'s lack of a Python *SQL compiler*. That
+    conflated two different things: `ADR-0061` never gave Python SQL
+    parsing, but every wire-touching round since `ADR-0057`
+    (`count_edges`) *has* given the Python reference client a raw,
+    per-request method (`page`, `write_batch`, `metrics`, `backup`,
+    `fetch_snapshot`, ...) — `SERVER-002`'s own §10 changelog confirms
+    this every time. Corrected: `clients/python/rusty_multimodal_db/`
+    gains `FilteredPage` in `protocol.py` and `Client.filtered_page` in
+    `client.py`, exercised by `driver.py` and asserted in
+    `tests/server_python_client.rs`, matching every prior round's
+    precedent exactly.
+  - The one open question left for implementation (`page_rows`/
+    `page_ids` reusability over an already-filtered `Vec<PageRow>`)
+    resolved with no change needed: `page_rows` already accepts a
+    materialized `Vec<PageRow>` directly.
+  - The other open question (an `Ordered`-index-aware override for
+    `Memory`/`Relation` when the filter is a single range on the
+    order-by field) was left undone, as recommended — a separable
+    follow-on, not a blocker.

@@ -1,7 +1,11 @@
-# Server Filtered Ordered Page: `Request::FilteredPage` — Combining `WHERE` with `ORDER BY` (Proposed)
+# Server Filtered Ordered Page: `Request::FilteredPage` — Combining `WHERE` with `ORDER BY` (Implemented)
 
-- Status: **Proposed** (2026-09-14, `ADR-0068`), design only — no source
-  file touched.
+- Status: **Accepted as designed and implemented** (2026-09-15,
+  `ADR-0068`) — implemented in the same session the design was
+  proposed. See `ADR-0068`'s own "Acceptance and implementation"
+  section for the full implementation record, including two real
+  corrections found while implementing (`FPG-FR-004`'s self-
+  contradictory text; the Python client Non-goal below, corrected).
 - Related: `docs/FUTURE-GROWTH.md`'s "Path to SQLite/DuckDB parity," item
   1 ("Still absent: ... `ORDER BY` combined with a filter"), `ADR-0061`
   (`SERVER-SQL-ORDER-BY-DESIGN.md`, whose own option (b) — "thread a
@@ -60,11 +64,14 @@ request instead of being refused at parse time.
   Vec<Predicate>` has never had one; this round does not introduce the
   first one for this shape either — the SQL grammar's own `AND`-chain
   parsing is the practical bound, matching `Query`'s precedent exactly.
-- **A Python client change.** `ADR-0061` never gave the Python
-  reference client a SQL compiler at all — it calls `page`/`query`
-  directly, by request shape, not by SQL text. This round's SQL-layer
-  work (`src/server/sql.rs`, `src/server/client.rs`) is Rust-only, the
-  identical scope `ADR-0061` itself had.
+- ~~A Python client change.~~ **Corrected during implementation: this
+  was wrong.** `ADR-0061` never gave the Python reference client a SQL
+  *compiler*, but every wire-touching round since `ADR-0057`
+  (`count_edges`) has given it a matching raw request-level method
+  (`page`, `write_batch`, `metrics`, `backup`, `fetch_snapshot`, ...) —
+  `SERVER-002` §10's own changelog confirms this every time. Corrected:
+  `clients/python/` gains `Client.filtered_page`, exercised by
+  `driver.py` and `tests/server_python_client.rs`, matching precedent.
 
 ## Context
 
@@ -176,11 +183,14 @@ stand at `SERVER-001` v0.55.0 / `PROTOCOL_VERSION = 25`:
   `FilteredPage` request through this one default; no
   `ConnectionStore::filtered_page` override exists on any adapter this
   round (see Decision for why, and the named cost).
-- `FPG-FR-004` **`ConnectionStore::filtered_page`, default
-  `Unsupported`** — matching every other opt-in capability's shape
-  (`backup`, `fetch_snapshot`, `compact`), even though this round's one
-  shared default answers every domain; the trait method exists so an
-  adapter *could* refuse or override it later without a wire change.
+- `FPG-FR-004` **`ConnectionStore::filtered_page`, a trait method with
+  a *working* default** (`page`'s own precedent — not `backup`/
+  `fetch_snapshot`/`compact`'s `Unsupported`-by-default opt-in-capability
+  shape, since this round's default correctly answers every domain, not
+  none): `scan_all()` → filter via `predicate_matches` → `page_rows`.
+  A trait method rather than inline `dispatch` logic (unlike `Query`)
+  so a future round can still override it for a domain with a cheaper
+  path, the same extensibility `page`/`page_keys` already have.
 - `FPG-FR-005` **`sql.rs`'s `OrderByWithFilter` exclusion removed**;
   `WHERE` + `ORDER BY` compiles to `Request::FilteredPage` instead of
   the parse-time refusal. `OrderByWithJoin`/`OrderByWithAggregate`
@@ -393,35 +403,40 @@ clippy --all-features -- -D warnings` clean.
 
 ## Traceability
 
-- Roadmap: `SERVER-FILTERED-PAGE-DESIGN` (this document, `Proposed`),
-  `SERVER-FILTERED-PAGE` (implementation, not started).
+- Roadmap: `SERVER-FILTERED-PAGE-DESIGN` (this document, `Implemented`),
+  `SERVER-FILTERED-PAGE` (implementation, `Implemented`).
 - `docs/FUTURE-GROWTH.md`'s SQL-parity item 1 updated once implemented
   — "`ORDER BY` combined with a filter" moves from "still absent" to
   named, bounded, and built, the identical treatment `Backup`/`Metrics`/
   `Replication`/schema migration each received in "Operational
   maturity."
 
-## Open questions
+## Open questions — resolved during implementation
 
 - **Should `Memory`/`Relation` override `filtered_page` to at least
   narrow candidates via the `Ordered` index when the filter's *only*
-  predicate happens to be a range on the order-by field itself** (the
-  one case `ADR-0059` already named as a plausible future "range
-  filter on the wire")? Recommendation: not this round — the shared
-  default already gives a correct, if not maximally fast, answer for
-  every domain including this case; a targeted optimization for one
-  narrow predicate shape is real, separable follow-on work, not a
-  blocker to shipping the primitive itself.
+  predicate happens to be a range on the order-by field itself**?
+  **Resolved: not this round**, exactly as recommended — the shared
+  default gives a correct, if not maximally fast, answer for every
+  domain including this case; a targeted optimization for one narrow
+  predicate shape stays a separable follow-on, not a blocker.
 - **Is `page_rows`/`page_ids`'s existing selection helper directly
   reusable over an already-filtered `Vec<PageRow>`, or does it need a
-  small signature adjustment** (today's helpers are written assuming
-  they receive either the full scan or the full key list, not a
-  pre-filtered subset)? Left for the implementation to resolve — a
-  mechanical detail, not a design fork the owner needs to weigh.
+  small signature adjustment?** **Resolved: directly reusable, no
+  change needed** — `page_rows(rows: Vec<PageRow>, order_by, after,
+  limit)` already takes a materialized row list and pages it; the
+  shared default's filtered subset is exactly that shape.
 - **Should the SQL grammar also accept `ORDER BY` + `WHERE` +
-  `LIMIT`-absent (an unbounded filtered walk)?** Recommendation: yes,
-  reusing the exact chunked-loop shape `ADR-0061` already built for the
-  unfiltered case — named here only because a highly selective filter
-  makes an unbounded walk's real cost more visible than it was for the
-  unfiltered case (still bounded by table size, not time, per Data/state
-  and invariants above).
+  `LIMIT`-absent (an unbounded filtered walk)?** **Resolved: yes**,
+  exactly as recommended — `query_ordered`'s existing chunked-loop
+  shape (`ORDER_BY_PAGE_CHUNK`) is reused unchanged for the filtered
+  case, routed through a new `fetch_ordered_page` dispatcher that
+  picks `fetch_page` (filter empty) or `fetch_filtered_page` (filter
+  non-empty) per page.
+
+## Change history
+
+- 2026-09-14: initial proposal, design only.
+- 2026-09-15: the owner picked option (a); implemented the same
+  session. See `ADR-0068`'s own "Acceptance and implementation"
+  section for the full record.
