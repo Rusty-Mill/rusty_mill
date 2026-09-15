@@ -32,10 +32,10 @@ unwrap_used = "warn"
 [dependencies]
 # rusty-mcp, rusty_proxmox, and rusty_opnsense are all siblings in this
 # same workspace -- plain path dependencies.
-rusty-mcp = { path = "../rusty_mcp/crates/rusty-mcp" }
-rusty_proxmox = { path = "../rusty_proxmox" }
-rusty_opnsense = { path = "../rusty_opnsense" }
-rusty_fedora = { path = "../rusty_fedora" }
+rusty-mcp = { workspace = true }
+rusty_proxmox = { workspace = true }
+rusty_opnsense = { workspace = true }
+rusty_fedora = { workspace = true }
 rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "macros",
@@ -54,7 +54,7 @@ toml = { workspace = true }
 [dev-dependencies]
 # The canned-response HTTP mock server the client tests drive against
 # (was an identical copy under tests/support/ in each REST-client crate).
-rusty_wiremock = { path = "../rusty_wiremock", features = ["std"] }
+rusty_wiremock = { workspace = true, features = ["std"] }
 rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "client",

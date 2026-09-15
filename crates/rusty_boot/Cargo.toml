@@ -13,32 +13,32 @@ categories = ["no-std", "os"]
 layer = "tools"
 
 [dependencies]
-rusty_wire = { path = "../rusty_wire" }
-rusty_regx = { path = "../rusty_regx" }
-rusty_json = { path = "../rusty_json" }
-rusty_compress = { path = "../rusty_compress" }
-rusty_std = { path = "../rusty_std" }
-rusty_sync = { path = "../rusty_sync" }
-rusty_time = { path = "../rusty_time" }
-rusty_err = { path = "../rusty_err" }
-rusty_codec = { path = "../rusty_codec" }
-rusty_audio = { path = "../rusty_audio" }
-rusty_jinja = { path = "../rusty_jinja" }
-rusty_tokio = { path = "../rusty_tokio" }
-rusty_http = { path = "../rusty_http" }
-rusty_lines = { path = "../rusty_lines" }
-rusty_font = { path = "../rusty_font" }
-rusty_gui = { path = "../rusty_gui" }
-rusty_gpu = { path = "../rusty_gpu" }
-rusty_vulkan = { path = "../rusty_vulkan" }
-rush = { path = "../rush" }
-rusty_term = { path = "../rusty_term" }
+rusty_wire = { workspace = true }
+rusty_regx = { workspace = true }
+rusty_json = { workspace = true }
+rusty_compress = { workspace = true }
+rusty_std = { workspace = true }
+rusty_sync = { workspace = true }
+rusty_time = { workspace = true }
+rusty_err = { workspace = true }
+rusty_codec = { workspace = true }
+rusty_audio = { workspace = true }
+rusty_jinja = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_http = { workspace = true }
+rusty_lines = { workspace = true }
+rusty_font = { workspace = true }
+rusty_gui = { workspace = true }
+rusty_gpu = { workspace = true }
+rusty_vulkan = { workspace = true }
+rush = { workspace = true }
+rusty_term = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { path = "../rusty_libc" }
+rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { path = "../rusty_win32" }
+rusty_win32 = { workspace = true }
 
 [features]
 default = []

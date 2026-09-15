@@ -11,8 +11,8 @@ publish = false
 layer = "apps"
 
 [dependencies]
-rusty_err = { path = "../../../rusty_err" }
-rusty_json = { path = "../../../rusty_json" }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_err = { workspace = true }
+rusty_json = { workspace = true }
+rusty_uuid = { workspace = true }
 
 [dev-dependencies]

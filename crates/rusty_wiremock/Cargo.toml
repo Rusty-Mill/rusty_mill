@@ -13,9 +13,9 @@ categories = ["development-tools::testing", "no-std"]
 layer = "libs"
 
 [dependencies]
-rusty_http = { path = "../rusty_http" }
-rusty_json = { path = "../rusty_json" }
-rusty_std = { path = "../rusty_std" }
+rusty_http = { workspace = true }
+rusty_json = { workspace = true }
+rusty_std = { workspace = true }
 
 [features]
 default = []

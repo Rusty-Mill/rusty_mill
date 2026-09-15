@@ -28,7 +28,7 @@ layer = "libs"
 # here never affects a `rusty_tokio`-based consumer elsewhere in the same
 # build.) See rusty_request's README ("Running on real tokio too") for the
 # full picture.
-rusty_request = { path = "../rusty_request", features = ["tokio"] }
+rusty_request = { workspace = true, features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -36,5 +36,5 @@ thiserror = "2"
 [dev-dependencies]
 # The canned-response HTTP mock server the client tests drive against
 # (was an identical copy under tests/support/ in each REST-client crate).
-rusty_wiremock = { path = "../rusty_wiremock", features = ["std"] }
+rusty_wiremock = { workspace = true, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

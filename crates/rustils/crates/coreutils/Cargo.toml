@@ -18,8 +18,8 @@ platform.workspace = true
 # dependencies (before that, unresolvable local-only paths — see git
 # history), now real workspace siblings that build reproducibly for
 # every clone and CI runner without a patch table.
-rusty_regx = { path = "../../../rusty_regx" }
-rpath = { path = "../../../rpath" }
+rusty_regx.workspace = true
+rpath.workspace = true
 
 [dev-dependencies]
 platform-mock.workspace = true

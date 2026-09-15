@@ -13,8 +13,8 @@ layer = "platform"
 [dependencies]
 # `rustils` is a workspace sibling (`crates/rustils`) -- path dependency,
 # matching platform-async's own.
-platform = { path = "../../../rustils/crates/platform" }
-platform-linux = { path = "../../../rustils/crates/platform-linux" }
+platform = { workspace = true }
+platform-linux = { workspace = true }
 platform-async = { path = "../platform-async" }
 reactor-core = { path = "../reactor-core" }
 

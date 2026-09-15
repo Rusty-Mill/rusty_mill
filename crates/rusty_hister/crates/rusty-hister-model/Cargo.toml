@@ -13,8 +13,8 @@ layer = "apps"
 
 [dependencies]
 rusty-hister-core = { path = "../rusty-hister-core" }
-rusty_rand = { path = "../../../rusty_rand" }
-rusty-db = { path = "../../../rusty_db/rusty_db", features = [
+rusty_rand.workspace = true
+rusty-db = { workspace = true, features = [
     "derive",
     "sqlite",
     "postgres",

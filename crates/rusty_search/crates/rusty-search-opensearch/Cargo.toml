@@ -15,7 +15,7 @@ layer = "libs"
 rusty-search-core = { workspace = true }
 rusty-search-elasticsearch = { workspace = true }
 async-trait = { workspace = true }
-rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
+rusty_request = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

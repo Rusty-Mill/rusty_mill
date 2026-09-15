@@ -21,7 +21,7 @@ rusty_serde = { workspace = true }
 serde_json = { workspace = true }
 meilisearch-sdk = "0.33"
 tokio = { workspace = true, features = ["sync"] }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

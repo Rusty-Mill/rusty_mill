@@ -13,11 +13,11 @@ layer = "apps"
 [dependencies]
 # `rustils` is a workspace sibling (`crates/rustils`) -- path dependency,
 # matching platform-async's own.
-platform = { path = "../../../rustils/crates/platform" }
-platform-async = { path = "../platform-async" }
+platform = { workspace = true }
+platform-async = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-async-linux = { path = "../platform-async-linux" }
+platform-async-linux = { workspace = true }
 
 [[bin]]
 name = "arun"

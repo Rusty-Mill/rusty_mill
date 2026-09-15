@@ -16,7 +16,7 @@ rusty_tokio-macros = { path = "rusty_tokio-macros", version = "0.1.0" }
 # dependency. (Was pinned to rev 3ab2361e, content-identical to the
 # merge commit that landed it on rusty_std's own main -- no behavior
 # change from this swap.)
-rusty_std = { path = "../rusty_std" }
+rusty_std = { workspace = true }
 libc = "0.2"
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/
@@ -25,7 +25,7 @@ libc = "0.2"
 # across all three so they all resolve to the identical `platform`
 # crate instance (mixing revs would make e.g. `platform::error::
 # PlatformError` from one checkout a different type than from another).
-platform = { path = "../rustils/crates/platform" }
+platform = { workspace = true }
 # The scheduler's per-worker local run queues and cross-worker stealing
 # (`runtime::Shared`) -- issue #8's lock-free swap. Not hand-rolled: a
 # Chase-Lev deque is real unsafe concurrent code, and this project has
@@ -137,7 +137,7 @@ thread-per-core = []
 io-uring-fs = ["dep:io-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux = { path = "../rustils/crates/platform-linux" }
+platform-linux = { workspace = true }
 # Optional (see the `io-uring-reactor` feature below): handles ring
 # setup/mmap and SQE/CQE layout safely -- issue #9 explicitly named this
 # crate (what tokio-uring/glommio/monoio are all built on) as the usual
@@ -158,7 +158,7 @@ io-uring = { version = "0.6", optional = true }
 # exactly (they must agree, or this crate would either fail to resolve
 # a dependency it needs, or pull one in it can't use). See #116.
 [target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dependencies]
-platform-bsd = { path = "../rustils/crates/platform-bsd" }
+platform-bsd = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # `platform-windows`, unlike the comment that used to be here: checked
@@ -177,7 +177,7 @@ platform-bsd = { path = "../rustils/crates/platform-bsd" }
 # change introduces) and for the one piece of the escape hatch that's
 # still missing (owned-socket adoption, blocking `UnixStream::connect`
 # from using it the same way Linux/BSD's `From<OwnedFd>` does).
-platform-windows = { path = "../rustils/crates/platform-windows" }
+platform-windows = { workspace = true }
 # `windows-sys` is Microsoft's own low-level FFI bindings, the same
 # crate mio itself depends on for its entire Windows backend (including
 # the undocumented AFD-poll protocol `io::reactor::windows` implements

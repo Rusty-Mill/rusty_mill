@@ -15,8 +15,8 @@ repository = "https://github.com/baileyrd/rusty_kafka"
 layer = "libs"
 
 [dependencies]
-rusty_wire = { path = "../rusty_wire" }
-rusty_tokio = { path = "../rusty_tokio" }
-rusty_err = { path = "../rusty_err" }
+rusty_wire = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_err = { workspace = true }
 
 [dev-dependencies]

@@ -13,9 +13,9 @@ categories = ["authentication", "web-programming"]
 layer = "libs"
 
 [dependencies]
-rusty_base64 = { path = "../rusty_base64" }
-rusty_rand = { path = "../rusty_rand" }
-rusty_rsa = { path = "../rusty_rsa" }
+rusty_base64 = { workspace = true }
+rusty_rand = { workspace = true }
+rusty_rsa = { workspace = true }
 # `Value` + JSON parser/writer for token/metadata/JWK responses and JWT
 # header/claims. This crate carried its own hand-rolled copy (deliberately
 # no `serde`) until `rusty_json` grew a serde-free `Value` surface of its

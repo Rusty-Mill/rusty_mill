@@ -9,8 +9,8 @@ description = "Pure Rust stream editing (sed) and pattern scanning/processing (a
 layer = "apps"
 
 [dependencies]
-rusty_regx = { path = "../rusty_regx" }
-rpath = { path = "../rpath" }
+rusty_regx = { workspace = true }
+rpath = { workspace = true }
 
 [[bin]]
 name = "rsed"

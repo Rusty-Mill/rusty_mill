@@ -35,4 +35,4 @@ tracing = { workspace = true }
 # this crate's plain-doubling-capped formula exactly, since the retry
 # config this crate compiles is a wire-compatible mirror of an upstream
 # schema that specifies no jitter.
-rusty_retry = { path = "../../../rusty_retry" }
+rusty_retry = { workspace = true }

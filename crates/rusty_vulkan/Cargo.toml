@@ -15,7 +15,7 @@ layer = "libs"
 [dependencies]
 
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { path = "../rusty_win32" }
+rusty_win32 = { workspace = true }
 
 [features]
 default = []

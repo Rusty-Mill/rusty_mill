@@ -13,6 +13,34 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 Phase 0b: hoist cross-family path dependencies
+**2026-09-15** · spec [`PHASE-0B-SPEC.md`](PHASE-0B-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+Second implementation slice of ADR-0003. Built by Codex (`/codex-build`)
+from a host-derived, data-backed work order; took two build rounds — the
+first correctly stopped rather than force a fix through a real Cargo
+restriction it hit mid-proof, the host resolved it, the second round
+applied cleanly.
+
+- **Added:** 40 new `[workspace.dependencies]` entries at root (12
+  targets already had one).
+- **Changed:** 241 dependency entries across 83 member manifests switched
+  from a relative `path = "..."` to `dep.workspace = true`, matching
+  ADR-0003's own methodology (cross-family = would break once its family
+  moves in Phases 1-4).
+- **Known exception:** 6 entries left as direct `path` dependencies,
+  deliberately not hoisted — Cargo forbids `default-features = false` on
+  a `workspace = true` dependency unless the workspace-level entry
+  itself already disables default features, and every *other* consumer
+  of those 5 target crates needs defaults on. Changing the shared root
+  default to accommodate one minority consumer would be a real behavior
+  change, not a safe mechanical hoist, so those 6 lines stay as they
+  were; each is documented with its reason in `PLAN-REVIEW-LOG.md`.
+- **Verified:** the full resolved dependency graph (`cargo metadata`,
+  diffed node-by-node) is byte-identical before and after, in both
+  `--all-features` and plain mode — this PR has zero effect on what
+  actually builds.
+
 ## ADR-0003 Phase 0a: workspace layer metadata, CI checker, generated map
 **2026-09-15** · spec [`PHASE-0A-SPEC.md`](PHASE-0A-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 

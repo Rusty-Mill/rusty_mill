@@ -19,10 +19,10 @@ rusty_serde = { workspace = true }
 # `.json()` convenience methods, so this stays alongside rusty_serde
 # rather than being replaced by it - see convert.rs.
 serde_json = { workspace = true }
-rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
+rusty_request = { workspace = true, features = ["tokio"] }
 percent-encoding = "2"
 tokio = { workspace = true, features = ["sync", "time"] }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

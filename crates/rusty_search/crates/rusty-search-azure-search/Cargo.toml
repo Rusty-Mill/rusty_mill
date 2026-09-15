@@ -19,15 +19,15 @@ rusty_serde = { workspace = true }
 # `.json()` convenience methods, so this stays alongside rusty_serde
 # rather than being replaced by it - see convert.rs.
 serde_json = { workspace = true }
-rusty_request = { path = "../../../rusty_request", features = ["tokio"] }
+rusty_request = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["sync"] }
-rusty_uuid = { path = "../../../rusty_uuid" }
+rusty_uuid.workspace = true
 # Used to percent-encode caller-supplied index/name path segments before
 # they are spliced into an HTTP request path (see `encode_path_segment` in
 # lib.rs) - same crate/version the elasticsearch/algolia sibling backends
 # already use for the same purpose.
 percent-encoding = "2"
-rusty_time = { path = "../../../rusty_time" }
+rusty_time.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

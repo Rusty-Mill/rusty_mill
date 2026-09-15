@@ -13,7 +13,7 @@ categories = ["concurrency", "no-std"]
 layer = "foundation"
 
 [dependencies]
-rusty_std = { path = "../rusty_std" }
+rusty_std = { workspace = true }
 
 [features]
 default = []

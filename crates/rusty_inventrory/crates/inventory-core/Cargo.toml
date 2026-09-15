@@ -17,7 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tracing.workspace = true
-rusty_sqlite = { path = "../../../rusty_sqlite" }
+rusty_sqlite.workspace = true
 aes-gcm = "0.10"
 directories = "5"
 walkdir = "2"

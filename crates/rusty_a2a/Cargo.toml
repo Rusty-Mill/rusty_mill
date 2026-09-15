@@ -15,8 +15,8 @@ layer = "libs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
-rusty_uuid = { path = "../rusty_uuid" }
-rusty_base64 = { path = "../rusty_base64" }
+rusty_uuid = { workspace = true }
+rusty_base64 = { workspace = true }
 thiserror = "1"
 
 # client feature

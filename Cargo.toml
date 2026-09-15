@@ -297,6 +297,46 @@ authors = ["rusty_search contributors"]
 publish = false
 
 [workspace.dependencies]
+platform-async = { path = "crates/rustils_async/crates/platform-async" }
+platform-async-linux = { path = "crates/rustils_async/crates/platform-async-linux" }
+rpath = { path = "crates/rpath", version = "0.1.0" }
+rush = { path = "crates/rush" }
+rusty-db = { path = "crates/rusty_db/rusty_db" }
+rusty-whisper = { path = "crates/rusty_whisper" }
+rusty_audio = { path = "crates/rusty_audio" }
+rusty_base64 = { path = "crates/rusty_base64" }
+rusty_codec = { path = "crates/rusty_codec" }
+rusty_compress = { path = "crates/rusty_compress" }
+rusty_diff = { path = "crates/rusty_diff" }
+rusty_err = { path = "crates/rusty_err" }
+rusty_fedora = { path = "crates/rusty_fedora" }
+rusty_font = { path = "crates/rusty_font" }
+rusty_git = { path = "crates/rusty_git" }
+rusty_gpu = { path = "crates/rusty_gpu" }
+rusty_gui = { path = "crates/rusty_gui" }
+rusty_jinja = { path = "crates/rusty_jinja" }
+rusty_kafka = { path = "crates/rusty_kafka" }
+rusty_libc = { path = "crates/rusty_libc", version = "0.0.1" }
+rusty_lines = { path = "crates/rusty_lines" }
+rusty_lsp = { path = "crates/rusty_lsp" }
+rusty_opnsense = { path = "crates/rusty_opnsense" }
+rusty_proxmox = { path = "crates/rusty_proxmox" }
+rusty_rand = { path = "crates/rusty_rand" }
+rusty_regx = { path = "crates/rusty_regx", version = "0.5.0" }
+rusty_request = { path = "crates/rusty_request" }
+rusty_retry = { path = "crates/rusty_retry" }
+rusty_rsa = { path = "crates/rusty_rsa" }
+rusty_sha1 = { path = "crates/rusty_sha1", version = "0.1.0" }
+rusty_simd = { path = "crates/rusty_simd" }
+rusty_sqlite = { path = "crates/rusty_sqlite" }
+rusty_sync = { path = "crates/rusty_sync" }
+rusty_term = { path = "crates/rusty_term", version = "0.1.1" }
+rusty_time = { path = "crates/rusty_time" }
+rusty_url = { path = "crates/rusty_url" }
+rusty_uuid = { path = "crates/rusty_uuid" }
+rusty_vulkan = { path = "crates/rusty_vulkan" }
+rusty_win32 = { path = "crates/rusty_win32", version = "0.1.0" }
+rusty_wiremock = { path = "crates/rusty_wiremock" }
 rusty-search-core = { path = "crates/rusty_search/crates/rusty-search-core", version = "0.1.0" }
 rusty-search-memory = { path = "crates/rusty_search/crates/rusty-search-memory", version = "0.1.0" }
 rusty-search-tantivy = { path = "crates/rusty_search/crates/rusty-search-tantivy", version = "0.1.0" }

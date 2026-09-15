@@ -60,7 +60,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 tracing = "0.1"
-rusty_base64 = { path = "../rusty_base64" }
+rusty_base64 = { workspace = true }
 
 # client
 reqwest = { version = "0.13", optional = true, default-features = false, features = [
@@ -74,7 +74,7 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 eventsource-stream = { version = "0.2", optional = true }
 # Exponential backoff math, shared with rusty_request's own RetryPolicy.
 # Retry *eligibility* (which statuses, which request types) stays here.
-rusty_retry = { path = "../rusty_retry", optional = true }
+rusty_retry = { workspace = true, optional = true }
 
 # well-known
 serde_norway = { version = "0.9", optional = true }
