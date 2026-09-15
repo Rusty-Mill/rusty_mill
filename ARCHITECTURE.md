@@ -75,6 +75,10 @@ See [docs/adr/](./docs/adr/) for decisions belonging to the workspace as a
 whole (see ADR-0001 for the root series' remit, and how it relates to the
 `docs/adr/` directories several individual crates already carry from
 before the merge). ADR-0001 documents the consolidation decision itself.
+ADR-0003 (status: Proposed) would replace the illustrative layering table
+above with five layer directories under `crates/` and a CI-checked
+dependency-direction rule; until it is accepted, the table above is the
+current description.
 
 Two duplication sweeps have already run against this workspace and are
 worth knowing before proposing a new one (both by hand/an ad hoc session,

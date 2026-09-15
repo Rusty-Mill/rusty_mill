@@ -8,6 +8,19 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- ADR-0003 (`docs/adr/0003-workspace-layout-by-layer.md`, status
+  Proposed): organize `crates/` into `foundation/`, `platform/`, `libs/`,
+  `apps/` and `tools/` layer directories, with a per-crate
+  `[package.metadata.rusty_mill] layer` field and a CI check that no
+  crate depends on a higher layer, and a phased migration plan that
+  hoists cross-family `path` dependencies first so each move is a root
+  `Cargo.toml` edit. Evidence is in the companion organization review
+  (`CODEX-MONOREPO-REVIEW-2026-09-15-organization.md`): the OS
+  abstraction layer (`platform*`, 12 external dependents) lives under
+  `crates/rustils/`, three OS-abstraction families are not discoverable
+  as such, and the 82-directory `crates/` root carries no layer signal.
+  Proposal only; nothing moves until the owner accepts it.
 ### Fixed
 - 38 correctness/security/reliability findings from a seventh `/codex-build`
   review (`CODEX-MONOREPO-REVIEW-2026-09-13-round7.md`), across crate
