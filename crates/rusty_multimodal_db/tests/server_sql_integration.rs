@@ -448,20 +448,19 @@ fn order_by_with_no_limit_walks_every_record_across_several_pages() {
 }
 
 /// Acceptance criterion 3: every client-side refusal, no frame sent —
-/// `WHERE`/`JOIN`/`GROUP BY` combined with `ORDER BY` (`ClientError::
-/// Sql`, the parser's own `OrderByWithFilter`/`OrderByWithJoin`/
-/// `OrderByWithAggregate`), a non-`U32`/`I64` order field and a zero
-/// `LIMIT` (`ClientError::Unsupported`), and an unknown order field
-/// (`ClientError::UnknownField`).
+/// a non-`U32`/`I64` order field and a zero `LIMIT`
+/// (`ClientError::Unsupported`), and an unknown order field
+/// (`ClientError::UnknownField`). `WHERE` combined with `ORDER BY` is no
+/// longer refused (`FPG-FR-005`, ADR-0068) — see the `FilteredPage`
+/// tests below; `JOIN`/`GROUP BY` combined with `ORDER BY` are still
+/// syntax errors, unit-tested directly in `sql.rs`
+/// (`order_by_with_join_is_a_syntax_error`/
+/// `order_by_with_group_by_or_aggregate_is_a_syntax_error`).
 #[test]
 fn order_by_client_side_refusals() {
     let addr = start_dog_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
 
-    assert!(matches!(
-        client.query("SELECT * FROM dog WHERE age > 3 ORDER BY age"),
-        Err(ClientError::Sql(_))
-    ));
     assert!(matches!(
         client.query("SELECT * FROM dog ORDER BY breed"),
         Err(ClientError::Unsupported("order by"))
@@ -493,6 +492,202 @@ fn order_by_requires_protocol_version_20() {
         Err(ClientError::Unsupported("order by"))
     ));
     assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+// `FPG-FR-001`–`007`, ADR-0068, `docs/design/SERVER-FILTERED-PAGE-DESIGN.md`.
+
+/// Acceptance criteria 1/2: `WHERE` combined with `ORDER BY` and
+/// `LIMIT` returns exactly the matching rows, strictly ascending by the
+/// ordered field — row-for-row identical (ignoring order) to a
+/// client-side filter-then-sort over the equivalent unordered `Query`
+/// result, and identical to `page()`'s own walk once its own result is
+/// filtered down to the same predicate by hand.
+#[test]
+fn filtered_order_by_with_limit_matches_page_and_query() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    let filtered = rows(
+        client
+            .query("SELECT * FROM dog WHERE breed = 'labrador' ORDER BY age LIMIT 10")
+            .unwrap(),
+    );
+    // This file's dogs: id1 age=3 labrador, id2 age=5 poodle, id3 age=9
+    // labrador — exactly two labradors, ascending by age.
+    assert_eq!(filtered.len(), 2);
+    assert_eq!(filtered[0].0, Uuid::from_u128(1));
+    assert_eq!(filtered[1].0, Uuid::from_u128(3));
+
+    // Acceptance criterion 2: the same *set* of ids as an unordered
+    // `Query` with the identical filter.
+    let mut via_query: Vec<Uuid> = rows(
+        client
+            .query("SELECT * FROM dog WHERE breed = 'labrador'")
+            .unwrap(),
+    )
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect();
+    via_query.sort();
+    let mut via_filtered_page: Vec<Uuid> = filtered.iter().map(|(id, _)| *id).collect();
+    via_filtered_page.sort();
+    assert_eq!(via_query, via_filtered_page);
+
+    // The unfiltered `page()` walk, filtered down by hand — the same
+    // rows in the same order (`FilteredPage`'s own contract: a strict
+    // subset-and-reorder of the unfiltered walk).
+    let paged: Vec<Uuid> = client
+        .page("age", None, 10)
+        .unwrap()
+        .into_iter()
+        .filter(|(_, fields)| {
+            fields
+                .iter()
+                .any(|(name, v)| name == "breed" && *v == ScanValue::Str("labrador".into()))
+        })
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        filtered.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        paged,
+        "FilteredPage matches Page's own walk filtered down by hand, in the same order"
+    );
+}
+
+/// Acceptance criterion 1: a named `SELECT` column list still projects
+/// down correctly through the filtered path.
+#[test]
+fn filtered_order_by_projects_named_columns() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let result = rows(
+        client
+            .query("SELECT age FROM dog WHERE breed = 'labrador' ORDER BY age LIMIT 1")
+            .unwrap(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].1, vec![("age".to_string(), ScanValue::U32(3))]);
+}
+
+/// Acceptance criterion 1: a filtered `ORDER BY` with no `LIMIT` walks
+/// the whole matching subset across several internal
+/// `Request::FilteredPage` calls (2,500 records, `age >= 10` matching
+/// well over the client's internal chunk size), returning every
+/// matching row exactly once, strictly ascending, with no duplicate or
+/// missing row across a chunk seam — and the identical id set an
+/// unordered `Query` with the same filter returns.
+#[test]
+fn filtered_order_by_with_no_limit_walks_every_matching_record_across_several_pages() {
+    let addr = start_dog_server_n(2_500);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let result = rows(
+        client
+            .query("SELECT * FROM dog WHERE age >= 10 ORDER BY age")
+            .unwrap(),
+    );
+    // Ages are uniformly drawn from 0..=20 (`MIN_AGE`/`MAX_AGE`); >= 10
+    // is about half of 2,500 — comfortably over `ORDER_BY_PAGE_CHUNK`
+    // (1,000) and comfortably under the full table, so this exercises a
+    // real multi-page filtered walk without depending on an exact count.
+    assert!(result.len() > 1_000 && result.len() < 2_500);
+
+    let ages: Vec<u32> = result.iter().map(|(id, _)| age_of(&result, *id)).collect();
+    assert!(
+        ages.iter().all(|age| *age >= 10),
+        "every returned row matches the WHERE clause"
+    );
+    assert!(
+        ages.windows(2).all(|pair| pair[0] <= pair[1]),
+        "strictly ascending by age (ties broken by id, unchecked here)"
+    );
+
+    let mut ids: Vec<Uuid> = result.iter().map(|(id, _)| *id).collect();
+    let before = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), before, "no duplicate row across a chunk seam");
+
+    let mut via_query: Vec<Uuid> = rows(client.query("SELECT * FROM dog WHERE age >= 10").unwrap())
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    via_query.sort();
+    assert_eq!(
+        ids, via_query,
+        "identical id set to an unordered Query with the same filter"
+    );
+}
+
+/// Acceptance criterion 3: every client-side refusal a filtered `ORDER
+/// BY` can produce, no frame sent — an unknown `WHERE` field, a kind
+/// mismatch, and an ordering comparator against a non-orderable field
+/// (`resolve_filter`'s existing checks, reused unchanged for this
+/// request) — plus `order by`'s own existing refusals still apply.
+#[test]
+fn filtered_order_by_client_side_refusals() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE weight = 5 ORDER BY age"),
+        Err(ClientError::UnknownField(name)) if name == "weight"
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE age = 'old' ORDER BY age"),
+        Err(ClientError::Sql(_))
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE breed > 'labrador' ORDER BY age"),
+        Err(ClientError::Sql(_))
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE breed = 'labrador' ORDER BY breed"),
+        Err(ClientError::Unsupported("order by"))
+    ));
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE breed = 'labrador' ORDER BY age LIMIT 0"),
+        Err(ClientError::Unsupported("order by limit"))
+    ));
+    // The connection is still usable after every refusal above — none
+    // of them sent a frame.
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+/// Acceptance criterion 4: a filtered `ORDER BY` requires protocol
+/// version 26 — against a connection negotiated at 25 (where plain,
+/// unfiltered `ORDER BY` already works, since it only needs 20), a
+/// filtered one is `ClientError::Unsupported("order by with filter")`
+/// with no frame sent, and the connection keeps working normally for
+/// everything else, including the still-legal unfiltered `ORDER BY`.
+#[test]
+fn filtered_order_by_requires_protocol_version_26() {
+    let addr = start_versioned_dog_server(25);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(client.server_protocol_version(), 25);
+    assert!(matches!(
+        client.query("SELECT * FROM dog WHERE breed = 'labrador' ORDER BY age"),
+        Err(ClientError::Unsupported("order by with filter"))
+    ));
+    let unfiltered = rows(client.query("SELECT * FROM dog ORDER BY age").unwrap());
+    assert_eq!(unfiltered.len(), 3);
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+/// Acceptance criterion 5: `Request::Page` (unfiltered) is unaffected —
+/// same result before and after this round for the identical
+/// field/limit, run again here (redundant with
+/// `order_by_with_limit_returns_rows_ascending_matching_page` above,
+/// stated explicitly as this round's own regression check).
+#[test]
+fn unfiltered_page_is_unaffected_by_filtered_page() {
+    let addr = start_dog_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let paged = client.page("age", None, 10).unwrap();
+    assert_eq!(paged.len(), 3);
+    assert_eq!(
+        paged.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)]
+    );
 }
 
 /// Acceptance criterion 6 (read-your-writes half): a read-your-writes

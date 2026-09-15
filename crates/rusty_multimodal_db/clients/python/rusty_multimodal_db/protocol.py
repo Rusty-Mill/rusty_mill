@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 25
+PROTOCOL_VERSION = 26
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -661,7 +661,6 @@ class Backup:
     name: str
 
 
-
 @_variant(34, [])
 class FetchSnapshot:
     """RPL-FR-001, ADR-0067, protocol 25: a full, lock-consistent
@@ -672,12 +671,36 @@ class FetchSnapshot:
     pass
 
 
+@_variant(
+    35,
+    [
+        ("order_by", "u16"),
+        ("after", ("opt", ("tuple", ScanValue, "uuid"))),
+        ("limit", "u64"),
+        ("filter", ("vec", Predicate)),
+    ],
+)
+class FilteredPage:
+    """FPG-FR-001, ADR-0068, protocol 26: Page's three fields
+    (order_by, after, limit) plus a WHERE-shaped filter — one ordered
+    keyset page over only the rows every filter predicate matches.
+    Answered Rows (reused, no new response variant)."""
+
+    order_by: int
+    after: Optional[Tuple[Any, uuid.UUID]]
+    limit: int
+    filter: Tuple[Predicate, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "filter", tuple(self.filter))
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
-    WriteBatch, Metrics, Backup, FetchSnapshot,
+    WriteBatch, Metrics, Backup, FetchSnapshot, FilteredPage,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -689,7 +712,7 @@ REQUEST_INTRODUCED_AT = {
     NeighborsByRelation: 10, ListRelationKinds: 10, Join: 12, DescribeRelations: 12,
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
     ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22, Metrics: 23, Backup: 24,
-    FetchSnapshot: 25,
+    FetchSnapshot: 25, FilteredPage: 26,
 }
 
 

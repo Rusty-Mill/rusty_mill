@@ -117,6 +117,18 @@ def main() -> int:
         except UnsupportedError as e:
             print(f"page=unsupported:{e}")
 
+        # Protocol 26 (FPG-FR-006): a filtered ordered page -- WHERE kind
+        # = 'person' combined with ORDER BY mention_count, in one request.
+        try:
+            persons = c.filtered_page("mention_count", [("kind", CompareOp.Eq, "person")], None, 100)
+            counts = [dict(f)["mention_count"] for _, f in persons]
+            kinds = {dict(f)["kind"] for _, f in persons}
+            print(f"filtered_page_total={len(persons)}")
+            print(f"filtered_page_sorted={'yes' if counts == sorted(counts) else 'no'}")
+            print(f"filtered_page_all_match={'yes' if kinds == {'person'} else 'no'}")
+        except UnsupportedError as e:
+            print(f"filtered_page=unsupported:{e}")
+
         # Protocol 21 (CNT-FR-004): the edge count under a label — the one
         # runtime edge under mentored_by, the samples' relates_to, and an
         # unknown label Malformed.

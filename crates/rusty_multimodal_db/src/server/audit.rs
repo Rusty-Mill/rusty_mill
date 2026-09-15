@@ -103,6 +103,8 @@ pub enum RequestKind {
     Backup,
     /// Protocol 25, ADR-0067.
     FetchSnapshot,
+    /// Protocol 26, ADR-0068.
+    FilteredPage,
 }
 
 impl RequestKind {
@@ -143,6 +145,7 @@ impl RequestKind {
             Request::Metrics => RequestKind::Metrics,
             Request::Backup { .. } => RequestKind::Backup,
             Request::FetchSnapshot => RequestKind::FetchSnapshot,
+            Request::FilteredPage { .. } => RequestKind::FilteredPage,
         }
     }
 }

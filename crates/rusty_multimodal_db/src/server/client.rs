@@ -1242,24 +1242,28 @@ impl SchemaDrivenClient {
         }
     }
 
-    /// `OBY-FR-003`/`004` (ADR-0061): compiles an `ORDER BY`-bearing
-    /// `ParsedQuery` — mutually exclusive with `WHERE`/`JOIN`/`GROUP BY`/
-    /// an aggregate column, enforced by `sql::parse` itself
-    /// (`OBY-FR-002`) — to one or more `Request::Page` calls (ADR-0055,
-    /// protocol 20), projecting each full row down to the `SELECT` list
-    /// before returning, since `Page` has no `Selection` argument of its
-    /// own. `LIMIT n` compiles to exactly one round trip; no `LIMIT`
-    /// walks the whole table in fixed-size pages until one returns fewer
-    /// rows than requested (the walk's own exhaustion signal,
-    /// `docs/design/SERVER-PAGE-DESIGN.md`'s "the empty page ends a
-    /// walk" generalized to "a short page ends a walk") — a materially
-    /// different, multi-round-trip cost from every other `SELECT`,
-    /// named in `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md` rather than
-    /// hidden. `ClientError::Unsupported("order by")` for a non-`U32`/
-    /// `I64` field or below protocol 20 (rule 4), `("order by limit")`
-    /// for `LIMIT 0` — both client-side, no frame sent — and
-    /// `ClientError::UnknownField` for an unknown `ORDER BY` or
-    /// `SELECT`-list field, matching `query_rows`'s own posture.
+    /// `OBY-FR-003`/`004` (ADR-0061); `FPG-FR-005`/`006` (ADR-0068):
+    /// compiles an `ORDER BY`-bearing `ParsedQuery` — mutually exclusive
+    /// with `JOIN`/`GROUP BY`/an aggregate column, enforced at parse
+    /// time (`OBY-FR-002`) — to one or more `Request::Page` calls
+    /// (ADR-0055, protocol 20) when `conditions` is empty, or
+    /// `Request::FilteredPage` calls (ADR-0068, protocol 26) when it
+    /// isn't, projecting each full row down to the `SELECT` list before
+    /// returning, since neither request has a `Selection` argument of
+    /// its own. `LIMIT n` compiles to exactly one round trip; no
+    /// `LIMIT` walks the whole table in fixed-size pages until one
+    /// returns fewer rows than requested (the walk's own exhaustion
+    /// signal, `docs/design/SERVER-PAGE-DESIGN.md`'s "the empty page
+    /// ends a walk" generalized to "a short page ends a walk") — a
+    /// materially different, multi-round-trip cost from every other
+    /// `SELECT`, named in `docs/design/SERVER-SQL-ORDER-BY-DESIGN.md`/
+    /// `SERVER-FILTERED-PAGE-DESIGN.md` rather than hidden.
+    /// `ClientError::Unsupported("order by")` for a non-`U32`/`I64`
+    /// field or below protocol 20 (rule 4), `("order by with filter")`
+    /// for a non-empty `WHERE` below protocol 26, `("order by limit")`
+    /// for `LIMIT 0` — all client-side, no frame sent — and
+    /// `ClientError::UnknownField` for an unknown `ORDER BY`, `WHERE`,
+    /// or `SELECT`-list field, matching `query_rows`'s own posture.
     fn query_ordered(&mut self, parsed: sql::ParsedQuery) -> Result<Vec<QueryRow>, ClientError> {
         const ORDER_BY_PAGE_CHUNK: u64 = 1_000;
 
@@ -1276,6 +1280,11 @@ impl SchemaDrivenClient {
             return Err(ClientError::Unsupported("order by"));
         }
         let order_by_tag = descriptor.tag;
+        // `FPG-FR-005`/`006` (ADR-0068): resolved client-side, no round
+        // trip, matching `query_rows`'s own posture — empty when the
+        // query has no `WHERE` clause, the identical `Vec::new()` shape
+        // `fetch_page` always effectively had.
+        let filter = self.resolve_filter(&parsed.conditions)?;
 
         // Resolve the SELECT list now, before any round trip, matching
         // `query_rows`'s own posture — `Page` returns every field, so
@@ -1303,19 +1312,24 @@ impl SchemaDrivenClient {
         match parsed.limit {
             Some(0) => return Err(ClientError::Unsupported("order by limit")),
             Some(limit) => {
-                rows.extend(self.fetch_page(order_by_tag, None, limit as u64)?);
+                rows.extend(self.fetch_ordered_page(order_by_tag, None, limit as u64, &filter)?);
             }
             None => {
                 let mut after = None;
                 loop {
-                    let page = self.fetch_page(order_by_tag, after.take(), ORDER_BY_PAGE_CHUNK)?;
+                    let page = self.fetch_ordered_page(
+                        order_by_tag,
+                        after.take(),
+                        ORDER_BY_PAGE_CHUNK,
+                        &filter,
+                    )?;
                     let page_len = page.len() as u64;
                     if let Some((id, fields)) = page.last() {
                         let value = fields
                             .iter()
                             .find(|(name, _)| *name == order_by_name)
                             .map(|(_, v)| v.clone())
-                            .expect("Page returns every field of each record");
+                            .expect("Page/FilteredPage return every field of each record");
                         after = Some((value, *id));
                     }
                     rows.extend(page);
@@ -1358,6 +1372,62 @@ impl SchemaDrivenClient {
             order_by,
             after,
             limit,
+        })? {
+            Response::Rows { rows } => Ok(rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let named = fields
+                        .into_iter()
+                        .map(|(tag, value)| (self.field_name(tag), value))
+                        .collect();
+                    (id, named)
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Rows")),
+        }
+    }
+
+    /// `FPG-FR-006` (ADR-0068): `query_ordered`'s single call site for
+    /// one page — routes to [`Self::fetch_page`] when `filter` is empty
+    /// (the exact call `query_ordered` always made before this round;
+    /// the unfiltered fast path is untouched) or
+    /// [`Self::fetch_filtered_page`] when it isn't. Both signal
+    /// exhaustion identically: a page shorter than requested.
+    fn fetch_ordered_page(
+        &mut self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: u64,
+        filter: &[Predicate],
+    ) -> Result<Vec<QueryRow>, ClientError> {
+        if filter.is_empty() {
+            self.fetch_page(order_by, after, limit)
+        } else {
+            self.fetch_filtered_page(order_by, after, limit, filter.to_vec())
+        }
+    }
+
+    /// One `Request::FilteredPage` round trip translated to named
+    /// fields — `fetch_page`'s own shape plus `filter`. `FPG-FR-007`
+    /// (ADR-0068): `ClientError::Unsupported("order by with filter")`
+    /// below protocol 26, client-side, no frame sent — `query_ordered`'s
+    /// own version-gate posture for `order by` itself.
+    fn fetch_filtered_page(
+        &mut self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: u64,
+        filter: Vec<Predicate>,
+    ) -> Result<Vec<QueryRow>, ClientError> {
+        if self.server_protocol_version < 26 {
+            return Err(ClientError::Unsupported("order by with filter"));
+        }
+        match self.roundtrip(Request::FilteredPage {
+            order_by,
+            after,
+            limit,
+            filter,
         })? {
             Response::Rows { rows } => Ok(rows
                 .into_iter()

@@ -80,6 +80,7 @@
 //! | 23 | `SERVER-001` v0.53.0 | + [`Request::Metrics`] (32) and [`Response::Metrics`] (21) — `MET-FR-001`, ADR-0064: a bounded, fixed set of process-wide atomic counters (requests total/ok/error, connections accepted/active, uptime), rendered as Prometheus text exposition format — no new dependency, no second listener. Gated as a **read**, but not restricted to `ReadWrite` — the first request answerable by any authenticated class, since observing process health is not a data write. `Malformed` below 23 (rule 3); never overlaid by a session, never read-set-tracked (process-wide data, not table data). No new `ErrorCode`. ADR-0064 |
 //! | 24 | `SERVER-001` v0.54.0 | + [`Request::Backup`] (33) and [`Response::BackedUp`] (22) — `BAK-FR-001`, ADR-0065: a live, lock-consistent snapshot copy of the connection's table files into an opt-in, server-configured `SERVER_BACKUP_ROOT`-relative directory named by `name` (a single path component — `/`, `\`, and `..` refused before any I/O, `BAK-FR-004`), under the table's write lock (`Compact`'s own precedent). Answered [`Response::BackedUp`] with the files/bytes copied; `Unsupported` when `SERVER_BACKUP_ROOT` is unconfigured or the adapter has no known data directory (`Dog`'s bespoke store when built without one, `Order`/`Employee`); `Storage` for an existing non-empty target or an I/O failure mid-copy (the partial target removed, never left half-written). An operator's write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, `Malformed` below 24. No new `ErrorCode`. ADR-0065 |
 //! | 25 | `SERVER-001` v0.55.0 | + [`Request::FetchSnapshot`] (34), [`Response::Snapshot`] (23), and [`ErrorCode::TooLarge`] (14) — `RPL-FR-001`, ADR-0067: a full, lock-consistent snapshot of the connection's table's files, streamed back over the wire — every companion file's name and bytes, the same file set [`Request::Backup`] already enumerates, reused unchanged. Gated behind a new [`TokenClass::Replication`], never satisfied by `ReadOnly`/`ReadWrite` — the whole point: a shape [`Request::Backup`]'s own design once considered and declined ("a new bulk-exfiltration primitive") is safe now because nothing short of a separately-provisioned credential can ever reach it. `TooLarge` refuses a table whose on-disk size exceeds [`MAX_SNAPSHOT_BYTES`] before any byte is read. `Malformed` below 25 (rule 3). ADR-0067 |
+//! | 26 | `SERVER-001` v0.56.0 | + [`Request::FilteredPage`] (35) — `FPG-FR-001`, ADR-0068: [`Request::Page`]'s three fields (`order_by`, `after`, `limit`) plus `filter: Vec<Predicate>`, answered [`Response::Rows`] (reused, no new response variant) — an ordered keyset page over only the rows every filter predicate matches. Evaluated by one shared default correct for every domain, no adapter override this round: `ConnectionStore::scan_all`, filtered via the identical [`ErrorCode`]-and-`predicate_matches` logic [`Request::Query`]'s own filter already uses, then [`Request::Page`]'s own key selection over the filtered subset. `Memory`/`Relation`'s `Ordered` index gives no speed advantage to a filtered request this round — only the unfiltered `Page` fast path keeps it, untouched by this addition. Validated exactly as `Page`/`Query` already are — no new validation function. Gated as a **read**, `Page`'s own precedent; `Malformed` below 26 (rule 3). No new `ErrorCode`. ADR-0068 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -114,7 +115,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -1000,8 +1001,33 @@ pub enum Request {
     /// other class ever grants. `Malformed` below 25; `SessionOpen`
     /// while a session is open.
     FetchSnapshot,
+    /// Protocol 26 (`FPG-FR-001`, ADR-0068,
+    /// `docs/design/SERVER-FILTERED-PAGE-DESIGN.md`): [`Request::Page`]'s
+    /// three fields plus a `WHERE`-shaped `filter` — one ordered keyset
+    /// page over only the rows every predicate in `filter` matches.
+    /// Answered [`Response::Rows`] (reused, not a new variant).
+    /// Validated exactly as `Page`/`Query` already are: `UnknownField`/
+    /// `Malformed` for `order_by`/`after`/`limit` (`Page`'s own rules),
+    /// `UnknownField`/`Malformed` for each `filter` predicate (`Query`'s
+    /// own rules) — no new validation function. Evaluated by one shared
+    /// default, correct for every domain, no adapter override this
+    /// round: [`ConnectionStore::scan_all`], filtered via the identical
+    /// `predicate_matches` logic [`Request::Query`]'s own filter already
+    /// uses, then `Page`'s own key selection over the filtered subset —
+    /// bounded by one full scan per request, the same worst-case ceiling
+    /// `Query` already has today for the identical filter.
+    /// `Memory`/`Relation`'s `Ordered` index gives this request no speed
+    /// advantage — only the unfiltered `Page` (untouched by this
+    /// variant) keeps it. A read, gated exactly as `Page`: authentication
+    /// only; never overlaid by a session, never read-set-tracked.
+    /// `Malformed` below 26 (rule 3).
+    FilteredPage {
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: u64,
+        filter: Vec<Predicate>,
+    },
 }
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
     Record {
@@ -1184,6 +1210,7 @@ mod tests {
             "Metrics" => 23,
             "Backup" | "BackedUp" => 24,
             "FetchSnapshot" | "Snapshot" | "Err(TooLarge)" => 25,
+            "FilteredPage" => 26,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1563,6 +1590,35 @@ mod tests {
             "FetchSnapshot",
             &Request::FetchSnapshot,
             &[0x22, 0x00, 0x00, 0x00],
+        );
+        // Protocol 26 (`FPG-FR-001`, ADR-0068): `FilteredPage` at 35 —
+        // `Page`'s own three fields, then `filter`: one `Predicate`.
+        assert_golden(
+            "FilteredPage",
+            &Request::FilteredPage {
+                order_by: 1,
+                after: Some((ScanValue::I64(2_000), id)),
+                limit: 10,
+                filter: vec![Predicate {
+                    field: 2,
+                    op: CompareOp::Eq,
+                    value: ScanValue::U32(5),
+                }],
+            },
+            &bytes(&[
+                &[0x23, 0x00, 0x00, 0x00],                         // FilteredPage
+                &[0x01, 0x00],                                     // order_by
+                &[0x01],                                           // Some
+                &[0x01, 0x00, 0x00, 0x00],                         // ScanValue::I64
+                &[0xd0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 2000
+                &ID1,
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // limit 10
+                &LEN1,                                             // filter: one Predicate
+                &[0x02, 0x00],                                     // predicate field
+                &[0x00, 0x00, 0x00, 0x00],                         // CompareOp::Eq
+                &[0x00, 0x00, 0x00, 0x00],                         // ScanValue::U32
+                &[0x05, 0x00, 0x00, 0x00],                         // 5
+            ]),
         );
         // Protocol 20 (`PAG-FR-004`, ADR-0055): `Page` at 29 — field tag,
         // `Some((I64 2000, id))`, limit.
@@ -2106,9 +2162,9 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 25 is the one that added
-    /// `Request::FetchSnapshot`/`Response::Snapshot` and `ErrorCode::TooLarge`
-    /// (24 `Request::Backup`/`Response::BackedUp`, 23 `Request::Metrics`/
+    /// module docs' table — version 26 is the one that added
+    /// `Request::FilteredPage` (25 `Request::FetchSnapshot`/`Response::Snapshot`
+    /// and `ErrorCode::TooLarge`, 24 `Request::Backup`/`Response::BackedUp`, 23 `Request::Metrics`/
     /// `Response::Metrics`, 22 `Request::WriteBatch`/`Response::BatchResults`
     /// (21 `Request::CountEdges`/`Response::Count`, 20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
     /// Storage}`, 12 `Request::Join`/
@@ -2122,7 +2178,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+        assert_eq!(PROTOCOL_VERSION, 26);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

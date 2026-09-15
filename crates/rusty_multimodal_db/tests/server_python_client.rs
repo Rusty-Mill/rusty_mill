@@ -212,6 +212,14 @@ fn the_python_reference_client_speaks_the_protocol_at_24_and_at_10() {
     assert_eq!(get("page_total"), "6");
     assert_eq!(get("page_sorted"), "yes");
     assert_eq!(get("page_disjoint"), "yes");
+    // `FPG-FR-006` (ADR-0068): a filtered ordered page from Python —
+    // WHERE kind = 'person' combined with ORDER BY mention_count, in
+    // one request. At this point Ada (mention_count 42, updated
+    // earlier), Charles Babbage (2), and Grace (3, after the guarded
+    // replace above) are the three persons.
+    assert_eq!(get("filtered_page_total"), "3");
+    assert_eq!(get("filtered_page_sorted"), "yes");
+    assert_eq!(get("filtered_page_all_match"), "yes");
     // `CNT-FR-004` (ADR-0057): the edge count from Python — the one
     // runtime `mentored_by` edge, an unknown label `Malformed`.
     assert_eq!(get("count_edges"), "1");
