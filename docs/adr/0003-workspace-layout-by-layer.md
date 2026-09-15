@@ -179,9 +179,17 @@ reach a libs crate by relative path break again at that point).
 2. A checker in `.github/scripts/` (a sibling of
    `check_workspace_deps.py`, with `test_*.py` coverage picked up by the
    existing `plan-tests` job) reads `cargo metadata --all-features`, fails
-   on any member without a `layer`, and fails on any path edge that points
-   to a higher layer or to an `apps` crate in another family. It is wired
-   into the existing `dependency-policy` job.
+   on any member without a `layer`, fails on any path edge that points to
+   a higher layer, and — restricted to callers whose own layer is
+   `apps` — fails on any edge to an `apps` crate in another family (this
+   is the `apps` row's "nothing outside a family depends on an app crate"
+   rule, not a general cross-family prohibition). A `tools` caller is
+   exempt from that second check because the `tools` row already permits
+   depending on everything; `crates/rusty_boot/Cargo.toml`'s
+   `rush = { path = "../rush" }` (tools → apps, cross-family) is the
+   existing edge this exemption covers, and the checker's `test_*.py`
+   suite includes it as an accepted case so the exemption can't silently
+   widen later. It is wired into the existing `dependency-policy` job.
 3. A generated `docs/WORKSPACE-MAP.md` (layer, family, crate, one-line
    description from `[package] description`, dependents count) replaces
    the hand-maintained "How the crates relate" narrative in `README.md`;
@@ -232,6 +240,37 @@ reach a libs crate by relative path break again at that point).
   links survive because families move as a unit; 408 files mention a
   `crates/<name>/` path in prose, which is not a link and needs no edit.
   Fix the 27 with the move.
+- Rust test consumers that hardcode a crate-group's current path. At
+  Phase 1, `crates/rusty_test/crates/conformance/tests/layering.rs` sets
+  `GROUP_PREFIX = "crates/rusty_test/"` and finds the workspace root via
+  `CARGO_MANIFEST_DIR.ancestors().nth(4)`, a depth that is only correct
+  before the move. At Phase 4, `rg -F '"crates/nexus' --type rust
+  crates/nexus` (re-run at move time; this ADR's own count, from that
+  same search at `cd789d573`, is seven files) finds every Nexus guard
+  under
+  `crates/nexus/crates/nexus-bootstrap/tests/` that hardcodes
+  `"crates/nexus/crates"` and/or `"crates/nexus/shell"` as the member-path
+  prefix it filters `[workspace] members` or walks the filesystem
+  against: `bootstrap_coverage.rs`, `core_plugin_loc_budget.rs`,
+  `dep_invariants.rs`, `dep_invariants_shell.rs`,
+  `ipc_topic_prefix_invariant.rs`, `plugin_contract_purity.rs` and
+  `tauri_command_boundary.rs`. Six of the seven already walk up from
+  `CARGO_MANIFEST_DIR` to find the workspace root dynamically by looking
+  for the ancestor whose `Cargo.toml` has a `[workspace]` table (only
+  `layering.rs` uses a fixed depth), so only that one needs the
+  root-finding fix, but every file in both sets needs its hardcoded
+  family-prefix string literal updated to the crate's new path
+  (`crates/platform/portable-runtime/` and `crates/apps/nexus/`,
+  respectively). Fix in the same PR as the move: replace the fixed
+  `ancestors().nth(N)` in `layering.rs` with the nearest-ancestor-with-a-
+  `[workspace]`-table walk the Nexus guards already use, update every
+  hardcoded prefix constant, and re-run the same `rg -F` search after the
+  `git mv` to confirm no consumer of the old literal remains — do not
+  treat the file list above as exhaustive for a family this ADR did not
+  already grep. Keep each file's nonempty-member-list / missing-path
+  assertions as is; a filter that silently matches zero members or an
+  absent directory after a move must still fail loudly, not pass by
+  accident.
 - Historical documents are not rewritten: `CODEX-MONOREPO-REVIEW*.md`,
   `RELEASE_NOTES.md`, `repo-inspector-report.md`, `docs/atlas/*`,
   per-crate `CHANGELOG.md`/`RELEASE_NOTES.md`.
@@ -317,6 +356,20 @@ unpublished generic names only.
 None from a second builder: Codex could not run (see the authorship note).
 The judgment calls listed in the last Consequences bullet are the places
 to push on; none of them changes the invariant or the checker.
+
+An independent Codex review of this ADR (once Codex could run from this
+host, via `/codex-build` review mode) is recorded in full in
+`PLAN-REVIEW-LOG.md`. Round 1 returned REVISE with two high findings,
+both accepted: the move-phase inventory omitted the Rust test files that
+hardcode a crate-group's current path, and the Phase 0a checker's
+app-to-app rule as originally worded would have rejected `rusty_boot`'s
+existing, plan-permitted `rush` dependency. Round 2 confirmed the checker
+fix closed that second finding but found the first fix incomplete —
+three more Nexus guards hardcode the same family-path literal — so the
+move-phase inventory (now under "What each move phase touches besides
+`git mv`") lists all seven Nexus files plus `layering.rs`, and specifies
+a re-run `rg` sweep at move time instead of treating any fixed list as
+exhaustive.
 
 ## Appendix A: layer order
 
