@@ -255,3 +255,39 @@ commit/push/publish) or by the host. Ready for the host to commit, open
 a PR, and — per the known-cost note in `PHASE-0A-SPEC.md` — expect the
 full CI build/test/clippy/cross-compile matrix to run, since every one
 of the 239 manifests changed.
+
+PR #222 opened, full CI matrix green (clippy × 2 OS, test × 6 shards,
+cross-compile, npm build, all passed), merged by the user at `aa9e32b6a`.
+
+## Build — Phase 0b — 2026-09-15
+
+User set a session goal ("after merge continue until fulfilled") to
+carry the ADR-0003 migration through its remaining phases without
+stopping to ask at each one; this and subsequent phase entries proceed
+under that standing authorization rather than a fresh per-phase ask,
+unless something genuinely needs a human decision (see the "stop and
+report" cases called out in each phase's spec).
+
+Computed the Phase 0b cross-family entry set independently, twice: once
+before Phase 0a merged (247 entries / 85 manifests / 53 targets, 13
+already hoisted / 40 new), and again fresh against the post-merge base
+commit `aa9e32b6a` in a new worktree (`../rusty_mill-adr0003-phase0b`,
+branch `claude/adr-0003-phase0b-2026-09-15`) — identical numbers both
+times. Cross-checked against the ADR's own historical estimate (128/85/
+257): the 85-manifest count matches exactly both times; the entry count
+is off by 10 (247 vs 257), most likely a minor counting-methodology
+difference against a script that was never committed to the repo, not a
+correctness issue — the manifest-level count (which manifests actually
+need edits) is what matters for scoping the work, and it matches
+exactly. Verified zero version-constraint disagreements and zero
+root-relative-path inconsistencies across all entries for the same
+target crate — a clean set with no ambiguous cases to resolve by hand.
+Notable finding: 13 of the 53 distinct target crates already have a
+`[workspace.dependencies]` entry at root (this workspace has already
+been partially, organically hoisted over time) — only 40 need a new
+entry.
+
+Wrote `PHASE-0B-DATA.json` (the exact 247-entry set, machine-readable)
+and `PHASE-0B-SPEC.md` (the work order, built to use that data file as
+ground truth rather than asking Codex to rediscover it) and committed
+both as the prep/baseline commit before delegating.
