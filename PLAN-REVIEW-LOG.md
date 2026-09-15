@@ -414,3 +414,72 @@ Phase 0b build **verified correct** as of the worktree branch
 `claude/adr-0003-phase0b-2026-09-15`. Ready to commit, open a PR, and —
 per `PHASE-0B-SPEC.md`'s known-cost note — expect a partial (not full)
 CI matrix scoped to the 83 touched manifests and their dependents.
+
+PR #223 opened, full-required-checks green, merged by the user at
+`0783ef859`.
+
+## Build — Phase 1 — 2026-09-15
+
+First phase involving actual `git mv` directory moves (18 crates: the
+`rustils`/`rustils_async` platform-half split plus the intact
+`rusty_test` → `portable-runtime` rename/move). Larger blast radius than
+0a/0b, so did more upfront verification before writing the spec rather
+than leaning on the build round to discover problems:
+
+- Confirmed `coreutils`/`coreutils-async` (the `apps`-layer halves of the
+  `rustils`/`rustils_async` split, deferred to Phase 4) already reference
+  every platform crate they depend on via `workspace = true` — a direct
+  payoff of Phase 0b's hoisting: moving the platform crates out from
+  under them needs zero edits to their manifests, only a root
+  `Cargo.toml` path update.
+- Swept the entire workspace (not just cross-family, all 239 members)
+  for any remaining literal `path = "..."` dependency targeting one of
+  the 18 moving crates: found exactly 3, all same-family internal
+  siblings within `rustils_async` (`platform-async-linux` → `platform-
+  async`/`reactor-core`, `platform-async-mock` → `platform-async`) —
+  safe, they move together and the relative paths stay valid.
+- Read both stale nested `crates/rustils/Cargo.toml` and `crates/
+  rustils_async/Cargo.toml` in full: confirmed both are genuinely dead
+  pre-merge `[workspace]` roots (their own `[workspace.package]` version/
+  repository fields describe the standalone-repo history), safe to
+  delete per the ADR's own instruction.
+- Checked every crate's own manifest for how it references same-family
+  siblings: all already use `X.workspace = true`, none use a literal
+  relative path (except the 3 above) — meaning moving the crates needs
+  no per-crate manifest edits at all, only root `Cargo.toml`'s 18
+  member-path entries + 12 `[workspace.dependencies]` path entries + 1
+  `exclude` entry.
+- Identified the 6 Phase-1 crates with zero root `[workspace.dependencies]`
+  entry today (`platform-async-mock`, `reactor-core`, `threading`,
+  `proc-runner`, `pty-shell`, `stat-tool`) and confirmed each has zero
+  consumers anywhere except same-family siblings (fine) or the two
+  stale manifests being deleted (moot) — none needs a new root entry.
+- Grepped every `.rs` file in the repo for a hardcoded `rustils`/
+  `rusty_test` path: found exactly one,
+  `crates/rusty_test/crates/conformance/tests/layering.rs` (`GROUP_PREFIX`
+  + a fixed-depth `ancestors().nth(4)` workspace-root lookup that is only
+  correct before the move — the new path is one level deeper). Located
+  the exact robust pattern already used by the Nexus guards
+  (`dep_invariants.rs`'s own `workspace_root()`, a walk-up-until-
+  `[workspace]`-found loop) to copy in as the fix.
+- Grepped every `.md` file for a `rustils`/`rustils_async`/`rusty_test`
+  path outside those three directories themselves: found exactly 4 —
+  `CHANGELOG.md` and `PLAN-REVIEW-LOG.md` (dated log entries, historical,
+  excluded), `docs/adr/0003-workspace-layout-by-layer.md` (the approved
+  plan itself, excluded — its Appendix B "current directory" column is a
+  deliberate before/after snapshot, not a live link), and `README.md`
+  (the 239-row crate table — real Markdown links that do break on a
+  move; confirmed exactly the 18 rows in question need both their link
+  target and their backtick-quoted path updated). Confirmed
+  `ARCHITECTURE.md`/`CONTRIBUTING.md` mention none of these paths, and
+  none of the 11 READMEs the ADR's own review flagged as having a
+  cross-family link (`mill-term`, `rusty_ansder`, etc.) point at any of
+  these three families either — their broken links must be to families
+  moving in a later phase, out of scope here.
+
+Wrote `PHASE-1-SPEC.md` baking in every fact above as ground truth (not
+asking Codex to re-derive any of it, only to sanity-check and report if
+something looks off) and committed it as the prep/baseline commit before
+delegating. Captured a pre-move `cargo metadata --all-features --locked`
+snapshot at `C:\tmp\phase1-metadata.json` for the post-move
+dependency-graph-identity check.
