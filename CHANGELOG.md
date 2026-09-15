@@ -21,6 +21,16 @@ Removed / Fixed / Security, newest first.
   `crates/rustils/`, three OS-abstraction families are not discoverable
   as such, and the 82-directory `crates/` root carries no layer signal.
   Proposal only; nothing moves until the owner accepts it.
+### Changed
+- ADR-0003: revised after independent Codex review (`/codex-build`
+  review mode, `PLAN-REVIEW-LOG.md`) found the move-phase inventory
+  missed 8 Rust test files that hardcode a crate-group's current path
+  (`crates/rusty_test/crates/conformance/tests/layering.rs` plus 7
+  Nexus guards under `crates/nexus/crates/nexus-bootstrap/tests/`) and
+  that the Phase 0a checker's cross-family rule as originally worded
+  would have rejected `rusty_boot`'s existing, plan-permitted `rush`
+  dependency. Both fixed in the ADR text; approved on the third review
+  round. Still Proposed; nothing implemented.
 ### Fixed
 - 38 correctness/security/reliability findings from a seventh `/codex-build`
   review (`CODEX-MONOREPO-REVIEW-2026-09-13-round7.md`), across crate

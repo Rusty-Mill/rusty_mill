@@ -13,6 +13,29 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 revised after independent Codex review
+**2026-09-15** · plan [`docs/adr/0003-workspace-layout-by-layer.md`](docs/adr/0003-workspace-layout-by-layer.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+`/codex-build` review mode ran an independent Codex review of ADR-0003
+(the proposed `crates/` layer reorganization from PR #220, which Codex
+could not review at drafting time). Took three rounds to reach APPROVED.
+
+- **Changed:** the migration plan's "what each move phase touches"
+  section now lists 8 Rust test files that hardcode a crate-group's
+  current path and would silently break at move time —
+  `crates/rusty_test/crates/conformance/tests/layering.rs` and 7 Nexus
+  guards under `crates/nexus/crates/nexus-bootstrap/tests/` — with the
+  specific fix for each (round 1 caught 5 of the 8; round 2's re-review
+  found 3 more, which the fix now generalizes into a repeatable `rg`
+  sweep rather than a fixed list).
+- **Changed:** the Phase 0a checker's cross-family dependency rule now
+  applies only to `apps`-layer callers; as originally worded it would
+  have rejected `rusty_boot`'s existing, plan-permitted `rush`
+  dependency (a `tools`-layer crate, which the plan's own layer table
+  already permits to depend on everything).
+- Still **Proposed**; this round changed the plan text only, nothing
+  implemented or moved.
+
 ## Round 7 `/codex-build` monorepo review: 38 findings fixed
 **2026-09-13** · report [`CODEX-MONOREPO-REVIEW-2026-09-13-round7.md`](CODEX-MONOREPO-REVIEW-2026-09-13-round7.md)
 
