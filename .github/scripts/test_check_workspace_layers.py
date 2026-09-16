@@ -108,6 +108,31 @@ class WorkspaceLayerTests(unittest.TestCase):
         pkg = {"name": "rusty_boot", "manifest_path": "/work/crates/rusty_boot/Cargo.toml"}
         self.assertEqual(package_family(pkg, "/work"), "rusty_boot")
 
+    def test_family_skips_a_libs_theme_directory_once_present(self) -> None:
+        # ADR-0003 Phase 3: crates/rusty_tokio moved to
+        # crates/libs/async/rusty_tokio. The family is still "rusty_tokio",
+        # not "async" (the theme) -- collapsing every crate in a theme into
+        # one fake family would silently disable the cross-family apps
+        # check the same way the layer-only bug did in Phase 1.
+        pkg = {"name": "rusty_tokio", "manifest_path":
+               "/work/crates/libs/async/rusty_tokio/Cargo.toml"}
+        self.assertEqual(package_family(pkg, "/work"), "rusty_tokio")
+
+    def test_family_of_a_libs_family_with_no_theme(self) -> None:
+        # Not every libs/ family has a theme -- crates/libs/rusty_adk/...
+        # has no theme directory, so "rusty_adk" itself is parts[2], and
+        # must not be mistaken for a theme name (it isn't one).
+        pkg = {"name": "adk-core", "manifest_path":
+               "/work/crates/libs/rusty_adk/crates/adk-core/Cargo.toml"}
+        self.assertEqual(package_family(pkg, "/work"), "rusty_adk")
+
+    def test_theme_skip_only_applies_within_libs_not_other_layers(self) -> None:
+        # "net" etc. are only themes under libs/; a family literally named
+        # "net" directly under another layer must not have its own name
+        # skipped as if it were a theme wrapper.
+        pkg = {"name": "net", "manifest_path": "/work/crates/apps/net/Cargo.toml"}
+        self.assertEqual(package_family(pkg, "/work"), "net")
+
 
 if __name__ == "__main__":
     unittest.main()
