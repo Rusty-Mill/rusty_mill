@@ -1,13 +1,20 @@
 # ADR-0003: Organize `crates/` by architectural layer
 
-Status: Proposed
-Date: 2026-09-15
+Status: Implemented
+Date: 2026-09-15 (proposed) / 2026-09-16 (implementation complete)
 
 Authorship: written by the Claude host under `/codex-build` on
 2026-09-15 (the Codex builder could not run) and inspected by fresh,
 separate Claude sessions; provenance details are in the companion review
-`CODEX-MONOREPO-REVIEW-2026-09-15-organization.md`, "Limitations". Nothing
-in this ADR is implemented; it proposes, the owner decides.
+`CODEX-MONOREPO-REVIEW-2026-09-15-organization.md`, "Limitations".
+Independently reviewed by Codex once it could run (`PLAN-REVIEW-LOG.md`,
+3 rounds, approved). Implemented across 6 merged PRs (#222-#227: Phase
+0a metadata/checker/generated-map, 0b dependency hoisting, then the
+1/platform, 2/foundation, 3/libs, 4/apps+tools moves), built by Codex and
+independently inspected by the host each round — full build/inspection
+record in `PLAN-REVIEW-LOG.md`. Every one of the 239 workspace members
+now lives at the exact path this ADR's Appendix B specifies, verified
+directly against the merged `main` after the final PR landed.
 
 ## Context
 
