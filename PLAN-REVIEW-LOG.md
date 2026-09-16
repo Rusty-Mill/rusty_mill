@@ -953,3 +953,61 @@ flaky pattern already established on PR #224 in the same crate family,
 this reads as the same pre-existing Windows-CI flakiness, not a Phase 3
 regression — logged for the record rather than treated as fully
 dismissed without cause.
+
+PR #226 merged by the user (`0cead027b`) before the fresh CI run
+(re-triggered by the log-only push above) had finished all shards.
+
+## Build — Phase 4 — 2026-09-15 (final phase)
+
+Computed the apps/tools move set from Appendix B: 125 crates across 21
+families (matches the ADR's own count exactly) — 20 into `apps/`, 1
+(`rusty_boot`) into `tools/`.
+
+Reused every lesson from Phases 1-3 proactively rather than rediscovering
+them:
+- **Package names, not directory names**, for the
+  `workspace.dependencies` sweep (Phase 3's 28-entry miss) — checked
+  all 125 members' actual `[package] name`, not just the 21 family
+  directory names: 46 need a path update, 79 have zero external
+  consumers (verified via `workspace = true` grep, none missing a
+  needed root entry).
+- **Every mover's own literal paths, not just incoming edges**, for the
+  cascading-fix sweep (Phase 3's cross-phase cascade) — found exactly
+  one: `rush`→`rusty_lines`, the same entry fixed once already in
+  Phase 3 (`"../rusty_lines"` → `"../libs/ui/rusty_lines"`), needing a
+  second re-derivation now that `rush` itself moved a level deeper.
+- **CI/config files, not just source and docs**, for the hardcoded-path
+  sweep — found 3 *functional* lines in `.github/workflows/ci.yml`
+  (`rusty_meshed`'s `data-mesh-monitor` job: change-filter,
+  `working-directory`, `cache-dependency-path`) that would have
+  silently broken that job for every future `rusty_meshed` PR.
+- **The 7 Nexus test guards** flagged back during the original ADR
+  review (Phase 1's spec explicitly deferred these, "nexus doesn't move
+  until Phase 4") — confirmed all 7 already use the robust
+  walk-up-to-`[workspace]` pattern (none use a fixed-`ancestors()`
+  depth the way `layering.rs` did), so only their hardcoded
+  `"crates/nexus/crates"`/`"crates/nexus/shell"` prefix *strings* need
+  updating, not their logic. Also found and explicitly scoped *out* a
+  separate, pre-existing, unrelated bug in
+  `ipc_topic_prefix_invariant.rs` (a `"crates/nexus-bootstrap/src"`
+  reference missing its `crates/nexus/crates/` prefix entirely — never
+  valid, even before this migration) — not this migration's to fix.
+
+Performed the `git mv` directly: 20 family directories to `crates/apps/`,
+`rusty_boot` to `crates/tools/`, `rusty_inventrory` renamed to
+`rusty_inventory` during its move (per the ADR's naming convention).
+`coreutils`/`coreutils-async` moved from their nested location under
+`crates/rustils/crates/`/`crates/rustils_async/crates/` (deferred there
+since Phase 1) — removing the two now-empty leftover directories
+completes the `rustils`/`rustils_async` split Phase 1 started; neither
+directory exists anymore. Verified: 4786 renames at 100% similarity,
+zero deletions (cleaner than Phase 3's move — no CRLF-normalization
+side effects this time). Committed (`c8423476e`).
+
+Wrote `PHASE-4-DATA.json` (125-entry member mapping, 46-entry
+workspace.dependencies fixes, 4 exclude fixes, 7 Nexus guard fixes,
+the `rush` cascading fix, 3 CI functional fixes, 3 comment fixes) as
+machine-readable ground truth and `PHASE-4-SPEC.md` referencing it,
+rather than transcribing 125+ entries into prose by hand (the exact
+transcription-error risk that caused Phase 3's original 20-vs-48 gap).
+Committed and delegated to Codex.
