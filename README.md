@@ -337,6 +337,9 @@ times out instead.
 
 The crate relationship map is generated at [docs/WORKSPACE-MAP.md](docs/WORKSPACE-MAP.md)
 by `.github/scripts/generate_workspace_map.py` and checked for staleness in CI.
+An interactive, searchable snapshot of that table — browse by layer, search, inspect
+dependents — lives at [docs/WORKSPACE-ATLAS.html](docs/WORKSPACE-ATLAS.html); download
+it and open it in a browser. It's a point-in-time export, not regenerated automatically.
 
 ## History
 
