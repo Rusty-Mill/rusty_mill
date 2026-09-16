@@ -8,3 +8,6 @@ target/
 # Python bytecode from running .github/scripts tests locally
 __pycache__/
 *.pyc
+
+# Runtime SQLite artifacts
+meshed_registry.db
