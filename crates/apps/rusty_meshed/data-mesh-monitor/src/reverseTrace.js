@@ -2,7 +2,7 @@
  * reverseTrace.js
  *
  * Pure JavaScript port of `rusty-meshed-trace` (rusty_mill →
- * crates/rusty_meshed/crates/rusty-meshed-trace): the domain maturity
+ * crates/apps/rusty_meshed/crates/rusty-meshed-trace): the domain maturity
  * ladder and the reverse-trace algorithm (outcome → domains → sources).
  *
  * The Rust crate is the reference implementation; this file exists so the

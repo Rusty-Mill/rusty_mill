@@ -120,7 +120,7 @@ fn shell_manifest_path() -> PathBuf {
             if let Ok(text) = std::fs::read_to_string(&candidate) {
                 if text.contains("[workspace]") {
                     return dir
-                        .join("crates/nexus/shell")
+                        .join("crates/apps/nexus/shell")
                         .join("src-tauri")
                         .join("Cargo.toml");
                 }

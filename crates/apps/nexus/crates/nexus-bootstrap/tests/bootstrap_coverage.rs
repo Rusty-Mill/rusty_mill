@@ -96,12 +96,12 @@ fn every_workspace_member_is_registered_or_exempt() {
     // Workspace members from the root Cargo.toml `[workspace] members`.
     // The root workspace now spans the whole `rusty_mill` monorepo (post
     // subtree-merge), so this scopes to nexus's own subsystem —
-    // `crates/nexus/crates/*` — the same set nexus's own `[workspace]`
+    // `crates/apps/nexus/crates/*` — the same set nexus's own `[workspace]`
     // covered before the merge. Sibling rusty_mill crates (`providers`,
     // `sessionmgr-*`, `agentgateway-*`, etc.) have no bootstrap registrar
     // and were never meant to: this test only asserts nexus-internal
     // coverage.
-    const NEXUS_CRATES_PREFIX: &str = "crates/nexus/crates/";
+    const NEXUS_CRATES_PREFIX: &str = "crates/apps/nexus/crates/";
     let cargo_toml = workspace_root.join("Cargo.toml");
     let text = std::fs::read_to_string(&cargo_toml)
         .unwrap_or_else(|e| panic!("read {}: {e}", cargo_toml.display()));
@@ -116,7 +116,7 @@ fn every_workspace_member_is_registered_or_exempt() {
                 .filter_map(|v| v.as_str())
                 .filter(|p| p.starts_with(NEXUS_CRATES_PREFIX))
                 .map(|p| {
-                    // members look like "crates/nexus/crates/nexus-foo";
+                    // members look like "crates/apps/nexus/crates/nexus-foo";
                     // strip the prefix to get the crate name.
                     p.rsplit('/').next().unwrap_or(p).to_string()
                 })

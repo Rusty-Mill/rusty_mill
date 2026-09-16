@@ -52,7 +52,7 @@ Markdown version on the clipboard for briefing decks.
 
 The model and the trace algorithm are owned by the Rust crate
 `rusty-meshed-trace` in [`Rusty-Mill/rusty_mill`](https://github.com/Rusty-Mill/rusty_mill)
-(`crates/rusty_meshed/crates/rusty-meshed-trace`). This app carries:
+(`crates/apps/rusty_meshed/crates/rusty-meshed-trace`). This app carries:
 
 - `src/reverseTrace.js` — a line-for-line JavaScript port of the crate's
   `trace()` and Markdown export, so v1 runs fully client-side (no backend).

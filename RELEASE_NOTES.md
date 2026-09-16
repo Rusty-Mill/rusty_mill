@@ -13,6 +13,49 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 Phase 4: apps/tools layer (125 crates, 21 families) — migration complete
+**2026-09-15** · spec [`PHASE-4-SPEC.md`](PHASE-4-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+Sixth and final implementation slice of ADR-0003. Every one of the 239
+workspace members now lives under its assigned layer directory
+(`foundation/`, `platform/`, `libs/`, `apps/`, `tools/`), matching
+Appendix B exactly. Same mixed-authorship pattern as Phases 1-3.
+
+- **Changed:** 125 crates across 21 families moved — 20 to
+  `crates/apps/`, 1 (`rusty_boot`) to `crates/tools/`.
+  `rusty_inventrory` renamed to `rusty_inventory` during its move.
+- **Removed:** `crates/rustils/` and `crates/rustils_async/` no longer
+  exist — `coreutils`/`coreutils-async` (deferred there since Phase 1)
+  moved out to their own single-crate `apps/` families, completing the
+  split.
+- **Fixed:** 3 real functional CI lines — `rusty_meshed`'s vendored
+  `data-mesh-monitor` job's change-filter, `working-directory`, and
+  `cache-dependency-path` would have silently stopped triggering/
+  running without this fix.
+- **Fixed:** the 7 Nexus test guards deferred since Phase 1
+  (`dep_invariants`, `plugin_contract_purity`,
+  `tauri_command_boundary`, `bootstrap_coverage`,
+  `core_plugin_loc_budget`, `ipc_topic_prefix_invariant`,
+  `dep_invariants_shell`) — all already used a robust dynamic
+  workspace-root walk from Phase 1's own fix pattern; only their
+  hardcoded path-prefix strings needed updating. One separate,
+  pre-existing, unrelated bug in `ipc_topic_prefix_invariant.rs` was
+  identified and deliberately left untouched (never valid, not
+  introduced by this migration).
+- **Fixed:** the last `rush`→`rusty_lines` cascade (Phase 3's fix
+  needed re-deriving once `rush` itself moved a level deeper this
+  phase) and 25 stale comment/doc references across 9 files (including
+  `ARCHITECTURE.md` and two crates' own live documentation) — a Codex
+  build round's own grep sweep found all of these; the host categorized
+  and resolved each rather than guessing.
+- **Regenerated** `docs/WORKSPACE-MAP.md`: `coreutils`/
+  `coreutils-async` and the 3 renamed `rusty_inventory` crates now show
+  their correct family (previously the leftover `rustils`/
+  `rusty_inventrory` names from the intermediate migration state).
+- **Verified:** dependency graph identical before/after (by package
+  name) across all 22 changed files; all 23 Nexus guard tests pass,
+  independently re-run by the host (not just Codex's own report).
+
 ## ADR-0003 Phase 3: libs layer (66 crates, 34 families)
 **2026-09-15** · spec [`PHASE-3-SPEC.md`](PHASE-3-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 

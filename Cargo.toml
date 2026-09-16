@@ -2,15 +2,15 @@
 resolver = "2"
 members = [
     "crates/libs/net/rusty_kafka",
-    "crates/rusty_meshed/crates/rusty-meshed-core",
-    "crates/rusty_meshed/crates/rusty-meshed-schema-registry",
-    "crates/rusty_meshed/crates/rusty-meshed-governance",
-    "crates/rusty_meshed/crates/rusty-meshed-observability",
-    "crates/rusty_meshed/crates/rusty-meshed-sdk",
-    "crates/rusty_meshed/crates/rusty-meshed-registry",
-    "crates/rusty_meshed/crates/rusty-meshed-cli",
-    "crates/rusty_meshed/crates/rusty-meshed-domains",
-    "crates/rusty_meshed/crates/rusty-meshed-trace",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-core",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-schema-registry",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-governance",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-observability",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-sdk",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-registry",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-cli",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-domains",
+    "crates/apps/rusty_meshed/crates/rusty-meshed-trace",
     "crates/libs/ui/rusty_term",
     "crates/libs/ui/rusty_term/l13",
     "crates/libs/ui/rusty_gpu",
@@ -24,9 +24,9 @@ members = [
     "crates/libs/rusty_git",
     "crates/foundation/rusty_sha1",
     "crates/libs/ui/rusty_lines",
-    "crates/rush",
-    "crates/mill-term",
-    "crates/rusty_text",
+    "crates/apps/rush",
+    "crates/apps/mill-term",
+    "crates/apps/rusty_text",
     "crates/libs/async/rusty_tokio",
     "crates/libs/async/rusty_tokio/rusty_tokio-macros",
     "crates/libs/storage/rusty_rusqlite",
@@ -49,23 +49,23 @@ members = [
     "crates/libs/homelab/rusty_proxmox",
     "crates/libs/homelab/rusty_opnsense",
     "crates/libs/homelab/rusty_fedora",
-    "crates/rusty_homelab_mcp",
-    "crates/rusty_fedora_agent",
-    "crates/rusty_multimodal_db",
-    "crates/rusty_hister/crates/rusty-hister-core",
-    "crates/rusty_hister/crates/rusty-hister-model",
-    "crates/rusty_hister/crates/rusty-hister-extractor",
-    "crates/rusty_hister/crates/rusty-hister-indexer",
-    "crates/rusty_hister/crates/rusty-hister-vectorstore",
-    "crates/rusty_hister/crates/rusty-hister-crawler",
-    "crates/rusty_hister/crates/rusty-hister-server",
-    "crates/rusty_hister/crates/rusty-hister-mcp",
+    "crates/apps/rusty_homelab_mcp",
+    "crates/apps/rusty_fedora_agent",
+    "crates/apps/rusty_multimodal_db",
+    "crates/apps/rusty_hister/crates/rusty-hister-core",
+    "crates/apps/rusty_hister/crates/rusty-hister-model",
+    "crates/apps/rusty_hister/crates/rusty-hister-extractor",
+    "crates/apps/rusty_hister/crates/rusty-hister-indexer",
+    "crates/apps/rusty_hister/crates/rusty-hister-vectorstore",
+    "crates/apps/rusty_hister/crates/rusty-hister-crawler",
+    "crates/apps/rusty_hister/crates/rusty-hister-server",
+    "crates/apps/rusty_hister/crates/rusty-hister-mcp",
     "crates/platform/rustils_async/crates/reactor-core",
     "crates/platform/rustils_async/crates/platform-async",
     "crates/platform/rustils_async/crates/platform-async-mock",
     "crates/platform/rustils_async/crates/platform-async-linux",
     "crates/platform/rustils_async/crates/threading",
-    "crates/rustils_async/crates/coreutils-async",
+    "crates/apps/coreutils-async",
     "crates/foundation/rusty_wire",
     "crates/foundation/rusty_std",
     "crates/foundation/rusty_err",
@@ -109,10 +109,10 @@ members = [
     "crates/foundation/rusty_jinja",
     "crates/foundation/rusty_ansder",
     "crates/libs/ai/rusty_rag",
-    "crates/rusty_boot",
+    "crates/tools/rusty_boot",
     "crates/libs/ai/rusty_whisper",
     "crates/libs/net/rusty_rdp",
-    "crates/rusty_voice",
+    "crates/apps/rusty_voice",
     "crates/platform/rustils/crates/platform",
     "crates/platform/rustils/crates/platform-mock",
     "crates/platform/rustils/crates/platform-parity",
@@ -120,46 +120,46 @@ members = [
     "crates/platform/rustils/crates/platform-windows",
     "crates/platform/rustils/crates/platform-bsd",
     "crates/platform/rustils/crates/winargv",
-    "crates/rustils/crates/coreutils",
-    "crates/rusty_croc",
+    "crates/apps/coreutils",
+    "crates/apps/rusty_croc",
     "crates/platform/portable-runtime/crates/contract",
     "crates/platform/portable-runtime/crates/compat",
     "crates/platform/portable-runtime/crates/conformance",
     "crates/platform/portable-runtime/tools/stat-tool",
     "crates/platform/portable-runtime/tools/proc-runner",
     "crates/platform/portable-runtime/tools/pty-shell",
-    "crates/rusty_inventrory/crates/inventory-core",
-    "crates/rusty_inventrory/crates/inventory-cli",
-    "crates/rusty_inventrory/crates/inventory-tauri",
-    "crates/rusty_skillopt/crates/skillopt-core",
-    "crates/rusty_skillopt/crates/skillopt-model",
-    "crates/rusty_skillopt/crates/skillopt-envs",
-    "crates/rusty_skillopt/crates/skillopt-cli",
-    "crates/rusty_key/crates/config",
-    "crates/rusty_key/crates/observe",
-    "crates/rusty_key/crates/constrain",
-    "crates/rusty_key/crates/feed",
-    "crates/rusty_key/crates/kernel",
-    "crates/rusty_key/crates/mcp",
-    "crates/rusty_key/crates/compose",
-    "crates/rusty_key/crates/app",
+    "crates/apps/rusty_inventory/crates/inventory-core",
+    "crates/apps/rusty_inventory/crates/inventory-cli",
+    "crates/apps/rusty_inventory/crates/inventory-tauri",
+    "crates/apps/rusty_skillopt/crates/skillopt-core",
+    "crates/apps/rusty_skillopt/crates/skillopt-model",
+    "crates/apps/rusty_skillopt/crates/skillopt-envs",
+    "crates/apps/rusty_skillopt/crates/skillopt-cli",
+    "crates/apps/rusty_key/crates/config",
+    "crates/apps/rusty_key/crates/observe",
+    "crates/apps/rusty_key/crates/constrain",
+    "crates/apps/rusty_key/crates/feed",
+    "crates/apps/rusty_key/crates/kernel",
+    "crates/apps/rusty_key/crates/mcp",
+    "crates/apps/rusty_key/crates/compose",
+    "crates/apps/rusty_key/crates/app",
     "crates/libs/ai/rusty_llama",
-    "crates/rusty_tailscale/crates/ts-types",
-    "crates/rusty_tailscale/crates/ts-key",
-    "crates/rusty_tailscale/crates/ts-control",
-    "crates/rusty_tailscale/crates/ts-derp",
-    "crates/rusty_tailscale/crates/ts-stun",
-    "crates/rusty_tailscale/crates/ts-disco",
-    "crates/rusty_tailscale/crates/ts-magicsock",
-    "crates/rusty_tailscale/crates/ts-wg",
-    "crates/rusty_tailscale/crates/ts-tun",
-    "crates/rusty_tailscale/crates/ts-filter",
-    "crates/rusty_tailscale/crates/ts-engine",
-    "crates/rusty_tailscale/crates/ts-localapi",
-    "crates/rusty_tailscale/crates/ts-net",
-    "crates/rusty_tailscale/crates/ts-daemon",
-    "crates/rusty_tailscale/crates/ts-cli",
-    "crates/rusty_tailscale/xtask",
+    "crates/apps/rusty_tailscale/crates/ts-types",
+    "crates/apps/rusty_tailscale/crates/ts-key",
+    "crates/apps/rusty_tailscale/crates/ts-control",
+    "crates/apps/rusty_tailscale/crates/ts-derp",
+    "crates/apps/rusty_tailscale/crates/ts-stun",
+    "crates/apps/rusty_tailscale/crates/ts-disco",
+    "crates/apps/rusty_tailscale/crates/ts-magicsock",
+    "crates/apps/rusty_tailscale/crates/ts-wg",
+    "crates/apps/rusty_tailscale/crates/ts-tun",
+    "crates/apps/rusty_tailscale/crates/ts-filter",
+    "crates/apps/rusty_tailscale/crates/ts-engine",
+    "crates/apps/rusty_tailscale/crates/ts-localapi",
+    "crates/apps/rusty_tailscale/crates/ts-net",
+    "crates/apps/rusty_tailscale/crates/ts-daemon",
+    "crates/apps/rusty_tailscale/crates/ts-cli",
+    "crates/apps/rusty_tailscale/xtask",
     "crates/libs/rusty_adk/crates/adk-core",
     "crates/libs/rusty_adk/crates/adk-macros",
     "crates/libs/rusty_adk/crates/adk-tools",
@@ -174,72 +174,72 @@ members = [
     "crates/libs/rusty_adk/examples/weather-agent",
     "crates/libs/rusty_adk/examples/mcp-tool-server",
     "crates/libs/rusty_adk/examples/a2a-agent-server",
-    "crates/rusty_provider/crates/core",
-    "crates/rusty_provider/crates/providers",
-    "crates/rusty_provider/crates/router",
-    "crates/rusty_provider/crates/mcp",
-    "crates/rusty_provider/crates/server",
-    "crates/rusty_provider/crates/cli",
-    "crates/rusty_yirp/crates/sessionmgr-core",
-    "crates/rusty_yirp/crates/sessionmgr-protocol",
-    "crates/rusty_yirp/crates/sessionmgr-proc",
-    "crates/rusty_yirp/crates/sessionmgr-git",
-    "crates/rusty_yirp/crates/sessionmgr-pty",
-    "crates/rusty_yirp/crates/sessionmgr-tui",
-    "crates/rusty_yirp/crates/sessionmgr-agents",
-    "crates/rusty_yirp/crates/sessionmgr-daemon",
-    "crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri",
-    "crates/rusty_agent_gateway/crates/agentgateway-config",
-    "crates/rusty_agent_gateway/crates/agentgateway-auth",
-    "crates/rusty_agent_gateway/crates/agentgateway-a2a",
-    "crates/rusty_agent_gateway/crates/agentgateway-llm",
-    "crates/rusty_agent_gateway/crates/agentgateway-mcp",
-    "crates/rusty_agent_gateway/crates/agentgateway-proxy",
-    "crates/rusty_agent_gateway/crates/agentgateway-tls",
-    "crates/rusty_agent_gateway/crates/agentgateway-core",
-    "crates/rusty_agent_gateway/crates/agentgateway",
-    "crates/nexus/crates/nexus-types",
-    "crates/nexus/crates/nexus-plugin-api",
-    "crates/nexus/crates/nexus-hashline",
-    "crates/nexus/crates/nexus-kernel",
-    "crates/nexus/crates/nexus-kv",
-    "crates/nexus/crates/nexus-security",
-    "crates/nexus/crates/nexus-storage",
-    "crates/nexus/crates/nexus-plugins",
-    "crates/nexus/crates/nexus-ai",
-    "crates/nexus/crates/nexus-ai-runtime",
-    "crates/nexus/crates/nexus-mcp",
-    "crates/nexus/crates/nexus-lsp",
-    "crates/nexus/crates/nexus-dap",
-    "crates/nexus/crates/nexus-acp",
-    "crates/nexus/crates/nexus-remote",
-    "crates/nexus/crates/nexus-cli",
-    "crates/nexus/crates/nexus-tui",
-    "crates/nexus/crates/nexus-git",
-    "crates/nexus/crates/nexus-formats",
-    "crates/nexus/crates/nexus-database",
-    "crates/nexus/crates/nexus-theme",
-    "crates/nexus/crates/nexus-bootstrap",
-    "crates/nexus/crates/nexus-editor",
-    "crates/nexus/crates/nexus-rush",
-    "crates/nexus/crates/nexus-vt",
-    "crates/nexus/crates/nexus-terminal",
-    "crates/nexus/crates/nexus-agent",
-    "crates/nexus/crates/nexus-skills",
-    "crates/nexus/crates/nexus-templates",
-    "crates/nexus/crates/nexus-workflow",
-    "crates/nexus/crates/nexus-linkpreview",
-    "crates/nexus/crates/nexus-notifications",
-    "crates/nexus/crates/nexus-comments",
-    "crates/nexus/crates/nexus-panic-log",
-    "crates/nexus/crates/nexus-crdt",
-    "crates/nexus/crates/nexus-fuzz",
-    "crates/nexus/crates/nexus-audio",
-    "crates/nexus/crates/nexus-collab",
-    "crates/nexus/crates/nexus-memory",
-    "crates/nexus/crates/nexus-memory-hub",
-    "crates/nexus/crates/nexus-context",
-    "crates/nexus/crates/nexus-protocol",
+    "crates/apps/rusty_provider/crates/core",
+    "crates/apps/rusty_provider/crates/providers",
+    "crates/apps/rusty_provider/crates/router",
+    "crates/apps/rusty_provider/crates/mcp",
+    "crates/apps/rusty_provider/crates/server",
+    "crates/apps/rusty_provider/crates/cli",
+    "crates/apps/rusty_yirp/crates/sessionmgr-core",
+    "crates/apps/rusty_yirp/crates/sessionmgr-protocol",
+    "crates/apps/rusty_yirp/crates/sessionmgr-proc",
+    "crates/apps/rusty_yirp/crates/sessionmgr-git",
+    "crates/apps/rusty_yirp/crates/sessionmgr-pty",
+    "crates/apps/rusty_yirp/crates/sessionmgr-tui",
+    "crates/apps/rusty_yirp/crates/sessionmgr-agents",
+    "crates/apps/rusty_yirp/crates/sessionmgr-daemon",
+    "crates/apps/rusty_yirp/crates/sessionmgr-desktop/src-tauri",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-config",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-auth",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-a2a",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-llm",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-mcp",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-proxy",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-tls",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-core",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway",
+    "crates/apps/nexus/crates/nexus-types",
+    "crates/apps/nexus/crates/nexus-plugin-api",
+    "crates/apps/nexus/crates/nexus-hashline",
+    "crates/apps/nexus/crates/nexus-kernel",
+    "crates/apps/nexus/crates/nexus-kv",
+    "crates/apps/nexus/crates/nexus-security",
+    "crates/apps/nexus/crates/nexus-storage",
+    "crates/apps/nexus/crates/nexus-plugins",
+    "crates/apps/nexus/crates/nexus-ai",
+    "crates/apps/nexus/crates/nexus-ai-runtime",
+    "crates/apps/nexus/crates/nexus-mcp",
+    "crates/apps/nexus/crates/nexus-lsp",
+    "crates/apps/nexus/crates/nexus-dap",
+    "crates/apps/nexus/crates/nexus-acp",
+    "crates/apps/nexus/crates/nexus-remote",
+    "crates/apps/nexus/crates/nexus-cli",
+    "crates/apps/nexus/crates/nexus-tui",
+    "crates/apps/nexus/crates/nexus-git",
+    "crates/apps/nexus/crates/nexus-formats",
+    "crates/apps/nexus/crates/nexus-database",
+    "crates/apps/nexus/crates/nexus-theme",
+    "crates/apps/nexus/crates/nexus-bootstrap",
+    "crates/apps/nexus/crates/nexus-editor",
+    "crates/apps/nexus/crates/nexus-rush",
+    "crates/apps/nexus/crates/nexus-vt",
+    "crates/apps/nexus/crates/nexus-terminal",
+    "crates/apps/nexus/crates/nexus-agent",
+    "crates/apps/nexus/crates/nexus-skills",
+    "crates/apps/nexus/crates/nexus-templates",
+    "crates/apps/nexus/crates/nexus-workflow",
+    "crates/apps/nexus/crates/nexus-linkpreview",
+    "crates/apps/nexus/crates/nexus-notifications",
+    "crates/apps/nexus/crates/nexus-comments",
+    "crates/apps/nexus/crates/nexus-panic-log",
+    "crates/apps/nexus/crates/nexus-crdt",
+    "crates/apps/nexus/crates/nexus-fuzz",
+    "crates/apps/nexus/crates/nexus-audio",
+    "crates/apps/nexus/crates/nexus-collab",
+    "crates/apps/nexus/crates/nexus-memory",
+    "crates/apps/nexus/crates/nexus-memory-hub",
+    "crates/apps/nexus/crates/nexus-context",
+    "crates/apps/nexus/crates/nexus-protocol",
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
@@ -252,19 +252,19 @@ members = [
 # library's own zero-dependency build.
 exclude = [
     "crates/libs/ui/rusty_term/fuzz",
-    "crates/rush/fuzz",
+    "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",
     "crates/libs/net/rusty_tls/fuzz",
     "crates/libs/protocol/rusty_lsp/fuzz",
     "crates/platform/rustils/fuzz",
-    "crates/rusty_croc/fuzz",
-    "crates/rusty_key/desktop/src-tauri",
+    "crates/apps/rusty_croc/fuzz",
+    "crates/apps/rusty_key/desktop/src-tauri",
     # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
     # was excluded from nexus's own workspace too: it is built by `tauri
     # build` from the pnpm side, carries its own dependency graph (tauri
     # plugins, WebKitGTK), and is not a `cargo test` target.
-    "crates/nexus/shell",
+    "crates/apps/nexus/shell",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/
@@ -300,7 +300,7 @@ publish = false
 platform-async = { path = "crates/platform/rustils_async/crates/platform-async" }
 platform-async-linux = { path = "crates/platform/rustils_async/crates/platform-async-linux" }
 rpath = { path = "crates/foundation/rpath", version = "0.1.0" }
-rush = { path = "crates/rush" }
+rush = { path = "crates/apps/rush" }
 rusty-db = { path = "crates/libs/storage/rusty_db/rusty_db" }
 rusty-whisper = { path = "crates/libs/ai/rusty_whisper" }
 rusty_audio = { path = "crates/libs/ui/rusty_audio" }
@@ -458,7 +458,7 @@ anyhow = "1.0"
 # treatment, not rusty_search's. `anyhow`/`serde`/`serde_json` above already
 # cover its requirements; `thiserror` is the same "2" vs "1" split as
 # rusty_test's, so inventory-core keeps a literal one of its own.
-inventory-core = { path = "crates/rusty_inventrory/crates/inventory-core" }
+inventory-core = { path = "crates/apps/rusty_inventory/crates/inventory-core" }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
 # nexus asks for "0.39" + `backup` (bundled sqlite3 links natively, so only
@@ -476,9 +476,9 @@ rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 # `anyhow`/`chrono`/`tracing`/`tokio` above already cover its requirements;
 # `thiserror` is the same "2"-vs-"1" split rusty_test and rusty_inventrory
 # hit, so its two consumers keep literal ones.
-skillopt-core = { path = "crates/rusty_skillopt/crates/skillopt-core" }
-skillopt-model = { path = "crates/rusty_skillopt/crates/skillopt-model" }
-skillopt-envs = { path = "crates/rusty_skillopt/crates/skillopt-envs" }
+skillopt-core = { path = "crates/apps/rusty_skillopt/crates/skillopt-core" }
+skillopt-model = { path = "crates/apps/rusty_skillopt/crates/skillopt-model" }
+skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [
@@ -512,13 +512,13 @@ rand = "0.8"
 # literal rather than bumped -- the 0.9-to-3.1 API surface changed enough
 # (client/transport construction in particular) that a same-PR bump isn't a
 # mechanical version-number edit; tracked as a real migration, not drift.
-rk-config = { path = "crates/rusty_key/crates/config" }
-rk-observe = { path = "crates/rusty_key/crates/observe" }
-rk-constrain = { path = "crates/rusty_key/crates/constrain" }
-rk-feed = { path = "crates/rusty_key/crates/feed" }
-rk-kernel = { path = "crates/rusty_key/crates/kernel" }
-rk-mcp = { path = "crates/rusty_key/crates/mcp" }
-rk-compose = { path = "crates/rusty_key/crates/compose" }
+rk-config = { path = "crates/apps/rusty_key/crates/config" }
+rk-observe = { path = "crates/apps/rusty_key/crates/observe" }
+rk-constrain = { path = "crates/apps/rusty_key/crates/constrain" }
+rk-feed = { path = "crates/apps/rusty_key/crates/feed" }
+rk-kernel = { path = "crates/apps/rusty_key/crates/kernel" }
+rk-mcp = { path = "crates/apps/rusty_key/crates/mcp" }
+rk-compose = { path = "crates/apps/rusty_key/crates/compose" }
 aisdk = "0.5.2"
 schemars = "1.0.4"
 toml = "0.8"
@@ -537,19 +537,19 @@ tiny_http = "0.12"
 # from `../rusty_http`-style (relative to its own former root) to this
 # root's `crates/` layout; `platform`/`platform-linux` above already cover
 # the pins its ts-magicsock/ts-tun crates used to carry.
-ts-types = { path = "crates/rusty_tailscale/crates/ts-types" }
-ts-key = { path = "crates/rusty_tailscale/crates/ts-key" }
-ts-control = { path = "crates/rusty_tailscale/crates/ts-control" }
-ts-derp = { path = "crates/rusty_tailscale/crates/ts-derp" }
-ts-stun = { path = "crates/rusty_tailscale/crates/ts-stun" }
-ts-disco = { path = "crates/rusty_tailscale/crates/ts-disco" }
-ts-magicsock = { path = "crates/rusty_tailscale/crates/ts-magicsock" }
-ts-wg = { path = "crates/rusty_tailscale/crates/ts-wg" }
-ts-tun = { path = "crates/rusty_tailscale/crates/ts-tun" }
-ts-filter = { path = "crates/rusty_tailscale/crates/ts-filter" }
-ts-engine = { path = "crates/rusty_tailscale/crates/ts-engine" }
-ts-localapi = { path = "crates/rusty_tailscale/crates/ts-localapi" }
-ts-net = { path = "crates/rusty_tailscale/crates/ts-net" }
+ts-types = { path = "crates/apps/rusty_tailscale/crates/ts-types" }
+ts-key = { path = "crates/apps/rusty_tailscale/crates/ts-key" }
+ts-control = { path = "crates/apps/rusty_tailscale/crates/ts-control" }
+ts-derp = { path = "crates/apps/rusty_tailscale/crates/ts-derp" }
+ts-stun = { path = "crates/apps/rusty_tailscale/crates/ts-stun" }
+ts-disco = { path = "crates/apps/rusty_tailscale/crates/ts-disco" }
+ts-magicsock = { path = "crates/apps/rusty_tailscale/crates/ts-magicsock" }
+ts-wg = { path = "crates/apps/rusty_tailscale/crates/ts-wg" }
+ts-tun = { path = "crates/apps/rusty_tailscale/crates/ts-tun" }
+ts-filter = { path = "crates/apps/rusty_tailscale/crates/ts-filter" }
+ts-engine = { path = "crates/apps/rusty_tailscale/crates/ts-engine" }
+ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
+ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 hyper = { version = "1", default-features = false }
@@ -605,10 +605,10 @@ rusty_a2a = { path = "crates/libs/protocol/rusty_a2a", default-features = false 
 # carry literal `[package]` fields -- rusty_db treatment. `rusty-mcp` is a
 # merged sibling here, retiring rusty_provider's branch-tracking git
 # dependency on it.
-rp-core = { path = "crates/rusty_provider/crates/core" }
-rp-mcp = { path = "crates/rusty_provider/crates/mcp" }
-rp-providers = { path = "crates/rusty_provider/crates/providers" }
-rp-router = { path = "crates/rusty_provider/crates/router" }
+rp-core = { path = "crates/apps/rusty_provider/crates/core" }
+rp-mcp = { path = "crates/apps/rusty_provider/crates/mcp" }
+rp-providers = { path = "crates/apps/rusty_provider/crates/providers" }
+rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 # `default-features = false` because rusty_agent_gateway's crates ask for it
 # explicitly and an inheriting member may not override the root's choice.
 # A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
@@ -636,13 +636,13 @@ eventsource-stream = "0.2"
 # ("MIT"), so its nine crates carry literal `[package]` fields -- rusty_db
 # treatment. Its `rusty_tokio` pin, and sessionmgr-pty's three `rustils`
 # pins, retire to this root's existing path entries.
-sessionmgr-core = { path = "crates/rusty_yirp/crates/sessionmgr-core" }
-sessionmgr-protocol = { path = "crates/rusty_yirp/crates/sessionmgr-protocol" }
-sessionmgr-proc = { path = "crates/rusty_yirp/crates/sessionmgr-proc" }
-sessionmgr-git = { path = "crates/rusty_yirp/crates/sessionmgr-git" }
-sessionmgr-pty = { path = "crates/rusty_yirp/crates/sessionmgr-pty" }
-sessionmgr-tui = { path = "crates/rusty_yirp/crates/sessionmgr-tui" }
-sessionmgr-agents = { path = "crates/rusty_yirp/crates/sessionmgr-agents" }
+sessionmgr-core = { path = "crates/apps/rusty_yirp/crates/sessionmgr-core" }
+sessionmgr-protocol = { path = "crates/apps/rusty_yirp/crates/sessionmgr-protocol" }
+sessionmgr-proc = { path = "crates/apps/rusty_yirp/crates/sessionmgr-proc" }
+sessionmgr-git = { path = "crates/apps/rusty_yirp/crates/sessionmgr-git" }
+sessionmgr-pty = { path = "crates/apps/rusty_yirp/crates/sessionmgr-pty" }
+sessionmgr-tui = { path = "crates/apps/rusty_yirp/crates/sessionmgr-tui" }
+sessionmgr-agents = { path = "crates/apps/rusty_yirp/crates/sessionmgr-agents" }
 ratatui = "0.30"
 crossterm = "0.29"
 tui-term = "0.3"
@@ -657,14 +657,14 @@ ureq = "3"
 # each crate (see the README). `rmcp`/`axum`/`tower`/`hyper`/`hyper-util`/
 # `http`/`http-body-util`/`bytes`/`regex`/`serde_yaml` above already cover
 # its requirements; `clap` gained `env` for its CLI.
-agentgateway-config = { path = "crates/rusty_agent_gateway/crates/agentgateway-config", version = "0.1.0" }
-agentgateway-auth = { path = "crates/rusty_agent_gateway/crates/agentgateway-auth", version = "0.1.0" }
-agentgateway-core = { path = "crates/rusty_agent_gateway/crates/agentgateway-core", version = "0.1.0" }
-agentgateway-a2a = { path = "crates/rusty_agent_gateway/crates/agentgateway-a2a", version = "0.1.0" }
-agentgateway-llm = { path = "crates/rusty_agent_gateway/crates/agentgateway-llm", version = "0.1.0" }
-agentgateway-mcp = { path = "crates/rusty_agent_gateway/crates/agentgateway-mcp", version = "0.1.0" }
-agentgateway-proxy = { path = "crates/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }
-agentgateway-tls = { path = "crates/rusty_agent_gateway/crates/agentgateway-tls", version = "0.1.0" }
+agentgateway-config = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-config", version = "0.1.0" }
+agentgateway-auth = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-auth", version = "0.1.0" }
+agentgateway-core = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-core", version = "0.1.0" }
+agentgateway-a2a = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-a2a", version = "0.1.0" }
+agentgateway-llm = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-llm", version = "0.1.0" }
+agentgateway-mcp = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-mcp", version = "0.1.0" }
+agentgateway-proxy = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }
+agentgateway-tls = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-tls", version = "0.1.0" }
 # Another merged sibling, retiring agentgateway-tls' pinned git dependency.
 rusty_tls = { path = "crates/libs/net/rusty_tls" }
 # `rt` is nexus-kernel's (CancellationToken-based cooperative IPC cancellation).
@@ -723,8 +723,8 @@ windows-sys = { version = "0.59", features = [
 # used by nexus-rush's Linux job control) retire to this root's existing
 # path entries -- the ADR-0002 rule, and the same swap rusty_yirp's
 # sessionmgr-pty made.
-nexus-plugin-api = { path = "crates/nexus/crates/nexus-plugin-api" }
-nexus-hashline = { path = "crates/nexus/crates/nexus-hashline" }
+nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
+nexus-hashline = { path = "crates/apps/nexus/crates/nexus-hashline" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }
@@ -800,7 +800,7 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 ts-rs = { version = "11", features = ["serde-compat"] }
 # WebSocket relay transport (nexus-collab): plain ws:// only, TLS deferred.
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
-# Tauri desktop shell (`crates/nexus/shell/src-tauri`, excluded above).
+# Tauri desktop shell (`crates/apps/nexus/shell/src-tauri`, excluded above).
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

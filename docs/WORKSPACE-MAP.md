@@ -128,6 +128,8 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |
 | libs | rusty_wiremock | rusty_wiremock | A #![no_std] + alloc sovereign HTTP mock server and request matcher for Rusty Mill test suites | 4 |
+| apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
+| apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
 | apps | nexus | nexus-acp | Nexus ACP host + server — outbound Agent Communication Protocol host for external agent processes (BL-144) and inbound JSON-RPC surface exposing Nexus's agent IPC to Hermes-compatible clients (BL-145) | 2 |
 | apps | nexus | nexus-agent | Nexus agent system: Agent trait, Plan/Step types, and PlanExecutor driving tool calls through kernel IPC (PRD-15 scaffold) | 1 |
@@ -172,8 +174,6 @@ Families are the current directories immediately below `crates/`.
 | apps | nexus | nexus-vt | Headless VT engine for Nexus: a GUI-free, l13-free in-tree port of baileyrd/rusty_term's core/ (VT parser + grid + scrollback + OSC 133 command tracking), for server-side terminal screen introspection (RFC 0003 Track B). No GUI, no in-band channel. | 1 |
 | apps | nexus | nexus-workflow | Nexus workflow subsystem: .workflow.toml parser + typed model + registry (PRD-16 scaffold) | 1 |
 | apps | rush | rush | A small, bash-compatible shell written in Rust | 1 |
-| apps | rustils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
-| apps | rustils_async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | rusty_agent_gateway | agentgateway | An AI-native gateway for MCP, speaking agentgateway's configuration | 0 |
 | apps | rusty_agent_gateway | agentgateway-a2a | Agent2Agent (A2A) method gating and agent-card discovery for rusty_agent_gateway | 1 |
 | apps | rusty_agent_gateway | agentgateway-auth | JWT authentication policy for rusty_agent_gateway | 1 |
@@ -194,9 +194,9 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_hister | rusty-hister-server | Hister's HTTP/JSON API and WebSocket search protocol (server/api.go's surface), v1 scope | 0 |
 | apps | rusty_hister | rusty-hister-vectorstore | Embedding pipeline and vector storage for rusty_hister's semantic search | 0 |
 | apps | rusty_homelab_mcp | rusty_homelab_mcp | An MCP server for controlling a homelab -- Proxmox VE, OPNsense, and Fedora (via rusty_fedora_agent) today, more backends welcome. | 0 |
-| apps | rusty_inventrory | inventory-cli | Search every AI agent and IDE conversation on your machine, from the terminal | 0 |
-| apps | rusty_inventrory | inventory-core | Local-first index over the conversation history AI coding tools write to disk | 2 |
-| apps | rusty_inventrory | inventory-tauri | Menu bar app: one keystroke to every AI conversation on your machine | 0 |
+| apps | rusty_inventory | inventory-cli | Search every AI agent and IDE conversation on your machine, from the terminal | 0 |
+| apps | rusty_inventory | inventory-core | Local-first index over the conversation history AI coding tools write to disk | 2 |
+| apps | rusty_inventory | inventory-tauri | Menu bar app: one keystroke to every AI conversation on your machine | 0 |
 | apps | rusty_key | rk-app |  | 0 |
 | apps | rusty_key | rk-compose |  | 1 |
 | apps | rusty_key | rk-config |  | 7 |

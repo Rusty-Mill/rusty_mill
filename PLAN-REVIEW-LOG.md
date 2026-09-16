@@ -953,3 +953,169 @@ flaky pattern already established on PR #224 in the same crate family,
 this reads as the same pre-existing Windows-CI flakiness, not a Phase 3
 regression — logged for the record rather than treated as fully
 dismissed without cause.
+
+PR #226 merged by the user (`0cead027b`) before the fresh CI run
+(re-triggered by the log-only push above) had finished all shards.
+
+## Build — Phase 4 — 2026-09-15 (final phase)
+
+Computed the apps/tools move set from Appendix B: 125 crates across 21
+families (matches the ADR's own count exactly) — 20 into `apps/`, 1
+(`rusty_boot`) into `tools/`.
+
+Reused every lesson from Phases 1-3 proactively rather than rediscovering
+them:
+- **Package names, not directory names**, for the
+  `workspace.dependencies` sweep (Phase 3's 28-entry miss) — checked
+  all 125 members' actual `[package] name`, not just the 21 family
+  directory names: 46 need a path update, 79 have zero external
+  consumers (verified via `workspace = true` grep, none missing a
+  needed root entry).
+- **Every mover's own literal paths, not just incoming edges**, for the
+  cascading-fix sweep (Phase 3's cross-phase cascade) — found exactly
+  one: `rush`→`rusty_lines`, the same entry fixed once already in
+  Phase 3 (`"../rusty_lines"` → `"../libs/ui/rusty_lines"`), needing a
+  second re-derivation now that `rush` itself moved a level deeper.
+- **CI/config files, not just source and docs**, for the hardcoded-path
+  sweep — found 3 *functional* lines in `.github/workflows/ci.yml`
+  (`rusty_meshed`'s `data-mesh-monitor` job: change-filter,
+  `working-directory`, `cache-dependency-path`) that would have
+  silently broken that job for every future `rusty_meshed` PR.
+- **The 7 Nexus test guards** flagged back during the original ADR
+  review (Phase 1's spec explicitly deferred these, "nexus doesn't move
+  until Phase 4") — confirmed all 7 already use the robust
+  walk-up-to-`[workspace]` pattern (none use a fixed-`ancestors()`
+  depth the way `layering.rs` did), so only their hardcoded
+  `"crates/nexus/crates"`/`"crates/nexus/shell"` prefix *strings* need
+  updating, not their logic. Also found and explicitly scoped *out* a
+  separate, pre-existing, unrelated bug in
+  `ipc_topic_prefix_invariant.rs` (a `"crates/nexus-bootstrap/src"`
+  reference missing its `crates/nexus/crates/` prefix entirely — never
+  valid, even before this migration) — not this migration's to fix.
+
+Performed the `git mv` directly: 20 family directories to `crates/apps/`,
+`rusty_boot` to `crates/tools/`, `rusty_inventrory` renamed to
+`rusty_inventory` during its move (per the ADR's naming convention).
+`coreutils`/`coreutils-async` moved from their nested location under
+`crates/rustils/crates/`/`crates/rustils_async/crates/` (deferred there
+since Phase 1) — removing the two now-empty leftover directories
+completes the `rustils`/`rustils_async` split Phase 1 started; neither
+directory exists anymore. Verified: 4786 renames at 100% similarity,
+zero deletions (cleaner than Phase 3's move — no CRLF-normalization
+side effects this time). Committed (`c8423476e`).
+
+Wrote `PHASE-4-DATA.json` (125-entry member mapping, 46-entry
+workspace.dependencies fixes, 4 exclude fixes, 7 Nexus guard fixes,
+the `rush` cascading fix, 3 CI functional fixes, 3 comment fixes) as
+machine-readable ground truth and `PHASE-4-SPEC.md` referencing it,
+rather than transcribing 125+ entries into prose by hand (the exact
+transcription-error risk that caused Phase 3's original 20-vs-48 gap).
+Committed and delegated to Codex.
+
+### Round 1 — succeeded on every authorized edit, correctly declined to guess on the rest
+
+Codex's build (session `01a0a852-ee73-7ea3-982d-700aab889dd2`, exit 0,
+306s) applied all 12 authorized files correctly (verified: dependency
+graph identity held, all 23 Nexus guard tests passed even before the
+host's own re-verification). It also ran its own grep sweep and found
+real gaps, and — rather than guessing at any of them — reported each
+with a proposed resolution and left the working tree exactly at the
+12-file authorized boundary:
+
+1. **`docs/WORKSPACE-MAP.md` is genuinely stale, not a false positive.**
+   Two things changed real Family values this phase, not just paths:
+   `coreutils`/`coreutils-async` finally landing in their own
+   single-crate-family location (`apps/coreutils`) instead of the
+   leftover `rustils`/`rustils_async` shell family name they'd been
+   stuck showing since Phase 1 deferred their move; and the
+   `rusty_inventrory` → `rusty_inventory` rename literally changing the
+   family name for its 3 crates. The spec's own acceptance criteria
+   said to regenerate the map "if stale," but the file wasn't in the
+   explicit allowed-file list Codex was told to stay within — a
+   self-contradiction in the spec, correctly flagged rather than
+   resolved by guessing which instruction wins.
+2. **`PHASE-4-DATA.json` deletion vs. the blanket "no deletion"
+   instruction** — the spec's Status section said "do not attempt any
+   file deletion" (meaning: don't re-do the crate moves), but Acceptance
+   criteria separately said to delete this one build-artifact file
+   before finishing. Same class of self-contradiction as #1.
+3. **42 residual path references across 15 files**, reported with full
+   file:line detail rather than edited (correctly, since none were in
+   the authorized list) or silently ignored.
+
+### Host disposition on the 42 residual references
+
+Categorized all 42 by hand rather than blanket-fixing or
+blanket-exempting:
+- **6 in `README.md`** — confirmed all fall inside the "## History"
+  section (git-subtree merge-wave narrative, dated prose) — same
+  exemption class as `CHANGELOG.md`/`RELEASE_NOTES.md`. No edit.
+- **8 in `crates/platform/rustils/docs/coreutils-gap-backlog.md`** —
+  a dated record ("Recorded 2026-07-21") citing specific file:line
+  evidence for bugs found at that time — rewriting the paths would
+  misrepresent what was true when recorded, the same reasoning that
+  exempted Phase 1's decision-request panic backtrace. No edit.
+- **3 in `.github/scripts/test_check_workspace_layers.py` /
+  `test_cargo_toml_diff.py`** — synthetic test fixture data
+  (`test_check_workspace_layers.py`'s own `rusty_boot` case
+  deliberately exercises the *not-yet-moved* shape; `test_cargo_toml_
+  diff.py`'s fixture is unrelated example data for a different check).
+  No edit — these are intentionally testing a shape other than "moved."
+- **25 across 9 files** — `ARCHITECTURE.md` (a live, prescriptive
+  architecture description, not history), 4 more doc-comment mentions
+  in the already-being-edited Nexus guard files (their functional
+  string constants were already fixed; these were leftover
+  *explanatory* comments citing the same stale path), `rusty_hister`'s
+  own `AGENTS.md`/`README.md`, `rusty_meshed`'s own
+  `capability-manifest.md`/`data-mesh-monitor/{README.md,src/
+  reverseTrace.js}` (a crate's own live docs describing its own current
+  structure — not historical, meant to be accurate now), a
+  cross-crate comment in `rusty_kafka/Cargo.toml` citing
+  `rusty_meshed`'s manifest path, and a comment in `portable-runtime`'s
+  `proc-runner/src/main.rs`. Applied all 25 via a verified,
+  count-checked script (each old string's occurrence count logged and
+  matched the residual-sweep report's own per-file counts exactly: 2,
+  2, 1, 1, 2, 8, 6, 1, 1, 1, 1).
+- Regenerated `docs/WORKSPACE-MAP.md` (exactly the 5 rows Codex's own
+  candidate predicted) and deleted `PHASE-4-DATA.json`.
+
+## Inspect — Phase 4 — 2026-09-15
+
+- `git status --short`: 22 files (12 originally authorized + the map
+  regeneration + the data-file deletion + 9 additional comment/doc
+  fixes), all accounted for.
+- Re-ran the full grep sweep with every exemption applied (including
+  the newly-identified historical `coreutils-gap-backlog.md` and the
+  test-fixture files): **zero** unexplained hits (one apparent hit,
+  `PHASE-0A-SPEC.md`, turned out to be a gap in the verification
+  command's own exemption regex — `PHASE-[0-9]-SPEC.md` doesn't match
+  `PHASE-0A-SPEC.md`'s letter suffix — not a real finding).
+- `python3 -m unittest discover` → 64 passed; `check_workspace_deps.py`,
+  `check_workspace_layers.py` → both exit 0;
+  `generate_workspace_map.py --verify` → exit 0 after regeneration.
+- **Dependency-graph identity** by package name: 1443 names before and
+  after, **0** changed — confirms the 12 authorized edits, the 25
+  additional comment fixes, and the map regeneration are all exactly
+  what they claim to be (no accidental behavior change hiding in any of
+  them).
+- Ran all 7 Nexus guard test files myself (not just re-reading Codex's
+  report): 23/23 passed, matching exactly — `dep_invariants` (3),
+  `plugin_contract_purity` (5), `tauri_command_boundary` (5),
+  `bootstrap_coverage` (1), `core_plugin_loc_budget` (3),
+  `ipc_topic_prefix_invariant` (5), `dep_invariants_shell` (1). These
+  aren't just "does it compile" checks — they assert real architectural
+  invariants (microkernel isolation, contract/impl separation, IPC
+  command registration) that now hold at the new location.
+
+No findings beyond the two spec self-contradictions, both closed by
+host disposition above (not code changes — the spec needed correcting
+authority, not the build).
+
+### Outcome
+Phase 4 build **verified correct** — the final phase of ADR-0003's
+migration. Every one of the 239 workspace members is now under its
+assigned layer directory (`foundation/`, `platform/`, `libs/`,
+`apps/`, `tools/`), matching Appendix B exactly. `crates/rustils/` and
+`crates/rustils_async/` no longer exist — the split Phase 1 started is
+complete. Ready to commit, open a PR, and expect the largest CI matrix
+of the whole migration.

@@ -2,7 +2,7 @@
 
 ## Scope
 
-Applies to `crates/rusty_hister/` (this cluster) within the RustyMill
+Applies to `crates/apps/rusty_hister/` (this cluster) within the RustyMill
 workspace.
 
 ## Project shape
@@ -12,7 +12,7 @@ workspace.
   wire-compatible with Hister's existing frontends). See `README.md` for the
   crate list and `docs/PROJECT-STATUS.md` for current state.
 - Rust structure: normal flat workspace members under
-  `crates/rusty_hister/crates/rusty-hister-*`, registered directly in the
+  `crates/apps/rusty_hister/crates/rusty-hister-*`, registered directly in the
   root `Cargo.toml`'s `[workspace] members` — no nested `[workspace]`
   manifest (this cluster is fresh work, not a `git subtree` import of a
   pre-existing standalone repo, so there is no prior standalone-repo

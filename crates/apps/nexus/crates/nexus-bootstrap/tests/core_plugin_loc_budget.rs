@@ -145,10 +145,10 @@ fn workspace_root() -> PathBuf {
 /// The root workspace now spans the whole `rusty_mill` monorepo (post
 /// subtree-merge): `<workspace_root>/crates` holds sibling rusty_mill
 /// crates too, and nexus's own crates live one level deeper, under
-/// `crates/nexus/crates`. Scoping here keeps this SD-07 guardrail
+/// `crates/apps/nexus/crates`. Scoping here keeps this SD-07 guardrail
 /// checking only the files it was written for.
 fn nexus_crates_dir() -> PathBuf {
-    workspace_root().join("crates/nexus/crates")
+    workspace_root().join("crates/apps/nexus/crates")
 }
 
 /// Count physical lines in `path`. Matches `wc -l` semantics: counts

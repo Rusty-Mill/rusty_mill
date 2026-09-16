@@ -13,7 +13,7 @@ use contract::{ProcessRunner, ProcessSpec};
 /// non-Unicode argument degrades to U+FFFD replacement characters instead
 /// of panicking the way `std::env::args()` does. `ProcessSpec` is typed
 /// `String`/`Vec<String>`, so a lossy conversion at this boundary is
-/// unavoidable; mirrors `rustils/crates/coreutils::args::collect_lossy`,
+/// unavoidable; mirrors `apps/coreutils::args::collect_lossy`,
 /// duplicated locally rather than pulled in as a dependency — `rusty_test`
 /// does not depend on `rustils` (see ARCHITECTURE.md: treat it as a donor
 /// to raid for patterns, not a base to converge into).

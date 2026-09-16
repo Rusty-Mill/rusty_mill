@@ -9,6 +9,41 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **ADR-0003 migration complete.** Phase 4 (final phase) implemented:
+  125 crates across 21 `apps`/`tools` families moved to `crates/apps/`
+  (20 families) and `crates/tools/` (`rusty_boot`). `rusty_inventrory`
+  renamed to `rusty_inventory` during its move. `coreutils`/
+  `coreutils-async` moved out of their nested location under
+  `crates/rustils/crates/`/`crates/rustils_async/crates/` (deferred
+  there since Phase 1); `crates/rustils/` and `crates/rustils_async/`
+  no longer exist, completing the split Phase 1 started. Fixed 3 real
+  functional CI lines (`rusty_meshed`'s vendored `data-mesh-monitor`
+  job's change-filter, working-directory, and cache-dependency-path)
+  that would otherwise have silently stopped working. Fixed the 7
+  Nexus test guards deferred since Phase 1 (`dep_invariants`,
+  `plugin_contract_purity`, `tauri_command_boundary`,
+  `bootstrap_coverage`, `core_plugin_loc_budget`,
+  `ipc_topic_prefix_invariant`, `dep_invariants_shell` — all already
+  used a robust dynamic workspace-root walk, only their hardcoded
+  `crates/nexus/...` prefix strings needed updating); left one
+  separate, pre-existing, unrelated bug in
+  `ipc_topic_prefix_invariant.rs` untouched (a stray path reference
+  that was never valid, even before this migration). Closed the last
+  `rush`→`rusty_lines` cascade (Phase 3's fix needed re-deriving once
+  `rush` itself moved a level deeper this phase). Fixed 25 stale
+  comment/doc references across 9 files, including `ARCHITECTURE.md`
+  and two crates' own live documentation
+  (`rusty_hister`/`rusty_meshed`); left historical/dated documents and
+  intentional test fixtures untouched. Regenerated
+  `docs/WORKSPACE-MAP.md` — `coreutils`/`coreutils-async` and the 3
+  renamed `rusty_inventory` crates now show their correct family
+  (previously showing the leftover `rustils`/`rusty_inventrory` names).
+  Built by Codex (`/codex-build`), independently inspected
+  (`PLAN-REVIEW-LOG.md`): dependency graph identical before/after by
+  package name across all 22 changed files, all 23 Nexus guard tests
+  pass and independently re-run by the host, every one of the 239
+  workspace members now lives under its ADR-0003-assigned layer
+  directory.
 - ADR-0003 Phase 3 implemented: 66 `libs`-layer crates across 34
   families moved to `crates/libs/`, 31 grouped into one of 7 thematic
   subdirectories (`ai`, `async`, `homelab`, `net`, `protocol`,
