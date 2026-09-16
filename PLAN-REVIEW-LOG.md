@@ -918,3 +918,38 @@ time that crate itself moves in a later phase). Ready to commit, open a
 PR, and expect the largest partial CI matrix yet (66 moved crates,
 including `rusty_tokio`/`rusty_http`/`rusty_search`, which much of the
 rest of the workspace depends on).
+
+## CI investigation — PR #226 — 2026-09-15
+
+All 3 `test (windows-latest, ...)` shards failed; every other check
+passed (both `ubuntu-latest` clippy/test, `fmt`, `dependency-policy`,
+`plan`, cross-compile, npm build). Pulled the actual failure summaries:
+
+- Shard 2: `nexus-types::sandbox::tests::
+  workspace_write_roots_include_cwd_extras_and_tmp` — the exact same
+  test and panic line (`sandbox.rs:341:9`) that failed on PR #224.
+- Shard 3: `nexus-terminal::job_object::imp::tests::
+  assign_to_current_process_succeeds_once` — same test that failed on
+  PR #224.
+- Shard 1: `sessionmgr-daemon::supervisor_restart_recovery::
+  a_session_survives_the_daemon_being_killed_and_is_adopted_by_its_
+  replacement`, `TRY 3 FAIL` — a new test, but the same crate and same
+  flaky *class* (daemon/process-supervision lifecycle, inherently
+  OS-timing-sensitive) as PR #224's `sessionmgr-daemon::
+  worktree_lifecycle` failures.
+
+Checked dependency relationships directly: `nexus-types` and
+`nexus-terminal` have zero dependency on any Phase 3 family (same as
+before). `sessionmgr-daemon` *does* depend on `rusty_tokio`, which moved
+this phase — worth stating precisely rather than waving it off. But the
+dependency-graph-identity check already proved `rusty_tokio`'s resolved
+`deps` and `features` are byte-identical before and after this phase's
+move (see Inspect above) — a pure path relocation cannot change the
+runtime behavior of a crate whose resolved dependency graph is
+unchanged. Combined with the test itself being about killing and
+restarting an OS process and checking recovery (inherently timing/
+scheduler-sensitive, not content-sensitive) and matching the exact same
+flaky pattern already established on PR #224 in the same crate family,
+this reads as the same pre-existing Windows-CI flakiness, not a Phase 3
+regression — logged for the record rather than treated as fully
+dismissed without cause.
