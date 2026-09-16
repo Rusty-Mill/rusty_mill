@@ -833,3 +833,88 @@ ADR's own rule that prose needs no edit, only broken links do).
 Wrote `PHASE-3-SPEC.md` with all of the above baked in as ground truth.
 Committed and delegated the remaining edits (root `Cargo.toml`,
 `README.md`, `rush/Cargo.toml`, and the 3 comment fixes) to Codex.
+
+### Round 1 — blocked by two real spec gaps, both found and correctly not silently fixed
+
+Codex's build (session `01a0a7d0-eade-7d41-9225-5ea85923d356`, exit 0,
+218s) applied every edit the spec actually specified, then found two
+real problems the spec's Task 1/2 scoping missed, and proposed but did
+**not** apply fixes for either — deferred both to the host:
+
+1. **Task 1 was incomplete.** The host's workspace.dependencies sweep
+   only checked whether each of the 34 *family* names was a root key —
+   it never checked the actual *package* names of multi-crate families'
+   sub-crates (`adk-core`, `rusty-db-core`, `rusty-search-core`, etc.,
+   and `rusty-whisper`/`rusty-mcp` whose package name differs from their
+   directory name). Re-derived the check properly (compare every one of
+   the 66 members' actual `[package] name` against root
+   `workspace.dependencies` keys, not just the 34 directory names): 48
+   entries needed a path update, not 20 — the spec missed 28.
+2. **Task 2 was incomplete in a different way**: the Phase 2 fixes for
+   `rusty_oauth`/`rusty_request` (→ `rusty_json`) and `rusty_rag` (→
+   `rusty_simd`) used `"../foundation/rusty_json"`-style paths correct
+   for their *Phase-2* location (`crates/rusty_oauth/`). All three are
+   themselves `libs`-layer crates that just moved *this* phase
+   (`crates/libs/net/rusty_oauth/`, etc.) — one level deeper — so the
+   same literal string now resolves to a nonexistent
+   `crates/libs/net/foundation/rusty_json`. The host's Task-2 sweep
+   only checked for literal paths *targeting* a Phase-3 crate; it never
+   re-checked whether a Phase-3-moving crate's own *existing* literal
+   paths (to an already-moved, earlier-phase crate) were still valid
+   after the crate carrying them moved again. Confirmed Codex's exact
+   proposed fix (`"../../../foundation/rusty_json"` /
+   `"../../../foundation/rusty_simd"`) is correct by hand-tracing the
+   new directory depth.
+
+Also confirmed Codex's third flag (`crates/libs/async/rusty_tokio/docs/
+decision-request-real-tokio-interop-bridge.md` citing
+`crates/rusty_request/src/client.rs:609:30`) is a pasted historical
+panic backtrace in a decision-record document — exempt, same principle
+as the per-crate ADR exemption; rewriting a stack trace to match a path
+that didn't exist when the panic happened would be actively wrong, not
+a fix.
+
+Applied all three corrections directly (28 additional root path fixes
+via a small script matching each key precisely, rather than 28 manual
+edits; 3 manual one-line path fixes in `rusty_oauth`/`rusty_request`/
+`rusty_rag`). Re-ran the full grep sweep with the decision-doc exemption
+added — zero unexplained hits.
+
+## Inspect — Phase 3 — 2026-09-15
+
+- `git status --short`: exactly 8 files modified (the 5 Codex touched
+  plus the 3 cascading fixes), nothing else.
+- `cargo metadata --format-version=1 --all-features --locked` succeeds
+  (previously failed outright — `crates/libs/net/foundation/rusty_json/
+  Cargo.toml` did not exist — confirming the bug was real, not
+  theoretical).
+- `check_workspace_deps.py`, `check_workspace_layers.py`,
+  `generate_workspace_map.py --verify` — all exit 0.
+  `docs/WORKSPACE-MAP.md` needed **no regeneration** this phase — its
+  columns are layer/family/crate/description/dependents-count, none of
+  which a pure directory move changes (unlike Phase 1, which changed
+  `package_family()`'s *output* for the first time; Phases 2-3 run
+  against the already-fixed function from the start, so the map never
+  went stale).
+- **Dependency-graph identity** by package name: 1443 names before and
+  after, **0** changed — confirms both the 28-entry fix and the 3
+  cascading fixes are correct, not just that `cargo metadata` no longer
+  errors.
+- Compiled `rusty_oauth`, `rusty_request`, `rusty_rag`, `rush` (the 4
+  crates in the cascading-fix chain) plus a representative sample from
+  the 28-entry fix (`adk-core`, `rusty-db-core`, `rusty-search-core`,
+  `rusty_tokio`) directly — all succeed.
+- `python3 -m unittest discover` → 64 passed (unchanged from prep,
+  Phase 3 touches no script).
+
+No findings beyond the two spec gaps, both closed above.
+
+### Outcome
+Phase 3 build **verified correct**. This phase closes the last of Phase
+0b's 6 `default-features`-excluded entries (`rush`→`rusty_lines`) and
+fully resolves the cross-phase cascading class of bug it exposed
+(Phase-N's fix for a still-moving-later crate needs re-checking every
+time that crate itself moves in a later phase). Ready to commit, open a
+PR, and expect the largest partial CI matrix yet (66 moved crates,
+including `rusty_tokio`/`rusty_http`/`rusty_search`, which much of the
+rest of the workspace depends on).

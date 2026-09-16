@@ -9,6 +9,28 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0003 Phase 3 implemented: 66 `libs`-layer crates across 34
+  families moved to `crates/libs/`, 31 grouped into one of 7 thematic
+  subdirectories (`ai`, `async`, `homelab`, `net`, `protocol`,
+  `storage`, `ui`) per the ADR's own table, 3 with no theme
+  (`rusty_adk`, `rusty_git`, `rusty_wiremock`). Proactively generalized
+  `check_workspace_layers.py`'s `package_family()` to skip a theme
+  segment as well as a layer segment before this move landed, avoiding a
+  repeat of Phase 1's exact bug one level deeper. Closed the last of
+  Phase 0b's 6 `default-features`-excluded entries (`rush`→
+  `rusty_lines`). Fixed 3 stale path references in comments. A Codex
+  build round caught two real gaps the host's own spec missed — 28
+  additional `[workspace.dependencies]` path entries (multi-crate
+  families' sub-crate package names differ from their family directory
+  name, e.g. `adk-core`, `rusty-db-core`), and a cross-phase cascade
+  where Phase 2's fix for `rusty_oauth`/`rusty_request`/`rusty_rag`
+  (all three `libs`-layer, all three moved again in this phase) needed
+  re-deriving from their new, one-level-deeper location — both
+  correctly deferred rather than guessed, both fixed and independently
+  verified by the host (dependency graph identical before/after by
+  package name, `cargo metadata` resolves cleanly where it previously
+  failed outright). Built by Codex (`/codex-build`), independently
+  inspected (`PLAN-REVIEW-LOG.md`).
 - ADR-0003 Phase 2 implemented: 30 foundation crates (26 families —
   `rpath`, `rusty_ansder`, `rusty_base64`, `rusty_codec`,
   `rusty_compress`, `rusty_config`, `rusty_crypto_key`, `rusty_diff`,

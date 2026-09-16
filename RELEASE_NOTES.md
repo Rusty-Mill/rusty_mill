@@ -13,6 +13,37 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 Phase 3: libs layer (66 crates, 34 families)
+**2026-09-15** · spec [`PHASE-3-SPEC.md`](PHASE-3-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+Fifth implementation slice of ADR-0003. Same mixed-authorship split as
+Phases 1-2, plus a proactive fix and a build round that caught two real
+spec gaps before they shipped.
+
+- **Changed:** 66 crates across 34 families moved to `crates/libs/`, 31
+  grouped into a theme (`ai`/`async`/`homelab`/`net`/`protocol`/
+  `storage`/`ui`), 3 with no theme.
+- **Fixed (proactive):** `check_workspace_layers.py`'s `package_family()`
+  generalized to skip a `libs/` theme directory as well as a layer
+  directory — done *before* this phase's move, closing the same class
+  of bug Phase 1 hit reactively, this time before it could cause a CI
+  failure.
+- **Fixed:** the last of Phase 0b's 6 `default-features`-excluded
+  entries, `rush`→`rusty_lines`.
+- **Fixed:** two gaps a Codex build round caught and correctly declined
+  to guess at — 28 additional `[workspace.dependencies]` path entries
+  the host's own sweep missed (sub-crate package names differing from
+  their family directory name, e.g. `adk-core`, `rusty-db-core`,
+  `rusty-search-core`), and a cross-phase cascade where Phase 2's own
+  fix for `rusty_oauth`/`rusty_request`/`rusty_rag` needed re-deriving
+  because all three are `libs`-layer crates that moved again in this
+  phase, one level deeper than where that fix was computed.
+- **Verified:** dependency graph identical before/after (by package
+  name) — 1443 names, 0 changed; `cargo metadata` resolves cleanly
+  where it previously failed outright on the unfixed cascade; `cargo
+  check` succeeds on the cascading-fix crates plus a sample of the
+  28-entry fix.
+
 ## ADR-0003 Phase 2: foundation layer (30 crates, 26 families)
 **2026-09-15** · spec [`PHASE-2-SPEC.md`](PHASE-2-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 

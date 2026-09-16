@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rusty_kafka",
+    "crates/libs/net/rusty_kafka",
     "crates/rusty_meshed/crates/rusty-meshed-core",
     "crates/rusty_meshed/crates/rusty-meshed-schema-registry",
     "crates/rusty_meshed/crates/rusty-meshed-governance",
@@ -11,44 +11,44 @@ members = [
     "crates/rusty_meshed/crates/rusty-meshed-cli",
     "crates/rusty_meshed/crates/rusty-meshed-domains",
     "crates/rusty_meshed/crates/rusty-meshed-trace",
-    "crates/rusty_term",
-    "crates/rusty_term/l13",
-    "crates/rusty_gpu",
-    "crates/rusty_gui",
-    "crates/rusty_font",
+    "crates/libs/ui/rusty_term",
+    "crates/libs/ui/rusty_term/l13",
+    "crates/libs/ui/rusty_gpu",
+    "crates/libs/ui/rusty_gui",
+    "crates/libs/ui/rusty_font",
     "crates/foundation/rusty_regx",
     "crates/foundation/rusty_win32",
     "crates/foundation/rpath",
     "crates/foundation/rusty_diff",
     "crates/foundation/rusty_compress",
-    "crates/rusty_git",
+    "crates/libs/rusty_git",
     "crates/foundation/rusty_sha1",
-    "crates/rusty_lines",
+    "crates/libs/ui/rusty_lines",
     "crates/rush",
     "crates/mill-term",
     "crates/rusty_text",
-    "crates/rusty_tokio",
-    "crates/rusty_tokio/rusty_tokio-macros",
-    "crates/rusty_rusqlite",
+    "crates/libs/async/rusty_tokio",
+    "crates/libs/async/rusty_tokio/rusty_tokio-macros",
+    "crates/libs/storage/rusty_rusqlite",
     "crates/foundation/rusty_libc",
-    "crates/rusty_acp",
-    "crates/rusty_tls",
+    "crates/libs/protocol/rusty_acp",
+    "crates/libs/net/rusty_tls",
     "crates/foundation/rusty_serde/rusty_serde",
     "crates/foundation/rusty_serde/rusty_serde_derive",
     "crates/foundation/rusty_serde/rusty_serde_erased",
-    "crates/rusty_lsp",
-    "crates/rusty_a2a",
-    "crates/rusty_mcp/crates/rusty-mcp",
-    "crates/rusty_mcp/crates/rusty-mcp-demo",
-    "crates/rusty_stream",
+    "crates/libs/protocol/rusty_lsp",
+    "crates/libs/protocol/rusty_a2a",
+    "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
+    "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
+    "crates/libs/async/rusty_stream",
     "crates/foundation/rusty_url",
-    "crates/rusty_http",
+    "crates/libs/net/rusty_http",
     "crates/foundation/rusty_json",
     "crates/foundation/rusty_json/rusty_json-derive",
-    "crates/rusty_oauth",
-    "crates/rusty_proxmox",
-    "crates/rusty_opnsense",
-    "crates/rusty_fedora",
+    "crates/libs/net/rusty_oauth",
+    "crates/libs/homelab/rusty_proxmox",
+    "crates/libs/homelab/rusty_opnsense",
+    "crates/libs/homelab/rusty_fedora",
     "crates/rusty_homelab_mcp",
     "crates/rusty_fedora_agent",
     "crates/rusty_multimodal_db",
@@ -70,48 +70,48 @@ members = [
     "crates/foundation/rusty_std",
     "crates/foundation/rusty_err",
     "crates/foundation/rusty_err/derive",
-    "crates/rusty_request",
+    "crates/libs/net/rusty_request",
     "crates/foundation/rusty_base64",
     "crates/foundation/rusty_rand",
     "crates/foundation/rusty_retry",
     "crates/foundation/rusty_rsa",
-    "crates/rusty_sqlite",
+    "crates/libs/storage/rusty_sqlite",
     "crates/foundation/rusty_time",
     "crates/foundation/rusty_uuid",
-    "crates/rusty_wiremock",
-    "crates/rusty_search/crates/rusty-search-core",
-    "crates/rusty_search/crates/rusty-search-memory",
-    "crates/rusty_search/crates/rusty-search-tantivy",
-    "crates/rusty_search/crates/rusty-search-sqlite-fts5",
-    "crates/rusty_search/crates/rusty-search-elasticsearch",
-    "crates/rusty_search/crates/rusty-search-meilisearch",
-    "crates/rusty_search/crates/rusty-search-opensearch",
-    "crates/rusty_search/crates/rusty-search-solr",
-    "crates/rusty_search/crates/rusty-search-algolia",
-    "crates/rusty_search/crates/rusty-search-azure-search",
-    "crates/rusty_search/crates/rusty-search-cloud",
-    "crates/rusty_search/crates/rusty-search",
-    "crates/rusty_vulkan",
+    "crates/libs/rusty_wiremock",
+    "crates/libs/storage/rusty_search/crates/rusty-search-core",
+    "crates/libs/storage/rusty_search/crates/rusty-search-memory",
+    "crates/libs/storage/rusty_search/crates/rusty-search-tantivy",
+    "crates/libs/storage/rusty_search/crates/rusty-search-sqlite-fts5",
+    "crates/libs/storage/rusty_search/crates/rusty-search-elasticsearch",
+    "crates/libs/storage/rusty_search/crates/rusty-search-meilisearch",
+    "crates/libs/storage/rusty_search/crates/rusty-search-opensearch",
+    "crates/libs/storage/rusty_search/crates/rusty-search-solr",
+    "crates/libs/storage/rusty_search/crates/rusty-search-algolia",
+    "crates/libs/storage/rusty_search/crates/rusty-search-azure-search",
+    "crates/libs/storage/rusty_search/crates/rusty-search-cloud",
+    "crates/libs/storage/rusty_search/crates/rusty-search",
+    "crates/libs/ui/rusty_vulkan",
     "crates/foundation/rusty_sync",
     "crates/foundation/rusty_simd",
     "crates/foundation/rusty_codec",
-    "crates/rusty_h2",
-    "crates/rusty_audio",
+    "crates/libs/net/rusty_h2",
+    "crates/libs/ui/rusty_audio",
     "crates/foundation/rusty_crypto_key",
-    "crates/rusty_db/crates/rusty-db-core",
-    "crates/rusty_db/crates/rusty-db-derive",
-    "crates/rusty_db/crates/rusty-db-sqlite",
-    "crates/rusty_db/crates/rusty-db-postgres",
-    "crates/rusty_db/crates/rusty-db-mysql",
-    "crates/rusty_db/rusty_db",
-    "crates/rusty_ansi",
+    "crates/libs/storage/rusty_db/crates/rusty-db-core",
+    "crates/libs/storage/rusty_db/crates/rusty-db-derive",
+    "crates/libs/storage/rusty_db/crates/rusty-db-sqlite",
+    "crates/libs/storage/rusty_db/crates/rusty-db-postgres",
+    "crates/libs/storage/rusty_db/crates/rusty-db-mysql",
+    "crates/libs/storage/rusty_db/rusty_db",
+    "crates/libs/ui/rusty_ansi",
     "crates/foundation/rusty_config",
     "crates/foundation/rusty_jinja",
     "crates/foundation/rusty_ansder",
-    "crates/rusty_rag",
+    "crates/libs/ai/rusty_rag",
     "crates/rusty_boot",
-    "crates/rusty_whisper",
-    "crates/rusty_rdp",
+    "crates/libs/ai/rusty_whisper",
+    "crates/libs/net/rusty_rdp",
     "crates/rusty_voice",
     "crates/platform/rustils/crates/platform",
     "crates/platform/rustils/crates/platform-mock",
@@ -143,7 +143,7 @@ members = [
     "crates/rusty_key/crates/mcp",
     "crates/rusty_key/crates/compose",
     "crates/rusty_key/crates/app",
-    "crates/rusty_llama",
+    "crates/libs/ai/rusty_llama",
     "crates/rusty_tailscale/crates/ts-types",
     "crates/rusty_tailscale/crates/ts-key",
     "crates/rusty_tailscale/crates/ts-control",
@@ -160,20 +160,20 @@ members = [
     "crates/rusty_tailscale/crates/ts-daemon",
     "crates/rusty_tailscale/crates/ts-cli",
     "crates/rusty_tailscale/xtask",
-    "crates/rusty_adk/crates/adk-core",
-    "crates/rusty_adk/crates/adk-macros",
-    "crates/rusty_adk/crates/adk-tools",
-    "crates/rusty_adk/crates/adk-models",
-    "crates/rusty_adk/crates/adk-sessions",
-    "crates/rusty_adk/crates/adk-graph",
-    "crates/rusty_adk/crates/adk-agents",
-    "crates/rusty_adk/crates/adk-runner",
-    "crates/rusty_adk/crates/adk-mcp",
-    "crates/rusty_adk/crates/adk-a2a",
-    "crates/rusty_adk/crates/rusty-adk",
-    "crates/rusty_adk/examples/weather-agent",
-    "crates/rusty_adk/examples/mcp-tool-server",
-    "crates/rusty_adk/examples/a2a-agent-server",
+    "crates/libs/rusty_adk/crates/adk-core",
+    "crates/libs/rusty_adk/crates/adk-macros",
+    "crates/libs/rusty_adk/crates/adk-tools",
+    "crates/libs/rusty_adk/crates/adk-models",
+    "crates/libs/rusty_adk/crates/adk-sessions",
+    "crates/libs/rusty_adk/crates/adk-graph",
+    "crates/libs/rusty_adk/crates/adk-agents",
+    "crates/libs/rusty_adk/crates/adk-runner",
+    "crates/libs/rusty_adk/crates/adk-mcp",
+    "crates/libs/rusty_adk/crates/adk-a2a",
+    "crates/libs/rusty_adk/crates/rusty-adk",
+    "crates/libs/rusty_adk/examples/weather-agent",
+    "crates/libs/rusty_adk/examples/mcp-tool-server",
+    "crates/libs/rusty_adk/examples/a2a-agent-server",
     "crates/rusty_provider/crates/core",
     "crates/rusty_provider/crates/providers",
     "crates/rusty_provider/crates/router",
@@ -243,20 +243,20 @@ members = [
 ]
 # cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
 # it was excluded from rusty_term's own workspace before the merge.
-# crates/rusty_lines/bench is a standalone on-demand benchmark harness
+# crates/libs/ui/rusty_lines/bench is a standalone on-demand benchmark harness
 # (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
-# own, run only via `cd crates/rusty_lines/bench && cargo run --release` —
+# own, run only via `cd crates/libs/ui/rusty_lines/bench && cargo run --release` —
 # excluded so it doesn't try to join this workspace.
 # crates/foundation/rusty_libc/bench is the same shape: its own standalone `[workspace]`
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
-    "crates/rusty_term/fuzz",
+    "crates/libs/ui/rusty_term/fuzz",
     "crates/rush/fuzz",
-    "crates/rusty_lines/bench",
+    "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",
-    "crates/rusty_tls/fuzz",
-    "crates/rusty_lsp/fuzz",
+    "crates/libs/net/rusty_tls/fuzz",
+    "crates/libs/protocol/rusty_lsp/fuzz",
     "crates/platform/rustils/fuzz",
     "crates/rusty_croc/fuzz",
     "crates/rusty_key/desktop/src-tauri",
@@ -301,52 +301,52 @@ platform-async = { path = "crates/platform/rustils_async/crates/platform-async" 
 platform-async-linux = { path = "crates/platform/rustils_async/crates/platform-async-linux" }
 rpath = { path = "crates/foundation/rpath", version = "0.1.0" }
 rush = { path = "crates/rush" }
-rusty-db = { path = "crates/rusty_db/rusty_db" }
-rusty-whisper = { path = "crates/rusty_whisper" }
-rusty_audio = { path = "crates/rusty_audio" }
+rusty-db = { path = "crates/libs/storage/rusty_db/rusty_db" }
+rusty-whisper = { path = "crates/libs/ai/rusty_whisper" }
+rusty_audio = { path = "crates/libs/ui/rusty_audio" }
 rusty_base64 = { path = "crates/foundation/rusty_base64" }
 rusty_codec = { path = "crates/foundation/rusty_codec" }
 rusty_compress = { path = "crates/foundation/rusty_compress" }
 rusty_diff = { path = "crates/foundation/rusty_diff" }
 rusty_err = { path = "crates/foundation/rusty_err" }
-rusty_fedora = { path = "crates/rusty_fedora" }
-rusty_font = { path = "crates/rusty_font" }
-rusty_git = { path = "crates/rusty_git" }
-rusty_gpu = { path = "crates/rusty_gpu" }
-rusty_gui = { path = "crates/rusty_gui" }
+rusty_fedora = { path = "crates/libs/homelab/rusty_fedora" }
+rusty_font = { path = "crates/libs/ui/rusty_font" }
+rusty_git = { path = "crates/libs/rusty_git" }
+rusty_gpu = { path = "crates/libs/ui/rusty_gpu" }
+rusty_gui = { path = "crates/libs/ui/rusty_gui" }
 rusty_jinja = { path = "crates/foundation/rusty_jinja" }
-rusty_kafka = { path = "crates/rusty_kafka" }
+rusty_kafka = { path = "crates/libs/net/rusty_kafka" }
 rusty_libc = { path = "crates/foundation/rusty_libc", version = "0.0.1" }
-rusty_lines = { path = "crates/rusty_lines" }
-rusty_lsp = { path = "crates/rusty_lsp" }
-rusty_opnsense = { path = "crates/rusty_opnsense" }
-rusty_proxmox = { path = "crates/rusty_proxmox" }
+rusty_lines = { path = "crates/libs/ui/rusty_lines" }
+rusty_lsp = { path = "crates/libs/protocol/rusty_lsp" }
+rusty_opnsense = { path = "crates/libs/homelab/rusty_opnsense" }
+rusty_proxmox = { path = "crates/libs/homelab/rusty_proxmox" }
 rusty_rand = { path = "crates/foundation/rusty_rand" }
 rusty_regx = { path = "crates/foundation/rusty_regx", version = "0.5.0" }
-rusty_request = { path = "crates/rusty_request" }
+rusty_request = { path = "crates/libs/net/rusty_request" }
 rusty_retry = { path = "crates/foundation/rusty_retry" }
 rusty_rsa = { path = "crates/foundation/rusty_rsa" }
 rusty_sha1 = { path = "crates/foundation/rusty_sha1", version = "0.1.0" }
 rusty_simd = { path = "crates/foundation/rusty_simd" }
-rusty_sqlite = { path = "crates/rusty_sqlite" }
+rusty_sqlite = { path = "crates/libs/storage/rusty_sqlite" }
 rusty_sync = { path = "crates/foundation/rusty_sync" }
-rusty_term = { path = "crates/rusty_term", version = "0.1.1" }
+rusty_term = { path = "crates/libs/ui/rusty_term", version = "0.1.1" }
 rusty_time = { path = "crates/foundation/rusty_time" }
 rusty_url = { path = "crates/foundation/rusty_url" }
 rusty_uuid = { path = "crates/foundation/rusty_uuid" }
-rusty_vulkan = { path = "crates/rusty_vulkan" }
+rusty_vulkan = { path = "crates/libs/ui/rusty_vulkan" }
 rusty_win32 = { path = "crates/foundation/rusty_win32", version = "0.1.0" }
-rusty_wiremock = { path = "crates/rusty_wiremock" }
-rusty-search-core = { path = "crates/rusty_search/crates/rusty-search-core", version = "0.1.0" }
-rusty-search-memory = { path = "crates/rusty_search/crates/rusty-search-memory", version = "0.1.0" }
-rusty-search-tantivy = { path = "crates/rusty_search/crates/rusty-search-tantivy", version = "0.1.0" }
-rusty-search-sqlite-fts5 = { path = "crates/rusty_search/crates/rusty-search-sqlite-fts5", version = "0.1.0" }
-rusty-search-elasticsearch = { path = "crates/rusty_search/crates/rusty-search-elasticsearch", version = "0.1.0" }
-rusty-search-meilisearch = { path = "crates/rusty_search/crates/rusty-search-meilisearch", version = "0.1.0" }
-rusty-search-opensearch = { path = "crates/rusty_search/crates/rusty-search-opensearch", version = "0.1.0" }
-rusty-search-solr = { path = "crates/rusty_search/crates/rusty-search-solr", version = "0.1.0" }
-rusty-search-algolia = { path = "crates/rusty_search/crates/rusty-search-algolia", version = "0.1.0" }
-rusty-search-azure-search = { path = "crates/rusty_search/crates/rusty-search-azure-search", version = "0.1.0" }
+rusty_wiremock = { path = "crates/libs/rusty_wiremock" }
+rusty-search-core = { path = "crates/libs/storage/rusty_search/crates/rusty-search-core", version = "0.1.0" }
+rusty-search-memory = { path = "crates/libs/storage/rusty_search/crates/rusty-search-memory", version = "0.1.0" }
+rusty-search-tantivy = { path = "crates/libs/storage/rusty_search/crates/rusty-search-tantivy", version = "0.1.0" }
+rusty-search-sqlite-fts5 = { path = "crates/libs/storage/rusty_search/crates/rusty-search-sqlite-fts5", version = "0.1.0" }
+rusty-search-elasticsearch = { path = "crates/libs/storage/rusty_search/crates/rusty-search-elasticsearch", version = "0.1.0" }
+rusty-search-meilisearch = { path = "crates/libs/storage/rusty_search/crates/rusty-search-meilisearch", version = "0.1.0" }
+rusty-search-opensearch = { path = "crates/libs/storage/rusty_search/crates/rusty-search-opensearch", version = "0.1.0" }
+rusty-search-solr = { path = "crates/libs/storage/rusty_search/crates/rusty-search-solr", version = "0.1.0" }
+rusty-search-algolia = { path = "crates/libs/storage/rusty_search/crates/rusty-search-algolia", version = "0.1.0" }
+rusty-search-azure-search = { path = "crates/libs/storage/rusty_search/crates/rusty-search-azure-search", version = "0.1.0" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -378,14 +378,14 @@ tokio = { version = "1", features = [
 tantivy = "0.26"
 
 # rusty_db's own five crates (path deps, mirroring rusty-search-* above).
-rusty-db-core = { path = "crates/rusty_db/crates/rusty-db-core", version = "0.1.0" }
-rusty-db-derive = { path = "crates/rusty_db/crates/rusty-db-derive", version = "0.1.0" }
-rusty-db-sqlite = { path = "crates/rusty_db/crates/rusty-db-sqlite", version = "0.1.0" }
-rusty-db-postgres = { path = "crates/rusty_db/crates/rusty-db-postgres", version = "0.1.0" }
-rusty-db-mysql = { path = "crates/rusty_db/crates/rusty-db-mysql", version = "0.1.0" }
+rusty-db-core = { path = "crates/libs/storage/rusty_db/crates/rusty-db-core", version = "0.1.0" }
+rusty-db-derive = { path = "crates/libs/storage/rusty_db/crates/rusty-db-derive", version = "0.1.0" }
+rusty-db-sqlite = { path = "crates/libs/storage/rusty_db/crates/rusty-db-sqlite", version = "0.1.0" }
+rusty-db-postgres = { path = "crates/libs/storage/rusty_db/crates/rusty-db-postgres", version = "0.1.0" }
+rusty-db-mysql = { path = "crates/libs/storage/rusty_db/crates/rusty-db-mysql", version = "0.1.0" }
 # Already-merged siblings rusty_db depends on -- plain path dependencies,
 # same pin-retirement pattern as everywhere else in this series.
-rusty_tokio = { path = "crates/rusty_tokio" }
+rusty_tokio = { path = "crates/libs/async/rusty_tokio" }
 rusty_wire = { path = "crates/foundation/rusty_wire" }
 rusty_json = { path = "crates/foundation/rusty_json" }
 rusty_std = { path = "crates/foundation/rusty_std" }
@@ -550,7 +550,7 @@ ts-filter = { path = "crates/rusty_tailscale/crates/ts-filter" }
 ts-engine = { path = "crates/rusty_tailscale/crates/ts-engine" }
 ts-localapi = { path = "crates/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/rusty_tailscale/crates/ts-net" }
-rusty_http = { path = "crates/rusty_http" }
+rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
@@ -581,16 +581,16 @@ boringtun = "0.7"
 # which only surfaced as a duplicate-crate-version compile failure once
 # CI exercised a full `--all-features` workspace build); both now inherit
 # this entry via `axum.workspace = true` like every other consumer.
-adk-core = { path = "crates/rusty_adk/crates/adk-core", version = "0.1.0" }
-adk-macros = { path = "crates/rusty_adk/crates/adk-macros", version = "0.1.0" }
-adk-tools = { path = "crates/rusty_adk/crates/adk-tools", version = "0.1.0" }
-adk-models = { path = "crates/rusty_adk/crates/adk-models", version = "0.1.0", default-features = false }
-adk-sessions = { path = "crates/rusty_adk/crates/adk-sessions", version = "0.1.0" }
-adk-graph = { path = "crates/rusty_adk/crates/adk-graph", version = "0.1.0" }
-adk-agents = { path = "crates/rusty_adk/crates/adk-agents", version = "0.1.0" }
-adk-runner = { path = "crates/rusty_adk/crates/adk-runner", version = "0.1.0" }
-adk-mcp = { path = "crates/rusty_adk/crates/adk-mcp", version = "0.1.0" }
-adk-a2a = { path = "crates/rusty_adk/crates/adk-a2a", version = "0.1.0" }
+adk-core = { path = "crates/libs/rusty_adk/crates/adk-core", version = "0.1.0" }
+adk-macros = { path = "crates/libs/rusty_adk/crates/adk-macros", version = "0.1.0" }
+adk-tools = { path = "crates/libs/rusty_adk/crates/adk-tools", version = "0.1.0" }
+adk-models = { path = "crates/libs/rusty_adk/crates/adk-models", version = "0.1.0", default-features = false }
+adk-sessions = { path = "crates/libs/rusty_adk/crates/adk-sessions", version = "0.1.0" }
+adk-graph = { path = "crates/libs/rusty_adk/crates/adk-graph", version = "0.1.0" }
+adk-agents = { path = "crates/libs/rusty_adk/crates/adk-agents", version = "0.1.0" }
+adk-runner = { path = "crates/libs/rusty_adk/crates/adk-runner", version = "0.1.0" }
+adk-mcp = { path = "crates/libs/rusty_adk/crates/adk-mcp", version = "0.1.0" }
+adk-a2a = { path = "crates/libs/rusty_adk/crates/adk-a2a", version = "0.1.0" }
 futures = "0.3"
 tokio-test = "0.4"
 # rusty_a2a is a merged sibling -- retiring adk-a2a's and
@@ -598,7 +598,7 @@ tokio-test = "0.4"
 # because both ask for it explicitly and an inheriting member may not
 # override the root's choice; a no-op either way, since rusty_a2a's own
 # `default` feature is empty.
-rusty_a2a = { path = "crates/rusty_a2a", default-features = false }
+rusty_a2a = { path = "crates/libs/protocol/rusty_a2a", default-features = false }
 
 # Hoisted from rusty_provider's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `license` ("MIT"), so its six crates
@@ -613,7 +613,7 @@ rp-router = { path = "crates/rusty_provider/crates/router" }
 # explicitly and an inheriting member may not override the root's choice.
 # A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
 # own `default` feature is empty.
-rusty-mcp = { path = "crates/rusty_mcp/crates/rusty-mcp", default-features = false }
+rusty-mcp = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp", default-features = false }
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
@@ -666,7 +666,7 @@ agentgateway-mcp = { path = "crates/rusty_agent_gateway/crates/agentgateway-mcp"
 agentgateway-proxy = { path = "crates/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }
 agentgateway-tls = { path = "crates/rusty_agent_gateway/crates/agentgateway-tls", version = "0.1.0" }
 # Another merged sibling, retiring agentgateway-tls' pinned git dependency.
-rusty_tls = { path = "crates/rusty_tls" }
+rusty_tls = { path = "crates/libs/net/rusty_tls" }
 # `rt` is nexus-kernel's (CancellationToken-based cooperative IPC cancellation).
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 http-body = "1"

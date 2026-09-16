@@ -19,7 +19,7 @@ use contract::PtySession;
 /// inner PTY (arrow keys, Ctrl-C, line editing) doesn't also leave the
 /// user's real shell stuck without echo/line-editing if this tool exits
 /// abnormally. Mirrors the enable-on-construct/restore-on-drop pattern
-/// `rusty_term`'s `RawModeGuard` (`crates/rusty_term/src/render.rs`) uses
+/// `rusty_term`'s `RawModeGuard` (`crates/libs/ui/rusty_term/src/render.rs`) uses
 /// for the same host-terminal lifecycle.
 struct RawModeGuard;
 

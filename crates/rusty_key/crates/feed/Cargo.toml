@@ -26,7 +26,7 @@ rusty_url.workspace = true
 # sovereignty wrapper crate (a pure `pub use rusqlite;` re-export); it
 # already pins rusqlite 0.39 workspace-wide for the same
 # `links = "sqlite3"` / stable-toolchain reasons this crate used to
-# explain here directly -- see crates/rusty_sqlite/Cargo.toml.
+# explain here directly -- see crates/libs/storage/rusty_sqlite/Cargo.toml.
 rusty_sqlite.workspace = true
 schemars.workspace = true
 serde.workspace = true
