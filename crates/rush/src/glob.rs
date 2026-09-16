@@ -18,7 +18,7 @@
 //! non-backtracking engine `[[ =~ ]]` uses — falling back to a hand-rolled
 //! backtracking matcher only for what that engine doesn't (yet) cover. See
 //! `match_component`'s own doc comment for exactly when and why, and
-//! `crates/rusty_regx/docs/GLOB_DESIGN.md` (issue #20) for the engine's
+//! `crates/foundation/rusty_regx/docs/GLOB_DESIGN.md` (issue #20) for the engine's
 //! design and roadmap toward covering the rest.
 
 use std::cell::RefCell;
@@ -188,7 +188,7 @@ fn unescape(seg: &str) -> String {
 /// below, kept as a regression test on the fallback path itself).
 ///
 /// Falls back to the hand-rolled matcher below for what `rusty_regx::Glob`
-/// doesn't (yet) cover, per `crates/rusty_regx/docs/GLOB_DESIGN.md`'s
+/// doesn't (yet) cover, per `crates/foundation/rusty_regx/docs/GLOB_DESIGN.md`'s
 /// restricted-v1 scope:
 ///   * `!(p)` negation embedded anywhere but as the *entire* pattern (e.g.
 ///     `!(a|b)file` — only bare `!(a|b)` is supported so far). `Glob::new`

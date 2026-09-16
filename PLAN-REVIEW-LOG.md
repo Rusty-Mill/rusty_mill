@@ -649,3 +649,124 @@ crates (`rusty_tokio`, `serde`, `serde_json`, `sessionmgr-*` siblings,
 timing flakiness in an unrelated crate family, surfaced only because the
 root-`Cargo.toml` path edit forced the full sweep. Re-running the failed
 jobs rather than treating this as a Phase 1 regression.
+
+Pushed the `package_family()` fix (`fb259c193`); the re-run's
+`dependency policy` job passed, confirming the fix. The re-run's own
+Windows shards then failed differently: `test (windows-latest, shard 2)`
+on `nexus-types::sandbox::tests::workspace_write_roots_include_cwd_
+extras_and_tmp` (asserts a Unix-style `/tmp` path is present in a
+Windows sandbox-roots list — an inherently Windows-hostile assertion)
+after an `install-action: installation failed due to bash startup
+failure` warning earlier in the same job (a documented GitHub Actions
+partner-runner-image bug, `actions/partner-runner-images#169`); `test
+(windows-latest, shard 3)` on `nexus-terminal::job_object::imp::tests::
+assign_to_current_process_succeeds_once` (`TRY 3 FAIL` — Windows job-
+object assignment, sensitive to whether the runner process is already in
+a job object, a known flaky class). Confirmed both `nexus-types` and
+`nexus-terminal` have zero dependency relationship to any of the 18
+moved crates. User merged PR #224 with these two checks red — a
+reasonable call given both are pre-existing, unrelated Windows-CI
+flakiness in the `nexus` family, and the migration's own behavior was
+already independently verified (dependency-graph identity, `cargo
+check`/`cargo test` on the actual changed surface) before either failure
+surfaced.
+
+## Build — Phase 2 — 2026-09-15
+
+Continuing under the same standing authorization (see Phase 1's build
+entry). Computed the foundation-layer move set from Appendix B: 30
+crates across 26 families (matches the ADR's own count exactly).
+Performed the `git mv` directly again without attempting a Codex round
+first — the sandbox limitation is now confirmed twice, no reason to
+spend a build round rediscovering it. 26 family directories moved
+wholesale (`crates/<name>` → `crates/foundation/<name>`, each carrying
+its own nested sub-crates automatically); deleted the third stale nested
+workspace manifest, `crates/rusty_serde/Cargo.toml`. Verified: 350
+renames at 100% similarity, 1 deletion, nothing else. Committed as
+`30afc0c9e`.
+
+Swept the whole workspace for remaining literal `path` dependencies
+targeting any of the 30 moved crates (same technique as Phase 1): found
+9. Categorized each: 6 resolve for free because both the consumer and
+the target are moving to the same new layer this phase, so their
+relative path survives unchanged (`rusty_ansder`→`rusty_wire`,
+`rusty_uuid`→`rusty_serde`, and 4 same-family
+derive/erased-sibling references) — 3 are real, because the *consumer*
+is a `libs`-layer crate not moving until Phase 3 while the *target* just
+moved: `rusty_oauth`→`rusty_json`, `rusty_request`→`rusty_json`,
+`rusty_rag`→`rusty_simd`. All 3 are among Phase 0b's 6
+default-features-excluded entries (documented there), so this was
+expected, not a surprise — Phase 0b's log already flagged that leaving
+an entry unhoisted means its relative path needs a manual check whenever
+either endpoint moves. Computed the exact fix for each
+(`"../rusty_json"` → `"../foundation/rusty_json"`, etc.).
+
+Also swept every `.rs` file for a hardcoded path to any of the 26
+families (zero, unlike Phase 1's `layering.rs`) and every `.md` file for
+a cross-family link into them (only `README.md`'s 30 crate-table rows;
+`rusty_ansder`'s own README, despite being one of the ADR review's
+11-file cross-family-link list, turned out not to reference any of these
+paths directly).
+
+Wrote `PHASE-2-SPEC.md`, explicitly requiring the `generate_workspace_map.py
+--verify` check this time (the gap that caused Phase 1's first CI
+failure) as an acceptance criterion up front rather than finding it again
+via a red build. Committed and delegated the remaining edits (root
+`Cargo.toml`, 3 manifests, `README.md`) to Codex.
+
+Codex's build (session `01a0a7a9-40a9-7270-b6f6-da0933bca0c6`, exit 0,
+260s) applied all 5 authorized edits correctly and additionally ran its
+own grep sweep against the acceptance criterion — finding 6 stale
+references the spec's exemption list didn't account for, and correctly
+declining to touch any of them without authorization: `PHASE-1-SPEC.md`
+(a merged historical spec the exemption list forgot to add), plus 5
+*comment*-only references (not functional code/config) in `Cargo.toml`,
+`.github/workflows/ci.yml` (×2), and `crates/rush/src/glob.rs` (×2) —
+each a doc comment pointing a human reader at
+`crates/rusty_libc/bench`, `crates/rusty_win32/Cargo.toml`,
+`crates/rusty_config/Cargo.toml`, or `crates/rusty_regx/docs/
+GLOB_DESIGN.md` for further reading, none of them affecting build
+behavior. Fixed all 5 directly (one-line path-string edits, zero
+functional risk) and added `PHASE-1-SPEC.md` to the exemption list;
+re-ran the full grep sweep — zero unexplained hits.
+
+## Inspect — Phase 2 — 2026-09-15
+
+- `git status --short`: exactly 7 files (`Cargo.toml`, `README.md`, the
+  3 manifests, plus the 2 comment-fix files) modified, nothing else.
+- `git diff --numstat`: `Cargo.toml` 56/56, `README.md` 30/30 (pure
+  swaps — 30 member paths + 24 `workspace.dependencies` paths + 1
+  `exclude` entry + 1 comment = 56; 30 crate-table rows × 2 occurrences
+  = 30 numstat-line-pairs).
+- Read the 3 manual manifest fixes (`rusty_oauth`, `rusty_request`,
+  `rusty_rag`) in full: each changes only the `path` value on its one
+  `rusty_json`/`rusty_simd` line, every other key (`default-features`,
+  `features`) untouched, matching the spec exactly.
+- Ran the proof commands myself: `python3 -m unittest discover` → 61
+  passed; `check_workspace_deps.py`, `check_workspace_layers.py`,
+  `generate_workspace_map.py --verify` → **all three exit 0** this time
+  (the map check specifically closes Phase 1's CI-failure gap).
+- **Dependency-graph identity** by package name: 1443 names before and
+  after, **0** changed — confirms the 3 manual path fixes preserved
+  identical resolution, not just that they compile.
+- Compiled the 3 manually-fixed crates plus a representative foundation
+  sample directly (`cargo check -p rusty_oauth -p rusty_request -p
+  rusty_rag -p rusty_std -p rusty_serde -p rusty_json`) — all succeed
+  from the new locations.
+- Investigated several IDE/background-analyzer diagnostics that
+  surfaced against the *main checkout* (`rusty_tokio`/`rusty_stream`
+  io-uring APIs, `rusty_fedora_agent`'s `platform_linux::LinuxSpawner`)
+  during this work — confirmed unrelated: all are `cfg(target_os =
+  "linux")`-gated APIs a Windows-hosted analyzer can't resolve,
+  pre-existing and unaffected by any phase of this migration (`platform-
+  linux` still resolves correctly via `workspace = true`, independently
+  confirmed by the graph-identity check above).
+
+No findings beyond the exemption-list gap, closed by the 5 comment
+fixes above.
+
+### Outcome
+Phase 2 build **verified correct**. Ready to commit, open a PR, and
+expect a large but partial CI matrix (the 30 moved crates plus their
+dependents, plus `rusty_oauth`/`rusty_request`/`rusty_rag` and their own
+dependents).

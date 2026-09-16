@@ -13,6 +13,32 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## ADR-0003 Phase 2: foundation layer (30 crates, 26 families)
+**2026-09-15** · spec [`PHASE-2-SPEC.md`](PHASE-2-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
+
+Fourth implementation slice of ADR-0003. Same mixed-authorship split as
+Phase 1 (host `git mv`, Codex content edits, both inspected).
+
+- **Changed:** 30 crates across 26 families moved to `crates/foundation/`.
+- **Removed:** the third stale pre-merge nested `[workspace]` manifest,
+  `crates/rusty_serde/Cargo.toml`.
+- **Fixed:** 3 `libs`-layer manifests (`rusty_oauth`, `rusty_request`,
+  `rusty_rag`) whose literal-path dependency on a now-moved foundation
+  crate would otherwise point at a directory that no longer exists there
+  — each was one of Phase 0b's 6 `default-features`-excluded entries, so
+  this was expected, not a surprise.
+- **Fixed:** 5 stale path references in comments (root `Cargo.toml`,
+  `.github/workflows/ci.yml`, `crates/rush/src/glob.rs`) caught by the
+  acceptance criterion's own grep sweep — Codex correctly declined to
+  touch them without authorization; the host reviewed and applied all 5
+  directly (one-line path-string edits, zero functional risk).
+- **Verified:** dependency graph identical before/after (by package
+  name); `generate_workspace_map.py --verify` passes — this was the gap
+  that caused Phase 1's first CI failure (`package_family()` derived the
+  wrong family for a crate nested under a layer directory), fixed then
+  and confirmed holding here; `cargo check` succeeds on the 3
+  manually-fixed crates plus a foundation sample.
+
 ## ADR-0003 Phase 1: rustils/rustils_async split, rusty_test → portable-runtime
 **2026-09-15** · spec [`PHASE-1-SPEC.md`](PHASE-1-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 

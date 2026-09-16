@@ -9,6 +9,30 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0003 Phase 2 implemented: 30 foundation crates (26 families —
+  `rpath`, `rusty_ansder`, `rusty_base64`, `rusty_codec`,
+  `rusty_compress`, `rusty_config`, `rusty_crypto_key`, `rusty_diff`,
+  `rusty_err`(+`derive`), `rusty_jinja`, `rusty_json`(+`-derive`),
+  `rusty_libc`, `rusty_rand`, `rusty_regx`, `rusty_retry`, `rusty_rsa`,
+  `rusty_serde`(+its two sub-crates), `rusty_sha1`, `rusty_simd`,
+  `rusty_std`, `rusty_sync`, `rusty_time`, `rusty_url`, `rusty_uuid`,
+  `rusty_win32`, `rusty_wire`) moved to `crates/foundation/`. Deleted the
+  third stale pre-merge nested `[workspace]` manifest,
+  `crates/rusty_serde/Cargo.toml` (`rustils`'s and `rustils_async`'s were
+  deleted in Phase 1). Fixed 3 `libs`-layer manifests
+  (`rusty_oauth`, `rusty_request`, `rusty_rag`) whose dependency on a
+  now-moved foundation crate uses a literal `path` (excluded from Phase
+  0b's hoist by the same `default-features` restriction found there) —
+  updated each path to the new location. Also fixed 5 stale path
+  references in comments (root `Cargo.toml`, `ci.yml`, `rush/src/
+  glob.rs`) caught by the same acceptance-criterion sweep. Mixed
+  authorship: host performed the `git mv`, Codex applied the manifest/
+  doc edits; both inspected by the host. Verified behavior-neutral:
+  dependency graph identical before/after by package name,
+  `generate_workspace_map.py --verify` passes (closing the gap that
+  caused Phase 1's first CI failure), `cargo check` succeeds on the
+  3 manually-fixed crates plus a foundation sample. Built by Codex
+  (`/codex-build`), independently inspected (`PLAN-REVIEW-LOG.md`).
 - ADR-0003 Phase 1 implemented: `rustils` and `rustils_async` split —
   their 7+5 platform crates (plus `winargv`) moved to
   `crates/platform/rustils{,_async}/crates/`, while `coreutils`/

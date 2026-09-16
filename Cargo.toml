@@ -16,13 +16,13 @@ members = [
     "crates/rusty_gpu",
     "crates/rusty_gui",
     "crates/rusty_font",
-    "crates/rusty_regx",
-    "crates/rusty_win32",
-    "crates/rpath",
-    "crates/rusty_diff",
-    "crates/rusty_compress",
+    "crates/foundation/rusty_regx",
+    "crates/foundation/rusty_win32",
+    "crates/foundation/rpath",
+    "crates/foundation/rusty_diff",
+    "crates/foundation/rusty_compress",
     "crates/rusty_git",
-    "crates/rusty_sha1",
+    "crates/foundation/rusty_sha1",
     "crates/rusty_lines",
     "crates/rush",
     "crates/mill-term",
@@ -30,21 +30,21 @@ members = [
     "crates/rusty_tokio",
     "crates/rusty_tokio/rusty_tokio-macros",
     "crates/rusty_rusqlite",
-    "crates/rusty_libc",
+    "crates/foundation/rusty_libc",
     "crates/rusty_acp",
     "crates/rusty_tls",
-    "crates/rusty_serde/rusty_serde",
-    "crates/rusty_serde/rusty_serde_derive",
-    "crates/rusty_serde/rusty_serde_erased",
+    "crates/foundation/rusty_serde/rusty_serde",
+    "crates/foundation/rusty_serde/rusty_serde_derive",
+    "crates/foundation/rusty_serde/rusty_serde_erased",
     "crates/rusty_lsp",
     "crates/rusty_a2a",
     "crates/rusty_mcp/crates/rusty-mcp",
     "crates/rusty_mcp/crates/rusty-mcp-demo",
     "crates/rusty_stream",
-    "crates/rusty_url",
+    "crates/foundation/rusty_url",
     "crates/rusty_http",
-    "crates/rusty_json",
-    "crates/rusty_json/rusty_json-derive",
+    "crates/foundation/rusty_json",
+    "crates/foundation/rusty_json/rusty_json-derive",
     "crates/rusty_oauth",
     "crates/rusty_proxmox",
     "crates/rusty_opnsense",
@@ -66,18 +66,18 @@ members = [
     "crates/platform/rustils_async/crates/platform-async-linux",
     "crates/platform/rustils_async/crates/threading",
     "crates/rustils_async/crates/coreutils-async",
-    "crates/rusty_wire",
-    "crates/rusty_std",
-    "crates/rusty_err",
-    "crates/rusty_err/derive",
+    "crates/foundation/rusty_wire",
+    "crates/foundation/rusty_std",
+    "crates/foundation/rusty_err",
+    "crates/foundation/rusty_err/derive",
     "crates/rusty_request",
-    "crates/rusty_base64",
-    "crates/rusty_rand",
-    "crates/rusty_retry",
-    "crates/rusty_rsa",
+    "crates/foundation/rusty_base64",
+    "crates/foundation/rusty_rand",
+    "crates/foundation/rusty_retry",
+    "crates/foundation/rusty_rsa",
     "crates/rusty_sqlite",
-    "crates/rusty_time",
-    "crates/rusty_uuid",
+    "crates/foundation/rusty_time",
+    "crates/foundation/rusty_uuid",
     "crates/rusty_wiremock",
     "crates/rusty_search/crates/rusty-search-core",
     "crates/rusty_search/crates/rusty-search-memory",
@@ -92,12 +92,12 @@ members = [
     "crates/rusty_search/crates/rusty-search-cloud",
     "crates/rusty_search/crates/rusty-search",
     "crates/rusty_vulkan",
-    "crates/rusty_sync",
-    "crates/rusty_simd",
-    "crates/rusty_codec",
+    "crates/foundation/rusty_sync",
+    "crates/foundation/rusty_simd",
+    "crates/foundation/rusty_codec",
     "crates/rusty_h2",
     "crates/rusty_audio",
-    "crates/rusty_crypto_key",
+    "crates/foundation/rusty_crypto_key",
     "crates/rusty_db/crates/rusty-db-core",
     "crates/rusty_db/crates/rusty-db-derive",
     "crates/rusty_db/crates/rusty-db-sqlite",
@@ -105,9 +105,9 @@ members = [
     "crates/rusty_db/crates/rusty-db-mysql",
     "crates/rusty_db/rusty_db",
     "crates/rusty_ansi",
-    "crates/rusty_config",
-    "crates/rusty_jinja",
-    "crates/rusty_ansder",
+    "crates/foundation/rusty_config",
+    "crates/foundation/rusty_jinja",
+    "crates/foundation/rusty_ansder",
     "crates/rusty_rag",
     "crates/rusty_boot",
     "crates/rusty_whisper",
@@ -247,14 +247,14 @@ members = [
 # (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
 # own, run only via `cd crates/rusty_lines/bench && cargo run --release` —
 # excluded so it doesn't try to join this workspace.
-# crates/rusty_libc/bench is the same shape: its own standalone `[workspace]`
+# crates/foundation/rusty_libc/bench is the same shape: its own standalone `[workspace]`
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
     "crates/rusty_term/fuzz",
     "crates/rush/fuzz",
     "crates/rusty_lines/bench",
-    "crates/rusty_libc/bench",
+    "crates/foundation/rusty_libc/bench",
     "crates/rusty_tls/fuzz",
     "crates/rusty_lsp/fuzz",
     "crates/platform/rustils/fuzz",
@@ -299,43 +299,43 @@ publish = false
 [workspace.dependencies]
 platform-async = { path = "crates/platform/rustils_async/crates/platform-async" }
 platform-async-linux = { path = "crates/platform/rustils_async/crates/platform-async-linux" }
-rpath = { path = "crates/rpath", version = "0.1.0" }
+rpath = { path = "crates/foundation/rpath", version = "0.1.0" }
 rush = { path = "crates/rush" }
 rusty-db = { path = "crates/rusty_db/rusty_db" }
 rusty-whisper = { path = "crates/rusty_whisper" }
 rusty_audio = { path = "crates/rusty_audio" }
-rusty_base64 = { path = "crates/rusty_base64" }
-rusty_codec = { path = "crates/rusty_codec" }
-rusty_compress = { path = "crates/rusty_compress" }
-rusty_diff = { path = "crates/rusty_diff" }
-rusty_err = { path = "crates/rusty_err" }
+rusty_base64 = { path = "crates/foundation/rusty_base64" }
+rusty_codec = { path = "crates/foundation/rusty_codec" }
+rusty_compress = { path = "crates/foundation/rusty_compress" }
+rusty_diff = { path = "crates/foundation/rusty_diff" }
+rusty_err = { path = "crates/foundation/rusty_err" }
 rusty_fedora = { path = "crates/rusty_fedora" }
 rusty_font = { path = "crates/rusty_font" }
 rusty_git = { path = "crates/rusty_git" }
 rusty_gpu = { path = "crates/rusty_gpu" }
 rusty_gui = { path = "crates/rusty_gui" }
-rusty_jinja = { path = "crates/rusty_jinja" }
+rusty_jinja = { path = "crates/foundation/rusty_jinja" }
 rusty_kafka = { path = "crates/rusty_kafka" }
-rusty_libc = { path = "crates/rusty_libc", version = "0.0.1" }
+rusty_libc = { path = "crates/foundation/rusty_libc", version = "0.0.1" }
 rusty_lines = { path = "crates/rusty_lines" }
 rusty_lsp = { path = "crates/rusty_lsp" }
 rusty_opnsense = { path = "crates/rusty_opnsense" }
 rusty_proxmox = { path = "crates/rusty_proxmox" }
-rusty_rand = { path = "crates/rusty_rand" }
-rusty_regx = { path = "crates/rusty_regx", version = "0.5.0" }
+rusty_rand = { path = "crates/foundation/rusty_rand" }
+rusty_regx = { path = "crates/foundation/rusty_regx", version = "0.5.0" }
 rusty_request = { path = "crates/rusty_request" }
-rusty_retry = { path = "crates/rusty_retry" }
-rusty_rsa = { path = "crates/rusty_rsa" }
-rusty_sha1 = { path = "crates/rusty_sha1", version = "0.1.0" }
-rusty_simd = { path = "crates/rusty_simd" }
+rusty_retry = { path = "crates/foundation/rusty_retry" }
+rusty_rsa = { path = "crates/foundation/rusty_rsa" }
+rusty_sha1 = { path = "crates/foundation/rusty_sha1", version = "0.1.0" }
+rusty_simd = { path = "crates/foundation/rusty_simd" }
 rusty_sqlite = { path = "crates/rusty_sqlite" }
-rusty_sync = { path = "crates/rusty_sync" }
+rusty_sync = { path = "crates/foundation/rusty_sync" }
 rusty_term = { path = "crates/rusty_term", version = "0.1.1" }
-rusty_time = { path = "crates/rusty_time" }
-rusty_url = { path = "crates/rusty_url" }
-rusty_uuid = { path = "crates/rusty_uuid" }
+rusty_time = { path = "crates/foundation/rusty_time" }
+rusty_url = { path = "crates/foundation/rusty_url" }
+rusty_uuid = { path = "crates/foundation/rusty_uuid" }
 rusty_vulkan = { path = "crates/rusty_vulkan" }
-rusty_win32 = { path = "crates/rusty_win32", version = "0.1.0" }
+rusty_win32 = { path = "crates/foundation/rusty_win32", version = "0.1.0" }
 rusty_wiremock = { path = "crates/rusty_wiremock" }
 rusty-search-core = { path = "crates/rusty_search/crates/rusty-search-core", version = "0.1.0" }
 rusty-search-memory = { path = "crates/rusty_search/crates/rusty-search-memory", version = "0.1.0" }
@@ -358,7 +358,7 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # rusty_serde is now a sibling in this same workspace -- plain path
 # dependency (previously a pinned git rev, matching the pattern used for
 # every other pin retired in this series).
-rusty_serde = { path = "crates/rusty_serde/rusty_serde", features = ["derive"] }
+rusty_serde = { path = "crates/foundation/rusty_serde/rusty_serde", features = ["derive"] }
 # Feature set is the union of what rusty_search, rusty_db and rusty_skillopt
 # each need -- widened rather than split, so one tokio serves all three.
 tokio = { version = "1", features = [
@@ -386,9 +386,9 @@ rusty-db-mysql = { path = "crates/rusty_db/crates/rusty-db-mysql", version = "0.
 # Already-merged siblings rusty_db depends on -- plain path dependencies,
 # same pin-retirement pattern as everywhere else in this series.
 rusty_tokio = { path = "crates/rusty_tokio" }
-rusty_wire = { path = "crates/rusty_wire" }
-rusty_json = { path = "crates/rusty_json" }
-rusty_std = { path = "crates/rusty_std" }
+rusty_wire = { path = "crates/foundation/rusty_wire" }
+rusty_json = { path = "crates/foundation/rusty_json" }
+rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"
 futures-core = "0.3"
 # `sink` is nexus-collab's (WebSocket relay writes); `futures-util`'s
@@ -551,7 +551,7 @@ ts-engine = { path = "crates/rusty_tailscale/crates/ts-engine" }
 ts-localapi = { path = "crates/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/rusty_http" }
-rusty_crypto_key = { path = "crates/rusty_crypto_key" }
+rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
 http-body-util = "0.1"
