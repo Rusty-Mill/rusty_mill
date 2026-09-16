@@ -100,11 +100,11 @@ without a specific date.
 | [`rusty_homelab_mcp`](crates/rusty_homelab_mcp) | `crates/rusty_homelab_mcp` | MCP server exposing homelab control (Proxmox VE, OPNsense) as tools, built on the `rusty-mcp` scaffold |
 | [`rusty_fedora_agent`](crates/rusty_fedora_agent) | `crates/rusty_fedora_agent` | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP — the backend `rusty_homelab_mcp`'s fedora module talks to |
 | [`rusty_fedora`](crates/rusty_fedora) | `crates/rusty_fedora` | Async client for `rusty_fedora_agent`'s local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write |
-| [`reactor-core`](crates/rustils_async/crates/reactor-core) | `crates/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
-| [`platform-async`](crates/rustils_async/crates/platform-async) | `crates/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
-| [`platform-async-mock`](crates/rustils_async/crates/platform-async-mock) | `crates/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |
-| [`platform-async-linux`](crates/rustils_async/crates/platform-async-linux) | `crates/rustils_async/crates/platform-async-linux` | The real Linux backend for `platform-async`: `pidfd` + `epoll` async wait path |
-| [`threading`](crates/rustils_async/crates/threading) | `crates/rustils_async/crates/threading` | Minimal multithreading primitives: scoped-thread spawn, `Mutex`/`RwLock` with explicit poisoning policy |
+| [`reactor-core`](crates/platform/rustils_async/crates/reactor-core) | `crates/platform/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
+| [`platform-async`](crates/platform/rustils_async/crates/platform-async) | `crates/platform/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
+| [`platform-async-mock`](crates/platform/rustils_async/crates/platform-async-mock) | `crates/platform/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |
+| [`platform-async-linux`](crates/platform/rustils_async/crates/platform-async-linux) | `crates/platform/rustils_async/crates/platform-async-linux` | The real Linux backend for `platform-async`: `pidfd` + `epoll` async wait path |
+| [`threading`](crates/platform/rustils_async/crates/threading) | `crates/platform/rustils_async/crates/threading` | Minimal multithreading primitives: scoped-thread spawn, `Mutex`/`RwLock` with explicit poisoning policy |
 | [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/rusty_wire) | `crates/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/rusty_std) | `crates/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
@@ -149,21 +149,21 @@ without a specific date.
 | [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | [`rusty_rdp`](crates/rusty_rdp) | `crates/rusty_rdp` | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format |
 | [`rusty_voice`](crates/rusty_voice) | `crates/rusty_voice` | A sovereign voice-to-text application leveraging `rusty_whisper` and `rusty_audio`, built exclusively with Rusty Mill libraries |
-| [`platform`](crates/rustils/crates/platform) | `crates/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
-| [`platform-mock`](crates/rustils/crates/platform-mock) | `crates/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
-| [`platform-parity`](crates/rustils/crates/platform-parity) | `crates/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
-| [`platform-linux`](crates/rustils/crates/platform-linux) | `crates/rustils/crates/platform-linux` | Linux backend for `platform`: libc floor, with a `rusty_libc`-backed raw-syscall track behind a feature flag |
-| [`platform-windows`](crates/rustils/crates/platform-windows) | `crates/rustils/crates/platform-windows` | Windows backend for `platform`: `windows-sys` floor, with a `rusty_win32`-backed track behind a feature flag |
-| [`platform-bsd`](crates/rustils/crates/platform-bsd) | `crates/rustils/crates/platform-bsd` | BSD backend for `platform` (net-only slice): macOS, FreeBSD, OpenBSD, NetBSD, DragonFly |
-| [`winargv`](crates/rustils/crates/winargv) | `crates/rustils/crates/winargv` | Windows argv → command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable) |
+| [`platform`](crates/platform/rustils/crates/platform) | `crates/platform/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
+| [`platform-mock`](crates/platform/rustils/crates/platform-mock) | `crates/platform/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
+| [`platform-parity`](crates/platform/rustils/crates/platform-parity) | `crates/platform/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
+| [`platform-linux`](crates/platform/rustils/crates/platform-linux) | `crates/platform/rustils/crates/platform-linux` | Linux backend for `platform`: libc floor, with a `rusty_libc`-backed raw-syscall track behind a feature flag |
+| [`platform-windows`](crates/platform/rustils/crates/platform-windows) | `crates/platform/rustils/crates/platform-windows` | Windows backend for `platform`: `windows-sys` floor, with a `rusty_win32`-backed track behind a feature flag |
+| [`platform-bsd`](crates/platform/rustils/crates/platform-bsd) | `crates/platform/rustils/crates/platform-bsd` | BSD backend for `platform` (net-only slice): macOS, FreeBSD, OpenBSD, NetBSD, DragonFly |
+| [`winargv`](crates/platform/rustils/crates/winargv) | `crates/platform/rustils/crates/winargv` | Windows argv → command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable) |
 | [`coreutils`](crates/rustils/crates/coreutils) | `crates/rustils/crates/coreutils` | Modular pure-Rust implementation of core GNU/POSIX utilities (`rcat`, `rls`, `rrun`, `rgrep`, and more) |
 | [`rusty-croc`](crates/rusty_croc) | `crates/rusty_croc` | Rust port of [croc](https://github.com/schollz/croc): wire-compatible secure peer-to-peer file transfer (PAKE, relay, resume) |
-| [`contract`](crates/rusty_test/crates/contract) | `crates/rusty_test/crates/contract` | Portable tool-runtime trait boundary: one execution contract, no OS-specific code |
-| [`compat`](crates/rusty_test/crates/compat) | `crates/rusty_test/crates/compat` | Per-host adapter implementing `contract` over `cap-std`/`portable-pty`/`dirs` plus `std`'s file locking |
-| [`conformance`](crates/rusty_test/crates/conformance) | `crates/rusty_test/crates/conformance` | Cross-cutting verification of `contract`/`compat`: probe suite and conformance report |
-| [`stat-tool`](crates/rusty_test/tools/stat-tool) | `crates/rusty_test/tools/stat-tool` | Reference tool over `contract`: scoped filesystem primitive |
-| [`proc-runner`](crates/rusty_test/tools/proc-runner) | `crates/rusty_test/tools/proc-runner` | Reference tool over `contract`: process spawn + stdio capture primitive |
-| [`pty-shell`](crates/rusty_test/tools/pty-shell) | `crates/rusty_test/tools/pty-shell` | Reference tool over `contract`: interactive PTY primitive (manual, not CI) |
+| [`contract`](crates/platform/portable-runtime/crates/contract) | `crates/platform/portable-runtime/crates/contract` | Portable tool-runtime trait boundary: one execution contract, no OS-specific code |
+| [`compat`](crates/platform/portable-runtime/crates/compat) | `crates/platform/portable-runtime/crates/compat` | Per-host adapter implementing `contract` over `cap-std`/`portable-pty`/`dirs` plus `std`'s file locking |
+| [`conformance`](crates/platform/portable-runtime/crates/conformance) | `crates/platform/portable-runtime/crates/conformance` | Cross-cutting verification of `contract`/`compat`: probe suite and conformance report |
+| [`stat-tool`](crates/platform/portable-runtime/tools/stat-tool) | `crates/platform/portable-runtime/tools/stat-tool` | Reference tool over `contract`: scoped filesystem primitive |
+| [`proc-runner`](crates/platform/portable-runtime/tools/proc-runner) | `crates/platform/portable-runtime/tools/proc-runner` | Reference tool over `contract`: process spawn + stdio capture primitive |
+| [`pty-shell`](crates/platform/portable-runtime/tools/pty-shell) | `crates/platform/portable-runtime/tools/pty-shell` | Reference tool over `contract`: interactive PTY primitive (manual, not CI) |
 | [`inventory-core`](crates/rusty_inventrory/crates/inventory-core) | `crates/rusty_inventrory/crates/inventory-core` | Local-first encrypted index over the conversation history AI coding tools write to disk |
 | [`inventory-cli`](crates/rusty_inventrory/crates/inventory-cli) | `crates/rusty_inventrory/crates/inventory-cli` | `inv`: search every AI agent and IDE conversation on your machine, from the terminal |
 | [`inventory-tauri`](crates/rusty_inventrory/crates/inventory-tauri) | `crates/rusty_inventrory/crates/inventory-tauri` | Menu-bar app over `inventory-core`: one keystroke to every AI conversation on your machine |

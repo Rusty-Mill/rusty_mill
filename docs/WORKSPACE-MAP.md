@@ -44,6 +44,12 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
+| platform | portable-runtime | compat |  | 4 |
+| platform | portable-runtime | conformance |  | 0 |
+| platform | portable-runtime | contract |  | 5 |
+| platform | portable-runtime | proc-runner |  | 0 |
+| platform | portable-runtime | pty-shell |  | 0 |
+| platform | portable-runtime | stat-tool |  | 0 |
 | platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 19 |
 | platform | rustils | platform-bsd | BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering. | 2 |
 | platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 10 |
@@ -56,12 +62,6 @@ Families are the current directories immediately below `crates/`.
 | platform | rustils_async | platform-async-mock | In-memory async backend for platform-async, wrapping rustils' platform-mock. For consumer tests without a real OS reactor. | 0 |
 | platform | rustils_async | reactor-core | Runtime-agnostic async-io primitives (Rusty-Mill AKB ADR-0160: a provider framework, not a universal capability). No I/O, no unsafe, no hidden runtime. | 1 |
 | platform | rustils_async | threading | Minimal multithreading primitives: scoped-thread spawn with a decoded join outcome, and Mutex/RwLock with an explicit poisoning policy. No unsafe. | 0 |
-| platform | rusty_test | compat |  | 4 |
-| platform | rusty_test | conformance |  | 0 |
-| platform | rusty_test | contract |  | 5 |
-| platform | rusty_test | proc-runner |  | 0 |
-| platform | rusty_test | pty-shell |  | 0 |
-| platform | rusty_test | stat-tool |  | 0 |
 | libs | rusty_a2a | rusty_a2a | A reusable Rust implementation of the Agent2Agent (A2A) protocol (https://a2a-protocol.org) | 2 |
 | libs | rusty_acp | rusty-acp | Agent Communication Protocol (ACP) v0.2.0 for Rust: protocol types, an HTTP client, and a server framework for hosting agents. | 0 |
 | libs | rusty_adk | a2a-agent-server | Serves a Rust ADK agent over A2A, so agents in any language can talk to it | 0 |

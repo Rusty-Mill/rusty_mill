@@ -86,6 +86,28 @@ class WorkspaceLayerTests(unittest.TestCase):
                "C:\\crates\\checkout\\crates\\product\\crates\\core\\Cargo.toml"}
         self.assertEqual(package_family(pkg, "C:\\crates\\checkout"), "product")
 
+    def test_family_skips_the_layer_directory_once_a_family_has_moved_under_it(self) -> None:
+        # ADR-0003 Phase 1: crates/rustils/crates/platform-linux moved to
+        # crates/platform/rustils/crates/platform-linux. The family is
+        # still "rustils", not "platform" (the layer) -- collapsing every
+        # crate in a layer into one fake family would silently disable the
+        # cross-family apps check.
+        pkg = {"name": "platform-linux", "manifest_path":
+               "/work/crates/platform/rustils/crates/platform-linux/Cargo.toml"}
+        self.assertEqual(package_family(pkg, "/work"), "rustils")
+
+    def test_family_of_a_single_crate_family_moved_directly_under_its_layer(self) -> None:
+        # A single-crate family (directory name == crate name) that lands
+        # straight under its layer with no extra nesting, e.g.
+        # crates/foundation/rpath -- family is the crate's own directory
+        # name, not the layer.
+        pkg = {"name": "rpath", "manifest_path": "/work/crates/foundation/rpath/Cargo.toml"}
+        self.assertEqual(package_family(pkg, "/work"), "rpath")
+
+    def test_family_before_any_move_is_unaffected_by_the_layer_skip(self) -> None:
+        pkg = {"name": "rusty_boot", "manifest_path": "/work/crates/rusty_boot/Cargo.toml"}
+        self.assertEqual(package_family(pkg, "/work"), "rusty_boot")
+
 
 if __name__ == "__main__":
     unittest.main()

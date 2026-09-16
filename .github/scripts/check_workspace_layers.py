@@ -40,12 +40,25 @@ def package_layer(package: dict) -> str | None:
 
 
 def package_family(package: dict, workspace_root: str) -> str:
-    """Find the family below workspace-root/crates on either host path syntax."""
+    """Find the family below workspace-root/crates on either host path syntax.
+
+    Before ADR-0003 Phase 1, every member lived at `crates/<family>/...`, so
+    the family was always the second path component. Once a family moves
+    under its layer directory (`crates/<layer>/<family>/...`, e.g.
+    `crates/platform/rustils/crates/platform`), that second component is
+    the layer name instead -- skip it so `platform-linux`'s family stays
+    `rustils`, not `platform` (which would collapse every crate in a layer
+    into one fake "family" and silently disable the cross-family apps
+    check). Both directory shapes coexist during the migration, so this
+    must handle either one.
+    """
     directory = PurePosixPath(package["manifest_path"].replace("\\", "/")).parent
     root = PurePosixPath(workspace_root.replace("\\", "/"))
     parts = directory.relative_to(root).parts
     if len(parts) < 2 or parts[0] != "crates":
         raise ValueError(f"{package['name']}: manifest directory must be under crates/<family>")
+    if parts[1] in LAYER_ORDER and len(parts) >= 3:
+        return parts[2]
     return parts[1]
 
 
