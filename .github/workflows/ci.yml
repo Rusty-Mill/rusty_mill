@@ -432,7 +432,7 @@ jobs:
       - run: npm test
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
-  # reasons (see crates/rusty_win32/Cargo.toml) — this mirrors its own CI's
+  # reasons (see crates/foundation/rusty_win32/Cargo.toml) — this mirrors its own CI's
   # cross-compile pre-check so a Linux-only contributor still gets fast
   # feedback on it without waiting on the windows-latest queue.
   win32-cross-compile-check:
@@ -457,7 +457,7 @@ jobs:
         run: cargo clippy -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std -- -D warnings
 
   # Every other Rust job above passes --all-features, and rusty_config's
-  # own `default = ["std"]` (see crates/rusty_config/Cargo.toml) means
+  # own `default = ["std"]` (see crates/foundation/rusty_config/Cargo.toml) means
   # --all-features never disables it -- so CI has never actually compiled
   # the crate's documented `#![no_std]` + alloc-only code path (see the
   # `#![cfg_attr(not(feature = "std"), no_std)]` line in its src/lib.rs).

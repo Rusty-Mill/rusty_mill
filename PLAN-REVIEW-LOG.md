@@ -713,3 +713,60 @@ Wrote `PHASE-2-SPEC.md`, explicitly requiring the `generate_workspace_map.py
 failure) as an acceptance criterion up front rather than finding it again
 via a red build. Committed and delegated the remaining edits (root
 `Cargo.toml`, 3 manifests, `README.md`) to Codex.
+
+Codex's build (session `01a0a7a9-40a9-7270-b6f6-da0933bca0c6`, exit 0,
+260s) applied all 5 authorized edits correctly and additionally ran its
+own grep sweep against the acceptance criterion — finding 6 stale
+references the spec's exemption list didn't account for, and correctly
+declining to touch any of them without authorization: `PHASE-1-SPEC.md`
+(a merged historical spec the exemption list forgot to add), plus 5
+*comment*-only references (not functional code/config) in `Cargo.toml`,
+`.github/workflows/ci.yml` (×2), and `crates/rush/src/glob.rs` (×2) —
+each a doc comment pointing a human reader at
+`crates/rusty_libc/bench`, `crates/rusty_win32/Cargo.toml`,
+`crates/rusty_config/Cargo.toml`, or `crates/rusty_regx/docs/
+GLOB_DESIGN.md` for further reading, none of them affecting build
+behavior. Fixed all 5 directly (one-line path-string edits, zero
+functional risk) and added `PHASE-1-SPEC.md` to the exemption list;
+re-ran the full grep sweep — zero unexplained hits.
+
+## Inspect — Phase 2 — 2026-09-15
+
+- `git status --short`: exactly 7 files (`Cargo.toml`, `README.md`, the
+  3 manifests, plus the 2 comment-fix files) modified, nothing else.
+- `git diff --numstat`: `Cargo.toml` 56/56, `README.md` 30/30 (pure
+  swaps — 30 member paths + 24 `workspace.dependencies` paths + 1
+  `exclude` entry + 1 comment = 56; 30 crate-table rows × 2 occurrences
+  = 30 numstat-line-pairs).
+- Read the 3 manual manifest fixes (`rusty_oauth`, `rusty_request`,
+  `rusty_rag`) in full: each changes only the `path` value on its one
+  `rusty_json`/`rusty_simd` line, every other key (`default-features`,
+  `features`) untouched, matching the spec exactly.
+- Ran the proof commands myself: `python3 -m unittest discover` → 61
+  passed; `check_workspace_deps.py`, `check_workspace_layers.py`,
+  `generate_workspace_map.py --verify` → **all three exit 0** this time
+  (the map check specifically closes Phase 1's CI-failure gap).
+- **Dependency-graph identity** by package name: 1443 names before and
+  after, **0** changed — confirms the 3 manual path fixes preserved
+  identical resolution, not just that they compile.
+- Compiled the 3 manually-fixed crates plus a representative foundation
+  sample directly (`cargo check -p rusty_oauth -p rusty_request -p
+  rusty_rag -p rusty_std -p rusty_serde -p rusty_json`) — all succeed
+  from the new locations.
+- Investigated several IDE/background-analyzer diagnostics that
+  surfaced against the *main checkout* (`rusty_tokio`/`rusty_stream`
+  io-uring APIs, `rusty_fedora_agent`'s `platform_linux::LinuxSpawner`)
+  during this work — confirmed unrelated: all are `cfg(target_os =
+  "linux")`-gated APIs a Windows-hosted analyzer can't resolve,
+  pre-existing and unaffected by any phase of this migration (`platform-
+  linux` still resolves correctly via `workspace = true`, independently
+  confirmed by the graph-identity check above).
+
+No findings beyond the exemption-list gap, closed by the 5 comment
+fixes above.
+
+### Outcome
+Phase 2 build **verified correct**. Ready to commit, open a PR, and
+expect a large but partial CI matrix (the 30 moved crates plus their
+dependents, plus `rusty_oauth`/`rusty_request`/`rusty_rag` and their own
+dependents).
