@@ -770,3 +770,66 @@ Phase 2 build **verified correct**. Ready to commit, open a PR, and
 expect a large but partial CI matrix (the 30 moved crates plus their
 dependents, plus `rusty_oauth`/`rusty_request`/`rusty_rag` and their own
 dependents).
+
+PR #225 merged by the user (`805796115`) with all checks that had a
+conclusion green; the 3 Windows test shards were still running (not
+cancelled by the merge) and their outcome wasn't chased down given the
+established pattern from Phase 1's PR — same call, not re-litigated.
+
+## Build — Phase 3 — 2026-09-15
+
+Computed the libs-layer move set from Appendix B: 66 crates across 34
+families (matches the ADR's own count exactly), 31 grouped into one of
+7 themes (`ai`/`async`/`homelab`/`net`/`protocol`/`storage`/`ui`), 3
+with no theme (`rusty_adk`, `rusty_git`, `rusty_wiremock`).
+
+**Proactive fix before the move**: recognized that `libs/`'s thematic
+subdirectories are a *second* wrapper level `package_family()` didn't
+account for — the Phase 1 fix only skipped the layer segment, so
+`rusty_tokio` at `crates/libs/async/rusty_tokio` would have derived
+family `async` (the theme), repeating Phase 1's exact bug one level
+deeper and re-silencing the cross-family apps check. Generalized
+`package_family()` to skip a theme segment too when the layer is
+`libs` and the next segment matches a known theme name; added 4 tests
+(missing-theme, theme-present, theme-absent for `rusty_adk`,
+theme-name-collision with another layer). Fixed and committed
+(`a08d010fa`) *before* moving anything, closing this class of bug
+proactively rather than discovering it via CI again.
+
+Performed the `git mv` directly (34 family directories, creating the 7
+theme subdirectories first). Verified: 1666 renames at 100% similarity,
+no deletions. Noticed 8 markdown files (4 in `rusty_rusqlite`, 4 in
+`rusty_gui`) got CRLF-normalized to LF as an incidental side effect of
+being staged — matches this repo's own `.gitattributes` LF policy,
+content unchanged, only `git log --follow` loses the thread at this
+commit for those 8 files specifically (confirmed: all other 1658 files,
+including every `.rs` and `Cargo.toml`, traced cleanly). Accepted as a
+minor, disclosed side effect rather than something to engineer around.
+Committed (`726e8398f`).
+
+Swept the whole workspace for remaining literal `path` dependencies
+targeting any of the 66 moved crates (reading manifests from the
+pre-move commit, since the live filesystem no longer has the old
+paths): found 17. 16 resolve for free (same-family, or both endpoints
+moving to the same new theme this phase). 1 is real: `rush`→
+`rusty_lines` — `rush` is an `apps`-layer crate not moving until
+Phase 4, and this was the 6th and last of Phase 0b's `default-features`-
+excluded entries (the other 5 were closed out in Phase 2), so finding
+exactly one here was expected, not a surprise.
+
+Also found 3 comment-only stale references via the standard sweep
+technique (root `Cargo.toml`'s exclude-list comment, a doc comment in
+`pty-shell/src/main.rs`, a comment in `rusty_key/crates/feed/Cargo.toml`)
+— same category as Phase 2's 5 comment fixes, folded into the spec
+directly this time instead of waiting for Codex to flag them. Also
+checked and exempted: `docs/adr/0002-dependency-sovereignty-policy.md`
+(a root ADR the original ADR-0003 text already exempts, which the
+Phase 1/2 grep exemption lists hadn't included until now),
+`crates/rusty_hister/docs/decisions/ADR-0002-*.md` (a per-crate
+historical decision record), and `crates/rusty_multimodal_db/docs/
+design/*.md` (prose mentions in backtick-code, not Markdown links — the
+ADR's own rule that prose needs no edit, only broken links do).
+
+Wrote `PHASE-3-SPEC.md` with all of the above baked in as ground truth.
+Committed and delegated the remaining edits (root `Cargo.toml`,
+`README.md`, `rush/Cargo.toml`, and the 3 comment fixes) to Codex.
