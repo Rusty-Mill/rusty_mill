@@ -770,3 +770,186 @@ Phase 2 build **verified correct**. Ready to commit, open a PR, and
 expect a large but partial CI matrix (the 30 moved crates plus their
 dependents, plus `rusty_oauth`/`rusty_request`/`rusty_rag` and their own
 dependents).
+
+PR #225 merged by the user (`805796115`) with all checks that had a
+conclusion green; the 3 Windows test shards were still running (not
+cancelled by the merge) and their outcome wasn't chased down given the
+established pattern from Phase 1's PR — same call, not re-litigated.
+
+## Build — Phase 3 — 2026-09-15
+
+Computed the libs-layer move set from Appendix B: 66 crates across 34
+families (matches the ADR's own count exactly), 31 grouped into one of
+7 themes (`ai`/`async`/`homelab`/`net`/`protocol`/`storage`/`ui`), 3
+with no theme (`rusty_adk`, `rusty_git`, `rusty_wiremock`).
+
+**Proactive fix before the move**: recognized that `libs/`'s thematic
+subdirectories are a *second* wrapper level `package_family()` didn't
+account for — the Phase 1 fix only skipped the layer segment, so
+`rusty_tokio` at `crates/libs/async/rusty_tokio` would have derived
+family `async` (the theme), repeating Phase 1's exact bug one level
+deeper and re-silencing the cross-family apps check. Generalized
+`package_family()` to skip a theme segment too when the layer is
+`libs` and the next segment matches a known theme name; added 4 tests
+(missing-theme, theme-present, theme-absent for `rusty_adk`,
+theme-name-collision with another layer). Fixed and committed
+(`a08d010fa`) *before* moving anything, closing this class of bug
+proactively rather than discovering it via CI again.
+
+Performed the `git mv` directly (34 family directories, creating the 7
+theme subdirectories first). Verified: 1666 renames at 100% similarity,
+no deletions. Noticed 8 markdown files (4 in `rusty_rusqlite`, 4 in
+`rusty_gui`) got CRLF-normalized to LF as an incidental side effect of
+being staged — matches this repo's own `.gitattributes` LF policy,
+content unchanged, only `git log --follow` loses the thread at this
+commit for those 8 files specifically (confirmed: all other 1658 files,
+including every `.rs` and `Cargo.toml`, traced cleanly). Accepted as a
+minor, disclosed side effect rather than something to engineer around.
+Committed (`726e8398f`).
+
+Swept the whole workspace for remaining literal `path` dependencies
+targeting any of the 66 moved crates (reading manifests from the
+pre-move commit, since the live filesystem no longer has the old
+paths): found 17. 16 resolve for free (same-family, or both endpoints
+moving to the same new theme this phase). 1 is real: `rush`→
+`rusty_lines` — `rush` is an `apps`-layer crate not moving until
+Phase 4, and this was the 6th and last of Phase 0b's `default-features`-
+excluded entries (the other 5 were closed out in Phase 2), so finding
+exactly one here was expected, not a surprise.
+
+Also found 3 comment-only stale references via the standard sweep
+technique (root `Cargo.toml`'s exclude-list comment, a doc comment in
+`pty-shell/src/main.rs`, a comment in `rusty_key/crates/feed/Cargo.toml`)
+— same category as Phase 2's 5 comment fixes, folded into the spec
+directly this time instead of waiting for Codex to flag them. Also
+checked and exempted: `docs/adr/0002-dependency-sovereignty-policy.md`
+(a root ADR the original ADR-0003 text already exempts, which the
+Phase 1/2 grep exemption lists hadn't included until now),
+`crates/rusty_hister/docs/decisions/ADR-0002-*.md` (a per-crate
+historical decision record), and `crates/rusty_multimodal_db/docs/
+design/*.md` (prose mentions in backtick-code, not Markdown links — the
+ADR's own rule that prose needs no edit, only broken links do).
+
+Wrote `PHASE-3-SPEC.md` with all of the above baked in as ground truth.
+Committed and delegated the remaining edits (root `Cargo.toml`,
+`README.md`, `rush/Cargo.toml`, and the 3 comment fixes) to Codex.
+
+### Round 1 — blocked by two real spec gaps, both found and correctly not silently fixed
+
+Codex's build (session `01a0a7d0-eade-7d41-9225-5ea85923d356`, exit 0,
+218s) applied every edit the spec actually specified, then found two
+real problems the spec's Task 1/2 scoping missed, and proposed but did
+**not** apply fixes for either — deferred both to the host:
+
+1. **Task 1 was incomplete.** The host's workspace.dependencies sweep
+   only checked whether each of the 34 *family* names was a root key —
+   it never checked the actual *package* names of multi-crate families'
+   sub-crates (`adk-core`, `rusty-db-core`, `rusty-search-core`, etc.,
+   and `rusty-whisper`/`rusty-mcp` whose package name differs from their
+   directory name). Re-derived the check properly (compare every one of
+   the 66 members' actual `[package] name` against root
+   `workspace.dependencies` keys, not just the 34 directory names): 48
+   entries needed a path update, not 20 — the spec missed 28.
+2. **Task 2 was incomplete in a different way**: the Phase 2 fixes for
+   `rusty_oauth`/`rusty_request` (→ `rusty_json`) and `rusty_rag` (→
+   `rusty_simd`) used `"../foundation/rusty_json"`-style paths correct
+   for their *Phase-2* location (`crates/rusty_oauth/`). All three are
+   themselves `libs`-layer crates that just moved *this* phase
+   (`crates/libs/net/rusty_oauth/`, etc.) — one level deeper — so the
+   same literal string now resolves to a nonexistent
+   `crates/libs/net/foundation/rusty_json`. The host's Task-2 sweep
+   only checked for literal paths *targeting* a Phase-3 crate; it never
+   re-checked whether a Phase-3-moving crate's own *existing* literal
+   paths (to an already-moved, earlier-phase crate) were still valid
+   after the crate carrying them moved again. Confirmed Codex's exact
+   proposed fix (`"../../../foundation/rusty_json"` /
+   `"../../../foundation/rusty_simd"`) is correct by hand-tracing the
+   new directory depth.
+
+Also confirmed Codex's third flag (`crates/libs/async/rusty_tokio/docs/
+decision-request-real-tokio-interop-bridge.md` citing
+`crates/rusty_request/src/client.rs:609:30`) is a pasted historical
+panic backtrace in a decision-record document — exempt, same principle
+as the per-crate ADR exemption; rewriting a stack trace to match a path
+that didn't exist when the panic happened would be actively wrong, not
+a fix.
+
+Applied all three corrections directly (28 additional root path fixes
+via a small script matching each key precisely, rather than 28 manual
+edits; 3 manual one-line path fixes in `rusty_oauth`/`rusty_request`/
+`rusty_rag`). Re-ran the full grep sweep with the decision-doc exemption
+added — zero unexplained hits.
+
+## Inspect — Phase 3 — 2026-09-15
+
+- `git status --short`: exactly 8 files modified (the 5 Codex touched
+  plus the 3 cascading fixes), nothing else.
+- `cargo metadata --format-version=1 --all-features --locked` succeeds
+  (previously failed outright — `crates/libs/net/foundation/rusty_json/
+  Cargo.toml` did not exist — confirming the bug was real, not
+  theoretical).
+- `check_workspace_deps.py`, `check_workspace_layers.py`,
+  `generate_workspace_map.py --verify` — all exit 0.
+  `docs/WORKSPACE-MAP.md` needed **no regeneration** this phase — its
+  columns are layer/family/crate/description/dependents-count, none of
+  which a pure directory move changes (unlike Phase 1, which changed
+  `package_family()`'s *output* for the first time; Phases 2-3 run
+  against the already-fixed function from the start, so the map never
+  went stale).
+- **Dependency-graph identity** by package name: 1443 names before and
+  after, **0** changed — confirms both the 28-entry fix and the 3
+  cascading fixes are correct, not just that `cargo metadata` no longer
+  errors.
+- Compiled `rusty_oauth`, `rusty_request`, `rusty_rag`, `rush` (the 4
+  crates in the cascading-fix chain) plus a representative sample from
+  the 28-entry fix (`adk-core`, `rusty-db-core`, `rusty-search-core`,
+  `rusty_tokio`) directly — all succeed.
+- `python3 -m unittest discover` → 64 passed (unchanged from prep,
+  Phase 3 touches no script).
+
+No findings beyond the two spec gaps, both closed above.
+
+### Outcome
+Phase 3 build **verified correct**. This phase closes the last of Phase
+0b's 6 `default-features`-excluded entries (`rush`→`rusty_lines`) and
+fully resolves the cross-phase cascading class of bug it exposed
+(Phase-N's fix for a still-moving-later crate needs re-checking every
+time that crate itself moves in a later phase). Ready to commit, open a
+PR, and expect the largest partial CI matrix yet (66 moved crates,
+including `rusty_tokio`/`rusty_http`/`rusty_search`, which much of the
+rest of the workspace depends on).
+
+## CI investigation — PR #226 — 2026-09-15
+
+All 3 `test (windows-latest, ...)` shards failed; every other check
+passed (both `ubuntu-latest` clippy/test, `fmt`, `dependency-policy`,
+`plan`, cross-compile, npm build). Pulled the actual failure summaries:
+
+- Shard 2: `nexus-types::sandbox::tests::
+  workspace_write_roots_include_cwd_extras_and_tmp` — the exact same
+  test and panic line (`sandbox.rs:341:9`) that failed on PR #224.
+- Shard 3: `nexus-terminal::job_object::imp::tests::
+  assign_to_current_process_succeeds_once` — same test that failed on
+  PR #224.
+- Shard 1: `sessionmgr-daemon::supervisor_restart_recovery::
+  a_session_survives_the_daemon_being_killed_and_is_adopted_by_its_
+  replacement`, `TRY 3 FAIL` — a new test, but the same crate and same
+  flaky *class* (daemon/process-supervision lifecycle, inherently
+  OS-timing-sensitive) as PR #224's `sessionmgr-daemon::
+  worktree_lifecycle` failures.
+
+Checked dependency relationships directly: `nexus-types` and
+`nexus-terminal` have zero dependency on any Phase 3 family (same as
+before). `sessionmgr-daemon` *does* depend on `rusty_tokio`, which moved
+this phase — worth stating precisely rather than waving it off. But the
+dependency-graph-identity check already proved `rusty_tokio`'s resolved
+`deps` and `features` are byte-identical before and after this phase's
+move (see Inspect above) — a pure path relocation cannot change the
+runtime behavior of a crate whose resolved dependency graph is
+unchanged. Combined with the test itself being about killing and
+restarting an OS process and checking recovery (inherently timing/
+scheduler-sensitive, not content-sensitive) and matching the exact same
+flaky pattern already established on PR #224 in the same crate family,
+this reads as the same pre-existing Windows-CI flakiness, not a Phase 3
+regression — logged for the record rather than treated as fully
+dismissed without cause.

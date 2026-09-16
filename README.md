@@ -61,45 +61,45 @@ without a specific date.
 
 | Crate | Path | Purpose |
 |---|---|---|
-| [`rusty_term`](crates/rusty_term) | `crates/rusty_term` | Terminal emulator (VT/ANSI parser, optional native GUI/GPU backends) |
-| [`rusty_term_l13`](crates/rusty_term/l13) | `crates/rusty_term/l13` | `rusty_term`'s L13 structured side-channel (MCP + LSP/ACP over private OSC) |
-| [`rusty_gpu`](crates/rusty_gpu) | `crates/rusty_gpu` | `no_std` software framebuffer presenter and SIMD rasterizer |
-| [`rusty_gui`](crates/rusty_gui) | `crates/rusty_gui` | `no_std` windowing, event loop, and clipboard manager |
-| [`rusty_font`](crates/rusty_font) | `crates/rusty_font` | `no_std` TrueType/OpenType parser and glyph rasterizer |
+| [`rusty_term`](crates/libs/ui/rusty_term) | `crates/libs/ui/rusty_term` | Terminal emulator (VT/ANSI parser, optional native GUI/GPU backends) |
+| [`rusty_term_l13`](crates/libs/ui/rusty_term/l13) | `crates/libs/ui/rusty_term/l13` | `rusty_term`'s L13 structured side-channel (MCP + LSP/ACP over private OSC) |
+| [`rusty_gpu`](crates/libs/ui/rusty_gpu) | `crates/libs/ui/rusty_gpu` | `no_std` software framebuffer presenter and SIMD rasterizer |
+| [`rusty_gui`](crates/libs/ui/rusty_gui) | `crates/libs/ui/rusty_gui` | `no_std` windowing, event loop, and clipboard manager |
+| [`rusty_font`](crates/libs/ui/rusty_font) | `crates/libs/ui/rusty_font` | `no_std` TrueType/OpenType parser and glyph rasterizer |
 | [`rusty_regx`](crates/foundation/rusty_regx) | `crates/foundation/rusty_regx` | Zero-dependency, linear-time POSIX ERE regex engine |
 | [`rusty_win32`](crates/foundation/rusty_win32) | `crates/foundation/rusty_win32` | Minimal-dependency Win32 API wrapper (leaf crate) |
 | [`rush`](crates/rush) | `crates/rush` | A small, bash-compatible shell |
-| [`rusty_lines`](crates/rusty_lines) | `crates/rusty_lines` | Hand-rolled readline alternative (emacs/vi keymaps, history, completion hooks) |
+| [`rusty_lines`](crates/libs/ui/rusty_lines) | `crates/libs/ui/rusty_lines` | Hand-rolled readline alternative (emacs/vi keymaps, history, completion hooks) |
 | [`mill-term`](crates/mill-term) | `crates/mill-term` | Integrated terminal + environment launcher hosting `rush` inside `rusty_term` |
 | [`rpath`](crates/foundation/rpath) | `crates/foundation/rpath` | Path translation/normalization for MSYS2/Git Bash/POSIX ↔ Windows |
-| [`rusty_git`](crates/rusty_git) | `crates/rusty_git` | Pure-Rust Git object model, index, refs, and `rgit` CLI |
+| [`rusty_git`](crates/libs/rusty_git) | `crates/libs/rusty_git` | Pure-Rust Git object model, index, refs, and `rgit` CLI |
 | [`rusty_diff`](crates/foundation/rusty_diff) | `crates/foundation/rusty_diff` | Myers/Patience diff algorithms, unified diff formatting, patch application |
 | [`rusty_compress`](crates/foundation/rusty_compress) | `crates/foundation/rusty_compress` | Sans-IO DEFLATE/Gzip/Zlib/LZMA stream compression |
 | [`rusty_text`](crates/rusty_text) | `crates/rusty_text` | Pure-Rust sed (`rsed`) and awk (`rawk`) engines |
-| [`rusty_tokio`](crates/rusty_tokio) | `crates/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
-| [`rusty_tokio-macros`](crates/rusty_tokio/rusty_tokio-macros) | `crates/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
-| [`rusty_rusqlite`](crates/rusty_rusqlite) | `crates/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
+| [`rusty_tokio`](crates/libs/async/rusty_tokio) | `crates/libs/async/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
+| [`rusty_tokio-macros`](crates/libs/async/rusty_tokio/rusty_tokio-macros) | `crates/libs/async/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
+| [`rusty_rusqlite`](crates/libs/storage/rusty_rusqlite) | `crates/libs/storage/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
 | [`rusty_libc`](crates/foundation/rusty_libc) | `crates/foundation/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
-| [`rusty_acp`](crates/rusty_acp) | `crates/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
-| [`rusty_tls`](crates/rusty_tls) | `crates/rusty_tls` | A `rustls`-based TLS library, with an optional `rusty_tokio`-backed async stream and an experimental hand-rolled record-layer engine |
+| [`rusty_acp`](crates/libs/protocol/rusty_acp) | `crates/libs/protocol/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
+| [`rusty_tls`](crates/libs/net/rusty_tls) | `crates/libs/net/rusty_tls` | A `rustls`-based TLS library, with an optional `rusty_tokio`-backed async stream and an experimental hand-rolled record-layer engine |
 | [`rusty_serde`](crates/foundation/rusty_serde/rusty_serde) | `crates/foundation/rusty_serde/rusty_serde` | Hand-rolled, dependency-free `Serialize`/`Deserialize` data model plus JSON and RON-inspired formats |
 | [`rusty_serde_derive`](crates/foundation/rusty_serde/rusty_serde_derive) | `crates/foundation/rusty_serde/rusty_serde_derive` | `rusty_serde`'s `#[derive(Serialize, Deserialize)]` proc-macro, hand-written directly on `proc_macro` (no `syn`/`quote`) |
 | [`rusty_serde_erased`](crates/foundation/rusty_serde/rusty_serde_erased) | `crates/foundation/rusty_serde/rusty_serde_erased` | Minimal unsafe primitive erasing a serializer/deserializer's associated `Ok` type across an object-safe boundary — internal to `rusty_serde` |
-| [`rusty_lsp`](crates/rusty_lsp) | `crates/rusty_lsp` | Small, reusable async Language Server Protocol framework: own the protocol plumbing, implement one trait for your language |
-| [`rusty_a2a`](crates/rusty_a2a) | `crates/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
-| [`rusty-mcp`](crates/rusty_mcp/crates/rusty-mcp) | `crates/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
-| [`rusty-mcp-demo`](crates/rusty_mcp/crates/rusty-mcp-demo) | `crates/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
-| [`rusty_stream`](crates/rusty_stream) | `crates/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
+| [`rusty_lsp`](crates/libs/protocol/rusty_lsp) | `crates/libs/protocol/rusty_lsp` | Small, reusable async Language Server Protocol framework: own the protocol plumbing, implement one trait for your language |
+| [`rusty_a2a`](crates/libs/protocol/rusty_a2a) | `crates/libs/protocol/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
+| [`rusty-mcp`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
+| [`rusty-mcp-demo`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
+| [`rusty_stream`](crates/libs/async/rusty_stream) | `crates/libs/async/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty_url`](crates/foundation/rusty_url) | `crates/foundation/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
-| [`rusty_http`](crates/rusty_http) | `crates/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
+| [`rusty_http`](crates/libs/net/rusty_http) | `crates/libs/net/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
 | [`rusty_json`](crates/foundation/rusty_json) | `crates/foundation/rusty_json` | From-scratch JSON library, `no_std`-capable, with `serde` interop |
 | [`rusty_json-derive`](crates/foundation/rusty_json/rusty_json-derive) | `crates/foundation/rusty_json/rusty_json-derive` | `rusty_json`'s `#[derive(RustyJson)]` proc-macro |
-| [`rusty_oauth`](crates/rusty_oauth) | `crates/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |
-| [`rusty_proxmox`](crates/rusty_proxmox) | `crates/rusty_proxmox` | Async client for the Proxmox VE REST API: nodes, guests (QEMU/LXC), and power control |
-| [`rusty_opnsense`](crates/rusty_opnsense) | `crates/rusty_opnsense` | Async client for the OPNsense REST API: system status, services, interfaces, firewall aliases, and gateways |
+| [`rusty_oauth`](crates/libs/net/rusty_oauth) | `crates/libs/net/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |
+| [`rusty_proxmox`](crates/libs/homelab/rusty_proxmox) | `crates/libs/homelab/rusty_proxmox` | Async client for the Proxmox VE REST API: nodes, guests (QEMU/LXC), and power control |
+| [`rusty_opnsense`](crates/libs/homelab/rusty_opnsense) | `crates/libs/homelab/rusty_opnsense` | Async client for the OPNsense REST API: system status, services, interfaces, firewall aliases, and gateways |
 | [`rusty_homelab_mcp`](crates/rusty_homelab_mcp) | `crates/rusty_homelab_mcp` | MCP server exposing homelab control (Proxmox VE, OPNsense) as tools, built on the `rusty-mcp` scaffold |
 | [`rusty_fedora_agent`](crates/rusty_fedora_agent) | `crates/rusty_fedora_agent` | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP — the backend `rusty_homelab_mcp`'s fedora module talks to |
-| [`rusty_fedora`](crates/rusty_fedora) | `crates/rusty_fedora` | Async client for `rusty_fedora_agent`'s local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write |
+| [`rusty_fedora`](crates/libs/homelab/rusty_fedora) | `crates/libs/homelab/rusty_fedora` | Async client for `rusty_fedora_agent`'s local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write |
 | [`reactor-core`](crates/platform/rustils_async/crates/reactor-core) | `crates/platform/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
 | [`platform-async`](crates/platform/rustils_async/crates/platform-async) | `crates/platform/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
 | [`platform-async-mock`](crates/platform/rustils_async/crates/platform-async-mock) | `crates/platform/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |
@@ -110,44 +110,44 @@ without a specific date.
 | [`rusty_std`](crates/foundation/rusty_std) | `crates/foundation/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
 | [`rusty_err`](crates/foundation/rusty_err) | `crates/foundation/rusty_err` | `no_std` + `alloc` sovereign error trait, context extension, and proc-macro error derive library, built on `rusty_std` |
 | [`rusty_err_derive`](crates/foundation/rusty_err/derive) | `crates/foundation/rusty_err/derive` | `rusty_err`'s `#[derive(Error)]` proc-macro |
-| [`rusty_request`](crates/rusty_request) | `crates/rusty_request` | Async HTTP client (a Rust take on Python's `requests`), built on `rusty_tokio`/`rusty_tls`/`rusty_http` |
-| [`rusty_sqlite`](crates/rusty_sqlite) | `crates/rusty_sqlite` | A thin, ergonomic wrapper over `rusqlite`: bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management |
+| [`rusty_request`](crates/libs/net/rusty_request) | `crates/libs/net/rusty_request` | Async HTTP client (a Rust take on Python's `requests`), built on `rusty_tokio`/`rusty_tls`/`rusty_http` |
+| [`rusty_sqlite`](crates/libs/storage/rusty_sqlite) | `crates/libs/storage/rusty_sqlite` | A thin, ergonomic wrapper over `rusqlite`: bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management |
 | [`rusty_time`](crates/foundation/rusty_time) | `crates/foundation/rusty_time` | `no_std` + `alloc` sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate, built on `rusty_std` |
 | [`rusty_uuid`](crates/foundation/rusty_uuid) | `crates/foundation/rusty_uuid` | Minimal, dependency-free UUID v4 generation |
-| [`rusty_wiremock`](crates/rusty_wiremock) | `crates/rusty_wiremock` | `no_std` + `alloc` sovereign HTTP mock server and request matcher for Rusty Mill test suites, built on `rusty_http`/`rusty_json`/`rusty_std` |
-| [`rusty-search-core`](crates/rusty_search/crates/rusty-search-core) | `crates/rusty_search/crates/rusty-search-core` | Backend-agnostic async search interface: documents, schema, query DSL, and the pluggable `SearchBackend` trait |
-| [`rusty-search-memory`](crates/rusty_search/crates/rusty-search-memory) | `crates/rusty_search/crates/rusty-search-memory` | In-memory `SearchBackend` implementation: no external engine required |
-| [`rusty-search-tantivy`](crates/rusty_search/crates/rusty-search-tantivy) | `crates/rusty_search/crates/rusty-search-tantivy` | Tantivy-backed `SearchBackend` implementation: embedded full-text search |
-| [`rusty-search-sqlite-fts5`](crates/rusty_search/crates/rusty-search-sqlite-fts5) | `crates/rusty_search/crates/rusty-search-sqlite-fts5` | SQLite FTS5-backed `SearchBackend` implementation: embedded full-text search via SQL virtual tables |
-| [`rusty-search-elasticsearch`](crates/rusty_search/crates/rusty-search-elasticsearch) | `crates/rusty_search/crates/rusty-search-elasticsearch` | Elasticsearch-backed `SearchBackend` implementation: a remote HTTP search cluster |
-| [`rusty-search-meilisearch`](crates/rusty_search/crates/rusty-search-meilisearch) | `crates/rusty_search/crates/rusty-search-meilisearch` | Meilisearch-backed `SearchBackend` implementation: a remote HTTP search engine |
-| [`rusty-search-opensearch`](crates/rusty_search/crates/rusty-search-opensearch) | `crates/rusty_search/crates/rusty-search-opensearch` | OpenSearch-backed `SearchBackend` implementation: a remote HTTP search cluster |
-| [`rusty-search-solr`](crates/rusty_search/crates/rusty-search-solr) | `crates/rusty_search/crates/rusty-search-solr` | Apache Solr-backed `SearchBackend` implementation: a remote HTTP search cluster |
-| [`rusty-search-algolia`](crates/rusty_search/crates/rusty-search-algolia) | `crates/rusty_search/crates/rusty-search-algolia` | Algolia-backed `SearchBackend` implementation: a hosted search SaaS |
-| [`rusty-search-azure-search`](crates/rusty_search/crates/rusty-search-azure-search) | `crates/rusty_search/crates/rusty-search-azure-search` | Azure AI Search-backed `SearchBackend` implementation: a hosted search-as-a-service on Azure |
-| [`rusty-search-cloud`](crates/rusty_search/crates/rusty-search-cloud) | `crates/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
-| [`rusty-search`](crates/rusty_search/crates/rusty-search) | `crates/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
-| [`rusty_vulkan`](crates/rusty_vulkan) | `crates/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
+| [`rusty_wiremock`](crates/libs/rusty_wiremock) | `crates/libs/rusty_wiremock` | `no_std` + `alloc` sovereign HTTP mock server and request matcher for Rusty Mill test suites, built on `rusty_http`/`rusty_json`/`rusty_std` |
+| [`rusty-search-core`](crates/libs/storage/rusty_search/crates/rusty-search-core) | `crates/libs/storage/rusty_search/crates/rusty-search-core` | Backend-agnostic async search interface: documents, schema, query DSL, and the pluggable `SearchBackend` trait |
+| [`rusty-search-memory`](crates/libs/storage/rusty_search/crates/rusty-search-memory) | `crates/libs/storage/rusty_search/crates/rusty-search-memory` | In-memory `SearchBackend` implementation: no external engine required |
+| [`rusty-search-tantivy`](crates/libs/storage/rusty_search/crates/rusty-search-tantivy) | `crates/libs/storage/rusty_search/crates/rusty-search-tantivy` | Tantivy-backed `SearchBackend` implementation: embedded full-text search |
+| [`rusty-search-sqlite-fts5`](crates/libs/storage/rusty_search/crates/rusty-search-sqlite-fts5) | `crates/libs/storage/rusty_search/crates/rusty-search-sqlite-fts5` | SQLite FTS5-backed `SearchBackend` implementation: embedded full-text search via SQL virtual tables |
+| [`rusty-search-elasticsearch`](crates/libs/storage/rusty_search/crates/rusty-search-elasticsearch) | `crates/libs/storage/rusty_search/crates/rusty-search-elasticsearch` | Elasticsearch-backed `SearchBackend` implementation: a remote HTTP search cluster |
+| [`rusty-search-meilisearch`](crates/libs/storage/rusty_search/crates/rusty-search-meilisearch) | `crates/libs/storage/rusty_search/crates/rusty-search-meilisearch` | Meilisearch-backed `SearchBackend` implementation: a remote HTTP search engine |
+| [`rusty-search-opensearch`](crates/libs/storage/rusty_search/crates/rusty-search-opensearch) | `crates/libs/storage/rusty_search/crates/rusty-search-opensearch` | OpenSearch-backed `SearchBackend` implementation: a remote HTTP search cluster |
+| [`rusty-search-solr`](crates/libs/storage/rusty_search/crates/rusty-search-solr) | `crates/libs/storage/rusty_search/crates/rusty-search-solr` | Apache Solr-backed `SearchBackend` implementation: a remote HTTP search cluster |
+| [`rusty-search-algolia`](crates/libs/storage/rusty_search/crates/rusty-search-algolia) | `crates/libs/storage/rusty_search/crates/rusty-search-algolia` | Algolia-backed `SearchBackend` implementation: a hosted search SaaS |
+| [`rusty-search-azure-search`](crates/libs/storage/rusty_search/crates/rusty-search-azure-search) | `crates/libs/storage/rusty_search/crates/rusty-search-azure-search` | Azure AI Search-backed `SearchBackend` implementation: a hosted search-as-a-service on Azure |
+| [`rusty-search-cloud`](crates/libs/storage/rusty_search/crates/rusty-search-cloud) | `crates/libs/storage/rusty_search/crates/rusty-search-cloud` | Sovereign zero-dependency HTTP JSON remote cloud search provider |
+| [`rusty-search`](crates/libs/storage/rusty_search/crates/rusty-search) | `crates/libs/storage/rusty_search/crates/rusty-search` | Async, pluggable search interface: swap search engines without changing application code |
+| [`rusty_vulkan`](crates/libs/ui/rusty_vulkan) | `crates/libs/ui/rusty_vulkan` | `no_std` + `alloc` sovereign raw Vulkan hardware command buffer and GPU surface layer (Windows-only for now), built on `rusty_win32` |
 | [`rusty_sync`](crates/foundation/rusty_sync) | `crates/foundation/rusty_sync` | `no_std` + `alloc` sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate, built on `rusty_std` |
 | [`rusty_simd`](crates/foundation/rusty_simd) | `crates/foundation/rusty_simd` | Zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference |
 | [`rusty_codec`](crates/foundation/rusty_codec) | `crates/foundation/rusty_codec` | `no_std` + `alloc` sovereign TOML configuration parser and binary buffer serialization crate, built on `rusty_wire`/`rusty_std` |
-| [`rusty_h2`](crates/rusty_h2) | `crates/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
-| [`rusty_audio`](crates/rusty_audio) | `crates/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
+| [`rusty_h2`](crates/libs/net/rusty_h2) | `crates/libs/net/rusty_h2` | A from-scratch HTTP/2 (RFC 9113) implementation, including HPACK header compression |
+| [`rusty_audio`](crates/libs/ui/rusty_audio) | `crates/libs/ui/rusty_audio` | `no_std` + `alloc` sovereign PCM audio capture and playback device driver (hand-written WASAPI COM FFI on Windows, ALSA on Linux) |
 | [`rusty_crypto_key`](crates/foundation/rusty_crypto_key) | `crates/foundation/rusty_crypto_key` | A zeroize-on-drop key storage and file persistence micro-crate (`0600` permissions on Unix) |
-| [`rusty-db-core`](crates/rusty_db/crates/rusty-db-core) | `crates/rusty_db/crates/rusty-db-core` | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of `rusty_db`) |
-| [`rusty-db-derive`](crates/rusty_db/crates/rusty-db-derive) | `crates/rusty_db/crates/rusty-db-derive` | `#[derive(Mapped)]` macro for `rusty_db`: maps a struct to a table |
-| [`rusty-db-sqlite`](crates/rusty_db/crates/rusty-db-sqlite) | `crates/rusty_db/crates/rusty-db-sqlite` | SQLite driver for `rusty_db`, built on `sqlx` |
-| [`rusty-db-postgres`](crates/rusty_db/crates/rusty-db-postgres) | `crates/rusty_db/crates/rusty-db-postgres` | PostgreSQL driver for `rusty_db`, built on `sqlx` |
-| [`rusty-db-mysql`](crates/rusty_db/crates/rusty-db-mysql) | `crates/rusty_db/crates/rusty-db-mysql` | MySQL/MariaDB driver for `rusty_db`, built on `sqlx` |
-| [`rusty-db`](crates/rusty_db/rusty_db) | `crates/rusty_db/rusty_db` | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
-| [`rusty_ansi`](crates/rusty_ansi) | `crates/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
+| [`rusty-db-core`](crates/libs/storage/rusty_db/crates/rusty-db-core) | `crates/libs/storage/rusty_db/crates/rusty-db-core` | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of `rusty_db`) |
+| [`rusty-db-derive`](crates/libs/storage/rusty_db/crates/rusty-db-derive) | `crates/libs/storage/rusty_db/crates/rusty-db-derive` | `#[derive(Mapped)]` macro for `rusty_db`: maps a struct to a table |
+| [`rusty-db-sqlite`](crates/libs/storage/rusty_db/crates/rusty-db-sqlite) | `crates/libs/storage/rusty_db/crates/rusty-db-sqlite` | SQLite driver for `rusty_db`, built on `sqlx` |
+| [`rusty-db-postgres`](crates/libs/storage/rusty_db/crates/rusty-db-postgres) | `crates/libs/storage/rusty_db/crates/rusty-db-postgres` | PostgreSQL driver for `rusty_db`, built on `sqlx` |
+| [`rusty-db-mysql`](crates/libs/storage/rusty_db/crates/rusty-db-mysql) | `crates/libs/storage/rusty_db/crates/rusty-db-mysql` | MySQL/MariaDB driver for `rusty_db`, built on `sqlx` |
+| [`rusty-db`](crates/libs/storage/rusty_db/rusty_db) | `crates/libs/storage/rusty_db/rusty_db` | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
+| [`rusty_ansi`](crates/libs/ui/rusty_ansi) | `crates/libs/ui/rusty_ansi` | Zero-allocation, `no_std` VT100/CSI/OSC ANSI escape sequence parser core |
 | [`rusty_config`](crates/foundation/rusty_config) | `crates/foundation/rusty_config` | Zero-dependency, `no_std` INI and Key-Value configuration file parser |
 | [`rusty_jinja`](crates/foundation/rusty_jinja) | `crates/foundation/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
 | [`rusty_ansder`](crates/foundation/rusty_ansder) | `crates/foundation/rusty_ansder` | ASN.1 BER/DER TLV encoder and decoder, built on `rusty_wire` |
-| [`rusty_rag`](crates/rusty_rag) | `crates/rusty_rag` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine, built on `rusty_simd`; split out of `rusty_ansder`, which used to bundle both under one portmanteau name |
+| [`rusty_rag`](crates/libs/ai/rusty_rag) | `crates/libs/ai/rusty_rag` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine, built on `rusty_simd`; split out of `rusty_ansder`, which used to bundle both under one portmanteau name |
 | [`rusty_boot`](crates/rusty_boot) | `crates/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
-| [`rusty-whisper`](crates/rusty_whisper) | `crates/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
-| [`rusty_rdp`](crates/rusty_rdp) | `crates/rusty_rdp` | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format |
+| [`rusty-whisper`](crates/libs/ai/rusty_whisper) | `crates/libs/ai/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
+| [`rusty_rdp`](crates/libs/net/rusty_rdp) | `crates/libs/net/rusty_rdp` | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format |
 | [`rusty_voice`](crates/rusty_voice) | `crates/rusty_voice` | A sovereign voice-to-text application leveraging `rusty_whisper` and `rusty_audio`, built exclusively with Rusty Mill libraries |
 | [`platform`](crates/platform/rustils/crates/platform) | `crates/platform/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/platform/rustils/crates/platform-mock) | `crates/platform/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
@@ -179,7 +179,7 @@ without a specific date.
 | [`rk-mcp`](crates/rusty_key/crates/mcp) | `crates/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
 | [`rk-compose`](crates/rusty_key/crates/compose) | `crates/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
 | [`rk-app`](crates/rusty_key/crates/app) | `crates/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
-| [`rusty_llama`](crates/rusty_llama) | `crates/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
+| [`rusty_llama`](crates/libs/ai/rusty_llama) | `crates/libs/ai/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
 | [`ts-types`](crates/rusty_tailscale/crates/ts-types) | `crates/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
 | [`ts-key`](crates/rusty_tailscale/crates/ts-key) | `crates/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
 | [`ts-control`](crates/rusty_tailscale/crates/ts-control) | `crates/rusty_tailscale/crates/ts-control` | ts2021 control-plane client: Noise (control base) handshake and the map session |
@@ -196,20 +196,20 @@ without a specific date.
 | [`ts-daemon`](crates/rusty_tailscale/crates/ts-daemon) | `crates/rusty_tailscale/crates/ts-daemon` | `ts-daemon`: the long-running node daemon |
 | [`ts-cli`](crates/rusty_tailscale/crates/ts-cli) | `crates/rusty_tailscale/crates/ts-cli` | `ts-cli`: the LocalAPI-driven command line client |
 | [`xtask`](crates/rusty_tailscale/xtask) | `crates/rusty_tailscale/xtask` | `rusty_tailscale`'s integration harness: Headscale in a container, multi-node NAT simulation |
-| [`adk-core`](crates/rusty_adk/crates/adk-core) | `crates/rusty_adk/crates/adk-core` | ADK 2.0's data model: events, content, state, and the tool/callback contracts |
-| [`adk-macros`](crates/rusty_adk/crates/adk-macros) | `crates/rusty_adk/crates/adk-macros` | `#[tool]` and friends: `adk-core`'s derive/attribute macros |
-| [`adk-tools`](crates/rusty_adk/crates/adk-tools) | `crates/rusty_adk/crates/adk-tools` | Built-in tool implementations and the tool registry |
-| [`adk-models`](crates/rusty_adk/crates/adk-models) | `crates/rusty_adk/crates/adk-models` | LLM provider adapters for the ADK runtime |
-| [`adk-sessions`](crates/rusty_adk/crates/adk-sessions) | `crates/rusty_adk/crates/adk-sessions` | Session and event persistence (in-memory and SQLite stores) |
-| [`adk-graph`](crates/rusty_adk/crates/adk-graph) | `crates/rusty_adk/crates/adk-graph` | ADK 2.0's graph-based execution engine |
-| [`adk-agents`](crates/rusty_adk/crates/adk-agents) | `crates/rusty_adk/crates/adk-agents` | Agent types built on the graph engine: LLM, sequential, parallel, loop |
-| [`adk-runner`](crates/rusty_adk/crates/adk-runner) | `crates/rusty_adk/crates/adk-runner` | The runner: drives an agent over a session and streams its events |
-| [`adk-mcp`](crates/rusty_adk/crates/adk-mcp) | `crates/rusty_adk/crates/adk-mcp` | MCP bridge: consume MCP servers as ADK tools, and serve ADK tools over MCP |
-| [`adk-a2a`](crates/rusty_adk/crates/adk-a2a) | `crates/rusty_adk/crates/adk-a2a` | A2A bridge: serve a Rust ADK agent over the Agent2Agent protocol |
-| [`rusty-adk`](crates/rusty_adk/crates/rusty-adk) | `crates/rusty_adk/crates/rusty-adk` | The `rusty-adk` facade crate re-exporting the ADK stack |
-| [`weather-agent`](crates/rusty_adk/examples/weather-agent) | `crates/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
-| [`mcp-tool-server`](crates/rusty_adk/examples/mcp-tool-server) | `crates/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
-| [`a2a-agent-server`](crates/rusty_adk/examples/a2a-agent-server) | `crates/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
+| [`adk-core`](crates/libs/rusty_adk/crates/adk-core) | `crates/libs/rusty_adk/crates/adk-core` | ADK 2.0's data model: events, content, state, and the tool/callback contracts |
+| [`adk-macros`](crates/libs/rusty_adk/crates/adk-macros) | `crates/libs/rusty_adk/crates/adk-macros` | `#[tool]` and friends: `adk-core`'s derive/attribute macros |
+| [`adk-tools`](crates/libs/rusty_adk/crates/adk-tools) | `crates/libs/rusty_adk/crates/adk-tools` | Built-in tool implementations and the tool registry |
+| [`adk-models`](crates/libs/rusty_adk/crates/adk-models) | `crates/libs/rusty_adk/crates/adk-models` | LLM provider adapters for the ADK runtime |
+| [`adk-sessions`](crates/libs/rusty_adk/crates/adk-sessions) | `crates/libs/rusty_adk/crates/adk-sessions` | Session and event persistence (in-memory and SQLite stores) |
+| [`adk-graph`](crates/libs/rusty_adk/crates/adk-graph) | `crates/libs/rusty_adk/crates/adk-graph` | ADK 2.0's graph-based execution engine |
+| [`adk-agents`](crates/libs/rusty_adk/crates/adk-agents) | `crates/libs/rusty_adk/crates/adk-agents` | Agent types built on the graph engine: LLM, sequential, parallel, loop |
+| [`adk-runner`](crates/libs/rusty_adk/crates/adk-runner) | `crates/libs/rusty_adk/crates/adk-runner` | The runner: drives an agent over a session and streams its events |
+| [`adk-mcp`](crates/libs/rusty_adk/crates/adk-mcp) | `crates/libs/rusty_adk/crates/adk-mcp` | MCP bridge: consume MCP servers as ADK tools, and serve ADK tools over MCP |
+| [`adk-a2a`](crates/libs/rusty_adk/crates/adk-a2a) | `crates/libs/rusty_adk/crates/adk-a2a` | A2A bridge: serve a Rust ADK agent over the Agent2Agent protocol |
+| [`rusty-adk`](crates/libs/rusty_adk/crates/rusty-adk) | `crates/libs/rusty_adk/crates/rusty-adk` | The `rusty-adk` facade crate re-exporting the ADK stack |
+| [`weather-agent`](crates/libs/rusty_adk/examples/weather-agent) | `crates/libs/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
+| [`mcp-tool-server`](crates/libs/rusty_adk/examples/mcp-tool-server) | `crates/libs/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
+| [`a2a-agent-server`](crates/libs/rusty_adk/examples/a2a-agent-server) | `crates/libs/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
 | [`rp-core`](crates/rusty_provider/crates/core) | `crates/rusty_provider/crates/core` | Unified OpenAI-shaped request/response types and the provider trait |
 | [`rp-providers`](crates/rusty_provider/crates/providers) | `crates/rusty_provider/crates/providers` | Provider adapters: OpenAI, Anthropic, Gemini, Groq, Together AI, Fireworks |
 | [`rp-router`](crates/rusty_provider/crates/router) | `crates/rusty_provider/crates/router` | Config-driven routing: fallback chains, budgets, metrics, and usage persistence |
@@ -282,7 +282,7 @@ without a specific date.
 | [`rusty_rand`](crates/foundation/rusty_rand) | `crates/foundation/rusty_rand` | OS-backed cryptographically secure random bytes (`/dev/urandom`/`BCryptGenRandom`), the CSPRNG shared by `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc` |
 | [`rusty_retry`](crates/foundation/rusty_retry) | `crates/foundation/rusty_retry` | Exponential backoff with jitter and `Retry-After` delta-seconds parsing, the retry mechanism shared by `rusty_request` and `rusty_acp` |
 | [`rusty_rsa`](crates/foundation/rusty_rsa) | `crates/foundation/rusty_rsa` | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256, the primitives `rusty_oauth` and `rusty_rdp` each independently reimplemented for RSA public-key verification/encryption |
-| [`rusty_kafka`](crates/rusty_kafka) | `crates/rusty_kafka` | Hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on `rusty_wire` and `rusty_tokio` |
+| [`rusty_kafka`](crates/libs/net/rusty_kafka) | `crates/libs/net/rusty_kafka` | Hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty-meshed-core`](crates/rusty_meshed/crates/rusty-meshed-core) | `crates/rusty_meshed/crates/rusty-meshed-core` | `rusty_meshed`'s shared platform config: env-prefixed settings loaded once and injected into every other `rusty_meshed` crate |
 | [`rusty-meshed-schema-registry`](crates/rusty_meshed/crates/rusty-meshed-schema-registry) | `crates/rusty_meshed/crates/rusty-meshed-schema-registry` | Confluent Schema Registry client and compatibility-mode enforcement, ported from `meshed.schema_registry` |
 | [`rusty-meshed-governance`](crates/rusty_meshed/crates/rusty-meshed-governance) | `crates/rusty_meshed/crates/rusty-meshed-governance` | Policy-as-code governance engine and built-in policies, ported from `meshed.governance` |

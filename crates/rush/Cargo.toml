@@ -20,7 +20,7 @@ rusty_regx = { workspace = true }
 # raw-mode terminal, emacs + vi keymaps, kill ring, undo, history search,
 # bracketed paste, $RPS1 right prompt. rush drives it through its `Hooks`
 # trait (completion, hints, highlighting, abbreviations, vi-mode flag).
-rusty_lines = { path = "../rusty_lines", version = "0.4.0", default-features = false }
+rusty_lines = { path = "../libs/ui/rusty_lines", version = "0.4.0", default-features = false }
 # Path translation/normalization for MSYS2/Git Bash/POSIX-style paths on
 # Windows. Not yet wired into any call site.
 rpath = { workspace = true }

@@ -18,7 +18,7 @@ categories = ["science"]
 layer = "libs"
 
 [dependencies]
-rusty_simd = { path = "../foundation/rusty_simd", default-features = false }
+rusty_simd = { path = "../../../foundation/rusty_simd", default-features = false }
 
 [features]
 default = ["std"]

@@ -12,6 +12,11 @@ from pathlib import Path, PurePosixPath
 # docs/adr/0003-workspace-layout-by-layer.md, Appendix A (layer-order).
 LAYER_ORDER = ("foundation", "platform", "libs", "apps", "tools")
 
+# docs/adr/0003-workspace-layout-by-layer.md, "libs/ subdirectories" table.
+# Only libs/ groups families by theme; the other four layers place a family
+# directly under the layer (see package_family()).
+LIBS_THEMES = frozenset({"ai", "async", "homelab", "net", "protocol", "storage", "ui"})
+
 
 def workspace_packages(metadata: dict) -> dict[str, dict]:
     """Index workspace members by their resolved package IDs."""
@@ -49,17 +54,27 @@ def package_family(package: dict, workspace_root: str) -> str:
     the layer name instead -- skip it so `platform-linux`'s family stays
     `rustils`, not `platform` (which would collapse every crate in a layer
     into one fake "family" and silently disable the cross-family apps
-    check). Both directory shapes coexist during the migration, so this
-    must handle either one.
+    check). `libs/` adds a second wrapper level, grouping some (not all)
+    families by theme (`crates/libs/async/rusty_tokio`) -- skip that too
+    when present, so `rusty_tokio`'s family stays `rusty_tokio`, not
+    `async` (which would collapse every crate in a theme the same way).
+    All of these directory shapes coexist during the migration, so this
+    must handle each one.
     """
     directory = PurePosixPath(package["manifest_path"].replace("\\", "/")).parent
     root = PurePosixPath(workspace_root.replace("\\", "/"))
     parts = directory.relative_to(root).parts
     if len(parts) < 2 or parts[0] != "crates":
         raise ValueError(f"{package['name']}: manifest directory must be under crates/<family>")
-    if parts[1] in LAYER_ORDER and len(parts) >= 3:
-        return parts[2]
-    return parts[1]
+    index = 1
+    if parts[index] in LAYER_ORDER:
+        layer = parts[index]
+        index += 1
+        if layer == "libs" and index < len(parts) and parts[index] in LIBS_THEMES:
+            index += 1
+    if index >= len(parts):
+        raise ValueError(f"{package['name']}: no family segment found after layer/theme")
+    return parts[index]
 
 
 def workspace_layer_violations(metadata: dict) -> list[str]:
