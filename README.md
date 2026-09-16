@@ -68,14 +68,14 @@ without a specific date.
 | [`rusty_font`](crates/libs/ui/rusty_font) | `crates/libs/ui/rusty_font` | `no_std` TrueType/OpenType parser and glyph rasterizer |
 | [`rusty_regx`](crates/foundation/rusty_regx) | `crates/foundation/rusty_regx` | Zero-dependency, linear-time POSIX ERE regex engine |
 | [`rusty_win32`](crates/foundation/rusty_win32) | `crates/foundation/rusty_win32` | Minimal-dependency Win32 API wrapper (leaf crate) |
-| [`rush`](crates/rush) | `crates/rush` | A small, bash-compatible shell |
+| [`rush`](crates/apps/rush) | `crates/apps/rush` | A small, bash-compatible shell |
 | [`rusty_lines`](crates/libs/ui/rusty_lines) | `crates/libs/ui/rusty_lines` | Hand-rolled readline alternative (emacs/vi keymaps, history, completion hooks) |
-| [`mill-term`](crates/mill-term) | `crates/mill-term` | Integrated terminal + environment launcher hosting `rush` inside `rusty_term` |
+| [`mill-term`](crates/apps/mill-term) | `crates/apps/mill-term` | Integrated terminal + environment launcher hosting `rush` inside `rusty_term` |
 | [`rpath`](crates/foundation/rpath) | `crates/foundation/rpath` | Path translation/normalization for MSYS2/Git Bash/POSIX ↔ Windows |
 | [`rusty_git`](crates/libs/rusty_git) | `crates/libs/rusty_git` | Pure-Rust Git object model, index, refs, and `rgit` CLI |
 | [`rusty_diff`](crates/foundation/rusty_diff) | `crates/foundation/rusty_diff` | Myers/Patience diff algorithms, unified diff formatting, patch application |
 | [`rusty_compress`](crates/foundation/rusty_compress) | `crates/foundation/rusty_compress` | Sans-IO DEFLATE/Gzip/Zlib/LZMA stream compression |
-| [`rusty_text`](crates/rusty_text) | `crates/rusty_text` | Pure-Rust sed (`rsed`) and awk (`rawk`) engines |
+| [`rusty_text`](crates/apps/rusty_text) | `crates/apps/rusty_text` | Pure-Rust sed (`rsed`) and awk (`rawk`) engines |
 | [`rusty_tokio`](crates/libs/async/rusty_tokio) | `crates/libs/async/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
 | [`rusty_tokio-macros`](crates/libs/async/rusty_tokio/rusty_tokio-macros) | `crates/libs/async/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
 | [`rusty_rusqlite`](crates/libs/storage/rusty_rusqlite) | `crates/libs/storage/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
@@ -97,15 +97,15 @@ without a specific date.
 | [`rusty_oauth`](crates/libs/net/rusty_oauth) | `crates/libs/net/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |
 | [`rusty_proxmox`](crates/libs/homelab/rusty_proxmox) | `crates/libs/homelab/rusty_proxmox` | Async client for the Proxmox VE REST API: nodes, guests (QEMU/LXC), and power control |
 | [`rusty_opnsense`](crates/libs/homelab/rusty_opnsense) | `crates/libs/homelab/rusty_opnsense` | Async client for the OPNsense REST API: system status, services, interfaces, firewall aliases, and gateways |
-| [`rusty_homelab_mcp`](crates/rusty_homelab_mcp) | `crates/rusty_homelab_mcp` | MCP server exposing homelab control (Proxmox VE, OPNsense) as tools, built on the `rusty-mcp` scaffold |
-| [`rusty_fedora_agent`](crates/rusty_fedora_agent) | `crates/rusty_fedora_agent` | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP — the backend `rusty_homelab_mcp`'s fedora module talks to |
+| [`rusty_homelab_mcp`](crates/apps/rusty_homelab_mcp) | `crates/apps/rusty_homelab_mcp` | MCP server exposing homelab control (Proxmox VE, OPNsense) as tools, built on the `rusty-mcp` scaffold |
+| [`rusty_fedora_agent`](crates/apps/rusty_fedora_agent) | `crates/apps/rusty_fedora_agent` | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP — the backend `rusty_homelab_mcp`'s fedora module talks to |
 | [`rusty_fedora`](crates/libs/homelab/rusty_fedora) | `crates/libs/homelab/rusty_fedora` | Async client for `rusty_fedora_agent`'s local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write |
 | [`reactor-core`](crates/platform/rustils_async/crates/reactor-core) | `crates/platform/rustils_async/crates/reactor-core` | Runtime-agnostic async-io primitives (a provider framework, not a universal capability) |
 | [`platform-async`](crates/platform/rustils_async/crates/platform-async) | `crates/platform/rustils_async/crates/platform-async` | Async trait counterparts to `rustils::platform`'s process domain |
 | [`platform-async-mock`](crates/platform/rustils_async/crates/platform-async-mock) | `crates/platform/rustils_async/crates/platform-async-mock` | In-memory async process backend for `platform-async`, for consumer tests without a real OS reactor |
 | [`platform-async-linux`](crates/platform/rustils_async/crates/platform-async-linux) | `crates/platform/rustils_async/crates/platform-async-linux` | The real Linux backend for `platform-async`: `pidfd` + `epoll` async wait path |
 | [`threading`](crates/platform/rustils_async/crates/threading) | `crates/platform/rustils_async/crates/threading` | Minimal multithreading primitives: scoped-thread spawn, `Mutex`/`RwLock` with explicit poisoning policy |
-| [`coreutils-async`](crates/rustils_async/crates/coreutils-async) | `crates/rustils_async/crates/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
+| [`coreutils-async`](crates/apps/coreutils-async) | `crates/apps/coreutils-async` | Reference consumer for `platform-async`: `arun`, an async port of `rustils`' `rrun` |
 | [`rusty_wire`](crates/foundation/rusty_wire) | `crates/foundation/rusty_wire` | Minimal, zero-dependency endian-explicit byte cursor Reader/Writer |
 | [`rusty_std`](crates/foundation/rusty_std) | `crates/foundation/rusty_std` | `no_std` + `alloc` sovereign standard library, built on `rusty_libc`/`rusty_win32` |
 | [`rusty_err`](crates/foundation/rusty_err) | `crates/foundation/rusty_err` | `no_std` + `alloc` sovereign error trait, context extension, and proc-macro error derive library, built on `rusty_std` |
@@ -145,10 +145,10 @@ without a specific date.
 | [`rusty_jinja`](crates/foundation/rusty_jinja) | `crates/foundation/rusty_jinja` | `no_std` + `alloc` sovereign, zero-dependency Jinja2 LLM chat template evaluator |
 | [`rusty_ansder`](crates/foundation/rusty_ansder) | `crates/foundation/rusty_ansder` | ASN.1 BER/DER TLV encoder and decoder, built on `rusty_wire` |
 | [`rusty_rag`](crates/libs/ai/rusty_rag) | `crates/libs/ai/rusty_rag` | Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering engine, built on `rusty_simd`; split out of `rusty_ansder`, which used to bundle both under one portmanteau name |
-| [`rusty_boot`](crates/rusty_boot) | `crates/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
+| [`rusty_boot`](crates/tools/rusty_boot) | `crates/tools/rusty_boot` | `no_std` + `alloc` sovereign bootstrapper demonstrating kernel-to-application execution without Rust `std`, exercising the full stack of merged crates |
 | [`rusty-whisper`](crates/libs/ai/rusty_whisper) | `crates/libs/ai/rusty_whisper` | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) |
 | [`rusty_rdp`](crates/libs/net/rusty_rdp) | `crates/libs/net/rusty_rdp` | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format |
-| [`rusty_voice`](crates/rusty_voice) | `crates/rusty_voice` | A sovereign voice-to-text application leveraging `rusty_whisper` and `rusty_audio`, built exclusively with Rusty Mill libraries |
+| [`rusty_voice`](crates/apps/rusty_voice) | `crates/apps/rusty_voice` | A sovereign voice-to-text application leveraging `rusty_whisper` and `rusty_audio`, built exclusively with Rusty Mill libraries |
 | [`platform`](crates/platform/rustils/crates/platform) | `crates/platform/rustils/crates/platform` | rustils' portable trait surface and types — the PAL's api layer, no I/O, no unsafe |
 | [`platform-mock`](crates/platform/rustils/crates/platform-mock) | `crates/platform/rustils/crates/platform-mock` | In-memory backend implementing every `platform` trait — the injectable test double |
 | [`platform-parity`](crates/platform/rustils/crates/platform-parity) | `crates/platform/rustils/crates/platform-parity` | Shared behavior-spec assertion sets for the PAL parity suites (test-support only) |
@@ -156,46 +156,46 @@ without a specific date.
 | [`platform-windows`](crates/platform/rustils/crates/platform-windows) | `crates/platform/rustils/crates/platform-windows` | Windows backend for `platform`: `windows-sys` floor, with a `rusty_win32`-backed track behind a feature flag |
 | [`platform-bsd`](crates/platform/rustils/crates/platform-bsd) | `crates/platform/rustils/crates/platform-bsd` | BSD backend for `platform` (net-only slice): macOS, FreeBSD, OpenBSD, NetBSD, DragonFly |
 | [`winargv`](crates/platform/rustils/crates/winargv) | `crates/platform/rustils/crates/winargv` | Windows argv → command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable) |
-| [`coreutils`](crates/rustils/crates/coreutils) | `crates/rustils/crates/coreutils` | Modular pure-Rust implementation of core GNU/POSIX utilities (`rcat`, `rls`, `rrun`, `rgrep`, and more) |
-| [`rusty-croc`](crates/rusty_croc) | `crates/rusty_croc` | Rust port of [croc](https://github.com/schollz/croc): wire-compatible secure peer-to-peer file transfer (PAKE, relay, resume) |
+| [`coreutils`](crates/apps/coreutils) | `crates/apps/coreutils` | Modular pure-Rust implementation of core GNU/POSIX utilities (`rcat`, `rls`, `rrun`, `rgrep`, and more) |
+| [`rusty-croc`](crates/apps/rusty_croc) | `crates/apps/rusty_croc` | Rust port of [croc](https://github.com/schollz/croc): wire-compatible secure peer-to-peer file transfer (PAKE, relay, resume) |
 | [`contract`](crates/platform/portable-runtime/crates/contract) | `crates/platform/portable-runtime/crates/contract` | Portable tool-runtime trait boundary: one execution contract, no OS-specific code |
 | [`compat`](crates/platform/portable-runtime/crates/compat) | `crates/platform/portable-runtime/crates/compat` | Per-host adapter implementing `contract` over `cap-std`/`portable-pty`/`dirs` plus `std`'s file locking |
 | [`conformance`](crates/platform/portable-runtime/crates/conformance) | `crates/platform/portable-runtime/crates/conformance` | Cross-cutting verification of `contract`/`compat`: probe suite and conformance report |
 | [`stat-tool`](crates/platform/portable-runtime/tools/stat-tool) | `crates/platform/portable-runtime/tools/stat-tool` | Reference tool over `contract`: scoped filesystem primitive |
 | [`proc-runner`](crates/platform/portable-runtime/tools/proc-runner) | `crates/platform/portable-runtime/tools/proc-runner` | Reference tool over `contract`: process spawn + stdio capture primitive |
 | [`pty-shell`](crates/platform/portable-runtime/tools/pty-shell) | `crates/platform/portable-runtime/tools/pty-shell` | Reference tool over `contract`: interactive PTY primitive (manual, not CI) |
-| [`inventory-core`](crates/rusty_inventrory/crates/inventory-core) | `crates/rusty_inventrory/crates/inventory-core` | Local-first encrypted index over the conversation history AI coding tools write to disk |
-| [`inventory-cli`](crates/rusty_inventrory/crates/inventory-cli) | `crates/rusty_inventrory/crates/inventory-cli` | `inv`: search every AI agent and IDE conversation on your machine, from the terminal |
-| [`inventory-tauri`](crates/rusty_inventrory/crates/inventory-tauri) | `crates/rusty_inventrory/crates/inventory-tauri` | Menu-bar app over `inventory-core`: one keystroke to every AI conversation on your machine |
-| [`skillopt-core`](crates/rusty_skillopt/crates/skillopt-core) | `crates/rusty_skillopt/crates/skillopt-core` | Text-space optimizer for skill markdown: epochs, batches, and a validation gate over a frozen LLM agent |
-| [`skillopt-model`](crates/rusty_skillopt/crates/skillopt-model) | `crates/rusty_skillopt/crates/skillopt-model` | LLM provider adapters for `skillopt-core` |
-| [`skillopt-envs`](crates/rusty_skillopt/crates/skillopt-envs) | `crates/rusty_skillopt/crates/skillopt-envs` | Task environments and benchmark adapters `skillopt-core` optimizes against |
-| [`skillopt-cli`](crates/rusty_skillopt/crates/skillopt-cli) | `crates/rusty_skillopt/crates/skillopt-cli` | `skillopt`: the training-loop command line front end |
-| [`rk-config`](crates/rusty_key/crates/config) | `crates/rusty_key/crates/config` | Rusty Keys' configuration layer: typed settings, env overrides, workspace discovery |
-| [`rk-observe`](crates/rusty_key/crates/observe) | `crates/rusty_key/crates/observe` | Rusty Keys' *observe* pillar: structured attribution and turn-level observation records |
-| [`rk-constrain`](crates/rusty_key/crates/constrain) | `crates/rusty_key/crates/constrain` | Rusty Keys' *constrain* pillar: policy enforcement around tool dispatch |
-| [`rk-feed`](crates/rusty_key/crates/feed) | `crates/rusty_key/crates/feed` | Rusty Keys' *feed* pillar: guides, memory, recall, and the built-in tool set |
-| [`rk-kernel`](crates/rusty_key/crates/kernel) | `crates/rusty_key/crates/kernel` | Rusty Keys' kernel: the model's agent loop (turn, stream, complete) |
-| [`rk-mcp`](crates/rusty_key/crates/mcp) | `crates/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
-| [`rk-compose`](crates/rusty_key/crates/compose) | `crates/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
-| [`rk-app`](crates/rusty_key/crates/app) | `crates/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
+| [`inventory-core`](crates/apps/rusty_inventory/crates/inventory-core) | `crates/apps/rusty_inventory/crates/inventory-core` | Local-first encrypted index over the conversation history AI coding tools write to disk |
+| [`inventory-cli`](crates/apps/rusty_inventory/crates/inventory-cli) | `crates/apps/rusty_inventory/crates/inventory-cli` | `inv`: search every AI agent and IDE conversation on your machine, from the terminal |
+| [`inventory-tauri`](crates/apps/rusty_inventory/crates/inventory-tauri) | `crates/apps/rusty_inventory/crates/inventory-tauri` | Menu-bar app over `inventory-core`: one keystroke to every AI conversation on your machine |
+| [`skillopt-core`](crates/apps/rusty_skillopt/crates/skillopt-core) | `crates/apps/rusty_skillopt/crates/skillopt-core` | Text-space optimizer for skill markdown: epochs, batches, and a validation gate over a frozen LLM agent |
+| [`skillopt-model`](crates/apps/rusty_skillopt/crates/skillopt-model) | `crates/apps/rusty_skillopt/crates/skillopt-model` | LLM provider adapters for `skillopt-core` |
+| [`skillopt-envs`](crates/apps/rusty_skillopt/crates/skillopt-envs) | `crates/apps/rusty_skillopt/crates/skillopt-envs` | Task environments and benchmark adapters `skillopt-core` optimizes against |
+| [`skillopt-cli`](crates/apps/rusty_skillopt/crates/skillopt-cli) | `crates/apps/rusty_skillopt/crates/skillopt-cli` | `skillopt`: the training-loop command line front end |
+| [`rk-config`](crates/apps/rusty_key/crates/config) | `crates/apps/rusty_key/crates/config` | Rusty Keys' configuration layer: typed settings, env overrides, workspace discovery |
+| [`rk-observe`](crates/apps/rusty_key/crates/observe) | `crates/apps/rusty_key/crates/observe` | Rusty Keys' *observe* pillar: structured attribution and turn-level observation records |
+| [`rk-constrain`](crates/apps/rusty_key/crates/constrain) | `crates/apps/rusty_key/crates/constrain` | Rusty Keys' *constrain* pillar: policy enforcement around tool dispatch |
+| [`rk-feed`](crates/apps/rusty_key/crates/feed) | `crates/apps/rusty_key/crates/feed` | Rusty Keys' *feed* pillar: guides, memory, recall, and the built-in tool set |
+| [`rk-kernel`](crates/apps/rusty_key/crates/kernel) | `crates/apps/rusty_key/crates/kernel` | Rusty Keys' kernel: the model's agent loop (turn, stream, complete) |
+| [`rk-mcp`](crates/apps/rusty_key/crates/mcp) | `crates/apps/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
+| [`rk-compose`](crates/apps/rusty_key/crates/compose) | `crates/apps/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
+| [`rk-app`](crates/apps/rusty_key/crates/app) | `crates/apps/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
 | [`rusty_llama`](crates/libs/ai/rusty_llama) | `crates/libs/ai/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
-| [`ts-types`](crates/rusty_tailscale/crates/ts-types) | `crates/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
-| [`ts-key`](crates/rusty_tailscale/crates/ts-key) | `crates/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
-| [`ts-control`](crates/rusty_tailscale/crates/ts-control) | `crates/rusty_tailscale/crates/ts-control` | ts2021 control-plane client: Noise (control base) handshake and the map session |
-| [`ts-derp`](crates/rusty_tailscale/crates/ts-derp) | `crates/rusty_tailscale/crates/ts-derp` | DERP relay client: the always-available fallback data path |
-| [`ts-stun`](crates/rusty_tailscale/crates/ts-stun) | `crates/rusty_tailscale/crates/ts-stun` | STUN client for discovering the server-reflexive endpoint |
-| [`ts-disco`](crates/rusty_tailscale/crates/ts-disco) | `crates/rusty_tailscale/crates/ts-disco` | Disco protocol: ping/pong/call-me-maybe path probing |
-| [`ts-magicsock`](crates/rusty_tailscale/crates/ts-magicsock) | `crates/rusty_tailscale/crates/ts-magicsock` | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
-| [`ts-wg`](crates/rusty_tailscale/crates/ts-wg) | `crates/rusty_tailscale/crates/ts-wg` | WireGuard data plane over the magicsock transport |
-| [`ts-tun`](crates/rusty_tailscale/crates/ts-tun) | `crates/rusty_tailscale/crates/ts-tun` | TUN device, routes, and DNS platform adapters |
-| [`ts-filter`](crates/rusty_tailscale/crates/ts-filter) | `crates/rusty_tailscale/crates/ts-filter` | Packet filter evaluating the tailnet ACL rules the control plane hands down |
-| [`ts-engine`](crates/rusty_tailscale/crates/ts-engine) | `crates/rusty_tailscale/crates/ts-engine` | The node engine wiring control, magicsock, WireGuard, TUN and filter together |
-| [`ts-localapi`](crates/rusty_tailscale/crates/ts-localapi) | `crates/rusty_tailscale/crates/ts-localapi` | LocalAPI server: the daemon's Unix-socket control surface |
-| [`ts-net`](crates/rusty_tailscale/crates/ts-net) | `crates/rusty_tailscale/crates/ts-net` | Userspace TCP/IP stack (smoltcp) on the tailnet — a tailnet service with no TUN and no root |
-| [`ts-daemon`](crates/rusty_tailscale/crates/ts-daemon) | `crates/rusty_tailscale/crates/ts-daemon` | `ts-daemon`: the long-running node daemon |
-| [`ts-cli`](crates/rusty_tailscale/crates/ts-cli) | `crates/rusty_tailscale/crates/ts-cli` | `ts-cli`: the LocalAPI-driven command line client |
-| [`xtask`](crates/rusty_tailscale/xtask) | `crates/rusty_tailscale/xtask` | `rusty_tailscale`'s integration harness: Headscale in a container, multi-node NAT simulation |
+| [`ts-types`](crates/apps/rusty_tailscale/crates/ts-types) | `crates/apps/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
+| [`ts-key`](crates/apps/rusty_tailscale/crates/ts-key) | `crates/apps/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
+| [`ts-control`](crates/apps/rusty_tailscale/crates/ts-control) | `crates/apps/rusty_tailscale/crates/ts-control` | ts2021 control-plane client: Noise (control base) handshake and the map session |
+| [`ts-derp`](crates/apps/rusty_tailscale/crates/ts-derp) | `crates/apps/rusty_tailscale/crates/ts-derp` | DERP relay client: the always-available fallback data path |
+| [`ts-stun`](crates/apps/rusty_tailscale/crates/ts-stun) | `crates/apps/rusty_tailscale/crates/ts-stun` | STUN client for discovering the server-reflexive endpoint |
+| [`ts-disco`](crates/apps/rusty_tailscale/crates/ts-disco) | `crates/apps/rusty_tailscale/crates/ts-disco` | Disco protocol: ping/pong/call-me-maybe path probing |
+| [`ts-magicsock`](crates/apps/rusty_tailscale/crates/ts-magicsock) | `crates/apps/rusty_tailscale/crates/ts-magicsock` | Path multiplexer: direct UDP and DERP, path upgrade and live migration |
+| [`ts-wg`](crates/apps/rusty_tailscale/crates/ts-wg) | `crates/apps/rusty_tailscale/crates/ts-wg` | WireGuard data plane over the magicsock transport |
+| [`ts-tun`](crates/apps/rusty_tailscale/crates/ts-tun) | `crates/apps/rusty_tailscale/crates/ts-tun` | TUN device, routes, and DNS platform adapters |
+| [`ts-filter`](crates/apps/rusty_tailscale/crates/ts-filter) | `crates/apps/rusty_tailscale/crates/ts-filter` | Packet filter evaluating the tailnet ACL rules the control plane hands down |
+| [`ts-engine`](crates/apps/rusty_tailscale/crates/ts-engine) | `crates/apps/rusty_tailscale/crates/ts-engine` | The node engine wiring control, magicsock, WireGuard, TUN and filter together |
+| [`ts-localapi`](crates/apps/rusty_tailscale/crates/ts-localapi) | `crates/apps/rusty_tailscale/crates/ts-localapi` | LocalAPI server: the daemon's Unix-socket control surface |
+| [`ts-net`](crates/apps/rusty_tailscale/crates/ts-net) | `crates/apps/rusty_tailscale/crates/ts-net` | Userspace TCP/IP stack (smoltcp) on the tailnet — a tailnet service with no TUN and no root |
+| [`ts-daemon`](crates/apps/rusty_tailscale/crates/ts-daemon) | `crates/apps/rusty_tailscale/crates/ts-daemon` | `ts-daemon`: the long-running node daemon |
+| [`ts-cli`](crates/apps/rusty_tailscale/crates/ts-cli) | `crates/apps/rusty_tailscale/crates/ts-cli` | `ts-cli`: the LocalAPI-driven command line client |
+| [`xtask`](crates/apps/rusty_tailscale/xtask) | `crates/apps/rusty_tailscale/xtask` | `rusty_tailscale`'s integration harness: Headscale in a container, multi-node NAT simulation |
 | [`adk-core`](crates/libs/rusty_adk/crates/adk-core) | `crates/libs/rusty_adk/crates/adk-core` | ADK 2.0's data model: events, content, state, and the tool/callback contracts |
 | [`adk-macros`](crates/libs/rusty_adk/crates/adk-macros) | `crates/libs/rusty_adk/crates/adk-macros` | `#[tool]` and friends: `adk-core`'s derive/attribute macros |
 | [`adk-tools`](crates/libs/rusty_adk/crates/adk-tools) | `crates/libs/rusty_adk/crates/adk-tools` | Built-in tool implementations and the tool registry |
@@ -210,96 +210,96 @@ without a specific date.
 | [`weather-agent`](crates/libs/rusty_adk/examples/weather-agent) | `crates/libs/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
 | [`mcp-tool-server`](crates/libs/rusty_adk/examples/mcp-tool-server) | `crates/libs/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
 | [`a2a-agent-server`](crates/libs/rusty_adk/examples/a2a-agent-server) | `crates/libs/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
-| [`rp-core`](crates/rusty_provider/crates/core) | `crates/rusty_provider/crates/core` | Unified OpenAI-shaped request/response types and the provider trait |
-| [`rp-providers`](crates/rusty_provider/crates/providers) | `crates/rusty_provider/crates/providers` | Provider adapters: OpenAI, Anthropic, Gemini, Groq, Together AI, Fireworks |
-| [`rp-router`](crates/rusty_provider/crates/router) | `crates/rusty_provider/crates/router` | Config-driven routing: fallback chains, budgets, metrics, and usage persistence |
-| [`rp-mcp`](crates/rusty_provider/crates/mcp) | `crates/rusty_provider/crates/mcp` | MCP surface over the router, built on the `rusty-mcp` scaffold |
-| [`rp-server`](crates/rusty_provider/crates/server) | `crates/rusty_provider/crates/server` | The OpenAI-compatible HTTP server front end |
-| [`rp-cli`](crates/rusty_provider/crates/cli) | `crates/rusty_provider/crates/cli` | `rp-cli`: config inspection and routing dry-runs from the terminal |
-| [`sessionmgr-core`](crates/rusty_yirp/crates/sessionmgr-core) | `crates/rusty_yirp/crates/sessionmgr-core` | sessionmgr's pure domain logic: session state machine, identifiers, crash-recovery policy |
-| [`sessionmgr-protocol`](crates/rusty_yirp/crates/sessionmgr-protocol) | `crates/rusty_yirp/crates/sessionmgr-protocol` | Wire types shared by the sessionmgr daemon, its workers, and its clients |
-| [`sessionmgr-proc`](crates/rusty_yirp/crates/sessionmgr-proc) | `crates/rusty_yirp/crates/sessionmgr-proc` | Process adapter: detached spawn, PID-reuse-safe liveness, stdio-inheritance hardening |
-| [`sessionmgr-git`](crates/rusty_yirp/crates/sessionmgr-git) | `crates/rusty_yirp/crates/sessionmgr-git` | Git adapter: worktree lifecycle, status, and diff |
-| [`sessionmgr-pty`](crates/rusty_yirp/crates/sessionmgr-pty) | `crates/rusty_yirp/crates/sessionmgr-pty` | PTY adapter over `rustils`' `Pty` capability (ConPTY on Windows, `openpty` on Linux) |
-| [`sessionmgr-tui`](crates/rusty_yirp/crates/sessionmgr-tui) | `crates/rusty_yirp/crates/sessionmgr-tui` | The TUI grid dashboard (ratatui + `tui-term`'s vt100 screen) |
-| [`sessionmgr-agents`](crates/rusty_yirp/crates/sessionmgr-agents) | `crates/rusty_yirp/crates/sessionmgr-agents` | Per-agent-CLI adapters for Claude Code, Codex, and Gemini CLI |
-| [`sessionmgr-daemon`](crates/rusty_yirp/crates/sessionmgr-daemon) | `crates/rusty_yirp/crates/sessionmgr-daemon` | `sessionmgr`: the composition root — supervisor daemon, detached workers, CLI client |
-| [`sessionmgr-desktop`](crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri) | `crates/rusty_yirp/crates/sessionmgr-desktop/src-tauri` | sessionmgr's Tauri 2 desktop shell over the daemon socket |
-| [`agentgateway-config`](crates/rusty_agent_gateway/crates/agentgateway-config) | `crates/rusty_agent_gateway/crates/agentgateway-config` | Configuration model, wire-compatible with agentgateway's own `config.yaml` |
-| [`agentgateway-core`](crates/rusty_agent_gateway/crates/agentgateway-core) | `crates/rusty_agent_gateway/crates/agentgateway-core` | Route matching and policy evaluation |
-| [`agentgateway-auth`](crates/rusty_agent_gateway/crates/agentgateway-auth) | `crates/rusty_agent_gateway/crates/agentgateway-auth` | JWT authentication policy, over `rusty-mcp`'s JWKS validator |
-| [`agentgateway-a2a`](crates/rusty_agent_gateway/crates/agentgateway-a2a) | `crates/rusty_agent_gateway/crates/agentgateway-a2a` | A2A method gating and agent-card discovery |
-| [`agentgateway-llm`](crates/rusty_agent_gateway/crates/agentgateway-llm) | `crates/rusty_agent_gateway/crates/agentgateway-llm` | OpenAI-compatible LLM gateway pillar |
-| [`agentgateway-mcp`](crates/rusty_agent_gateway/crates/agentgateway-mcp) | `crates/rusty_agent_gateway/crates/agentgateway-mcp` | MCP federation: several upstream MCP servers behind one endpoint, with guardrails |
-| [`agentgateway-proxy`](crates/rusty_agent_gateway/crates/agentgateway-proxy) | `crates/rusty_agent_gateway/crates/agentgateway-proxy` | HTTP reverse proxying for host backends |
-| [`agentgateway-tls`](crates/rusty_agent_gateway/crates/agentgateway-tls) | `crates/rusty_agent_gateway/crates/agentgateway-tls` | TLS termination, over `rusty_tls` |
-| [`agentgateway`](crates/rusty_agent_gateway/crates/agentgateway) | `crates/rusty_agent_gateway/crates/agentgateway` | `agentgateway`: the AI-native gateway binary for MCP, speaking agentgateway's config |
-| [`nexus-types`](crates/nexus/crates/nexus-types) | `crates/nexus/crates/nexus-types` | Nexus: shared plain-data types with no I/O, at the base of every other nexus crate |
-| [`nexus-plugin-api`](crates/nexus/crates/nexus-plugin-api) | `crates/nexus/crates/nexus-plugin-api` | Nexus: the versioned `CorePlugin`/capability/IPC ABI every plugin crate implements against |
-| [`nexus-hashline`](crates/nexus/crates/nexus-hashline) | `crates/nexus/crates/nexus-hashline` | Nexus: content-hash-anchored patch format for concurrent note edits (RFC 0005) |
-| [`nexus-kernel`](crates/nexus/crates/nexus-kernel) | `crates/nexus/crates/nexus-kernel` | Nexus: the microkernel — event bus, IPC dispatcher, capability system, plugin lifecycle |
-| [`nexus-kv`](crates/nexus/crates/nexus-kv) | `crates/nexus/crates/nexus-kv` | Nexus: the forge-scoped key/value store service plugin |
-| [`nexus-security`](crates/nexus/crates/nexus-security) | `crates/nexus/crates/nexus-security` | Nexus: capability grants, at-rest encryption, and the Linux Landlock/seccomp OS sandbox |
-| [`nexus-storage`](crates/nexus/crates/nexus-storage) | `crates/nexus/crates/nexus-storage` | Nexus: file-as-truth — SQLite index, Tantivy FTS, file watcher, knowledge graph |
-| [`nexus-plugins`](crates/nexus/crates/nexus-plugins) | `crates/nexus/crates/nexus-plugins` | Nexus: community plugin lifecycle — WASM (wasmtime) and JS-sandboxed plugin hosting |
-| [`nexus-ai`](crates/nexus/crates/nexus-ai) | `crates/nexus/crates/nexus-ai` | Nexus: AI provider integration — chat, embeddings, RAG |
-| [`nexus-ai-runtime`](crates/nexus/crates/nexus-ai-runtime) | `crates/nexus/crates/nexus-ai-runtime` | Nexus: local model runtime plumbing for `nexus-ai` |
-| [`nexus-mcp`](crates/nexus/crates/nexus-mcp) | `crates/nexus/crates/nexus-mcp` | Nexus: Host-side MCP client/server integration |
-| [`nexus-lsp`](crates/nexus/crates/nexus-lsp) | `crates/nexus/crates/nexus-lsp` | Nexus: Language Server Protocol integration |
-| [`nexus-dap`](crates/nexus/crates/nexus-dap) | `crates/nexus/crates/nexus-dap` | Nexus: Debug Adapter Protocol integration |
-| [`nexus-acp`](crates/nexus/crates/nexus-acp) | `crates/nexus/crates/nexus-acp` | Nexus: Agent Client Protocol integration |
-| [`nexus-remote`](crates/nexus/crates/nexus-remote) | `crates/nexus/crates/nexus-remote` | Nexus: remote/hosted forge connectivity |
-| [`nexus-cli`](crates/nexus/crates/nexus-cli) | `crates/nexus/crates/nexus-cli` | `nexus`: the CLI frontend, built on `nexus-bootstrap` |
-| [`nexus-tui`](crates/nexus/crates/nexus-tui) | `crates/nexus/crates/nexus-tui` | `nexus-tui`: the terminal UI frontend, built on `nexus-bootstrap` |
-| [`nexus-git`](crates/nexus/crates/nexus-git) | `crates/nexus/crates/nexus-git` | Nexus: Git integration (built on `git2`) |
-| [`nexus-formats`](crates/nexus/crates/nexus-formats) | `crates/nexus/crates/nexus-formats` | Nexus: import/export format converters (e.g. Notion `.zip` export) |
-| [`nexus-database`](crates/nexus/crates/nexus-database) | `crates/nexus/crates/nexus-database` | Nexus: user-facing embedded-database note views |
-| [`nexus-theme`](crates/nexus/crates/nexus-theme) | `crates/nexus/crates/nexus-theme` | Nexus: shell theming service |
-| [`nexus-bootstrap`](crates/nexus/crates/nexus-bootstrap) | `crates/nexus/crates/nexus-bootstrap` | Nexus: the orchestrator — assembles the kernel + every registered `CorePlugin` into a `Runtime` |
-| [`nexus-editor`](crates/nexus/crates/nexus-editor) | `crates/nexus/crates/nexus-editor` | Nexus: the note editor backend — CRDT snapshots, crash journal |
-| [`nexus-rush`](crates/nexus/crates/nexus-rush) | `crates/nexus/crates/nexus-rush` | Nexus: in-tree port of `rush` (RFC 0002) — the bundled shell for sandboxed sessions |
-| [`nexus-vt`](crates/nexus/crates/nexus-vt) | `crates/nexus/crates/nexus-vt` | Nexus: in-tree, GUI-free port of `rusty_term`'s core (RFC 0003) — the headless VT grid behind `nexus-terminal` |
-| [`nexus-terminal`](crates/nexus/crates/nexus-terminal) | `crates/nexus/crates/nexus-terminal` | Nexus: terminal/process-manager service plugin, built on `nexus-vt` + `portable-pty` |
-| [`nexus-agent`](crates/nexus/crates/nexus-agent) | `crates/nexus/crates/nexus-agent` | Nexus: the in-app agent — tool registry, planning, delegation |
-| [`nexus-skills`](crates/nexus/crates/nexus-skills) | `crates/nexus/crates/nexus-skills` | Nexus: agent skill loading |
-| [`nexus-templates`](crates/nexus/crates/nexus-templates) | `crates/nexus/crates/nexus-templates` | Nexus: note template service |
-| [`nexus-workflow`](crates/nexus/crates/nexus-workflow) | `crates/nexus/crates/nexus-workflow` | Nexus: multi-step workflow orchestration |
-| [`nexus-linkpreview`](crates/nexus/crates/nexus-linkpreview) | `crates/nexus/crates/nexus-linkpreview` | Nexus: URL link-preview fetching |
-| [`nexus-notifications`](crates/nexus/crates/nexus-notifications) | `crates/nexus/crates/nexus-notifications` | Nexus: notification inbox + SMTP email transport |
-| [`nexus-comments`](crates/nexus/crates/nexus-comments) | `crates/nexus/crates/nexus-comments` | Nexus: note comment threads |
-| [`nexus-panic-log`](crates/nexus/crates/nexus-panic-log) | `crates/nexus/crates/nexus-panic-log` | Nexus: structured panic capture and logging |
-| [`nexus-crdt`](crates/nexus/crates/nexus-crdt) | `crates/nexus/crates/nexus-crdt` | Nexus: CRDT primitives backing `nexus-editor`/`nexus-collab` |
-| [`nexus-fuzz`](crates/nexus/crates/nexus-fuzz) | `crates/nexus/crates/nexus-fuzz` | Nexus: fuzz targets for parser/format boundaries |
-| [`nexus-audio`](crates/nexus/crates/nexus-audio) | `crates/nexus/crates/nexus-audio` | Nexus: STT/TTS provider traits (local / provider-routed / platform backends) |
-| [`nexus-collab`](crates/nexus/crates/nexus-collab) | `crates/nexus/crates/nexus-collab` | Nexus: real-time collaboration over a WebSocket relay |
-| [`nexus-memory`](crates/nexus/crates/nexus-memory) | `crates/nexus/crates/nexus-memory` | Nexus: the `com.nexus.memory` service plugin — full `remind_me` schema/API parity |
-| [`nexus-memory-hub`](crates/nexus/crates/nexus-memory-hub) | `crates/nexus/crates/nexus-memory-hub` | Nexus: standalone `axum` HTTP sync server for `nexus-memory` — a deployable binary, not a bootstrap plugin |
-| [`nexus-context`](crates/nexus/crates/nexus-context) | `crates/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
-| [`nexus-protocol`](crates/nexus/crates/nexus-protocol) | `crates/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
-| [`rusty_multimodal_db`](crates/rusty_multimodal_db) | `crates/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
+| [`rp-core`](crates/apps/rusty_provider/crates/core) | `crates/apps/rusty_provider/crates/core` | Unified OpenAI-shaped request/response types and the provider trait |
+| [`rp-providers`](crates/apps/rusty_provider/crates/providers) | `crates/apps/rusty_provider/crates/providers` | Provider adapters: OpenAI, Anthropic, Gemini, Groq, Together AI, Fireworks |
+| [`rp-router`](crates/apps/rusty_provider/crates/router) | `crates/apps/rusty_provider/crates/router` | Config-driven routing: fallback chains, budgets, metrics, and usage persistence |
+| [`rp-mcp`](crates/apps/rusty_provider/crates/mcp) | `crates/apps/rusty_provider/crates/mcp` | MCP surface over the router, built on the `rusty-mcp` scaffold |
+| [`rp-server`](crates/apps/rusty_provider/crates/server) | `crates/apps/rusty_provider/crates/server` | The OpenAI-compatible HTTP server front end |
+| [`rp-cli`](crates/apps/rusty_provider/crates/cli) | `crates/apps/rusty_provider/crates/cli` | `rp-cli`: config inspection and routing dry-runs from the terminal |
+| [`sessionmgr-core`](crates/apps/rusty_yirp/crates/sessionmgr-core) | `crates/apps/rusty_yirp/crates/sessionmgr-core` | sessionmgr's pure domain logic: session state machine, identifiers, crash-recovery policy |
+| [`sessionmgr-protocol`](crates/apps/rusty_yirp/crates/sessionmgr-protocol) | `crates/apps/rusty_yirp/crates/sessionmgr-protocol` | Wire types shared by the sessionmgr daemon, its workers, and its clients |
+| [`sessionmgr-proc`](crates/apps/rusty_yirp/crates/sessionmgr-proc) | `crates/apps/rusty_yirp/crates/sessionmgr-proc` | Process adapter: detached spawn, PID-reuse-safe liveness, stdio-inheritance hardening |
+| [`sessionmgr-git`](crates/apps/rusty_yirp/crates/sessionmgr-git) | `crates/apps/rusty_yirp/crates/sessionmgr-git` | Git adapter: worktree lifecycle, status, and diff |
+| [`sessionmgr-pty`](crates/apps/rusty_yirp/crates/sessionmgr-pty) | `crates/apps/rusty_yirp/crates/sessionmgr-pty` | PTY adapter over `rustils`' `Pty` capability (ConPTY on Windows, `openpty` on Linux) |
+| [`sessionmgr-tui`](crates/apps/rusty_yirp/crates/sessionmgr-tui) | `crates/apps/rusty_yirp/crates/sessionmgr-tui` | The TUI grid dashboard (ratatui + `tui-term`'s vt100 screen) |
+| [`sessionmgr-agents`](crates/apps/rusty_yirp/crates/sessionmgr-agents) | `crates/apps/rusty_yirp/crates/sessionmgr-agents` | Per-agent-CLI adapters for Claude Code, Codex, and Gemini CLI |
+| [`sessionmgr-daemon`](crates/apps/rusty_yirp/crates/sessionmgr-daemon) | `crates/apps/rusty_yirp/crates/sessionmgr-daemon` | `sessionmgr`: the composition root — supervisor daemon, detached workers, CLI client |
+| [`sessionmgr-desktop`](crates/apps/rusty_yirp/crates/sessionmgr-desktop/src-tauri) | `crates/apps/rusty_yirp/crates/sessionmgr-desktop/src-tauri` | sessionmgr's Tauri 2 desktop shell over the daemon socket |
+| [`agentgateway-config`](crates/apps/rusty_agent_gateway/crates/agentgateway-config) | `crates/apps/rusty_agent_gateway/crates/agentgateway-config` | Configuration model, wire-compatible with agentgateway's own `config.yaml` |
+| [`agentgateway-core`](crates/apps/rusty_agent_gateway/crates/agentgateway-core) | `crates/apps/rusty_agent_gateway/crates/agentgateway-core` | Route matching and policy evaluation |
+| [`agentgateway-auth`](crates/apps/rusty_agent_gateway/crates/agentgateway-auth) | `crates/apps/rusty_agent_gateway/crates/agentgateway-auth` | JWT authentication policy, over `rusty-mcp`'s JWKS validator |
+| [`agentgateway-a2a`](crates/apps/rusty_agent_gateway/crates/agentgateway-a2a) | `crates/apps/rusty_agent_gateway/crates/agentgateway-a2a` | A2A method gating and agent-card discovery |
+| [`agentgateway-llm`](crates/apps/rusty_agent_gateway/crates/agentgateway-llm) | `crates/apps/rusty_agent_gateway/crates/agentgateway-llm` | OpenAI-compatible LLM gateway pillar |
+| [`agentgateway-mcp`](crates/apps/rusty_agent_gateway/crates/agentgateway-mcp) | `crates/apps/rusty_agent_gateway/crates/agentgateway-mcp` | MCP federation: several upstream MCP servers behind one endpoint, with guardrails |
+| [`agentgateway-proxy`](crates/apps/rusty_agent_gateway/crates/agentgateway-proxy) | `crates/apps/rusty_agent_gateway/crates/agentgateway-proxy` | HTTP reverse proxying for host backends |
+| [`agentgateway-tls`](crates/apps/rusty_agent_gateway/crates/agentgateway-tls) | `crates/apps/rusty_agent_gateway/crates/agentgateway-tls` | TLS termination, over `rusty_tls` |
+| [`agentgateway`](crates/apps/rusty_agent_gateway/crates/agentgateway) | `crates/apps/rusty_agent_gateway/crates/agentgateway` | `agentgateway`: the AI-native gateway binary for MCP, speaking agentgateway's config |
+| [`nexus-types`](crates/apps/nexus/crates/nexus-types) | `crates/apps/nexus/crates/nexus-types` | Nexus: shared plain-data types with no I/O, at the base of every other nexus crate |
+| [`nexus-plugin-api`](crates/apps/nexus/crates/nexus-plugin-api) | `crates/apps/nexus/crates/nexus-plugin-api` | Nexus: the versioned `CorePlugin`/capability/IPC ABI every plugin crate implements against |
+| [`nexus-hashline`](crates/apps/nexus/crates/nexus-hashline) | `crates/apps/nexus/crates/nexus-hashline` | Nexus: content-hash-anchored patch format for concurrent note edits (RFC 0005) |
+| [`nexus-kernel`](crates/apps/nexus/crates/nexus-kernel) | `crates/apps/nexus/crates/nexus-kernel` | Nexus: the microkernel — event bus, IPC dispatcher, capability system, plugin lifecycle |
+| [`nexus-kv`](crates/apps/nexus/crates/nexus-kv) | `crates/apps/nexus/crates/nexus-kv` | Nexus: the forge-scoped key/value store service plugin |
+| [`nexus-security`](crates/apps/nexus/crates/nexus-security) | `crates/apps/nexus/crates/nexus-security` | Nexus: capability grants, at-rest encryption, and the Linux Landlock/seccomp OS sandbox |
+| [`nexus-storage`](crates/apps/nexus/crates/nexus-storage) | `crates/apps/nexus/crates/nexus-storage` | Nexus: file-as-truth — SQLite index, Tantivy FTS, file watcher, knowledge graph |
+| [`nexus-plugins`](crates/apps/nexus/crates/nexus-plugins) | `crates/apps/nexus/crates/nexus-plugins` | Nexus: community plugin lifecycle — WASM (wasmtime) and JS-sandboxed plugin hosting |
+| [`nexus-ai`](crates/apps/nexus/crates/nexus-ai) | `crates/apps/nexus/crates/nexus-ai` | Nexus: AI provider integration — chat, embeddings, RAG |
+| [`nexus-ai-runtime`](crates/apps/nexus/crates/nexus-ai-runtime) | `crates/apps/nexus/crates/nexus-ai-runtime` | Nexus: local model runtime plumbing for `nexus-ai` |
+| [`nexus-mcp`](crates/apps/nexus/crates/nexus-mcp) | `crates/apps/nexus/crates/nexus-mcp` | Nexus: Host-side MCP client/server integration |
+| [`nexus-lsp`](crates/apps/nexus/crates/nexus-lsp) | `crates/apps/nexus/crates/nexus-lsp` | Nexus: Language Server Protocol integration |
+| [`nexus-dap`](crates/apps/nexus/crates/nexus-dap) | `crates/apps/nexus/crates/nexus-dap` | Nexus: Debug Adapter Protocol integration |
+| [`nexus-acp`](crates/apps/nexus/crates/nexus-acp) | `crates/apps/nexus/crates/nexus-acp` | Nexus: Agent Client Protocol integration |
+| [`nexus-remote`](crates/apps/nexus/crates/nexus-remote) | `crates/apps/nexus/crates/nexus-remote` | Nexus: remote/hosted forge connectivity |
+| [`nexus-cli`](crates/apps/nexus/crates/nexus-cli) | `crates/apps/nexus/crates/nexus-cli` | `nexus`: the CLI frontend, built on `nexus-bootstrap` |
+| [`nexus-tui`](crates/apps/nexus/crates/nexus-tui) | `crates/apps/nexus/crates/nexus-tui` | `nexus-tui`: the terminal UI frontend, built on `nexus-bootstrap` |
+| [`nexus-git`](crates/apps/nexus/crates/nexus-git) | `crates/apps/nexus/crates/nexus-git` | Nexus: Git integration (built on `git2`) |
+| [`nexus-formats`](crates/apps/nexus/crates/nexus-formats) | `crates/apps/nexus/crates/nexus-formats` | Nexus: import/export format converters (e.g. Notion `.zip` export) |
+| [`nexus-database`](crates/apps/nexus/crates/nexus-database) | `crates/apps/nexus/crates/nexus-database` | Nexus: user-facing embedded-database note views |
+| [`nexus-theme`](crates/apps/nexus/crates/nexus-theme) | `crates/apps/nexus/crates/nexus-theme` | Nexus: shell theming service |
+| [`nexus-bootstrap`](crates/apps/nexus/crates/nexus-bootstrap) | `crates/apps/nexus/crates/nexus-bootstrap` | Nexus: the orchestrator — assembles the kernel + every registered `CorePlugin` into a `Runtime` |
+| [`nexus-editor`](crates/apps/nexus/crates/nexus-editor) | `crates/apps/nexus/crates/nexus-editor` | Nexus: the note editor backend — CRDT snapshots, crash journal |
+| [`nexus-rush`](crates/apps/nexus/crates/nexus-rush) | `crates/apps/nexus/crates/nexus-rush` | Nexus: in-tree port of `rush` (RFC 0002) — the bundled shell for sandboxed sessions |
+| [`nexus-vt`](crates/apps/nexus/crates/nexus-vt) | `crates/apps/nexus/crates/nexus-vt` | Nexus: in-tree, GUI-free port of `rusty_term`'s core (RFC 0003) — the headless VT grid behind `nexus-terminal` |
+| [`nexus-terminal`](crates/apps/nexus/crates/nexus-terminal) | `crates/apps/nexus/crates/nexus-terminal` | Nexus: terminal/process-manager service plugin, built on `nexus-vt` + `portable-pty` |
+| [`nexus-agent`](crates/apps/nexus/crates/nexus-agent) | `crates/apps/nexus/crates/nexus-agent` | Nexus: the in-app agent — tool registry, planning, delegation |
+| [`nexus-skills`](crates/apps/nexus/crates/nexus-skills) | `crates/apps/nexus/crates/nexus-skills` | Nexus: agent skill loading |
+| [`nexus-templates`](crates/apps/nexus/crates/nexus-templates) | `crates/apps/nexus/crates/nexus-templates` | Nexus: note template service |
+| [`nexus-workflow`](crates/apps/nexus/crates/nexus-workflow) | `crates/apps/nexus/crates/nexus-workflow` | Nexus: multi-step workflow orchestration |
+| [`nexus-linkpreview`](crates/apps/nexus/crates/nexus-linkpreview) | `crates/apps/nexus/crates/nexus-linkpreview` | Nexus: URL link-preview fetching |
+| [`nexus-notifications`](crates/apps/nexus/crates/nexus-notifications) | `crates/apps/nexus/crates/nexus-notifications` | Nexus: notification inbox + SMTP email transport |
+| [`nexus-comments`](crates/apps/nexus/crates/nexus-comments) | `crates/apps/nexus/crates/nexus-comments` | Nexus: note comment threads |
+| [`nexus-panic-log`](crates/apps/nexus/crates/nexus-panic-log) | `crates/apps/nexus/crates/nexus-panic-log` | Nexus: structured panic capture and logging |
+| [`nexus-crdt`](crates/apps/nexus/crates/nexus-crdt) | `crates/apps/nexus/crates/nexus-crdt` | Nexus: CRDT primitives backing `nexus-editor`/`nexus-collab` |
+| [`nexus-fuzz`](crates/apps/nexus/crates/nexus-fuzz) | `crates/apps/nexus/crates/nexus-fuzz` | Nexus: fuzz targets for parser/format boundaries |
+| [`nexus-audio`](crates/apps/nexus/crates/nexus-audio) | `crates/apps/nexus/crates/nexus-audio` | Nexus: STT/TTS provider traits (local / provider-routed / platform backends) |
+| [`nexus-collab`](crates/apps/nexus/crates/nexus-collab) | `crates/apps/nexus/crates/nexus-collab` | Nexus: real-time collaboration over a WebSocket relay |
+| [`nexus-memory`](crates/apps/nexus/crates/nexus-memory) | `crates/apps/nexus/crates/nexus-memory` | Nexus: the `com.nexus.memory` service plugin — full `remind_me` schema/API parity |
+| [`nexus-memory-hub`](crates/apps/nexus/crates/nexus-memory-hub) | `crates/apps/nexus/crates/nexus-memory-hub` | Nexus: standalone `axum` HTTP sync server for `nexus-memory` — a deployable binary, not a bootstrap plugin |
+| [`nexus-context`](crates/apps/nexus/crates/nexus-context) | `crates/apps/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
+| [`nexus-protocol`](crates/apps/nexus/crates/nexus-protocol) | `crates/apps/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
+| [`rusty_multimodal_db`](crates/apps/rusty_multimodal_db) | `crates/apps/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
 | [`rusty_sha1`](crates/foundation/rusty_sha1) | `crates/foundation/rusty_sha1` | Zero-dependency SHA-1 (FIPS 180-1) implementation, shared by `rusty_git`'s object hashing and `rusty_term`'s WebSocket handshake |
 | [`rusty_base64`](crates/foundation/rusty_base64) | `crates/foundation/rusty_base64` | Hand-rolled, dependency-free Base64 (RFC 4648) codec (standard and URL-safe alphabets, encode/decode), extracted from `rusty_oauth` and now shared by `rusty_acp`/`rusty-mcp`/`rusty_a2a` |
 | [`rusty_rand`](crates/foundation/rusty_rand) | `crates/foundation/rusty_rand` | OS-backed cryptographically secure random bytes (`/dev/urandom`/`BCryptGenRandom`), the CSPRNG shared by `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc` |
 | [`rusty_retry`](crates/foundation/rusty_retry) | `crates/foundation/rusty_retry` | Exponential backoff with jitter and `Retry-After` delta-seconds parsing, the retry mechanism shared by `rusty_request` and `rusty_acp` |
 | [`rusty_rsa`](crates/foundation/rusty_rsa) | `crates/foundation/rusty_rsa` | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256, the primitives `rusty_oauth` and `rusty_rdp` each independently reimplemented for RSA public-key verification/encryption |
 | [`rusty_kafka`](crates/libs/net/rusty_kafka) | `crates/libs/net/rusty_kafka` | Hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on `rusty_wire` and `rusty_tokio` |
-| [`rusty-meshed-core`](crates/rusty_meshed/crates/rusty-meshed-core) | `crates/rusty_meshed/crates/rusty-meshed-core` | `rusty_meshed`'s shared platform config: env-prefixed settings loaded once and injected into every other `rusty_meshed` crate |
-| [`rusty-meshed-schema-registry`](crates/rusty_meshed/crates/rusty-meshed-schema-registry) | `crates/rusty_meshed/crates/rusty-meshed-schema-registry` | Confluent Schema Registry client and compatibility-mode enforcement, ported from `meshed.schema_registry` |
-| [`rusty-meshed-governance`](crates/rusty_meshed/crates/rusty-meshed-governance) | `crates/rusty_meshed/crates/rusty-meshed-governance` | Policy-as-code governance engine and built-in policies, ported from `meshed.governance` |
-| [`rusty-meshed-observability`](crates/rusty_meshed/crates/rusty-meshed-observability) | `crates/rusty_meshed/crates/rusty-meshed-observability` | Lineage tracking, metrics collection, SLO monitoring, and the CI contract gate, ported from `meshed.observability` |
-| [`rusty-meshed-sdk`](crates/rusty_meshed/crates/rusty-meshed-sdk) | `crates/rusty_meshed/crates/rusty-meshed-sdk` | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from `meshed.sdk`/`meshed.infrastructure` |
-| [`rusty-meshed-registry`](crates/rusty_meshed/crates/rusty-meshed-registry) | `crates/rusty_meshed/crates/rusty-meshed-registry` | The data-product registry HTTP API: models, CRUD routers, and governance/lineage/metrics/monitor endpoints, ported from `meshed.registry` |
-| [`rusty-meshed-cli`](crates/rusty_meshed/crates/rusty-meshed-cli) | `crates/rusty_meshed/crates/rusty-meshed-cli` | The meshed operator CLI (health/lineage/metrics/slo commands), ported from `meshed.cli` |
-| [`rusty-meshed-domains`](crates/rusty_meshed/crates/rusty-meshed-domains) | `crates/rusty_meshed/crates/rusty-meshed-domains` | The manpower domain: event schemas, domain data products, scenario builder, and demo generators, ported from `meshed.domains` |
-| [`rusty-meshed-trace`](crates/rusty_meshed/crates/rusty-meshed-trace) | `crates/rusty_meshed/crates/rusty-meshed-trace` | Reverse-trace and domain-maturity model: outcome → domains → sources, with a fidelity verdict and worst-first bottleneck list |
-| [`rusty-hister-core`](crates/rusty_hister/crates/rusty-hister-core) | `crates/rusty_hister/crates/rusty-hister-core` | rusty_hister: shared types, IDs, error types, and the `Document`/extractor-SDK data model |
-| [`rusty-hister-model`](crates/rusty_hister/crates/rusty-hister-model) | `crates/rusty_hister/crates/rusty-hister-model` | rusty_hister: persisted schema on `rusty_db`, dual SQLite/Postgres (schema implemented; query layer complete — embedding-queue, `WebSession`, `DocumentVersion`, `crawl.go`, `history.go`, and `user.go` all ported) |
-| [`rusty-hister-extractor`](crates/rusty_hister/crates/rusty-hister-extractor) | `crates/rusty_hister/crates/rusty-hister-extractor` | rusty_hister: extractor chain-of-responsibility registry, plus all twenty built-in concrete extractors (JSON-LD, EmbeddedVideo, StackExchange, GoDoc, Lobsters, HackerNews, GitHub, ChatGPT, Basic, Wikipedia, Reddit, Discourse, Ytdlp, Markdown, OrgMode, Notion, Readability, Mastodon, Bluesky, Twitter) |
-| [`rusty-hister-indexer`](crates/rusty_hister/crates/rusty-hister-indexer) | `crates/rusty_hister/crates/rusty-hister-indexer` | rusty_hister: query language + full-text indexing on `rusty_search` (skeleton; unblocked by ADR-0002, not yet started) |
-| [`rusty-hister-vectorstore`](crates/rusty_hister/crates/rusty-hister-vectorstore) | `crates/rusty_hister/crates/rusty-hister-vectorstore` | rusty_hister: embedding pipeline and vector storage for semantic search (skeleton; unblocked by ADR-0002, not yet started) |
-| [`rusty-hister-crawler`](crates/rusty_hister/crates/rusty-hister-crawler) | `crates/rusty_hister/crates/rusty-hister-crawler` | rusty_hister: HTTP and JS-rendering crawler backends (skeleton; CDP backend unblocked by ADR-0003, not yet started) |
-| [`rusty-hister-server`](crates/rusty_hister/crates/rusty-hister-server) | `crates/rusty_hister/crates/rusty-hister-server` | rusty_hister: HTTP/JSON API + WebSocket search protocol, the v1 backend surface (skeleton) |
-| [`rusty-hister-mcp`](crates/rusty_hister/crates/rusty-hister-mcp) | `crates/rusty_hister/crates/rusty-hister-mcp` | rusty_hister: MCP JSON-RPC tool surface (search, get_preview, get_history) on `rusty_mcp` (skeleton) |
+| [`rusty-meshed-core`](crates/apps/rusty_meshed/crates/rusty-meshed-core) | `crates/apps/rusty_meshed/crates/rusty-meshed-core` | `rusty_meshed`'s shared platform config: env-prefixed settings loaded once and injected into every other `rusty_meshed` crate |
+| [`rusty-meshed-schema-registry`](crates/apps/rusty_meshed/crates/rusty-meshed-schema-registry) | `crates/apps/rusty_meshed/crates/rusty-meshed-schema-registry` | Confluent Schema Registry client and compatibility-mode enforcement, ported from `meshed.schema_registry` |
+| [`rusty-meshed-governance`](crates/apps/rusty_meshed/crates/rusty-meshed-governance) | `crates/apps/rusty_meshed/crates/rusty-meshed-governance` | Policy-as-code governance engine and built-in policies, ported from `meshed.governance` |
+| [`rusty-meshed-observability`](crates/apps/rusty_meshed/crates/rusty-meshed-observability) | `crates/apps/rusty_meshed/crates/rusty-meshed-observability` | Lineage tracking, metrics collection, SLO monitoring, and the CI contract gate, ported from `meshed.observability` |
+| [`rusty-meshed-sdk`](crates/apps/rusty_meshed/crates/rusty-meshed-sdk) | `crates/apps/rusty_meshed/crates/rusty-meshed-sdk` | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from `meshed.sdk`/`meshed.infrastructure` |
+| [`rusty-meshed-registry`](crates/apps/rusty_meshed/crates/rusty-meshed-registry) | `crates/apps/rusty_meshed/crates/rusty-meshed-registry` | The data-product registry HTTP API: models, CRUD routers, and governance/lineage/metrics/monitor endpoints, ported from `meshed.registry` |
+| [`rusty-meshed-cli`](crates/apps/rusty_meshed/crates/rusty-meshed-cli) | `crates/apps/rusty_meshed/crates/rusty-meshed-cli` | The meshed operator CLI (health/lineage/metrics/slo commands), ported from `meshed.cli` |
+| [`rusty-meshed-domains`](crates/apps/rusty_meshed/crates/rusty-meshed-domains) | `crates/apps/rusty_meshed/crates/rusty-meshed-domains` | The manpower domain: event schemas, domain data products, scenario builder, and demo generators, ported from `meshed.domains` |
+| [`rusty-meshed-trace`](crates/apps/rusty_meshed/crates/rusty-meshed-trace) | `crates/apps/rusty_meshed/crates/rusty-meshed-trace` | Reverse-trace and domain-maturity model: outcome → domains → sources, with a fidelity verdict and worst-first bottleneck list |
+| [`rusty-hister-core`](crates/apps/rusty_hister/crates/rusty-hister-core) | `crates/apps/rusty_hister/crates/rusty-hister-core` | rusty_hister: shared types, IDs, error types, and the `Document`/extractor-SDK data model |
+| [`rusty-hister-model`](crates/apps/rusty_hister/crates/rusty-hister-model) | `crates/apps/rusty_hister/crates/rusty-hister-model` | rusty_hister: persisted schema on `rusty_db`, dual SQLite/Postgres (schema implemented; query layer complete — embedding-queue, `WebSession`, `DocumentVersion`, `crawl.go`, `history.go`, and `user.go` all ported) |
+| [`rusty-hister-extractor`](crates/apps/rusty_hister/crates/rusty-hister-extractor) | `crates/apps/rusty_hister/crates/rusty-hister-extractor` | rusty_hister: extractor chain-of-responsibility registry, plus all twenty built-in concrete extractors (JSON-LD, EmbeddedVideo, StackExchange, GoDoc, Lobsters, HackerNews, GitHub, ChatGPT, Basic, Wikipedia, Reddit, Discourse, Ytdlp, Markdown, OrgMode, Notion, Readability, Mastodon, Bluesky, Twitter) |
+| [`rusty-hister-indexer`](crates/apps/rusty_hister/crates/rusty-hister-indexer) | `crates/apps/rusty_hister/crates/rusty-hister-indexer` | rusty_hister: query language + full-text indexing on `rusty_search` (skeleton; unblocked by ADR-0002, not yet started) |
+| [`rusty-hister-vectorstore`](crates/apps/rusty_hister/crates/rusty-hister-vectorstore) | `crates/apps/rusty_hister/crates/rusty-hister-vectorstore` | rusty_hister: embedding pipeline and vector storage for semantic search (skeleton; unblocked by ADR-0002, not yet started) |
+| [`rusty-hister-crawler`](crates/apps/rusty_hister/crates/rusty-hister-crawler) | `crates/apps/rusty_hister/crates/rusty-hister-crawler` | rusty_hister: HTTP and JS-rendering crawler backends (skeleton; CDP backend unblocked by ADR-0003, not yet started) |
+| [`rusty-hister-server`](crates/apps/rusty_hister/crates/rusty-hister-server) | `crates/apps/rusty_hister/crates/rusty-hister-server` | rusty_hister: HTTP/JSON API + WebSocket search protocol, the v1 backend surface (skeleton) |
+| [`rusty-hister-mcp`](crates/apps/rusty_hister/crates/rusty-hister-mcp) | `crates/apps/rusty_hister/crates/rusty-hister-mcp` | rusty_hister: MCP JSON-RPC tool surface (search, get_preview, get_history) on `rusty_mcp` (skeleton) |
 
 Each crate's own README, docs, and issue history describe its design in
 depth — the links above point at the original standalone repos' content,

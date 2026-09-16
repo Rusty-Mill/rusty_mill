@@ -52,7 +52,7 @@ runs:
     # dbus-daemon + gnome-keyring-daemon per test (see that crate's own
     # sys::secret_service doc comment) and don't need this. Code that talks
     # to the *ambient* session bus instead -- nexus-security's credential
-    # store plugin, exercised by crates/nexus/crates/nexus-bootstrap's
+    # store plugin, exercised by crates/apps/nexus/crates/nexus-bootstrap's
     # acp_contribution_wiring tests -- does, and the packages installed
     # above only make a Secret Service provider installable, not running:
     # nothing had ever started or unlocked one, so every such test failed

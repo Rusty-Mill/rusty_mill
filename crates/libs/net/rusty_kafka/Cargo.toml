@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_kafka"
 
 # Prerequisite for rusty_meshed's migration from confluent-kafka-python
-# (see crates/rusty_meshed/capability-manifest.md) -- built hand-rolled
+# (see crates/apps/rusty_meshed/capability-manifest.md) -- built hand-rolled
 # per the platform's sovereignty convention rather than wrapping an
 # external crate, matching rusty_http/rusty_tls/rusty_sqlite's own
 # "own the protocol" pattern in this workspace.

@@ -21,14 +21,14 @@ decision-requests that block indexer and crawler work. See
 
 | Crate | Path | Purpose |
 |---|---|---|
-| [`rusty-hister-core`](crates/rusty-hister-core) | `crates/rusty_hister/crates/rusty-hister-core` | Shared types, IDs, error types, and the `Document`/extractor-SDK data model — **implemented** (Phase 1) |
-| [`rusty-hister-model`](crates/rusty-hister-model) | `crates/rusty_hister/crates/rusty-hister-model` | Persisted schema on `rusty_db` (dual SQLite/Postgres) — history, links, users, crawl jobs, embedding queue, sessions — **implemented, query layer complete** (Phase 1: schema plus all six Go model files' query layers — embedding-queue, `WebSession`, `DocumentVersion`, `crawl.go`, `history.go`, and `user.go`) |
-| [`rusty-hister-extractor`](crates/rusty-hister-extractor) | `crates/rusty_hister/crates/rusty-hister-extractor` | Extractor chain-of-responsibility registry — **implemented** (Phase 1); all 20 built-in extractors done (JSON-LD, EmbeddedVideo, StackExchange, GoDoc, Lobsters, HackerNews, GitHub, ChatGPT, Basic, Wikipedia, Reddit, Discourse, Ytdlp, Markdown, OrgMode, Notion, Readability, Mastodon, Bluesky, Twitter) |
-| [`rusty-hister-indexer`](crates/rusty-hister-indexer) | `crates/rusty_hister/crates/rusty-hister-indexer` | Query language + full-text indexing on `rusty_search` + `rusty-search-sqlite-fts5` (ADR-0002) |
-| [`rusty-hister-vectorstore`](crates/rusty-hister-vectorstore) | `crates/rusty_hister/crates/rusty-hister-vectorstore` | Embedding pipeline and vector storage for semantic search |
-| [`rusty-hister-crawler`](crates/rusty-hister-crawler) | `crates/rusty_hister/crates/rusty-hister-crawler` | HTTP and CDP (`chromiumoxide`) crawler backends; WebDriver BiDi descoped for v1 (ADR-0003) |
-| [`rusty-hister-server`](crates/rusty-hister-server) | `crates/rusty_hister/crates/rusty-hister-server` | HTTP/JSON API + WebSocket search protocol — the v1 backend surface |
-| [`rusty-hister-mcp`](crates/rusty-hister-mcp) | `crates/rusty_hister/crates/rusty-hister-mcp` | MCP JSON-RPC tool surface (search, get_preview, get_history) on `rusty_mcp` |
+| [`rusty-hister-core`](crates/rusty-hister-core) | `crates/apps/rusty_hister/crates/rusty-hister-core` | Shared types, IDs, error types, and the `Document`/extractor-SDK data model — **implemented** (Phase 1) |
+| [`rusty-hister-model`](crates/rusty-hister-model) | `crates/apps/rusty_hister/crates/rusty-hister-model` | Persisted schema on `rusty_db` (dual SQLite/Postgres) — history, links, users, crawl jobs, embedding queue, sessions — **implemented, query layer complete** (Phase 1: schema plus all six Go model files' query layers — embedding-queue, `WebSession`, `DocumentVersion`, `crawl.go`, `history.go`, and `user.go`) |
+| [`rusty-hister-extractor`](crates/rusty-hister-extractor) | `crates/apps/rusty_hister/crates/rusty-hister-extractor` | Extractor chain-of-responsibility registry — **implemented** (Phase 1); all 20 built-in extractors done (JSON-LD, EmbeddedVideo, StackExchange, GoDoc, Lobsters, HackerNews, GitHub, ChatGPT, Basic, Wikipedia, Reddit, Discourse, Ytdlp, Markdown, OrgMode, Notion, Readability, Mastodon, Bluesky, Twitter) |
+| [`rusty-hister-indexer`](crates/rusty-hister-indexer) | `crates/apps/rusty_hister/crates/rusty-hister-indexer` | Query language + full-text indexing on `rusty_search` + `rusty-search-sqlite-fts5` (ADR-0002) |
+| [`rusty-hister-vectorstore`](crates/rusty-hister-vectorstore) | `crates/apps/rusty_hister/crates/rusty-hister-vectorstore` | Embedding pipeline and vector storage for semantic search |
+| [`rusty-hister-crawler`](crates/rusty-hister-crawler) | `crates/apps/rusty_hister/crates/rusty-hister-crawler` | HTTP and CDP (`chromiumoxide`) crawler backends; WebDriver BiDi descoped for v1 (ADR-0003) |
+| [`rusty-hister-server`](crates/rusty-hister-server) | `crates/apps/rusty_hister/crates/rusty-hister-server` | HTTP/JSON API + WebSocket search protocol — the v1 backend surface |
+| [`rusty-hister-mcp`](crates/rusty-hister-mcp) | `crates/apps/rusty_hister/crates/rusty-hister-mcp` | MCP JSON-RPC tool surface (search, get_preview, get_history) on `rusty_mcp` |
 
 A `rusty_hister` binary crate (CLI) is deferred to a later phase per v1's
 backend-only scope (see ADR-0001) — v1 ships as libraries plus whatever thin
