@@ -74,6 +74,7 @@
 
 pub mod dog_impl;
 pub mod employee_impl;
+pub mod mvcc_spike;
 pub mod order_bench_support;
 pub mod order_naive;
 pub mod rule_bench_support;
