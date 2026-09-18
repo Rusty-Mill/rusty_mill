@@ -20,12 +20,15 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 26
+PROTOCOL_VERSION = 27
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
 SESSION_VALIDATE_ON_STAGE = 2
 SESSION_SNAPSHOT_ISOLATION = 4
+# MVCC2-FR-004/011, ADR-0072: real multi-version concurrency control on
+# Memory/Entity/Relation only (Unsupported elsewhere), protocol 27.
+SESSION_MVCC_ISOLATION = 8
 
 
 # ---- fieldless enums (a u32 index on the wire) ----
