@@ -347,6 +347,14 @@ where
                 match ConcurrentStore::update_age(&self.store, id, age) {
                     Ok(()) => {
                         self.mvcc_record_field_write(id, FIELD_AGE, ScanValue::U32(age));
+                        // `ADR-0072`'s `MVCC2-FR-010`: this path is never
+                        // journaled (`JRN-FR-007`) and has no `Compact` to
+                        // piggyback on, so it must flush MVCC history on
+                        // every write it records — see
+                        // `MemoryConnectionStore::insert_record`.
+                        if !self.mvcc_flush_now(0) {
+                            return Err(ErrorCode::Storage);
+                        }
                         Ok(true)
                     }
                     Err(ConcurrencyError::Store(StoreError::NotFound(_))) => Ok(false),
@@ -453,6 +461,12 @@ where
                 Self::check_read_set(read_set, |id| DogStore::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `MemoryConnectionStore::apply_transaction`: no
+                // journal means no checkpoint boundary, so this commit
+                // flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             // `GRP-FR-001`: validate with per-call reads, then append,
@@ -516,6 +530,12 @@ where
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `MemoryConnectionStore::apply_transaction`: no
+                // journal means no checkpoint boundary, so this commit
+                // flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -1175,5 +1195,131 @@ mod tests {
             Err((0, ErrorCode::Conflict))
         );
         adapter.mvcc_release(snapshot);
+    }
+
+    /// The round-ten fix: `Dog` is never journaled by a single
+    /// `update_field`/`apply_transaction` (`JRN-FR-007`) and has no
+    /// insert log or `Compact` to piggyback on — the *only* thing that
+    /// could ever persist a write to `<mmap_path>.mvcc` here is the write
+    /// path itself flushing synchronously. Before this fix, `update_field`
+    /// recorded into the in-memory index but never flushed, so a restart
+    /// with no intervening write silently lost it from MVCC's own
+    /// bookkeeping.
+    #[test]
+    fn update_field_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let dir = fresh_temp_dir("server_dog_mvcc_update_field_flush").unwrap();
+        let path = dir.join("dogs.mmap");
+        let records = vec![DogRecord::new(Uuid::from_u128(1), "labrador", 3)];
+        let store = ProductionStore::create(records, Vec::new(), &path).unwrap();
+        let adapter = DogConnectionStore::new(store).with_mvcc(&path).unwrap();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.update_field(id, FIELD_AGE, ScanValue::U32(9)),
+            Ok(true)
+        );
+        drop(adapter);
+
+        let reopened = DogConnectionStore::new(ProductionStore::open_portable(&path).unwrap())
+            .with_mvcc(&path)
+            .unwrap();
+        assert!(reopened.mvcc_supported());
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[1],
+            (FIELD_AGE, ScanValue::U32(3)),
+            "the pre-update snapshot still sees the pre-update value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[1],
+            (FIELD_AGE, ScanValue::U32(9)),
+            "a fresh snapshot after reopen sees the write update_field flushed"
+        );
+    }
+
+    /// See `update_field_flushes_mvcc_history_and_a_restart_reconstructs_
+    /// it`: `apply_transaction`'s own non-journaled path has the identical
+    /// gap and fix.
+    #[test]
+    fn apply_transaction_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let dir = fresh_temp_dir("server_dog_mvcc_txn_flush").unwrap();
+        let path = dir.join("dogs.mmap");
+        let records = vec![DogRecord::new(Uuid::from_u128(1), "labrador", 3)];
+        let store = ProductionStore::create(records, Vec::new(), &path).unwrap();
+        let adapter = DogConnectionStore::new(store).with_mvcc(&path).unwrap();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_AGE,
+                    value: ScanValue::U32(9),
+                }],
+                &[],
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let reopened = DogConnectionStore::new(ProductionStore::open_portable(&path).unwrap())
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[1],
+            (FIELD_AGE, ScanValue::U32(3)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[1],
+            (FIELD_AGE, ScanValue::U32(9)),
+            "a fresh snapshot after reopen sees the commit apply_transaction flushed"
+        );
+    }
+
+    /// See `update_field_flushes_mvcc_history_and_a_restart_reconstructs_
+    /// it`: `apply_transaction_mvcc`'s own non-journaled path has the
+    /// identical gap and fix.
+    #[test]
+    fn apply_transaction_mvcc_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let dir = fresh_temp_dir("server_dog_mvcc_txn_mvcc_flush").unwrap();
+        let path = dir.join("dogs.mmap");
+        let records = vec![DogRecord::new(Uuid::from_u128(1), "labrador", 3)];
+        let store = ProductionStore::create(records, Vec::new(), &path).unwrap();
+        let adapter = DogConnectionStore::new(store).with_mvcc(&path).unwrap();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_AGE,
+                    value: ScanValue::U32(9),
+                }],
+                &[],
+                before,
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let reopened = DogConnectionStore::new(ProductionStore::open_portable(&path).unwrap())
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[1],
+            (FIELD_AGE, ScanValue::U32(3)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[1],
+            (FIELD_AGE, ScanValue::U32(9)),
+            "a fresh snapshot after reopen sees the commit apply_transaction_mvcc flushed"
+        );
     }
 }
