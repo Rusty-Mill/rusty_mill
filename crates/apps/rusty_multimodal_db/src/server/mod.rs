@@ -178,6 +178,10 @@ pub mod memory;
 pub mod metrics;
 #[cfg(feature = "server")]
 mod metrics_http;
+/// Real MVCC version chains (`ADR-0072`) — `Memory`/`Entity`/`Relation`
+/// only; see the module's own docs.
+#[cfg(feature = "server")]
+pub mod mvcc;
 #[cfg(all(feature = "server", feature = "research"))]
 pub mod order;
 mod pem;

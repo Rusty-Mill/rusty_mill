@@ -396,6 +396,14 @@ pub(crate) struct Turn {
     /// journaled entry is then applied. The closure answers by flushing
     /// the store and returning `true`; the group truncates.
     pub(crate) checkpoint_due: bool,
+    /// `ADR-0072`'s `MVCC2-FR-010`: how many journal entries have been
+    /// appended since the last truncate, as of this batch's turn —
+    /// including this batch itself. A caller flushing MVCC history right
+    /// before a checkpoint's truncate records this as
+    /// `journal_entries_reflected`, so a later open knows how many
+    /// leading replayed entries the flush already covers, whether or not
+    /// the truncate that was meant to follow actually completed.
+    pub(crate) journal_entries: u64,
 }
 
 /// Why [`CommitGroup::commit`] failed: the journal (the batch was never
@@ -428,6 +436,13 @@ struct GroupState {
     journal: BatchJournal,
     /// The sequence of the last entry written.
     appended: u64,
+    /// `ADR-0072`'s `MVCC2-FR-010`: entries appended since the journal
+    /// was last truncated — unlike `appended`, this resets to `0` on a
+    /// successful [`BatchJournal::truncate`], so a caller flushing MVCC
+    /// history right before a checkpoint's truncate can record exactly
+    /// how many journal entries are reflected in that flush (`Turn::
+    /// journal_entries`), regardless of the journal's lifetime total.
+    since_checkpoint: u64,
     /// Every sequence `<= durable` has had an `fsync` return after its
     /// bytes were written (monotone: a leader covers every earlier entry).
     durable: u64,
@@ -507,6 +522,7 @@ impl CommitGroup {
                 state: Mutex::new(GroupState {
                     journal,
                     appended: 0,
+                    since_checkpoint: 0,
                     durable: 0,
                     failed_upto: 0,
                     syncing: false,
@@ -590,6 +606,7 @@ impl CommitGroup {
             .append_unsynced(entry)
             .map_err(CommitError::Journal)?;
         state.appended += 1;
+        state.since_checkpoint += 1;
         let seq = state.appended;
 
         // `GRP-FR-002`: wait for durability through `seq`, leading when
@@ -639,17 +656,23 @@ impl CommitGroup {
         }
         let checkpoint_due =
             durable.is_ok() && state.journal.needs_checkpoint() && state.appended == seq;
+        let journal_entries = state.since_checkpoint;
         drop(state);
         let _turn = TurnGuard { group: self };
 
         durable?;
-        let flushed = apply(Turn { checkpoint_due }).map_err(CommitError::Apply)?;
+        let flushed = apply(Turn {
+            checkpoint_due,
+            journal_entries,
+        })
+        .map_err(CommitError::Apply)?;
         if flushed {
             // `GRP-FR-004`: truncate only if still quiescent — an entry
             // appended during the apply is not yet applied.
             let mut state = self.lock().map_err(CommitError::Journal)?;
             if state.appended == seq {
                 let _ = state.journal.truncate();
+                state.since_checkpoint = 0;
             }
         }
         Ok(())
@@ -678,6 +701,16 @@ impl CommitGroup {
             .lock()
             .map(|s| s.journal.len_bytes())
             .unwrap_or(0)
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-010`: how many entries have been appended
+    /// since the last successful truncate, right now — the count an
+    /// adapter records as `journal_entries_reflected` when it flushes
+    /// MVCC history for a reason other than a live commit's own
+    /// checkpoint (`MvccState::open`'s own baseline-seeding flush, which
+    /// has no [`Turn`] to read `journal_entries` from).
+    pub(crate) fn entries_since_checkpoint(&self) -> u64 {
+        self.state.lock().map(|s| s.since_checkpoint).unwrap_or(0)
     }
 }
 

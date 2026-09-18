@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.15.0 (protocol version 26 — `SERVER-001` v0.56.0, `FPG-FR-005`,
+- Version: 0.16.0 (protocol version 27 — `SERVER-001` v0.57.0,
+  `MVCC2-FR-004`, `ADR-0072`; 0.15.0 was protocol 26 — `SERVER-001` v0.56.0, `FPG-FR-005`,
   ADR-0068; 0.14.0 was protocol 25, `SERVER-001` v0.55.0, `RPL-FR-006`,
   ADR-0067; 0.13.0 was protocol 24, `SERVER-001` v0.54.0, `BAK-FR-006`,
   ADR-0065; 0.12.0 was protocol 23, `SERVER-001` v0.53.0, `MET-FR-004`,
@@ -95,13 +96,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 26 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1a 00 00 00` (26).
+- `Request::Hello { protocol_version: 27 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1b 00 00 00` (27).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 26
+## 5. Types at protocol version 27
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -610,6 +611,7 @@ wire. (`FR-050`)
 | `1` | `SESSION_READ_YOUR_WRITES` | 5 | the connection's own `GetById` sees its staged writes |
 | `2` | `SESSION_VALIDATE_ON_STAGE` | 6 | each staged write is validated when staged |
 | `4` | `SESSION_SNAPSHOT_ISOLATION` | 7 | session `GetById`s are tracked and re-checked at `Commit` (`Conflict` on mismatch) |
+| `8` | `SESSION_MVCC_ISOLATION` | 27 | real multi-version concurrency control — `Memory`/`Entity`/`Relation` only (`Unsupported` on any other table); `GetById` answers as of the snapshot taken at `Begin`, including against a concurrent ordinary (non-session) write; `Commit`'s write-write check reuses `Conflict` |
 
 An unknown bit for the negotiated version is `Malformed`.
 
@@ -643,6 +645,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 24 | v0.54.0 | `Backup` (33), `BackedUp` (22) |
 | 25 | v0.55.0 | `FetchSnapshot` (34), `Snapshot` (23), `ErrorCode::TooLarge` (14) |
 | 26 | v0.56.0 | `FilteredPage` (35) |
+| 27 | v0.57.0 | flag bit 8, `SESSION_MVCC_ISOLATION` — no new variant |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -690,6 +693,19 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.16.0 (`SERVER-001` v0.57.0, `ADR-0072`, `MVCC2-FR-004`): protocol
+  version 27 — no new variant: `BeginWith` learns a fourth flag bit,
+  `SESSION_MVCC_ISOLATION` (§7.6) — real multi-version concurrency
+  control for `Memory`/`Entity`/`Relation` only. `Begin` opens a
+  snapshot at the table's current `last_committed_txn`; `GetById` while
+  such a session is open answers as of that snapshot, including against
+  a concurrent *ordinary* (non-session) write, not only another
+  session's commit; `Commit`'s write-write conflict check reuses
+  `ErrorCode::Conflict` and `Response::TransactionFailed { index: 0,
+  .. }` (no new error code). `Dog`/`Order`/`Employee` refuse the bit
+  with `Unsupported`. §4's `Hello` example, §5 header, §7.6, §8 row 27;
+  no §9 fixture change beyond the two new `BeginWith` golden vectors
+  already covered by the existing pin mechanism.
 - 0.15.0 (`SERVER-001` v0.56.0, ADR-0068, `FPG-FR-005`): protocol
   version 26 — `Request::FilteredPage` (35), answered `Response::Rows`
   (reused, no new response variant) — `Page`'s three fields

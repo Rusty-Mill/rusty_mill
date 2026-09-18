@@ -7,7 +7,9 @@ Request/Authenticate	1	080000000600000000000000733363723374
 Request/Backup	24	2100000007000000000000006e696768746c79
 Request/Begin	3	0b000000
 Request/BeginWith	5	0e00000001000000
+Request/BeginWith(all four bits)	27	0e0000000f000000
 Request/BeginWith(all three bits)	7	0e00000007000000
+Request/BeginWith(mvcc isolation)	27	0e00000008000000
 Request/BeginWith(snapshot isolation)	7	0e00000004000000
 Request/Children	1	05000000100000000000000000000000000000000000000000000001
 Request/Commit	3	0c000000
