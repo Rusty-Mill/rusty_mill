@@ -64,6 +64,30 @@ class WireVectors(unittest.TestCase):
             bytes.fromhex("1c000000" "00000000" "1000000000000000" + "00" * 15 + "01"),
         )
 
+    def test_mvcc_isolation_flag_is_8_and_round_trips_at_protocol_27(self):
+        # MVCC2-FR-004/011, ADR-0072: real MVCC's BeginWith bit — this
+        # client declares protocol 27, so it may send it (compatibility
+        # rule 4), and the wire shape is BeginWith's existing plain u32
+        # flags field, no new codec logic needed.
+        self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
+        self.assertEqual(p.PROTOCOL_VERSION, 27)
+        req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
+        data = p.encode_request(req)
+        self.assertEqual(p.decode_request(data), req)
+        self.assertEqual(p.encode_request(p.decode_request(data)), data)
+        # Matches the pinned fixture byte-for-byte.
+        self.assertEqual(data, bytes.fromhex("0e00000008000000"))
+        # Composes with the other three bits independently (ADR-0072).
+        combined = p.BeginWith(
+            p.SESSION_READ_YOUR_WRITES
+            | p.SESSION_VALIDATE_ON_STAGE
+            | p.SESSION_SNAPSHOT_ISOLATION
+            | p.SESSION_MVCC_ISOLATION
+        )
+        combined_data = p.encode_request(combined)
+        self.assertEqual(p.decode_request(combined_data), combined)
+        self.assertEqual(combined_data, bytes.fromhex("0e0000000f000000"))
+
 
 if __name__ == "__main__":
     unittest.main()
