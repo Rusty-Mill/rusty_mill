@@ -24,7 +24,10 @@ use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{AllIds, Delete, GetById, Insert, Replace, UpdateField};
-use crate::generic::relation::{Relation, RelationProductionStack, SubjectField, UpdatedAtField};
+use crate::generic::relation::{
+    open_relation_production_stack_portable, Relation, RelationProductionStack, SubjectField,
+    UpdatedAtField,
+};
 use crate::generic::traits::SchemaTag;
 use crate::generic::{DeleteError, InsertError, ReplaceError};
 use std::path::{Path, PathBuf};
@@ -91,11 +94,56 @@ impl RelationConnectionStore {
     pub fn with_mvcc(mut self, mmap_path: &Path) -> Result<Self, DurabilityError> {
         let reconstructed = MvccState::open(mmap_path)?;
         let log = insert_log::log_path(mmap_path);
-        let entries: Vec<LogEntry<Relation, RecordId>> =
-            insert_log::read_entries(&log, Relation::SCHEMA_TAG)?
-                .into_iter()
-                .skip(reconstructed.insert_log_entries_reflected)
-                .collect();
+        let entries = insert_log::read_entries(&log, Relation::SCHEMA_TAG)?;
+        Self::fold_pending_log_entries(&reconstructed, entries);
+        self.mvcc = Some(MvccHandle {
+            state: reconstructed.state,
+            mmap_path: mmap_path.to_path_buf(),
+        });
+        Ok(self)
+    }
+
+    /// `docs/design/MVCC-OPEN-HOOK-PROPOSAL.md` (Accepted, option (b)):
+    /// the *reopen* counterpart to [`Self::with_mvcc`] — see
+    /// `MemoryConnectionStore::open_with_mvcc` for the full contract;
+    /// identical here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError`] if `<mmap_path>.mvcc` exists but can't
+    /// be read/decoded, if the insert log can't be read, or if the
+    /// underlying reopen (`open_relation_production_stack_portable`)
+    /// fails.
+    pub fn open_with_mvcc(path: &Path) -> Result<Self, DurabilityError> {
+        let log = insert_log::log_path(path);
+        let pending_entries = insert_log::read_entries(&log, Relation::SCHEMA_TAG)?;
+
+        let stack = open_relation_production_stack_portable(path)?;
+        let store = GenericProductionStore::new(stack);
+
+        let reconstructed = MvccState::open(path)?;
+        Self::fold_pending_log_entries(&reconstructed, pending_entries);
+        Ok(Self {
+            store,
+            journal: None,
+            backup_source: None,
+            mvcc: Some(MvccHandle {
+                state: reconstructed.state,
+                mmap_path: path.to_path_buf(),
+            }),
+        })
+    }
+
+    /// Shared by [`Self::with_mvcc`] and [`Self::open_with_mvcc`] — see
+    /// `MemoryConnectionStore::fold_pending_log_entries` for the full
+    /// contract; identical here.
+    fn fold_pending_log_entries(
+        reconstructed: &mvcc::Reconstructed,
+        entries: Vec<LogEntry<Relation, RecordId>>,
+    ) {
+        let entries = entries
+            .into_iter()
+            .skip(reconstructed.insert_log_entries_reflected);
         for entry in entries {
             let txn_id = reconstructed.state.counter().next();
             reconstructed.state.with_index(|index| match entry {
@@ -115,11 +163,6 @@ impl RelationConnectionStore {
                 }
             });
         }
-        self.mvcc = Some(MvccHandle {
-            state: reconstructed.state,
-            mmap_path: mmap_path.to_path_buf(),
-        });
-        Ok(self)
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -1271,6 +1314,45 @@ mod tests {
         assert_eq!(reopened.mvcc_get(id, before).unwrap(), Some(original));
         let after = reopened.mvcc_begin();
         assert_eq!(reopened.mvcc_get(id, after).unwrap(), Some(edited));
+    }
+
+    /// `docs/design/MVCC-OPEN-HOOK-PROPOSAL.md` acceptance criterion 1 —
+    /// see `MemoryConnectionStore`'s own identical test for the full
+    /// rationale: a genuinely pending, unflushed insert-log entry (an
+    /// ordinary `replace_record`, no `Compact` in between) at the moment
+    /// of a simulated restart is still correctly reconstructed by
+    /// `open_with_mvcc`, which `with_mvcc` alone cannot do.
+    #[test]
+    fn open_with_mvcc_reconstructs_a_pending_unflushed_insert_log_entry() {
+        let (adapter, path) = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let before = adapter.mvcc_begin();
+        let original = adapter.get(id).unwrap();
+        let mut edited = original.clone();
+        edited[1] = (
+            FIELD_RELATION,
+            ScanValue::Str("edited, never flushed".into()),
+        );
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced),
+            "an ordinary write — appends to the insert log, no Compact/flush follows"
+        );
+        drop(adapter);
+
+        let reopened = RelationConnectionStore::open_with_mvcc(&path).unwrap();
+        assert!(reopened.mvcc_supported());
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap(),
+            Some(original),
+            "the pre-write snapshot still sees the pre-write value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap(),
+            Some(edited),
+            "a fresh snapshot after reopen sees the pending write open_with_mvcc recovered"
+        );
     }
 
     /// `REL-FR-004`: seven fields in tag order, `subject` the one
