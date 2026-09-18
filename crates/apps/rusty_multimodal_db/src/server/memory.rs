@@ -32,8 +32,8 @@ use super::{
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
 use crate::generic::memory::{
-    AccessCountField, CategoryField, Memory, MemoryProductionStack, UpdatedAtOrder,
-    MEMORY_FOREIGN_TABLE, MEMORY_RELATION_LABELS,
+    open_memory_production_stack_portable, AccessCountField, CategoryField, Memory,
+    MemoryProductionStack, UpdatedAtOrder, MEMORY_FOREIGN_TABLE, MEMORY_RELATION_LABELS,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{AllIds, Delete, GetById, Insert, MultiLink, Replace, UpdateField};
@@ -160,11 +160,66 @@ impl MemoryConnectionStore {
     pub fn with_mvcc(mut self, mmap_path: &Path) -> Result<Self, DurabilityError> {
         let reconstructed = MvccState::open(mmap_path)?;
         let log = insert_log::log_path(mmap_path);
-        let entries: Vec<LogEntry<Memory, RecordId>> =
-            insert_log::read_entries(&log, Memory::SCHEMA_TAG)?
-                .into_iter()
-                .skip(reconstructed.insert_log_entries_reflected)
-                .collect();
+        let entries = insert_log::read_entries(&log, Memory::SCHEMA_TAG)?;
+        Self::fold_pending_log_entries(&reconstructed, entries);
+        self.mvcc = Some(MvccHandle {
+            state: reconstructed.state,
+            mmap_path: mmap_path.to_path_buf(),
+        });
+        Ok(self)
+    }
+
+    /// `docs/design/MVCC-OPEN-HOOK-PROPOSAL.md` (Accepted, option (b)):
+    /// the *reopen* counterpart to [`Self::with_mvcc`]. `with_mvcc`
+    /// alone is wrong for a table reopened through the normal portable-
+    /// open path, because `GenericMmapStore::open` (inside
+    /// [`open_memory_production_stack_portable`]) unconditionally clears
+    /// the insert log as part of its own primary-state fold — by the
+    /// time `with_mvcc` could run afterward and read that log itself, any
+    /// pending entries it needed are already gone. This constructor reads
+    /// those entries *before* the reopen call, then feeds them into the
+    /// same folding logic `with_mvcc` uses, closing that gap without any
+    /// change to `GenericMmapStore::open` or to any non-MVCC domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError`] if `<mmap_path>.mvcc` exists but can't
+    /// be read/decoded, if the insert log can't be read, or if the
+    /// underlying reopen (`open_memory_production_stack_portable`) fails.
+    pub fn open_with_mvcc(path: &Path) -> Result<Self, DurabilityError> {
+        // Read the pending log first — before anything below has a
+        // chance to clear it.
+        let log = insert_log::log_path(path);
+        let pending_entries = insert_log::read_entries(&log, Memory::SCHEMA_TAG)?;
+
+        let stack = open_memory_production_stack_portable(path)?;
+        let store = GenericProductionStore::new(stack);
+
+        let reconstructed = MvccState::open(path)?;
+        Self::fold_pending_log_entries(&reconstructed, pending_entries);
+        Ok(Self {
+            store,
+            journal: None,
+            backup_source: None,
+            mvcc: Some(MvccHandle {
+                state: reconstructed.state,
+                mmap_path: path.to_path_buf(),
+            }),
+        })
+    }
+
+    /// Shared by [`Self::with_mvcc`] and [`Self::open_with_mvcc`]: fold
+    /// whatever insert-log entries weren't yet reflected in the
+    /// persisted `.mvcc` store (`reconstructed.insert_log_entries_reflected`
+    /// entries are skipped — already accounted for) into the
+    /// reconstructed index, one freshly assigned txn id per entry.
+    fn fold_pending_log_entries(
+        reconstructed: &mvcc::Reconstructed,
+        entries: Vec<LogEntry<Memory, RecordId>>,
+    ) {
+        let entries = entries
+            .into_iter()
+            .skip(reconstructed.insert_log_entries_reflected);
         for entry in entries {
             let txn_id = reconstructed.state.counter().next();
             reconstructed.state.with_index(|index| match entry {
@@ -184,11 +239,6 @@ impl MemoryConnectionStore {
                 }
             });
         }
-        self.mvcc = Some(MvccHandle {
-            state: reconstructed.state,
-            mmap_path: mmap_path.to_path_buf(),
-        });
-        Ok(self)
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -1605,6 +1655,59 @@ mod tests {
             reopened.mvcc_get(id, after).unwrap().unwrap()[10],
             (FIELD_ACCESS_COUNT, ScanValue::I64(9)),
             "a fresh snapshot after reopen sees the write made before compact"
+        );
+    }
+
+    /// `docs/design/MVCC-OPEN-HOOK-PROPOSAL.md` acceptance criterion 1:
+    /// a table with a genuinely pending, unflushed insert-log entry
+    /// (an ordinary `replace_record` made after activation, with no
+    /// `Compact` and no explicit flush in between) at the moment of a
+    /// simulated restart — `open_with_mvcc` on the reopened table still
+    /// answers correctly, both for a snapshot taken before the write
+    /// (sees the original value) and a fresh one after reopen (sees the
+    /// write). `with_mvcc` alone cannot handle this: by the time it would
+    /// run after the normal portable-open path, `GenericMmapStore::open`
+    /// has already cleared the insert log this test relies on.
+    #[test]
+    fn open_with_mvcc_reconstructs_a_pending_unflushed_insert_log_entry() {
+        let dir = fresh_temp_dir("server_memory_mvcc_open_hook").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        let stack =
+            create_memory_production_stack(vec![memory(1, "general", false)], &[], &path).unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+
+        let before = adapter.mvcc_begin();
+        let original = adapter.get(id).unwrap();
+        let mut edited = original.clone();
+        edited[0] = (
+            FIELD_CONTENT,
+            ScanValue::Str("edited, never flushed".into()),
+        );
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced),
+            "an ordinary write — appends to the insert log, no Compact/flush follows"
+        );
+        // No `compact()`, no further `mvcc_begin()` — the replace above
+        // is the *only* thing that touched the insert log, and it is
+        // still sitting there, unflushed, when we drop and reopen.
+        drop(adapter);
+
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        assert!(reopened.mvcc_supported());
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap(),
+            Some(original),
+            "the pre-write snapshot still sees the pre-write value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap(),
+            Some(edited),
+            "a fresh snapshot after reopen sees the pending write open_with_mvcc recovered"
         );
     }
 
