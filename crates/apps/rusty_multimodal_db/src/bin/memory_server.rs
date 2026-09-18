@@ -197,10 +197,77 @@ fn main() {
         ),
     };
     let durable = matches!(data, DataLocation::Durable(_));
+    let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
+    // `SERVER_MVCC_ISOLATION` (`ADR-0072`, `MVCC2-FR-004`/`011`): opt-in,
+    // unset by default — matching `with_mvcc`/`open_with_mvcc`'s own
+    // "unset by default" framing and `SERVER_BACKUP_ROOT`/
+    // `SERVER_AUTH_REPLICATION_TOKEN`'s own presence-gated precedent.
+    // With it set, a session may open with `SESSION_MVCC_ISOLATION` on
+    // any of the three tables; unset, that bit is refused `Unsupported`
+    // everywhere, exactly as it always was before this variable existed.
+    let mvcc_enabled = std::env::var_os("SERVER_MVCC_ISOLATION").is_some();
+    // These two do not compose safely today: `with_journal`'s own
+    // `open_or_create_*_production_stack` call (inside `open_stores`,
+    // below) already folds and clears the insert log for its own
+    // primary-state purposes, before either `with_journal` or any MVCC
+    // constructor ever sees it — the exact gap `open_with_mvcc`'s own
+    // doc comment names, but with no way to recover from it here, since
+    // by the time `with_journal` or `.with_mvcc()` would run the log is
+    // already gone. Refusing to start (an explicit, named limitation,
+    // not a silent gap) matches this binary's own "unopenable path is a
+    // startup error" convention for every other misconfiguration.
+    if mvcc_enabled && journaled {
+        panic!(
+            "SERVER_MVCC_ISOLATION and SERVER_TXN_JOURNAL_PATH cannot both be set: real MVCC \
+             and the crash-atomic journal are not yet composable for a reopened table (see \
+             MemoryConnectionStore::with_mvcc's and ::open_with_mvcc's own doc comments, and \
+             ADR-0072's \"Negative / tradeoffs\") — pick one for this table"
+        );
+    }
+    // Detected *before* `open_stores` runs `open_or_create_*_production_stack`
+    // on each path — afterward every file exists regardless, so this is
+    // the only point a caller can still tell "fresh" from "reopen" the
+    // same way `open_or_create_memory_production_stack`'s own
+    // `path.exists()` check does internally. Scratch mode is always
+    // "fresh": its directory is a brand-new per-process temp path that
+    // cannot already hold any of these three files.
+    let (memories_existed, entities_existed, relations_existed) = match &data {
+        DataLocation::Durable(dir) => (
+            dir.join("memories.mmap").exists(),
+            dir.join("entities.mmap").exists(),
+            dir.join("relations.mmap").exists(),
+        ),
+        DataLocation::Scratch(_) => (false, false, false),
+    };
+    // Known, accepted tradeoff of this round: when `open_with_mvcc` is
+    // used below (reopening a table with MVCC on), the corresponding
+    // stack `open_stores` already built here (`store`/`entity_store`/
+    // `relation_store`) is left unused for that table — `open_with_mvcc`
+    // opens the file a second time itself, since it must read the insert
+    // log *before* the normal open path clears it, and this binary's own
+    // `open_stores` has no way to be told "skip this one, something else
+    // will open it." The first, unused mapping is simply dropped at
+    // `main`'s own end; it is never read or written, so this is wasted
+    // I/O and a doubled peak file-handle count for that table's startup,
+    // not a correctness risk — a deeper `open_stores` refactor to avoid
+    // it is future work, not attempted in this round.
     let (store, entity_store, relation_store, memories_path, entities_path, relations_path) =
         open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
     let relation_connection_store: Arc<dyn ConnectionStore> = Arc::new({
-        let adapter = RelationConnectionStore::new(GenericProductionStore::new(relation_store));
+        let adapter = if mvcc_enabled && relations_existed {
+            RelationConnectionStore::open_with_mvcc(&relations_path).unwrap_or_else(|e| {
+                panic!("SERVER_MVCC_ISOLATION: reopening {relations_path:?} for relation: {e}")
+            })
+        } else {
+            let adapter = RelationConnectionStore::new(GenericProductionStore::new(relation_store));
+            if mvcc_enabled {
+                adapter.with_mvcc(&relations_path).unwrap_or_else(|e| {
+                    panic!("SERVER_MVCC_ISOLATION: activating for relation: {e}")
+                })
+            } else {
+                adapter
+            }
+        };
         // `BAK-FR-002` (ADR-0065): only a durable table has a directory
         // worth naming — a scratch table is gone on restart regardless.
         if durable {
@@ -210,7 +277,20 @@ fn main() {
         }
     });
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
-        let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
+        let adapter = if mvcc_enabled && entities_existed {
+            EntityConnectionStore::open_with_mvcc(&entities_path).unwrap_or_else(|e| {
+                panic!("SERVER_MVCC_ISOLATION: reopening {entities_path:?} for entity: {e}")
+            })
+        } else {
+            let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
+            if mvcc_enabled {
+                adapter
+                    .with_mvcc(&entities_path)
+                    .unwrap_or_else(|e| panic!("SERVER_MVCC_ISOLATION: activating for entity: {e}"))
+            } else {
+                adapter
+            }
+        };
         if durable {
             adapter.with_backup_source(entities_path)
         } else {
@@ -220,15 +300,30 @@ fn main() {
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
     // write, replayed on the next start. Set it the same way every start:
-    // opening without it after a crash forgoes the replay.
+    // opening without it after a crash forgoes the replay. Mutually
+    // exclusive with `SERVER_MVCC_ISOLATION` (checked above), so this
+    // branch and the MVCC one below never both apply to `memory`.
     let connection_store = Arc::new({
-        let adapter = match std::env::var("SERVER_TXN_JOURNAL_PATH") {
-            Ok(journal_path) => MemoryConnectionStore::with_journal(
-                GenericProductionStore::new(store),
-                Path::new(&journal_path),
-            )
-            .unwrap_or_else(|e| panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")),
-            Err(_) => MemoryConnectionStore::new(GenericProductionStore::new(store)),
+        let adapter = if mvcc_enabled && memories_existed {
+            MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
+                panic!("SERVER_MVCC_ISOLATION: reopening {memories_path:?} for memory: {e}")
+            })
+        } else {
+            let adapter = match std::env::var("SERVER_TXN_JOURNAL_PATH") {
+                Ok(journal_path) => MemoryConnectionStore::with_journal(
+                    GenericProductionStore::new(store),
+                    Path::new(&journal_path),
+                )
+                .unwrap_or_else(|e| panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")),
+                Err(_) => MemoryConnectionStore::new(GenericProductionStore::new(store)),
+            };
+            if mvcc_enabled {
+                adapter
+                    .with_mvcc(&memories_path)
+                    .unwrap_or_else(|e| panic!("SERVER_MVCC_ISOLATION: activating for memory: {e}"))
+            } else {
+                adapter
+            }
         };
         if durable {
             adapter.with_backup_source(memories_path)
@@ -236,7 +331,6 @@ fn main() {
             adapter
         }
     });
-    let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
 
