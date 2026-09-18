@@ -172,8 +172,8 @@ use super::framing::{self, FrameError};
 use super::protocol::{
     AggregateFn, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldDescriptor, FieldRef,
     JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor, Request, Response, ScanValue,
-    Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
-    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION, SESSION_MVCC_ISOLATION,
+    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -459,18 +459,21 @@ pub struct Session<'a> {
     read_your_writes: bool,
     validate_on_stage: bool,
     snapshot_isolation: bool,
+    mvcc_isolation: bool,
 }
 
 /// How to open a session with [`SchemaDrivenClient::begin_with`]: each
 /// option is a `Request::BeginWith` flag bit and is gated on the protocol
 /// version that introduced it (compatibility rule 4) — `read_your_writes`
 /// on 5 (`FR-028`), `validate_on_stage` on 6 (`FR-030`),
-/// `snapshot_isolation` on 7 (`ISO-FR-001`).
+/// `snapshot_isolation` on 7 (`ISO-FR-001`), `mvcc_isolation` on 27
+/// (`MVCC2-FR-004`/`011`, `ADR-0072`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionOptions {
     read_your_writes: bool,
     validate_on_stage: bool,
     snapshot_isolation: bool,
+    mvcc_isolation: bool,
 }
 
 impl SessionOptions {
@@ -499,6 +502,19 @@ impl SessionOptions {
         self
     }
 
+    /// Real multi-version concurrency control (`MVCC2-FR-004`/`005`,
+    /// `ADR-0072`) — `Memory`/`Entity`/`Relation` only, `ErrorCode::
+    /// Unsupported` on any other table. `GetById` on this session answers
+    /// as of the snapshot taken at `Begin`, unaffected by any later
+    /// commit from another connection — a session or an ordinary
+    /// single-shot/atomic-batch write. `commit` fails with
+    /// `ErrorCode::Conflict` if any key this session staged was written
+    /// by anyone else since that snapshot.
+    pub fn mvcc_isolation(mut self) -> Self {
+        self.mvcc_isolation = true;
+        self
+    }
+
     fn flags(self) -> u32 {
         (if self.read_your_writes {
             SESSION_READ_YOUR_WRITES
@@ -512,12 +528,18 @@ impl SessionOptions {
             SESSION_SNAPSHOT_ISOLATION
         } else {
             0
+        }) | (if self.mvcc_isolation {
+            SESSION_MVCC_ISOLATION
+        } else {
+            0
         })
     }
 
     /// The protocol version the chosen options need.
     fn required_version(self) -> u32 {
-        if self.snapshot_isolation {
+        if self.mvcc_isolation {
+            27
+        } else if self.snapshot_isolation {
             7
         } else if self.validate_on_stage {
             6
@@ -619,6 +641,15 @@ impl Session<'_> {
     /// another connection's commit before this one landed.
     pub fn snapshot_isolation(&self) -> bool {
         self.snapshot_isolation
+    }
+
+    /// Whether this session uses real MVCC (`MVCC2-FR-004`, `ADR-0072`)
+    /// — on such a session, [`Session::get`] answers as of the snapshot
+    /// taken at `Begin`, and [`Session::commit`] can fail with
+    /// `ErrorCode::Conflict` if a key this session staged was written by
+    /// anyone else since.
+    pub fn mvcc_isolation(&self) -> bool {
+        self.mvcc_isolation
     }
 
     /// Discard every staged write and close the session.
@@ -999,6 +1030,7 @@ impl SchemaDrivenClient {
             read_your_writes: false,
             validate_on_stage: false,
             snapshot_isolation: false,
+            mvcc_isolation: false,
         })
     }
 
@@ -1025,6 +1057,7 @@ impl SchemaDrivenClient {
             read_your_writes: options.read_your_writes,
             validate_on_stage: options.validate_on_stage,
             snapshot_isolation: options.snapshot_isolation,
+            mvcc_isolation: options.mvcc_isolation,
         })
     }
 
@@ -1049,6 +1082,7 @@ impl SchemaDrivenClient {
             read_your_writes: true,
             validate_on_stage: false,
             snapshot_isolation: false,
+            mvcc_isolation: false,
         })
     }
 
