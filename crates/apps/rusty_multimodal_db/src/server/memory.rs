@@ -18,6 +18,7 @@
 //! consumer's table holds that this record does not, and why.
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::mvcc::{self, MvccState};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
@@ -28,13 +29,16 @@ use super::{
     validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
     PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
+use crate::durability::DurabilityError;
+use crate::generic::insert_log::{self, LogEntry};
 use crate::generic::memory::{
     AccessCountField, CategoryField, Memory, MemoryProductionStack, UpdatedAtOrder,
     MEMORY_FOREIGN_TABLE, MEMORY_RELATION_LABELS,
 };
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{Delete, GetById, Insert, MultiLink, Replace, UpdateField};
-use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
+use crate::generic::query::{AllIds, Delete, GetById, Insert, MultiLink, Replace, UpdateField};
+use crate::generic::traits::SchemaTag;
+use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
 use std::path::{Path, PathBuf};
 
 pub const FIELD_CONTENT: FieldRef = 0;
@@ -77,12 +81,26 @@ fn valid_access_count(value: i64) -> bool {
     value >= 0
 }
 
+/// `ADR-0072`'s `MVCC2-FR-001`/`010`: an active table's MVCC state plus
+/// the `mmap_path` [`MvccState::flush`] needs to name `<mmap_path>.mvcc`.
+struct MvccHandle {
+    state: MvccState,
+    mmap_path: PathBuf,
+}
+
 pub struct MemoryConnectionStore {
     store: GenericProductionStore<MemoryProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
     journal: Option<CommitGroup>,
     /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
     backup_source: Option<PathBuf>,
+    /// `ADR-0072`'s `MVCC2-FR-001`: `None` — the same "unset by default,
+    /// opt in with the real path" shape `backup_source` already
+    /// establishes — until [`Self::with_mvcc`] is called; `mvcc_supported`
+    /// answers `false` until then, `Unsupported` for
+    /// `SESSION_MVCC_ISOLATION`, matching `backup`/`fetch_snapshot`'s own
+    /// precedent for `backup_source`.
+    mvcc: Option<MvccHandle>,
 }
 
 impl MemoryConnectionStore {
@@ -91,6 +109,7 @@ impl MemoryConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            mvcc: None,
         }
     }
 
@@ -98,6 +117,78 @@ impl MemoryConnectionStore {
     pub fn with_backup_source(mut self, path: PathBuf) -> Self {
         self.backup_source = Some(path);
         self
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-001`/`003`: enable real MVCC for this table,
+    /// reconstructing `<mmap_path>.mvcc` (if any) and folding whatever the
+    /// insert log still holds since that flush.
+    ///
+    /// **Known gap, honestly named rather than silently accepted, and
+    /// deeper than a first look suggests**: `crate::generic::mmap_store::
+    /// GenericMmapStore::open` already calls `insert_log::clear`
+    /// *unconditionally*, at the end of its own reconciliation pass —
+    /// confirmed by reading it directly, not assumed — which runs
+    /// *before* this method (or any server-layer code) ever gets a
+    /// chance to see the log's contents. This means: for a table with
+    /// **any** pending insert-log entries at the moment of a reopen
+    /// (crash or ordinary restart), those entries' history is gone
+    /// before `with_mvcc` runs at all, regardless of whether it's chained
+    /// after [`Self::with_journal`] or called directly — this method's
+    /// own "fold whatever the insert log still holds" logic is only
+    /// actually exercised by a *fresh* table (nothing to fold yet, so
+    /// `open()`'s clear is a no-op) or one whose insert log was already
+    /// empty at the last clean shutdown. Chaining after
+    /// [`Self::with_journal`] adds an *identical* gap for journaled
+    /// batches (that constructor also unconditionally replays-then-
+    /// truncates before this runs). **Closing this for real needs a hook
+    /// threaded through `GenericMmapStore::open` itself** (`MVCC2-FR-010`
+    /// item 3's own plan) — a generic-layer change shared by every domain
+    /// in this crate, deliberately not attempted in this round without
+    /// its own dedicated review, given the risk of touching that
+    /// crash-recovery-critical function. **What already works despite
+    /// this**: every write made *after* a table opens is fully covered
+    /// (`MVCC2-FR-008`), and `Compact`'s own flush (`Self::compact`)
+    /// correctly persists history before *its* insert-log clear, since
+    /// that happens at runtime, on an already-constructed adapter that
+    /// controls the ordering — this gap is specific to the *open/reopen*
+    /// path, not compaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError`] if `<mmap_path>.mvcc` exists but can't
+    /// be read/decoded, or if the insert log can't be read.
+    pub fn with_mvcc(mut self, mmap_path: &Path) -> Result<Self, DurabilityError> {
+        let reconstructed = MvccState::open(mmap_path)?;
+        let log = insert_log::log_path(mmap_path);
+        let entries: Vec<LogEntry<Memory, RecordId>> =
+            insert_log::read_entries(&log, Memory::SCHEMA_TAG)?
+                .into_iter()
+                .skip(reconstructed.insert_log_entries_reflected)
+                .collect();
+        for entry in entries {
+            let txn_id = reconstructed.state.counter().next();
+            reconstructed.state.with_index(|index| match entry {
+                LogEntry::Item(record) => {
+                    let id = record.id;
+                    index.record_write(
+                        (id, mvcc::EXISTENCE_FIELD),
+                        txn_id,
+                        Some(ScanValue::Bool(true)),
+                    );
+                    for (tag, value) in Self::fields_of(record) {
+                        index.record_write((id, tag), txn_id, Some(value));
+                    }
+                }
+                LogEntry::Tombstone(id) => {
+                    index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None);
+                }
+            });
+        }
+        self.mvcc = Some(MvccHandle {
+            state: reconstructed.state,
+            mmap_path: mmap_path.to_path_buf(),
+        });
+        Ok(self)
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -138,6 +229,7 @@ impl MemoryConnectionStore {
             store,
             journal: Some(journal),
             backup_source: None,
+            mvcc: None,
         })
     }
 
@@ -403,6 +495,148 @@ impl MemoryConnectionStore {
             (FIELD_NODE_ID, ScanValue::Str(memory.node_id)),
         ]
     }
+
+    /// `ADR-0072`'s `MVCC2-FR-008`: record one whole-record write
+    /// (`Insert`/`Replace`) into the MVCC version index — a fresh txn id
+    /// (assigned *here*, inside whichever `with_exclusive` section the
+    /// caller already holds — `MVCC2-FR-002`'s round-nine apply-time
+    /// rule), the existence field plus every field `fields` carries. A
+    /// no-op if this table was never given `with_mvcc` or never went
+    /// MVCC-active (`MVCC2-FR-001`).
+    fn mvcc_record_write(&self, fields: &[(FieldRef, ScanValue)], id: RecordId) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            index.record_write(
+                (id, mvcc::EXISTENCE_FIELD),
+                txn_id,
+                Some(ScanValue::Bool(true)),
+            );
+            for (tag, value) in fields {
+                index.record_write((id, *tag), txn_id, Some(value.clone()));
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008`: record a delete — a tombstone on the
+    /// existence field only; a snapshot that finds it absent never
+    /// consults any individual field's own chain (`MvccIndex::read`'s own
+    /// contract, checked in [`ConnectionStore::mvcc_get`] first). Same
+    /// activation-gating as [`Self::mvcc_record_write`].
+    fn mvcc_record_delete(&self, id: RecordId) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state
+            .with_index(|index| index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None));
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008`: record a session `Commit`'s whole
+    /// staged batch — one txn id for every key it touches (`MVCC2-FR-002`).
+    /// A no-op (no `fetch_add`, matching `mvcc_spike.rs`'s own proven
+    /// empty-commit rule) if `updates` is empty or this table isn't
+    /// MVCC-active. Must be called from inside the same `with_exclusive`
+    /// section that already ran [`Self::apply_batch`] for this batch.
+    fn mvcc_record_transaction(&self, updates: &[TransactionOp]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() || updates.is_empty() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            for op in updates {
+                index.record_write((op.id, op.field), txn_id, Some(op.value.clone()));
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-002`/`008`: record an atomic `WriteBatch`'s
+    /// whole set of writes — one shared txn id for every key any op in
+    /// `ops` actually wrote, decided by `results` (a `Duplicate`/
+    /// `NotFound`/`GuardFailed`/`Linked`/`AlreadyLinked`/`Failed` outcome
+    /// wrote nothing, so it records nothing). `Link` touches no field
+    /// [`ConnectionStore::mvcc_get`] ever reads, so it is never recorded.
+    /// Must be called from inside the same `with_exclusive` section that
+    /// already ran every op in `ops`. A no-op if `ops` is empty or
+    /// nothing in it actually wrote (matching the empty-commit rule).
+    fn mvcc_record_write_ops(&self, ops: &[WriteOp], results: &[WriteResult]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let writes: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> = ops
+            .iter()
+            .zip(results)
+            .filter_map(|(op, result)| match (op, result) {
+                (WriteOp::Insert { id, fields }, WriteResult::Inserted)
+                | (WriteOp::Replace { id, fields }, WriteResult::Replaced)
+                | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
+                    Some((*id, fields.clone()))
+                }
+                (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, Vec::new())),
+                _ => None,
+            })
+            .collect();
+        if writes.is_empty() {
+            return;
+        }
+        let deletes: std::collections::HashSet<RecordId> = ops
+            .iter()
+            .zip(results)
+            .filter_map(|(op, result)| match (op, result) {
+                (WriteOp::Delete { id }, WriteResult::Deleted) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            for (id, fields) in writes {
+                if deletes.contains(&id) {
+                    index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None);
+                    continue;
+                }
+                index.record_write(
+                    (id, mvcc::EXISTENCE_FIELD),
+                    txn_id,
+                    Some(ScanValue::Bool(true)),
+                );
+                for (tag, value) in fields {
+                    index.record_write((id, tag), txn_id, Some(value));
+                }
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-010`: flush the current MVCC index to
+    /// `<mmap_path>.mvcc`, recording the insert log's current entry count
+    /// and `journal_entries` (the journal's own current count, from
+    /// whichever boundary is flushing — a live checkpoint's own
+    /// [`super::journal::Turn::journal_entries`], or the count `Self::
+    /// mvcc_begin`'s own baseline flush measures itself). `true` if there
+    /// was nothing to flush (MVCC never enabled or never activated — not
+    /// a failure) or the flush succeeded; `false` only on a real I/O
+    /// failure, in which case the caller must not reclaim the source log
+    /// (`MVCC2-FR-010`'s own flush-before-reclaim gate).
+    fn mvcc_flush_now(&self, journal_entries: u64) -> bool {
+        let Some(mvcc) = &self.mvcc else { return true };
+        if !mvcc.state.is_active() {
+            return true;
+        }
+        let insert_log_count = insert_log::read_entries::<Memory, RecordId>(
+            &insert_log::log_path(&mvcc.mmap_path),
+            Memory::SCHEMA_TAG,
+        )
+        .map(|entries| entries.len())
+        .unwrap_or(0);
+        mvcc.state
+            .flush(&mvcc.mmap_path, insert_log_count, journal_entries as usize)
+            .is_ok()
+    }
 }
 
 /// `WBT-FR-003` (ADR-0060): one parsed, pre-validated write of an atomic
@@ -636,11 +870,24 @@ impl ConnectionStore for MemoryConnectionStore {
         fields: Vec<(FieldRef, ScanValue)>,
     ) -> Result<InsertOutcome, ErrorCode> {
         let memory = Self::memory_from_fields(id, fields)?;
-        match self.store.insert(memory) {
-            Ok(()) => Ok(InsertOutcome::Inserted),
-            Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
-            Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        // `MVCC2-FR-002`/`008` (round nine): the MVCC record happens
+        // inside the *same* `with_exclusive` section as the primary
+        // write, not after `self.store.insert` has already released the
+        // lock — that gap is exactly the cross-path ordering race round
+        // nine's own research found and fixed by assigning `txn_id` at
+        // apply time, under whichever lock the write already holds.
+        self.store
+            .with_exclusive(|inner| match Insert::insert(inner, memory) {
+                Ok(()) => {
+                    self.mvcc_record_write(
+                        &Self::fields_of(GetById::<Memory>::get(inner, id).expect("just inserted")),
+                        id,
+                    );
+                    Ok(InsertOutcome::Inserted)
+                }
+                Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
+                Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
+            })
     }
 
     /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,
@@ -652,11 +899,18 @@ impl ConnectionStore for MemoryConnectionStore {
         fields: Vec<(FieldRef, ScanValue)>,
     ) -> Result<ReplaceOutcome, ErrorCode> {
         let memory = Self::memory_from_fields(id, fields)?;
-        match self.store.replace(memory) {
-            Ok(()) => Ok(ReplaceOutcome::Replaced),
-            Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
-            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store
+            .with_exclusive(|inner| match Replace::replace(inner, memory) {
+                Ok(()) => {
+                    self.mvcc_record_write(
+                        &Self::fields_of(GetById::<Memory>::get(inner, id).expect("just replaced")),
+                        id,
+                    );
+                    Ok(ReplaceOutcome::Replaced)
+                }
+                Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+                Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+            })
     }
 
     /// `GRD-FR-003` (ADR-0054): `replace_record`'s validation, then the
@@ -669,30 +923,63 @@ impl ConnectionStore for MemoryConnectionStore {
         guard: &Predicate,
     ) -> Result<ReplaceIfOutcome, ErrorCode> {
         let memory = Self::memory_from_fields(id, fields)?;
-        let holds = |stored: &Memory| predicate_matches(&Self::fields_of(stored.clone()), guard);
-        match self.store.replace_if(memory, holds) {
-            Ok(GuardedReplace::Replaced) => Ok(ReplaceIfOutcome::Replaced),
-            Ok(GuardedReplace::Refused) => Ok(ReplaceIfOutcome::GuardFailed),
-            Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
-            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store.with_exclusive(|inner| {
+            let Some(current) = GetById::<Memory>::get(inner, id) else {
+                return Ok(ReplaceIfOutcome::NotFound);
+            };
+            if !predicate_matches(&Self::fields_of(current), guard) {
+                return Ok(ReplaceIfOutcome::GuardFailed);
+            }
+            match Replace::replace(inner, memory) {
+                Ok(()) => {
+                    self.mvcc_record_write(
+                        &Self::fields_of(GetById::<Memory>::get(inner, id).expect("just replaced")),
+                        id,
+                    );
+                    Ok(ReplaceIfOutcome::Replaced)
+                }
+                Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
+                Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+            }
+        })
     }
 
     /// `DEL-FR-006` (ADR-0051): one whole-record delete under the store's
     /// own lock — the record and, within this table, every edge touching
     /// it. An unknown id is the normal outcome, not an error.
     fn delete_record(&self, id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
-        match self.store.delete::<Memory>(id) {
-            Ok(()) => Ok(DeleteOutcome::Deleted),
-            Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
-            Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store
+            .with_exclusive(|inner| match Delete::<Memory>::delete(inner, id) {
+                Ok(()) => {
+                    self.mvcc_record_delete(id);
+                    Ok(DeleteOutcome::Deleted)
+                }
+                Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
+                Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
+            })
     }
 
     /// `CMP-FR-006` (ADR-0052): the stack compacted under the store's own
     /// write lock; a file that could not be rewritten is `Storage`.
     fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
-        self.store.compact().map_err(|_| ErrorCode::Storage)
+        self.store.with_exclusive(|inner| {
+            // `ADR-0072`'s `MVCC2-FR-010` item 2: flush MVCC history
+            // *before* `Compact`'s own insert-log clear, inside the same
+            // lock `compact()` itself runs under — so nothing can write
+            // (and thus append to the insert log) in between. If the
+            // flush fails, refuse to compact at all rather than let the
+            // clear proceed and lose whatever history was still only in
+            // the log.
+            let journal_entries = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            if !self.mvcc_flush_now(journal_entries) {
+                return Err(ErrorCode::Storage);
+            }
+            crate::generic::query::Compact::compact(inner).map_err(|_| ErrorCode::Storage)
+        })
     }
 
     /// `BAK-FR-002`/`006` (ADR-0065): copy every file under
@@ -780,6 +1067,11 @@ impl ConnectionStore for MemoryConnectionStore {
             for (i, p) in prepared.into_iter().enumerate() {
                 results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
             }
+            // `ADR-0072`'s `MVCC2-FR-002`/`008`: an atomic `WriteBatch` is
+            // one unit — one txn id for the whole batch, assigned here,
+            // inside the same exclusive section, immediately after every
+            // op in it has actually applied.
+            self.mvcc_record_write_ops(ops, &results);
             Ok(results)
         };
         match &self.journal {
@@ -799,7 +1091,9 @@ impl ConnectionStore for MemoryConnectionStore {
                         self.store.with_exclusive(|inner| {
                             let results = apply(inner)?;
                             *results_cell.borrow_mut() = Some(results);
-                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
                         })
                     })
                     .map_err(|e| match e {
@@ -900,11 +1194,18 @@ impl ConnectionStore for MemoryConnectionStore {
     ) -> Result<(), (usize, ErrorCode)> {
         // See `DogConnectionStore::apply_transaction` for the two paths
         // (`GRP-FR-001`–`005`) and where the read-set check runs in each.
+        // `ADR-0072`'s `MVCC2-FR-008`: the MVCC record runs inside the
+        // same exclusive section, immediately after `apply_batch`
+        // succeeds — this ordinary (no-session) path has no
+        // `mvcc_snapshot` to conflict-check against, so it records
+        // unconditionally, exactly as a validated session write does.
         match &self.journal {
             None => self.store.with_exclusive(|inner| {
                 Self::validate_batch(updates, |id| GetById::<Memory>::get(inner, id).is_some())?;
                 Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
-                Self::apply_batch(inner, updates)
+                Self::apply_batch(inner, updates)?;
+                self.mvcc_record_transaction(updates);
+                Ok(())
             }),
             Some(journal) => {
                 Self::validate_batch(updates, |id| self.store.get::<Memory>(id).is_some())?;
@@ -913,7 +1214,10 @@ impl ConnectionStore for MemoryConnectionStore {
                         self.store.with_exclusive(|inner| {
                             Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
                             Self::apply_batch(inner, updates)?;
-                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                            self.mvcc_record_transaction(updates);
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
                         })
                     })
                     .map_err(|e| match e {
@@ -923,12 +1227,174 @@ impl ConnectionStore for MemoryConnectionStore {
             }
         }
     }
+
+    /// `ADR-0072`'s `MVCC2-FR-007`: [`Self::apply_transaction`]'s exact
+    /// contract, plus a write-write conflict check against
+    /// `mvcc_snapshot` — every key `updates` targets whose current
+    /// last-write txn exceeds `mvcc_snapshot` refuses the whole commit,
+    /// applying nothing, before the MVCC record. Both the check and the
+    /// record run inside the same exclusive section as `apply_batch` —
+    /// `check_read_set`'s own precedent.
+    fn apply_transaction_mvcc(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+        mvcc_snapshot: u64,
+    ) -> Result<(), (usize, ErrorCode)> {
+        let Some(mvcc) = &self.mvcc else {
+            return Err((0, ErrorCode::Unsupported));
+        };
+        let conflict_check = || -> Result<(), (usize, ErrorCode)> {
+            let conflicts = mvcc.state.with_index(|index| {
+                index.conflicts(updates.iter().map(|op| (op.id, op.field)), mvcc_snapshot)
+            });
+            if conflicts {
+                return Err((0, ErrorCode::Conflict));
+            }
+            Ok(())
+        };
+        match &self.journal {
+            None => self.store.with_exclusive(|inner| {
+                Self::validate_batch(updates, |id| GetById::<Memory>::get(inner, id).is_some())?;
+                Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
+                conflict_check()?;
+                Self::apply_batch(inner, updates)?;
+                self.mvcc_record_transaction(updates);
+                Ok(())
+            }),
+            Some(journal) => {
+                Self::validate_batch(updates, |id| self.store.get::<Memory>(id).is_some())?;
+                journal
+                    .commit(updates, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
+                            conflict_check()?;
+                            Self::apply_batch(inner, updates)?;
+                            self.mvcc_record_transaction(updates);
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })
+            }
+        }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-012`: `Memory` implements real MVCC.
+    fn mvcc_supported(&self) -> bool {
+        self.mvcc.is_some()
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-001`/`005`: activate (baseline-seed every
+    /// currently-live record, once) and open a new snapshot.
+    fn mvcc_begin(&self) -> u64 {
+        let Some(mvcc) = &self.mvcc else { return 0 };
+        if !mvcc.state.is_active() {
+            self.store.with_exclusive(|inner| {
+                mvcc.state.activate();
+                for id in AllIds::<Memory>::all_ids(inner) {
+                    if let Some(record) = GetById::<Memory>::get(inner, id) {
+                        let fields = Self::fields_of(record);
+                        mvcc.state.with_index(|index| {
+                            index.record_write(
+                                (id, mvcc::EXISTENCE_FIELD),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::Bool(true)),
+                            );
+                            for (tag, value) in &fields {
+                                index.record_write(
+                                    (id, *tag),
+                                    mvcc::BASELINE_TXN,
+                                    Some(value.clone()),
+                                );
+                            }
+                        });
+                    }
+                }
+            });
+            // `MVCC2-FR-001`: durably record the baseline now, so this
+            // table's "has ever gone MVCC-active" signal survives a
+            // restart even if nothing is ever written again. Reflects
+            // everything currently in the insert log/journal too — a
+            // baseline scan reads the *current* live state, which
+            // already includes every insert-log entry folded in (the
+            // stack was opened through `GenericMmapStore::open`, which
+            // folds the log before this ever runs).
+            let journal_count = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            let _ = self.mvcc_flush_now(journal_count);
+        }
+        let snapshot_txn = mvcc.state.with_index(|index| index.last_committed());
+        mvcc.state.open_snapshots().register(snapshot_txn);
+        snapshot_txn
+    }
+
+    fn mvcc_release(&self, snapshot_txn: u64) {
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.state.open_snapshots().deregister(snapshot_txn);
+        }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-006`: `id`'s value as of `snapshot_txn` —
+    /// the existence field decides absence outright (a delete's
+    /// tombstone, or a snapshot before this table's own baseline covered
+    /// `id`); each schema field is then read from its own chain.
+    /// [`ErrorCode::Conflict`] is reused as the typed "history reclaimed"
+    /// signal — the same code a write-write conflict already uses,
+    /// distinguished by the caller never treating `Commit`'s own
+    /// `TransactionFailed { index: 0, .. }` shape as this method's return.
+    fn mvcc_get(
+        &self,
+        id: RecordId,
+        snapshot_txn: u64,
+    ) -> Result<Option<Vec<(FieldRef, ScanValue)>>, ErrorCode> {
+        let Some(mvcc) = &self.mvcc else {
+            return Ok(self.get(id));
+        };
+        if !mvcc.state.is_active() {
+            return Ok(self.get(id));
+        }
+        let existed = mvcc
+            .state
+            .with_index(|index| index.read(&(id, mvcc::EXISTENCE_FIELD), snapshot_txn));
+        match existed {
+            Err(mvcc::HistoryReclaimed) => return Err(ErrorCode::Conflict),
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+        }
+        let mut fields = Vec::with_capacity(Self::schema().fields.len());
+        for field in Self::schema().fields {
+            let value = mvcc
+                .state
+                .with_index(|index| index.read(&(id, field.tag), snapshot_txn));
+            match value {
+                Err(mvcc::HistoryReclaimed) => return Err(ErrorCode::Conflict),
+                Ok(Some(v)) => fields.push((field.tag, v)),
+                // Existence says present but this one field has no entry
+                // at or below the snapshot — cannot happen once the
+                // baseline scan has run (it seeds every field for every
+                // live record atomically with existence), so this is
+                // defensive, not an expected path.
+                Ok(None) => {}
+            }
+        }
+        Ok(Some(fields))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::memory::create_memory_production_stack;
+    use crate::generic::memory::{
+        create_memory_production_stack, open_memory_production_stack_portable,
+    };
     use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
@@ -969,6 +1435,237 @@ mod tests {
 
     fn full_fields(n: u128) -> Vec<(FieldRef, ScanValue)> {
         MemoryConnectionStore::fields_of(memory(n, "decision", false))
+    }
+
+    /// `ADR-0072`: a table with two pre-existing records, built with
+    /// [`MemoryConnectionStore::with_mvcc`] so `SESSION_MVCC_ISOLATION`
+    /// is available — but not yet activated (`mvcc_begin` does that).
+    fn sample_adapter_with_mvcc() -> MemoryConnectionStore {
+        let dir = fresh_temp_dir("server_memory_mvcc_adapter").unwrap();
+        let path = dir.join("memories.mmap");
+        let stack = create_memory_production_stack(
+            vec![memory(1, "general", false), memory(2, "preference", false)],
+            &[],
+            &path,
+        )
+        .unwrap();
+        MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap()
+    }
+
+    /// `MVCC2-FR-001`/`013`: activation baseline-seeds a pre-existing
+    /// record, so a snapshot opened right at activation still sees it —
+    /// not absence.
+    #[test]
+    fn mvcc_begin_baseline_seeds_pre_existing_records() {
+        let adapter = sample_adapter_with_mvcc();
+        assert!(adapter.mvcc_supported());
+        let id = Uuid::from_u128(1);
+        let snapshot = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.mvcc_get(id, snapshot).unwrap(),
+            Some(full_fields_of(1, "general", false))
+        );
+        adapter.mvcc_release(snapshot);
+    }
+
+    /// `MVCC2-FR-006`/`008`, acceptance criterion 4: a real-MVCC
+    /// snapshot survives a *concurrent ordinary* (non-session) write —
+    /// not only a conflicting session commit — and a fresh snapshot
+    /// taken afterward sees the new value.
+    #[test]
+    fn mvcc_snapshot_survives_a_concurrent_ordinary_replace() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let before = adapter.mvcc_begin();
+
+        let mut edited = full_fields(1);
+        edited[0] = (FIELD_CONTENT, ScanValue::Str("edited".into()));
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced)
+        );
+
+        assert_eq!(
+            adapter.mvcc_get(id, before).unwrap(),
+            Some(full_fields_of(1, "general", false)),
+            "the snapshot still sees the pre-replace value"
+        );
+        let after = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.mvcc_get(id, after).unwrap(),
+            Some(edited),
+            "a fresh snapshot sees the ordinary write"
+        );
+        adapter.mvcc_release(before);
+        adapter.mvcc_release(after);
+    }
+
+    /// Acceptance criterion 5: a key created by an ordinary `Insert`
+    /// after a snapshot began is invisible to that snapshot.
+    #[test]
+    fn mvcc_snapshot_does_not_see_a_key_created_after_it_began() {
+        let adapter = sample_adapter_with_mvcc();
+        let before = adapter.mvcc_begin();
+        let new_id = Uuid::from_u128(99);
+        assert_eq!(
+            adapter.insert_record(new_id, full_fields(99)),
+            Ok(InsertOutcome::Inserted)
+        );
+        assert_eq!(adapter.mvcc_get(new_id, before).unwrap(), None);
+        let after = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.mvcc_get(new_id, after).unwrap(),
+            Some(full_fields(99))
+        );
+        adapter.mvcc_release(before);
+        adapter.mvcc_release(after);
+    }
+
+    /// Acceptance criterion 3, adapted to a single-adapter test: a
+    /// session's staged `UpdateField` batch commits cleanly against its
+    /// own unchanged snapshot, but is refused `Conflict` — nothing
+    /// applied — once a concurrent write has touched the same key.
+    #[test]
+    fn apply_transaction_mvcc_detects_a_write_write_conflict() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let snapshot = adapter.mvcc_begin();
+        let update = TransactionOp {
+            id,
+            field: FIELD_ACCESS_COUNT,
+            value: ScanValue::I64(5),
+        };
+
+        // Uncontested: applies and is visible afterward.
+        assert_eq!(
+            adapter.apply_transaction_mvcc(std::slice::from_ref(&update), &[], snapshot),
+            Ok(())
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(5))
+        );
+
+        // The same (now stale) snapshot's own second attempt conflicts
+        // with the write it just made.
+        assert_eq!(
+            adapter.apply_transaction_mvcc(&[update], &[], snapshot),
+            Err((0, ErrorCode::Conflict))
+        );
+        adapter.mvcc_release(snapshot);
+    }
+
+    /// Acceptance criterion 8: a `Compact` flushes MVCC history *before*
+    /// clearing anything, and a reopen afterward still reconstructs the
+    /// full, correct history from before that `Compact` — a snapshot
+    /// taken before a write still sees the pre-write value, and a fresh
+    /// snapshot after reopen sees the write.
+    #[test]
+    fn compact_flushes_mvcc_history_and_a_reopen_reconstructs_it() {
+        let dir = fresh_temp_dir("server_memory_mvcc_compact").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        let stack =
+            create_memory_production_stack(vec![memory(1, "general", false)], &[], &path).unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_ACCESS_COUNT,
+                    value: ScanValue::I64(9),
+                }],
+                &[],
+                before,
+            ),
+            Ok(())
+        );
+        adapter.compact().unwrap();
+        drop(adapter);
+
+        let stack = open_memory_production_stack_portable(&path).unwrap();
+        let reopened = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert!(reopened.mvcc_supported());
+        let fields = reopened.mvcc_get(id, before).unwrap().unwrap();
+        assert_eq!(
+            fields[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(0)),
+            "the pre-write snapshot still sees the pre-write value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(9)),
+            "a fresh snapshot after reopen sees the write made before compact"
+        );
+    }
+
+    /// `MVCC2-FR-008`: an atomic `WriteBatch`'s `Insert`/`Replace`/
+    /// `Delete` are recorded too, not only the single-shot paths — a
+    /// snapshot taken before it still sees the pre-batch state.
+    #[test]
+    fn mvcc_snapshot_survives_a_concurrent_atomic_write_batch() {
+        let adapter = sample_adapter_with_mvcc();
+        let (existing, deleted) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let new_id = Uuid::from_u128(50);
+        let before = adapter.mvcc_begin();
+
+        let mut edited = full_fields(1);
+        edited[0] = (FIELD_CONTENT, ScanValue::Str("batched edit".into()));
+        let ops = vec![
+            WriteOp::Replace {
+                id: existing,
+                fields: edited.clone(),
+            },
+            WriteOp::Delete { id: deleted },
+            WriteOp::Insert {
+                id: new_id,
+                fields: full_fields(50),
+            },
+        ];
+        assert_eq!(
+            adapter.write_batch(&ops, true),
+            Ok(vec![
+                WriteResult::Replaced,
+                WriteResult::Deleted,
+                WriteResult::Inserted
+            ])
+        );
+
+        assert_eq!(
+            adapter.mvcc_get(existing, before).unwrap(),
+            Some(full_fields_of(1, "general", false)),
+            "the snapshot still sees the pre-batch value"
+        );
+        assert_eq!(
+            adapter.mvcc_get(deleted, before).unwrap(),
+            Some(full_fields_of(2, "preference", false)),
+            "the snapshot still sees the not-yet-deleted record"
+        );
+        assert_eq!(
+            adapter.mvcc_get(new_id, before).unwrap(),
+            None,
+            "the snapshot never sees a record inserted after it began"
+        );
+
+        let after = adapter.mvcc_begin();
+        assert_eq!(adapter.mvcc_get(existing, after).unwrap(), Some(edited));
+        assert_eq!(adapter.mvcc_get(deleted, after).unwrap(), None);
+        assert!(adapter.mvcc_get(new_id, after).unwrap().is_some());
+        adapter.mvcc_release(before);
+        adapter.mvcc_release(after);
+    }
+
+    fn full_fields_of(n: u128, category: &str, sensitive: bool) -> Vec<(FieldRef, ScanValue)> {
+        MemoryConnectionStore::fields_of(memory(n, category, sensitive))
     }
 
     #[test]

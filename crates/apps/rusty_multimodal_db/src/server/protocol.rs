@@ -81,6 +81,7 @@
 //! | 24 | `SERVER-001` v0.54.0 | + [`Request::Backup`] (33) and [`Response::BackedUp`] (22) — `BAK-FR-001`, ADR-0065: a live, lock-consistent snapshot copy of the connection's table files into an opt-in, server-configured `SERVER_BACKUP_ROOT`-relative directory named by `name` (a single path component — `/`, `\`, and `..` refused before any I/O, `BAK-FR-004`), under the table's write lock (`Compact`'s own precedent). Answered [`Response::BackedUp`] with the files/bytes copied; `Unsupported` when `SERVER_BACKUP_ROOT` is unconfigured or the adapter has no known data directory (`Dog`'s bespoke store when built without one, `Order`/`Employee`); `Storage` for an existing non-empty target or an I/O failure mid-copy (the partial target removed, never left half-written). An operator's write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, `Malformed` below 24. No new `ErrorCode`. ADR-0065 |
 //! | 25 | `SERVER-001` v0.55.0 | + [`Request::FetchSnapshot`] (34), [`Response::Snapshot`] (23), and [`ErrorCode::TooLarge`] (14) — `RPL-FR-001`, ADR-0067: a full, lock-consistent snapshot of the connection's table's files, streamed back over the wire — every companion file's name and bytes, the same file set [`Request::Backup`] already enumerates, reused unchanged. Gated behind a new [`TokenClass::Replication`], never satisfied by `ReadOnly`/`ReadWrite` — the whole point: a shape [`Request::Backup`]'s own design once considered and declined ("a new bulk-exfiltration primitive") is safe now because nothing short of a separately-provisioned credential can ever reach it. `TooLarge` refuses a table whose on-disk size exceeds [`MAX_SNAPSHOT_BYTES`] before any byte is read. `Malformed` below 25 (rule 3). ADR-0067 |
 //! | 26 | `SERVER-001` v0.56.0 | + [`Request::FilteredPage`] (35) — `FPG-FR-001`, ADR-0068: [`Request::Page`]'s three fields (`order_by`, `after`, `limit`) plus `filter: Vec<Predicate>`, answered [`Response::Rows`] (reused, no new response variant) — an ordered keyset page over only the rows every filter predicate matches. Evaluated by one shared default correct for every domain, no adapter override this round: `ConnectionStore::scan_all`, filtered via the identical [`ErrorCode`]-and-`predicate_matches` logic [`Request::Query`]'s own filter already uses, then [`Request::Page`]'s own key selection over the filtered subset. `Memory`/`Relation`'s `Ordered` index gives no speed advantage to a filtered request this round — only the unfiltered `Page` fast path keeps it, untouched by this addition. Validated exactly as `Page`/`Query` already are — no new validation function. Gated as a **read**, `Page`'s own precedent; `Malformed` below 26 (rule 3). No new `ErrorCode`. ADR-0068 |
+//! | 27 | `SERVER-001` v0.57.0 | No new variant: `BeginWith` learns a fourth flag bit, [`SESSION_MVCC_ISOLATION`] (`MVCC2-FR-004`, `ADR-0072`) — real multi-version concurrency control for `Memory`/`Entity`/`Relation` (`MVCC2-FR-012`): `Begin` opens a snapshot at the table's current `last_committed_txn`; `GetById` while such a session is open answers with the version visible as of that snapshot, including against a conflicting *ordinary* (non-session) write from another connection, not only another session's commit (`MVCC2-FR-006`/`008`); `Commit`'s write-write conflict check reuses [`ErrorCode::Conflict`] and `Response::TransactionFailed { index: 0, .. }` — `SESSION_SNAPSHOT_ISOLATION`'s own precedent, no new `ErrorCode`. Unknown below 27 (rule 3), sent only after negotiating ≥ 27 (rule 4); composes independently with the three existing bits. `Dog`/`Order`/`Employee` unaffected — the bit is `Unsupported` there, the same domain-scoping precedent `Insert`/`Replace`/`Delete`/`Compact` already established. ADR-0072 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -115,7 +116,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -140,6 +141,19 @@ pub const SESSION_VALIDATE_ON_STAGE: u32 = 2;
 /// `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`. Unknown
 /// below protocol 7 (`Malformed`, as any unknown bit).
 pub const SESSION_SNAPSHOT_ISOLATION: u32 = 4;
+
+/// `Request::BeginWith` flag bit 3 (protocol 27, `MVCC2-FR-004`,
+/// `ADR-0072`): real multi-version concurrency control, not read-set
+/// replay-validation — `Memory`/`Entity`/`Relation` only
+/// (`MVCC2-FR-012`; `Malformed` on every other table, `ErrorCode::
+/// Unsupported`'s own precedent for a domain-scoped capability). `Begin`
+/// opens a snapshot at the table's current `last_committed_txn`; `GetById`
+/// answers as of that snapshot; `Commit`'s write-write conflict check
+/// runs inside the existing exclusive section `check_read_set` already
+/// occupies. See `docs/design/MVCC-PRODUCTION-DESIGN.md`. Unknown below
+/// protocol 27 (`Malformed`, as any unknown bit); composes independently
+/// with the three bits above.
+pub const SESSION_MVCC_ISOLATION: u32 = 8;
 
 /// The most `UpdateField`s one connection may stage between
 /// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
@@ -1211,6 +1225,7 @@ mod tests {
             "Backup" | "BackedUp" => 24,
             "FetchSnapshot" | "Snapshot" | "Err(TooLarge)" => 25,
             "FilteredPage" => 26,
+            "BeginWith(mvcc isolation)" | "BeginWith(all four bits)" => 27,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1396,6 +1411,26 @@ mod tests {
                     | SESSION_SNAPSHOT_ISOLATION,
             },
             &[0x0e, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00],
+        );
+        // Protocol 27 (`MVCC2-FR-004`, ADR-0072): the fourth bit, and all
+        // four composed (`flags: 15`) — still `BeginWith` at 14, just a
+        // different flags word.
+        assert_golden(
+            "BeginWith(mvcc isolation)",
+            &Request::BeginWith {
+                flags: SESSION_MVCC_ISOLATION,
+            },
+            &[0x0e, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00],
+        );
+        assert_golden(
+            "BeginWith(all four bits)",
+            &Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES
+                    | SESSION_VALIDATE_ON_STAGE
+                    | SESSION_SNAPSHOT_ISOLATION
+                    | SESSION_MVCC_ISOLATION,
+            },
+            &[0x0e, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00],
         );
         // Protocol 8 (`SQL-FR-003`, ADR-0034): `Query` at 15 — the first
         // `Option` field on this wire; bincode encodes it as one byte
@@ -2162,8 +2197,8 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 26 is the one that added
-    /// `Request::FilteredPage` (25 `Request::FetchSnapshot`/`Response::Snapshot`
+    /// module docs' table — version 27 is the one that added
+    /// `SESSION_MVCC_ISOLATION` (26 `Request::FilteredPage`, 25 `Request::FetchSnapshot`/`Response::Snapshot`
     /// and `ErrorCode::TooLarge`, 24 `Request::Backup`/`Response::BackedUp`, 23 `Request::Metrics`/
     /// `Response::Metrics`, 22 `Request::WriteBatch`/`Response::BatchResults`
     /// (21 `Request::CountEdges`/`Response::Count`, 20 `Request::Page`, 19 `Request::ReplaceIf` and `ErrorCode::GuardFailed`, 18 `Request::Compact`/`Response::Compacted`, 17 `Request::Delete`, 16 `Request::Use`/`ListTables` and `Response::Tables`, 15 `Request::Replace`, 14 `Request::Link`, 13 `Request::Insert` and `ErrorCode::{Duplicate,
@@ -2178,7 +2213,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 26);
+        assert_eq!(PROTOCOL_VERSION, 27);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

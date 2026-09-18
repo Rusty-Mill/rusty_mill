@@ -15,10 +15,11 @@ use super::protocol::{
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
     Request, Response, ScanValue, Selection, TransactionOp, WriteOp, WriteResult, MAX_BATCH_OPS,
     MAX_SNAPSHOT_BYTES, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION,
-    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
@@ -539,6 +540,64 @@ pub trait ConnectionStore: Send + Sync {
         updates: &[TransactionOp],
         read_set: &[(RecordId, FieldRef, ScanValue)],
     ) -> Result<(), (usize, ErrorCode)>;
+
+    /// `MVCC2-FR-007`, `ADR-0072`: [`Self::apply_transaction`]'s own
+    /// contract, for a table where a real-MVCC session
+    /// (`SESSION_MVCC_ISOLATION`) is open — `mvcc_snapshot`'s write-write
+    /// conflict check runs inside the *same* exclusive section as
+    /// `read_set`'s check and the apply itself, never a separate call
+    /// (which would reopen exactly the window `read_set`'s own check
+    /// avoids). A **separate method, not an added parameter on
+    /// [`Self::apply_transaction`]**, so `Dog`/`Order`/`Employee`/
+    /// `Reminder`'s existing signature and every call site are untouched
+    /// (`MVCC2-FR-012`). Only ever called when [`Self::mvcc_supported`]
+    /// is `true`; the default is unreachable in practice and answers
+    /// `Unsupported` defensively.
+    fn apply_transaction_mvcc(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+        mvcc_snapshot: u64,
+    ) -> Result<(), (usize, ErrorCode)> {
+        let _ = (updates, read_set, mvcc_snapshot);
+        Err((0, ErrorCode::Unsupported))
+    }
+
+    /// `MVCC2-FR-012`: whether this table implements real MVCC —
+    /// `Memory`/`Entity`/`Relation` only. `BeginWith { flags:
+    /// SESSION_MVCC_ISOLATION }` on any other table is refused
+    /// `Unsupported`, the same domain-scoping precedent `Insert`/
+    /// `Compact`/etc. already established.
+    fn mvcc_supported(&self) -> bool {
+        false
+    }
+
+    /// `MVCC2-FR-001`/`005`: activate this table for MVCC if this is its
+    /// first-ever call (idempotent — seeds a baseline for every
+    /// currently-live record, `MVCC2-FR-001`), then open a new snapshot
+    /// and return its `snapshot_txn`. Only ever called when
+    /// [`Self::mvcc_supported`] is `true`.
+    fn mvcc_begin(&self) -> u64 {
+        0
+    }
+
+    /// `Commit`/`Rollback`/disconnect: release one registration of
+    /// `snapshot_txn` from the table's open-snapshot set (`MVCC2-FR-005`).
+    fn mvcc_release(&self, _snapshot_txn: u64) {}
+
+    /// `MVCC2-FR-006`: `id`'s value as of `snapshot_txn` — the same wire
+    /// shape [`Self::get`] returns. `Err(ErrorCode::Conflict)` reused as
+    /// the typed "history reclaimed" signal a snapshot below GC's
+    /// boundary hits (distinct from `RecordNotFound`/`None`, matching
+    /// `MVCC-SPIKE-DESIGN.md`'s own distinction). Only ever called when
+    /// [`Self::mvcc_supported`] is `true`.
+    fn mvcc_get(
+        &self,
+        _id: RecordId,
+        _snapshot_txn: u64,
+    ) -> Result<Option<Vec<(FieldRef, ScanValue)>>, ErrorCode> {
+        Ok(None)
+    }
 }
 
 /// `BAK-FR-006` (ADR-0065): every file a table's on-disk stack owns
@@ -2742,6 +2801,26 @@ impl Drop for DisconnectAudit<'_> {
     }
 }
 
+/// `MVCC2-FR-005` (`ADR-0072`): releases an open real-MVCC snapshot's
+/// registration from its table's open-snapshot set on every return path
+/// out of `handle_connection` — including an ungraceful disconnect, not
+/// only `Commit`/`Rollback`'s own explicit release. Without this, a
+/// dropped connection would leave a stale registration pinning
+/// `Compact`'s GC boundary forever, growing that table's MVCC history
+/// unbounded.
+struct MvccReleaseGuard<'a> {
+    tables: &'a [(String, Arc<dyn ConnectionStore>)],
+    snapshot: &'a Cell<Option<(usize, u64)>>,
+}
+
+impl Drop for MvccReleaseGuard<'_> {
+    fn drop(&mut self) {
+        if let Some((table, snapshot_txn)) = self.snapshot.get() {
+            self.tables[table].1.mvcc_release(snapshot_txn);
+        }
+    }
+}
+
 fn handle_connection(
     stream: TcpStream,
     tables: &[(String, Arc<dyn ConnectionStore>)],
@@ -2843,6 +2922,19 @@ fn handle_connection(
     // already uses.
     options.metrics().record_connection_opened();
     let _metrics_guard = ConnectionMetricsGuard(options.metrics());
+    // `MVCC2-FR-005` (`ADR-0072`): the `(table index, snapshot_txn)` of an
+    // open real-MVCC session, if any — a `Cell` so [`MvccReleaseGuard`]'s
+    // `Drop` (which fires on *every* return path, including an ungraceful
+    // disconnect) can read it without fighting the loop body's own
+    // ordinary reads/writes for a borrow. `Use` is refused while any
+    // session is open (`TBL-FR-002`'s own rule), so the table index
+    // recorded here never goes stale while a snapshot is registered
+    // against it.
+    let mvcc_snapshot: Cell<Option<(usize, u64)>> = Cell::new(None);
+    let _mvcc_release_guard = MvccReleaseGuard {
+        tables,
+        snapshot: &mvcc_snapshot,
+    };
 
     // `PROTO-FR-004`: only the very first frame may be a `Hello`. Since
     // protocol 3 the negotiated version is kept too (`SESS-FR-006`): the
@@ -3042,6 +3134,7 @@ fn handle_connection(
                     read_your_writes = None;
                     validate_on_stage = false;
                     snapshot_reads = None;
+                    mvcc_snapshot.set(None);
                     Response::Ok
                 }
             }
@@ -3050,7 +3143,8 @@ fn handle_connection(
                 // A flag bit is introduced at a version like a variant
                 // (`STV-FR-003`): below 6 the validate bit is unknown,
                 // below 7 the snapshot-isolation bit is unknown
-                // (`ISO-FR-001`).
+                // (`ISO-FR-001`), below 27 the real-MVCC bit is unknown
+                // (`MVCC2-FR-004`).
                 let known = SESSION_READ_YOUR_WRITES
                     | if negotiated >= 6 {
                         SESSION_VALIDATE_ON_STAGE
@@ -3061,11 +3155,23 @@ fn handle_connection(
                         SESSION_SNAPSHOT_ISOLATION
                     } else {
                         0
+                    }
+                    | if negotiated >= 27 {
+                        SESSION_MVCC_ISOLATION
+                    } else {
+                        0
                     };
                 if flags & !known != 0 {
                     err_response(ErrorCode::Malformed)
                 } else if session.is_some() {
                     err_response(ErrorCode::SessionOpen)
+                } else if flags & SESSION_MVCC_ISOLATION != 0 && !store.mvcc_supported() {
+                    // `MVCC2-FR-012`: a domain that doesn't implement real
+                    // MVCC (`Dog`/`Order`/`Employee`) refuses the bit —
+                    // `Unsupported`, the same precedent `Insert`/`Compact`
+                    // already established for a domain-scoped capability.
+                    // Nothing is staged; no session opens.
+                    err_response(ErrorCode::Unsupported)
                 } else {
                     session = Some(Vec::new());
                     read_your_writes = (flags & SESSION_READ_YOUR_WRITES != 0).then(|| {
@@ -3079,6 +3185,9 @@ fn handle_connection(
                     });
                     validate_on_stage = flags & SESSION_VALIDATE_ON_STAGE != 0;
                     snapshot_reads = (flags & SESSION_SNAPSHOT_ISOLATION != 0).then(HashMap::new);
+                    mvcc_snapshot.set(
+                        (flags & SESSION_MVCC_ISOLATION != 0).then(|| (table, store.mvcc_begin())),
+                    );
                     Response::Ok
                 }
             }
@@ -3086,6 +3195,11 @@ fn handle_connection(
                 read_your_writes = None;
                 validate_on_stage = false;
                 snapshot_reads = None;
+                // `MVCC2-FR-005`: release before clearing — `Commit`'s own
+                // arm below follows the identical order.
+                if let Some((table, snapshot_txn)) = mvcc_snapshot.take() {
+                    tables[table].1.mvcc_release(snapshot_txn);
+                }
                 if session.take().is_some() {
                     Response::Ok
                 } else {
@@ -3093,16 +3207,36 @@ fn handle_connection(
                 }
             }
             Request::GetById { id }
-                if (read_your_writes.is_some() || snapshot_reads.is_some())
+                if (read_your_writes.is_some()
+                    || snapshot_reads.is_some()
+                    || mvcc_snapshot.get().is_some())
                     && session.is_some() =>
             {
-                match dispatch(store, Request::GetById { id }) {
-                    Response::Record { id, mut fields } => {
+                // `MVCC2-FR-006`: a real-MVCC session answers from the
+                // version index as of its own snapshot, not the store's
+                // current committed state — a genuinely different read
+                // path from `dispatch`'s ordinary `GetById`, not an
+                // overlay on top of it. Read-your-writes still composes
+                // afterward, exactly as it does with the other two bits.
+                let record = match mvcc_snapshot.get() {
+                    Some((_, snapshot_txn)) => match store.mvcc_get(id, snapshot_txn) {
+                        Ok(Some(fields)) => Some(Response::Record { id, fields }),
+                        Ok(None) => None,
+                        Err(code) => Some(err_response(code)),
+                    },
+                    None => match dispatch(store, Request::GetById { id }) {
+                        found @ Response::Record { .. } => Some(found),
+                        _ => None,
+                    },
+                };
+                match record {
+                    Some(Response::Record { id, mut fields }) => {
                         // `ISO-FR-002`/`ISO-FR-005`: record the raw,
                         // committed values — before any read-your-writes
                         // overlay — into the read set; only a found
-                        // record is tracked at all (`dispatch` returned
-                        // `Response::Record` here, so it was found).
+                        // record is tracked at all. Not recorded for a
+                        // real-MVCC session: its own conflict check at
+                        // `Commit` supersedes this read-set replay check.
                         if let Some(reads) = snapshot_reads.as_mut() {
                             record_read_set(reads, id, &fields);
                         }
@@ -3113,7 +3247,8 @@ fn handle_connection(
                         }
                         Response::Record { id, fields }
                     }
-                    other => other,
+                    Some(other) => other,
+                    None => Response::NotFound,
                 }
             }
             Request::Commit => {
@@ -3127,15 +3262,25 @@ fn handle_connection(
                     .take()
                     .map(|reads| reads.into_iter().map(|((id, f), v)| (id, f, v)).collect())
                     .unwrap_or_default();
-                match session.take() {
+                // `MVCC2-FR-005`: release after the apply, regardless of
+                // outcome — a rejected commit still closes its snapshot.
+                let mvcc = mvcc_snapshot.take();
+                let outcome = session.take().map(|batch| match mvcc {
+                    Some((_, snapshot_txn)) => {
+                        store.apply_transaction_mvcc(&batch, &read_set, snapshot_txn)
+                    }
+                    None => store.apply_transaction(&batch, &read_set),
+                });
+                if let Some((table, snapshot_txn)) = mvcc {
+                    tables[table].1.mvcc_release(snapshot_txn);
+                }
+                match outcome {
                     None => err_response(ErrorCode::NoSession),
-                    Some(batch) => match store.apply_transaction(&batch, &read_set) {
-                        Ok(()) => Response::Ok,
-                        Err((index, code)) => Response::TransactionFailed {
-                            index,
-                            code,
-                            message: error_message(code).to_string(),
-                        },
+                    Some(Ok(())) => Response::Ok,
+                    Some(Err((index, code))) => Response::TransactionFailed {
+                        index,
+                        code,
+                        message: error_message(code).to_string(),
                     },
                 }
             }

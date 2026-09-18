@@ -1048,9 +1048,9 @@ fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
 
     let mut c = connect_v3(addr);
     assert_err(
-        // Bit 3 (value 8) is still unknown to this build — every bit
-        // through `SESSION_SNAPSHOT_ISOLATION` (value 4) is taken.
-        roundtrip(&mut c, Request::BeginWith { flags: 8 }),
+        // Bit 4 (value 16) is still unknown to this build — every bit
+        // through `SESSION_MVCC_ISOLATION` (value 8) is taken.
+        roundtrip(&mut c, Request::BeginWith { flags: 16 }),
         ErrorCode::Malformed,
     );
     assert_eq!(stage(&mut c, id, 9), Response::Ok, "no session was opened");

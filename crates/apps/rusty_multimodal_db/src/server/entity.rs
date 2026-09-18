@@ -47,6 +47,7 @@
 //! exactly the three-field shape `FR-042` returned.
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::mvcc::{self, MvccState};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
@@ -56,11 +57,14 @@ use super::{
     BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReadTableFilesError,
     ReplaceIfOutcome, ReplaceOutcome,
 };
+use crate::durability::DurabilityError;
 use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
+use crate::generic::insert_log::{self, LogEntry};
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{Delete, GetById, Insert, MultiLink, Replace, UpdateField};
+use crate::generic::query::{AllIds, Delete, GetById, Insert, MultiLink, Replace, UpdateField};
 use crate::generic::store::valid_relation_label;
-use crate::generic::{DeleteError, GuardedReplace, InsertError, LinkError, ReplaceError};
+use crate::generic::traits::SchemaTag;
+use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
 use std::path::{Path, PathBuf};
 
 pub const FIELD_LABEL: FieldRef = 0;
@@ -69,12 +73,22 @@ pub const FIELD_MENTION_COUNT: FieldRef = 2;
 /// `ENT4-FR-002` (ADR-0041, protocol 11): read-only; see module docs.
 pub const FIELD_ALIASES: FieldRef = 3;
 
+/// `ADR-0072`'s `MVCC2-FR-001`/`010`: an active table's MVCC state plus
+/// the `mmap_path` [`MvccState::flush`] needs to name `<mmap_path>.mvcc`.
+struct MvccHandle {
+    state: MvccState,
+    mmap_path: PathBuf,
+}
+
 pub struct EntityConnectionStore {
     store: GenericProductionStore<EntityProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
     journal: Option<CommitGroup>,
     /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
     backup_source: Option<PathBuf>,
+    /// `ADR-0072`'s `MVCC2-FR-001` — see `MemoryConnectionStore`'s own
+    /// `mvcc` field for the full contract; identical here.
+    mvcc: Option<MvccHandle>,
 }
 
 impl EntityConnectionStore {
@@ -83,6 +97,7 @@ impl EntityConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            mvcc: None,
         }
     }
 
@@ -90,6 +105,44 @@ impl EntityConnectionStore {
     pub fn with_backup_source(mut self, path: PathBuf) -> Self {
         self.backup_source = Some(path);
         self
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-001`/`003` — see
+    /// `MemoryConnectionStore::with_mvcc` for the full contract
+    /// (including its own documented restart-recovery gap); identical
+    /// here.
+    pub fn with_mvcc(mut self, mmap_path: &Path) -> Result<Self, DurabilityError> {
+        let reconstructed = MvccState::open(mmap_path)?;
+        let log = insert_log::log_path(mmap_path);
+        let entries: Vec<LogEntry<Entity, RecordId>> =
+            insert_log::read_entries(&log, Entity::SCHEMA_TAG)?
+                .into_iter()
+                .skip(reconstructed.insert_log_entries_reflected)
+                .collect();
+        for entry in entries {
+            let txn_id = reconstructed.state.counter().next();
+            reconstructed.state.with_index(|index| match entry {
+                LogEntry::Item(record) => {
+                    let id = record.id;
+                    index.record_write(
+                        (id, mvcc::EXISTENCE_FIELD),
+                        txn_id,
+                        Some(ScanValue::Bool(true)),
+                    );
+                    for (tag, value) in Self::fields_of(record) {
+                        index.record_write((id, tag), txn_id, Some(value));
+                    }
+                }
+                LogEntry::Tombstone(id) => {
+                    index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None);
+                }
+            });
+        }
+        self.mvcc = Some(MvccHandle {
+            state: reconstructed.state,
+            mmap_path: mmap_path.to_path_buf(),
+        });
+        Ok(self)
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -130,6 +183,7 @@ impl EntityConnectionStore {
             store,
             journal: Some(journal),
             backup_source: None,
+            mvcc: None,
         })
     }
 
@@ -303,6 +357,123 @@ impl EntityConnectionStore {
             }
         }
         Ok(())
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008` — see `MemoryConnectionStore::
+    /// mvcc_record_write` for the full contract; identical here.
+    fn mvcc_record_write(&self, fields: &[(FieldRef, ScanValue)], id: RecordId) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            index.record_write(
+                (id, mvcc::EXISTENCE_FIELD),
+                txn_id,
+                Some(ScanValue::Bool(true)),
+            );
+            for (tag, value) in fields {
+                index.record_write((id, *tag), txn_id, Some(value.clone()));
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008` — see `MemoryConnectionStore::
+    /// mvcc_record_delete` for the full contract; identical here.
+    fn mvcc_record_delete(&self, id: RecordId) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state
+            .with_index(|index| index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None));
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008` — see `MemoryConnectionStore::
+    /// mvcc_record_transaction` for the full contract; identical here.
+    fn mvcc_record_transaction(&self, updates: &[TransactionOp]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() || updates.is_empty() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            for op in updates {
+                index.record_write((op.id, op.field), txn_id, Some(op.value.clone()));
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-002`/`008` — see `MemoryConnectionStore::
+    /// mvcc_record_write_ops` for the full contract; identical here.
+    /// `Link` touches no field [`ConnectionStore::mvcc_get`] ever reads,
+    /// so it is never recorded.
+    fn mvcc_record_write_ops(&self, ops: &[WriteOp], results: &[WriteResult]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let writes: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> = ops
+            .iter()
+            .zip(results)
+            .filter_map(|(op, result)| match (op, result) {
+                (WriteOp::Insert { id, fields }, WriteResult::Inserted)
+                | (WriteOp::Replace { id, fields }, WriteResult::Replaced)
+                | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
+                    Some((*id, fields.clone()))
+                }
+                (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, Vec::new())),
+                _ => None,
+            })
+            .collect();
+        if writes.is_empty() {
+            return;
+        }
+        let deletes: std::collections::HashSet<RecordId> = ops
+            .iter()
+            .zip(results)
+            .filter_map(|(op, result)| match (op, result) {
+                (WriteOp::Delete { id }, WriteResult::Deleted) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            for (id, fields) in writes {
+                if deletes.contains(&id) {
+                    index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None);
+                    continue;
+                }
+                index.record_write(
+                    (id, mvcc::EXISTENCE_FIELD),
+                    txn_id,
+                    Some(ScanValue::Bool(true)),
+                );
+                for (tag, value) in fields {
+                    index.record_write((id, tag), txn_id, Some(value));
+                }
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-010` — see `MemoryConnectionStore::
+    /// mvcc_flush_now` for the full contract; identical here.
+    fn mvcc_flush_now(&self, journal_entries: u64) -> bool {
+        let Some(mvcc) = &self.mvcc else { return true };
+        if !mvcc.state.is_active() {
+            return true;
+        }
+        let insert_log_count = insert_log::read_entries::<Entity, RecordId>(
+            &insert_log::log_path(&mvcc.mmap_path),
+            Entity::SCHEMA_TAG,
+        )
+        .map(|entries| entries.len())
+        .unwrap_or(0);
+        mvcc.state
+            .flush(&mvcc.mmap_path, insert_log_count, journal_entries as usize)
+            .is_ok()
     }
 }
 
@@ -516,11 +687,18 @@ impl ConnectionStore for EntityConnectionStore {
         fields: Vec<(FieldRef, ScanValue)>,
     ) -> Result<InsertOutcome, ErrorCode> {
         let entity = Self::entity_from_fields(id, fields)?;
-        match self.store.insert(entity) {
-            Ok(()) => Ok(InsertOutcome::Inserted),
-            Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
-            Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store
+            .with_exclusive(|inner| match Insert::insert(inner, entity) {
+                Ok(()) => {
+                    self.mvcc_record_write(
+                        &Self::fields_of(GetById::<Entity>::get(inner, id).expect("just inserted")),
+                        id,
+                    );
+                    Ok(InsertOutcome::Inserted)
+                }
+                Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
+                Err(InsertError::Durability(_)) => Err(ErrorCode::Storage),
+            })
     }
 
     /// `REP-FR-005` (ADR-0049): the same validation as `insert_record`,
@@ -533,11 +711,18 @@ impl ConnectionStore for EntityConnectionStore {
         fields: Vec<(FieldRef, ScanValue)>,
     ) -> Result<ReplaceOutcome, ErrorCode> {
         let entity = Self::entity_from_fields(id, fields)?;
-        match self.store.replace(entity) {
-            Ok(()) => Ok(ReplaceOutcome::Replaced),
-            Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
-            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store
+            .with_exclusive(|inner| match Replace::replace(inner, entity) {
+                Ok(()) => {
+                    self.mvcc_record_write(
+                        &Self::fields_of(GetById::<Entity>::get(inner, id).expect("just replaced")),
+                        id,
+                    );
+                    Ok(ReplaceOutcome::Replaced)
+                }
+                Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
+                Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+            })
     }
 
     /// `GRD-FR-003` (ADR-0054): `replace_record`'s validation, then the
@@ -550,30 +735,59 @@ impl ConnectionStore for EntityConnectionStore {
         guard: &Predicate,
     ) -> Result<ReplaceIfOutcome, ErrorCode> {
         let entity = Self::entity_from_fields(id, fields)?;
-        let holds = |stored: &Entity| predicate_matches(&Self::fields_of(stored.clone()), guard);
-        match self.store.replace_if(entity, holds) {
-            Ok(GuardedReplace::Replaced) => Ok(ReplaceIfOutcome::Replaced),
-            Ok(GuardedReplace::Refused) => Ok(ReplaceIfOutcome::GuardFailed),
-            Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
-            Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store.with_exclusive(|inner| {
+            let Some(current) = GetById::<Entity>::get(inner, id) else {
+                return Ok(ReplaceIfOutcome::NotFound);
+            };
+            if !predicate_matches(&Self::fields_of(current), guard) {
+                return Ok(ReplaceIfOutcome::GuardFailed);
+            }
+            match Replace::replace(inner, entity) {
+                Ok(()) => {
+                    self.mvcc_record_write(
+                        &Self::fields_of(GetById::<Entity>::get(inner, id).expect("just replaced")),
+                        id,
+                    );
+                    Ok(ReplaceIfOutcome::Replaced)
+                }
+                Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
+                Err(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+            }
+        })
     }
 
     /// `DEL-FR-006` (ADR-0051): one whole-record delete under the store's
     /// own lock — the record and, within this table, every edge touching
     /// it. An unknown id is the normal outcome, not an error.
     fn delete_record(&self, id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
-        match self.store.delete::<Entity>(id) {
-            Ok(()) => Ok(DeleteOutcome::Deleted),
-            Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
-            Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
-        }
+        self.store
+            .with_exclusive(|inner| match Delete::<Entity>::delete(inner, id) {
+                Ok(()) => {
+                    self.mvcc_record_delete(id);
+                    Ok(DeleteOutcome::Deleted)
+                }
+                Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
+                Err(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
+            })
     }
 
     /// `CMP-FR-006` (ADR-0052): the stack compacted under the store's own
     /// write lock; a file that could not be rewritten is `Storage`.
     fn compact(&self) -> Result<crate::generic::CompactionReport, ErrorCode> {
-        self.store.compact().map_err(|_| ErrorCode::Storage)
+        self.store.with_exclusive(|inner| {
+            // `ADR-0072`'s `MVCC2-FR-010` item 2 — see
+            // `MemoryConnectionStore::compact` for the full contract;
+            // identical here.
+            let journal_entries = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            if !self.mvcc_flush_now(journal_entries) {
+                return Err(ErrorCode::Storage);
+            }
+            crate::generic::query::Compact::compact(inner).map_err(|_| ErrorCode::Storage)
+        })
     }
 
     /// `BAK-FR-002`/`006` (ADR-0065) — see
@@ -670,6 +884,7 @@ impl ConnectionStore for EntityConnectionStore {
             for (i, p) in prepared.into_iter().enumerate() {
                 results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
             }
+            self.mvcc_record_write_ops(ops, &results);
             Ok(results)
         };
         match &self.journal {
@@ -682,7 +897,9 @@ impl ConnectionStore for EntityConnectionStore {
                         self.store.with_exclusive(|inner| {
                             let results = apply(inner)?;
                             *results_cell.borrow_mut() = Some(results);
-                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
                         })
                     })
                     .map_err(|e| match e {
@@ -789,7 +1006,9 @@ impl ConnectionStore for EntityConnectionStore {
             None => self.store.with_exclusive(|inner| {
                 Self::validate_batch(updates, |id| GetById::<Entity>::get(inner, id).is_some())?;
                 Self::check_read_set(read_set, |id| GetById::<Entity>::get(inner, id))?;
-                Self::apply_batch(inner, updates)
+                Self::apply_batch(inner, updates)?;
+                self.mvcc_record_transaction(updates);
+                Ok(())
             }),
             Some(journal) => {
                 Self::validate_batch(updates, |id| self.store.get::<Entity>(id).is_some())?;
@@ -798,7 +1017,10 @@ impl ConnectionStore for EntityConnectionStore {
                         self.store.with_exclusive(|inner| {
                             Self::check_read_set(read_set, |id| GetById::<Entity>::get(inner, id))?;
                             Self::apply_batch(inner, updates)?;
-                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                            self.mvcc_record_transaction(updates);
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
                         })
                     })
                     .map_err(|e| match e {
@@ -808,19 +1030,155 @@ impl ConnectionStore for EntityConnectionStore {
             }
         }
     }
+
+    /// `ADR-0072`'s `MVCC2-FR-007` — see `MemoryConnectionStore::
+    /// apply_transaction_mvcc` for the full contract; identical here.
+    fn apply_transaction_mvcc(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+        mvcc_snapshot: u64,
+    ) -> Result<(), (usize, ErrorCode)> {
+        let Some(mvcc) = &self.mvcc else {
+            return Err((0, ErrorCode::Unsupported));
+        };
+        let conflict_check = || -> Result<(), (usize, ErrorCode)> {
+            let conflicts = mvcc.state.with_index(|index| {
+                index.conflicts(updates.iter().map(|op| (op.id, op.field)), mvcc_snapshot)
+            });
+            if conflicts {
+                return Err((0, ErrorCode::Conflict));
+            }
+            Ok(())
+        };
+        match &self.journal {
+            None => self.store.with_exclusive(|inner| {
+                Self::validate_batch(updates, |id| GetById::<Entity>::get(inner, id).is_some())?;
+                Self::check_read_set(read_set, |id| GetById::<Entity>::get(inner, id))?;
+                conflict_check()?;
+                Self::apply_batch(inner, updates)?;
+                self.mvcc_record_transaction(updates);
+                Ok(())
+            }),
+            Some(journal) => {
+                Self::validate_batch(updates, |id| self.store.get::<Entity>(id).is_some())?;
+                journal
+                    .commit(updates, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            Self::check_read_set(read_set, |id| GetById::<Entity>::get(inner, id))?;
+                            conflict_check()?;
+                            Self::apply_batch(inner, updates)?;
+                            self.mvcc_record_transaction(updates);
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })
+            }
+        }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-012`: `Entity` implements real MVCC.
+    fn mvcc_supported(&self) -> bool {
+        self.mvcc.is_some()
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-001`/`005` — see `MemoryConnectionStore::
+    /// mvcc_begin` for the full contract; identical here.
+    fn mvcc_begin(&self) -> u64 {
+        let Some(mvcc) = &self.mvcc else { return 0 };
+        if !mvcc.state.is_active() {
+            self.store.with_exclusive(|inner| {
+                mvcc.state.activate();
+                for id in AllIds::<Entity>::all_ids(inner) {
+                    if let Some(record) = GetById::<Entity>::get(inner, id) {
+                        let fields = Self::fields_of(record);
+                        mvcc.state.with_index(|index| {
+                            index.record_write(
+                                (id, mvcc::EXISTENCE_FIELD),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::Bool(true)),
+                            );
+                            for (tag, value) in &fields {
+                                index.record_write(
+                                    (id, *tag),
+                                    mvcc::BASELINE_TXN,
+                                    Some(value.clone()),
+                                );
+                            }
+                        });
+                    }
+                }
+            });
+            let journal_count = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            let _ = self.mvcc_flush_now(journal_count);
+        }
+        let snapshot_txn = mvcc.state.with_index(|index| index.last_committed());
+        mvcc.state.open_snapshots().register(snapshot_txn);
+        snapshot_txn
+    }
+
+    fn mvcc_release(&self, snapshot_txn: u64) {
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.state.open_snapshots().deregister(snapshot_txn);
+        }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-006` — see `MemoryConnectionStore::
+    /// mvcc_get` for the full contract; identical here.
+    fn mvcc_get(
+        &self,
+        id: RecordId,
+        snapshot_txn: u64,
+    ) -> Result<Option<Vec<(FieldRef, ScanValue)>>, ErrorCode> {
+        let Some(mvcc) = &self.mvcc else {
+            return Ok(self.get(id));
+        };
+        if !mvcc.state.is_active() {
+            return Ok(self.get(id));
+        }
+        let existed = mvcc
+            .state
+            .with_index(|index| index.read(&(id, mvcc::EXISTENCE_FIELD), snapshot_txn));
+        match existed {
+            Err(mvcc::HistoryReclaimed) => return Err(ErrorCode::Conflict),
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+        }
+        let mut fields = Vec::with_capacity(Self::schema().fields.len());
+        for field in Self::schema().fields {
+            let value = mvcc
+                .state
+                .with_index(|index| index.read(&(id, field.tag), snapshot_txn));
+            match value {
+                Err(mvcc::HistoryReclaimed) => return Err(ErrorCode::Conflict),
+                Ok(Some(v)) => fields.push((field.tag, v)),
+                Ok(None) => {}
+            }
+        }
+        Ok(Some(fields))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::entity::create_entity_production_stack;
+    use crate::generic::entity::{
+        create_entity_production_stack, open_entity_production_stack_portable,
+    };
     use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
-    fn sample_adapter() -> EntityConnectionStore {
-        let dir = fresh_temp_dir("server_entity_v2_adapter").unwrap();
-        let path = dir.join("entities.mmap");
-        let entities = vec![
+    fn sample_entities() -> Vec<Entity> {
+        vec![
             Entity {
                 id: Uuid::from_u128(1),
                 label: "Ada Lovelace".into(),
@@ -842,12 +1200,176 @@ mod tests {
                 mention_count: 1,
                 aliases: vec!["Londinium".into()],
             },
-        ];
+        ]
+    }
+
+    fn sample_adapter() -> EntityConnectionStore {
+        let dir = fresh_temp_dir("server_entity_v2_adapter").unwrap();
+        let path = dir.join("entities.mmap");
         let relates_to = vec![(Uuid::from_u128(1), Uuid::from_u128(2))];
         let mentioned_with = vec![(Uuid::from_u128(1), Uuid::from_u128(3))];
         let stack =
-            create_entity_production_stack(entities, &relates_to, &mentioned_with, &path).unwrap();
+            create_entity_production_stack(sample_entities(), &relates_to, &mentioned_with, &path)
+                .unwrap();
         EntityConnectionStore::new(GenericProductionStore::new(stack))
+    }
+
+    fn sample_adapter_with_mvcc() -> (EntityConnectionStore, std::path::PathBuf) {
+        let dir = fresh_temp_dir("server_entity_mvcc_adapter").unwrap();
+        let path = dir.join("entities.mmap");
+        let stack = create_entity_production_stack(sample_entities(), &[], &[], &path).unwrap();
+        let adapter = EntityConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        (adapter, path)
+    }
+
+    /// `ADR-0072`: activation baseline, a snapshot surviving a concurrent
+    /// ordinary write and a concurrent atomic `WriteBatch`, invisibility
+    /// of a post-snapshot insert, and write-write conflict detection.
+    /// Mirrors `MemoryConnectionStore`'s own MVCC test suite.
+    #[test]
+    fn mvcc_activation_snapshot_isolation_and_conflict_detection() {
+        let (adapter, _path) = sample_adapter_with_mvcc();
+        assert!(adapter.mvcc_supported());
+        let id = Uuid::from_u128(1);
+        let before = adapter.mvcc_begin();
+        assert_eq!(adapter.mvcc_get(id, before).unwrap(), adapter.get(id));
+
+        let edited = vec![
+            (FIELD_LABEL, ScanValue::Str("Ada King".into())),
+            (FIELD_KIND, ScanValue::Str("person".into())),
+            (FIELD_MENTION_COUNT, ScanValue::I64(99)),
+            (
+                FIELD_ALIASES,
+                ScanValue::StrList(vec!["Enchantress".into()]),
+            ),
+        ];
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced)
+        );
+        assert_eq!(
+            adapter.mvcc_get(id, before).unwrap(),
+            Some(vec![
+                (FIELD_LABEL, ScanValue::Str("Ada Lovelace".into())),
+                (FIELD_KIND, ScanValue::Str("person".into())),
+                (FIELD_MENTION_COUNT, ScanValue::I64(3)),
+                (
+                    FIELD_ALIASES,
+                    ScanValue::StrList(vec!["Ada".into(), "Countess of Lovelace".into()])
+                ),
+            ]),
+            "the snapshot still sees the pre-replace value"
+        );
+
+        let new_id = Uuid::from_u128(77);
+        let new_fields = vec![
+            (FIELD_LABEL, ScanValue::Str("Grace Hopper".into())),
+            (FIELD_KIND, ScanValue::Str("person".into())),
+            (FIELD_MENTION_COUNT, ScanValue::I64(1)),
+            (FIELD_ALIASES, ScanValue::StrList(vec![])),
+        ];
+        assert_eq!(
+            adapter.insert_record(new_id, new_fields.clone()),
+            Ok(InsertOutcome::Inserted)
+        );
+        assert_eq!(adapter.mvcc_get(new_id, before).unwrap(), None);
+
+        let after = adapter.mvcc_begin();
+        assert_eq!(adapter.mvcc_get(id, after).unwrap(), Some(edited));
+        assert_eq!(adapter.mvcc_get(new_id, after).unwrap(), Some(new_fields));
+
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_MENTION_COUNT,
+                    value: ScanValue::I64(5),
+                }],
+                &[],
+                before,
+            ),
+            Err((0, ErrorCode::Conflict)),
+            "stale snapshot conflicts with the ordinary replace above"
+        );
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_MENTION_COUNT,
+                    value: ScanValue::I64(5),
+                }],
+                &[],
+                after,
+            ),
+            Ok(())
+        );
+        adapter.mvcc_release(before);
+        adapter.mvcc_release(after);
+    }
+
+    /// `MVCC2-FR-008`: an atomic `WriteBatch`'s `Insert`/`Replace`/
+    /// `Delete`/`Link` — `Link` never gets an MVCC entry, since it
+    /// touches no field `mvcc_get` reads.
+    #[test]
+    fn mvcc_snapshot_survives_a_concurrent_atomic_write_batch() {
+        let (adapter, _path) = sample_adapter_with_mvcc();
+        let (kept, deleted) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let before = adapter.mvcc_begin();
+        let before_kept = adapter.get(kept).unwrap();
+        let before_deleted = adapter.get(deleted).unwrap();
+
+        let mut edited = before_kept.clone();
+        edited[2] = (FIELD_MENTION_COUNT, ScanValue::I64(42));
+        let ops = vec![
+            WriteOp::Replace {
+                id: kept,
+                fields: edited.clone(),
+            },
+            WriteOp::Delete { id: deleted },
+        ];
+        assert_eq!(
+            adapter.write_batch(&ops, true),
+            Ok(vec![WriteResult::Replaced, WriteResult::Deleted])
+        );
+        assert_eq!(adapter.mvcc_get(kept, before).unwrap(), Some(before_kept));
+        assert_eq!(
+            adapter.mvcc_get(deleted, before).unwrap(),
+            Some(before_deleted)
+        );
+
+        let after = adapter.mvcc_begin();
+        assert_eq!(adapter.mvcc_get(kept, after).unwrap(), Some(edited));
+        assert_eq!(adapter.mvcc_get(deleted, after).unwrap(), None);
+        adapter.mvcc_release(before);
+        adapter.mvcc_release(after);
+    }
+
+    /// Acceptance criterion 8: `Compact` flushes MVCC history before
+    /// clearing, and a reopen afterward reconstructs it correctly.
+    #[test]
+    fn compact_flushes_mvcc_history_and_a_reopen_reconstructs_it() {
+        let (adapter, path) = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let before = adapter.mvcc_begin();
+        let original = adapter.get(id).unwrap();
+        let mut edited = original.clone();
+        edited[2] = (FIELD_MENTION_COUNT, ScanValue::I64(42));
+        assert_eq!(
+            adapter.replace_record(id, edited.clone()),
+            Ok(ReplaceOutcome::Replaced)
+        );
+        adapter.compact().unwrap();
+        drop(adapter);
+
+        let stack = open_entity_production_stack_portable(&path).unwrap();
+        let reopened = EntityConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(reopened.mvcc_get(id, before).unwrap(), Some(original));
+        let after = reopened.mvcc_begin();
+        assert_eq!(reopened.mvcc_get(id, after).unwrap(), Some(edited));
     }
 
     #[test]
