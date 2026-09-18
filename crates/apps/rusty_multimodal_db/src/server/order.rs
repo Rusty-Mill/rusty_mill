@@ -324,6 +324,13 @@ impl ConnectionStore for OrderConnectionStore {
                 match self.store.update::<Order, Amount>(id, amount) {
                     Ok(()) => {
                         self.mvcc_record_field_write(id, FIELD_AMOUNT, ScanValue::I64(amount));
+                        // See `DogConnectionStore::update_field`: never
+                        // journaled and no `Compact` boundary, so this path
+                        // must flush MVCC history on every write it
+                        // records.
+                        if !self.mvcc_flush_now(0) {
+                            return Err(ErrorCode::Storage);
+                        }
                         Ok(true)
                     }
                     Err(_not_found) => Ok(false),
@@ -436,6 +443,12 @@ impl ConnectionStore for OrderConnectionStore {
                 Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `MemoryConnectionStore::apply_transaction`: no
+                // journal means no checkpoint boundary, so this commit
+                // flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -486,6 +499,12 @@ impl ConnectionStore for OrderConnectionStore {
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `MemoryConnectionStore::apply_transaction`: no
+                // journal means no checkpoint boundary, so this commit
+                // flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -615,7 +634,9 @@ impl ConnectionStore for OrderConnectionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::order_customer::{create_order_production_stack, OrderStatus};
+    use crate::generic::order_customer::{
+        create_order_production_stack, open_order_production_stack_portable, OrderStatus,
+    };
     use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
@@ -886,5 +907,140 @@ mod tests {
             Err((0, ErrorCode::Conflict))
         );
         adapter.mvcc_release(snapshot);
+    }
+
+    fn single_order_with_mvcc() -> (OrderConnectionStore, std::path::PathBuf) {
+        let dir = fresh_temp_dir("server_order_mvcc_flush").unwrap();
+        let path = dir.join("amount.mmap");
+        let orders = vec![crate::generic::order_customer::Order {
+            id: Uuid::from_u128(1),
+            customer_id: Uuid::from_u128(100),
+            amount_cents: 2_500,
+            status: OrderStatus::Shipped,
+            created_at_unix_ms: 1_000,
+            discount_cents: 0,
+        }];
+        let stack = create_order_production_stack(orders, &path).unwrap();
+        let adapter = OrderConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        (adapter, path)
+    }
+
+    /// The round-ten fix: `Order` is never journaled by a single
+    /// `update_field`/`apply_transaction` and has no insert log or
+    /// `Compact` to piggyback on — the *only* thing that could ever
+    /// persist a write to `<mmap_path>.mvcc` here is the write path
+    /// itself flushing synchronously. Before this fix, `update_field`
+    /// recorded into the in-memory index but never flushed, so a restart
+    /// with no intervening write silently lost it from MVCC's own
+    /// bookkeeping.
+    #[test]
+    fn update_field_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let (adapter, path) = single_order_with_mvcc();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.update_field(id, FIELD_AMOUNT, ScanValue::I64(9_000)),
+            Ok(true)
+        );
+        drop(adapter);
+
+        let stack = open_order_production_stack_portable(&path).unwrap();
+        let reopened = OrderConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert!(reopened.mvcc_supported());
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(2_500)),
+            "the pre-update snapshot still sees the pre-update value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(9_000)),
+            "a fresh snapshot after reopen sees the write update_field flushed"
+        );
+    }
+
+    /// See `update_field_flushes_mvcc_history_and_a_restart_reconstructs_
+    /// it`: `apply_transaction`'s own non-journaled path has the identical
+    /// gap and fix.
+    #[test]
+    fn apply_transaction_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let (adapter, path) = single_order_with_mvcc();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_AMOUNT,
+                    value: ScanValue::I64(9_000),
+                }],
+                &[],
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let stack = open_order_production_stack_portable(&path).unwrap();
+        let reopened = OrderConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(2_500)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(9_000)),
+            "a fresh snapshot after reopen sees the commit apply_transaction flushed"
+        );
+    }
+
+    /// See `update_field_flushes_mvcc_history_and_a_restart_reconstructs_
+    /// it`: `apply_transaction_mvcc`'s own non-journaled path has the
+    /// identical gap and fix.
+    #[test]
+    fn apply_transaction_mvcc_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let (adapter, path) = single_order_with_mvcc();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_AMOUNT,
+                    value: ScanValue::I64(9_000),
+                }],
+                &[],
+                before,
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let stack = open_order_production_stack_portable(&path).unwrap();
+        let reopened = OrderConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(2_500)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(9_000)),
+            "a fresh snapshot after reopen sees the commit apply_transaction_mvcc flushed"
+        );
     }
 }

@@ -288,6 +288,13 @@ impl ConnectionStore for EmployeeConnectionStore {
                 match self.store.update::<Employee, SalaryCents>(id, salary) {
                     Ok(()) => {
                         self.mvcc_record_field_write(id, FIELD_SALARY, ScanValue::I64(salary));
+                        // See `DogConnectionStore::update_field`: never
+                        // journaled and no `Compact` boundary, so this path
+                        // must flush MVCC history on every write it
+                        // records.
+                        if !self.mvcc_flush_now(0) {
+                            return Err(ErrorCode::Storage);
+                        }
                         Ok(true)
                     }
                     Err(_not_found) => Ok(false),
@@ -445,6 +452,12 @@ impl ConnectionStore for EmployeeConnectionStore {
                 Self::check_read_set(read_set, |id| GetById::<Employee>::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `MemoryConnectionStore::apply_transaction`: no
+                // journal means no checkpoint boundary, so this commit
+                // flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -498,6 +511,12 @@ impl ConnectionStore for EmployeeConnectionStore {
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `MemoryConnectionStore::apply_transaction`: no
+                // journal means no checkpoint boundary, so this commit
+                // flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -616,7 +635,9 @@ impl ConnectionStore for EmployeeConnectionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic_spike::employee_impl::create_employee_production_stack;
+    use crate::generic_spike::employee_impl::{
+        create_employee_production_stack, open_employee_production_stack_portable,
+    };
     use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
@@ -870,5 +891,139 @@ mod tests {
             Err((0, ErrorCode::Conflict))
         );
         adapter.mvcc_release(snapshot);
+    }
+
+    fn single_employee_with_mvcc() -> (EmployeeConnectionStore, std::path::PathBuf) {
+        let dir = fresh_temp_dir("server_employee_mvcc_flush").unwrap();
+        let path = dir.join("salary.mmap");
+        let employees = vec![Employee {
+            id: Uuid::from_u128(1),
+            name: "Alex".into(),
+            department: Department::Engineering,
+            salary_cents: 1_200_000,
+            manager_id: None,
+        }];
+        let stack = create_employee_production_stack(employees, &[], &path).unwrap();
+        let adapter = EmployeeConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        (adapter, path)
+    }
+
+    /// The round-ten fix: `Employee` is never journaled by a single
+    /// `update_field`/`apply_transaction` and has no insert log or
+    /// `Compact` to piggyback on — the *only* thing that could ever
+    /// persist a write to `<mmap_path>.mvcc` here is the write path
+    /// itself flushing synchronously. Before this fix, `update_field`
+    /// recorded into the in-memory index but never flushed, so a restart
+    /// with no intervening write silently lost it from MVCC's own
+    /// bookkeeping.
+    #[test]
+    fn update_field_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let (adapter, path) = single_employee_with_mvcc();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.update_field(id, FIELD_SALARY, ScanValue::I64(1_500_000)),
+            Ok(true)
+        );
+        drop(adapter);
+
+        let stack = open_employee_production_stack_portable(&path).unwrap();
+        let reopened = EmployeeConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert!(reopened.mvcc_supported());
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[2],
+            (FIELD_SALARY, ScanValue::I64(1_200_000)),
+            "the pre-update snapshot still sees the pre-update value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[2],
+            (FIELD_SALARY, ScanValue::I64(1_500_000)),
+            "a fresh snapshot after reopen sees the write update_field flushed"
+        );
+    }
+
+    /// See `update_field_flushes_mvcc_history_and_a_restart_reconstructs_
+    /// it`: `apply_transaction`'s own non-journaled path has the identical
+    /// gap and fix.
+    #[test]
+    fn apply_transaction_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let (adapter, path) = single_employee_with_mvcc();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_SALARY,
+                    value: ScanValue::I64(1_500_000),
+                }],
+                &[],
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let stack = open_employee_production_stack_portable(&path).unwrap();
+        let reopened = EmployeeConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[2],
+            (FIELD_SALARY, ScanValue::I64(1_200_000)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[2],
+            (FIELD_SALARY, ScanValue::I64(1_500_000)),
+            "a fresh snapshot after reopen sees the commit apply_transaction flushed"
+        );
+    }
+
+    /// See `update_field_flushes_mvcc_history_and_a_restart_reconstructs_
+    /// it`: `apply_transaction_mvcc`'s own non-journaled path has the
+    /// identical gap and fix.
+    #[test]
+    fn apply_transaction_mvcc_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let (adapter, path) = single_employee_with_mvcc();
+        let id = Uuid::from_u128(1);
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_SALARY,
+                    value: ScanValue::I64(1_500_000),
+                }],
+                &[],
+                before,
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let stack = open_employee_production_stack_portable(&path).unwrap();
+        let reopened = EmployeeConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[2],
+            (FIELD_SALARY, ScanValue::I64(1_200_000)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[2],
+            (FIELD_SALARY, ScanValue::I64(1_500_000)),
+            "a fresh snapshot after reopen sees the commit apply_transaction_mvcc flushed"
+        );
     }
 }

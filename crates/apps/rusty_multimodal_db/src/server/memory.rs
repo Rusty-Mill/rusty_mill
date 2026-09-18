@@ -933,6 +933,15 @@ impl ConnectionStore for MemoryConnectionStore {
                         &Self::fields_of(GetById::<Memory>::get(inner, id).expect("just inserted")),
                         id,
                     );
+                    // `ADR-0072`'s `MVCC2-FR-010`: a non-journaled table has
+                    // no checkpoint boundary to piggyback on, so every
+                    // MVCC-recording write flushes immediately — otherwise
+                    // this write is invisible to `.mvcc` until the next
+                    // `Compact`, and a restart in between silently loses it
+                    // from MVCC's own bookkeeping (never a plain read).
+                    if !self.mvcc_flush_now(0) {
+                        return Err(ErrorCode::Storage);
+                    }
                     Ok(InsertOutcome::Inserted)
                 }
                 Err(InsertError::Duplicate(_)) => Ok(InsertOutcome::Duplicate),
@@ -956,6 +965,11 @@ impl ConnectionStore for MemoryConnectionStore {
                         &Self::fields_of(GetById::<Memory>::get(inner, id).expect("just replaced")),
                         id,
                     );
+                    // See `insert_record`: a non-journaled table must flush
+                    // on every MVCC-recording write, not just at `Compact`.
+                    if !self.mvcc_flush_now(0) {
+                        return Err(ErrorCode::Storage);
+                    }
                     Ok(ReplaceOutcome::Replaced)
                 }
                 Err(ReplaceError::NotFound(_)) => Ok(ReplaceOutcome::NotFound),
@@ -986,6 +1000,11 @@ impl ConnectionStore for MemoryConnectionStore {
                         &Self::fields_of(GetById::<Memory>::get(inner, id).expect("just replaced")),
                         id,
                     );
+                    // See `insert_record`: a non-journaled table must flush
+                    // on every MVCC-recording write, not just at `Compact`.
+                    if !self.mvcc_flush_now(0) {
+                        return Err(ErrorCode::Storage);
+                    }
                     Ok(ReplaceIfOutcome::Replaced)
                 }
                 Err(ReplaceError::NotFound(_)) => Ok(ReplaceIfOutcome::NotFound),
@@ -1002,6 +1021,11 @@ impl ConnectionStore for MemoryConnectionStore {
             .with_exclusive(|inner| match Delete::<Memory>::delete(inner, id) {
                 Ok(()) => {
                     self.mvcc_record_delete(id);
+                    // See `insert_record`: a non-journaled table must flush
+                    // on every MVCC-recording write, not just at `Compact`.
+                    if !self.mvcc_flush_now(0) {
+                        return Err(ErrorCode::Storage);
+                    }
                     Ok(DeleteOutcome::Deleted)
                 }
                 Err(DeleteError::NotFound(_)) => Ok(DeleteOutcome::NotFound),
@@ -1125,8 +1149,18 @@ impl ConnectionStore for MemoryConnectionStore {
             Ok(results)
         };
         match &self.journal {
-            // `WBJ-FR-004`: no journal, no change from before ADR-0063.
-            None => self.store.with_exclusive(apply),
+            // `WBJ-FR-004`: no journal, no change from before ADR-0063,
+            // except `ADR-0072`'s `MVCC2-FR-010`: with no checkpoint
+            // boundary to piggyback on, every MVCC-recording batch flushes
+            // immediately after `apply` records it, still inside the same
+            // exclusive section.
+            None => self.store.with_exclusive(|inner| {
+                let results = apply(inner)?;
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
+                Ok(results)
+            }),
             // `WBJ-FR-002` (ADR-0063): journal the raw, already-validated
             // `ops` before applying — a crash after the journal `fsync`
             // but before/during apply replays cleanly (`WBJ-FR-003`).
@@ -1255,6 +1289,14 @@ impl ConnectionStore for MemoryConnectionStore {
                 Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // `ADR-0072`'s `MVCC2-FR-010`: no journal means no
+                // checkpoint boundary, so a committed transaction flushes
+                // MVCC history immediately — otherwise it is invisible to
+                // `.mvcc` until the next `Compact`, and a restart in
+                // between silently loses it from MVCC's own bookkeeping.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -1310,6 +1352,11 @@ impl ConnectionStore for MemoryConnectionStore {
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
                 self.mvcc_record_transaction(updates);
+                // See `apply_transaction`: no journal means no checkpoint
+                // boundary, so this commit flushes MVCC history now.
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
                 Ok(())
             }),
             Some(journal) => {
@@ -1765,6 +1812,204 @@ mod tests {
         assert!(adapter.mvcc_get(new_id, after).unwrap().is_some());
         adapter.mvcc_release(before);
         adapter.mvcc_release(after);
+    }
+
+    /// The round-ten fix: on a non-journaled table, `insert_record`/
+    /// `replace_record`/`delete_record` each used to record into the
+    /// in-memory MVCC index but never flush `<mmap_path>.mvcc` — only
+    /// `Compact` did. Checked directly against the on-disk file via an
+    /// independent `MvccState::open`, not via `open_with_mvcc`'s own
+    /// insert-log fold: none of these three ever clear the insert log
+    /// themselves (only `GenericMmapStore::open`/`Compact` do), so a
+    /// restart-based test would reconstruct the same answer from the
+    /// still-pending log regardless of whether the flush actually ran.
+    #[test]
+    fn insert_replace_delete_each_flush_mvcc_history_immediately_with_no_compact() {
+        let dir = fresh_temp_dir("server_memory_mvcc_write_flush").unwrap();
+        let path = dir.join("memories.mmap");
+        let stack = create_memory_production_stack(
+            vec![memory(1, "general", false), memory(2, "preference", false)],
+            &[],
+            &path,
+        )
+        .unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        adapter.mvcc_begin();
+
+        let read_field = |id: Uuid, field: FieldRef| {
+            MvccState::open(&path)
+                .unwrap()
+                .state
+                .with_index(|index| index.read(&(id, field), u64::MAX))
+                .unwrap()
+        };
+
+        let new_id = Uuid::from_u128(50);
+        assert_eq!(
+            adapter.insert_record(new_id, full_fields(50)),
+            Ok(InsertOutcome::Inserted)
+        );
+        assert_eq!(
+            read_field(new_id, mvcc::EXISTENCE_FIELD),
+            Some(ScanValue::Bool(true)),
+            "insert_record must flush to disk immediately, not only at Compact"
+        );
+
+        let mut edited = full_fields(1);
+        edited[0] = (FIELD_CONTENT, ScanValue::Str("edited".into()));
+        assert_eq!(
+            adapter.replace_record(Uuid::from_u128(1), edited),
+            Ok(ReplaceOutcome::Replaced)
+        );
+        assert_eq!(
+            read_field(Uuid::from_u128(1), FIELD_CONTENT),
+            Some(ScanValue::Str("edited".into())),
+            "replace_record must flush to disk immediately, not only at Compact"
+        );
+
+        assert_eq!(
+            adapter.delete_record(Uuid::from_u128(2)),
+            Ok(DeleteOutcome::Deleted)
+        );
+        assert_eq!(
+            read_field(Uuid::from_u128(2), mvcc::EXISTENCE_FIELD),
+            None,
+            "delete_record's tombstone must flush to disk immediately, not only at Compact"
+        );
+    }
+
+    /// See `insert_replace_delete_each_flush_mvcc_history_immediately_
+    /// with_no_compact`: a non-journaled atomic `WriteBatch` must flush
+    /// too, checked the same direct way.
+    #[test]
+    fn write_batch_atomic_non_journaled_flushes_mvcc_history_immediately() {
+        let dir = fresh_temp_dir("server_memory_mvcc_batch_flush").unwrap();
+        let path = dir.join("memories.mmap");
+        let stack =
+            create_memory_production_stack(vec![memory(1, "general", false)], &[], &path).unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+        adapter.mvcc_begin();
+
+        let new_id = Uuid::from_u128(50);
+        let ops = vec![WriteOp::Insert {
+            id: new_id,
+            fields: full_fields(50),
+        }];
+        assert_eq!(
+            adapter.write_batch(&ops, true),
+            Ok(vec![WriteResult::Inserted])
+        );
+
+        let value = MvccState::open(&path)
+            .unwrap()
+            .state
+            .with_index(|index| index.read(&(new_id, mvcc::EXISTENCE_FIELD), u64::MAX))
+            .unwrap();
+        assert_eq!(
+            value,
+            Some(ScanValue::Bool(true)),
+            "a non-journaled atomic write_batch must flush MVCC history \
+             immediately, not only at Compact"
+        );
+    }
+
+    /// The round-ten fix's core case: on a non-journaled table, an
+    /// ordinary (non-session) `apply_transaction` commit — the only
+    /// mutation path that never touches the insert log at all — used to
+    /// be recorded in the in-memory index but never flushed to
+    /// `<mmap_path>.mvcc` until the next `Compact`. A restart in between
+    /// silently lost it from MVCC's own bookkeeping, even though a plain
+    /// `GetById` read showed the correct current value. Unlike
+    /// `open_with_mvcc_reconstructs_a_pending_unflushed_insert_log_entry`,
+    /// there is no insert log here to fall back on — this restart only
+    /// reconstructs correctly if `apply_transaction` itself flushed.
+    #[test]
+    fn apply_transaction_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let dir = fresh_temp_dir("server_memory_mvcc_txn_flush").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        let stack =
+            create_memory_production_stack(vec![memory(1, "general", false)], &[], &path).unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_ACCESS_COUNT,
+                    value: ScanValue::I64(7),
+                }],
+                &[],
+            ),
+            Ok(())
+        );
+        // No `Compact`, no journal — the only thing that could have
+        // flushed this commit to disk is `apply_transaction` itself.
+        drop(adapter);
+
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        assert!(reopened.mvcc_supported());
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(0)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+            "a fresh snapshot after reopen sees the commit apply_transaction flushed"
+        );
+    }
+
+    /// See `apply_transaction_non_journaled_flushes_mvcc_history_and_a_
+    /// restart_reconstructs_it`: `apply_transaction_mvcc`'s own
+    /// non-journaled path has the identical gap and fix.
+    #[test]
+    fn apply_transaction_mvcc_non_journaled_flushes_mvcc_history_and_a_restart_reconstructs_it() {
+        let dir = fresh_temp_dir("server_memory_mvcc_txn_mvcc_flush").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        let stack =
+            create_memory_production_stack(vec![memory(1, "general", false)], &[], &path).unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap();
+
+        let before = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.apply_transaction_mvcc(
+                &[TransactionOp {
+                    id,
+                    field: FIELD_ACCESS_COUNT,
+                    value: ScanValue::I64(11),
+                }],
+                &[],
+                before,
+            ),
+            Ok(())
+        );
+        drop(adapter);
+
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        assert_eq!(
+            reopened.mvcc_get(id, before).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(0)),
+            "the pre-commit snapshot still sees the pre-commit value after reopen"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(11)),
+            "a fresh snapshot after reopen sees the commit apply_transaction_mvcc flushed"
+        );
     }
 
     fn full_fields_of(n: u128, category: &str, sensitive: bool) -> Vec<(FieldRef, ScanValue)> {
