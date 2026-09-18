@@ -30,17 +30,19 @@
 //! convenience this adapter invents.
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::mvcc::{self, MvccState};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::ConnectionStore;
+use crate::durability::DurabilityError;
 use crate::generic::order_customer::{
     Amount, BelongsToCustomer, Customer, Order, OrderProductionStack, OrderStatus, Status,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const FIELD_AMOUNT: FieldRef = 0;
 pub const FIELD_STATUS: FieldRef = 1;
@@ -72,10 +74,25 @@ fn status_from_u32(value: u32) -> Option<OrderStatus> {
     }
 }
 
+/// `ADR-0072`'s `MVCC2-FR-001`/`010` — see `MemoryConnectionStore`'s own
+/// `MvccHandle` for the full contract; identical here, except `Order`
+/// has no insert log or `Compact` at all (no runtime `Insert`/`Replace`/
+/// `Delete` exists for this domain — its only mutation path is a session
+/// `Commit`/journaled `Request::Transaction` batch of `UpdateField` ops),
+/// so `MvccState::flush`'s `insert_log_entries_reflected` is always `0`
+/// here and the only reclamation boundary is a journal checkpoint.
+struct MvccHandle {
+    state: MvccState,
+    mmap_path: PathBuf,
+}
+
 pub struct OrderConnectionStore {
     store: GenericProductionStore<OrderProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
     journal: Option<CommitGroup>,
+    /// `ADR-0072`'s `MVCC2-FR-001` — see `MemoryConnectionStore`'s own
+    /// `mvcc` field for the full contract; identical here.
+    mvcc: Option<MvccHandle>,
 }
 
 impl OrderConnectionStore {
@@ -83,7 +100,79 @@ impl OrderConnectionStore {
         Self {
             store,
             journal: None,
+            mvcc: None,
         }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-001`/`003`: enable real MVCC for this
+    /// table, reconstructing `<mmap_path>.mvcc` (if any). Unlike
+    /// `MemoryConnectionStore::with_mvcc`, there is no insert log to
+    /// fold here at all — `Order` has no runtime `Insert`/`Replace`/
+    /// `Delete`, so every write is a session `Commit`/journaled
+    /// `UpdateField` batch, and the only durable record of MVCC history
+    /// beyond `<mmap_path>.mvcc` itself is the journal, replayed the
+    /// same way `with_journal` already replays it into the store (see
+    /// that constructor's own doc comment for the accepted, pre-existing
+    /// gap this shares with `ADR-0033`'s own rejected-commit window: a
+    /// journal replayed on open is not folded into MVCC either, the
+    /// identical shape `MVCC-OPEN-HOOK-PROPOSAL.md`'s own "Open
+    /// questions" section named for `Memory`/`Entity`/`Relation` and
+    /// left for a follow-up decision).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError`] if `<mmap_path>.mvcc` exists but
+    /// can't be read/decoded.
+    pub fn with_mvcc(mut self, mmap_path: &Path) -> Result<Self, DurabilityError> {
+        let reconstructed = MvccState::open(mmap_path)?;
+        self.mvcc = Some(MvccHandle {
+            state: reconstructed.state,
+            mmap_path: mmap_path.to_path_buf(),
+        });
+        Ok(self)
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008` — see `MemoryConnectionStore::
+    /// mvcc_record_transaction` for the full contract; identical here.
+    fn mvcc_record_transaction(&self, updates: &[TransactionOp]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() || updates.is_empty() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state.with_index(|index| {
+            for op in updates {
+                index.record_write((op.id, op.field), txn_id, Some(op.value.clone()));
+            }
+        });
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-010` — see `MemoryConnectionStore::
+    /// mvcc_flush_now` for the full contract; simplified here since
+    /// there is no insert log at all (`insert_log_entries_reflected` is
+    /// always `0`).
+    fn mvcc_flush_now(&self, journal_entries: u64) -> bool {
+        let Some(mvcc) = &self.mvcc else { return true };
+        if !mvcc.state.is_active() {
+            return true;
+        }
+        mvcc.state
+            .flush(&mvcc.mmap_path, 0, journal_entries as usize)
+            .is_ok()
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-008`: record a single ordinary (non-batch)
+    /// field write — the `update_field` path's own equivalent of
+    /// `MemoryConnectionStore::mvcc_record_write`, sized to one field
+    /// since that is all `update_field` ever changes.
+    fn mvcc_record_field_write(&self, id: RecordId, field: FieldRef, value: ScanValue) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state
+            .with_index(|index| index.record_write((id, field), txn_id, Some(value)));
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -112,6 +201,7 @@ impl OrderConnectionStore {
         Ok(Self {
             store,
             journal: Some(journal),
+            mvcc: None,
         })
     }
 
@@ -232,7 +322,10 @@ impl ConnectionStore for OrderConnectionStore {
         match (field, value) {
             (FIELD_AMOUNT, ScanValue::I64(amount)) => {
                 match self.store.update::<Order, Amount>(id, amount) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => {
+                        self.mvcc_record_field_write(id, FIELD_AMOUNT, ScanValue::I64(amount));
+                        Ok(true)
+                    }
                     Err(_not_found) => Ok(false),
                 }
             }
@@ -341,7 +434,9 @@ impl ConnectionStore for OrderConnectionStore {
             None => self.store.with_exclusive(|inner| {
                 Self::validate_batch(updates, |id| GetById::<Order>::get(inner, id).is_some())?;
                 Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
-                Self::apply_batch(inner, updates)
+                Self::apply_batch(inner, updates)?;
+                self.mvcc_record_transaction(updates);
+                Ok(())
             }),
             Some(journal) => {
                 Self::validate_batch(updates, |id| self.store.get::<Order>(id).is_some())?;
@@ -350,7 +445,10 @@ impl ConnectionStore for OrderConnectionStore {
                         self.store.with_exclusive(|inner| {
                             Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
                             Self::apply_batch(inner, updates)?;
-                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                            self.mvcc_record_transaction(updates);
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
                         })
                     })
                     .map_err(|e| match e {
@@ -359,6 +457,158 @@ impl ConnectionStore for OrderConnectionStore {
                     })
             }
         }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-007` — see `MemoryConnectionStore::
+    /// apply_transaction_mvcc` for the full contract; identical here.
+    fn apply_transaction_mvcc(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+        mvcc_snapshot: u64,
+    ) -> Result<(), (usize, ErrorCode)> {
+        let Some(mvcc) = &self.mvcc else {
+            return Err((0, ErrorCode::Unsupported));
+        };
+        let conflict_check = || -> Result<(), (usize, ErrorCode)> {
+            let conflicts = mvcc.state.with_index(|index| {
+                index.conflicts(updates.iter().map(|op| (op.id, op.field)), mvcc_snapshot)
+            });
+            if conflicts {
+                return Err((0, ErrorCode::Conflict));
+            }
+            Ok(())
+        };
+        match &self.journal {
+            None => self.store.with_exclusive(|inner| {
+                Self::validate_batch(updates, |id| GetById::<Order>::get(inner, id).is_some())?;
+                Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
+                conflict_check()?;
+                Self::apply_batch(inner, updates)?;
+                self.mvcc_record_transaction(updates);
+                Ok(())
+            }),
+            Some(journal) => {
+                Self::validate_batch(updates, |id| self.store.get::<Order>(id).is_some())?;
+                journal
+                    .commit(updates, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
+                            conflict_check()?;
+                            Self::apply_batch(inner, updates)?;
+                            self.mvcc_record_transaction(updates);
+                            Ok(turn.checkpoint_due
+                                && inner.checkpoint_flush().is_ok()
+                                && self.mvcc_flush_now(turn.journal_entries))
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })
+            }
+        }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-012`: `Order` implements real MVCC.
+    fn mvcc_supported(&self) -> bool {
+        self.mvcc.is_some()
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-001`/`005`: activate (baseline-seed every
+    /// currently-live record, once — `Order`'s own "no runtime deletion"
+    /// invariant means `all_ids` never changes at runtime, so reading it
+    /// once before the exclusive section is safe) and open a new
+    /// snapshot.
+    fn mvcc_begin(&self) -> u64 {
+        let Some(mvcc) = &self.mvcc else { return 0 };
+        if !mvcc.state.is_active() {
+            let ids = self.store.all_ids::<Order>();
+            self.store.with_exclusive(|inner| {
+                mvcc.state.activate();
+                for id in ids {
+                    if let Some(order) = GetById::<Order>::get(inner, id) {
+                        mvcc.state.with_index(|index| {
+                            index.record_write(
+                                (id, mvcc::EXISTENCE_FIELD),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::Bool(true)),
+                            );
+                            index.record_write(
+                                (id, FIELD_AMOUNT),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::I64(order.amount_cents)),
+                            );
+                            index.record_write(
+                                (id, FIELD_STATUS),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::U32(status_to_u32(order.status))),
+                            );
+                            index.record_write(
+                                (id, FIELD_CREATED_AT),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::I64(order.created_at_unix_ms)),
+                            );
+                            index.record_write(
+                                (id, FIELD_DISCOUNT),
+                                mvcc::BASELINE_TXN,
+                                Some(ScanValue::I64(order.discount_cents)),
+                            );
+                        });
+                    }
+                }
+            });
+            let journal_count = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            let _ = self.mvcc_flush_now(journal_count);
+        }
+        let snapshot_txn = mvcc.state.with_index(|index| index.last_committed());
+        mvcc.state.open_snapshots().register(snapshot_txn);
+        snapshot_txn
+    }
+
+    fn mvcc_release(&self, snapshot_txn: u64) {
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.state.open_snapshots().deregister(snapshot_txn);
+        }
+    }
+
+    /// `ADR-0072`'s `MVCC2-FR-006` — see `MemoryConnectionStore::
+    /// mvcc_get` for the full contract; identical here.
+    fn mvcc_get(
+        &self,
+        id: RecordId,
+        snapshot_txn: u64,
+    ) -> Result<Option<Vec<(FieldRef, ScanValue)>>, ErrorCode> {
+        let Some(mvcc) = &self.mvcc else {
+            return Ok(self.get(id));
+        };
+        if !mvcc.state.is_active() {
+            return Ok(self.get(id));
+        }
+        let existed = mvcc
+            .state
+            .with_index(|index| index.read(&(id, mvcc::EXISTENCE_FIELD), snapshot_txn));
+        match existed {
+            Err(mvcc::HistoryReclaimed) => return Err(ErrorCode::Conflict),
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+        }
+        let mut fields = Vec::with_capacity(self.describe().fields.len());
+        for field in self.describe().fields {
+            let value = mvcc
+                .state
+                .with_index(|index| index.read(&(id, field.tag), snapshot_txn));
+            match value {
+                Err(mvcc::HistoryReclaimed) => return Err(ErrorCode::Conflict),
+                Ok(Some(v)) => fields.push((field.tag, v)),
+                Ok(None) => {}
+            }
+        }
+        Ok(Some(fields))
     }
 }
 
@@ -511,5 +761,130 @@ mod tests {
             adapter.neighbors(Uuid::from_u128(1)),
             Err(ErrorCode::Unsupported)
         );
+    }
+
+    /// `ADR-0072`: a table with two pre-existing records, built with
+    /// [`OrderConnectionStore::with_mvcc`] so `SESSION_MVCC_ISOLATION` is
+    /// available — but not yet activated (`mvcc_begin` does that).
+    fn sample_adapter_with_mvcc() -> OrderConnectionStore {
+        let dir = fresh_temp_dir("server_order_mvcc_adapter").unwrap();
+        let path = dir.join("amount.mmap");
+        let orders = vec![
+            crate::generic::order_customer::Order {
+                id: Uuid::from_u128(1),
+                customer_id: Uuid::from_u128(100),
+                amount_cents: 2_500,
+                status: OrderStatus::Shipped,
+                created_at_unix_ms: 1_000,
+                discount_cents: 0,
+            },
+            crate::generic::order_customer::Order {
+                id: Uuid::from_u128(2),
+                customer_id: Uuid::from_u128(100),
+                amount_cents: 4_200,
+                status: OrderStatus::Pending,
+                created_at_unix_ms: 2_000,
+                discount_cents: 0,
+            },
+        ];
+        let stack = create_order_production_stack(orders, &path).unwrap();
+        OrderConnectionStore::new(GenericProductionStore::new(stack))
+            .with_mvcc(&path)
+            .unwrap()
+    }
+
+    /// `MVCC2-FR-001`/`013`: activation baseline-seeds a pre-existing
+    /// record, so a snapshot opened right at activation still sees it —
+    /// not absence.
+    #[test]
+    fn mvcc_begin_baseline_seeds_pre_existing_records() {
+        let adapter = sample_adapter_with_mvcc();
+        assert!(adapter.mvcc_supported());
+        let id = Uuid::from_u128(1);
+        let snapshot = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.mvcc_get(id, snapshot).unwrap(),
+            Some(vec![
+                (FIELD_AMOUNT, ScanValue::I64(2_500)),
+                (FIELD_STATUS, ScanValue::U32(1)),
+                (FIELD_CREATED_AT, ScanValue::I64(1_000)),
+                (FIELD_DISCOUNT, ScanValue::I64(0)),
+            ])
+        );
+        adapter.mvcc_release(snapshot);
+    }
+
+    /// `MVCC2-FR-006`/`008`, acceptance criterion 4: a real-MVCC snapshot
+    /// survives a *concurrent ordinary* (non-session) write — not only a
+    /// conflicting session commit — and a fresh snapshot taken afterward
+    /// sees the new value.
+    #[test]
+    fn mvcc_snapshot_survives_a_concurrent_ordinary_update() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let before = adapter.mvcc_begin();
+
+        assert_eq!(
+            adapter.update_field(id, FIELD_AMOUNT, ScanValue::I64(9_000)),
+            Ok(true)
+        );
+
+        assert_eq!(
+            adapter.mvcc_get(id, before).unwrap(),
+            Some(vec![
+                (FIELD_AMOUNT, ScanValue::I64(2_500)),
+                (FIELD_STATUS, ScanValue::U32(1)),
+                (FIELD_CREATED_AT, ScanValue::I64(1_000)),
+                (FIELD_DISCOUNT, ScanValue::I64(0)),
+            ]),
+            "the snapshot still sees the pre-update value"
+        );
+        let after = adapter.mvcc_begin();
+        assert_eq!(
+            adapter.mvcc_get(id, after).unwrap(),
+            Some(vec![
+                (FIELD_AMOUNT, ScanValue::I64(9_000)),
+                (FIELD_STATUS, ScanValue::U32(1)),
+                (FIELD_CREATED_AT, ScanValue::I64(1_000)),
+                (FIELD_DISCOUNT, ScanValue::I64(0)),
+            ]),
+            "a fresh snapshot sees the ordinary write"
+        );
+        adapter.mvcc_release(before);
+        adapter.mvcc_release(after);
+    }
+
+    /// Acceptance criterion 3, adapted to a single-adapter test: a
+    /// session's staged `UpdateField` batch commits cleanly against its
+    /// own unchanged snapshot, but is refused `Conflict` — nothing
+    /// applied — once a concurrent write has touched the same key.
+    #[test]
+    fn apply_transaction_mvcc_detects_a_write_write_conflict() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let snapshot = adapter.mvcc_begin();
+        let update = TransactionOp {
+            id,
+            field: FIELD_AMOUNT,
+            value: ScanValue::I64(5_000),
+        };
+
+        // Uncontested: applies and is visible afterward.
+        assert_eq!(
+            adapter.apply_transaction_mvcc(std::slice::from_ref(&update), &[], snapshot),
+            Ok(())
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(5_000))
+        );
+
+        // The same (now stale) snapshot's own second attempt conflicts
+        // with the write it just made.
+        assert_eq!(
+            adapter.apply_transaction_mvcc(&[update], &[], snapshot),
+            Err((0, ErrorCode::Conflict))
+        );
+        adapter.mvcc_release(snapshot);
     }
 }
