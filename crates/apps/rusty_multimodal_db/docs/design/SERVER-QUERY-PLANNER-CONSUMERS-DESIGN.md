@@ -1,7 +1,9 @@
-# Server Query Planner, Step Two: The Equality-Index Candidate Step for `Aggregate`, `FilteredPage`, and `Join` (Proposed)
+# Server Query Planner, Step Two: The Equality-Index Candidate Step for `Aggregate`, `FilteredPage`, and `Join` (Accepted)
 
-- Status: **Proposed** (2026-09-19, `ADR-0074`). Design only — no code in
-  this round.
+- Status: **Accepted as designed** (2026-09-19, `ADR-0074`, option (a) —
+  all three consumers through one shared helper; (b) `FilteredPage`
+  only and (c) decline, both declined). Design only in this PR;
+  implementation is the next round, on its own branch.
 - Date: 2026-09-19
 - Related: `ADR-0073`/`docs/design/SERVER-QUERY-PLANNER-DESIGN.md` (step
   one — `plan_query`/`query_candidates` for `Request::Query` alone, whose
@@ -373,3 +375,7 @@ of it and of `ADR-0073`'s implementation is owed and not claimed.
   option (b) named, taken as the owner's pick for the next round after
   the planner's step one merged (PR #243) and measured. Every claim about
   the current code read from `main` at `6b84b1831` this pass.
+- 2026-09-19: the owner picked option (a) the same session, before the
+  design PR merged; recorded here and in `ADR-0074`. Implementation to
+  follow on its own branch — Claude as builder (Codex's sandbox still
+  cannot spawn processes), independent Codex review owed.

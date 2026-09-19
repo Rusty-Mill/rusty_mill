@@ -1,7 +1,9 @@
 # ADR-0074: Query Planner Step Two — The Equality-Index Candidate Step for `Aggregate`, `FilteredPage`, and `Join`
 
-- Status: **Proposed** (2026-09-19). Design only; the owner's pick among
-  (a)/(b)/(c) below is pending.
+- Status: **Accepted as designed** (2026-09-19 — the owner picked option
+  (a): all three consumers through one shared helper; (b) `FilteredPage`
+  only and (c) decline both declined). Proposed and accepted in the same
+  session; implementation is the next round.
 - Date: 2026-09-19
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md` (the
@@ -91,4 +93,12 @@ The fork, held for the owner:
 
 ## Acceptance and implementation
 
-- 2026-09-19: proposed, design only. Owner's option pending.
+- 2026-09-19: proposed, design only.
+- 2026-09-19: the owner picked option (a) the same session, recorded in
+  the design PR before merge (the `ADR-0061`/`ADR-0073` precedent).
+  Implementation not yet started — it follows on its own branch,
+  extending `SERVER-001` at its next minor (`FR-038`/`FR-045`/`FR-068`
+  on `FR-070`), with `QPC-FR-005`'s per-consumer proofs and acceptance
+  criterion 4's measurement as its exit gate. Builder: Claude directly,
+  under the host-takeover convention (Codex's sandbox still cannot spawn
+  processes); independent Codex inspection owed, not claimed.
