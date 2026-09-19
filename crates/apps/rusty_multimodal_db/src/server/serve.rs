@@ -322,19 +322,22 @@ pub trait ConnectionStore: Send + Sync {
     /// filter. `dispatch` has already validated `order_by`/`after`/
     /// `limit` (`validate_page`'s checks) and every `filter` predicate
     /// (`validate_predicate`, `Request::Query`'s own rule). The default
-    /// answers every domain correctly: [`Self::scan_all`], keep only
-    /// rows [`predicate_matches`] every predicate for (the identical
-    /// filter step `Request::Query`'s own [`evaluate_query`] uses), then
+    /// answers every domain correctly: the candidate rows — since
+    /// `QPC-FR-003` (ADR-0074), `Query`'s own [`indexed_candidates`]: the
+    /// declared equality index's bucket when `filter` has an `Eq` on an
+    /// indexed field, [`Self::scan_all`] otherwise — keep only rows
+    /// [`predicate_matches`] every predicate for (the identical filter
+    /// step `Request::Query`'s own [`evaluate_query`] uses), then
     /// [`page_rows`] over that already-filtered, already-materialized
-    /// subset — one full scan per request, the same worst-case ceiling
-    /// `Query` already has today for the identical filter.
-    /// `Memory`/`Relation`'s `Ordered` index (`ADR-0059`) is not
-    /// consulted here — this default gives up its speed advantage for a
-    /// filtered request, the [`Self::page`]-fast-path's own unfiltered
-    /// case is untouched. A trait method, not inlined in `dispatch`
-    /// (unlike `Query`), so a future round can override it for a domain
-    /// that can narrow candidates more cheaply, the same shape
-    /// [`Self::page`] already established.
+    /// subset. The page's order is [`page_rows`]'s `(key, id)` order over
+    /// the filtered *set*, so which plan gathered the set is invisible
+    /// here. `Memory`/`Relation`'s `Ordered` index (`ADR-0059`) is still
+    /// not consulted — the [`Self::page`]-fast-path's own unfiltered case
+    /// is untouched. A trait method, not inlined in `dispatch` (unlike
+    /// `Query`), so a future round can still override it for a domain
+    /// that can narrow further (the `Ordered` walk when the filter is on
+    /// the ordered field), the same shape [`Self::page`] already
+    /// established.
     fn filtered_page(
         &self,
         order_by: FieldRef,
@@ -342,8 +345,7 @@ pub trait ConnectionStore: Send + Sync {
         limit: usize,
         filter: &[Predicate],
     ) -> Result<Vec<PageRow>, ErrorCode> {
-        let filtered: Vec<PageRow> = self
-            .scan_all()
+        let filtered: Vec<PageRow> = indexed_candidates(self, &self.describe(), filter)
             .into_iter()
             .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
             .collect();
@@ -958,6 +960,20 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
     }
 }
 
+/// `QPC-FR-001` (ADR-0074): the one candidate step every filtered read
+/// shares — [`plan_query`] then [`query_candidates`] — so `Query`,
+/// `Aggregate`, the default [`ConnectionStore::filtered_page`], and
+/// `Join`'s left side all narrow the same way and none narrows
+/// differently. Callers keep re-checking every predicate over the
+/// result; this only decides what is read.
+fn indexed_candidates<S: ConnectionStore + ?Sized>(
+    store: &S,
+    schema: &DomainSchema,
+    filter: &[Predicate],
+) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+    query_candidates(store, plan_query(schema, filter), filter)
+}
+
 /// `PAG-FR-003` (ADR-0055): `Request::Page`'s validation, before any
 /// scan — `UnknownField` for an `order_by` the schema lacks, `Malformed`
 /// for a field that is not `U32`/`I64` (the one kind pair with an order,
@@ -1243,7 +1259,13 @@ fn evaluate_join<L: ConnectionStore + ?Sized, R: ConnectionStore + ?Sized>(
     if limit == 0 {
         return out;
     }
-    for (left_id, left_fields) in store.scan_all() {
+    // `QPC-FR-004` (ADR-0074): the left side is `Query`'s own candidate
+    // step — the left filter's declared equality index when it has one,
+    // `scan_all` otherwise — planned against the *left* store's schema,
+    // which is the one `left_filter` was validated against (a cross-table
+    // join's right store is a different table). The re-check below stays:
+    // it is what keeps a superset index (`Entity::label`) exact.
+    for (left_id, left_fields) in indexed_candidates(store, &store.describe(), &spec.left_filter) {
         if !spec
             .left_filter
             .iter()
@@ -2497,17 +2519,14 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
                 // indexed field, the whole table otherwise — and
                 // `evaluate_query` re-checks every predicate either way,
                 // so the result set is the full scan's by construction.
-                Ok(()) => {
-                    let plan = plan_query(&schema, &filter);
-                    Response::Rows {
-                        rows: evaluate_query(
-                            query_candidates(store, plan, &filter),
-                            &select,
-                            &filter,
-                            limit,
-                        ),
-                    }
-                }
+                Ok(()) => Response::Rows {
+                    rows: evaluate_query(
+                        indexed_candidates(store, &schema, &filter),
+                        &select,
+                        &filter,
+                        limit,
+                    ),
+                },
                 Err(code) => err_response(code),
             }
         }
@@ -2515,6 +2534,9 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // shape `Query` above uses, and the same "never overlaid, never
         // read-set-tracked" posture — `Aggregate` never reaches the
         // `GetById`-keyed session intercepts in `handle_connection` either.
+        // `QPC-FR-002` (ADR-0074): the same candidate step too —
+        // `evaluate_aggregate` re-filters every row before bucketing, so
+        // the groups are the full scan's by construction.
         Request::Aggregate {
             group_by,
             filter,
@@ -2525,7 +2547,7 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             match validate_aggregate(&schema, &group_by, &filter, &aggregates) {
                 Ok(()) => Response::Groups {
                     groups: evaluate_aggregate(
-                        store.scan_all(),
+                        indexed_candidates(store, &schema, &filter),
                         &group_by,
                         &filter,
                         &aggregates,
@@ -4688,8 +4710,14 @@ mod tests {
         fn children(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
             Err(ErrorCode::Unsupported)
         }
-        fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
-            Err(ErrorCode::Unsupported)
+        /// A fixed symmetric edge 1 — 3 (both labradors), so a `Join`
+        /// over `Neighbors(None)` has pairs to find in either orientation.
+        fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            Ok(match id {
+                id if id == RecordId::from_u128(1) => vec![RecordId::from_u128(3)],
+                id if id == RecordId::from_u128(3) => vec![RecordId::from_u128(1)],
+                _ => vec![],
+            })
         }
         fn neighbors_by_relation(
             &self,
@@ -4853,6 +4881,151 @@ mod tests {
             Response::Rows { rows } => assert_eq!(rows.len(), 1),
             other => panic!("expected Rows, got {other:?}"),
         }
+    }
+
+    /// `QPC-FR-002` (ADR-0074), acceptance criterion 1: `Aggregate`
+    /// through `dispatch` with an indexed `Eq` reads only the bucket and
+    /// returns the same groups (compared as a set) as with the index
+    /// refusing; a superset bucket is corrected by `evaluate_aggregate`'s
+    /// own re-filter.
+    #[test]
+    fn dispatch_aggregate_returns_the_same_groups_on_either_plan() {
+        let request = || Request::Aggregate {
+            group_by: vec![2],
+            filter: vec![labrador()],
+            aggregates: vec![
+                AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                },
+                AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(1),
+                },
+            ],
+            limit: None,
+        };
+        let groups_of = |response| match response {
+            Response::Groups { mut groups } => {
+                groups.sort_by(|a, b| format!("{:?}", a.key).cmp(&format!("{:?}", b.key)));
+                groups
+            }
+            other => panic!("expected Groups, got {other:?}"),
+        };
+        // Exact bucket.
+        let indexed =
+            PlannerFixture::with_index(Ok(vec![RecordId::from_u128(3), RecordId::from_u128(1)]));
+        // Superset bucket (the `Entity::label` shape): the poodle is in the
+        // bucket but must not be counted.
+        let superset = PlannerFixture::with_index(Ok(vec![
+            RecordId::from_u128(1),
+            RecordId::from_u128(2),
+            RecordId::from_u128(3),
+        ]));
+        let refusing = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let a = groups_of(dispatch(&indexed, request()));
+        let b = groups_of(dispatch(&superset, request()));
+        let c = groups_of(dispatch(&refusing, request()));
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(a.len(), 1, "one group: labrador");
+        assert_eq!(
+            a[0].values[0],
+            ScanValue::I64(2),
+            "COUNT(*) of the two labradors"
+        );
+        assert_eq!(a[0].values[1], ScanValue::I64(12), "SUM(field 1) = 3 + 9");
+        assert_eq!(indexed.gets(), 2);
+        assert_eq!(indexed.scans(), 0, "the index path never scans");
+        assert_eq!(superset.gets(), 3);
+        assert_eq!(refusing.scans(), 1);
+        assert_eq!(refusing.gets(), 0);
+    }
+
+    /// `QPC-FR-003` (ADR-0074), acceptance criterion 1: the
+    /// `filtered_page` default reads only the bucket and returns the
+    /// **identical sequence** either way — `page_rows` orders the
+    /// filtered set by `(key, id)`, so the plan is invisible; a cursor
+    /// works the same on both.
+    #[test]
+    fn filtered_page_default_returns_the_identical_sequence_on_either_plan() {
+        let indexed =
+            PlannerFixture::with_index(Ok(vec![RecordId::from_u128(3), RecordId::from_u128(1)]));
+        let refusing = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let filter = [labrador()];
+        let a = indexed.filtered_page(1, None, 10, &filter).unwrap();
+        let b = refusing.filtered_page(1, None, 10, &filter).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            ids_of(&a),
+            vec![RecordId::from_u128(1), RecordId::from_u128(3)]
+        );
+        assert_eq!(a[0].0, RecordId::from_u128(1), "field 1 = 3 sorts before 9");
+        assert_eq!(indexed.scans(), 0);
+        assert_eq!(indexed.gets(), 2);
+        assert_eq!(refusing.scans(), 1);
+
+        // A cursored second page: strictly after (3, id 1) → only id 3.
+        let after = Some((ScanValue::U32(3), RecordId::from_u128(1)));
+        let a2 = indexed
+            .filtered_page(1, after.clone(), 10, &filter)
+            .unwrap();
+        let b2 = refusing.filtered_page(1, after, 10, &filter).unwrap();
+        assert_eq!(a2, b2);
+        assert_eq!(ids_of(&a2), vec![RecordId::from_u128(3)]);
+    }
+
+    /// `QPC-FR-004` (ADR-0074), acceptance criterion 1: `evaluate_join`
+    /// narrows the *left* side through the index and returns the same
+    /// pair set either way; the right side is fetched by id regardless.
+    #[test]
+    fn evaluate_join_returns_the_same_pairs_on_either_plan() {
+        let spec = JoinSpec {
+            relation: JoinRelation::Neighbors(None),
+            right_table: None,
+            left: Selection::Fields(vec![2]),
+            right: Selection::Fields(vec![1]),
+            left_filter: vec![labrador()],
+            right_filter: vec![],
+            limit: None,
+        };
+        let pair_ids = |rows: &[JoinedRow]| {
+            let mut ids: Vec<(RecordId, RecordId)> =
+                rows.iter().map(|r| (r.left_id, r.right_id)).collect();
+            ids.sort();
+            ids
+        };
+        let indexed =
+            PlannerFixture::with_index(Ok(vec![RecordId::from_u128(1), RecordId::from_u128(3)]));
+        let superset = PlannerFixture::with_index(Ok(vec![
+            RecordId::from_u128(1),
+            RecordId::from_u128(2),
+            RecordId::from_u128(3),
+        ]));
+        let refusing = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let a = evaluate_join(&indexed, &indexed, &spec);
+        let b = evaluate_join(&superset, &superset, &spec);
+        let c = evaluate_join(&refusing, &refusing, &spec);
+        assert_eq!(pair_ids(&a), pair_ids(&b));
+        assert_eq!(pair_ids(&a), pair_ids(&c));
+        assert_eq!(
+            pair_ids(&a),
+            vec![
+                (RecordId::from_u128(1), RecordId::from_u128(3)),
+                (RecordId::from_u128(3), RecordId::from_u128(1)),
+            ],
+            "the symmetric 1 — 3 edge in both orientations; the poodle (2) has no edge"
+        );
+        assert_eq!(
+            indexed.scans(),
+            0,
+            "the left side never scans on the index path"
+        );
+        assert_eq!(refusing.scans(), 1);
+        // Left rows are projected to field 2, right rows to field 1.
+        assert_eq!(a[0].left, vec![(2, ScanValue::Str("labrador".into()))]);
+        assert_eq!(a[0].right.len(), 1);
+        assert_eq!(a[0].right[0].0, 1);
     }
 
     /// `SQL-FR-006`: an empty filter matches every row; a filter matching
