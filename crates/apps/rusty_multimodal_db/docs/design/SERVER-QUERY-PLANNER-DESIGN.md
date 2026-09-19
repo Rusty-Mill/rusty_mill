@@ -1,7 +1,10 @@
-# Server Query Planner, Step One: An Equality-Index Path for `Request::Query` (Proposed)
+# Server Query Planner, Step One: An Equality-Index Path for `Request::Query` (Accepted)
 
-- Status: **Proposed** (2026-09-18, `ADR-0073`). Design only — no code in
-  this round.
+- Status: **Accepted as designed** (2026-09-18, `ADR-0073`, option (a) —
+  `Request::Query` only, schema-driven plan, every predicate re-checked;
+  (b) the same step for `Aggregate`/`FilteredPage`/`Join` too and (c)
+  decline, both declined). Design only in this PR; implementation is the
+  next round, on its own branch.
 - Date: 2026-09-18
 - Related: `ADR-0034`/`docs/design/SERVER-SQL-SELECT-DESIGN.md` (the
   `SELECT` subset and `Request::Query` this round changes the evaluation
@@ -477,3 +480,8 @@ must not cite this session as having covered it.
   0072`, protocol 27) during this pass, including the discovery that
   the "`WHERE id = …` via `GetById`" cheap path `SERVER-SQL-SELECT-
   DESIGN.md` mentions is not expressible in today's `Predicate`.
+- 2026-09-18: the owner picked option (a) the same session, before the
+  design PR merged; recorded here and in `ADR-0073`. Implementation to
+  follow on its own branch — Claude as builder (Codex's sandbox still
+  cannot spawn processes), with independent Codex inspection of both
+  this design and the code owed once that is restored.

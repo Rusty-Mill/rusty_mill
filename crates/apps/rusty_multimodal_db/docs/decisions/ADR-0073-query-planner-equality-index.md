@@ -1,7 +1,9 @@
 # ADR-0073: Query Planner Step One — Route `Request::Query` Through an Equality Index
 
-- Status: **Proposed** (2026-09-18). Design only; the owner's pick among
-  (a)/(b)/(c) below is pending.
+- Status: **Accepted as designed** (2026-09-18 — the owner picked option
+  (a): `Request::Query` only, as scoped; (b) the four-consumer
+  generalization and (c) decline both declined). Proposed and accepted
+  in the same session; implementation is the next round.
 - Date: 2026-09-18
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-PLANNER-DESIGN.md` (the full
@@ -123,4 +125,14 @@ The fork, held for the owner:
 
 ## Acceptance and implementation
 
-- 2026-09-18: proposed, design only. Owner's option pending.
+- 2026-09-18: proposed, design only.
+- 2026-09-18: the owner picked option (a) the same session. Recorded in
+  the design PR before merge (the `ADR-0061` precedent). Implementation
+  not yet started — it follows on its own branch, extending `SERVER-001`
+  (`FR-037`'s `Request::Query`) at its next minor, with `QPL-FR-005`'s
+  per-domain result-set-equality tests and acceptance criterion 5's
+  measurement as its exit gate. Builder: Claude directly, under this
+  crate's host-takeover convention (Codex's sandbox still cannot spawn
+  processes); independent Codex inspection of both this design and the
+  implementation is owed once restored, and neither may cite this
+  session as having provided it.
