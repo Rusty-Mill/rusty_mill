@@ -107,6 +107,7 @@
 //! read.
 
 use rusty_multimodal_db::bench_support::{fresh_temp_dir, RoundRobin};
+use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memory};
 use rusty_multimodal_db::generic::order_customer::{
     create_order_production_stack, Order, OrderStatus,
 };
@@ -119,9 +120,10 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::employee::{EmployeeConnectionStore, FIELD_SALARY};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
+use rusty_multimodal_db::server::memory::{MemoryConnectionStore, FIELD_CATEGORY, FIELD_SOURCE};
 use rusty_multimodal_db::server::order::{OrderConnectionStore, FIELD_AMOUNT};
 use rusty_multimodal_db::server::protocol::{
-    FieldRef, Request, Response, ScanValue, TransactionOp,
+    CompareOp, FieldRef, Predicate, Request, Response, ScanValue, Selection, TransactionOp,
 };
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -508,4 +510,114 @@ fn main() {
     bench_transaction_domain("employee", addr, ids, FIELD_SALARY, |i| {
         ScanValue::I64(100_000 + i as i64)
     });
+
+    bench_query_planner();
+}
+
+/// `ADR-0073` acceptance criterion 5: how many `Memory` records the
+/// planner benchmark serves, and over how many distinct `category`
+/// values they are spread — so one equality bucket is 1% of the table.
+const PLANNER_RECORDS: usize = 100_000;
+const PLANNER_CATEGORIES: usize = 100;
+const PLANNER_QUERY_ITERATIONS: usize = 20;
+
+/// A `Memory` table sized for the planner measurement, with `category`
+/// (`filter_eq: true` — the generic equality index) and `source`
+/// (`filter_eq: false` — never indexed) holding the *same* value per
+/// record, so `WHERE source = v` is an equal-selectivity full-scan
+/// control for `WHERE category = v`, with no test-only hook to force a
+/// plan.
+fn start_memory_planner_server() -> SocketAddr {
+    let dir = fresh_temp_dir("server_bench_memory_planner")
+        .expect("fresh temp dir for memory planner bench");
+    let path = dir.join("memories.mmap");
+    let memories: Vec<Memory> = (0..PLANNER_RECORDS as u128)
+        .map(|n| {
+            let bucket = format!("c{}", n as usize % PLANNER_CATEGORIES);
+            Memory {
+                id: Uuid::from_u128(n + 1),
+                content: format!("memory {n}"),
+                category: bucket.clone(),
+                tags: vec![],
+                source: bucket,
+                metadata_json: "{}".into(),
+                created_at_unix_ms: n as i64,
+                updated_at_unix_ms: n as i64,
+                memory_type: "unclassified".into(),
+                status: "active".into(),
+                sensitive: false,
+                access_count: 0,
+                deleted_at_unix_ms: 0,
+                node_id: String::new(),
+            }
+        })
+        .collect();
+    let stack = create_memory_production_stack(memories, &[], &path)
+        .expect("create MemoryProductionStack for planner bench");
+    let connection_store = Arc::new(MemoryConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+/// One `Request::Query { WHERE field = 'c7' }` round trip, timed over
+/// [`PLANNER_QUERY_ITERATIONS`] on one connection; returns the mean
+/// wall-clock per query and the row count (asserted identical for both
+/// fields by the caller — the planner changes what is read, not what is
+/// returned).
+fn measure_query_latency(addr: SocketAddr, field: FieldRef) -> (Duration, usize) {
+    let mut client = connect(addr);
+    let request = Request::Query {
+        select: Selection::Fields(vec![FIELD_CATEGORY]),
+        filter: vec![Predicate {
+            field,
+            op: CompareOp::Eq,
+            value: ScanValue::Str("c7".into()),
+        }],
+        limit: None,
+    };
+    // One untimed warm-up so the first request's page-in doesn't land
+    // in either column.
+    let rows = match roundtrip(&mut client, &request) {
+        Response::Rows { rows } => rows.len(),
+        other => panic!("expected Rows, got {other:?}"),
+    };
+    let start = Instant::now();
+    for _ in 0..PLANNER_QUERY_ITERATIONS {
+        let resp = roundtrip(&mut client, &request);
+        debug_assert!(matches!(resp, Response::Rows { .. }));
+    }
+    (start.elapsed() / PLANNER_QUERY_ITERATIONS as u32, rows)
+}
+
+/// `ADR-0073` acceptance criterion 5 (`docs/design/SERVER-QUERY-PLANNER-
+/// DESIGN.md`): the same 1%-selective equality `Query` over a 100K
+/// `Memory` table, once through the declared `category` index
+/// (`QueryPlan::IndexEq`) and once through the unindexed `source` field
+/// (`QueryPlan::FullScan`) holding identical values — the difference is
+/// exactly what the planner saves. Reported beside the other domains'
+/// rows as `memory-planner`, in µs per query.
+fn bench_query_planner() {
+    let addr = start_memory_planner_server();
+    let (indexed, indexed_rows) = measure_query_latency(addr, FIELD_CATEGORY);
+    let (scanned, scanned_rows) = measure_query_latency(addr, FIELD_SOURCE);
+    assert_eq!(
+        indexed_rows, scanned_rows,
+        "the planner must not change the result set"
+    );
+    println!(
+        "{:<10} {:>10} {:>14.1}   query WHERE category = 'c7' (indexed, {indexed_rows} rows of {PLANNER_RECORDS})",
+        "memory-planner",
+        "index-eq",
+        indexed.as_secs_f64() * 1e6
+    );
+    println!(
+        "{:<10} {:>10} {:>14.1}   query WHERE source = 'c7' (unindexed control, same {scanned_rows} rows)",
+        "memory-planner",
+        "full-scan",
+        scanned.as_secs_f64() * 1e6
+    );
 }

@@ -893,6 +893,71 @@ fn evaluate_query(
     matched
 }
 
+/// `QPL-FR-001` (ADR-0073): how `dispatch` fetches a `Request::Query`'s
+/// candidate rows — the whole table, or one declared equality index's
+/// bucket. `evaluate_query` re-checks every predicate over the result
+/// either way, so the plan changes what is *read*, never what is
+/// *returned*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryPlan {
+    FullScan,
+    /// Position in `filter` of the `Eq` predicate whose field's declared
+    /// index narrows the read.
+    IndexEq(usize),
+}
+
+/// `QPL-FR-001` (ADR-0073): the plan, from `schema` and `filter` alone —
+/// the first `Eq` predicate, in wire order, on a field `schema` reports
+/// `filter_eq: true` for; a full scan otherwise. Deterministic and
+/// value-blind: neither the table's size nor the literal is consulted
+/// (no cost model — `docs/design/SERVER-QUERY-PLANNER-DESIGN.md`'s own
+/// Non-goal). `validate_query` has already rejected unknown tags, so a
+/// tag `schema` lacks simply never plans.
+fn plan_query(schema: &DomainSchema, filter: &[Predicate]) -> QueryPlan {
+    filter
+        .iter()
+        .position(|p| {
+            p.op == protocol::CompareOp::Eq
+                && schema
+                    .fields
+                    .iter()
+                    .any(|f| f.tag == p.field && f.capabilities.filter_eq)
+        })
+        .map_or(QueryPlan::FullScan, QueryPlan::IndexEq)
+}
+
+/// `QPL-FR-002`/`QPL-FR-004` (ADR-0073): the rows `evaluate_query` will
+/// filter. `FullScan` is `scan_all` exactly as before. `IndexEq(i)` asks
+/// the adapter's own `filter_eq` for `filter[i]`'s bucket and reads each
+/// id back through `get`, dropping an id whose record vanished in
+/// between — the identical per-id drop every adapter's `scan_all`
+/// (`all_ids` then `get`) already performs, so the consistency class is
+/// unchanged. A `filter_eq` refusal on a field the schema claimed
+/// indexed (a `describe()`/`filter_eq` contract mismatch no shipped
+/// adapter has) falls back to the full scan rather than surfacing:
+/// `Query`'s error surface stays `validate_query`'s alone (`SQL-FR-007`).
+/// The index narrows what is read only — the caller still runs every
+/// predicate, `filter[i]` included, over what comes back (`QPL-FR-003`);
+/// `Entity`'s `label` index is a normalized *superset* of exact `Eq`,
+/// and that re-check is what keeps `Query`'s `Eq` exact on every plan.
+fn query_candidates<S: ConnectionStore + ?Sized>(
+    store: &S,
+    plan: QueryPlan,
+    filter: &[Predicate],
+) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+    let QueryPlan::IndexEq(i) = plan else {
+        return store.scan_all();
+    };
+    let predicate = &filter[i];
+    match store.filter_eq(predicate.field, &predicate.value) {
+        Ok(ids) => ids
+            .into_iter()
+            .filter_map(|id| store.get(id).map(|fields| (id, fields)))
+            .collect(),
+        Err(_) => store.scan_all(),
+    }
+}
+
 /// `PAG-FR-003` (ADR-0055): `Request::Page`'s validation, before any
 /// scan — `UnknownField` for an `order_by` the schema lacks, `Malformed`
 /// for a field that is not `U32`/`I64` (the one kind pair with an order,
@@ -2424,12 +2489,28 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             select,
             filter,
             limit,
-        } => match validate_query(&store.describe(), &select, &filter) {
-            Ok(()) => Response::Rows {
-                rows: evaluate_query(store.scan_all(), &select, &filter, limit),
-            },
-            Err(code) => err_response(code),
-        },
+        } => {
+            let schema = store.describe();
+            match validate_query(&schema, &select, &filter) {
+                // `QPL-FR-001`–`004` (ADR-0073): one declared equality
+                // index's bucket when the filter has an `Eq` on an
+                // indexed field, the whole table otherwise — and
+                // `evaluate_query` re-checks every predicate either way,
+                // so the result set is the full scan's by construction.
+                Ok(()) => {
+                    let plan = plan_query(&schema, &filter);
+                    Response::Rows {
+                        rows: evaluate_query(
+                            query_candidates(store, plan, &filter),
+                            &select,
+                            &filter,
+                            limit,
+                        ),
+                    }
+                }
+                Err(code) => err_response(code),
+            }
+        }
         // `AGG-FR-006`/`AGG-FR-009` (ADR-0035): the same validate-then-scan
         // shape `Query` above uses, and the same "never overlaid, never
         // read-set-tracked" posture — `Aggregate` never reaches the
@@ -4439,6 +4520,339 @@ mod tests {
                 ],
             ),
         ]
+    }
+
+    /// A three-field schema for the planner tests: `1` unindexed `U32`,
+    /// `2` indexed `Str`, `3` indexed `U32`.
+    fn planner_schema() -> DomainSchema {
+        use protocol::{FieldCapabilities, FieldDescriptor, RelationCapabilities, ValueKind};
+        let field = |tag: FieldRef, filter_eq: bool, value_kind: ValueKind| FieldDescriptor {
+            tag,
+            name: format!("f{tag}"),
+            value_kind,
+            capabilities: FieldCapabilities {
+                filter_eq,
+                scan: true,
+                update: true,
+            },
+        };
+        DomainSchema {
+            fields: vec![
+                field(1, false, ValueKind::U32),
+                field(2, true, ValueKind::Str),
+                field(3, true, ValueKind::U32),
+            ],
+            relations: RelationCapabilities {
+                parent_children: false,
+                neighbors: false,
+            },
+        }
+    }
+
+    fn eq(field: FieldRef, value: ScanValue) -> Predicate {
+        Predicate {
+            field,
+            op: CompareOp::Eq,
+            value,
+        }
+    }
+
+    /// `QPL-FR-001` (ADR-0073), acceptance criterion 1: the plan is the
+    /// first `Eq` on a `filter_eq: true` field in wire order, else a full
+    /// scan — an empty filter, an `Eq` on an unindexed field, every
+    /// non-`Eq` comparator on an indexed field, and a tag the schema
+    /// lacks all plan `FullScan`; an ineligible predicate ahead of an
+    /// eligible one yields the eligible one's own index.
+    #[test]
+    fn plan_query_picks_the_first_indexed_equality_or_a_full_scan() {
+        let schema = planner_schema();
+        let str_x = || ScanValue::Str("x".into());
+        assert_eq!(plan_query(&schema, &[]), QueryPlan::FullScan);
+        assert_eq!(
+            plan_query(&schema, &[eq(2, str_x())]),
+            QueryPlan::IndexEq(0)
+        );
+        assert_eq!(
+            plan_query(&schema, &[eq(3, ScanValue::U32(1)), eq(2, str_x())]),
+            QueryPlan::IndexEq(0),
+            "two eligible predicates: the first in wire order"
+        );
+        assert_eq!(
+            plan_query(&schema, &[eq(1, ScanValue::U32(1))]),
+            QueryPlan::FullScan,
+            "Eq on a filter_eq: false field"
+        );
+        for op in [
+            CompareOp::Ne,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ] {
+            assert_eq!(
+                plan_query(
+                    &schema,
+                    &[Predicate {
+                        field: 3,
+                        op,
+                        value: ScanValue::U32(1),
+                    }]
+                ),
+                QueryPlan::FullScan,
+                "{op:?} on an indexed field never uses the equality index"
+            );
+        }
+        assert_eq!(
+            plan_query(
+                &schema,
+                &[
+                    Predicate {
+                        field: 3,
+                        op: CompareOp::Gt,
+                        value: ScanValue::U32(1),
+                    },
+                    eq(2, str_x()),
+                ]
+            ),
+            QueryPlan::IndexEq(1),
+            "an ineligible predicate ahead of an eligible one"
+        );
+        assert_eq!(
+            plan_query(&schema, &[eq(99, ScanValue::U32(1))]),
+            QueryPlan::FullScan,
+            "a tag the schema lacks (validate_query already rejected it)"
+        );
+    }
+
+    /// `QPL-FR-002`–`004` (ADR-0073): a `ConnectionStore` whose equality
+    /// index answers whatever the test says — exact, a superset, or a
+    /// refusal — and which counts every `get` and `scan_all`, so a test
+    /// asserts what the planner actually read rather than inferring it.
+    /// Schema is [`planner_schema`]; rows are [`sql_test_rows`].
+    struct PlannerFixture {
+        index: Result<Vec<RecordId>, ErrorCode>,
+        gets: std::sync::atomic::AtomicUsize,
+        scans: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PlannerFixture {
+        fn with_index(index: Result<Vec<RecordId>, ErrorCode>) -> Self {
+            Self {
+                index,
+                gets: Default::default(),
+                scans: Default::default(),
+            }
+        }
+        fn gets(&self) -> usize {
+            self.gets.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn scans(&self) -> usize {
+            self.scans.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl ConnectionStore for PlannerFixture {
+        fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            sql_test_rows()
+                .into_iter()
+                .find(|(row_id, _)| *row_id == id)
+                .map(|(_, fields)| fields)
+        }
+        fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+            self.scans
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            sql_test_rows()
+        }
+        fn filter_eq(
+            &self,
+            _field: FieldRef,
+            _value: &ScanValue,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            self.index.clone()
+        }
+        fn scan_field(&self, _field: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn update_field(
+            &self,
+            _id: RecordId,
+            _field: FieldRef,
+            _value: ScanValue,
+        ) -> Result<bool, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn parent(&self, _id: RecordId) -> Result<ParentLookup, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn children(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn neighbors_by_relation(
+            &self,
+            _id: RecordId,
+            _relation: &str,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn list_relation_kinds(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn validate_op(&self, _op: &TransactionOp) -> Result<(), ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn describe(&self) -> DomainSchema {
+            planner_schema()
+        }
+        fn apply_transaction(
+            &self,
+            _updates: &[TransactionOp],
+            _read_set: &[(RecordId, FieldRef, ScanValue)],
+        ) -> Result<(), (usize, ErrorCode)> {
+            Err((0, ErrorCode::Unsupported))
+        }
+    }
+
+    fn labrador() -> Predicate {
+        eq(2, ScanValue::Str("labrador".into()))
+    }
+
+    fn ids_of(rows: &[(RecordId, Vec<(FieldRef, ScanValue)>)]) -> Vec<RecordId> {
+        let mut ids: Vec<_> = rows.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        ids
+    }
+
+    /// `QPL-FR-002`, acceptance criterion 2: the index path reads exactly
+    /// the bucket's ids through `get` and never touches `scan_all`; an id
+    /// whose record is gone is dropped silently, as `scan_all`'s own
+    /// per-id `get` already drops it.
+    #[test]
+    fn query_candidates_index_path_reads_only_the_bucket_and_drops_a_vanished_id() {
+        let store = PlannerFixture::with_index(Ok(vec![
+            RecordId::from_u128(1),
+            RecordId::from_u128(42),
+            RecordId::from_u128(3),
+        ]));
+        let filter = [labrador()];
+        let plan = plan_query(&store.describe(), &filter);
+        assert_eq!(plan, QueryPlan::IndexEq(0));
+        let candidates = query_candidates(&store, plan, &filter);
+        assert_eq!(
+            store.gets(),
+            3,
+            "one get per index id, including the vanished one"
+        );
+        assert_eq!(store.scans(), 0, "the index path never scans");
+        assert_eq!(
+            ids_of(&candidates),
+            vec![RecordId::from_u128(1), RecordId::from_u128(3)],
+            "id 42 has no record and is dropped, not an error"
+        );
+    }
+
+    /// `QPL-FR-003`/`QPL-FR-005`, acceptance criterion 2: an index that
+    /// returns a *superset* of the exact matches (`Entity::label`'s real
+    /// shape) is corrected by `evaluate_query`'s re-check — the final rows
+    /// equal the full scan's exactly.
+    #[test]
+    fn query_candidates_superset_index_is_corrected_by_the_re_check() {
+        let store = PlannerFixture::with_index(Ok(vec![
+            RecordId::from_u128(1),
+            RecordId::from_u128(2),
+            RecordId::from_u128(3),
+        ]));
+        let filter = [labrador()];
+        let via_index = evaluate_query(
+            query_candidates(&store, QueryPlan::IndexEq(0), &filter),
+            &Selection::All,
+            &filter,
+            None,
+        );
+        let via_scan = evaluate_query(
+            query_candidates(&store, QueryPlan::FullScan, &filter),
+            &Selection::All,
+            &filter,
+            None,
+        );
+        assert_eq!(
+            ids_of(&via_index),
+            vec![RecordId::from_u128(1), RecordId::from_u128(3)]
+        );
+        assert_eq!(ids_of(&via_index), ids_of(&via_scan));
+    }
+
+    /// `QPL-FR-004`, acceptance criterion 2: a `filter_eq` refusal on a
+    /// field the schema claimed indexed falls back to one full scan with
+    /// the identical result — and, through `dispatch`, a `Response::Rows`,
+    /// never an error.
+    #[test]
+    fn query_candidates_index_refusal_falls_back_to_a_full_scan_without_an_error() {
+        let store = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let filter = [labrador()];
+        let candidates = query_candidates(&store, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(store.scans(), 1);
+        assert_eq!(store.gets(), 0);
+        assert_eq!(ids_of(&candidates), ids_of(&sql_test_rows()));
+
+        match dispatch(
+            &store,
+            Request::Query {
+                select: Selection::All,
+                filter: vec![labrador()],
+                limit: None,
+            },
+        ) {
+            Response::Rows { rows } => assert_eq!(
+                ids_of(&rows),
+                vec![RecordId::from_u128(1), RecordId::from_u128(3)]
+            ),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    /// `QPL-FR-005`/`QPL-FR-006`: end to end through `dispatch`, an
+    /// indexed `Eq` and the same filter with the index unavailable return
+    /// the same row set, projected the same way; `limit` still truncates.
+    #[test]
+    fn dispatch_query_returns_the_same_rows_on_either_plan() {
+        let indexed =
+            PlannerFixture::with_index(Ok(vec![RecordId::from_u128(3), RecordId::from_u128(1)]));
+        let unindexed = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let request = || Request::Query {
+            select: Selection::Fields(vec![1]),
+            filter: vec![labrador()],
+            limit: None,
+        };
+        let rows_of = |response| match response {
+            Response::Rows { mut rows } => {
+                rows.sort_by_key(|(id, _)| *id);
+                rows
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        };
+        let a = rows_of(dispatch(&indexed, request()));
+        let b = rows_of(dispatch(&unindexed, request()));
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].1, vec![(1, ScanValue::U32(3))], "projection applied");
+        assert_eq!(indexed.scans(), 0);
+        assert_eq!(unindexed.scans(), 1);
+
+        match dispatch(
+            &indexed,
+            Request::Query {
+                select: Selection::All,
+                filter: vec![labrador()],
+                limit: Some(1),
+            },
+        ) {
+            Response::Rows { rows } => assert_eq!(rows.len(), 1),
+            other => panic!("expected Rows, got {other:?}"),
+        }
     }
 
     /// `SQL-FR-006`: an empty filter matches every row; a filter matching

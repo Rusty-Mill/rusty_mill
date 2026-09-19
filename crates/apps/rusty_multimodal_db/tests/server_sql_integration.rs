@@ -11,10 +11,16 @@
 //! `tests/server_schema_driven_client.rs`'s own precedent for a target
 //! that needs every domain adapter.
 
+use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
+use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memory};
 use rusty_multimodal_db::generic::order_customer::{
     create_order_production_stack, Order, OrderStatus,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::generic::relation::{create_relation_production_stack, Relation};
+use rusty_multimodal_db::generic::reminder::{
+    create_reminder_production_stack, Reminder, ReminderStatus,
+};
 use rusty_multimodal_db::generic_spike::employee_impl::{
     create_employee_production_stack, Department, Employee,
 };
@@ -24,8 +30,12 @@ use rusty_multimodal_db::server::client::{
 };
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
+use rusty_multimodal_db::server::entity::EntityConnectionStore;
+use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::ScanValue;
+use rusty_multimodal_db::server::relation::RelationConnectionStore;
+use rusty_multimodal_db::server::reminder::ReminderConnectionStore;
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{SocketAddr, TcpListener};
@@ -1125,4 +1135,425 @@ fn aggregate_inside_a_snapshot_isolation_session_is_not_read_set_tracked() {
         .update(Uuid::from_u128(2), "age", ScanValue::U32(6))
         .unwrap();
     session.commit().unwrap();
+}
+
+// ---------------------------------------------------------------------
+// `ADR-0073` / `docs/design/SERVER-QUERY-PLANNER-DESIGN.md`, acceptance
+// criterion 3 (`QPL-FR-005`): an equality `Query` on every shipped
+// `filter_eq: true` field returns exactly the full scan's rows — before
+// and after runtime writes — and `Entity::label`'s normalized index is
+// corrected to exact `Eq`. The oracle is the unfiltered `SELECT *`,
+// filtered here by exact `ScanValue` equality: there is deliberately no
+// server-side hook to force a plan, so the comparison is between what the
+// planner returns and what the table actually holds.
+// ---------------------------------------------------------------------
+
+fn memory(n: u128, category: &str) -> Memory {
+    Memory {
+        id: Uuid::from_u128(n),
+        content: format!("memory {n}"),
+        category: category.into(),
+        tags: vec!["sample".into()],
+        source: "manual".into(),
+        metadata_json: "{}".into(),
+        created_at_unix_ms: 1_000 * n as i64,
+        updated_at_unix_ms: 1_000 * n as i64,
+        memory_type: "unclassified".into(),
+        status: "active".into(),
+        sensitive: false,
+        access_count: n as i64,
+        deleted_at_unix_ms: 0,
+        node_id: String::new(),
+    }
+}
+
+/// The full field list `Insert`/`Replace` need for a `Memory`, by wire
+/// name, in `MemoryConnectionStore`'s own tag order.
+fn memory_fields(n: u128, category: &str) -> Vec<(&'static str, ScanValue)> {
+    vec![
+        ("content", ScanValue::Str(format!("memory {n}"))),
+        ("category", ScanValue::Str(category.into())),
+        ("tags", ScanValue::StrList(vec!["sample".into()])),
+        ("source", ScanValue::Str("manual".into())),
+        ("metadata_json", ScanValue::Str("{}".into())),
+        ("created_at_unix_ms", ScanValue::I64(1_000 * n as i64)),
+        ("updated_at_unix_ms", ScanValue::I64(1_000 * n as i64)),
+        ("memory_type", ScanValue::Str("unclassified".into())),
+        ("status", ScanValue::Str("active".into())),
+        ("sensitive", ScanValue::Bool(false)),
+        ("access_count", ScanValue::I64(n as i64)),
+        ("deleted_at_unix_ms", ScanValue::I64(0)),
+        ("node_id", ScanValue::Str(String::new())),
+    ]
+}
+
+/// Five memories over three categories: `general` is shared by three
+/// records, so an indexed equality is neither the whole table nor one
+/// row.
+fn start_memory_server() -> SocketAddr {
+    let dir = unique_dir("sql_integration_memory");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("memories.mmap");
+    let memories = vec![
+        memory(1, "general"),
+        memory(2, "preference"),
+        memory(3, "general"),
+        memory(4, "decision"),
+        memory(5, "general"),
+    ];
+    let stack = create_memory_production_stack(memories, &[], &path).unwrap();
+    let connection_store = Arc::new(MemoryConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+fn entity(n: u128, label: &str, kind: &str, mention_count: i64) -> Entity {
+    Entity {
+        id: Uuid::from_u128(n),
+        label: label.into(),
+        kind: kind.into(),
+        mention_count,
+        aliases: vec![],
+    }
+}
+
+/// Four entities: three `person`s (one with a two-word label whose
+/// case/whitespace variants the `label` index also matches) and one
+/// `decision`.
+fn start_entity_server() -> SocketAddr {
+    let dir = unique_dir("sql_integration_entity");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("entities.mmap");
+    let entities = vec![
+        entity(1, "Grace Hopper", "person", 7),
+        entity(2, "Ada Lovelace", "person", 3),
+        entity(3, "ADR-0046", "decision", 1),
+        entity(4, "Alan Turing", "person", 12),
+    ];
+    let stack = create_entity_production_stack(entities, &[], &[], &path).unwrap();
+    let connection_store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+fn relation(n: u128, subject: &str, label: &str, object: &str) -> Relation {
+    Relation {
+        id: Uuid::from_u128(n),
+        subject: subject.into(),
+        relation: label.into(),
+        object: object.into(),
+        created_at_unix_ms: 1_000 * n as i64,
+        updated_at_unix_ms: 1_000 * n as i64,
+        node_id: String::new(),
+        deleted_at_unix_ms: 0,
+    }
+}
+
+fn start_relation_server() -> SocketAddr {
+    let dir = unique_dir("sql_integration_relation");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("relations.mmap");
+    let relations = vec![
+        relation(1, "ada", "authored", "adr-0046"),
+        relation(2, "adr-0047", "follows", "adr-0046"),
+        relation(3, "ada", "mentions", "grace"),
+    ];
+    let stack = create_relation_production_stack(relations, &path).unwrap();
+    let connection_store = Arc::new(RelationConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+fn start_reminder_server() -> SocketAddr {
+    let dir = unique_dir("sql_integration_reminder");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("reminders.mmap");
+    let reminders = vec![
+        Reminder {
+            id: Uuid::from_u128(1),
+            title: "a".into(),
+            due_at_unix_ms: 1_000,
+            status: ReminderStatus::Pending,
+        },
+        Reminder {
+            id: Uuid::from_u128(2),
+            title: "b".into(),
+            due_at_unix_ms: 2_000,
+            status: ReminderStatus::Done,
+        },
+        Reminder {
+            id: Uuid::from_u128(3),
+            title: "c".into(),
+            due_at_unix_ms: 1_000,
+            status: ReminderStatus::Snoozed,
+        },
+    ];
+    let stack = create_reminder_production_stack(reminders, &path).unwrap();
+    let connection_store = Arc::new(ReminderConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+/// `QPL-FR-005`'s oracle: `SELECT * FROM table WHERE field = literal`
+/// (the planner's index path when `field` is `filter_eq: true`) must
+/// equal the unfiltered `SELECT *` filtered here by exact `ScanValue`
+/// equality on `field` — same ids, same fields, compared sorted by id
+/// since both plans return rows in their own unspecified order
+/// (`QPL-FR-006`). Returns the match count so a caller can assert the
+/// case is neither empty nor the whole table.
+fn assert_indexed_eq_matches_full_scan(
+    client: &mut SchemaDrivenClient,
+    table: &str,
+    field: &str,
+    literal: &str,
+    value: &ScanValue,
+) -> usize {
+    let mut oracle = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+    let total = oracle.len();
+    oracle.retain(|(_, fields)| fields.iter().any(|(name, v)| name == field && v == value));
+    oracle.sort_by_key(|(id, _)| *id);
+    let mut indexed = rows(
+        client
+            .query(&format!("SELECT * FROM {table} WHERE {field} = {literal}"))
+            .unwrap(),
+    );
+    indexed.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        indexed, oracle,
+        "{table}.{field} = {literal}: the index path must return exactly the full scan's rows"
+    );
+    assert!(
+        !indexed.is_empty() && indexed.len() < total,
+        "{table}.{field} = {literal}: a meaningful case is neither empty nor the whole table \
+         (got {} of {total})",
+        indexed.len()
+    );
+    indexed.len()
+}
+
+/// Acceptance criterion 3, every shipped `filter_eq: true` field —
+/// `Memory::category`, `Entity::kind`/`label`, `Relation::subject`,
+/// `Order::status`, `Employee::department`, `Reminder::due_at_unix_ms` —
+/// plus `Dog::breed` as the control that never plans an index
+/// (`filter_eq: false` on every `Dog` field) and answers identically.
+#[test]
+fn indexed_equality_query_matches_the_full_scan_on_every_shipped_index() {
+    let mut memory = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut memory,
+            "memory",
+            "category",
+            "'general'",
+            &ScanValue::Str("general".into()),
+        ),
+        3
+    );
+
+    let mut entity = SchemaDrivenClient::connect(start_entity_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut entity,
+            "entity",
+            "kind",
+            "'person'",
+            &ScanValue::Str("person".into()),
+        ),
+        3
+    );
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut entity,
+            "entity",
+            "label",
+            "'Grace Hopper'",
+            &ScanValue::Str("Grace Hopper".into()),
+        ),
+        1
+    );
+
+    let mut relation = SchemaDrivenClient::connect(start_relation_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut relation,
+            "relation",
+            "subject",
+            "'ada'",
+            &ScanValue::Str("ada".into()),
+        ),
+        2
+    );
+
+    let mut order = SchemaDrivenClient::connect(start_order_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(&mut order, "order", "status", "1", &ScanValue::U32(1)),
+        1
+    );
+
+    let mut employee = SchemaDrivenClient::connect(start_employee_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut employee,
+            "employee",
+            "department",
+            "0",
+            &ScanValue::U32(0),
+        ),
+        1
+    );
+
+    let mut reminder = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut reminder,
+            "reminder",
+            "due_at_unix_ms",
+            "1000",
+            &ScanValue::I64(1_000),
+        ),
+        2
+    );
+
+    let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
+    assert_eq!(
+        assert_indexed_eq_matches_full_scan(
+            &mut dog,
+            "dog",
+            "breed",
+            "'labrador'",
+            &ScanValue::Str("labrador".into()),
+        ),
+        2
+    );
+}
+
+/// `QPL-FR-003`, acceptance criterion 3: `Entity::label`'s index is
+/// case- and whitespace-insensitive (`ENT3-FR-005`, ADR-0040) — a
+/// *superset* of exact `Eq`. `Request::FilterEq` returns the record for
+/// a variant; `Query`'s `Eq` must not, because the re-check runs the
+/// exact comparison over whatever the index handed back.
+#[test]
+fn entity_label_index_superset_is_corrected_to_exact_equality_by_query() {
+    let mut client = SchemaDrivenClient::connect(start_entity_server()).unwrap();
+    let grace = Uuid::from_u128(1);
+
+    for variant in [
+        "grace hopper",
+        "GRACE HOPPER",
+        "Grace  Hopper",
+        " Grace Hopper ",
+    ] {
+        let via_filter_eq = client
+            .filter_eq("label", ScanValue::Str(variant.into()))
+            .unwrap();
+        assert!(
+            via_filter_eq.contains(&grace),
+            "FilterEq's normalized index matches {variant:?}"
+        );
+        let via_query = rows(
+            client
+                .query(&format!("SELECT * FROM entity WHERE label = '{variant}'"))
+                .unwrap(),
+        );
+        assert!(
+            via_query.is_empty(),
+            "Query's Eq is exact: {variant:?} must match nothing, got {via_query:?}"
+        );
+    }
+
+    let exact = rows(
+        client
+            .query("SELECT label FROM entity WHERE label = 'Grace Hopper'")
+            .unwrap(),
+    );
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].0, grace);
+}
+
+/// `QPL-FR-001`/`003`: with an indexed `Eq` and a second, unindexed
+/// predicate, the index narrows the read and the re-check applies both —
+/// exactly the rows satisfying the conjunction, and no others.
+#[test]
+fn indexed_equality_composes_with_a_second_predicate() {
+    let mut client = SchemaDrivenClient::connect(start_entity_server()).unwrap();
+    let mut result = rows(
+        client
+            .query("SELECT label FROM entity WHERE kind = 'person' AND mention_count > 5")
+            .unwrap(),
+    );
+    result.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        result.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![Uuid::from_u128(1), Uuid::from_u128(4)]
+    );
+
+    // The same conjunction with the predicates reversed plans the same
+    // index (`plan_query` picks the first *eligible* predicate) and
+    // answers identically.
+    let mut reversed = rows(
+        client
+            .query("SELECT label FROM entity WHERE mention_count > 5 AND kind = 'person'")
+            .unwrap(),
+    );
+    reversed.sort_by_key(|(id, _)| *id);
+    assert_eq!(reversed, result);
+}
+
+/// `QPL-FR-005`, acceptance criterion 3: the generic equality index is
+/// maintained under runtime `Insert`, `Replace` (a record moving into
+/// and another out of the indexed value), and `Delete` — the index path
+/// tracks each write exactly as the full scan does.
+#[test]
+fn indexed_equality_query_tracks_runtime_insert_replace_and_delete() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let general = ScanValue::Str("general".into());
+    let preference = ScanValue::Str("preference".into());
+    let check = |client: &mut SchemaDrivenClient, literal: &str, value: &ScanValue| {
+        assert_indexed_eq_matches_full_scan(client, "memory", "category", literal, value)
+    };
+
+    assert_eq!(check(&mut client, "'general'", &general), 3);
+    assert_eq!(check(&mut client, "'preference'", &preference), 1);
+
+    // Insert a fourth `general`.
+    client
+        .insert(Uuid::from_u128(6), &memory_fields(6, "general"))
+        .unwrap();
+    assert_eq!(check(&mut client, "'general'", &general), 4);
+
+    // Replace moves id 1 out of `general` into `preference`.
+    client
+        .replace(Uuid::from_u128(1), &memory_fields(1, "preference"))
+        .unwrap();
+    assert_eq!(check(&mut client, "'general'", &general), 3);
+    assert_eq!(check(&mut client, "'preference'", &preference), 2);
+
+    // Delete one `general` record.
+    assert!(client.delete(Uuid::from_u128(3)).unwrap());
+    assert_eq!(check(&mut client, "'general'", &general), 2);
+
+    // A value no record holds (any more, or ever) is an empty result on
+    // either plan — never an error.
+    let gone = rows(
+        client
+            .query("SELECT * FROM memory WHERE category = 'never'")
+            .unwrap(),
+    );
+    assert!(gone.is_empty());
 }

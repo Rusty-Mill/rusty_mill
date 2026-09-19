@@ -1273,6 +1273,48 @@ Per the task's own framing: this section reports where `ProductionStore` is genu
 - **SQLite is the most consistently competitive external engine across all six shapes, but "consistently the closest" is no longer accurate past three hops** — never the fastest external engine on `scan_ages` at scale, never the worst on anything, and the clear best on `get`. On graph traversal specifically, it's the closest engine at every depth at 1,000 records, but Postgres has now edged ahead of it at 1,000,000 records (four hops) and separately at 100,000 records (five hops) — see the bounce above. Its embedded, no-network-hop, direct-B-tree-lookup design still generalizes well across these fixed shapes, just not with the clean "always second-best" story the first three hops suggested.
 - **Postgres's numbers are dominated by its client/server round trip, not its query engine — except where a real planner decision changes which plan runs.** Its `get` and (post-fix) one-hop graph-traversal numbers are both flat, ~90–110 µs regardless of dataset size, consistent with loopback TCP/protocol overhead rather than any per-row cost. Its `scan_ages` numbers, by contrast, do scale with row count (a real sequential scan has to touch every row) — the one one-hop-or-simpler workload in this section where Postgres's *query* cost, not its round-trip cost, is the visible factor. Two- through five-hop traversal all break the "flat" pattern the same way, at every depth tested: cost is dominated by *which join strategy the planner picks* (Hash Join + `Seq Scan` at 1K vs. Nested Loop + index at 100K/1M — see `### Graph traversal, two-hop` through `### Graph traversal, five-hop` above), not by round-trip overhead or row count directly. The plan choice itself is completely stable across all four depths tested; the SQLite/Postgres "closest engine" bounce is driven by how much the Nested Loop plan's own buffer I/O grows per hop at a given size, not by any change in which plan Postgres picks.
 
+## Query planner step one — an equality-index path for `Request::Query` (`ADR-0073`, `SERVER-001` v0.58.0 / FR-070)
+
+`docs/design/SERVER-QUERY-PLANNER-DESIGN.md`'s acceptance criterion 5,
+measured by `benches/server.rs`'s new `memory-planner` rows on this
+session's Windows development machine (`std::thread::available_parallelism()`
+= 24), 2026-09-18. The design-only round predicted the shape (O(*k*)
+reads against O(*n*)) and declined to guess a number; this is the number.
+
+**Setup.** One `MemoryConnectionStore` over 100,000 `Memory` records,
+`category` and `source` holding the *same* value per record (`c0`…`c99`,
+round-robin, so each value names exactly 1,000 records — 1% of the
+table). `category` is `Memory`'s one `filter_eq: true` field (the generic
+`HashMap` equality index); `source` is never indexed. The same
+`Request::Query { select: [category], filter: [field = 'c7'], limit: None }`
+is sent twice per iteration set, once per field, over a real loopback
+`TcpStream` with `TCP_NODELAY`, one connection, one untimed warm-up, then
+20 timed round trips each. The `source` request is the full-scan control
+with *identical* selectivity and an identical 1,000-row response — no
+test-only hook forces a plan; the planner's own schema-driven rule
+(`QPL-FR-001`) picks `IndexEq` for `category` and `FullScan` for `source`.
+
+| Plan (`plan_query`) | Request | Rows returned | µs per query |
+|---|---|---|---|
+| `IndexEq` (declared `category` index) | `WHERE category = 'c7'` | 1,000 of 100,000 | **576.5** |
+| `FullScan` (unindexed `source`, control) | `WHERE source = 'c7'` | 1,000 of 100,000 | **104,492.7** |
+
+**Read it as**: the same query, the same 1,000-row answer, ~181× faster
+(104.5 ms → 0.58 ms) when the schema declares an index for the equality
+predicate — because the server reads 1,000 records instead of decoding
+all 100,000 and discarding 99% of them. The remaining 576 µs is
+dominated by materializing, encoding, and shipping 1,000 rows (the
+per-row decode/encode components `## Regression check` measured for
+`Page` — ~0.3–0.7 µs per row per stage — put a 1,000-row response in
+exactly this range) plus the ~90 µs loopback round trip; the index
+lookup itself is a hash probe. Not measured this round, named plainly:
+a value shared by nearly every record (where *k* ≈ *n* and the planner
+still takes the index, since it has no cost model — `QPL-FR-001`),
+expected to land at the full-scan cost plus one hash lookup, never
+below it and never meaningfully above; and any domain other than
+`Memory`, whose `describe()`-declared indexes route through the identical
+`filter_eq` + `get` path with no domain-specific code.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

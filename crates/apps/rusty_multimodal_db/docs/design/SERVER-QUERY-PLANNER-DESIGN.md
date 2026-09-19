@@ -485,3 +485,33 @@ must not cite this session as having covered it.
   follow on its own branch — Claude as builder (Codex's sandbox still
   cannot spawn processes), with independent Codex inspection of both
   this design and the code owed once that is restored.
+- 2026-09-18: implemented on `claude/sql-planner-impl` as `SERVER-001`
+  v0.58.0 / `FR-070`, exactly the "Proposed shape": `QueryPlan`,
+  `plan_query`, `query_candidates` beside `evaluate_query` in
+  `src/server/serve.rs`, and the `Query` dispatch arm as validate → plan
+  → candidates → evaluate. No other source file changed — `QPL-FR-007`
+  held literally. **One deviation from `QPL-FR-004`'s text**: no
+  `debug_assert!` on the fallback branch, because acceptance criterion
+  2's own fixture test (`query_candidates_index_refusal_falls_back_to_a_
+  full_scan_without_an_error`) exercises exactly that branch and would
+  trip it; the shipped adapters' `describe()`/`filter_eq` agreement is
+  proven by `QPL-FR-005`'s per-domain integration tests instead, each of
+  which would fail on a refusal. Acceptance criteria 1–4 are the five new
+  `serve.rs` unit tests (`plan_query_picks_the_first_indexed_equality_or_
+  a_full_scan`; the three `query_candidates_*` tests and `dispatch_query_
+  returns_the_same_rows_on_either_plan`, over a `PlannerFixture` whose
+  index is exact, a superset, or a refusal and which counts every `get`
+  and `scan_all`; lib total 604, up from 599) and four new
+  `tests/server_sql_integration.rs` tests (44, up from 40)
+  (every shipped indexed field plus the `Dog` control cross-checked
+  against the full scan; `Entity::label` case/whitespace/padding
+  variants matched by `FilterEq` and rejected by `Query`; the
+  two-predicate conjunction in both orders; runtime `Insert`/`Replace`/
+  `Delete` tracked) — every pre-existing SQL test passes unmodified.
+  Criterion 5's measurement is `benches/server.rs`'s new
+  `memory-planner` rows, recorded in `RESULTS.md`: at 100K `Memory`
+  records, the same 1%-selective equality (1,000 rows returned either
+  way) costs 576.5 µs per query through the declared `category` index
+  and 104,492.7 µs through the equal-selectivity unindexed `source`
+  control — ~181× — over a real loopback socket. Still no independent
+  review: Codex could not spawn processes throughout; owed.

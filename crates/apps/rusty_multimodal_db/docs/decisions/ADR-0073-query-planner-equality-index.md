@@ -1,9 +1,11 @@
 # ADR-0073: Query Planner Step One — Route `Request::Query` Through an Equality Index
 
-- Status: **Accepted as designed** (2026-09-18 — the owner picked option
-  (a): `Request::Query` only, as scoped; (b) the four-consumer
-  generalization and (c) decline both declined). Proposed and accepted
-  in the same session; implementation is the next round.
+- Status: **Accepted as designed and implemented** (2026-09-18 — the
+  owner picked option (a): `Request::Query` only, as scoped; (b) the
+  four-consumer generalization and (c) decline both declined). Proposed,
+  accepted, and implemented in the same session — `SERVER-001` v0.58.0
+  / `FR-070`, one recorded deviation (see "Acceptance and
+  implementation").
 - Date: 2026-09-18
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-PLANNER-DESIGN.md` (the full
@@ -136,3 +138,29 @@ The fork, held for the owner:
   processes); independent Codex inspection of both this design and the
   implementation is owed once restored, and neither may cite this
   session as having provided it.
+- 2026-09-18: implemented on `claude/sql-planner-impl` — `SERVER-001`
+  v0.58.0 / `SERVER-001-FR-070`. `src/server/serve.rs` only:
+  `QueryPlan`/`plan_query`/`query_candidates` beside `evaluate_query`,
+  the `Request::Query` dispatch arm as validate → plan → candidates →
+  evaluate; `QPL-FR-007` held literally (no trait, adapter, wire,
+  protocol, `sql.rs`, client, or Python change). **One recorded
+  deviation**: `QPL-FR-004`'s `debug_assert!` on the fallback branch is
+  not in the code — the fixture test that proves the fallback would trip
+  it; the shipped adapters' `describe()`/`filter_eq` agreement is proven
+  by `QPL-FR-005`'s per-domain integration tests instead. Proven: 5 new
+  `serve.rs` unit tests (lib 604, up from 599 — a `PlannerFixture` with
+  an exact, superset, or refusing index and `get`/`scan_all` counters),
+  4 new `tests/server_sql_integration.rs` tests over real sockets (44,
+  up from 40 — all seven shipped indexed fields plus the `Dog` control
+  against the full scan; `Entity::label` variants matched by `FilterEq`
+  but not `Query`; the two-predicate conjunction in both orders; runtime
+  `Insert`/`Replace`/`Delete`), every pre-existing test unmodified and
+  green; `cargo fmt`/`clippy --features server,research --all-targets
+  -D warnings` clean. Measured (`benches/server.rs`'s `memory-planner`
+  rows, `RESULTS.md`): at 100K `Memory` records the same 1%-selective
+  equality (1,000 rows returned either way) is 576.5 µs per query
+  through the declared `category` index vs. 104,492.7 µs through the
+  equal-selectivity unindexed `source` control — ~181×, over a real
+  loopback socket. Still no independent review — Codex could
+  not spawn processes throughout this session; a fresh Codex inspection
+  of the design and this diff is owed and must not be reported as done.
