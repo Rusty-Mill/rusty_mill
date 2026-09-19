@@ -25,19 +25,62 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
-    # Minor and patch only. The first grouped PR (#246) took every
-    # front-end to latest majors at once (React 19, Vite 8, TypeScript 7,
-    # xterm 6) and two of the three directories have no npm CI to catch a
-    # broken build — a major upgrade is a deliberate per-app round, not a
-    # weekly bump. Security updates are governed by the repo setting, not
-    # this list, and the two open advisories (browserslist 4.28.7,
-    # baseline-browser-mapping 2.11.0) are patch/minor anyway.
+    # Majors are a deliberate per-app round, not a weekly bump: the first
+    # grouped PR (#246) took every front-end to latest majors at once
+    # (React 19, Vite 8, TypeScript 7, xterm 6) with no CI on two of the
+    # three directories. The one exception is the Vite toolchain, which
+    # must move *together*: vite 8 requires @vitejs/plugin-react 6, so
+    # Dependabot's single-package security PRs for the vite/esbuild
+    # advisories (#255, #258) could not even `npm ci` (ERESOLVE on
+    # plugin-react 4's peer range). Dependabot cannot express "ignore
+    # majors for everything except X" and rejects a second entry for the
+    # same directory, so the blanket ignore is spelled out as today's other
+    # direct dependencies instead — a *new* direct dependency is not on
+    # this list and would get major proposals until it is added.
     ignore:
-      - dependency-name: "*"
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@anthropic-ai/sdk"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@xterm/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@codemirror/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tauri-apps/api"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "solid-js"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@tailwindcss/vite"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "autoprefixer"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "postcss"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "playwright"
         update-types: ["version-update:semver-major"]
     groups:
-      # One PR per directory per week for routine bumps; security updates
-      # still arrive individually and immediately.
+      # Evaluated first: the Vite toolchain moves as one PR, majors
+      # included, so vite and its plugin land in the same lockfile
+      # regeneration and CI (data-mesh-monitor's job; rusty_term/web's
+      # build job) proves the combination before it merges.
+      vite-toolchain:
+        patterns:
+          - "vite"
+          - "@vitejs/plugin-react"
+          - "vite-plugin-solid"
+      # Everything else: one minor/patch PR per directory per week.
+      # Security updates still arrive individually and immediately.
       npm-dependencies:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
