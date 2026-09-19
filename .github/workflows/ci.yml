@@ -106,6 +106,7 @@ jobs:
       packages: ${{ steps.plan.outputs.packages }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
+      key_desktop: ${{ steps.plan.outputs.key_desktop }}
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
@@ -127,6 +128,7 @@ jobs:
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
             echo "term_web=true" >> "$GITHUB_OUTPUT"
+            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -143,6 +145,7 @@ jobs:
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
             echo "term_web=true" >> "$GITHUB_OUTPUT"
+            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -156,6 +159,7 @@ jobs:
               echo "packages=" >> "$GITHUB_OUTPUT"
               echo "dashboard=true" >> "$GITHUB_OUTPUT"
               echo "term_web=true" >> "$GITHUB_OUTPUT"
+              echo "key_desktop=true" >> "$GITHUB_OUTPUT"
               echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -177,6 +181,14 @@ jobs:
             echo "term_web=true" >> "$GITHUB_OUTPUT"
           else
             echo "term_web=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # And rusty_key's Tauri front end (Vite/Solid), the third
+          # vendored npm app -- same gate, same reason.
+          if echo "$changed" | grep -q '^crates/apps/rusty_key/desktop/'; then
+            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "key_desktop=false" >> "$GITHUB_OUTPUT"
           fi
 
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
@@ -463,6 +475,29 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: crates/libs/ui/rusty_term/web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+
+  # rusty_key's desktop front end: a vendored Vite/Solid app inside a
+  # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build
+  # only -- `npm run build` bundles the web assets without needing the
+  # Tauri toolchain -- so a dependency bump is proven to compile and
+  # bundle before it merges. No test script exists there.
+  rusty-key-desktop:
+    name: rusty_key desktop (npm build)
+    needs: plan
+    if: needs.plan.outputs.key_desktop == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_key/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_key/desktop/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run build
 
