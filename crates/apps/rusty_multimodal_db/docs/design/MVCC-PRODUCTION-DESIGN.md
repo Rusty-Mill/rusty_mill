@@ -1,14 +1,19 @@
 # MVCC Production Design (Accepted)
 
-- Status: **Accepted** — owner picked scope and mechanism interactively,
-  2026-09-17, alongside `ADR-0072`. Authorizes real, production wiring
-  of `SESSION_MVCC_ISOLATION` into `Memory`/`Entity`/`Relation`, with
-  full mutation-path coverage, `(new_value, txn_id)` chain entries
-  (no before-image capture — round seven's revision) folded directly
-  into the existing insert log and redo journal, and a persistent
-  history store flushed only at existing checkpoint/compact boundaries
-  (round six's revision) (all revised mid-round — see `ADR-0072`'s own
-  "Decision" and "Acceptance and implementation").
+- Status: **Accepted and implemented** — owner picked scope and
+  mechanism interactively, 2026-09-17, alongside `ADR-0072`. Authorizes
+  real, production wiring of `SESSION_MVCC_ISOLATION` into `Memory`/
+  `Entity`/`Relation`, with full mutation-path coverage, `(new_value,
+  txn_id)` chain entries (no before-image capture — round seven's
+  revision) folded directly into the existing insert log and redo
+  journal, and a persistent history store flushed at existing
+  checkpoint/compact boundaries (round six's revision) **and, since PR
+  #240, after every non-journaled write** — an unjournaled table has no
+  checkpoint boundary, so round six's rule alone left its history
+  unpersisted until an explicit `Compact` (all revised mid-round and
+  after merge — see `ADR-0072`'s own "Decision" and "Acceptance and
+  implementation"). Shipped as PRs #234–#241 (2026-09-18), extended to
+  all six domains by #239 at the owner's call.
 - Date: 2026-09-17
 - Related: `ADR-0072` (the full decision record — read that first for
   Context/Decision-drivers/Decision; this document is the concrete
@@ -851,3 +856,24 @@ Structural points that are fixed:
   directly; a fresh Codex session should independently inspect the
   result once its sandbox is restored, per this crate's own established
   host-takeover review convention.
+- 2026-09-18: implemented and merged as PR #234 (`Memory`/`Entity`/
+  `Relation`), then closed out by seven follow-on PRs the same day, each
+  independently verified before merge — see `ADR-0072`'s "Acceptance and
+  implementation" for the per-PR record. In this document's own terms:
+  `MVCC2-FR-011` (client support) landed in #236; the `MVCC2-FR-010`
+  item-3 restart gap round ten named landed in #237/#238 as a per-domain
+  `open_with_mvcc` (a pre-open read — `docs/design/MVCC-OPEN-HOOK-
+  PROPOSAL.md`, option (b) — not the generic-layer hook round ten
+  predicted); the domain scope widened to all six adapters in #239 at
+  the owner's call; and #240 fixed a real bug round six's rule left
+  behind — "flush only at reclamation boundaries" is complete only for
+  a *journaled* table, and an unjournaled one has no boundary, so every
+  non-journaled MVCC-recording write now flushes inside its own
+  exclusive section (surfacing a flush failure as `ErrorCode::Storage`).
+  #241 exposed the table behind `memory_server`'s `SERVER_MVCC_ISOLATION`
+  and is the deployment test that found #240's bug. Still open,
+  deliberately: reconstruction from a pending *journal* remainder; MVCC
+  and the crash-atomic journal together on one table; independent
+  review.
+- 2026-09-19: status header and this history reconciled with the
+  merged state — both had been left describing PR #234 alone.
