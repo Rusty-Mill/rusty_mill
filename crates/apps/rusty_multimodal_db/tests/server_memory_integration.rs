@@ -719,6 +719,63 @@ fn start_two_table_server_at(dir: std::path::PathBuf) -> SocketAddr {
     addr
 }
 
+/// `QPC-FR-004`/`QPC-FR-005` (ADR-0074): a cross-table join whose
+/// *left*-side `WHERE` is an indexed equality on the left table
+/// (`memory.category`) — the plan is made against the left store's own
+/// schema, the right rows still come from the entity table by id — must
+/// return exactly the unfiltered join's pairs whose left row matches by
+/// exact equality. Pairs compared as a set; their order is unspecified.
+#[test]
+fn cross_table_join_with_an_indexed_left_filter_matches_the_full_scan_pairs() {
+    let dir = unique_dir("memory_two_tables_planner");
+    let addr = start_two_table_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    type JoinedPair = (Uuid, Uuid, Vec<(String, ScanValue)>);
+    let pairs_of = |result: QueryResult| match result {
+        QueryResult::Joined(rows) => {
+            let mut pairs: Vec<JoinedPair> = rows
+                .into_iter()
+                .map(|r| (r.left_id, r.right_id, r.fields))
+                .collect();
+            pairs.sort_by_key(|(l, r, _)| (*l, *r));
+            pairs
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    let all = pairs_of(
+        client
+            .query("SELECT m.category, e.label FROM memory m JOIN entity e ON mentions")
+            .unwrap(),
+    );
+    assert_eq!(all.len(), 3);
+
+    for (category, expected_lefts) in [
+        ("fact", vec![Uuid::from_u128(2), Uuid::from_u128(2)]),
+        ("preference", vec![Uuid::from_u128(1)]),
+        ("general", vec![]),
+    ] {
+        let mut oracle = all.clone();
+        oracle.retain(|(_, _, f)| {
+            f.iter()
+                .any(|(n, v)| n == "m.category" && *v == ScanValue::Str(category.into()))
+        });
+        let indexed = pairs_of(
+            client
+                .query(&format!(
+                    "SELECT m.category, e.label FROM memory m JOIN entity e ON mentions \
+                     WHERE m.category = '{category}'"
+                ))
+                .unwrap(),
+        );
+        assert_eq!(indexed, oracle, "m.category = {category:?}");
+        assert_eq!(
+            indexed.iter().map(|(l, _, _)| *l).collect::<Vec<_>>(),
+            expected_lefts,
+            "m.category = {category:?}"
+        );
+    }
+}
+
 /// `TBL` acceptance criteria 1–3 (ADR-0050) over a socket — the
 /// consumer's `memory_entities` path end to end: `ListTables`; the
 /// cross-table `SELECT m.content, e.label FROM memory m JOIN entity e ON

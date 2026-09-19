@@ -120,10 +120,13 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::employee::{EmployeeConnectionStore, FIELD_SALARY};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::memory::{MemoryConnectionStore, FIELD_CATEGORY, FIELD_SOURCE};
+use rusty_multimodal_db::server::memory::{
+    MemoryConnectionStore, FIELD_CATEGORY, FIELD_SOURCE, FIELD_UPDATED_AT,
+};
 use rusty_multimodal_db::server::order::{OrderConnectionStore, FIELD_AMOUNT};
 use rusty_multimodal_db::server::protocol::{
-    CompareOp, FieldRef, Predicate, Request, Response, ScanValue, Selection, TransactionOp,
+    AggregateFn, AggregateSpec, CompareOp, FieldRef, Predicate, Request, Response, ScanValue,
+    Selection, TransactionOp, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -563,61 +566,124 @@ fn start_memory_planner_server() -> SocketAddr {
     addr
 }
 
-/// One `Request::Query { WHERE field = 'c7' }` round trip, timed over
-/// [`PLANNER_QUERY_ITERATIONS`] on one connection; returns the mean
-/// wall-clock per query and the row count (asserted identical for both
-/// fields by the caller — the planner changes what is read, not what is
-/// returned).
-fn measure_query_latency(addr: SocketAddr, field: FieldRef) -> (Duration, usize) {
+/// One request round trip, timed over [`PLANNER_QUERY_ITERATIONS`] on one
+/// connection after one untimed warm-up (so the first request's page-in
+/// lands in neither column); returns the mean wall-clock per request and
+/// the row or group count, which the caller asserts identical for the
+/// indexed and the control field — the planner changes what is read, not
+/// what is returned.
+fn measure_planner_request(addr: SocketAddr, request: &Request) -> (Duration, usize) {
     let mut client = connect(addr);
-    let request = Request::Query {
-        select: Selection::Fields(vec![FIELD_CATEGORY]),
-        filter: vec![Predicate {
-            field,
-            op: CompareOp::Eq,
-            value: ScanValue::Str("c7".into()),
-        }],
-        limit: None,
-    };
-    // One untimed warm-up so the first request's page-in doesn't land
-    // in either column.
-    let rows = match roundtrip(&mut client, &request) {
+    // Negotiate the current protocol first: `FilteredPage` is gated at
+    // 26 (`FPG-FR-007`) and an un-negotiated connection sits below it
+    // (`Query`/`Aggregate`, gated at 8/9, pass either way) — the same
+    // `Hello` every integration test sends before its first request.
+    match roundtrip(
+        &mut client,
+        &Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    ) {
+        Response::Hello { .. } => {}
+        other => panic!("unexpected Hello response {other:?}"),
+    }
+    let count = match roundtrip(&mut client, request) {
         Response::Rows { rows } => rows.len(),
-        other => panic!("expected Rows, got {other:?}"),
+        Response::Groups { groups } => groups.len(),
+        other => panic!("unexpected response {other:?}"),
     };
     let start = Instant::now();
     for _ in 0..PLANNER_QUERY_ITERATIONS {
-        let resp = roundtrip(&mut client, &request);
-        debug_assert!(matches!(resp, Response::Rows { .. }));
+        let resp = roundtrip(&mut client, request);
+        debug_assert!(matches!(
+            resp,
+            Response::Rows { .. } | Response::Groups { .. }
+        ));
     }
-    (start.elapsed() / PLANNER_QUERY_ITERATIONS as u32, rows)
+    (start.elapsed() / PLANNER_QUERY_ITERATIONS as u32, count)
 }
 
-/// `ADR-0073` acceptance criterion 5 (`docs/design/SERVER-QUERY-PLANNER-
-/// DESIGN.md`): the same 1%-selective equality `Query` over a 100K
-/// `Memory` table, once through the declared `category` index
-/// (`QueryPlan::IndexEq`) and once through the unindexed `source` field
-/// (`QueryPlan::FullScan`) holding identical values — the difference is
-/// exactly what the planner saves. Reported beside the other domains'
-/// rows as `memory-planner`, in µs per query.
+fn c7_filter(field: FieldRef) -> Vec<Predicate> {
+    vec![Predicate {
+        field,
+        op: CompareOp::Eq,
+        value: ScanValue::Str("c7".into()),
+    }]
+}
+
+/// The three planner consumers this benchmark measures, each with the
+/// identical 1%-selective equality on `field`: `Query` (`ADR-0073`),
+/// and `Aggregate` / `FilteredPage` (`ADR-0074`). `Join` is not measured
+/// — its left side is this same candidate fetch and its cost is
+/// dominated by the per-left-row right-side lookups the planner does not
+/// touch (`SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md`, acceptance
+/// criterion 4).
+fn planner_requests(field: FieldRef) -> [(&'static str, Request); 3] {
+    [
+        (
+            "query",
+            Request::Query {
+                select: Selection::Fields(vec![FIELD_CATEGORY]),
+                filter: c7_filter(field),
+                limit: None,
+            },
+        ),
+        (
+            "count(*)",
+            Request::Aggregate {
+                group_by: vec![],
+                filter: c7_filter(field),
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            },
+        ),
+        (
+            "fpage-50",
+            Request::FilteredPage {
+                order_by: FIELD_UPDATED_AT,
+                after: None,
+                limit: 50,
+                filter: c7_filter(field),
+            },
+        ),
+    ]
+}
+
+/// `ADR-0073` acceptance criterion 5 and `ADR-0074` acceptance criterion 4
+/// (`docs/design/SERVER-QUERY-PLANNER{,-CONSUMERS}-DESIGN.md`): the same
+/// 1%-selective equality over a 100K `Memory` table, once through the
+/// declared `category` index (`QueryPlan::IndexEq`) and once through the
+/// unindexed `source` field (`QueryPlan::FullScan`) holding identical
+/// values — the difference is exactly what the planner saves — for each
+/// consumer that plans. Reported beside the other domains' rows as
+/// `memory-planner`, in µs per request.
 fn bench_query_planner() {
     let addr = start_memory_planner_server();
-    let (indexed, indexed_rows) = measure_query_latency(addr, FIELD_CATEGORY);
-    let (scanned, scanned_rows) = measure_query_latency(addr, FIELD_SOURCE);
-    assert_eq!(
-        indexed_rows, scanned_rows,
-        "the planner must not change the result set"
-    );
-    println!(
-        "{:<10} {:>10} {:>14.1}   query WHERE category = 'c7' (indexed, {indexed_rows} rows of {PLANNER_RECORDS})",
-        "memory-planner",
-        "index-eq",
-        indexed.as_secs_f64() * 1e6
-    );
-    println!(
-        "{:<10} {:>10} {:>14.1}   query WHERE source = 'c7' (unindexed control, same {scanned_rows} rows)",
-        "memory-planner",
-        "full-scan",
-        scanned.as_secs_f64() * 1e6
-    );
+    let indexed_requests = planner_requests(FIELD_CATEGORY);
+    let control_requests = planner_requests(FIELD_SOURCE);
+    for ((label, indexed_request), (_, control_request)) in
+        indexed_requests.iter().zip(control_requests.iter())
+    {
+        let (indexed, indexed_count) = measure_planner_request(addr, indexed_request);
+        let (scanned, scanned_count) = measure_planner_request(addr, control_request);
+        assert_eq!(
+            indexed_count, scanned_count,
+            "{label}: the planner must not change the result"
+        );
+        println!(
+            "{:<10} {:>10} {:>14.1}   {label} WHERE category = 'c7' (indexed, {indexed_count} rows/groups of {PLANNER_RECORDS})",
+            "memory-planner",
+            "index-eq",
+            indexed.as_secs_f64() * 1e6
+        );
+        println!(
+            "{:<10} {:>10} {:>14.1}   {label} WHERE source = 'c7' (unindexed control, same {scanned_count})",
+            "memory-planner",
+            "full-scan",
+            scanned.as_secs_f64() * 1e6
+        );
+    }
 }

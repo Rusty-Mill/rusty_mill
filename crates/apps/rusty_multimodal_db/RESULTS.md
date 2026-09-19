@@ -1315,6 +1315,48 @@ below it and never meaningfully above; and any domain other than
 `Memory`, whose `describe()`-declared indexes route through the identical
 `filter_eq` + `get` path with no domain-specific code.
 
+## Query planner step two — the same candidate step behind `Aggregate` and `FilteredPage` (`ADR-0074`, `SERVER-001` v0.59.0 / FR-071)
+
+`docs/design/SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md`'s acceptance
+criterion 4, measured by the same `benches/server.rs` `memory-planner`
+harness as step one above — the same 100,000-record `Memory` table, the
+same 1%-selective `'c7'` equality on the declared `category` index vs.
+the never-indexed `source` twin holding identical values, the same one
+connection, one untimed warm-up, 20 timed round trips — extended to the
+two consumers this round routes through `indexed_candidates`. The
+`query` row is re-measured in the same run so the three are comparable
+to each other, not only to yesterday's number. This session's Windows
+development machine, `std::thread::available_parallelism()` = 24,
+2026-09-19. One harness fix on the way: `FilteredPage` is gated at
+protocol 26 (`FPG-FR-007`) while `Query`/`Aggregate` have no server-side
+gate (`SQL-FR-010` — client-side only), so the raw bench connection now
+sends the `Hello` every integration test sends; the first run's
+`fpage-50` request was refused `Malformed` for that reason alone.
+
+| Consumer | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| `Query` (`ADR-0073`, re-measured) | `IndexEq` | `WHERE category = 'c7'` | 1,000 rows | **546.6** |
+| | `FullScan` (control) | `WHERE source = 'c7'` | 1,000 rows | **100,524.0** |
+| `Aggregate` (`QPC-FR-002`) | `IndexEq` | `COUNT(*) WHERE category = 'c7'` | 1 group | **419.9** |
+| | `FullScan` (control) | `COUNT(*) WHERE source = 'c7'` | 1 group | **99,583.2** |
+| `FilteredPage` (`QPC-FR-003`) | `IndexEq` | `WHERE category = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **535.7** |
+| | `FullScan` (control) | `WHERE source = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **104,109.9** |
+
+**Read it as**: ~184× / ~237× / ~194× for the same answer — every
+control sits at the ~100 ms it costs to decode all 100,000 records,
+every indexed request at ~0.4–0.55 ms. `COUNT(*)` is the cheapest of the
+three under the index because its response is one group rather than
+1,000 or 50 rows; `FilteredPage`'s 50-row page costs about the same as
+`Query`'s 1,000 rows because the sort over the 1,000-row candidate set
+(`page_rows`) replaces the encode of 950 rows the page never ships. The
+`FilteredPage` result is also the one with no observable difference at
+all between plans — `page_rows` orders the filtered set — so this row is
+a pure speed-up. Not measured, named plainly: `Join` (its left side is
+exactly the `query` fetch above; its cost is the per-left-row right-side
+lookups this round does not touch), and the *k* ≈ *n* case where the
+planner still takes an index that saves nothing (`ADR-0073`'s own
+named Non-goal, unchanged).
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

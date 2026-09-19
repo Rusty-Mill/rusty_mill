@@ -267,8 +267,11 @@ different, smaller record — `SERVER-REMINDER-DOMAIN-DESIGN.md` names
   for each right id `get(right_id)`, apply `right_filter`, project both
   sides, push a `JoinedRow`. `limit` truncates the pair count after
   evaluation (the "bounds the response, not the work" posture `Query`
-  has). Rows come out in `scan_all` order then relation order —
-  unspecified, like every other row-returning response.
+  has). Rows come out in left-candidate order then relation order —
+  since `ADR-0074` the left side is `Query`'s own candidate step (the
+  left filter's declared equality index when it has one, `scan_all`
+  otherwise), so "candidate order" is the plan's; unspecified either
+  way, like every other row-returning response.
 - `JOIN-FR-004` — **Symmetric relations produce both orientations.**
   `a JOIN b ON relates_to` yields `(x, y)` and `(y, x)` for one
   undirected edge — SQL semantics (each left row is joined), and what

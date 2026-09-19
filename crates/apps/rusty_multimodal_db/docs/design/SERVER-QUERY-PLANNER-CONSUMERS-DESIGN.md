@@ -1,9 +1,10 @@
 # Server Query Planner, Step Two: The Equality-Index Candidate Step for `Aggregate`, `FilteredPage`, and `Join` (Accepted)
 
-- Status: **Accepted as designed** (2026-09-19, `ADR-0074`, option (a) —
-  all three consumers through one shared helper; (b) `FilteredPage`
-  only and (c) decline, both declined). Design only in this PR;
-  implementation is the next round, on its own branch.
+- Status: **Accepted as designed and implemented** (2026-09-19,
+  `ADR-0074`, option (a) — all three consumers through one shared
+  helper; (b) `FilteredPage` only and (c) decline, both declined).
+  Implemented the same day as `SERVER-001` v0.59.0 / `FR-071`, no
+  deviation — see "Change history".
 - Date: 2026-09-19
 - Related: `ADR-0073`/`docs/design/SERVER-QUERY-PLANNER-DESIGN.md` (step
   one — `plan_query`/`query_candidates` for `Request::Query` alone, whose
@@ -379,3 +380,36 @@ of it and of `ADR-0073`'s implementation is owed and not claimed.
   design PR merged; recorded here and in `ADR-0074`. Implementation to
   follow on its own branch — Claude as builder (Codex's sandbox still
   cannot spawn processes), independent Codex review owed.
+- 2026-09-19: implemented on `claude/planner-consumers-impl` as
+  `SERVER-001` v0.59.0 / `FR-071`, exactly the "Proposed shape" and
+  with no deviation: `indexed_candidates` beside `plan_query`/
+  `query_candidates`; the `Query` arm refactored onto it; the
+  `Aggregate` arm, the `filtered_page` default body (signature and
+  contract untouched, doc comment updated), and `evaluate_join`'s left
+  loop substituted; `PlannerFixture` gains a fixed symmetric 1—3
+  `neighbors` edge. Acceptance criterion 1: three new `serve.rs` unit
+  tests (`dispatch_aggregate_returns_the_same_groups_on_either_plan`,
+  `filtered_page_default_returns_the_identical_sequence_on_either_plan`
+  — cursor included — and `evaluate_join_returns_the_same_pairs_on_
+  either_plan`), each over an exact, a superset, and a refusing index
+  with `get`/`scan_all` counters; lib 607, up from 604. Criterion 2:
+  three new real-socket tests in `tests/server_sql_integration.rs` (47,
+  up from 44) and one in `tests/server_memory_integration.rs` (14, up
+  from 13 — the cross-table `memory → entity` join with an indexed left
+  filter on `category`), all against oracles computed from unfiltered
+  requests. Criterion 3: every pre-existing test passed unmodified —
+  the anticipated order-pin relaxation was not needed; the entity
+  `GROUP BY kind` and `JOIN … WHERE a.…` tests compare sets already.
+  Criterion 4: `benches/server.rs`'s `memory-planner` rows extended to
+  `count(*)` and `fpage-50` beside `query`, each through the `category`
+  index vs. the unindexed `source` control on the same 100K `Memory`
+  table: `COUNT(*)` 419.9 µs vs. 99,583.2 µs (~237×), `FilteredPage`
+  `LIMIT 50` 535.7 µs vs. 104,109.9 µs (~194×), `Query` re-measured
+  546.6 µs vs. 100,524.0 µs (~184×) — table in `RESULTS.md`. One
+  harness fix on the way: the raw bench connection now sends `Hello`
+  first, since `FilteredPage` is gated at protocol 26 while `Query`/
+  `Aggregate` have no server-side gate.
+  `SERVER-SQL-JOIN-DESIGN.md`'s one sentence reworded and
+  `SERVER-FILTERED-PAGE-DESIGN.md`'s Consequences qualified, as this
+  document's "Proposed shape" said. Still no independent review —
+  Codex's sandbox cannot spawn processes; owed.
