@@ -1,0 +1,33 @@
+# Dependabot version updates — npm lockfiles only.
+#
+# Why npm only: the three front-end lockfiles below are the one place this
+# monorepo carries third-party code that nothing here regenerates locally
+# (no Node toolchain on the development machines; CI has one only for
+# data-mesh-monitor). The 2026-09-18 security alerts (browserslist
+# GHSA-73wf-gq98-2v4g, baseline-browser-mapping GHSA-w5vr-8v7q-w6rv) hit
+# rusty_term/web, and the identical vulnerable versions sat unflagged in the
+# other two lockfiles because Dependabot only scanned the path an alert
+# already pointed at. Listing all three here makes Dependabot regenerate
+# each lockfile server-side and open PRs that CI (`npm ci` where wired)
+# validates.
+#
+# Cargo is deliberately not listed: this workspace has ~125 crates and a
+# dependency-policy CI job of its own; automated Cargo bump PRs would be
+# noise without a per-crate policy decision first.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /crates/libs/ui/rusty_term/web
+      - /crates/apps/rusty_meshed/data-mesh-monitor
+      - /crates/apps/rusty_key/desktop
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One PR per directory per week for routine bumps; security updates
+      # still arrive individually and immediately.
+      npm-dependencies:
+        patterns:
+          - "*"
