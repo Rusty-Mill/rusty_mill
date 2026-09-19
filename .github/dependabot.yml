@@ -25,6 +25,16 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    # Minor and patch only. The first grouped PR (#246) took every
+    # front-end to latest majors at once (React 19, Vite 8, TypeScript 7,
+    # xterm 6) and two of the three directories have no npm CI to catch a
+    # broken build — a major upgrade is a deliberate per-app round, not a
+    # weekly bump. Security updates are governed by the repo setting, not
+    # this list, and the two open advisories (browserslist 4.28.7,
+    # baseline-browser-mapping 2.11.0) are patch/minor anyway.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       # One PR per directory per week for routine bumps; security updates
       # still arrive individually and immediately.
