@@ -1223,7 +1223,9 @@ fn entity(n: u128, label: &str, kind: &str, mention_count: i64) -> Entity {
 
 /// Four entities: three `person`s (one with a two-word label whose
 /// case/whitespace variants the `label` index also matches) and one
-/// `decision`.
+/// `decision`, plus two symmetric `relates_to` edges (1—2, 2—3) so a
+/// `JOIN … ON relates_to` has pairs whose left side is and is not a
+/// `person`.
 fn start_entity_server() -> SocketAddr {
     let dir = unique_dir("sql_integration_entity");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1234,7 +1236,11 @@ fn start_entity_server() -> SocketAddr {
         entity(3, "ADR-0046", "decision", 1),
         entity(4, "Alan Turing", "person", 12),
     ];
-    let stack = create_entity_production_stack(entities, &[], &[], &path).unwrap();
+    let relates_to = [
+        (Uuid::from_u128(1), Uuid::from_u128(2)),
+        (Uuid::from_u128(2), Uuid::from_u128(3)),
+    ];
+    let stack = create_entity_production_stack(entities, &relates_to, &[], &path).unwrap();
     let connection_store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
         stack,
     )));
@@ -1556,4 +1562,313 @@ fn indexed_equality_query_tracks_runtime_insert_replace_and_delete() {
             .unwrap(),
     );
     assert!(gone.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// `ADR-0074` / `docs/design/SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md`,
+// acceptance criterion 2 (`QPC-FR-005`): the same candidate step behind
+// `Aggregate`, `FilteredPage`, and `Join`'s left side returns exactly
+// what the full scan returns — groups as a set, a page as an exact
+// sequence, pairs as a set — proven against oracles computed in the test
+// from unfiltered requests (which plan `FullScan`, having no predicate).
+// ---------------------------------------------------------------------
+
+/// The `(id, fields)` rows of `SELECT * FROM {table}`, filtered here by
+/// exact `ScanValue` equality on `field` — the oracle every proof below
+/// starts from. The unfiltered `SELECT *` has no predicate to plan on,
+/// so it is always a full scan.
+fn exact_eq_rows(
+    client: &mut SchemaDrivenClient,
+    table: &str,
+    field: &str,
+    value: &ScanValue,
+) -> Vec<(Uuid, Vec<(String, ScanValue)>)> {
+    let mut all = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+    all.retain(|(_, fields)| fields.iter().any(|(name, v)| name == field && v == value));
+    all
+}
+
+fn i64_field(fields: &[(String, ScanValue)], name: &str) -> i64 {
+    match &fields.iter().find(|(n, _)| n == name).unwrap().1 {
+        ScanValue::I64(v) => *v,
+        other => panic!("expected I64 for {name}, got {other:?}"),
+    }
+}
+
+/// `QPC-FR-002`: `Aggregate` through the index path — `COUNT(*)` and
+/// `SUM(access_count)` grouped by the indexed field, the implicit single
+/// bucket with no `GROUP BY`, and the `Entity::label` superset case —
+/// each equal to the tally over the exact-equality oracle rows, before
+/// and after a runtime `Insert` into the indexed value.
+#[test]
+fn aggregate_over_an_indexed_equality_matches_the_full_scan_tally() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let general = ScanValue::Str("general".into());
+
+    let check = |client: &mut SchemaDrivenClient| {
+        let oracle = exact_eq_rows(client, "memory", "category", &general);
+        let expected_count = oracle.len() as i64;
+        let expected_sum: i64 = oracle
+            .iter()
+            .map(|(_, f)| i64_field(f, "access_count"))
+            .sum();
+
+        let grouped = groups(
+            client
+                .query(
+                    "SELECT category, COUNT(*), SUM(access_count) FROM memory \
+                     WHERE category = 'general' GROUP BY category",
+                )
+                .unwrap(),
+        );
+        assert_eq!(grouped.len(), 1, "one group: general");
+        assert_eq!(
+            grouped[0][0],
+            ("category".to_string(), ScanValue::Str("general".into()))
+        );
+        assert_eq!(grouped[0][1].1, ScanValue::I64(expected_count), "COUNT(*)");
+        assert_eq!(
+            grouped[0][2].1,
+            ScanValue::I64(expected_sum),
+            "SUM(access_count)"
+        );
+
+        let implicit = groups(
+            client
+                .query("SELECT COUNT(*) FROM memory WHERE category = 'general'")
+                .unwrap(),
+        );
+        assert_eq!(implicit.len(), 1, "the implicit bucket always exists");
+        assert_eq!(implicit[0][0].1, ScanValue::I64(expected_count));
+        expected_count
+    };
+
+    assert_eq!(check(&mut client), 3);
+    client
+        .insert(Uuid::from_u128(6), &memory_fields(6, "general"))
+        .unwrap();
+    assert_eq!(check(&mut client), 4);
+
+    // A value nothing holds: the implicit bucket still exists, at zero,
+    // on either plan (`AGG` acceptance criterion 4, unchanged).
+    let none = groups(
+        client
+            .query("SELECT COUNT(*) FROM memory WHERE category = 'never'")
+            .unwrap(),
+    );
+    assert_eq!(
+        none,
+        vec![vec![("COUNT(*)".to_string(), ScanValue::I64(0))]]
+    );
+
+    // `Entity::label`'s normalized index is a superset of exact `Eq`:
+    // `FilterEq` finds the record for a case variant, the aggregate's
+    // own re-filter counts nothing for it.
+    let mut entity = SchemaDrivenClient::connect(start_entity_server()).unwrap();
+    assert!(entity
+        .filter_eq("label", ScanValue::Str("grace hopper".into()))
+        .unwrap()
+        .contains(&Uuid::from_u128(1)));
+    let variant = groups(
+        entity
+            .query("SELECT COUNT(*) FROM entity WHERE label = 'grace hopper'")
+            .unwrap(),
+    );
+    assert_eq!(variant[0][0].1, ScanValue::I64(0));
+    let exact = groups(
+        entity
+            .query("SELECT COUNT(*) FROM entity WHERE label = 'Grace Hopper'")
+            .unwrap(),
+    );
+    assert_eq!(exact[0][0].1, ScanValue::I64(1));
+    let people = groups(
+        entity
+            .query("SELECT kind, COUNT(*) FROM entity WHERE kind = 'person' GROUP BY kind")
+            .unwrap(),
+    );
+    assert_eq!(
+        people,
+        vec![vec![
+            ("kind".to_string(), ScanValue::Str("person".into())),
+            ("COUNT(*)".to_string(), ScanValue::I64(3)),
+        ]]
+    );
+}
+
+/// `QPC-FR-003`: `WHERE <indexed> = v ORDER BY <field>` compiles to
+/// `FilteredPage`; its rows must be the **exact sequence** `page_rows`
+/// would produce over the exact-equality oracle rows — sorted by
+/// `(order_by value, id)`, truncated to `LIMIT` — with and without a
+/// `LIMIT`, and tracking a runtime `Insert` into and `Replace` out of the
+/// indexed value. Order is this consumer's contract, so the sequence is
+/// compared, not the set (`QPC-FR-006`: no observable difference).
+#[test]
+fn filtered_page_over_an_indexed_equality_returns_the_exact_sorted_sequence() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let general = ScanValue::Str("general".into());
+
+    let expected = |client: &mut SchemaDrivenClient, limit: Option<usize>| {
+        let mut oracle = exact_eq_rows(client, "memory", "category", &general);
+        oracle.sort_by_key(|(id, f)| (i64_field(f, "updated_at_unix_ms"), *id));
+        if let Some(n) = limit {
+            oracle.truncate(n);
+        }
+        oracle
+    };
+    let actual = |client: &mut SchemaDrivenClient, limit: Option<usize>| {
+        let sql = match limit {
+            Some(n) => format!(
+                "SELECT * FROM memory WHERE category = 'general' ORDER BY updated_at_unix_ms LIMIT {n}"
+            ),
+            None => "SELECT * FROM memory WHERE category = 'general' ORDER BY updated_at_unix_ms"
+                .to_string(),
+        };
+        rows(client.query(&sql).unwrap())
+    };
+    let check = |client: &mut SchemaDrivenClient, limit: Option<usize>| {
+        let want = expected(client, limit);
+        let got = actual(client, limit);
+        assert_eq!(
+            got, want,
+            "LIMIT {limit:?}: exact sequence, fields included"
+        );
+        got.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        check(&mut client, Some(2)),
+        vec![Uuid::from_u128(1), Uuid::from_u128(3)]
+    );
+    assert_eq!(
+        check(&mut client, None),
+        vec![Uuid::from_u128(1), Uuid::from_u128(3), Uuid::from_u128(5)]
+    );
+
+    client
+        .insert(Uuid::from_u128(6), &memory_fields(6, "general"))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, None),
+        vec![
+            Uuid::from_u128(1),
+            Uuid::from_u128(3),
+            Uuid::from_u128(5),
+            Uuid::from_u128(6)
+        ]
+    );
+    client
+        .replace(Uuid::from_u128(1), &memory_fields(1, "preference"))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, None),
+        vec![Uuid::from_u128(3), Uuid::from_u128(5), Uuid::from_u128(6)]
+    );
+    assert_eq!(check(&mut client, Some(1)), vec![Uuid::from_u128(3)]);
+}
+
+/// One joined row as `(left_id, right_id, projected fields)`.
+type JoinedPair = (Uuid, Uuid, Vec<(String, ScanValue)>);
+
+fn joined_pairs(result: QueryResult) -> Vec<JoinedPair> {
+    match result {
+        QueryResult::Joined(rows) => {
+            let mut pairs: Vec<JoinedPair> = rows
+                .into_iter()
+                .map(|r| (r.left_id, r.right_id, r.fields))
+                .collect();
+            pairs.sort_by_key(|(l, r, _)| (*l, *r));
+            pairs
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+/// `QPC-FR-004`: a `JOIN` whose left-side `WHERE` is an indexed equality
+/// returns exactly the pairs of the unfiltered join (no left filter →
+/// `FullScan`, the oracle) whose left row matches by exact equality —
+/// for `kind` (the generic index) and for `label` (the normalized
+/// superset index, where a case variant matches `FilterEq` but yields no
+/// pairs). Pairs are compared as a set: pair order is unspecified.
+#[test]
+fn join_with_an_indexed_left_filter_matches_the_full_scan_pairs() {
+    let mut client = SchemaDrivenClient::connect(start_entity_server()).unwrap();
+    let oracle_all = joined_pairs(
+        client
+            .query("SELECT a.kind, a.label, b.label FROM entity a JOIN entity b ON relates_to")
+            .unwrap(),
+    );
+    assert_eq!(oracle_all.len(), 4, "edges 1—2 and 2—3, both orientations");
+
+    let oracle_for = |field: &str, value: &str| {
+        let mut o = oracle_all.clone();
+        o.retain(|(_, _, f)| {
+            f.iter()
+                .any(|(n, v)| n == field && *v == ScanValue::Str(value.into()))
+        });
+        o
+    };
+
+    let people = joined_pairs(
+        client
+            .query(
+                "SELECT a.kind, a.label, b.label FROM entity a JOIN entity b ON relates_to \
+                 WHERE a.kind = 'person'",
+            )
+            .unwrap(),
+    );
+    assert_eq!(people, oracle_for("a.kind", "person"));
+    assert_eq!(
+        people.iter().map(|(l, r, _)| (*l, *r)).collect::<Vec<_>>(),
+        vec![
+            (Uuid::from_u128(1), Uuid::from_u128(2)),
+            (Uuid::from_u128(2), Uuid::from_u128(1)),
+            (Uuid::from_u128(2), Uuid::from_u128(3)),
+        ],
+        "left rows 1 and 2 are persons; 3 (a decision) contributes no left pair"
+    );
+
+    let ada = joined_pairs(
+        client
+            .query(
+                "SELECT a.kind, a.label, b.label FROM entity a JOIN entity b ON relates_to \
+                 WHERE a.label = 'Ada Lovelace'",
+            )
+            .unwrap(),
+    );
+    assert_eq!(ada, oracle_for("a.label", "Ada Lovelace"));
+    assert_eq!(ada.len(), 2);
+
+    // The superset case: `FilterEq` matches the variant, the join's own
+    // left re-check does not.
+    assert!(client
+        .filter_eq("label", ScanValue::Str("ada lovelace".into()))
+        .unwrap()
+        .contains(&Uuid::from_u128(2)));
+    let variant = joined_pairs(
+        client
+            .query(
+                "SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to \
+                 WHERE a.label = 'ada lovelace'",
+            )
+            .unwrap(),
+    );
+    assert!(variant.is_empty());
+
+    // `LIMIT` still bounds the pair count on the index path.
+    let limited = joined_pairs(
+        client
+            .query(
+                "SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to \
+                 WHERE a.kind = 'person' LIMIT 2",
+            )
+            .unwrap(),
+    );
+    assert_eq!(limited.len(), 2);
+    let people_ids: Vec<(Uuid, Uuid)> = people.iter().map(|(l, r, _)| (*l, *r)).collect();
+    assert!(
+        limited
+            .iter()
+            .all(|(l, r, _)| people_ids.contains(&(*l, *r))),
+        "every limited pair is one of the unlimited pairs (projections differ, so ids compare)"
+    );
 }

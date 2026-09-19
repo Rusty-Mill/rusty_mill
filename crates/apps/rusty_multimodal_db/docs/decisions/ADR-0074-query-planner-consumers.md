@@ -1,9 +1,11 @@
 # ADR-0074: Query Planner Step Two — The Equality-Index Candidate Step for `Aggregate`, `FilteredPage`, and `Join`
 
-- Status: **Accepted as designed** (2026-09-19 — the owner picked option
-  (a): all three consumers through one shared helper; (b) `FilteredPage`
-  only and (c) decline both declined). Proposed and accepted in the same
-  session; implementation is the next round.
+- Status: **Accepted as designed and implemented** (2026-09-19 — the
+  owner picked option (a): all three consumers through one shared
+  helper; (b) `FilteredPage` only and (c) decline both declined).
+  Proposed, accepted, and implemented the same day — `SERVER-001`
+  v0.59.0 / `FR-071`, no deviation (see "Acceptance and
+  implementation").
 - Date: 2026-09-19
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md` (the
@@ -102,3 +104,29 @@ The fork, held for the owner:
   criterion 4's measurement as its exit gate. Builder: Claude directly,
   under the host-takeover convention (Codex's sandbox still cannot spawn
   processes); independent Codex inspection owed, not claimed.
+- 2026-09-19: implemented on `claude/planner-consumers-impl` —
+  `SERVER-001` v0.59.0 / `SERVER-001-FR-071`, `src/server/serve.rs`
+  alone, **no deviation** from the accepted design: `indexed_candidates`;
+  the `Query` arm refactored onto it; the `Aggregate` arm, the
+  `filtered_page` default body, and `evaluate_join`'s left loop
+  substituted; `PlannerFixture` gains a fixed `neighbors` edge. Proven:
+  3 new `serve.rs` unit tests (lib 607, up from 604), 3 new real-socket
+  `tests/server_sql_integration.rs` tests (47, up from 44), 1 new
+  cross-table `tests/server_memory_integration.rs` test (14, up from
+  13); every pre-existing test passed unmodified — the anticipated
+  order-pin relaxation (`QPC-FR-006`) was not needed; `fmt`/`clippy
+  --features server,research --all-targets -D warnings` clean.
+  Measured (`benches/server.rs`'s `memory-planner` rows extended to
+  `count(*)` and `fpage-50`, `RESULTS.md`): on the same 100K `Memory`
+  table and 1%-selective equality as step one, `COUNT(*)` 419.9 µs
+  through the `category` index vs. 99,583.2 µs through the unindexed
+  `source` control (~237×), `FilteredPage` `LIMIT 50` 535.7 µs vs.
+  104,109.9 µs (~194×), and `Query` re-measured in the same run 546.6
+  µs vs. 100,524.0 µs (~184×), over a real loopback socket. One harness
+  fix: the raw bench connection now sends `Hello` first — `FilteredPage`
+  is gated at protocol 26 while `Query`/`Aggregate` have no server-side
+  gate. `SERVER-SQL-JOIN-DESIGN.md`'s one
+  sentence reworded; `SERVER-FILTERED-PAGE-DESIGN.md`'s Consequences
+  qualified. Still no independent review — Codex's sandbox cannot
+  spawn processes; a fresh Codex inspection of the design and this diff
+  is owed and must not be reported as done.

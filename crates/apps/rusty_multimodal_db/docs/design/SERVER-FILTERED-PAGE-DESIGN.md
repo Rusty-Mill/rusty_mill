@@ -219,7 +219,12 @@ stand at `SERVER-001` v0.55.0 / `PROTOCOL_VERSION = 25`:
   a filtered request loses the `Ordered` index's speed advantage this
   round — it falls back to the same full-scan-then-sort cost every
   other domain already pays for an unfiltered `Page`, since the shared
-  default does not consult the index at all. This is a **regression
+  default does not consult the index at all. (*Since `ADR-0074`:* the
+  shared default narrows its candidates through a declared *equality*
+  index when the filter has an `Eq` on an indexed field — `Query`'s own
+  `indexed_candidates` step — so a filtered page on `category = …` no
+  longer scans the table; the `Ordered` *range* index is still not
+  consulted for a filtered page.) This is a **regression
   only relative to what an indexed domain's *unfiltered* `Page` already
   achieves** — the *unfiltered* fast path is completely untouched by
   this round (`Request::Page` itself gains no field, no behavior
