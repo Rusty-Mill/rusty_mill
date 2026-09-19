@@ -709,3 +709,62 @@ own assumptions, both confirmed by direct code reading:
   per this crate's own established host-takeover convention. See
   `docs/design/MVCC-PRODUCTION-DESIGN.md` for the concrete shape and
   acceptance criteria.
+- 2026-09-18, merged: PR #234 (the core, `Memory`/`Entity`/`Relation`),
+  then seven follow-on PRs the same day, each independently verified by
+  Claude (diff read, fresh `fmt`/`clippy`/`test`) before merge — the
+  gaps PR #234 named as open are now closed or explicitly retained:
+  - #235 — `Entity`/`Relation` real-socket integration tests (6 each,
+    mirroring `Memory`'s).
+  - #236 — client support (`MVCC2-FR-011`): Rust
+    `SessionOptions::mvcc_isolation()`; Python `SESSION_MVCC_ISOLATION`.
+  - #237/#238 — round ten's insert-log restart gap, closed without the
+    generic-layer hook it predicted: `docs/design/MVCC-OPEN-HOOK-
+    PROPOSAL.md` weighed (a) a `GenericMmapStore::open` hook, (b) a
+    pre-open read of the pending log composed from already-`pub(crate)`
+    `insert_log::{read_entries, log_path}`, bundled into an
+    `open_with_mvcc(path)` constructor per domain, (c) docs only; the
+    owner picked (b). Zero change to `src/generic/mmap_store.rs`.
+  - #239 — `Dog`/`Order`/`Employee` wired, at the owner's explicit
+    "everything" pick, **reversing this ADR's own deferral** above.
+    Structurally different and simpler: none of the three implements
+    `insert_record`/`replace_record`/`delete_record`/`compact`/
+    `write_batch` (all default `Unsupported`), so their only mutation
+    path is `UpdateField`/session `Commit` — no insert log to fold, no
+    `Compact` flush; the journal checkpoint is their sole reclamation
+    boundary.
+  - #240 — **a real correctness bug, found only by #241's deployment
+    test, not by any unit or integration test above**: `mvcc_flush_now`
+    was called from `compact()`, the journaled checkpoint branches, and
+    `mvcc_begin`'s one-time baseline — never from any *non-journaled*
+    write path (`insert_record`/`replace_record`/`replace_record_if`/
+    `delete_record`/`write_batch`'s atomic branch/`apply_transaction`/
+    `apply_transaction_mvcc`, and `update_field` on the three new
+    domains). Round six's "flush only at reclamation boundaries" was
+    correct for *journaled* tables; an *unjournaled* table has no
+    checkpoint boundary at all, so its history was persisted only by an
+    explicit `Compact`. Symptom: a session `Commit`, then a restart, then
+    a fresh MVCC session read the stale pre-commit baseline while a plain
+    `GetById` showed the committed value. Fix, all six domains: flush
+    after every MVCC-recording write, inside the same exclusive section,
+    surfacing a flush I/O failure as `ErrorCode::Storage`; proportionate
+    because those paths already pay a per-write fsync. 22 restart-safety
+    tests added.
+  - #241 — `SERVER_MVCC_ISOLATION` on `memory_server`: a pre-open
+    file-existence check picks `with_mvcc` (fresh) vs. `open_with_mvcc`
+    (reopen) per table; refuses to start combined with
+    `SERVER_TXN_JOURNAL_PATH` (a named limitation, not a silent gap);
+    three tests spawn the real compiled binary over TCP. Held unmerged
+    at the owner's call until #240 landed, then its restart test was
+    changed from documenting the gap to asserting the fix.
+- Still open after #241, deliberately: reconstruction from a pending
+  *journal* remainder (the open-hook proposal's own open question — the
+  insert-log twin is closed); MVCC and the crash-atomic journal on the
+  same table; and independent Codex review of the entire line — its
+  Windows sandbox runner never connected its pipe at any point
+  (investigated 2026-09-19: the runner launches as the sandbox user and
+  logs on successfully, then times out connecting; the one coincident
+  machine change is Defender's 09-17 platform update; unresolved).
+- 2026-09-19: this record, `docs/design/MVCC-PRODUCTION-DESIGN.md`'s
+  change history, `PROJECT-STATUS.md`, `ROADMAP.md`, `TRACEABILITY.md`,
+  and `FUTURE-GROWTH.md` reconciled — all six had been left at PR #234's
+  state, still listing the gaps #235–#241 closed.
