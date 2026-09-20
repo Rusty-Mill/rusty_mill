@@ -20,7 +20,7 @@ use super::insert_log;
 use super::insert_log::LogEntry;
 use super::query::{
     AllIds, Children, Compact, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink,
-    Neighbors, PageBy, Parent, Replace, ScanField, UpdateField,
+    Neighbors, PageBy, Parent, RangeBy, Replace, ScanField, UpdateField,
 };
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::{
@@ -2307,6 +2307,39 @@ where
             None => page(&mut self.index.iter()),
             Some(cursor) => page(&mut self.index.range((Excluded(cursor), Unbounded))),
         }
+    }
+}
+
+// `QPR-FR-001` (ADR-0075): a range is one walk of the same set, guarded
+// against the two inputs `BTreeSet::range` panics on — a start past the
+// end, or equal endpoints both excluded — which a client's contradictory
+// bounds (`> 5 AND < 3`, `> 5 AND < 5`) legitimately produce and must
+// see as an empty answer.
+impl<S, R, Marker> RangeBy<R, Marker> for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+{
+    fn range_by(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> Vec<R::Id> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let inverted = match (&lower, &upper) {
+            (Unbounded, _) | (_, Unbounded) => false,
+            (Included(a), Included(b))
+            | (Included(a), Excluded(b))
+            | (Excluded(a), Included(b)) => a > b,
+            (Excluded(a), Excluded(b)) => a >= b,
+        };
+        if inverted {
+            return Vec::new();
+        }
+        self.index
+            .range((lower, upper))
+            .map(|(_, id)| *id)
+            .collect()
     }
 }
 

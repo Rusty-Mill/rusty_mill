@@ -8,6 +8,7 @@
 //! hop up, one hop down).
 
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
+use std::ops::Bound;
 
 /// Generalizes `get` — look up a record by its id.
 pub trait GetById<R: Record> {
@@ -258,4 +259,23 @@ where
     R: super::traits::OrderedField<Marker>,
 {
     fn page_by(&self, after: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id>;
+}
+
+/// Every id whose `(key, id)` pair lies within `lower..upper` on an
+/// [`OrderedField`] — `QPR-FR-001` (ADR-0075): [`PageBy`] without the
+/// cursor-only lower bound and without the `take`, so a `WHERE` range on
+/// the ordered field is one walk of the same sorted index, ascending by
+/// `(key, id)`. Bounds are on *pairs*, not keys, because `R::Id` has no
+/// `MIN`/`MAX` the generic layer could supply — the caller that knows its
+/// id type maps a key bound to a pair bound
+/// (`crate::server::uuid_pair_bounds` for `Uuid`). An inverted or empty
+/// range answers an empty `Vec`, never a panic.
+/// [`super::store::Ordered`] implements it; every layer above forwards.
+///
+/// [`OrderedField`]: super::traits::OrderedField
+pub trait RangeBy<R, Marker>
+where
+    R: super::traits::OrderedField<Marker>,
+{
+    fn range_by(&self, lower: Bound<(R::Key, R::Id)>, upper: Bound<(R::Key, R::Id)>) -> Vec<R::Id>;
 }

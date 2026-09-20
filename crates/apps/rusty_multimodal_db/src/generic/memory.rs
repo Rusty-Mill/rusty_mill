@@ -685,4 +685,92 @@ mod tests {
             vec![id(2), id(3), id(4), id(5), id(1)]
         );
     }
+
+    /// `QPR-FR-001` (ADR-0075): `range_by` is the same sorted index walked
+    /// between two pair bounds — inclusive or exclusive on either side
+    /// (the `Uuid::nil()`/`max()` sentinels turning a key bound into a
+    /// pair bound), the id as the tie-break within one key, unbounded on
+    /// either side — and an inverted range, or the equal-and-both-
+    /// excluded pair `BTreeSet::range` panics on, is empty, not a panic.
+    #[test]
+    fn range_by_updated_at_walks_the_sorted_index_between_two_bounds() {
+        use crate::generic::query::RangeBy;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let dir = fresh_temp_dir("memory_range_by").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128;
+        let (min, max) = (Uuid::nil(), Uuid::max());
+        // updated_at is 1_000 * n; 3 shares 2's stamp for the tie-break.
+        let mut third = memory(3, "general", false);
+        third.updated_at_unix_ms = 2_000;
+        let seeded = vec![
+            memory(5, "general", false),
+            memory(2, "general", false),
+            third,
+            memory(1, "general", false),
+            memory(4, "general", false),
+        ];
+        let store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        let none = Vec::<Uuid>::new();
+        // key >= 2_000
+        assert_eq!(
+            store.range_by(Included((2_000, min)), Unbounded),
+            vec![id(2), id(3), id(4), id(5)]
+        );
+        // key > 2_000
+        assert_eq!(
+            store.range_by(Excluded((2_000, max)), Unbounded),
+            vec![id(4), id(5)]
+        );
+        // key < 2_000
+        assert_eq!(
+            store.range_by(Unbounded, Excluded((2_000, min))),
+            vec![id(1)]
+        );
+        // key <= 2_000
+        assert_eq!(
+            store.range_by(Unbounded, Included((2_000, max))),
+            vec![id(1), id(2), id(3)]
+        );
+        // 2_000 <= key < 4_000
+        assert_eq!(
+            store.range_by(Included((2_000, min)), Excluded((4_000, min))),
+            vec![id(2), id(3)]
+        );
+        // key = 2_000
+        assert_eq!(
+            store.range_by(Included((2_000, min)), Included((2_000, max))),
+            vec![id(2), id(3)]
+        );
+        // Strictly after (2_000, id 2) — `page_by`'s own cursor shape.
+        assert_eq!(
+            store.range_by(Excluded((2_000, id(2))), Unbounded),
+            vec![id(3), id(4), id(5)]
+        );
+        assert_eq!(store.range_by(Unbounded, Unbounded).len(), 5);
+        // Inverted: key > 4_000 AND key < 2_000.
+        assert_eq!(
+            store.range_by(Excluded((4_000, max)), Excluded((2_000, min))),
+            none
+        );
+        // key > 2_000 AND key < 2_000: start (2_000, max) > end (2_000, min).
+        assert_eq!(
+            store.range_by(Excluded((2_000, max)), Excluded((2_000, min))),
+            none
+        );
+        // The exact equal-and-both-excluded input std would panic on.
+        assert_eq!(
+            store.range_by(Excluded((2_000, id(2))), Excluded((2_000, id(2)))),
+            none
+        );
+        // Equal endpoints, one or both inclusive: no panic either way.
+        assert_eq!(
+            store.range_by(Included((2_000, id(2))), Excluded((2_000, id(2)))),
+            none
+        );
+        assert_eq!(
+            store.range_by(Included((2_000, id(2))), Included((2_000, id(2)))),
+            vec![id(2)]
+        );
+    }
 }

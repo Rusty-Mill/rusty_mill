@@ -1872,3 +1872,424 @@ fn join_with_an_indexed_left_filter_matches_the_full_scan_pairs() {
         "every limited pair is one of the unlimited pairs (projections differ, so ids compare)"
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0075` / `docs/design/SERVER-QUERY-PLANNER-RANGE-DESIGN.md`,
+// acceptance criterion 5 (`QPR-FR-005`): a range on the one field
+// `Memory`/`Relation` keep an `Ordered` index over is walked, not
+// scanned, and returns exactly the full scan's result — proven against
+// two oracles: the unfiltered `SELECT *` filtered here, and the identical
+// predicate on `created_at_unix_ms`, which the fixtures set to the same
+// value per record and which is never range-indexed (`FullScan`). There
+// is deliberately no server-side hook to force a plan.
+// ---------------------------------------------------------------------
+
+/// The full field list `Insert`/`Replace` need for a `Relation`, by wire
+/// name, in `RelationConnectionStore`'s own tag order, with the stamp
+/// chosen by the caller.
+fn relation_fields(
+    n: u128,
+    subject: &str,
+    label: &str,
+    object: &str,
+    updated_at: i64,
+) -> Vec<(&'static str, ScanValue)> {
+    vec![
+        ("subject", ScanValue::Str(subject.into())),
+        ("relation", ScanValue::Str(label.into())),
+        ("object", ScanValue::Str(object.into())),
+        ("created_at_unix_ms", ScanValue::I64(1_000 * n as i64)),
+        ("updated_at_unix_ms", ScanValue::I64(updated_at)),
+        ("node_id", ScanValue::Str(String::new())),
+        ("deleted_at_unix_ms", ScanValue::I64(0)),
+    ]
+}
+
+/// [`memory_fields`] with `updated_at_unix_ms` overridden — a record
+/// re-keyed across a bound.
+fn memory_fields_updated_at(
+    n: u128,
+    category: &str,
+    updated_at: i64,
+) -> Vec<(&'static str, ScanValue)> {
+    let mut fields = memory_fields(n, category);
+    for (name, value) in &mut fields {
+        if *name == "updated_at_unix_ms" {
+            *value = ScanValue::I64(updated_at);
+        }
+    }
+    fields
+}
+
+fn compares(value: i64, op: &str, literal: i64) -> bool {
+    match op {
+        ">" => value > literal,
+        ">=" => value >= literal,
+        "<" => value < literal,
+        "<=" => value <= literal,
+        "=" => value == literal,
+        other => panic!("unknown comparator {other}"),
+    }
+}
+
+/// `QPR-FR-005`'s oracle for one table: `SELECT * FROM {table} WHERE
+/// updated_at_unix_ms <clause>` (the `Ordered` walk) must equal the
+/// unfiltered `SELECT *` filtered here, compared sorted by id (row order
+/// is unspecified on either plan, `QPR-FR-006`); and, while every record
+/// still carries `created_at == updated_at` (`control`), the identical
+/// clause on `created_at_unix_ms` — never range-indexed, so a full scan —
+/// must return the same rows. `clause` is `AND`-ed `(op, literal)`
+/// pairs. Returns the match count.
+fn assert_range_matches_full_scan(
+    client: &mut SchemaDrivenClient,
+    table: &str,
+    clause: &[(&str, i64)],
+    control: bool,
+) -> usize {
+    let where_on = |field: &str| {
+        clause
+            .iter()
+            .map(|(op, k)| format!("{field} {op} {k}"))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+    let mut oracle = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+    oracle.retain(|(_, f)| {
+        clause
+            .iter()
+            .all(|(op, k)| compares(i64_field(f, "updated_at_unix_ms"), op, *k))
+    });
+    oracle.sort_by_key(|(id, _)| *id);
+    let walked_sql = format!(
+        "SELECT * FROM {table} WHERE {}",
+        where_on("updated_at_unix_ms")
+    );
+    let mut walked = rows(client.query(&walked_sql).unwrap());
+    walked.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        walked, oracle,
+        "{walked_sql}: the range walk must return exactly the full scan's rows"
+    );
+    if control {
+        let scanned_sql = format!(
+            "SELECT * FROM {table} WHERE {}",
+            where_on("created_at_unix_ms")
+        );
+        let mut scanned = rows(client.query(&scanned_sql).unwrap());
+        scanned.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            walked, scanned,
+            "{scanned_sql}: the never-indexed twin must agree with the walk"
+        );
+    }
+    walked.len()
+}
+
+/// `QPR-FR-005`, acceptance criterion 5: every comparator, a two-sided
+/// range, `=` as a one-key walk, and the two contradictory ranges, on
+/// `Memory` (stamps 1_000–5_000) and `Relation` (1_000–3_000), each
+/// against both oracles; then runtime `Insert` into the range, `Replace`
+/// re-keying a record across a bound in both directions, and `Delete`,
+/// each tracked by the walk (the `created_at` control is dropped once a
+/// stamp is re-keyed, since the twin no longer holds the same value).
+#[test]
+fn range_query_on_the_ordered_field_matches_the_full_scan_on_memory_and_relation() {
+    for (table, addr, n) in [
+        ("memory", start_memory_server(), 5usize),
+        ("relation", start_relation_server(), 3usize),
+    ] {
+        let mut client = SchemaDrivenClient::connect(addr).unwrap();
+        let check = |client: &mut SchemaDrivenClient, clause: &[(&str, i64)]| {
+            assert_range_matches_full_scan(client, table, clause, true)
+        };
+        assert_eq!(check(&mut client, &[(">", 2_000)]), n - 2, "{table} > 2000");
+        assert_eq!(
+            check(&mut client, &[(">=", 2_000)]),
+            n - 1,
+            "{table} >= 2000"
+        );
+        assert_eq!(check(&mut client, &[("<", 2_000)]), 1, "{table} < 2000");
+        assert_eq!(check(&mut client, &[("<=", 2_000)]), 2, "{table} <= 2000");
+        assert_eq!(
+            check(&mut client, &[(">=", 2_000), ("<", 4_000)]),
+            2,
+            "{table}: 2000 <= stamp < 4000"
+        );
+        assert_eq!(check(&mut client, &[("=", 2_000)]), 1, "{table} = 2000");
+        assert_eq!(
+            check(&mut client, &[(">", 4_000), ("<", 2_000)]),
+            0,
+            "{table}: an inverted range is empty, never an error"
+        );
+        assert_eq!(
+            check(&mut client, &[(">", 2_000), ("<", 2_000)]),
+            0,
+            "{table}: equal exclusive bounds are empty, never an error"
+        );
+        assert_eq!(
+            check(&mut client, &[(">", 1_000), (">", 3_000)]),
+            n.saturating_sub(3),
+            "{table}: two lower bounds — the walk takes the first, the re-check the second"
+        );
+        assert_eq!(
+            check(&mut client, &[(">", 1_000), ("<=", 5_000), (">=", 1_000)]),
+            n - 1,
+            "{table}: three bounds, only the first of each side supplies the walk"
+        );
+    }
+
+    // Runtime writes on `Memory`.
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let check = |client: &mut SchemaDrivenClient, clause: &[(&str, i64)], control: bool| {
+        assert_range_matches_full_scan(client, "memory", clause, control)
+    };
+    client
+        .insert(Uuid::from_u128(6), &memory_fields(6, "general"))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, &[(">", 2_000)], true),
+        4,
+        "insert at 6000"
+    );
+    // Re-key id 1 from 1_000 up to 9_000: into `> 4000`.
+    client
+        .replace(
+            Uuid::from_u128(1),
+            &memory_fields_updated_at(1, "general", 9_000),
+        )
+        .unwrap();
+    assert_eq!(check(&mut client, &[(">", 4_000)], false), 3, "ids 5, 6, 1");
+    assert_eq!(
+        check(&mut client, &[("<", 2_000)], false),
+        0,
+        "id 1 left the low end"
+    );
+    // Re-key id 5 from 5_000 down to 500: out of `> 4000`.
+    client
+        .replace(
+            Uuid::from_u128(5),
+            &memory_fields_updated_at(5, "general", 500),
+        )
+        .unwrap();
+    assert_eq!(check(&mut client, &[(">", 4_000)], false), 2, "ids 6, 1");
+    assert_eq!(
+        check(&mut client, &[("<", 2_000)], false),
+        1,
+        "id 5 arrived"
+    );
+    assert!(client.delete(Uuid::from_u128(6)).unwrap());
+    assert_eq!(check(&mut client, &[(">", 4_000)], false), 1, "id 1 alone");
+    assert_eq!(check(&mut client, &[("=", 9_000)], false), 1);
+    assert_eq!(check(&mut client, &[("=", 6_000)], false), 0, "deleted");
+
+    // Runtime writes on `Relation`.
+    let mut client = SchemaDrivenClient::connect(start_relation_server()).unwrap();
+    let check = |client: &mut SchemaDrivenClient, clause: &[(&str, i64)], control: bool| {
+        assert_range_matches_full_scan(client, "relation", clause, control)
+    };
+    client
+        .insert(
+            Uuid::from_u128(4),
+            &relation_fields(4, "grace", "mentions", "ada", 500),
+        )
+        .unwrap();
+    assert_eq!(check(&mut client, &[("<", 2_000)], false), 2, "ids 1 and 4");
+    client
+        .replace(
+            Uuid::from_u128(4),
+            &relation_fields(4, "grace", "mentions", "ada", 9_000),
+        )
+        .unwrap();
+    assert_eq!(check(&mut client, &[("<", 2_000)], false), 1);
+    assert_eq!(
+        check(&mut client, &[(">", 3_000)], false),
+        1,
+        "id 4 re-keyed up"
+    );
+    assert!(client.delete(Uuid::from_u128(4)).unwrap());
+    assert_eq!(check(&mut client, &[(">", 3_000)], false), 0);
+}
+
+/// `QPR-FR-005`, acceptance criterion 5: `Aggregate` through the range
+/// walk — `COUNT(*)`/`SUM`/`MIN`/`MAX` over the implicit bucket and
+/// `COUNT(*)` grouped by `category` — equal to the tally over the oracle
+/// rows and to the never-indexed `created_at` twin; groups compared as a
+/// set (`QPR-FR-006`).
+#[test]
+fn aggregate_over_a_range_matches_the_full_scan_tally() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let mut oracle = rows(client.query("SELECT * FROM memory").unwrap());
+    oracle.retain(|(_, f)| {
+        let stamp = i64_field(f, "updated_at_unix_ms");
+        (2_000..5_000).contains(&stamp)
+    });
+    assert_eq!(oracle.len(), 3, "ids 2, 3, 4");
+    let counts: Vec<i64> = oracle
+        .iter()
+        .map(|(_, f)| i64_field(f, "access_count"))
+        .collect();
+    let expected_implicit = vec![
+        ScanValue::I64(counts.len() as i64),
+        ScanValue::I64(counts.iter().sum()),
+        ScanValue::I64(*counts.iter().min().unwrap()),
+        ScanValue::I64(*counts.iter().max().unwrap()),
+    ];
+    let mut expected_grouped: Vec<(ScanValue, i64)> = Vec::new();
+    for (_, f) in &oracle {
+        let category = f
+            .iter()
+            .find(|(n, _)| n == "category")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        match expected_grouped.iter_mut().find(|(c, _)| *c == category) {
+            Some((_, n)) => *n += 1,
+            None => expected_grouped.push((category, 1)),
+        }
+    }
+    expected_grouped.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+
+    for field in ["updated_at_unix_ms", "created_at_unix_ms"] {
+        let implicit = groups(
+            client
+                .query(&format!(
+                    "SELECT COUNT(*), SUM(access_count), MIN(access_count), MAX(access_count) \
+                     FROM memory WHERE {field} >= 2000 AND {field} < 5000"
+                ))
+                .unwrap(),
+        );
+        assert_eq!(implicit.len(), 1, "{field}: the implicit bucket");
+        let values: Vec<ScanValue> = implicit[0].iter().map(|(_, v)| v.clone()).collect();
+        assert_eq!(values, expected_implicit, "{field}: COUNT/SUM/MIN/MAX");
+
+        let mut grouped: Vec<(ScanValue, i64)> = groups(
+            client
+                .query(&format!(
+                    "SELECT category, COUNT(*) FROM memory \
+                     WHERE {field} >= 2000 AND {field} < 5000 GROUP BY category"
+                ))
+                .unwrap(),
+        )
+        .into_iter()
+        .map(|g| match (&g[0].1, &g[1].1) {
+            (category, ScanValue::I64(n)) => (category.clone(), *n),
+            other => panic!("unexpected group shape {other:?}"),
+        })
+        .collect();
+        grouped.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+        assert_eq!(
+            grouped, expected_grouped,
+            "{field}: COUNT(*) GROUP BY category"
+        );
+    }
+
+    // An empty range: the implicit bucket still exists, at zero.
+    let none = groups(
+        client
+            .query("SELECT COUNT(*) FROM memory WHERE updated_at_unix_ms > 9000")
+            .unwrap(),
+    );
+    assert_eq!(
+        none,
+        vec![vec![("COUNT(*)".to_string(), ScanValue::I64(0))]]
+    );
+}
+
+/// `QPR-FR-005`/`QPR-FR-006` (3), acceptance criterion 5: `WHERE
+/// updated_at_unix_ms > v ORDER BY access_count` compiles to
+/// `FilteredPage`; its rows must be the **exact sequence** `page_rows`
+/// produces over the oracle rows and the identical sequence the
+/// never-indexed `created_at` twin returns — with and without `LIMIT`,
+/// after a runtime `Insert` into the range and a `Replace` re-keying a
+/// record out of it.
+#[test]
+fn filtered_page_over_a_range_returns_the_exact_sorted_sequence() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let expected = |client: &mut SchemaDrivenClient, limit: Option<usize>| {
+        let mut oracle = rows(client.query("SELECT * FROM memory").unwrap());
+        oracle.retain(|(_, f)| i64_field(f, "updated_at_unix_ms") > 1_000);
+        oracle.sort_by_key(|(id, f)| (i64_field(f, "access_count"), *id));
+        if let Some(n) = limit {
+            oracle.truncate(n);
+        }
+        oracle
+    };
+    let actual = |client: &mut SchemaDrivenClient, field: &str, limit: Option<usize>| {
+        let sql = match limit {
+            Some(n) => {
+                format!("SELECT * FROM memory WHERE {field} > 1000 ORDER BY access_count LIMIT {n}")
+            }
+            None => format!("SELECT * FROM memory WHERE {field} > 1000 ORDER BY access_count"),
+        };
+        rows(client.query(&sql).unwrap())
+    };
+    let check = |client: &mut SchemaDrivenClient, limit: Option<usize>, control: bool| {
+        let want = expected(client, limit);
+        let got = actual(client, "updated_at_unix_ms", limit);
+        assert_eq!(
+            got, want,
+            "LIMIT {limit:?}: exact sequence, fields included"
+        );
+        if control {
+            assert_eq!(
+                actual(client, "created_at_unix_ms", limit),
+                want,
+                "LIMIT {limit:?}: the never-indexed twin"
+            );
+        }
+        got.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+    };
+    let id = Uuid::from_u128;
+    assert_eq!(check(&mut client, Some(2), true), vec![id(2), id(3)]);
+    assert_eq!(
+        check(&mut client, None, true),
+        vec![id(2), id(3), id(4), id(5)]
+    );
+    client
+        .insert(Uuid::from_u128(6), &memory_fields(6, "general"))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, None, true),
+        vec![id(2), id(3), id(4), id(5), id(6)]
+    );
+    // Re-key id 2 below the bound: it leaves the page.
+    client
+        .replace(id(2), &memory_fields_updated_at(2, "preference", 500))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, None, false),
+        vec![id(3), id(4), id(5), id(6)]
+    );
+    assert_eq!(check(&mut client, Some(1), false), vec![id(3)]);
+}
+
+/// `QPR-FR-007`, acceptance criterion 5: a domain with no range field
+/// (`Dog`, `Entity`) still answers an ordering predicate from the full
+/// scan, exactly as before this round.
+#[test]
+fn an_ordering_predicate_on_a_domain_with_no_range_field_still_matches_the_full_scan() {
+    let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
+    let all = rows(dog.query("SELECT * FROM dog").unwrap());
+    let pivot = age_of(&all, all[0].0);
+    let mut oracle = all.clone();
+    oracle.retain(|(id, _)| age_of(&all, *id) > pivot);
+    oracle.sort_by_key(|(id, _)| *id);
+    let mut got = rows(
+        dog.query(&format!("SELECT * FROM dog WHERE age > {pivot}"))
+            .unwrap(),
+    );
+    got.sort_by_key(|(id, _)| *id);
+    assert_eq!(got, oracle);
+
+    let mut entity = SchemaDrivenClient::connect(start_entity_server()).unwrap();
+    let all = rows(entity.query("SELECT * FROM entity").unwrap());
+    let mut oracle = all.clone();
+    oracle.retain(|(_, f)| i64_field(f, "mention_count") >= 1);
+    oracle.sort_by_key(|(id, _)| *id);
+    let mut got = rows(
+        entity
+            .query("SELECT * FROM entity WHERE mention_count >= 1")
+            .unwrap(),
+    );
+    got.sort_by_key(|(id, _)| *id);
+    assert_eq!(got, oracle);
+}

@@ -23,6 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -316,6 +317,37 @@ pub trait ConnectionStore: Send + Sync {
             .collect()
     }
 
+    /// `QPR-FR-002` (ADR-0075): the one field this adapter keeps an
+    /// `Ordered` index (`ADR-0059`) over, if any — the field a `WHERE`
+    /// range can be walked on through [`Self::range_ids`] instead of
+    /// scanned. Server-side only, deliberately not a `FieldCapabilities`
+    /// flag: that is wire shape, and a client cannot act on the answer.
+    /// The default is `None` — `Dog`, `Order`, `Employee`, `Reminder`,
+    /// and `Entity` keep no such index; `Memory` and `Relation` answer
+    /// `updated_at_unix_ms`.
+    fn range_field(&self) -> Option<FieldRef> {
+        None
+    }
+
+    /// `QPR-FR-002` (ADR-0075): every id whose stored `field` value lies
+    /// within `lower..upper`, ascending by `(value, id)` — a range walk
+    /// of the `Ordered` index [`Self::range_field`] names, the same set
+    /// [`Self::page`] walks from a cursor. `Unsupported` for any other
+    /// field, `Malformed` for a bound whose value is not the field's
+    /// kind; `dispatch` reaches neither (it asks only for `range_field`'s
+    /// own tag, with literals `validate_predicate` has already
+    /// kind-checked) and treats any error as "walk refused, scan instead"
+    /// (`QPR-FR-004`). The default answers `Unsupported`, as
+    /// `range_field`'s default `None` implies.
+    fn range_ids(
+        &self,
+        _field: FieldRef,
+        _lower: Bound<ScanValue>,
+        _upper: Bound<ScanValue>,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `FPG-FR-003`/`FPG-FR-004` (ADR-0068, protocol 26): one ordered
     /// keyset page over only the rows every predicate in `filter`
     /// matches — [`Self::page`]'s own contract plus a `WHERE`-shaped
@@ -331,12 +363,15 @@ pub trait ConnectionStore: Send + Sync {
     /// [`page_rows`] over that already-filtered, already-materialized
     /// subset. The page's order is [`page_rows`]'s `(key, id)` order over
     /// the filtered *set*, so which plan gathered the set is invisible
-    /// here. `Memory`/`Relation`'s `Ordered` index (`ADR-0059`) is still
-    /// not consulted — the [`Self::page`]-fast-path's own unfiltered case
-    /// is untouched. A trait method, not inlined in `dispatch` (unlike
+    /// here. Since `QPR-FR-004` (ADR-0075) a range on `Memory`/
+    /// `Relation`'s `Ordered` field (`ADR-0059`) is walked, not scanned,
+    /// by that same candidate step — but the walk still reads every
+    /// in-range record before `page_rows` cuts the page; the O(page)
+    /// bounded walk from `max(cursor, lower)` is that design's own option
+    /// (b), not taken. The [`Self::page`] fast path's unfiltered case is
+    /// untouched. A trait method, not inlined in `dispatch` (unlike
     /// `Query`), so a future round can still override it for a domain
-    /// that can narrow further (the `Ordered` walk when the filter is on
-    /// the ordered field), the same shape [`Self::page`] already
+    /// that can narrow further, the same shape [`Self::page`] already
     /// established.
     fn filtered_page(
         &self,
@@ -906,40 +941,96 @@ enum QueryPlan {
     /// Position in `filter` of the `Eq` predicate whose field's declared
     /// index narrows the read.
     IndexEq(usize),
+    /// `QPR-FR-003` (ADR-0075): positions in `filter` of the predicates
+    /// supplying each bound of a walk over the adapter's `range_field` —
+    /// at least one `Some`; one `Eq` may supply both.
+    IndexRange {
+        lower: Option<usize>,
+        upper: Option<usize>,
+    },
 }
 
-/// `QPL-FR-001` (ADR-0073): the plan, from `schema` and `filter` alone —
-/// the first `Eq` predicate, in wire order, on a field `schema` reports
-/// `filter_eq: true` for; a full scan otherwise. Deterministic and
-/// value-blind: neither the table's size nor the literal is consulted
-/// (no cost model — `docs/design/SERVER-QUERY-PLANNER-DESIGN.md`'s own
-/// Non-goal). `validate_query` has already rejected unknown tags, so a
-/// tag `schema` lacks simply never plans.
-fn plan_query(schema: &DomainSchema, filter: &[Predicate]) -> QueryPlan {
-    filter
-        .iter()
-        .position(|p| {
-            p.op == protocol::CompareOp::Eq
-                && schema
-                    .fields
-                    .iter()
-                    .any(|f| f.tag == p.field && f.capabilities.filter_eq)
-        })
-        .map_or(QueryPlan::FullScan, QueryPlan::IndexEq)
+/// `QPL-FR-001` (ADR-0073) then `QPR-FR-003` (ADR-0075): the plan, from
+/// `schema`, the adapter's `range_field`, and `filter` alone. First the
+/// equality rule, unchanged — the first `Eq` predicate, in wire order,
+/// on a field `schema` reports `filter_eq: true` for. Only if no
+/// predicate qualifies, the range rule: on the field `range_field`
+/// names, the first `Gt`/`Ge`/`Eq` in wire order supplies the lower
+/// bound and the first `Lt`/`Le`/`Eq` the upper (one `Eq` may supply
+/// both; `Ne` never contributes); `IndexRange` if either side is found.
+/// A full scan otherwise. Equality-first is a compatibility rule, not a
+/// selectivity claim: every filter that planned `IndexEq` before
+/// `ADR-0075` still does, so the range path reaches only filters that
+/// full-scanned before. Deterministic and value-blind: neither the
+/// table's size nor the literals are consulted (no cost model, no bound
+/// tightening — both rounds' own Non-goal). `validate_query` has already
+/// rejected unknown tags, so a tag `schema` lacks simply never plans.
+fn plan_query(
+    schema: &DomainSchema,
+    range_field: Option<FieldRef>,
+    filter: &[Predicate],
+) -> QueryPlan {
+    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
+    if let Some(i) = filter.iter().position(|p| {
+        p.op == Eq
+            && schema
+                .fields
+                .iter()
+                .any(|f| f.tag == p.field && f.capabilities.filter_eq)
+    }) {
+        return QueryPlan::IndexEq(i);
+    }
+    let Some(field) = range_field else {
+        return QueryPlan::FullScan;
+    };
+    let first = |ops: &[protocol::CompareOp]| {
+        filter
+            .iter()
+            .position(|p| p.field == field && ops.contains(&p.op))
+    };
+    let lower = first(&[Gt, Ge, Eq]);
+    let upper = first(&[Lt, Le, Eq]);
+    if lower.is_none() && upper.is_none() {
+        return QueryPlan::FullScan;
+    }
+    QueryPlan::IndexRange { lower, upper }
 }
 
-/// `QPL-FR-002`/`QPL-FR-004` (ADR-0073): the rows `evaluate_query` will
-/// filter. `FullScan` is `scan_all` exactly as before. `IndexEq(i)` asks
-/// the adapter's own `filter_eq` for `filter[i]`'s bucket and reads each
-/// id back through `get`, dropping an id whose record vanished in
-/// between — the identical per-id drop every adapter's `scan_all`
-/// (`all_ids` then `get`) already performs, so the consistency class is
-/// unchanged. A `filter_eq` refusal on a field the schema claimed
-/// indexed (a `describe()`/`filter_eq` contract mismatch no shipped
-/// adapter has) falls back to the full scan rather than surfacing:
-/// `Query`'s error surface stays `validate_query`'s alone (`SQL-FR-007`).
-/// The index narrows what is read only — the caller still runs every
-/// predicate, `filter[i]` included, over what comes back (`QPL-FR-003`);
+/// `QPR-FR-004` (ADR-0075): the two `Bound`s a range walk takes, from the
+/// supplying predicates' comparators — `Gt`/`Lt` exclusive, `Ge`/`Le`/
+/// `Eq` inclusive, an absent side `Unbounded`. The literal is passed
+/// through as is; `validate_predicate` already matched its kind to the
+/// field's.
+fn range_bounds(
+    filter: &[Predicate],
+    lower: Option<usize>,
+    upper: Option<usize>,
+) -> (Bound<ScanValue>, Bound<ScanValue>) {
+    let bound = |i: Option<usize>| match i.map(|i| &filter[i]) {
+        None => Bound::Unbounded,
+        Some(p) if matches!(p.op, protocol::CompareOp::Gt | protocol::CompareOp::Lt) => {
+            Bound::Excluded(p.value.clone())
+        }
+        Some(p) => Bound::Included(p.value.clone()),
+    };
+    (bound(lower), bound(upper))
+}
+
+/// `QPL-FR-002`/`QPL-FR-004` (ADR-0073) and `QPR-FR-004` (ADR-0075): the
+/// rows `evaluate_query` will filter. `FullScan` is `scan_all` exactly
+/// as before. `IndexEq(i)` asks the adapter's own `filter_eq` for
+/// `filter[i]`'s bucket; `IndexRange` asks its `range_ids` for the walk
+/// between the supplying predicates' bounds (`range_bounds`). Either
+/// way each id is read back through `get`, dropping an id whose record
+/// vanished in between — the identical per-id drop every adapter's
+/// `scan_all` (`all_ids` then `get`) already performs, so the
+/// consistency class is unchanged. A refusal on a field the adapter
+/// claimed indexed (a `describe()`/`filter_eq` or `range_field`/
+/// `range_ids` contract mismatch no shipped adapter has) falls back to
+/// the full scan rather than surfacing: the error surface stays
+/// validation's alone (`SQL-FR-007`). The index narrows what is read
+/// only — the caller still runs every predicate, the supplying ones
+/// included, over what comes back (`QPL-FR-003`/`QPR-FR-005`);
 /// `Entity`'s `label` index is a normalized *superset* of exact `Eq`,
 /// and that re-check is what keeps `Query`'s `Eq` exact on every plan.
 fn query_candidates<S: ConnectionStore + ?Sized>(
@@ -947,11 +1038,23 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
     plan: QueryPlan,
     filter: &[Predicate],
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
-    let QueryPlan::IndexEq(i) = plan else {
-        return store.scan_all();
+    let ids = match plan {
+        QueryPlan::FullScan => return store.scan_all(),
+        QueryPlan::IndexEq(i) => {
+            let predicate = &filter[i];
+            store.filter_eq(predicate.field, &predicate.value)
+        }
+        QueryPlan::IndexRange { lower, upper } => {
+            // `plan_query` never builds an `IndexRange` with neither side;
+            // the scan is the honest answer if one ever appears.
+            let Some(i) = lower.or(upper) else {
+                return store.scan_all();
+            };
+            let (lower, upper) = range_bounds(filter, lower, upper);
+            store.range_ids(filter[i].field, lower, upper)
+        }
     };
-    let predicate = &filter[i];
-    match store.filter_eq(predicate.field, &predicate.value) {
+    match ids {
         Ok(ids) => ids
             .into_iter()
             .filter_map(|id| store.get(id).map(|fields| (id, fields)))
@@ -964,14 +1067,20 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
 /// shares — [`plan_query`] then [`query_candidates`] — so `Query`,
 /// `Aggregate`, the default [`ConnectionStore::filtered_page`], and
 /// `Join`'s left side all narrow the same way and none narrows
-/// differently. Callers keep re-checking every predicate over the
-/// result; this only decides what is read.
+/// differently. Since `QPR-FR-004` (ADR-0075) the plan also sees the
+/// adapter's [`ConnectionStore::range_field`], so all four gain the
+/// range walk here with no call-site change. Callers keep re-checking
+/// every predicate over the result; this only decides what is read.
 fn indexed_candidates<S: ConnectionStore + ?Sized>(
     store: &S,
     schema: &DomainSchema,
     filter: &[Predicate],
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
-    query_candidates(store, plan_query(schema, filter), filter)
+    query_candidates(
+        store,
+        plan_query(schema, store.range_field(), filter),
+        filter,
+    )
 }
 
 /// `PAG-FR-003` (ADR-0055): `Request::Page`'s validation, before any
@@ -1132,6 +1241,41 @@ pub fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate
         .iter()
         .find(|(field, _)| *field == predicate.field)
         .is_some_and(|(_, value)| compare(value, predicate.op, &predicate.value))
+}
+
+/// The two `(key, id)` bounds of one `Ordered` walk over a `Uuid`-keyed,
+/// `i64`-ordered record — what [`uuid_pair_bounds`] produces and
+/// `GenericProductionStore::range_by` takes.
+pub type UuidPairBounds = (Bound<(i64, RecordId)>, Bound<(i64, RecordId)>);
+
+/// `QPR-FR-002` (ADR-0075): the pair bounds an `Ordered<_, R, _>` walk
+/// takes, from the key bounds `dispatch` hands a `Uuid`-keyed adapter —
+/// "key ≥ k" is `Included((k, nil))`, "key > k" is `Excluded((k, max))`,
+/// "key ≤ k" is `Included((k, max))`, "key < k" is `Excluded((k, nil))`,
+/// exact because every real id lies within `nil()..=max()`. The generic
+/// layer's `RangeBy` takes pair bounds and knows no sentinel; this is
+/// where the id type is known. `Malformed` for a bound whose value is
+/// not `I64` — the kind both shipped range fields carry, and the one
+/// `validate_predicate` already guaranteed through `dispatch`.
+pub fn uuid_pair_bounds(
+    lower: Bound<ScanValue>,
+    upper: Bound<ScanValue>,
+) -> Result<UuidPairBounds, ErrorCode> {
+    let key = |value: ScanValue| match value {
+        ScanValue::I64(k) => Ok(k),
+        _ => Err(ErrorCode::Malformed),
+    };
+    let lower = match lower {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(v) => Bound::Included((key(v)?, RecordId::nil())),
+        Bound::Excluded(v) => Bound::Excluded((key(v)?, RecordId::max())),
+    };
+    let upper = match upper {
+        Bound::Unbounded => Bound::Unbounded,
+        Bound::Included(v) => Bound::Included((key(v)?, RecordId::max())),
+        Bound::Excluded(v) => Bound::Excluded((key(v)?, RecordId::nil())),
+    };
+    Ok((lower, upper))
 }
 
 /// `validate_query` already refused an ordering comparator against a
@@ -4589,18 +4733,18 @@ mod tests {
     fn plan_query_picks_the_first_indexed_equality_or_a_full_scan() {
         let schema = planner_schema();
         let str_x = || ScanValue::Str("x".into());
-        assert_eq!(plan_query(&schema, &[]), QueryPlan::FullScan);
+        assert_eq!(plan_query(&schema, None, &[]), QueryPlan::FullScan);
         assert_eq!(
-            plan_query(&schema, &[eq(2, str_x())]),
+            plan_query(&schema, None, &[eq(2, str_x())]),
             QueryPlan::IndexEq(0)
         );
         assert_eq!(
-            plan_query(&schema, &[eq(3, ScanValue::U32(1)), eq(2, str_x())]),
+            plan_query(&schema, None, &[eq(3, ScanValue::U32(1)), eq(2, str_x())]),
             QueryPlan::IndexEq(0),
             "two eligible predicates: the first in wire order"
         );
         assert_eq!(
-            plan_query(&schema, &[eq(1, ScanValue::U32(1))]),
+            plan_query(&schema, None, &[eq(1, ScanValue::U32(1))]),
             QueryPlan::FullScan,
             "Eq on a filter_eq: false field"
         );
@@ -4614,6 +4758,7 @@ mod tests {
             assert_eq!(
                 plan_query(
                     &schema,
+                    None,
                     &[Predicate {
                         field: 3,
                         op,
@@ -4627,6 +4772,7 @@ mod tests {
         assert_eq!(
             plan_query(
                 &schema,
+                None,
                 &[
                     Predicate {
                         field: 3,
@@ -4640,7 +4786,7 @@ mod tests {
             "an ineligible predicate ahead of an eligible one"
         );
         assert_eq!(
-            plan_query(&schema, &[eq(99, ScanValue::U32(1))]),
+            plan_query(&schema, None, &[eq(99, ScanValue::U32(1))]),
             QueryPlan::FullScan,
             "a tag the schema lacks (validate_query already rejected it)"
         );
@@ -4653,6 +4799,11 @@ mod tests {
     /// Schema is [`planner_schema`]; rows are [`sql_test_rows`].
     struct PlannerFixture {
         index: Result<Vec<RecordId>, ErrorCode>,
+        /// `QPR-FR-002` (ADR-0075): the field the fixture's sorted index
+        /// is over, if any, and whether `range_ids` refuses despite
+        /// declaring it (the contract-mismatch fallback case).
+        range_field: Option<FieldRef>,
+        range_refuses: bool,
         gets: std::sync::atomic::AtomicUsize,
         scans: std::sync::atomic::AtomicUsize,
     }
@@ -4661,8 +4812,26 @@ mod tests {
         fn with_index(index: Result<Vec<RecordId>, ErrorCode>) -> Self {
             Self {
                 index,
+                range_field: None,
+                range_refuses: false,
                 gets: Default::default(),
                 scans: Default::default(),
+            }
+        }
+        /// An equality index that refuses and an exact sorted index over
+        /// `field` (`Ordered`'s shape: every row's `(value, id)`, walked
+        /// between the bounds).
+        fn with_range(field: FieldRef) -> Self {
+            Self {
+                range_field: Some(field),
+                ..Self::with_index(Err(ErrorCode::Unsupported))
+            }
+        }
+        /// Declares `field` range-indexed but refuses every walk.
+        fn with_refusing_range(field: FieldRef) -> Self {
+            Self {
+                range_refuses: true,
+                ..Self::with_range(field)
             }
         }
         fn gets(&self) -> usize {
@@ -4692,6 +4861,41 @@ mod tests {
             _value: &ScanValue,
         ) -> Result<Vec<RecordId>, ErrorCode> {
             self.index.clone()
+        }
+        fn range_field(&self) -> Option<FieldRef> {
+            self.range_field
+        }
+        /// The rows whose `U32` value of `field` lies within the bounds,
+        /// ascending by `(value, id)` — what `Ordered::range_by` answers
+        /// for a real domain.
+        fn range_ids(
+            &self,
+            field: FieldRef,
+            lower: Bound<ScanValue>,
+            upper: Bound<ScanValue>,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            use std::ops::RangeBounds;
+            if self.range_refuses || Some(field) != self.range_field {
+                return Err(ErrorCode::Unsupported);
+            }
+            let key = |b: Bound<ScanValue>| match b {
+                Bound::Unbounded => Bound::Unbounded,
+                Bound::Included(ScanValue::U32(v)) => Bound::Included(v),
+                Bound::Excluded(ScanValue::U32(v)) => Bound::Excluded(v),
+                other => panic!("the fixture's range field is U32, got {other:?}"),
+            };
+            let range = (key(lower), key(upper));
+            let mut keyed: Vec<(u32, RecordId)> = sql_test_rows()
+                .into_iter()
+                .filter_map(
+                    |(id, fields)| match fields.iter().find(|(f, _)| *f == field)?.1 {
+                        ScanValue::U32(v) if range.contains(&v) => Some((v, id)),
+                        _ => None,
+                    },
+                )
+                .collect();
+            keyed.sort();
+            Ok(keyed.into_iter().map(|(_, id)| id).collect())
         }
         fn scan_field(&self, _field: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
             Err(ErrorCode::Unsupported)
@@ -4766,7 +4970,7 @@ mod tests {
             RecordId::from_u128(3),
         ]));
         let filter = [labrador()];
-        let plan = plan_query(&store.describe(), &filter);
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
         assert_eq!(plan, QueryPlan::IndexEq(0));
         let candidates = query_candidates(&store, plan, &filter);
         assert_eq!(
@@ -5026,6 +5230,365 @@ mod tests {
         assert_eq!(a[0].left, vec![(2, ScanValue::Str("labrador".into()))]);
         assert_eq!(a[0].right.len(), 1);
         assert_eq!(a[0].right[0].0, 1);
+    }
+
+    fn u32_pred(field: FieldRef, op: CompareOp, value: u32) -> Predicate {
+        Predicate {
+            field,
+            op,
+            value: ScanValue::U32(value),
+        }
+    }
+
+    /// `QPR-FR-003` (ADR-0075), acceptance criterion 2: with no range
+    /// field every ordering predicate still plans a full scan; with one,
+    /// each comparator supplies its side, an `Eq` both, `Ne` neither, a
+    /// second lower bound is ignored (no tightening), an eligible
+    /// equality wins over any range (compatibility), and an ineligible
+    /// predicate ahead of the bound leaves the bound's own position.
+    #[test]
+    fn plan_query_walks_a_range_only_after_the_equality_rule() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        let schema = planner_schema();
+        let range = |lower, upper| QueryPlan::IndexRange { lower, upper };
+        for op in [Lt, Le, Gt, Ge] {
+            assert_eq!(
+                plan_query(&schema, None, &[u32_pred(1, op, 1)]),
+                QueryPlan::FullScan,
+                "{op:?} with no range field stays a full scan"
+            );
+        }
+        let f = Some(1);
+        assert_eq!(plan_query(&schema, f, &[]), QueryPlan::FullScan);
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Gt, 1)]),
+            range(Some(0), None)
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Ge, 1)]),
+            range(Some(0), None)
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Lt, 1)]),
+            range(None, Some(0))
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Le, 1)]),
+            range(None, Some(0))
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Ge, 1), u32_pred(1, Le, 9)]),
+            range(Some(0), Some(1))
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Eq, 5)]),
+            range(Some(0), Some(0)),
+            "an Eq on the (not filter_eq) range field is a one-key walk"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Ne, 5)]),
+            QueryPlan::FullScan
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(3, Gt, 1)]),
+            QueryPlan::FullScan,
+            "an ordering predicate on a field that is not the range field"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Gt, 1), u32_pred(1, Gt, 5)]),
+            range(Some(0), None),
+            "two lower bounds: the first in wire order, no tightening"
+        );
+        assert_eq!(
+            plan_query(
+                &schema,
+                f,
+                &[u32_pred(1, Gt, 1), eq(2, ScanValue::Str("x".into()))]
+            ),
+            QueryPlan::IndexEq(1),
+            "an eligible equality anywhere in the filter wins over a range"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(3, Ne, 1), u32_pred(1, Lt, 9)]),
+            range(None, Some(1)),
+            "an ineligible predicate ahead of the bound"
+        );
+    }
+
+    /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's
+    /// bound, and `Unbounded` for an absent side.
+    #[test]
+    fn range_bounds_maps_each_comparator_to_its_bound() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt};
+        let filter = [
+            u32_pred(1, Gt, 1),
+            u32_pred(1, Ge, 2),
+            u32_pred(1, Lt, 3),
+            u32_pred(1, Le, 4),
+            u32_pred(1, Eq, 5),
+        ];
+        assert_eq!(
+            range_bounds(&filter, Some(0), Some(2)),
+            (
+                Bound::Excluded(ScanValue::U32(1)),
+                Bound::Excluded(ScanValue::U32(3))
+            )
+        );
+        assert_eq!(
+            range_bounds(&filter, Some(1), Some(3)),
+            (
+                Bound::Included(ScanValue::U32(2)),
+                Bound::Included(ScanValue::U32(4))
+            )
+        );
+        assert_eq!(
+            range_bounds(&filter, Some(4), Some(4)),
+            (
+                Bound::Included(ScanValue::U32(5)),
+                Bound::Included(ScanValue::U32(5))
+            )
+        );
+        assert_eq!(
+            range_bounds(&filter, Some(0), None),
+            (Bound::Excluded(ScanValue::U32(1)), Bound::Unbounded)
+        );
+        assert_eq!(
+            range_bounds(&filter, None, Some(3)),
+            (Bound::Unbounded, Bound::Included(ScanValue::U32(4)))
+        );
+    }
+
+    /// `QPR-FR-004`, acceptance criterion 4: the range path reads exactly
+    /// the walked ids through `get` and never scans — one-sided,
+    /// two-sided, and the one-key `Eq` walk.
+    #[test]
+    fn query_candidates_range_path_reads_only_the_walked_ids() {
+        use CompareOp::{Eq, Ge, Gt, Lt};
+        let store = PlannerFixture::with_range(1);
+        let filter = [u32_pred(1, Gt, 3)];
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
+        assert_eq!(
+            plan,
+            QueryPlan::IndexRange {
+                lower: Some(0),
+                upper: None
+            }
+        );
+        let candidates = query_candidates(&store, plan, &filter);
+        assert_eq!(store.gets(), 2, "one get per walked id");
+        assert_eq!(store.scans(), 0, "the range path never scans");
+        assert_eq!(
+            candidates.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![RecordId::from_u128(2), RecordId::from_u128(3)],
+            "field 1 > 3: the poodle (5) then the labrador (9), in key order"
+        );
+
+        let store = PlannerFixture::with_range(1);
+        let filter = [u32_pred(1, Ge, 5), u32_pred(1, Lt, 9)];
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
+        assert_eq!(
+            ids_of(&query_candidates(&store, plan, &filter)),
+            vec![RecordId::from_u128(2)],
+            "5 <= field 1 < 9"
+        );
+        assert_eq!((store.gets(), store.scans()), (1, 0));
+
+        let store = PlannerFixture::with_range(1);
+        let filter = [u32_pred(1, Eq, 9)];
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
+        assert_eq!(
+            ids_of(&query_candidates(&store, plan, &filter)),
+            vec![RecordId::from_u128(3)],
+            "field 1 = 9 as a one-key walk"
+        );
+        assert_eq!((store.gets(), store.scans()), (1, 0));
+    }
+
+    /// `QPR-FR-004`, acceptance criterion 4: a `range_ids` refusal on a
+    /// field the adapter declared range-indexed falls back to one full
+    /// scan with the identical result — and, through `dispatch`, a
+    /// `Response::Rows`, never an error.
+    #[test]
+    fn query_candidates_range_refusal_falls_back_to_a_full_scan_without_an_error() {
+        let store = PlannerFixture::with_refusing_range(1);
+        let filter = [u32_pred(1, CompareOp::Gt, 3)];
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
+        assert!(matches!(plan, QueryPlan::IndexRange { .. }));
+        let candidates = query_candidates(&store, plan, &filter);
+        assert_eq!(store.scans(), 1);
+        assert_eq!(store.gets(), 0);
+        assert_eq!(ids_of(&candidates), ids_of(&sql_test_rows()));
+
+        match dispatch(
+            &store,
+            Request::Query {
+                select: Selection::All,
+                filter: filter.to_vec(),
+                limit: None,
+            },
+        ) {
+            Response::Rows { rows } => assert_eq!(
+                ids_of(&rows),
+                vec![RecordId::from_u128(2), RecordId::from_u128(3)]
+            ),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    /// `QPR-FR-005` (ADR-0075), acceptance criterion 4: every consumer —
+    /// `Query` rows, `Aggregate` groups, the `filtered_page` default's
+    /// exact sequence, `evaluate_join`'s pairs — returns the same result
+    /// through the range walk as through the full scan, the walk never
+    /// scanning; and a contradictory range answers zero rows, not an
+    /// error.
+    #[test]
+    fn every_consumer_returns_the_same_result_on_the_range_walk_and_the_scan() {
+        use CompareOp::{Ge, Gt, Lt};
+        let filter = vec![u32_pred(1, Ge, 5)];
+        let walked = || PlannerFixture::with_range(1);
+        let scanned = || PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+
+        // Query.
+        let rows_of = |response| match response {
+            Response::Rows { mut rows } => {
+                rows.sort_by_key(|(id, _)| *id);
+                rows
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        };
+        let request = || Request::Query {
+            select: Selection::All,
+            filter: filter.clone(),
+            limit: None,
+        };
+        let (a, b) = (walked(), scanned());
+        let (ra, rb) = (
+            rows_of(dispatch(&a, request())),
+            rows_of(dispatch(&b, request())),
+        );
+        assert_eq!(ra, rb);
+        assert_eq!(
+            ids_of(&ra),
+            vec![RecordId::from_u128(2), RecordId::from_u128(3)]
+        );
+        assert_eq!((a.scans(), a.gets()), (0, 2));
+        assert_eq!(b.scans(), 1);
+
+        // Aggregate.
+        let groups_of = |response| match response {
+            Response::Groups { mut groups } => {
+                groups.sort_by(|a, b| format!("{:?}", a.key).cmp(&format!("{:?}", b.key)));
+                groups
+            }
+            other => panic!("expected Groups, got {other:?}"),
+        };
+        let request = || Request::Aggregate {
+            group_by: vec![2],
+            filter: filter.clone(),
+            aggregates: vec![
+                AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                },
+                AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(1),
+                },
+            ],
+            limit: None,
+        };
+        let (a, b) = (walked(), scanned());
+        let (ga, gb) = (
+            groups_of(dispatch(&a, request())),
+            groups_of(dispatch(&b, request())),
+        );
+        assert_eq!(ga, gb);
+        assert_eq!(ga.len(), 2, "labrador (9) and poodle (5)");
+        assert_eq!(a.scans(), 0);
+
+        // The filtered_page default: the identical sequence.
+        let (a, b) = (walked(), scanned());
+        let pa = a.filtered_page(1, None, 10, &filter).unwrap();
+        let pb = b.filtered_page(1, None, 10, &filter).unwrap();
+        assert_eq!(pa, pb);
+        assert_eq!(
+            pa.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![RecordId::from_u128(2), RecordId::from_u128(3)]
+        );
+        assert_eq!(a.scans(), 0);
+
+        // Join: the left side walks; the 1 — 3 edge yields (3, 1) only.
+        let spec = JoinSpec {
+            relation: JoinRelation::Neighbors(None),
+            right_table: None,
+            left: Selection::Fields(vec![2]),
+            right: Selection::Fields(vec![1]),
+            left_filter: filter.clone(),
+            right_filter: vec![],
+            limit: None,
+        };
+        let pair_ids = |rows: &[JoinedRow]| {
+            let mut ids: Vec<(RecordId, RecordId)> =
+                rows.iter().map(|r| (r.left_id, r.right_id)).collect();
+            ids.sort();
+            ids
+        };
+        let (a, b) = (walked(), scanned());
+        let ja = evaluate_join(&a, &a, &spec);
+        let jb = evaluate_join(&b, &b, &spec);
+        assert_eq!(pair_ids(&ja), pair_ids(&jb));
+        assert_eq!(
+            pair_ids(&ja),
+            vec![(RecordId::from_u128(3), RecordId::from_u128(1))]
+        );
+        assert_eq!(a.scans(), 0);
+
+        // A contradictory range is data, not an error.
+        let a = walked();
+        match dispatch(
+            &a,
+            Request::Query {
+                select: Selection::All,
+                filter: vec![u32_pred(1, Gt, 9), u32_pred(1, Lt, 3)],
+                limit: None,
+            },
+        ) {
+            Response::Rows { rows } => assert!(rows.is_empty()),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+        assert_eq!(a.scans(), 0);
+    }
+
+    /// `QPR-FR-002` (ADR-0075): the key-to-pair mapping every `Uuid`-keyed
+    /// adapter uses — exact at every key because `nil()`/`max()` bracket
+    /// every real id — and `Malformed` for a non-`I64` bound.
+    #[test]
+    fn uuid_pair_bounds_bracket_each_key_with_the_id_sentinels() {
+        let (nil, max) = (RecordId::nil(), RecordId::max());
+        let i = |k| ScanValue::I64(k);
+        assert_eq!(
+            uuid_pair_bounds(Bound::Included(i(5)), Bound::Excluded(i(9))).unwrap(),
+            (Bound::Included((5, nil)), Bound::Excluded((9, nil)))
+        );
+        assert_eq!(
+            uuid_pair_bounds(Bound::Excluded(i(5)), Bound::Included(i(9))).unwrap(),
+            (Bound::Excluded((5, max)), Bound::Included((9, max)))
+        );
+        assert_eq!(
+            uuid_pair_bounds(Bound::Unbounded, Bound::Unbounded).unwrap(),
+            (Bound::Unbounded, Bound::Unbounded)
+        );
+        assert_eq!(
+            uuid_pair_bounds(Bound::Included(ScanValue::U32(5)), Bound::Unbounded),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            uuid_pair_bounds(
+                Bound::Unbounded,
+                Bound::Excluded(ScanValue::Str("x".into()))
+            ),
+            Err(ErrorCode::Malformed)
+        );
     }
 
     /// `SQL-FR-006`: an empty filter matches every row; a filter matching
