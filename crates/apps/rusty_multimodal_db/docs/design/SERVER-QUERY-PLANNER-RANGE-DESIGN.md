@@ -1,8 +1,10 @@
-# Server Query Planner, Step Three: A Range Path Through the `Ordered` Index (Proposed)
+# Server Query Planner, Step Three: A Range Path Through the `Ordered` Index (Accepted)
 
-- Status: **Proposed** (2026-09-20). Design only in this PR;
-  implementation is the next round, on its own branch, once the owner
-  picks an option (see "Considered options").
+- Status: **Accepted as designed** (2026-09-20, `ADR-0075`, option (a)
+  — the range candidate step for every consumer through the shared
+  helper; (b) the O(page) `FilteredPage` walk on top and (c) decline,
+  both declined). Design only in this PR; implementation is the next
+  round, on its own branch.
 - Date: 2026-09-20
 - Related: `ADR-0073`/`docs/design/SERVER-QUERY-PLANNER-DESIGN.md`
   (step one — its own Non-goals name "Range predicates via the
@@ -632,3 +634,9 @@ session as having covered it.
   `QPR-FR-001`'s guard necessary and the `R::Id`-has-no-`MIN`/`MAX`
   fact that puts the sentinel mapping in the adapter rather than the
   generic layer.
+- 2026-09-20: the owner picked option (a) the same session, before the
+  design PR (#273) merged; recorded here and in `ADR-0075`.
+  Implementation to follow on its own branch — Claude as builder
+  (Codex's sandbox still cannot spawn processes), with independent
+  Codex inspection of both this design and the code owed once that is
+  restored.

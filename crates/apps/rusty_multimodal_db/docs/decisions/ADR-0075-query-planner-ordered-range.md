@@ -1,8 +1,10 @@
 # ADR-0075: Query Planner Step Three — A Range Path Through the `Ordered` Index
 
-- Status: **Proposed** (2026-09-20). Design only in this PR;
-  implementation follows on its own branch once the owner picks an
-  option below.
+- Status: **Accepted as designed** (2026-09-20 — the owner picked
+  option (a): the range candidate step for every consumer through the
+  shared helper; (b) the O(page) `FilteredPage` walk on top and (c)
+  decline both declined). Design only in this PR; implementation
+  follows on its own branch.
 - Date: 2026-09-20
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-PLANNER-RANGE-DESIGN.md` (the full
@@ -126,8 +128,11 @@ The fork, held for the owner:
 
 ## Acceptance and implementation
 
-- 2026-09-20: proposed, design only. Implementation, once an option is
-  picked, extends `SERVER-001` at its next minor (`FR-072` on
+- 2026-09-20: proposed, design only.
+- 2026-09-20: the owner picked option (a) the same session, recorded in
+  the design PR (#273) before merge (the `ADR-0073`/`ADR-0074`
+  precedent). Implementation not yet started — it follows on its own
+  branch, extending `SERVER-001` at its next minor (`FR-072` on
   `FR-070`/`FR-071`), with `QPR-FR-005`'s per-consumer, per-domain
   proofs and acceptance criterion 7's measurement as its exit gate.
   Builder: Claude directly, under the host-takeover convention;
