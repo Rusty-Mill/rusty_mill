@@ -634,6 +634,35 @@ fn range_filter(field: FieldRef) -> Vec<Predicate> {
     ]
 }
 
+/// `ADR-0076` acceptance criterion: the `since`-shaped listing — one
+/// lower bound admitting ~99% of the table (`field >= 1_000`), paged 50
+/// at a time by the same field. Under `ADR-0075` alone the walk reads
+/// every in-range record before `page_rows` cuts the page; the bounded
+/// walk reads the page. `created_at_unix_ms` is the full-scan control.
+const PLANNER_SINCE: i64 = 1_000;
+
+fn since_filter(field: FieldRef) -> Vec<Predicate> {
+    vec![Predicate {
+        field,
+        op: CompareOp::Ge,
+        value: ScanValue::I64(PLANNER_SINCE),
+    }]
+}
+
+/// The `since`-shaped page alone — `Query`/`Aggregate` over ~99,000 rows
+/// would measure response shipping, not the planner.
+fn since_page_request(field: FieldRef) -> [(&'static str, Request); 1] {
+    [(
+        "fpage-50",
+        Request::FilteredPage {
+            order_by: FIELD_UPDATED_AT,
+            after: None,
+            limit: 50,
+            filter: since_filter(field),
+        },
+    )]
+}
+
 /// The three planner consumers this benchmark measures, each with the
 /// identical 1%-selective equality on `field`: `Query` (`ADR-0073`),
 /// and `Aggregate` / `FilteredPage` (`ADR-0074`). `Join` is not measured
@@ -679,12 +708,12 @@ fn planner_requests(filter: Vec<Predicate>) -> [(&'static str, Request); 3] {
 /// the planner's field and with its never-indexed twin holding identical
 /// values, the counts asserted equal — the planner changes what is read,
 /// not what is returned.
-fn measure_planner_pair(
+fn measure_planner_pair<const N: usize>(
     addr: SocketAddr,
     plan: &str,
-    indexed_requests: [(&'static str, Request); 3],
+    indexed_requests: [(&'static str, Request); N],
     indexed_clause: &str,
-    control_requests: [(&'static str, Request); 3],
+    control_requests: [(&'static str, Request); N],
     control_clause: &str,
 ) {
     for ((label, indexed_request), (_, control_request)) in
@@ -737,5 +766,15 @@ fn bench_query_planner() {
         "WHERE 50000 <= updated_at_unix_ms < 51000",
         planner_requests(range_filter(FIELD_CREATED_AT)),
         "WHERE 50000 <= created_at_unix_ms < 51000",
+    );
+    // `ADR-0076`: the `since`-shaped page — a bound admitting ~99% of
+    // the table, paged by the same field.
+    measure_planner_pair(
+        addr,
+        "index-since",
+        since_page_request(FIELD_UPDATED_AT),
+        "WHERE updated_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms",
+        since_page_request(FIELD_CREATED_AT),
+        "WHERE created_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms",
     );
 }

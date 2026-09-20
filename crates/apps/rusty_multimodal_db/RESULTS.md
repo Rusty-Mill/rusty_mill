@@ -1410,6 +1410,48 @@ planner still walks and saves nothing — no cost model, `QPR-FR-003`);
 `uuid_pair_bounds` + `range_by` path with no domain-specific code; and
 `Join`, whose left side is exactly the `Query` fetch above.
 
+## Filtered page, the bounded walk — the `since`-shaped listing before and after (`ADR-0076`, `SERVER-001` v0.61.0 / FR-073)
+
+`docs/design/SERVER-FILTERED-PAGE-WALK-DESIGN.md`'s acceptance criterion
+5, measured by a new `memory-planner` `index-since` row in
+`benches/server.rs` — the same 100,000-record `Memory` table, one
+connection, one untimed warm-up, 20 timed round trips — added and run on
+the pre-change code (`main` after `ADR-0075`) **first**, then again with
+this round's override, so the before/after is one harness on one
+machine in one session. The request is the `since` shape: `FilteredPage
+{ order_by: updated_at_unix_ms, after: None, limit: 50, filter:
+[updated_at_unix_ms >= 1000] }` — a bound admitting ~99,000 of the
+100,000 records, paged by the same field. The control is the identical
+request on `created_at_unix_ms` (identical values, never range-indexed
+— a full scan either way). This session's Windows development machine,
+`std::thread::available_parallelism()` = 24, 2026-09-20.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0075` alone) | `IndexRange` walk, then `page_rows` | `WHERE updated_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **123,436.1** |
+| | `FullScan` (control) | `WHERE created_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | 146,098.2 |
+| After (`ADR-0076`) | bounded walk (`page_by` + prefix cut) | `WHERE updated_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **89.4** |
+| | `FullScan` (control) | `WHERE created_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | 143,975.6 |
+
+**Read it as**: before, the range walk saved nothing here — it named
+~99,000 ids and the server decoded all of them before `page_rows` sorted
+and cut 50, landing within sight of the full-scan control (the
+difference is the control's extra sort key materialization). After, the
+same request costs ~1,380× less: the walk starts at the composed
+cursor, reads 50 records, and stops — the unfiltered `Page` cost
+`ADR-0059` measured, plus the predicate re-check. The 1%-selective
+`index-range` `fpage-50` row (`## Query planner step three`) is also
+eligible for the walk and moved with it in the same run: 498.9 µs
+(1,000 records read, then paged) to 80.1 µs (50 read) — a second,
+unlooked-for ~6× on the page `ADR-0075` had already sped up ~179×;
+its `query`/`count(*)` siblings, which are not pages, are unchanged
+(538.6 / 418.9 µs). Every `index-eq` row is unchanged too, as it must
+be: an equality on `category` is not a bound on the ordered field.
+Not measured, named plainly: a *mixed* filter (`… AND category = …`),
+which stays on the `ADR-0075` path and pays the before number — this
+round's own option (b); and `Relation`, which routes through the
+identical `bounded_filtered_page` over `UpdatedAtField`.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

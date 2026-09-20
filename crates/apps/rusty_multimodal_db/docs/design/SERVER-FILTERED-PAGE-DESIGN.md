@@ -424,7 +424,12 @@ clippy --all-features -- -D warnings` clean.
   **Resolved: not this round**, exactly as recommended — the shared
   default gives a correct, if not maximally fast, answer for every
   domain including this case; a targeted optimization for one narrow
-  predicate shape stays a separable follow-on, not a blocker.
+  predicate shape stays a separable follow-on, not a blocker. *That
+  follow-on landed as `ADR-0076` (2026-09-20): `Memory`/`Relation`
+  override `filtered_page` with the bounded `page_by` walk when
+  `order_by` is the range field and every predicate is a bound on it,
+  and answer every other shape through this design's default body,
+  factored into `filtered_page_by_candidates`.*
 - **Is `page_rows`/`page_ids`'s existing selection helper directly
   reusable over an already-filtered `Vec<PageRow>`, or does it need a
   small signature adjustment?** **Resolved: directly reusable, no

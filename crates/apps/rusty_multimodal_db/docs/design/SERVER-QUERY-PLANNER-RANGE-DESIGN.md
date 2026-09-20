@@ -608,7 +608,8 @@ session as having covered it.
 ## Open questions
 
 - **The O(page) `FilteredPage` walk** — option (b); if (a) is picked,
-  the next slice.
+  the next slice. *Taken: `ADR-0076` (2026-09-20), the round after this
+  one — `docs/design/SERVER-FILTERED-PAGE-WALK-DESIGN.md`.*
 - **A wire-visible range capability** — the `FieldCapabilities` flag,
   when a client has a reason to see it; a protocol round.
 - **Descending walks** — `ORDER BY … DESC` on the wire, then
