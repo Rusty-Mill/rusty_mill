@@ -105,6 +105,8 @@ jobs:
       full: ${{ steps.plan.outputs.full }}
       packages: ${{ steps.plan.outputs.packages }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
+      term_web: ${{ steps.plan.outputs.term_web }}
+      key_desktop: ${{ steps.plan.outputs.key_desktop }}
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +127,8 @@ jobs:
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
+            echo "term_web=true" >> "$GITHUB_OUTPUT"
+            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -140,6 +144,8 @@ jobs:
             echo "full=true" >> "$GITHUB_OUTPUT"
             echo "packages=" >> "$GITHUB_OUTPUT"
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
+            echo "term_web=true" >> "$GITHUB_OUTPUT"
+            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -152,6 +158,8 @@ jobs:
               echo "full=true" >> "$GITHUB_OUTPUT"
               echo "packages=" >> "$GITHUB_OUTPUT"
               echo "dashboard=true" >> "$GITHUB_OUTPUT"
+              echo "term_web=true" >> "$GITHUB_OUTPUT"
+              echo "key_desktop=true" >> "$GITHUB_OUTPUT"
               echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -165,6 +173,22 @@ jobs:
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
           else
             echo "dashboard=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Same for rusty_term's vendored web front end (Vite/React): not
+          # a Cargo crate, so gate its build job on its own path too.
+          if echo "$changed" | grep -q '^crates/libs/ui/rusty_term/web/'; then
+            echo "term_web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "term_web=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # And rusty_key's Tauri front end (Vite/Solid), the third
+          # vendored npm app -- same gate, same reason.
+          if echo "$changed" | grep -q '^crates/apps/rusty_key/desktop/'; then
+            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "key_desktop=false" >> "$GITHUB_OUTPUT"
           fi
 
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
@@ -430,6 +454,52 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build
       - run: npm test
+
+  # rusty_term's web front end: a vendored Vite/React app (not a Cargo
+  # crate). Build only -- `tsc -b && vite build` -- so a dependency bump
+  # (Dependabot's, in particular) is proven to compile and bundle before
+  # it merges. Its `npm test` is a Playwright end-to-end run that needs a
+  # live bridge and browsers; deliberately not run here.
+  rusty-term-web:
+    name: rusty_term web (npm build)
+    needs: plan
+    if: needs.plan.outputs.term_web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/libs/ui/rusty_term/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/libs/ui/rusty_term/web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+
+  # rusty_key's desktop front end: a vendored Vite/Solid app inside a
+  # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build
+  # only -- `npm run build` bundles the web assets without needing the
+  # Tauri toolchain -- so a dependency bump is proven to compile and
+  # bundle before it merges. No test script exists there.
+  rusty-key-desktop:
+    name: rusty_key desktop (npm build)
+    needs: plan
+    if: needs.plan.outputs.key_desktop == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_key/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_key/desktop/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
 
   # rusty_win32 is deliberately Windows-only and edition 2021 for MSRV
   # reasons (see crates/foundation/rusty_win32/Cargo.toml) — this mirrors its own CI's
