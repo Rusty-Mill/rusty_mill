@@ -338,7 +338,14 @@ mod tests {
         let paths: Vec<&PathBuf> = roots.iter().map(|r| &r.root).collect();
         assert!(paths.contains(&&cwd));
         assert!(paths.contains(&&extra));
-        assert!(paths.contains(&&PathBuf::from("/tmp"))); // unix
+        // `/tmp` is a Unix convention: `writable_roots_impl` adds it only
+        // under `cfg!(unix)`, so mirror that gate here instead of asserting
+        // it unconditionally (which failed every Windows run).
+        assert_eq!(
+            paths.contains(&&PathBuf::from("/tmp")),
+            cfg!(unix),
+            "/tmp is a writable root exactly on Unix"
+        );
         assert!(paths.contains(&&tmpdir));
 
         // The cwd root carves out a read-only `.git`.
