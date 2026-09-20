@@ -1357,6 +1357,59 @@ lookups this round does not touch), and the *k* ≈ *n* case where the
 planner still takes an index that saves nothing (`ADR-0073`'s own
 named Non-goal, unchanged).
 
+## Query planner step three — a range path through the `Ordered` index (`ADR-0075`, `SERVER-001` v0.60.0 / FR-072)
+
+`docs/design/SERVER-QUERY-PLANNER-RANGE-DESIGN.md`'s acceptance
+criterion 7, measured by the same `benches/server.rs` `memory-planner`
+harness as steps one and two — the same 100,000-record `Memory` table,
+the same one connection, one untimed warm-up, 20 timed round trips —
+extended with an `index-range` pair. The fixture already sets
+`created_at_unix_ms = updated_at_unix_ms = n` for record *n*, so the
+two-sided range `50000 <= field < 51000` names exactly 1,000 records
+(1% of the table) on either field: `updated_at_unix_ms` is the one field
+`Memory`'s `Ordered` index (`ADR-0059`) is over, so the planner's own
+rule (`QPR-FR-003`) plans `IndexRange` and walks the `BTreeSet` between
+the bounds; `created_at_unix_ms` is never range-indexed, so the identical
+request plans `FullScan` — the equal-selectivity control, no test-only
+hook. The `index-eq` rows are re-measured in the same run so the two
+plans are comparable to each other. This session's Windows development
+machine, `std::thread::available_parallelism()` = 24, 2026-09-20.
+
+| Consumer | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| `Query` | `IndexRange` | `WHERE 50000 <= updated_at_unix_ms < 51000` | 1,000 rows | **543.6** |
+| | `FullScan` (control) | `WHERE 50000 <= created_at_unix_ms < 51000` | 1,000 rows | **94,205.6** |
+| `Aggregate` | `IndexRange` | `COUNT(*) WHERE 50000 <= updated_at_unix_ms < 51000` | 1 group | **400.6** |
+| | `FullScan` (control) | `COUNT(*) WHERE 50000 <= created_at_unix_ms < 51000` | 1 group | **84,703.1** |
+| `FilteredPage` | `IndexRange` | `WHERE 50000 <= updated_at_unix_ms < 51000 ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **498.9** |
+| | `FullScan` (control) | `WHERE 50000 <= created_at_unix_ms < 51000 ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **89,241.0** |
+| `Query` (`index-eq`, re-measured) | `IndexEq` | `WHERE category = 'c7'` | 1,000 rows | 558.5 |
+| | `FullScan` (control) | `WHERE source = 'c7'` | 1,000 rows | 99,168.9 |
+| `Aggregate` (`index-eq`, re-measured) | `IndexEq` | `COUNT(*) WHERE category = 'c7'` | 1 group | 443.2 |
+| | `FullScan` (control) | `COUNT(*) WHERE source = 'c7'` | 1 group | 100,336.2 |
+| `FilteredPage` (`index-eq`, re-measured) | `IndexEq` | `WHERE category = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | 486.6 |
+| | `FullScan` (control) | `WHERE source = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | 100,685.1 |
+
+**Read it as**: ~173× / ~211× / ~179× for the same
+answer — the same shape as the equality path, for the same reason: the
+server reads the 1,000 records the walk names instead of decoding all
+100,000 and discarding 99%. The range walk lands in the same band as the
+equality bucket (the tree walk over 1,000 `(key, id)` pairs costs no
+more than the hash probe plus a bucket iteration did; both are dwarfed
+by the per-row decode/encode of the rows returned), and the controls sit
+at the same ~100 ms every full scan of this table costs. `FilteredPage`
+is again the row with no observable difference between plans —
+`page_rows` orders the filtered set — so it is a pure speed-up; but
+note what it still is *not*: the walk reads all 1,000 in-range records
+and then cuts a page of 50, so a `since`-shaped listing whose bound
+admits most of the table pays *k* reads, not 50 — the O(page) bounded
+walk is `ADR-0075`'s own option (b), not taken. Not measured, named
+plainly: a bound admitting nearly every record (*k* ≈ *n*, where the
+planner still walks and saves nothing — no cost model, `QPR-FR-003`);
+`Relation`, whose `range_ids` routes through the identical
+`uuid_pair_bounds` + `range_by` path with no domain-specific code; and
+`Join`, whose left side is exactly the `Query` fetch above.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

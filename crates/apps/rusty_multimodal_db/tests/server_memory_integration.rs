@@ -776,6 +776,74 @@ fn cross_table_join_with_an_indexed_left_filter_matches_the_full_scan_pairs() {
     }
 }
 
+/// `QPR-FR-005` (ADR-0075): a cross-table join whose *left*-side `WHERE`
+/// is a range on the left table's `Ordered` field
+/// (`memory.updated_at_unix_ms`) — planned against the left store's own
+/// `range_field`, the right rows still from the entity table by id —
+/// must return exactly the unfiltered join's pairs whose left stamp
+/// satisfies the bound, for every comparator. Pairs compared as a set.
+#[test]
+fn cross_table_join_with_a_range_left_filter_matches_the_full_scan_pairs() {
+    let dir = unique_dir("memory_two_tables_range_planner");
+    let addr = start_two_table_server_at(dir);
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    type JoinedPair = (Uuid, Uuid, Vec<(String, ScanValue)>);
+    let pairs_of = |result: QueryResult| match result {
+        QueryResult::Joined(rows) => {
+            let mut pairs: Vec<JoinedPair> = rows
+                .into_iter()
+                .map(|r| (r.left_id, r.right_id, r.fields))
+                .collect();
+            pairs.sort_by_key(|(l, r, _)| (*l, *r));
+            pairs
+        }
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    let stamp = |fields: &[(String, ScanValue)]| match fields
+        .iter()
+        .find(|(n, _)| n == "m.updated_at_unix_ms")
+    {
+        Some((_, ScanValue::I64(v))) => *v,
+        other => panic!("expected the left stamp, got {other:?}"),
+    };
+    let all = pairs_of(
+        client
+            .query("SELECT m.updated_at_unix_ms, e.label FROM memory m JOIN entity e ON mentions")
+            .unwrap(),
+    );
+    assert_eq!(all.len(), 3);
+    let min = all.iter().map(|(_, _, f)| stamp(f)).min().unwrap();
+    let max = all.iter().map(|(_, _, f)| stamp(f)).max().unwrap();
+    assert!(min < max, "the fixture's left rows carry distinct stamps");
+
+    for (op, literal) in [(">", min), (">=", max), ("<", max), ("<=", min), ("=", min)] {
+        let mut oracle = all.clone();
+        oracle.retain(|(_, _, f)| match op {
+            ">" => stamp(f) > literal,
+            ">=" => stamp(f) >= literal,
+            "<" => stamp(f) < literal,
+            "<=" => stamp(f) <= literal,
+            "=" => stamp(f) == literal,
+            _ => unreachable!(),
+        });
+        let walked = pairs_of(
+            client
+                .query(&format!(
+                    "SELECT m.updated_at_unix_ms, e.label FROM memory m JOIN entity e ON mentions \
+                     WHERE m.updated_at_unix_ms {op} {literal}"
+                ))
+                .unwrap(),
+        );
+        assert_eq!(walked, oracle, "m.updated_at_unix_ms {op} {literal}");
+        assert!(
+            !walked.is_empty() && walked.len() < all.len(),
+            "m.updated_at_unix_ms {op} {literal}: neither empty nor every pair ({} of {})",
+            walked.len(),
+            all.len()
+        );
+    }
+}
+
 /// `TBL` acceptance criteria 1–3 (ADR-0050) over a socket — the
 /// consumer's `memory_entities` path end to end: `ListTables`; the
 /// cross-table `SELECT m.content, e.label FROM memory m JOIN entity e ON

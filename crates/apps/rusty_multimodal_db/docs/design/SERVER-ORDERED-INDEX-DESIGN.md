@@ -164,7 +164,11 @@ table recorded.
 
 - **Descending order and a range on the wire** — both are one walk of
   the same set (`range(..cursor).rev()`, `range(a..b)`); a `Request`
-  field each, if the consumer asks.
+  field each, if the consumer asks. *The range half is taken by
+  `ADR-0075` (2026-09-20), not as a new `Request` field but as the query
+  planner's third step: a `WHERE` range on this field, in any filtered
+  read, walks the index through a new `RangeBy::range_by` on
+  `Ordered`.* Descending stays open.
 - **Open-time rebuild at scale** — 81 ms per 100K records here; a
   persisted index the day a directory is large enough to notice.
 - **`Employee`/`Order`/`Dog`** — the reference domains keep the scan

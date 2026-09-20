@@ -1,10 +1,11 @@
 # Server Query Planner, Step Three: A Range Path Through the `Ordered` Index (Accepted)
 
-- Status: **Accepted as designed** (2026-09-20, `ADR-0075`, option (a)
-  — the range candidate step for every consumer through the shared
-  helper; (b) the O(page) `FilteredPage` walk on top and (c) decline,
-  both declined). Design only in this PR; implementation is the next
-  round, on its own branch.
+- Status: **Accepted as designed and implemented** (2026-09-20,
+  `ADR-0075`, option (a) — the range candidate step for every consumer
+  through the shared helper; (b) the O(page) `FilteredPage` walk on top
+  and (c) decline, both declined). Design PR #273; implemented on
+  `claude/planner-range-impl` as `SERVER-001` v0.60.0 / `FR-072`, no
+  deviation — see "Change history".
 - Date: 2026-09-20
 - Related: `ADR-0073`/`docs/design/SERVER-QUERY-PLANNER-DESIGN.md`
   (step one — its own Non-goals name "Range predicates via the
@@ -640,3 +641,37 @@ session as having covered it.
   (Codex's sandbox still cannot spawn processes), with independent
   Codex inspection of both this design and the code owed once that is
   restored.
+- 2026-09-20: implemented on `claude/planner-range-impl` as `SERVER-001`
+  v0.60.0 / `FR-072`, exactly the "Proposed shape": `RangeBy` beside
+  `PageBy` in `src/generic/query.rs`; `impl RangeBy for Ordered` in
+  `src/generic/store.rs` (the guarded `BTreeSet::range` walk — the
+  guard proven directly against the equal-and-both-`Excluded` input std
+  panics on); `GenericProductionStore::range_by`; `range_field`/
+  `range_ids` defaults, `QueryPlan::IndexRange`, `plan_query(schema,
+  range_field, filter)`, `range_bounds`, the `IndexRange` arm of
+  `query_candidates`, `indexed_candidates` threading `range_field`, and
+  `uuid_pair_bounds`/`UuidPairBounds` in `src/server/serve.rs`; the two
+  overrides in `src/server/memory.rs`/`relation.rs`. **No deviation.**
+  Acceptance criteria 1–6 are the new tests: `generic/memory.rs` +1
+  (`range_by_updated_at_walks_the_sorted_index_between_two_bounds`),
+  `serve.rs` +6 (`plan_query_walks_a_range_only_after_the_equality_rule`,
+  `range_bounds_maps_each_comparator_to_its_bound`,
+  `query_candidates_range_path_reads_only_the_walked_ids`,
+  `query_candidates_range_refusal_falls_back_to_a_full_scan_without_an_error`,
+  `every_consumer_returns_the_same_result_on_the_range_walk_and_the_scan`,
+  `uuid_pair_bounds_bracket_each_key_with_the_id_sentinels`; lib 614,
+  up from 607), `tests/server_sql_integration.rs` +4 (51, up from 47),
+  `tests/server_memory_integration.rs` +1 (15, up from 14); the full
+  sweep 892 tests across 39 targets, 0 failed, every pre-existing test
+  unmodified — `QPR-FR-006`'s anticipated order-pin relaxation was not
+  needed. `fmt`/`clippy --features server,research --all-targets -D
+  warnings` clean. Criterion 7: `benches/server.rs`'s `memory-planner`
+  rows gained an `index-range` pair, recorded in `RESULTS.md` —
+  `Query` 543.6 µs vs. 94,205.6 µs (~173×),
+  `COUNT(*)` 400.6 µs vs. 84,703.1 µs (~211×),
+  `FilteredPage` `LIMIT 50` 498.9 µs vs. 89,241.0 µs
+  (~179×), over a real loopback socket. One doc change beyond
+  the design's list: the `filtered_page` trait default's doc comment,
+  which said the `Ordered` index "is still not consulted", now says
+  what is and is not walked. Still no independent review — Codex's
+  sandbox cannot spawn processes; owed.

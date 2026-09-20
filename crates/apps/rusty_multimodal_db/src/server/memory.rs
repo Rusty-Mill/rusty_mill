@@ -26,8 +26,8 @@ use super::protocol::{
 };
 use super::{
     copy_table_files, page_by_scan, page_key, predicate_matches, read_table_files,
-    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
-    PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
+    uuid_pair_bounds, validate_predicate, BackupReport, ConnectionStore, DeleteOutcome,
+    InsertOutcome, LinkOutcome, PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
@@ -39,6 +39,7 @@ use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{AllIds, Delete, GetById, Insert, MultiLink, Replace, UpdateField};
 use crate::generic::traits::SchemaTag;
 use crate::generic::{DeleteError, InsertError, LinkError, ReplaceError};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 pub const FIELD_CONTENT: FieldRef = 0;
@@ -864,6 +865,30 @@ impl ConnectionStore for MemoryConnectionStore {
                 Some((id, key))
             })
             .collect()
+    }
+
+    /// `QPR-FR-002` (ADR-0075): the field [`MemoryProductionStack`]'s
+    /// sorted index is over (`ORD-FR-004`).
+    fn range_field(&self) -> Option<FieldRef> {
+        Some(FIELD_UPDATED_AT)
+    }
+
+    /// `QPR-FR-002` (ADR-0075): a `WHERE` range on `updated_at_unix_ms`
+    /// is a walk of the stack's sorted index between the two bounds —
+    /// the same set [`Self::page`] walks from a cursor, every key bound
+    /// turned into a pair bound by [`uuid_pair_bounds`]. Any other field
+    /// is `Unsupported`; a non-`I64` bound is `Malformed`.
+    fn range_ids(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        if field != FIELD_UPDATED_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self.store.range_by::<Memory, UpdatedAtOrder>(lower, upper))
     }
 
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {

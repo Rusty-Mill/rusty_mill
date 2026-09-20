@@ -121,7 +121,7 @@ use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::employee::{EmployeeConnectionStore, FIELD_SALARY};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::memory::{
-    MemoryConnectionStore, FIELD_CATEGORY, FIELD_SOURCE, FIELD_UPDATED_AT,
+    MemoryConnectionStore, FIELD_CATEGORY, FIELD_CREATED_AT, FIELD_SOURCE, FIELD_UPDATED_AT,
 };
 use rusty_multimodal_db::server::order::{OrderConnectionStore, FIELD_AMOUNT};
 use rusty_multimodal_db::server::protocol::{
@@ -611,6 +611,29 @@ fn c7_filter(field: FieldRef) -> Vec<Predicate> {
     }]
 }
 
+/// `ADR-0075` acceptance criterion 7: the same 1% of the table as a
+/// two-sided range — record *n* carries `created_at = updated_at = n`,
+/// so `[50_000, 51_000)` names exactly 1,000 records on either field.
+/// `updated_at_unix_ms` is the `Ordered` field (`QueryPlan::IndexRange`);
+/// `created_at_unix_ms` is never range-indexed (the `FullScan` control).
+const PLANNER_RANGE_LOWER: i64 = 50_000;
+const PLANNER_RANGE_UPPER: i64 = 51_000;
+
+fn range_filter(field: FieldRef) -> Vec<Predicate> {
+    vec![
+        Predicate {
+            field,
+            op: CompareOp::Ge,
+            value: ScanValue::I64(PLANNER_RANGE_LOWER),
+        },
+        Predicate {
+            field,
+            op: CompareOp::Lt,
+            value: ScanValue::I64(PLANNER_RANGE_UPPER),
+        },
+    ]
+}
+
 /// The three planner consumers this benchmark measures, each with the
 /// identical 1%-selective equality on `field`: `Query` (`ADR-0073`),
 /// and `Aggregate` / `FilteredPage` (`ADR-0074`). `Join` is not measured
@@ -618,13 +641,13 @@ fn c7_filter(field: FieldRef) -> Vec<Predicate> {
 /// dominated by the per-left-row right-side lookups the planner does not
 /// touch (`SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md`, acceptance
 /// criterion 4).
-fn planner_requests(field: FieldRef) -> [(&'static str, Request); 3] {
+fn planner_requests(filter: Vec<Predicate>) -> [(&'static str, Request); 3] {
     [
         (
             "query",
             Request::Query {
                 select: Selection::Fields(vec![FIELD_CATEGORY]),
-                filter: c7_filter(field),
+                filter: filter.clone(),
                 limit: None,
             },
         ),
@@ -632,7 +655,7 @@ fn planner_requests(field: FieldRef) -> [(&'static str, Request); 3] {
             "count(*)",
             Request::Aggregate {
                 group_by: vec![],
-                filter: c7_filter(field),
+                filter: filter.clone(),
                 aggregates: vec![AggregateSpec {
                     func: AggregateFn::Count,
                     field: None,
@@ -646,10 +669,46 @@ fn planner_requests(field: FieldRef) -> [(&'static str, Request); 3] {
                 order_by: FIELD_UPDATED_AT,
                 after: None,
                 limit: 50,
-                filter: c7_filter(field),
+                filter,
             },
         ),
     ]
+}
+
+/// One indexed/control pair per consumer: the same request shape with
+/// the planner's field and with its never-indexed twin holding identical
+/// values, the counts asserted equal — the planner changes what is read,
+/// not what is returned.
+fn measure_planner_pair(
+    addr: SocketAddr,
+    plan: &str,
+    indexed_requests: [(&'static str, Request); 3],
+    indexed_clause: &str,
+    control_requests: [(&'static str, Request); 3],
+    control_clause: &str,
+) {
+    for ((label, indexed_request), (_, control_request)) in
+        indexed_requests.iter().zip(control_requests.iter())
+    {
+        let (indexed, indexed_count) = measure_planner_request(addr, indexed_request);
+        let (scanned, scanned_count) = measure_planner_request(addr, control_request);
+        assert_eq!(
+            indexed_count, scanned_count,
+            "{label}: the planner must not change the result"
+        );
+        println!(
+            "{:<10} {:>11} {:>14.1}   {label} {indexed_clause} (indexed, {indexed_count} rows/groups of {PLANNER_RECORDS})",
+            "memory-planner",
+            plan,
+            indexed.as_secs_f64() * 1e6
+        );
+        println!(
+            "{:<10} {:>11} {:>14.1}   {label} {control_clause} (unindexed control, same {scanned_count})",
+            "memory-planner",
+            "full-scan",
+            scanned.as_secs_f64() * 1e6
+        );
+    }
 }
 
 /// `ADR-0073` acceptance criterion 5 and `ADR-0074` acceptance criterion 4
@@ -662,28 +721,21 @@ fn planner_requests(field: FieldRef) -> [(&'static str, Request); 3] {
 /// `memory-planner`, in µs per request.
 fn bench_query_planner() {
     let addr = start_memory_planner_server();
-    let indexed_requests = planner_requests(FIELD_CATEGORY);
-    let control_requests = planner_requests(FIELD_SOURCE);
-    for ((label, indexed_request), (_, control_request)) in
-        indexed_requests.iter().zip(control_requests.iter())
-    {
-        let (indexed, indexed_count) = measure_planner_request(addr, indexed_request);
-        let (scanned, scanned_count) = measure_planner_request(addr, control_request);
-        assert_eq!(
-            indexed_count, scanned_count,
-            "{label}: the planner must not change the result"
-        );
-        println!(
-            "{:<10} {:>10} {:>14.1}   {label} WHERE category = 'c7' (indexed, {indexed_count} rows/groups of {PLANNER_RECORDS})",
-            "memory-planner",
-            "index-eq",
-            indexed.as_secs_f64() * 1e6
-        );
-        println!(
-            "{:<10} {:>10} {:>14.1}   {label} WHERE source = 'c7' (unindexed control, same {scanned_count})",
-            "memory-planner",
-            "full-scan",
-            scanned.as_secs_f64() * 1e6
-        );
-    }
+    measure_planner_pair(
+        addr,
+        "index-eq",
+        planner_requests(c7_filter(FIELD_CATEGORY)),
+        "WHERE category = 'c7'",
+        planner_requests(c7_filter(FIELD_SOURCE)),
+        "WHERE source = 'c7'",
+    );
+    // `ADR-0075` acceptance criterion 7: the `Ordered` walk vs. the scan.
+    measure_planner_pair(
+        addr,
+        "index-range",
+        planner_requests(range_filter(FIELD_UPDATED_AT)),
+        "WHERE 50000 <= updated_at_unix_ms < 51000",
+        planner_requests(range_filter(FIELD_CREATED_AT)),
+        "WHERE 50000 <= created_at_unix_ms < 51000",
+    );
 }
