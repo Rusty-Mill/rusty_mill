@@ -174,15 +174,48 @@ mod imp {
             let _job = JobObject::create().expect("create job");
         }
 
+        /// Assign a *child* process, never the test process itself: the
+        /// job is kill-on-close and `Drop` runs `TerminateJobObject`, so
+        /// assigning `std::process::id()` (as this test once did) killed
+        /// the test binary with exit code 1 the moment the job dropped —
+        /// nextest reported "test failed with exit code 1" with no panic,
+        /// on every Windows full sweep. Proves the real contract instead:
+        /// assignment lands, and `terminate` ends the assigned process
+        /// with the job's exit code.
         #[test]
-        fn assign_to_current_process_succeeds_once() {
-            let job = JobObject::create().expect("create job");
-            let pid = std::process::id();
-            // Assigning the current process is legal if the current
-            // process isn't already in a different job; on CI runners
-            // that might fail, so tolerate either outcome — we only
-            // want to prove the call compiles and links correctly.
-            let _ = job.assign_pid(pid);
+        fn assign_child_then_terminate_kills_it_with_the_job_exit_code() {
+            use std::process::{Command, Stdio};
+
+            let mut job = JobObject::create().expect("create job");
+            let mut child = Command::new("cmd")
+                .args(["/C", "ping -n 60 127.0.0.1 >nul"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn a long-lived child");
+
+            match job.assign_pid(child.id()) {
+                Ok(()) => {}
+                // A host whose own job forbids nesting (pre-Windows 8
+                // semantics) cannot run this test meaningfully; say so
+                // and clean up rather than fail on the environment.
+                Err(e) if e.raw_os_error() == Some(5) => {
+                    eprintln!("skipping: nested job assignment denied here ({e})");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Err(e) => panic!("assign child to job: {e}"),
+            }
+
+            job.terminate(7).expect("terminate job");
+            let status = child.wait().expect("wait for terminated child");
+            assert_eq!(
+                status.code(),
+                Some(7),
+                "the child must die with the job's exit code, got {status:?}"
+            );
         }
 
         #[test]
