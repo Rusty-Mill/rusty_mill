@@ -456,7 +456,10 @@ must not cite this session as having covered it.
 - **`Ordered` as a range index for `Query`** — the second planner step;
   needs an "ids in key range" primitive `Ordered` does not expose and a
   way for `DomainSchema` to say a field is range-indexed. Not decided
-  here.
+  here. *Taken as step three, `ADR-0075` (2026-09-20): the primitive is
+  `RangeBy::range_by`; the declaration is a server-side
+  `ConnectionStore::range_field`, deliberately not a `DomainSchema`
+  flag.*
 - **`WHERE id = …`** — a grammar/schema question (no `ScanValue` kind
   carries a `Uuid`; no adapter exposes `id` as a field), not a planner
   one. Not decided here.

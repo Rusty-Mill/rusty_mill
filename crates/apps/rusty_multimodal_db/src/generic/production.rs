@@ -31,7 +31,7 @@
 
 use super::query::{
     AllIds, Children, Compact, Delete, Detach, FilterEq, GetById, Insert, Link, MultiLink,
-    Neighbors, PageBy, Parent, Replace, ScanField, UpdateField,
+    Neighbors, PageBy, Parent, RangeBy, Replace, ScanField, UpdateField,
 };
 use super::store::Flush;
 use super::traits::{
@@ -509,6 +509,29 @@ impl<S> GenericProductionStore<S> {
             .read()
             .expect(LOCK_POISONED)
             .page_by(after, limit)
+    }
+
+    /// Every id in one key range of `R`'s `Marker` field (`QPR-FR-001`,
+    /// ADR-0075) — a range walk of the sorted index under the read lock,
+    /// ascending by `(key, id)`; [`Self::page_by`]'s twin with two bounds
+    /// and no limit. An inverted range is empty, never a panic.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn range_by<R, Marker>(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> Vec<R::Id>
+    where
+        R: OrderedField<Marker>,
+        S: RangeBy<R, Marker>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .range_by(lower, upper)
     }
 
     /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one

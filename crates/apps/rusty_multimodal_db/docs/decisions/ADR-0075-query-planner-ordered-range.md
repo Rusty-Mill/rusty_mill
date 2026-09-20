@@ -1,10 +1,11 @@
 # ADR-0075: Query Planner Step Three — A Range Path Through the `Ordered` Index
 
-- Status: **Accepted as designed** (2026-09-20 — the owner picked
-  option (a): the range candidate step for every consumer through the
-  shared helper; (b) the O(page) `FilteredPage` walk on top and (c)
-  decline both declined). Design only in this PR; implementation
-  follows on its own branch.
+- Status: **Accepted as designed and implemented** (2026-09-20 — the
+  owner picked option (a): the range candidate step for every consumer
+  through the shared helper; (b) the O(page) `FilteredPage` walk on top
+  and (c) decline both declined). Proposed, accepted, and implemented
+  the same day — `SERVER-001` v0.60.0 / `FR-072`, no deviation (see
+  "Acceptance and implementation").
 - Date: 2026-09-20
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-PLANNER-RANGE-DESIGN.md` (the full
@@ -137,3 +138,26 @@ The fork, held for the owner:
   proofs and acceptance criterion 7's measurement as its exit gate.
   Builder: Claude directly, under the host-takeover convention;
   independent Codex inspection owed, not claimed.
+- 2026-09-20: implemented on `claude/planner-range-impl` —
+  `SERVER-001` v0.60.0 / `SERVER-001-FR-072`, **no deviation** from the
+  accepted design: `RangeBy` + `impl RangeBy for Ordered` +
+  `GenericProductionStore::range_by` (`src/generic/`), `range_field`/
+  `range_ids` defaults, `QueryPlan::IndexRange`, `plan_query`/
+  `range_bounds`/`query_candidates`/`indexed_candidates`,
+  `uuid_pair_bounds` (`serve.rs`), the `Memory`/`Relation` overrides.
+  Proven: 1 new `generic/memory.rs` unit test, 6 new `serve.rs` unit
+  tests (lib 614, up from 607), 4 new real-socket
+  `tests/server_sql_integration.rs` tests (51, up from 47), 1 new
+  `tests/server_memory_integration.rs` test (15, up from 14); 892 tests
+  across 39 targets, 0 failed, every pre-existing test unmodified;
+  `fmt`/`clippy -D warnings` clean. Measured (`benches/server.rs`
+  `memory-planner` `index-range` rows, `RESULTS.md`): on the same 100K
+  `Memory` table, the 1%-selective two-sided range
+  `50000 <= updated_at_unix_ms < 51000` costs `Query` 543.6 µs
+  vs. 94,205.6 µs through the never-range-indexed `created_at_unix_ms`
+  control (~173×), `COUNT(*)` 400.6 µs vs. 84,703.1 µs
+  (~211×), `FilteredPage` `LIMIT 50` 498.9 µs vs.
+  89,241.0 µs (~179×), over a real loopback socket. Still no
+  independent review — Codex's sandbox cannot spawn processes; a fresh
+  Codex inspection of the design and this diff is owed and must not be
+  reported as done.
