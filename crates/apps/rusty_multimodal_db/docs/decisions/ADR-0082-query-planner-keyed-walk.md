@@ -83,3 +83,5 @@ The fork, held for the owner:
 - 2026-09-21: `ADR-0083` (bound tightening) the same day widened
   `keyed_walk` to any number of bounds per side, walking between the
   tightest two.
+- 2026-09-21: option (b) taken the same day as `ADR-0084` — `GROUP BY`
+  the range field as one group per run of equal walked keys.

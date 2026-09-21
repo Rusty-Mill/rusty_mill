@@ -1736,6 +1736,39 @@ lower literals (and, for the count, the whole decode path). The
 from the start, and it is unchanged within noise. Every other row is
 unchanged; a filter with one bound per side plans exactly as before.
 
+## Query planner step nine — `GROUP BY` the walked key (`ADR-0084`, `SERVER-001` v0.69.0 / FR-081)
+
+`docs/design/SERVER-QUERY-PLANNER-KEYED-GROUPS-DESIGN.md`'s acceptance
+criterion 4, measured by two new `reminder-due` rows in
+`benches/server.rs` — the same 100,000-record `Reminder` table, every
+due stamp distinct (the most groups a window can yield): `due-hist` is
+`due_at_unix_ms, COUNT(*) WHERE 50000 <= due_at_unix_ms < 51000 GROUP
+BY due_at_unix_ms` (1,000 groups) and `due-hist-5k` the same over
+`< 55000` (5,000 groups). Added and run on the pre-change code (`main`
+after PR #283, `ADR-0083`) **first**, then again with this round's
+runs; both binaries back to back on an idle 4-core Linux container,
+2026-09-21. Before, `Aggregate` decoded every candidate the walk named
+and bucketed each by a linear search over the groups found so far —
+quadratic in the groups, as the two rows show (5× the groups, ~18× the
+time). After, the walk yields the keys in order and a group is a run of
+equal adjacent keys: one pass, no decode, no search.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0083`) | `IndexRange` walk, every id decoded, linear bucket search | `GROUP BY due_at_unix_ms` over 1,000 stamps | 1,000 groups | **2,491.3** |
+| | the same | `GROUP BY due_at_unix_ms` over 5,000 stamps | 5,000 groups | **38,638.8** |
+| After (`ADR-0084`) | `range_keys` — runs of equal keys, no decode | `GROUP BY due_at_unix_ms` over 1,000 stamps | 1,000 groups | **299.8** |
+| | the same | `GROUP BY due_at_unix_ms` over 5,000 stamps | 5,000 groups | **1,437.1** |
+
+**Read it as**: the grouped answer is now linear in the range — the
+5,000-group row costs about 5× the 1,000-group row, not ~18× — and
+what remains is the walk, the `Vec<i64>` of keys, and the response
+itself (one group per distinct key, the same size as before, which is
+the larger part of the 5,000-group row). The decode path's quadratic
+bucket search is left as it was for every other `GROUP BY` — the
+obvious separate fix (option (b)), a `HashMap` over the key, is not a
+planner question and was not bundled. Every other row is unchanged.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

@@ -3287,3 +3287,167 @@ fn redundant_and_contradictory_bounds_on_the_range_field_answer_exactly() {
         1
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0084` / `docs/design/SERVER-QUERY-PLANNER-KEYED-GROUPS-DESIGN.md`,
+// acceptance criterion 3 (`QKG-FR-004`): `GROUP BY` the range field from
+// the walked keys — every column the decode path's, on `Memory` and
+// `Reminder` (whose fixture already repeats a due stamp).
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_group_by_of_the_range_field_from_the_walked_keys_matches_the_decoded_groups() {
+    type Row = [(String, ScanValue)];
+    let oracle = |client: &mut SchemaDrivenClient, table: &str, field: &str, keep: Keep| {
+        let mut all = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+        all.retain(|(_, f)| keep(f));
+        let mut keys: Vec<i64> = all.iter().map(|(_, f)| i64_field(f, field)).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys.into_iter()
+            .map(|k| {
+                let run: Vec<i64> = all
+                    .iter()
+                    .map(|(_, f)| i64_field(f, field))
+                    .filter(|v| *v == k)
+                    .collect();
+                vec![
+                    (field.to_string(), ScanValue::I64(k)),
+                    ("COUNT(*)".to_string(), ScanValue::I64(run.len() as i64)),
+                    (format!("SUM({field})"), ScanValue::I64(run.iter().sum())),
+                    (
+                        format!("AVG({field})"),
+                        ScanValue::F64(run.iter().sum::<i64>() as f64 / run.len() as f64),
+                    ),
+                    (format!("MIN({field})"), ScanValue::I64(k)),
+                    (format!("MAX({field})"), ScanValue::I64(k)),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+    let check =
+        |client: &mut SchemaDrivenClient, table: &str, field: &str, where_: &str, keep: Keep| {
+            let expected = oracle(client, table, field, keep);
+            let mut got = groups(
+                client
+                    .query(&format!(
+                        "SELECT {field}, COUNT(*), SUM({field}), AVG({field}), MIN({field}), \
+                     MAX({field}) FROM {table} {where_} GROUP BY {field}"
+                    ))
+                    .unwrap(),
+            );
+            // Column names are the SQL layer's; compare the values by position.
+            let values = |g: &mut Vec<Vec<(String, ScanValue)>>| -> Vec<Vec<ScanValue>> {
+                g.sort_by_key(|group| match &group[0].1 {
+                    ScanValue::I64(k) => *k,
+                    other => panic!("{other:?}"),
+                });
+                g.iter()
+                    .map(|group| group.iter().map(|(_, v)| v.clone()).collect())
+                    .collect()
+            };
+            let mut expected = expected;
+            assert_eq!(values(&mut got), values(&mut expected), "{table} {where_}");
+            got.len()
+        };
+    let updated = |f: &Row| i64_field(f, "updated_at_unix_ms");
+    let due = |f: &Row| i64_field(f, "due_at_unix_ms");
+
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    // Re-key two memories onto one stamp so a run of equal keys exists.
+    for n in [2u128, 4] {
+        client
+            .replace(
+                Uuid::from_u128(n),
+                &memory_fields_updated_at(n, "general", 3_000),
+            )
+            .unwrap();
+    }
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("WHERE updated_at_unix_ms >= 3000", &|f: &Row| {
+            updated(f) >= 3_000
+        }),
+        (
+            "WHERE updated_at_unix_ms > 1000 AND updated_at_unix_ms < 5000",
+            &|f: &Row| updated(f) > 1_000 && updated(f) < 5_000,
+        ),
+        ("WHERE updated_at_unix_ms > 9000", &|f: &Row| {
+            updated(f) > 9_000
+        }),
+    ] {
+        check(&mut client, "memory", "updated_at_unix_ms", where_, keep);
+    }
+    assert_eq!(
+        check(
+            &mut client,
+            "memory",
+            "updated_at_unix_ms",
+            "WHERE updated_at_unix_ms = 3000",
+            &|f: &Row| updated(f) == 3_000
+        ),
+        1,
+        "one run of three"
+    );
+    // Ineligible shapes decode and stay exact: a second field in the
+    // filter; the key grouped beside another field.
+    check(
+        &mut client,
+        "memory",
+        "updated_at_unix_ms",
+        "WHERE updated_at_unix_ms >= 1000 AND category = 'general'",
+        &|f: &Row| updated(f) >= 1_000 && str_field(f, "category") == "general",
+    );
+    let beside = groups(
+        client
+            .query(
+                "SELECT updated_at_unix_ms, category, COUNT(*) FROM memory \
+                 WHERE updated_at_unix_ms >= 1000 GROUP BY updated_at_unix_ms, category",
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        beside.len(),
+        3,
+        "every memory is now general: (1000), (3000) ×3 collapsed, (5000)"
+    );
+    // A `LIMIT` with a bound truncates the ascending groups; with no
+    // bound the request decodes and truncates the decode path's own.
+    let limited = groups(
+        client
+            .query(
+                "SELECT updated_at_unix_ms, COUNT(*) FROM memory \
+                 WHERE updated_at_unix_ms >= 1000 GROUP BY updated_at_unix_ms LIMIT 2",
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        limited
+            .iter()
+            .map(|g| (g[0].1.clone(), g[1].1.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (ScanValue::I64(1_000), ScanValue::I64(1)),
+            (ScanValue::I64(3_000), ScanValue::I64(3)),
+        ]
+    );
+    assert_eq!(
+        groups(
+            client
+                .query("SELECT updated_at_unix_ms, COUNT(*) FROM memory GROUP BY updated_at_unix_ms LIMIT 2")
+                .unwrap()
+        )
+        .len(),
+        2
+    );
+
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("WHERE due_at_unix_ms <= 1000", &|f: &Row| due(f) <= 1_000),
+        ("WHERE due_at_unix_ms > 1000", &|f: &Row| due(f) > 1_000),
+        ("WHERE due_at_unix_ms > 9000", &|f: &Row| due(f) > 9_000),
+    ] {
+        check(&mut client, "reminder", "due_at_unix_ms", where_, keep);
+    }
+}
