@@ -823,7 +823,9 @@ fn bench_query_planner() {
     );
     // `ADR-0077`: the same shape with the equality on the *declared*
     // index — equality-first keeps the bucket, so this row is the rule's
-    // cost, measured rather than assumed.
+    // cost, measured rather than assumed. Since `ADR-0078` the bucket is
+    // intersected with the (wide) range's ids before any record is
+    // read: the intersection's own wide-range cost.
     measure_planner_pair(
         addr,
         "since-eq",
@@ -832,4 +834,31 @@ fn bench_query_planner() {
         since_mixed_page_request(FIELD_CREATED_AT, FIELD_SOURCE),
         "WHERE created_at_unix_ms >= 1000 AND source = 'c7' ORDER BY created_at_unix_ms",
     );
+    // `ADR-0078` acceptance criterion: the equality index *and* a
+    // narrow range on the ordered field — 1% × 1% of the table, ten
+    // records. Under `ADR-0077` alone the bucket (1,000 records) is read
+    // and the range re-checked per row; the intersection reads ten.
+    measure_planner_pair(
+        addr,
+        "eq-range",
+        planner_requests(
+            intersect_filter(FIELD_CATEGORY, FIELD_UPDATED_AT),
+            FIELD_UPDATED_AT,
+        ),
+        "WHERE category = 'c7' AND 50000 <= updated_at_unix_ms < 51000",
+        planner_requests(
+            intersect_filter(FIELD_SOURCE, FIELD_CREATED_AT),
+            FIELD_CREATED_AT,
+        ),
+        "WHERE source = 'c7' AND 50000 <= created_at_unix_ms < 51000",
+    );
+}
+
+/// `ADR-0078`: the 1%-selective equality on `eq_field` and the 1%
+/// range on `range_field`, in that wire order — the equality first, so
+/// `plan_query`'s equality rule is what the intersection extends.
+fn intersect_filter(eq_field: FieldRef, range_field: FieldRef) -> Vec<Predicate> {
+    let mut filter = c7_filter(eq_field);
+    filter.extend(range_filter(range_field));
+    filter
 }

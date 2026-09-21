@@ -616,7 +616,9 @@ session as having covered it.
   `range(..).rev()`; unchanged from `ADR-0055`/`0059`.
 - **Bound tightening / index intersection** — the first cost-model
   question with a concrete shape (`a > 1 AND a > 5`; `IndexEq ∩
-  IndexRange`); declined three rounds running.
+  IndexRange`); declined three rounds running. *The intersection
+  taken: `ADR-0078` (2026-09-21), exact and estimate-free since both
+  indexes answer ids without a decode; bound tightening still open.*
 - **Plan metrics** — a per-plan counter in `ServerMetrics`, now three
   plans wide; still named, still not bundled.
 - **A second `Ordered` wrap** (`created_at_unix_ms`) and `Reminder`

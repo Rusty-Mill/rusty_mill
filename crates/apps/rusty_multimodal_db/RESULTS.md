@@ -1521,6 +1521,56 @@ pages, or they were already the one-chunk walk. `Relation` routes
 through the identical `bounded_filtered_page` over `UpdatedAtField`;
 not separately measured.
 
+## Query planner step four — intersecting the equality index with the range (`ADR-0078`, `SERVER-001` v0.63.0 / FR-075)
+
+`docs/design/SERVER-QUERY-PLANNER-INTERSECT-DESIGN.md`'s acceptance
+criterion 5, measured by a new `memory-planner` `eq-range` pair in
+`benches/server.rs` — the same 100,000-record `Memory` table, one
+connection, one untimed warm-up, 20 timed round trips — added and run on
+the pre-change code (`main` after PR #277, `ADR-0077`) **first**, then
+again with this round's plan. The filter is `category = 'c7' AND 50000
+<= updated_at_unix_ms < 51000`: the declared `category` index's bucket
+holds 1,000 records, the `Ordered` range admits 1,000, and both admit
+ten. Under `ADR-0077` alone the planner read the bucket (1,000 decodes)
+and re-checked the range per row; the intersection reads the two id
+lists (no decode) and ten records. The control is the identical filter
+on the never-indexed `source`/`created_at_unix_ms` twins, a full scan.
+The existing `since-eq` row (`updated_at_unix_ms >= 1000 AND category =
+'c7'`, paged) is the wide-range case: the bucket is still 1,000 but the
+range's id list is ~99,000 long, and the intersection walks it — this
+round's honest worst case, reported whichever way it goes. An idle
+4-core Linux container, 2026-09-21.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0077`) | `IndexEq` bucket, re-check the range | `query WHERE category = 'c7' AND 50000 <= updated_at_unix_ms < 51000` | 10 rows | **1,008.5** |
+| | `IndexEq` | `count(*)` same filter | 1 group | **1,028.7** |
+| | `IndexEq`, then `page_rows` | `fpage-50` same filter, `ORDER BY updated_at_unix_ms` | 10 rows | **1,085.8** |
+| | `IndexEq`, then `page_rows` | `fpage-50 WHERE updated_at_unix_ms >= 1000 AND category = 'c7'` (wide) | 50 rows | 1,270.7 |
+| After (`ADR-0078`) | `IndexIntersect` | `query WHERE category = 'c7' AND 50000 <= updated_at_unix_ms < 51000` | 10 rows | **174.3** |
+| | `IndexIntersect` | `count(*)` same filter | 1 group | **91.5** |
+| | `IndexIntersect`, then `page_rows` | `fpage-50` same filter | 10 rows | **101.4** |
+| | `IndexIntersect`, then `page_rows` | `fpage-50 WHERE updated_at_unix_ms >= 1000 AND category = 'c7'` (wide) | 50 rows | 5,030.0 |
+
+The full-scan controls sat at ~120,000–160,000 µs in both runs, as every
+planner row's control does.
+
+**Read it as**: the narrow shape reads its own ten rows — `query` ~6×,
+`count(*)` ~11×, the page ~11× less than the bucket-and-re-check it
+replaces; the remaining ~100 µs is the two index lookups (1,000 ids
+each), the hash, and the round trip. The wide shape is the cost of
+taking the intersection unconditionally: the range's ~99,000-id walk
+plus a hash lookup per id costs ~4 ms, against ~1.3 ms for the bucket's
+1,000 decodes alone — the intersection *loses* here, by ~4×, and that
+is the concrete case for a width guard (`ADR-0078`'s option (b)). Where
+the crossover sits on this machine: an id operation is ~40 ns, a decode
+~1 µs, so the intersection wins while the range's id list is shorter
+than roughly twenty-five times the bucket. No guard is taken this round
+because any guard is the first estimate this crate would keep; the
+number is here so that decision is made on a measurement. Every other
+planner row is unchanged within noise (`since-mixed` 3,933 → 2,710 µs
+is the same walk on a quieter run).
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.
