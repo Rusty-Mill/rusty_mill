@@ -129,8 +129,10 @@ not a guess.
   not this crate.) **Since `ADR-0086`**: one index stat —
   `dogserver_query_plans_total{plan="…"}`, the path each planned read
   took (`SERVER-001` v0.71.0/FR-083), classified before dispatch by a
-  pure function of the request; still absent: latency, queue depth,
-  journal size.
+  pure function of the request. **Since `ADR-0088`**: request latency —
+  `dogserver_request_duration_seconds`, one histogram with sixteen
+  fixed buckets (`SERVER-001` v0.73.0/FR-085), observed once per
+  dispatched request; still absent: queue depth, journal size.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing

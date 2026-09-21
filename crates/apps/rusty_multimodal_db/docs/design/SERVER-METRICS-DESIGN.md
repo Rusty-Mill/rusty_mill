@@ -56,7 +56,9 @@ incremented at the one place every request already passes through
   real decision about bucket boundaries; a genuinely separate, larger
   round if ever wanted. `benches/server.rs` already answers "how fast"
   offline; this round answers "is it up and how loaded," not "how
-  fast right now."
+  fast right now." *Taken: `ADR-0088` (2026-09-21) — one histogram
+  with sixteen fixed buckets chosen against the bench —
+  `docs/design/SERVER-REQUEST-LATENCY-DESIGN.md`.*
 - **Per-connection or per-peer metrics.** The access log (`ADR-0031`)
   already answers "what did peer X do" at the audit-trail level; this
   round is process-wide aggregate only.

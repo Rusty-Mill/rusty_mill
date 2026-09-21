@@ -100,7 +100,8 @@ The fork, held for the owner:
   operator request this crate has added (`Compact`, and `ADR-0065`'s
   proposed `Backup`).
 - Named, not hidden: this is **not** a full observability story. No
-  latency percentiles, no per-request-kind breakdown, no
+  latency percentiles (*since `ADR-0088`: a fixed-bucket histogram*),
+  no per-request-kind breakdown, no
   Prometheus-native scrape endpoint an out-of-the-box Prometheus
   install can hit without a bridge script. It answers exactly "is this
   process up, how loaded, how much is failing" — a real, useful, but

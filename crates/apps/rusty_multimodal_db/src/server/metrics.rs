@@ -16,7 +16,19 @@
 //! would only duplicate that shape.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// `RLH-FR-001` (ADR-0088): the fixed upper bounds, in seconds, of the
+/// request-latency histogram's buckets — sixteen, from 100 µs to 10 s
+/// in a 1-2.5-5 progression, plus the implicit `+Inf`. Chosen against
+/// `benches/server.rs`'s own numbers: an indexed point read sits in the
+/// first two buckets, a 100K full scan around 100–250 ms, and nothing
+/// this server answers should take ten seconds. Fixed at compile time
+/// (`MET-FR-002`'s bounded cardinality), never a setting.
+pub const LATENCY_BUCKETS_SECONDS: [f64; 16] = [
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+    5.0, 10.0,
+];
 
 /// Six atomics plus one fixed family of [`PlanKind::ALL`] atomics
 /// (`QPM-FR-002`, ADR-0086), never growing with new `Request` variants
@@ -37,6 +49,14 @@ pub struct ServerMetrics {
     /// `QPM-FR-002`: one counter per [`PlanKind`], indexed by
     /// [`PlanKind::index`].
     plans: [AtomicU64; PlanKind::ALL.len()],
+    /// `RLH-FR-002` (ADR-0088): the request-latency histogram — one
+    /// non-cumulative count per bucket of [`LATENCY_BUCKETS_SECONDS`]
+    /// plus one for `+Inf` (cumulated at render), the observation
+    /// count, and the sum in whole microseconds (an integer, so it stays
+    /// one atomic add; rendered as seconds).
+    latency_buckets: [AtomicU64; LATENCY_BUCKETS_SECONDS.len() + 1],
+    latency_count: AtomicU64,
+    latency_sum_micros: AtomicU64,
     started_at: SystemTime,
 }
 
@@ -109,6 +129,9 @@ impl Default for ServerMetrics {
             connections_total: AtomicU64::new(0),
             connections_active: AtomicI64::new(0),
             plans: Default::default(),
+            latency_buckets: Default::default(),
+            latency_count: AtomicU64::new(0),
+            latency_sum_micros: AtomicU64::new(0),
             started_at: SystemTime::now(),
         }
     }
@@ -155,6 +178,58 @@ impl ServerMetrics {
         self.plans[kind.index()].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// `RLH-FR-003` (ADR-0088): one dispatched request took `elapsed`
+    /// from its frame's arrival to its response being ready — the same
+    /// post-dispatch call site as [`ServerMetrics::record_request`], so
+    /// the histogram's count is `requests_total`'s population. Three
+    /// atomic adds: the one bucket the observation falls in, the count,
+    /// and the sum in microseconds (saturating at `u64::MAX` µs, some
+    /// 584,000 years).
+    pub(crate) fn record_latency(&self, elapsed: Duration) {
+        let seconds = elapsed.as_secs_f64();
+        let bucket = LATENCY_BUCKETS_SECONDS
+            .iter()
+            .position(|le| seconds <= *le)
+            .unwrap_or(LATENCY_BUCKETS_SECONDS.len());
+        self.latency_buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        self.latency_count.fetch_add(1, Ordering::Relaxed);
+        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        self.latency_sum_micros
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sum| {
+                Some(sum.saturating_add(micros))
+            })
+            .ok();
+    }
+
+    /// `RLH-FR-004`: the histogram's text — cumulative `_bucket` lines
+    /// in bound order ending at `+Inf`, then `_sum` (seconds, six
+    /// decimals) and `_count`.
+    fn render_latency(&self) -> String {
+        let mut out = String::new();
+        let mut cumulative = 0u64;
+        for (i, le) in LATENCY_BUCKETS_SECONDS.iter().enumerate() {
+            cumulative += self.latency_buckets[i].load(Ordering::Relaxed);
+            out.push_str(&format!(
+                "dogserver_request_duration_seconds_bucket{{le=\"{le}\"}} {cumulative}\n"
+            ));
+        }
+        cumulative += self.latency_buckets[LATENCY_BUCKETS_SECONDS.len()].load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "dogserver_request_duration_seconds_bucket{{le=\"+Inf\"}} {cumulative}\n"
+        ));
+        let sum = self.latency_sum_micros.load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "dogserver_request_duration_seconds_sum {}.{:06}\n",
+            sum / 1_000_000,
+            sum % 1_000_000
+        ));
+        out.push_str(&format!(
+            "dogserver_request_duration_seconds_count {}\n",
+            self.latency_count.load(Ordering::Relaxed)
+        ));
+        out
+    }
+
     pub fn render(&self) -> String {
         let uptime = SystemTime::now()
             .duration_since(self.started_at)
@@ -189,6 +264,9 @@ impl ServerMetrics {
              # HELP dogserver_query_plans_total Planned reads answered without an error, by the path taken.\n\
              # TYPE dogserver_query_plans_total counter\n\
              {}\
+             # HELP dogserver_request_duration_seconds Seconds from a dispatched request's arrival to its response being ready.\n\
+             # TYPE dogserver_request_duration_seconds histogram\n\
+             {}\
              # HELP dogserver_uptime_seconds Seconds since this process's `ServeOptions` was built.\n\
              # TYPE dogserver_uptime_seconds counter\n\
              dogserver_uptime_seconds {}\n",
@@ -198,6 +276,7 @@ impl ServerMetrics {
             self.connections_total.load(Ordering::Relaxed),
             self.connections_active.load(Ordering::Relaxed),
             plans,
+            self.render_latency(),
             uptime,
         )
     }
@@ -298,6 +377,50 @@ mod tests {
         let labels: std::collections::BTreeSet<&str> =
             PlanKind::ALL.iter().map(|k| k.label()).collect();
         assert_eq!(labels.len(), PlanKind::ALL.len());
+    }
+
+    /// `RLH-FR-001`–`004` (ADR-0088): the buckets are ascending and
+    /// fixed; an observation lands in the first bucket whose bound it
+    /// does not exceed and the render cumulates them, ending at `+Inf`
+    /// with the count; `_sum` is the seconds to six decimals; a fresh
+    /// instance renders every line at zero; the histogram sits before
+    /// `uptime_seconds`, which stays the last line.
+    #[test]
+    fn latency_histogram_cumulates_fixed_buckets_and_keeps_uptime_last() {
+        assert!(LATENCY_BUCKETS_SECONDS.windows(2).all(|w| w[0] < w[1]));
+        let m = ServerMetrics::new();
+        let text = m.render();
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"0.0001\"} 0\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"+Inf\"} 0\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_sum 0.000000\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_count 0\n"));
+        m.record_latency(Duration::from_micros(50)); // <= 0.0001
+        m.record_latency(Duration::from_micros(100)); // <= 0.0001 (inclusive)
+        m.record_latency(Duration::from_micros(300)); // <= 0.0005
+        m.record_latency(Duration::from_millis(30)); // <= 0.05
+        m.record_latency(Duration::from_secs(11)); // +Inf only
+        let text = m.render();
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"0.0001\"} 2\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"0.00025\"} 2\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"0.0005\"} 3\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"0.025\"} 3\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"0.05\"} 4\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"10\"} 4\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_bucket{le=\"+Inf\"} 5\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_sum 11.030450\n"));
+        assert!(text.contains("dogserver_request_duration_seconds_count 5\n"));
+        assert_eq!(
+            text.matches("# TYPE dogserver_request_duration_seconds histogram\n")
+                .count(),
+            1
+        );
+        assert!(
+            text.rfind("dogserver_uptime_seconds ").unwrap()
+                > text
+                    .rfind("dogserver_request_duration_seconds_count")
+                    .unwrap(),
+            "uptime stays the last line"
+        );
     }
 
     #[test]
