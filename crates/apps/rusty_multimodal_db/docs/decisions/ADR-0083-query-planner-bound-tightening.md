@@ -97,3 +97,5 @@ The fork, held for the owner:
   `count(*)` 13,136.5 → 58.7, `fpage-50` 130.2 →
   114.9 — `RESULTS.md`. The fork above remains the owner's at
   review; (a) is what merges if the PR merges unchanged.
+- 2026-09-21: option (b) taken the same day as `ADR-0091` — a
+  contradiction is `Malformed` at protocol 29 or above.

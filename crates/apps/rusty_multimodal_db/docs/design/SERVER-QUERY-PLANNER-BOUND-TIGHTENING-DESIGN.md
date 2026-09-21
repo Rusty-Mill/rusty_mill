@@ -167,7 +167,9 @@ owed.
 
 ## Open questions
 
-- **Contradiction as an error** — option (b).
+- **Contradiction as an error** — option (b). *Taken: `ADR-0091`
+  (2026-09-21, protocol 29, on the owner's word) —
+  `docs/design/SERVER-QUERY-CONTRADICTION-DESIGN.md`.*
 - **Plan metrics** — still named, still not bundled. *Taken: `ADR-0086`
   (2026-09-21) — `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 

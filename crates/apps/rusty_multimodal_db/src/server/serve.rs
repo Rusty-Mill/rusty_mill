@@ -3328,6 +3328,23 @@ impl Write for WriteHalf {
 /// response, so it is never counted), and a walk-only aggregate whose
 /// adapter refuses the walk (`range_count`/`range_keys` `Unsupported` —
 /// no shipped adapter) is counted as the walk it asked for.
+/// `QCX-FR-002` (ADR-0091): whether `req` carries a filter no record can
+/// satisfy ([`protocol::contradicted`]) — `Query`, `Aggregate`,
+/// `FilteredPage`/`FilteredPageDesc`, and either side of `Join`; every
+/// other request `false`. Pure.
+pub fn request_contradicted(req: &Request) -> bool {
+    match req {
+        Request::Query { filter, .. }
+        | Request::Aggregate { filter, .. }
+        | Request::FilteredPage { filter, .. }
+        | Request::FilteredPageDesc { filter, .. } => protocol::contradicted(filter),
+        Request::Join(spec) => {
+            protocol::contradicted(&spec.left_filter) || protocol::contradicted(&spec.right_filter)
+        }
+        _ => false,
+    }
+}
+
 pub fn plan_of<S: ConnectionStore + ?Sized>(store: &S, req: &Request) -> Option<PlanKind> {
     let candidate_step = |schema: &DomainSchema, filter: &[Predicate]| match plan_query(
         schema,
@@ -4424,6 +4441,12 @@ fn handle_connection(
             Request::FilteredPage { .. } if negotiated < 26 => err_response(ErrorCode::Malformed),
             // `PGD-FR-005` (ADR-0089), rule 3: reads, gated like `Page`.
             Request::PageDesc { .. } | Request::FilteredPageDesc { .. } if negotiated < 28 => {
+                err_response(ErrorCode::Malformed)
+            }
+            // `QCX-FR-002` (ADR-0091), protocol 29: a filter no record can
+            // satisfy is refused before any read on a connection negotiated
+            // at 29 or above; below, the empty answer it always gave.
+            ref filtered if negotiated >= 29 && request_contradicted(filtered) => {
                 err_response(ErrorCode::Malformed)
             }
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are

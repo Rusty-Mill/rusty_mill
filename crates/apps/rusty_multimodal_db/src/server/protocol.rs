@@ -83,6 +83,7 @@
 //! | 26 | `SERVER-001` v0.56.0 | + [`Request::FilteredPage`] (35) — `FPG-FR-001`, ADR-0068: [`Request::Page`]'s three fields (`order_by`, `after`, `limit`) plus `filter: Vec<Predicate>`, answered [`Response::Rows`] (reused, no new response variant) — an ordered keyset page over only the rows every filter predicate matches. Evaluated by one shared default correct for every domain, no adapter override this round: `ConnectionStore::scan_all`, filtered via the identical [`ErrorCode`]-and-`predicate_matches` logic [`Request::Query`]'s own filter already uses, then [`Request::Page`]'s own key selection over the filtered subset. `Memory`/`Relation`'s `Ordered` index gives no speed advantage to a filtered request this round — only the unfiltered `Page` fast path keeps it, untouched by this addition. Validated exactly as `Page`/`Query` already are — no new validation function. Gated as a **read**, `Page`'s own precedent; `Malformed` below 26 (rule 3). No new `ErrorCode`. ADR-0068 |
 //! | 27 | `SERVER-001` v0.57.0 | No new variant: `BeginWith` learns a fourth flag bit, [`SESSION_MVCC_ISOLATION`] (`MVCC2-FR-004`, `ADR-0072`) — real multi-version concurrency control for `Memory`/`Entity`/`Relation` (`MVCC2-FR-012`): `Begin` opens a snapshot at the table's current `last_committed_txn`; `GetById` while such a session is open answers with the version visible as of that snapshot, including against a conflicting *ordinary* (non-session) write from another connection, not only another session's commit (`MVCC2-FR-006`/`008`); `Commit`'s write-write conflict check reuses [`ErrorCode::Conflict`] and `Response::TransactionFailed { index: 0, .. }` — `SESSION_SNAPSHOT_ISOLATION`'s own precedent, no new `ErrorCode`. Unknown below 27 (rule 3), sent only after negotiating ≥ 27 (rule 4); composes independently with the three existing bits. `Dog`/`Order`/`Employee` unaffected — the bit is `Unsupported` there, the same domain-scoping precedent `Insert`/`Replace`/`Delete`/`Compact` already established. ADR-0072 |
 //! | 28 | `SERVER-001` v0.74.0 | + [`Request::PageDesc`] (36), [`Request::FilteredPageDesc`] (37) — `PGD-FR-001`, ADR-0089: [`Request::Page`]/[`Request::FilteredPage`] walked the other way — sorted *descending* by `(order_by, id)`, strictly *before* the `before` cursor, at most `limit` rows, answered [`Response::Rows`] (reused). The consumer's "latest N" shape (`ORDER BY updated_at DESC LIMIT 50`). `Memory`/`Relation`/`Reminder` answer `PageDesc` on their ordered field from the sorted index walked backward; every other shape from the scan. Validated exactly as `Page`/`FilteredPage`. Gated as a **read**; `Malformed` below 28 (rule 3). No new `ErrorCode`. ADR-0089 |
+//! | 29 | `SERVER-001` v0.76.0 | No new variant: a filter no record can satisfy — two bounds on one field whose intersection is empty (`a > 5 AND a < 3`, `a = 3 AND a > 3`, `a = 1 AND a = 2`, `a = 1 AND a != 1`) — is refused with `Err { Malformed }` before any read, on a connection negotiated at 29 or above (`QCX-FR-002`, `ADR-0091`); below 29 it keeps the empty answer every earlier version gave (rule 3's nearest older shape, applied to a semantics change as version 27 did). Pure over the request ([`contradicted`]); `Query`, `Aggregate`, `FilteredPage`/`FilteredPageDesc`, and both sides of `Join`. ADR-0091 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -117,7 +118,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -259,6 +260,58 @@ fn ordering_matches(ordering: std::cmp::Ordering, op: CompareOp) -> bool {
             | (CompareOp::Le, Less | Equal)
             | (CompareOp::Ge, Greater | Equal)
     )
+}
+
+/// `QCX-FR-001` (ADR-0091): whether no record can satisfy `filter` —
+/// decided between the predicates on one field, never against a table.
+/// On any kind: two `Eq` with different literals, or an `Eq` beside an
+/// `Ne` of the same literal. On the orderable kinds (`U32`/`I64`,
+/// compared as one `i128` order): a lower bound (`Gt`/`Ge`/`Eq`) above
+/// an upper bound (`Lt`/`Le`/`Eq`), or equal to it with either side
+/// exclusive. Pure; a filter with no such pair is never contradicted,
+/// whatever the table holds. `Ne` alone, `Str` ordering (already
+/// `Malformed` at validation), and predicates on different fields are
+/// never a contradiction.
+pub fn contradicted(filter: &[Predicate]) -> bool {
+    use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+    let numeric = |value: &ScanValue| match value {
+        ScanValue::U32(v) => Some(i128::from(*v)),
+        ScanValue::I64(v) => Some(i128::from(*v)),
+        _ => None,
+    };
+    for (i, a) in filter.iter().enumerate() {
+        for b in &filter[i + 1..] {
+            if a.field != b.field {
+                continue;
+            }
+            match (a.op, b.op) {
+                (Eq, Eq) if a.value != b.value => return true,
+                (Eq, Ne) | (Ne, Eq) if a.value == b.value => return true,
+                _ => {}
+            }
+            let (Some(x), Some(y)) = (numeric(&a.value), numeric(&b.value)) else {
+                continue;
+            };
+            let lower = |op: CompareOp, v: i128| match op {
+                Gt => Some((v, true)),
+                Ge | Eq => Some((v, false)),
+                _ => None,
+            };
+            let upper = |op: CompareOp, v: i128| match op {
+                Lt => Some((v, true)),
+                Le | Eq => Some((v, false)),
+                _ => None,
+            };
+            let empty = |lo: Option<(i128, bool)>, hi: Option<(i128, bool)>| match (lo, hi) {
+                (Some((l, l_excl)), Some((h, h_excl))) => l > h || (l == h && (l_excl || h_excl)),
+                _ => false,
+            };
+            if empty(lower(a.op, x), upper(b.op, y)) || empty(lower(b.op, y), upper(a.op, x)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One write within a [`Request::Transaction`] batch — the same three
@@ -2325,9 +2378,47 @@ mod tests {
     /// `ErrorCode::Journal`, 3 the session variants, 2 `Hello`). A change
     /// that appends a variant bumps this by exactly one and extends the
     /// table; this test is the reminder.
+    /// `QCX-FR-001` (ADR-0091): the contradiction matrix — each empty
+    /// pair on one field is refused, each satisfiable pair and each
+    /// pair on different fields is not, the `Eq`/`Ne` rules on a `Str`.
+    #[test]
+    fn contradicted_names_every_empty_pair_and_nothing_else() {
+        let p = |field: FieldRef, op: CompareOp, value: ScanValue| Predicate { field, op, value };
+        let n = |v: i64| ScanValue::I64(v);
+        let s = |v: &str| ScanValue::Str(v.into());
+        use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        for (filter, expect) in [
+            (vec![p(1, Gt, n(5)), p(1, Lt, n(3))], true),
+            (vec![p(1, Eq, n(3)), p(1, Gt, n(3))], true),
+            (vec![p(1, Ge, n(5)), p(1, Lt, n(5))], true),
+            (vec![p(1, Gt, n(5)), p(1, Le, n(5))], true),
+            (vec![p(1, Eq, n(1)), p(1, Eq, n(2))], true),
+            (vec![p(1, Eq, n(1)), p(1, Ne, n(1))], true),
+            (vec![p(2, Eq, s("a")), p(2, Eq, s("b"))], true),
+            (vec![p(2, Eq, s("a")), p(2, Ne, s("a"))], true),
+            (vec![p(1, Lt, n(3)), p(1, Gt, n(5))], true),
+            (vec![p(1, Ge, n(1)), p(1, Gt, n(5)), p(1, Lt, n(3))], true),
+            (vec![p(1, Gt, n(3)), p(1, Lt, n(5))], false),
+            (vec![p(1, Ge, n(5)), p(1, Le, n(5))], false),
+            (vec![p(1, Eq, n(5)), p(1, Ge, n(5))], false),
+            (vec![p(1, Eq, n(1)), p(1, Eq, n(1))], false),
+            (vec![p(1, Ne, n(1)), p(1, Ne, n(2))], false),
+            (vec![p(1, Gt, n(5)), p(3, Lt, n(3))], false),
+            (vec![p(2, Eq, s("a")), p(2, Ne, s("b"))], false),
+            (
+                vec![p(1, Gt, ScanValue::U32(5)), p(1, Lt, ScanValue::U32(3))],
+                true,
+            ),
+            (vec![], false),
+            (vec![p(1, Gt, n(5))], false),
+        ] {
+            assert_eq!(contradicted(&filter), expect, "{filter:?}");
+        }
+    }
+
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+        assert_eq!(PROTOCOL_VERSION, 29);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like
