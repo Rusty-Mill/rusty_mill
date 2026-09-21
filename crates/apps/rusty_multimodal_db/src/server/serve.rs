@@ -3896,6 +3896,9 @@ fn handle_connection(
             Err(_) => return, // client disconnected, or a framing/decode error — end the connection
         };
 
+        // `RLH-FR-003` (ADR-0088): the request's arrival — its frame fully
+        // read — from which a dispatched request's latency is measured.
+        let arrived = Instant::now();
         if let Request::Hello { protocol_version } = &req {
             let resp = if !first_frame || *protocol_version == 0 {
                 err_response(ErrorCode::Malformed)
@@ -4348,6 +4351,7 @@ fn handle_connection(
         if let (true, Some(kind)) = (ok, plan) {
             options.metrics().record_plan(kind);
         }
+        options.metrics().record_latency(arrived.elapsed());
         // `ACC-FR-004`: after the audit log's own recording for this path
         // (if any — the gates above already returned), one access event
         // per dispatched request, before the response is sent.

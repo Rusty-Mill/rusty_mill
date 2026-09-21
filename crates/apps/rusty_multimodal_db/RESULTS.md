@@ -1832,6 +1832,17 @@ one `KeyStats` fold and nothing allocated.
 grouped `due-hist` rows still materialize their keys (the runs need
 them) and are not expected to move.
 
+## Request latency histogram — no regression (`ADR-0088`, `SERVER-001` v0.73.0 / FR-085)
+
+`docs/design/SERVER-REQUEST-LATENCY-DESIGN.md`'s acceptance criterion
+3: this round adds one `Instant::now()` at each request's arrival and
+three atomic adds after dispatch, so the claim to measure is that the
+existing planner rows do not move. The pre-change binary (`main` after
+PR #287, `ADR-0087`) and this round's, back to back on an idle 4-core
+Linux container, 2026-09-21: two after-runs were taken because the first showed one ~2.5× spike (`eq-range` `fpage-50` 100.6 → 258.4 µs) beside siblings that did not move; the second run put it back (102.6) and spiked a different row instead (`eq-range` `count(*)` 91.6 → 214.1, from 103.9 in the first) — one row per run jumping ~2× is this container's pattern, not a per-request cost, which would move every row by the same few microseconds. Across both runs the rows move in both directions (`index-eq` `query` 1,248.2 → 1,564.2 → 1,313.7; `due-count` 461.4 → 356.3 → 300.3; `range-tight` `count(*)` 45.6 → 48.5 → 48.6; `index-range` `fpage-50` 127.2 → 125.3 → 105.7) and the sub-100 µs rows sit within their usual spread. The full table is not
+repeated here; the rows and their previous values stand in the
+sections above.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

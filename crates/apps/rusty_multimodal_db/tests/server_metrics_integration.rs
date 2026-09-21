@@ -274,3 +274,62 @@ fn query_plans_total_counts_each_planned_read_on_its_own_label() {
     assert_eq!(after[1], 4, "index_eq");
     assert_eq!(after.iter().sum::<u64>(), 10);
 }
+
+/// `RLH-FR-003`/`RLH-FR-004` (ADR-0088,
+/// `docs/design/SERVER-REQUEST-LATENCY-DESIGN.md`), acceptance criterion
+/// 2: over a real socket, the histogram's `_count` advances by exactly
+/// the dispatched requests between two scrapes (the same population as
+/// `requests_total`), its `+Inf` bucket equals its count, its buckets
+/// are cumulative and monotone, and its sum is non-negative and no more
+/// than the wall-clock the client saw.
+#[test]
+fn request_duration_histogram_counts_every_dispatched_request() {
+    let mut client = SchemaDrivenClient::connect(start_server(ServeOptions::default())).unwrap();
+    let bucket = |text: &str, le: &str| -> u64 {
+        metric_value(
+            text,
+            &format!("dogserver_request_duration_seconds_bucket{{le=\"{le}\"}}"),
+        )
+    };
+    let sum_seconds = |text: &str| -> f64 {
+        text.lines()
+            .find_map(|l| l.strip_prefix("dogserver_request_duration_seconds_sum "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let before = client.metrics().unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..5 {
+        assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+    }
+    client.query("SELECT * FROM memory").unwrap();
+    let after = client.metrics().unwrap();
+    let wall = started.elapsed().as_secs_f64();
+    // Six dispatched requests plus the `Metrics` scrape that produced
+    // `before` (it is itself dispatched and recorded after rendering).
+    assert_eq!(
+        metric_value(&after, "dogserver_request_duration_seconds_count")
+            - metric_value(&before, "dogserver_request_duration_seconds_count"),
+        metric_value(&after, "dogserver_requests_total")
+            - metric_value(&before, "dogserver_requests_total"),
+        "the histogram's population is requests_total's"
+    );
+    assert_eq!(
+        bucket(&after, "+Inf"),
+        metric_value(&after, "dogserver_request_duration_seconds_count")
+    );
+    let mut previous = 0;
+    for le in [
+        "0.0001", "0.00025", "0.0005", "0.001", "0.0025", "0.005", "0.01", "0.025", "0.05", "0.1",
+        "0.25", "0.5", "1", "2.5", "5", "10", "+Inf",
+    ] {
+        let n = bucket(&after, le);
+        assert!(n >= previous, "le={le}: {n} < {previous}");
+        previous = n;
+    }
+    let delta = sum_seconds(&after) - sum_seconds(&before);
+    assert!(delta >= 0.0);
+    assert!(delta <= wall + 1.0, "sum {delta} s vs wall {wall} s");
+}
