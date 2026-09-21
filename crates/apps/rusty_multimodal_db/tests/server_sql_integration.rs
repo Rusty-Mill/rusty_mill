@@ -2778,3 +2778,134 @@ fn an_indexed_equality_with_a_range_returns_the_exact_set_count_and_sequence() {
         Some(&[id(1)]),
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0080` / `docs/design/SERVER-REMINDER-DUE-INDEX-DESIGN.md`,
+// acceptance criterion 4 (`RDO-FR-004`): `Reminder`'s `due_at_unix_ms`
+// is range-indexed — the consumer's "what is due" shapes over a real
+// socket answer exactly the sorted oracle, through runtime writes.
+// Fixture: 1 at 1_000 pending, 2 at 2_000 done, 3 at 1_000 snoozed.
+// ---------------------------------------------------------------------
+
+#[test]
+fn reminder_due_at_range_and_page_return_the_exact_sequence() {
+    let id = Uuid::from_u128;
+    let due = |f: &[(String, ScanValue)]| i64_field(f, "due_at_unix_ms");
+    let status = |f: &[(String, ScanValue)]| match f.iter().find(|(n, _)| n == "status") {
+        Some((_, ScanValue::U32(s))) => *s,
+        other => panic!("status: {other:?}"),
+    };
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    let ids = |rows: Vec<(Uuid, Vec<(String, ScanValue)>)>| {
+        rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+    };
+    let check =
+        |client: &mut SchemaDrivenClient, where_: &str, keep: Keep, limit: Option<usize>| {
+            let mut oracle = rows(client.query("SELECT * FROM reminder").unwrap());
+            oracle.retain(|(_, f)| keep(f));
+            oracle.sort_by_key(|(id, f)| (due(f), *id));
+            if let Some(n) = limit {
+                oracle.truncate(n);
+            }
+            let sql = match limit {
+                Some(n) => format!(
+                    "SELECT * FROM reminder WHERE {where_} ORDER BY due_at_unix_ms LIMIT {n}"
+                ),
+                None => format!("SELECT * FROM reminder WHERE {where_} ORDER BY due_at_unix_ms"),
+            };
+            let got = rows(client.query(&sql).unwrap());
+            assert_eq!(got, oracle, "reminder: {where_} LIMIT {limit:?}");
+            let counted = groups(
+                client
+                    .query(&format!("SELECT COUNT(*) FROM reminder WHERE {where_}"))
+                    .unwrap(),
+            );
+            let mut all = rows(client.query("SELECT * FROM reminder").unwrap());
+            all.retain(|(_, f)| keep(f));
+            assert_eq!(
+                counted[0],
+                vec![("COUNT(*)".to_string(), ScanValue::I64(all.len() as i64))]
+            );
+            ids(got)
+        };
+    for limit in [None, Some(1), Some(5)] {
+        // The due-now listing: a bound and a `status` reject.
+        check(
+            &mut client,
+            "due_at_unix_ms <= 1500 AND status = 0",
+            &|f| due(f) <= 1_500 && status(f) == 0,
+            limit,
+        );
+        check(
+            &mut client,
+            "due_at_unix_ms <= 1500 AND status != 0",
+            &|f| due(f) <= 1_500 && status(f) != 0,
+            limit,
+        );
+        check(
+            &mut client,
+            "due_at_unix_ms >= 2000",
+            &|f| due(f) >= 2_000,
+            limit,
+        );
+        check(
+            &mut client,
+            "due_at_unix_ms > 500 AND due_at_unix_ms < 1500",
+            &|f| due(f) > 500 && due(f) < 1_500,
+            limit,
+        );
+        // The `due_at` equality is the bucket (equality-first), with and
+        // without a bound beside it (the intersection).
+        check(
+            &mut client,
+            "due_at_unix_ms = 1000",
+            &|f| due(f) == 1_000,
+            limit,
+        );
+        check(
+            &mut client,
+            "due_at_unix_ms = 1000 AND due_at_unix_ms >= 1000 AND status = 2",
+            &|f| due(f) == 1_000 && status(f) == 2,
+            limit,
+        );
+    }
+    assert_eq!(
+        check(
+            &mut client,
+            "due_at_unix_ms <= 1500 AND status = 0",
+            &|f| due(f) <= 1_500 && status(f) == 0,
+            Some(5),
+        ),
+        vec![id(1)]
+    );
+    assert_eq!(
+        check(
+            &mut client,
+            "due_at_unix_ms <= 1500 AND status != 0",
+            &|f| due(f) <= 1_500 && status(f) != 0,
+            None,
+        ),
+        vec![id(3)]
+    );
+    // A status update (the one runtime write this domain takes) is
+    // reflected; the order is untouched.
+    client.update(id(1), "status", ScanValue::U32(1)).unwrap();
+    assert_eq!(
+        check(
+            &mut client,
+            "due_at_unix_ms <= 1500 AND status = 0",
+            &|f| due(f) <= 1_500 && status(f) == 0,
+            None,
+        ),
+        Vec::<Uuid>::new()
+    );
+    assert_eq!(
+        check(
+            &mut client,
+            "due_at_unix_ms <= 2000",
+            &|f| due(f) <= 2_000,
+            None
+        ),
+        vec![id(1), id(3), id(2)]
+    );
+}

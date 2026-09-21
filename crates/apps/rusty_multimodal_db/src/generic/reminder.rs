@@ -23,7 +23,8 @@
 //! have.
 
 use super::mmap_store::GenericMmapStore;
-use super::traits::{IndexedField, Record, ScannableField, SchemaTag};
+use super::store::Ordered;
+use super::traits::{IndexedField, OrderedField, Record, ScannableField, SchemaTag};
 use crate::durability::DurabilityError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -117,10 +118,26 @@ impl ScannableField<StatusField> for Reminder {
     }
 }
 
-/// The durable production stack — `RMD-FR-005`: no relation of either
-/// kind, so no `Symmetric`/`Reversed` layer, just `GenericMmapStore`
-/// directly.
-pub type ReminderProductionStack = GenericMmapStore<Reminder, DueAtField, StatusField>;
+/// `RDO-FR-001` (ADR-0080): the field [`ReminderProductionStack`] keeps
+/// a sorted index over — the consumer's "what is due" listing orders by
+/// it and bounds it (`due_at_unix_ms <= now`), the shape `ADR-0059`
+/// gave `Memory` and `ADR-0075` a range path for.
+pub struct DueAtOrder;
+impl OrderedField<DueAtOrder> for Reminder {
+    type Key = i64;
+    fn order_key(&self) -> i64 {
+        self.due_at_unix_ms
+    }
+}
+
+/// The mmap core — `RMD-FR-005`: no relation of either kind, so no
+/// `Symmetric`/`Reversed` layer.
+pub type ReminderCore = GenericMmapStore<Reminder, DueAtField, StatusField>;
+
+/// The durable production stack: the core under a sorted index on
+/// `due_at_unix_ms` (`RDO-FR-001`, ADR-0080) — memory only, rebuilt
+/// from the records at every open; the files are unchanged.
+pub type ReminderProductionStack = Ordered<ReminderCore, Reminder, DueAtOrder>;
 
 /// Build a fresh, durable production store for `Reminder` at `path` —
 /// the generic analogue of `create_order_production_stack`/
@@ -137,7 +154,7 @@ pub fn create_reminder_production_stack(
     reminders: Vec<Reminder>,
     path: &Path,
 ) -> Result<ReminderProductionStack, DurabilityError> {
-    GenericMmapStore::<Reminder, DueAtField, StatusField>::create(reminders, path)
+    Ok(Ordered::new(ReminderCore::create(reminders, path)?))
 }
 
 /// Reopen an existing durable production store for `Reminder` at
@@ -155,7 +172,20 @@ pub fn open_reminder_production_stack(
     reminders: Vec<Reminder>,
     path: &Path,
 ) -> Result<ReminderProductionStack, DurabilityError> {
-    GenericMmapStore::<Reminder, DueAtField, StatusField>::open(reminders, path)
+    Ok(Ordered::new(ReminderCore::open(reminders, path)?))
+}
+
+/// Reopen from the files alone — records and insert log — under the
+/// sorted index, rebuilt (`RDO-FR-001`, ADR-0080); the generic
+/// analogue of `open_memory_production_stack_portable`.
+///
+/// # Errors
+///
+/// Everything [`GenericMmapStore::open_portable`] can return.
+pub fn open_reminder_production_stack_portable(
+    path: &Path,
+) -> Result<ReminderProductionStack, DurabilityError> {
+    Ok(Ordered::new(ReminderCore::open_portable(path)?))
 }
 
 #[cfg(test)]
@@ -207,6 +237,65 @@ mod tests {
         let matches = FilterEq::<Reminder, DueAtField>::filter_eq(&store, &2_000);
         assert_eq!(matches, vec![Uuid::from_u128(2)]);
         assert!(FilterEq::<Reminder, DueAtField>::filter_eq(&store, &9_999).is_empty());
+    }
+
+    /// `RDO-FR-001` (ADR-0080): the stack keeps a sorted index over
+    /// `due_at_unix_ms` — a page walks it in `(due_at, id)` order from a
+    /// strict cursor, a range walks it between bounds, an insert lands
+    /// by its stamp, a status update leaves the order, and a portable
+    /// reopen rebuilds the same order.
+    #[test]
+    fn page_by_and_range_by_due_at_walk_the_sorted_index_and_survive_reopen() {
+        use crate::generic::query::{Insert, PageBy, RangeBy};
+        use std::ops::Bound::{Included, Unbounded};
+        let dir = fresh_temp_dir("generic_reminder_ordered").unwrap();
+        let path = dir.join("reminders.mmap");
+        let id = Uuid::from_u128;
+        let (min, max) = (Uuid::nil(), Uuid::max());
+        let mut store = create_reminder_production_stack(sample_reminders(), &path).unwrap();
+        // Two seeded: 1 at 1_000, 2 at 2_000. Insert 3 at 1_000 (ties 1).
+        Insert::<Reminder>::insert(
+            &mut store,
+            Reminder {
+                id: id(3),
+                title: "Water plants".into(),
+                due_at_unix_ms: 1_000,
+                status: ReminderStatus::Pending,
+            },
+        )
+        .unwrap();
+        assert_eq!(store.page_by(None, 10), vec![id(1), id(3), id(2)]);
+        assert_eq!(store.page_by(Some((1_000, id(1))), 10), vec![id(3), id(2)]);
+        assert_eq!(
+            store.range_by(Unbounded, Included((1_000, max))),
+            vec![id(1), id(3)],
+            "due_at <= 1_000"
+        );
+        assert_eq!(
+            store.range_by(Included((2_000, min)), Unbounded),
+            vec![id(2)],
+            "due_at >= 2_000"
+        );
+        assert_eq!(
+            store.range_by_limited(Unbounded, Unbounded, 2),
+            None,
+            "three in range, budget two"
+        );
+        UpdateField::<Reminder, StatusField>::update(
+            &mut store,
+            id(1),
+            status_to_u32(ReminderStatus::Done),
+        )
+        .unwrap();
+        assert_eq!(
+            store.page_by(None, 10),
+            vec![id(1), id(3), id(2)],
+            "status leaves the order"
+        );
+        drop(store);
+        let reopened = open_reminder_production_stack_portable(&path).unwrap();
+        assert_eq!(reopened.page_by(None, 10), vec![id(1), id(3), id(2)]);
+        assert_eq!(reopened.indexed_len(), 3);
     }
 
     #[test]
@@ -277,11 +366,11 @@ mod tests {
             assert_eq!(AllIds::<Reminder>::all_ids(&store).len(), 3);
         }
 
-        let records = ReminderProductionStack::read_portable_records(&path).unwrap();
+        let records = ReminderCore::read_portable_records(&path).unwrap();
         assert_eq!(records.len(), 3, "blob records then the logged one");
         assert_eq!(records[2].id, Uuid::from_u128(3));
 
-        let reopened = ReminderProductionStack::open_portable(&path).unwrap();
+        let reopened = open_reminder_production_stack_portable(&path).unwrap();
         let got = GetById::<Reminder>::get(&reopened, Uuid::from_u128(3)).unwrap();
         assert_eq!(got.title, "Water plants");
         assert_eq!(got.status, ReminderStatus::Done, "the slot survived too");
@@ -289,7 +378,7 @@ mod tests {
         let blob_bytes = std::fs::read(&blob).unwrap();
         drop(reopened);
 
-        let again = ReminderProductionStack::open_portable(&path).unwrap();
+        let again = open_reminder_production_stack_portable(&path).unwrap();
         assert_eq!(AllIds::<Reminder>::all_ids(&again).len(), 3);
         assert_eq!(
             std::fs::read(&blob).unwrap(),

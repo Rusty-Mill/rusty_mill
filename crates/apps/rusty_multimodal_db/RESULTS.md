@@ -1606,6 +1606,40 @@ pair's `eq-range` `query` sits at ~100–130 µs against the earlier
 pair's 174.3; the full-scan controls vary the same ~10%). Every other
 planner row is unchanged.
 
+## `Reminder` under `Ordered` — the consumer's due listing before and after (`ADR-0080`, `SERVER-001` v0.65.0 / FR-077)
+
+`docs/design/SERVER-REMINDER-DUE-INDEX-DESIGN.md`'s acceptance criterion
+5, measured by a new `reminder-due` group in `benches/server.rs` — a
+100,000-record `Reminder` table, `due_at_unix_ms` at *n*, every fourth
+reminder `Pending` and the rest `Done`, one connection, one untimed
+warm-up, 20 timed round trips — added and run on the pre-change code
+(`main` after PR #279, `ADR-0079`: `Reminder` had no `Ordered` index, so
+every shape was a full scan) **first**, then again with this round's
+wrap. Three shapes, the consumer's own: the due-now page, a due count,
+and a narrow due window. An idle 4-core Linux container, 2026-09-21.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0079`) | `FullScan`, then `page_rows` | `FilteredPage WHERE due_at_unix_ms <= 50000 AND status = pending ORDER BY due_at_unix_ms LIMIT 50` | 50 rows | **53,278.9** |
+| | `FullScan` | `COUNT(*) WHERE due_at_unix_ms <= 50000` | 1 group | **52,913.6** |
+| | `FullScan` | `Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending` | 250 rows | **56,733.3** |
+| After (`ADR-0080`) | bounded walk past `status` rejects | `FilteredPage WHERE due_at_unix_ms <= 50000 AND status = pending ORDER BY due_at_unix_ms LIMIT 50` | 50 rows | **121.9** |
+| | `IndexRange` walk | `COUNT(*) WHERE due_at_unix_ms <= 50000` | 1 group | **22,312.4** |
+| | `IndexRange` walk, `status` re-checked | `Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending` | 250 rows | **476.6** |
+
+**Read it as**: the due-now page — the consumer's `rusty_remind_me`
+listing — goes from a full scan of 100,000 records to a walk of the
+first ~200 pairs (fifty pending among every-fourth), ~440× less; the
+narrow window walks its 1,000 pairs and re-checks `status` on each,
+~120× less. The count is the honest middle: `due_at <= 50000` admits
+50,000 records, and `Aggregate` still decodes every candidate the walk
+names before counting — half the table read instead of all of it,
+~2.4×. A count that needs no decode (the walk's own length, when every
+predicate is a bound on the walked field) is a real, unbuilt slice,
+named in the design's open questions rather than taken here. Every
+other bench row is unchanged; `Reminder`'s open now pays `ADR-0059`'s
+one-decode-per-record index rebuild, not separately measured.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

@@ -112,6 +112,9 @@ use rusty_multimodal_db::generic::order_customer::{
     create_order_production_stack, Order, OrderStatus,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::generic::reminder::{
+    create_reminder_production_stack, Reminder, ReminderStatus,
+};
 use rusty_multimodal_db::generic_spike::employee_impl::{
     create_employee_production_stack, Department, Employee,
 };
@@ -128,6 +131,7 @@ use rusty_multimodal_db::server::protocol::{
     AggregateFn, AggregateSpec, CompareOp, FieldRef, Predicate, Request, Response, ScanValue,
     Selection, TransactionOp, PROTOCOL_VERSION,
 };
+use rusty_multimodal_db::server::reminder::{ReminderConnectionStore, FIELD_DUE_AT, FIELD_STATUS};
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Barrier};
@@ -515,6 +519,112 @@ fn main() {
     });
 
     bench_query_planner();
+    bench_reminder_due();
+}
+
+/// `ADR-0080` acceptance criterion: the consumer's own "what is due"
+/// listing on a 100K `Reminder` table — `due_at_unix_ms` at `n`, every
+/// fourth reminder `Pending` (the rest `Done`). Three shapes, each
+/// measured on the pre-change code (a full scan: `Reminder` had no
+/// `Ordered` index) first and then with `due_at_unix_ms` as the range
+/// field: the due-now page, a due count, and a narrow due window.
+/// Reported as `reminder-due`, in µs per request, with the plan the
+/// server took named per row in `RESULTS.md` rather than here (the
+/// harness cannot see it).
+fn start_reminder_planner_server() -> SocketAddr {
+    let dir = fresh_temp_dir("server_bench_reminder_planner")
+        .expect("fresh temp dir for reminder planner bench");
+    let path = dir.join("reminders.mmap");
+    let reminders: Vec<Reminder> = (0..PLANNER_RECORDS as u128)
+        .map(|n| Reminder {
+            id: Uuid::from_u128(n + 1),
+            title: format!("reminder {n}"),
+            due_at_unix_ms: n as i64,
+            status: if n % 4 == 0 {
+                ReminderStatus::Pending
+            } else {
+                ReminderStatus::Done
+            },
+        })
+        .collect();
+    let stack = create_reminder_production_stack(reminders, &path)
+        .expect("create ReminderProductionStack for planner bench");
+    let connection_store = Arc::new(ReminderConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+fn bench_reminder_due() {
+    let addr = start_reminder_planner_server();
+    let due_before = |k: i64| Predicate {
+        field: FIELD_DUE_AT,
+        op: CompareOp::Le,
+        value: ScanValue::I64(k),
+    };
+    let pending = Predicate {
+        field: FIELD_STATUS,
+        op: CompareOp::Eq,
+        value: ScanValue::U32(0),
+    };
+    let requests = [
+        (
+            "due-page-50",
+            "FilteredPage WHERE due_at_unix_ms <= 50000 AND status = pending ORDER BY due_at_unix_ms LIMIT 50",
+            Request::FilteredPage {
+                order_by: FIELD_DUE_AT,
+                after: None,
+                limit: 50,
+                filter: vec![due_before(50_000), pending.clone()],
+            },
+        ),
+        (
+            "due-count",
+            "COUNT(*) WHERE due_at_unix_ms <= 50000",
+            Request::Aggregate {
+                group_by: vec![],
+                filter: vec![due_before(50_000)],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            },
+        ),
+        (
+            "due-window",
+            "Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending",
+            Request::Query {
+                select: Selection::Fields(vec![FIELD_DUE_AT]),
+                filter: vec![
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Ge,
+                        value: ScanValue::I64(PLANNER_RANGE_LOWER),
+                    },
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Lt,
+                        value: ScanValue::I64(PLANNER_RANGE_UPPER),
+                    },
+                    pending.clone(),
+                ],
+                limit: None,
+            },
+        ),
+    ];
+    for (label, clause, request) in requests {
+        let (elapsed, count) = measure_planner_request(addr, &request);
+        println!(
+            "{:<10} {:>11} {:>14.1}   {label} {clause} ({count} rows/groups of {PLANNER_RECORDS})",
+            "reminder-due",
+            "due_at",
+            elapsed.as_secs_f64() * 1e6
+        );
+    }
 }
 
 /// `ADR-0073` acceptance criterion 5: how many `Memory` records the

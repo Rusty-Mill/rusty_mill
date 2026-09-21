@@ -127,6 +127,9 @@ domain (`QPR-FR-005`); the observable differences, named
   per stack (`ADR-0059`'s own Non-goal); `range_field` returns at most
   one tag for the same reason. A second wrap is a second round, and the
   `Option<FieldRef>` becomes a `Vec` then, not now.
+- *(Taken: `ADR-0080`, 2026-09-21 — `Reminder` under `Ordered` on
+  `due_at_unix_ms`, exactly the wrap named below;
+  `docs/design/SERVER-REMINDER-DUE-INDEX-DESIGN.md`.)*
 - **`Reminder::due_at_unix_ms`.** Its index is the generic `HashMap`
   equality index (`filter_eq: true`), not an `Ordered` wrap; a `WHERE
   due_at_unix_ms < now` stays a full scan. Wrapping `Reminder` in
@@ -623,7 +626,7 @@ session as having covered it.
   plans wide; still named, still not bundled.
 - **A second `Ordered` wrap** (`created_at_unix_ms`) and `Reminder`
   under `Ordered` — each a wrap and a `range_field` change, if a
-  consumer asks.
+  consumer asks. *`Reminder` taken: `ADR-0080` (2026-09-21).*
 
 ## Change history
 
