@@ -58,6 +58,7 @@
 //! `fields_of`-equivalent) when reconstructing at open.
 
 use super::protocol::{FieldRef, RecordId, ScanValue};
+use crate::durability::sync_parent_dir;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -481,6 +482,7 @@ impl MvccState {
             file.sync_data()?;
         }
         std::fs::rename(&tmp, &path)?;
+        sync_parent_dir(&path)?;
         self.active.store(true, Ordering::SeqCst);
         Ok(())
     }

@@ -144,6 +144,7 @@
 //! unscoped follow-up if that transfer-by-analogy is ever judged
 //! insufficient.
 
+use super::sync_parent_dir;
 use super::{DurabilityError, PARALLEL_CONSTRUCTION_THRESHOLD};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
@@ -486,6 +487,7 @@ impl MmapAgeStore {
             temp_file.sync_all()?;
         }
         std::fs::rename(&temp_path, path)?;
+        sync_parent_dir(path)?;
 
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         // SAFETY: see `write_fresh` — same single-process exclusive-access

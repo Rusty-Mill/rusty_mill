@@ -88,6 +88,7 @@
 //! `pub(crate)` and parameterized by magic/version so both blobs share one
 //! implementation rather than two copies that could drift.
 
+use super::sync_parent_dir;
 use super::DurabilityError;
 use crate::record::DogRecord;
 use serde::{Deserialize, Serialize};
@@ -399,6 +400,7 @@ impl EncodedRecordBlob {
             temp_file.sync_all()?;
         }
         std::fs::rename(&temp_path, path)?;
+        sync_parent_dir(path)?;
         Ok(())
     }
 }

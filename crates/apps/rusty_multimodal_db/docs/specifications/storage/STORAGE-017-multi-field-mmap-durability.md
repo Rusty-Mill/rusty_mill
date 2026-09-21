@@ -1,6 +1,6 @@
 # STORAGE-017 — Multi-field mmap durability (`MmapScanned` per-field slot files over a shared `SlotFile`)
 
-- Version: 0.1.0
+- Version: 0.1.1
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-012` (the generic library: `ScannableField`,
@@ -408,6 +408,8 @@ Where the implementation settles something the design left to it:
   option 3 (blob rewrite, or the crate's WAL) is the named fallback.
 
 ## Change history
+
+- 0.1.1 (2026-09-21, ADR-0092): `SlotFile::create` and `SlotFile::rewrite` — and every other write-to-temp-then-rename install in the crate (`RecordBlob::write`, `MmapAgeStore::write_via_rename`, the insert log's version-1 upgrade, the MVCC history write) — call `durability::sync_parent_dir` after the rename or creation, so the directory entry is on disk, not only the file's bytes (`DDL-FR-004`). Format unchanged.
 
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
   implementation (`src/generic/slot_file.rs`, `src/generic/

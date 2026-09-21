@@ -87,7 +87,7 @@ justified each pick.
 
 `server::serve` puts a thin, real TCP listener in front of
 `ProductionStore`/`GenericProductionStore` — a versioned
-`Request`/`Response` wire protocol (currently version 18) over
+`Request`/`Response` wire protocol (currently version 29) over
 length-prefixed `bincode` framing, thread-per-connection, reusing whichever
 `RwLock` the wrapped store already manages (no new lock at this layer).
 Off by default, distinct from `research` (this is new, additive

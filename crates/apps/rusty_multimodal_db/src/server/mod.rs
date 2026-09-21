@@ -155,6 +155,7 @@ pub mod access;
 #[cfg(feature = "server")]
 pub mod audit;
 pub mod client;
+pub mod data_lock;
 #[cfg(feature = "server")]
 pub mod dog;
 #[cfg(all(feature = "server", feature = "research"))]

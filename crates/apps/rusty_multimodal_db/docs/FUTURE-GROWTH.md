@@ -7,7 +7,7 @@ This document captures directions this project could grow in beyond its current 
 Every current boundary in this project is a deliberate scope line from a specific round, not a structural limitation:
 
 * The multi-process append fix targets local filesystems only (`O_APPEND`'s atomicity guarantee excludes NFS) — a real, identifiable piece of work if that assumption ever needs to change, not a rewrite.
-* The multi-process fix covers slot creation specifically. Broader multi-writer coordination wasn't needed yet, not ruled out.
+* The multi-process fix covers slot creation specifically. Broader multi-writer coordination wasn't needed yet, not ruled out. *Since `ADR-0092`:* the deployment boundary is interlocked — `memory_server` claims its `SERVER_DATA_DIR` with an `flock` (`server::data_lock`) and a second server on the same directory refuses to start; the library itself still takes no lock, so two processes on one file remain possible by construction (the diagnosis harness relies on it) and coordinated only for slot creation.
 * The `research` feature flag means every benchmarked alternative — 4 storage backends, 8 durability variants, 4 concurrency strategies — is still in the codebase, just not compiled into a default build. Nothing was deleted at any point in this project's history.
 * The generic schema layer (`crate::generic`) was validated against a toy domain (`Order`/`Customer`) and a real one (requirements traceability). Nothing schema-specific is baked into the storage engine itself.
 * Staying off crates.io is a current decision (a `Cargo.toml`/publishing choice), not a technical constraint.
