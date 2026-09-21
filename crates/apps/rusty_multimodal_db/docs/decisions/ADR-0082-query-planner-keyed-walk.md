@@ -80,3 +80,6 @@ The fork, held for the owner:
   due_at_unix_ms <= 50000` 30,822.6 → 679.5 — `RESULTS.md`. The
   fork above remains the owner's at review; (a) is what merges if the
   PR merges unchanged.
+- 2026-09-21: `ADR-0083` (bound tightening) the same day widened
+  `keyed_walk` to any number of bounds per side, walking between the
+  tightest two.

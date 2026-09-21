@@ -1700,6 +1700,42 @@ them; a fold that never materializes the keys would close that gap and
 is the obvious refinement if a consumer ever aggregates a wide range in
 anger. Every other row is unchanged.
 
+## Query planner step eight — bound tightening (`ADR-0083`, `SERVER-001` v0.68.0 / FR-080)
+
+`docs/design/SERVER-QUERY-PLANNER-BOUND-TIGHTENING-DESIGN.md`'s
+acceptance criterion 5, measured by a new `memory-planner`
+`range-tight` row in `benches/server.rs` — the same 100,000-record
+`Memory` table and the `index-range` row's own 1% range, with a
+redundant looser lower bound ahead of it in wire order: `WHERE
+updated_at_unix_ms >= 40000 AND 50000 <= updated_at_unix_ms < 51000`
+(the 1,000 records the tight bounds admit are exactly the answer; the
+`>= 40000` admits 11,000). Added and run on the pre-change code
+(`main` after PR #282, `ADR-0082`) **first**, then again with this
+round's `tightest_bounds`; both binaries back to back on an idle
+4-core Linux container, 2026-09-21. Before, the planner walked from the
+first lower bound in wire order (11,000 ids), decoded each, and dropped
+10,000 over rows — and the count, with two lower bounds, was
+ineligible for `ADR-0081`'s index count and decoded too. After, every
+path walks the tight range alone.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0082`) | `IndexRange` from the first lower bound (11,000 ids decoded) | `query WHERE updated_at_unix_ms >= 40000 AND 50000 <= updated_at_unix_ms < 51000` | 1,000 rows | **12,231.3** |
+| | the same walk, every id decoded, then counted | `count(*)` of the same | 1 group | **13,136.5** |
+| | bounded page walk from the tightest lower bound (`ADR-0076`, already tight) | `fpage-50` of the same, `ORDER BY updated_at_unix_ms` | 50 rows | **130.2** |
+| After (`ADR-0083`) | `IndexRange` between the tightest two (1,000 ids) | `query …` | 1,000 rows | **1,369.8** |
+| | `range_count` between the tightest two, no decode | `count(*) …` | 1 group | **58.7** |
+| | the same bounded page walk | `fpage-50 …` | 50 rows | **114.9** |
+
+**Read it as**: `query` and `count(*)` now match the `index-range`
+row's own numbers for the same 1,000 records — the redundant bound
+costs nothing, where before it cost the 10,000 decodes between the two
+lower literals (and, for the count, the whole decode path). The
+`fpage-50` row is the control that was already right: `ADR-0076`'s
+`bounded_walk_start` took the tightest lower bound for the page walk
+from the start, and it is unchanged within noise. Every other row is
+unchanged; a filter with one bound per side plans exactly as before.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

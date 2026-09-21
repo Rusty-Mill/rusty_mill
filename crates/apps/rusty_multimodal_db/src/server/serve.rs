@@ -1022,10 +1022,11 @@ enum QueryPlan {
 /// `FullScan`. Since ADR-0078 the equality no longer *hides* a range
 /// beside it — the one deliberate change to the equality-first rule,
 /// and the result set is unchanged by construction since every
-/// consumer re-checks every predicate. Still deterministic and
-/// value-blind: neither the table's size nor the literals are consulted
-/// (no cost model, no bound tightening — every round's own Non-goal);
-/// the intersection needs no estimate because both id lists are exact.
+/// consumer re-checks every predicate. Since ADR-0083 each side is the
+/// *tightest* bound ([`tightest_bounds`]), not the first in wire order
+/// — the literals are compared to each other, never to the table, so
+/// the plan stays deterministic and free of any cost model; the
+/// intersection needs no estimate because both id lists are exact.
 /// `validate_query` has already rejected unknown tags, so a tag
 /// `schema` lacks simply never plans.
 fn plan_query(
@@ -1033,29 +1034,64 @@ fn plan_query(
     range_field: Option<FieldRef>,
     filter: &[Predicate],
 ) -> QueryPlan {
-    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
     let eq = filter.iter().position(|p| {
-        p.op == Eq
+        p.op == protocol::CompareOp::Eq
             && schema
                 .fields
                 .iter()
                 .any(|f| f.tag == p.field && f.capabilities.filter_eq)
     });
-    let first = |ops: &[protocol::CompareOp]| {
-        range_field.and_then(|field| {
-            filter
-                .iter()
-                .position(|p| p.field == field && ops.contains(&p.op))
-        })
-    };
-    let lower = first(&[Gt, Ge, Eq]);
-    let upper = first(&[Lt, Le, Eq]);
+    let (lower, upper) = tightest_bounds(range_field, filter);
     match (eq, lower.is_some() || upper.is_some()) {
         (Some(eq), true) => QueryPlan::IndexIntersect { eq, lower, upper },
         (Some(eq), false) => QueryPlan::IndexEq(eq),
         (None, true) => QueryPlan::IndexRange { lower, upper },
         (None, false) => QueryPlan::FullScan,
     }
+}
+
+/// `QBT-FR-001` (ADR-0083): the positions in `filter` of the tightest
+/// lower and tightest upper bound on `range_field` — the greatest lower
+/// literal (an exclusive `Gt` tighter than an inclusive `Ge` at the same
+/// literal) and the least upper literal (`Lt` tighter than `Le`), an
+/// `Eq` a candidate for both sides. Exact, not an estimate: every bound
+/// on one side is implied by the tightest, so a walk between the two
+/// tightest admits exactly the records every bound admits. `None` for a
+/// side with no bound, or when `range_field` is `None`. Literals of
+/// another kind than the field's never reach here (`validate_predicate`);
+/// two literals are compared as `i128` so `U32` and `I64` share one
+/// order, as `page_key` does.
+pub fn tightest_bounds(
+    range_field: Option<FieldRef>,
+    filter: &[Predicate],
+) -> (Option<usize>, Option<usize>) {
+    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
+    let Some(field) = range_field else {
+        return (None, None);
+    };
+    let literal = |p: &Predicate| page_key_value(&p.value).unwrap_or(i128::MIN);
+    let mut lower: Option<usize> = None;
+    let mut upper: Option<usize> = None;
+    for (i, p) in filter.iter().enumerate() {
+        if p.field != field {
+            continue;
+        }
+        // (literal, exclusive): a greater pair is a tighter lower bound.
+        if matches!(p.op, Gt | Ge | Eq) {
+            let key = (literal(p), p.op == Gt);
+            if lower.is_none_or(|j| key > (literal(&filter[j]), filter[j].op == Gt)) {
+                lower = Some(i);
+            }
+        }
+        // (literal, inclusive): a lesser pair is a tighter upper bound.
+        if matches!(p.op, Lt | Le | Eq) {
+            let key = (literal(p), p.op != Lt);
+            if upper.is_none_or(|j| key < (literal(&filter[j]), filter[j].op != Lt)) {
+                upper = Some(i);
+            }
+        }
+    }
+    (lower, upper)
 }
 
 /// `QPR-FR-004` (ADR-0075): the two `Bound`s a range walk takes, from the
@@ -1180,12 +1216,11 @@ pub fn intersect_ids(a: Vec<RecordId>, b: Vec<RecordId>) -> Vec<RecordId> {
 /// `QCW-FR-003` (ADR-0081): whether a `Request::Aggregate` is a count of
 /// a range the `Ordered` index can answer without reading a record —
 /// no `group_by`, every aggregate `COUNT(*)`, a range field, and a
-/// filter that is nothing but bounds on it with at most one bound per
-/// side (an `Eq` is both sides; two lower or two upper bounds would
-/// need tightening, `ADR-0075`'s own declined question, so they take
-/// the decode path). An empty filter qualifies: the whole index. Any
-/// other predicate needs a re-check over decoded rows, so the walk's
-/// length would over-count. Pure.
+/// filter that is nothing but bounds on it — any number per side since
+/// `QBT-FR-002` (ADR-0083), the tightest implying the rest; an `Eq` is
+/// both sides. An empty filter qualifies: the whole index. Any other
+/// predicate (`Ne`, another field) needs a re-check over decoded rows,
+/// so the walk's length would over-count. Pure.
 pub fn counted_walk_applies(
     range_field: Option<FieldRef>,
     group_by: &[FieldRef],
@@ -1205,22 +1240,12 @@ pub fn counted_walk_applies(
     {
         return false;
     }
-    let (mut lower, mut upper) = (0, 0);
-    for p in filter {
-        if p.field != field {
-            return false;
-        }
-        match p.op {
-            Gt | Ge => lower += 1,
-            Lt | Le => upper += 1,
-            Eq => {
-                lower += 1;
-                upper += 1;
-            }
-            _ => return false,
-        }
-    }
-    lower <= 1 && upper <= 1
+    // `QBT-FR-002` (ADR-0083): any number of bounds per side — the
+    // tightest implies the rest, so the walk between the two tightest
+    // is exact; only `Ne` and another field's predicate need a decode.
+    filter
+        .iter()
+        .all(|p| p.field == field && matches!(p.op, Gt | Ge | Lt | Le | Eq))
 }
 
 /// `QKW-FR-003` (ADR-0082): whether a `Request::Aggregate` is answerable
@@ -1280,9 +1305,8 @@ pub fn keyed_walk<S: ConnectionStore + ?Sized>(
     if aggregates.iter().all(|a| a.func == AggregateFn::Count) {
         return counted_walk(store, group_by, filter, aggregates, limit);
     }
-    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
-    let side = |ops: &[protocol::CompareOp]| filter.iter().position(|p| ops.contains(&p.op));
-    let (lower, upper) = range_bounds(filter, side(&[Gt, Ge, Eq]), side(&[Lt, Le, Eq]));
+    let (lower, upper) = tightest_bounds(Some(field), filter);
+    let (lower, upper) = range_bounds(filter, lower, upper);
     let keys = store.range_keys(field, lower, upper).ok()?;
     let kind = schema
         .fields
@@ -1339,9 +1363,8 @@ pub fn counted_walk<S: ConnectionStore + ?Sized>(
     if !counted_walk_applies(Some(field), group_by, filter, aggregates) {
         return None;
     }
-    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
-    let side = |ops: &[protocol::CompareOp]| filter.iter().position(|p| ops.contains(&p.op));
-    let (lower, upper) = range_bounds(filter, side(&[Gt, Ge, Eq]), side(&[Lt, Le, Eq]));
+    let (lower, upper) = tightest_bounds(Some(field), filter);
+    let (lower, upper) = range_bounds(filter, lower, upper);
     let count = store.range_count(field, lower, upper).ok()?;
     let mut groups = vec![AggregateGroup {
         key: Vec::new(),
@@ -5836,8 +5859,8 @@ mod tests {
         );
         assert_eq!(
             plan_query(&schema, f, &[u32_pred(1, Gt, 1), u32_pred(1, Gt, 5)]),
-            range(Some(0), None),
-            "two lower bounds: the first in wire order, no tightening"
+            range(Some(1), None),
+            "two lower bounds: the tightest (ADR-0083)"
         );
         assert_eq!(
             plan_query(
@@ -6168,12 +6191,130 @@ mod tests {
         );
         assert!(!applies(&[], &[u32_pred(1, Ne, 1)], &[count()]), "Ne");
         assert!(
-            !applies(&[], &[u32_pred(1, Ge, 1), u32_pred(1, Gt, 5)], &[count()]),
-            "two lower bounds"
+            applies(&[], &[u32_pred(1, Ge, 1), u32_pred(1, Gt, 5)], &[count()]),
+            "two lower bounds: the tightest implies the other (ADR-0083)"
         );
         assert!(
-            !applies(&[], &[u32_pred(1, Eq, 5), u32_pred(1, Le, 9)], &[count()]),
-            "Eq beside an upper bound"
+            applies(&[], &[u32_pred(1, Eq, 5), u32_pred(1, Le, 9)], &[count()]),
+            "Eq beside an upper bound (ADR-0083)"
+        );
+    }
+
+    /// `QBT-FR-001` (ADR-0083), acceptance criterion 1: the tightest
+    /// lower bound is the greatest literal, `Gt` over `Ge` at a tie; the
+    /// tightest upper the least, `Lt` over `Le` at a tie; `Eq` on either
+    /// side; another field ignored; `None` without a range field.
+    #[test]
+    fn tightest_bounds_picks_the_greatest_lower_and_least_upper() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        let t = |filter: &[Predicate]| tightest_bounds(Some(1), filter);
+        assert_eq!(t(&[]), (None, None));
+        assert_eq!(
+            t(&[u32_pred(1, Ge, 1), u32_pred(1, Gt, 5)]),
+            (Some(1), None)
+        );
+        assert_eq!(
+            t(&[u32_pred(1, Gt, 5), u32_pred(1, Ge, 1)]),
+            (Some(0), None)
+        );
+        assert_eq!(
+            t(&[u32_pred(1, Ge, 5), u32_pred(1, Gt, 5)]),
+            (Some(1), None),
+            "Gt beats Ge at the same literal"
+        );
+        assert_eq!(
+            t(&[u32_pred(1, Le, 9), u32_pred(1, Lt, 9), u32_pred(1, Lt, 12)]),
+            (None, Some(1)),
+            "Lt beats Le at the same literal; the least wins"
+        );
+        assert_eq!(
+            t(&[u32_pred(1, Ge, 1), u32_pred(1, Eq, 4), u32_pred(1, Le, 9)]),
+            (Some(1), Some(1)),
+            "Eq is the tightest of both sides here"
+        );
+        assert_eq!(
+            t(&[u32_pred(1, Eq, 4), u32_pred(1, Gt, 6)]),
+            (Some(1), Some(0)),
+            "a lower bound past the Eq: an empty range, honestly"
+        );
+        assert_eq!(
+            t(&[u32_pred(3, Gt, 99), u32_pred(1, Ne, 2), u32_pred(1, Lt, 3)]),
+            (None, Some(2)),
+            "another field and Ne ignored"
+        );
+        assert_eq!(tightest_bounds(None, &[u32_pred(1, Ge, 1)]), (None, None));
+    }
+
+    /// `QBT-FR-003` (ADR-0083), acceptance criterion 2: a redundant looser
+    /// bound ahead of the tight one changes what is read, not what is
+    /// returned — `query_candidates` walks the tight range only (one
+    /// `get` per admitted id), `dispatch` answers the scan's rows, and a
+    /// pure-range count with two bounds per side comes from the index.
+    #[test]
+    fn a_looser_bound_beside_a_tighter_one_walks_the_tight_range_only() {
+        use CompareOp::{Ge, Gt, Le, Lt};
+        let id = RecordId::from_u128;
+        // field 1 is 3, 5, 9: `>= 1 AND > 3 AND <= 9 AND < 9` admits 5 only.
+        let filter = [
+            u32_pred(1, Ge, 1),
+            u32_pred(1, Gt, 3),
+            u32_pred(1, Le, 9),
+            u32_pred(1, Lt, 9),
+        ];
+        let store = PlannerFixture::with_range(1);
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
+        assert_eq!(
+            plan,
+            QueryPlan::IndexRange {
+                lower: Some(1),
+                upper: Some(3)
+            }
+        );
+        assert_eq!(
+            ids_of(&query_candidates(&store, plan, &filter)),
+            vec![id(2)]
+        );
+        assert_eq!(
+            (store.gets(), store.scans()),
+            (1, 0),
+            "only the tight range read"
+        );
+        let scanned = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let rows_of = |response| match response {
+            Response::Rows { mut rows } => {
+                rows.sort_by_key(|(id, _)| *id);
+                rows
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        };
+        let request = || Request::Query {
+            select: Selection::All,
+            filter: filter.to_vec(),
+            limit: None,
+        };
+        assert_eq!(
+            rows_of(dispatch(&store, request())),
+            rows_of(dispatch(&scanned, request()))
+        );
+        let counted = PlannerFixture::with_range(1);
+        match dispatch(
+            &counted,
+            Request::Aggregate {
+                group_by: vec![],
+                filter: filter.to_vec(),
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            },
+        ) {
+            Response::Groups { groups } => assert_eq!(groups[0].values, vec![ScanValue::I64(1)]),
+            other => panic!("expected Groups, got {other:?}"),
+        }
+        assert_eq!(
+            (counted.gets(), counted.scans(), counted.range_counts()),
+            (0, 0, 1)
         );
     }
 
