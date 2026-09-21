@@ -2308,6 +2308,19 @@ where
             Some(cursor) => page(&mut self.index.range((Excluded(cursor), Unbounded))),
         }
     }
+
+    // `PGD-FR-003` (ADR-0089): the same set, walked backward from the
+    // cursor (exclusive) or from the greatest pair.
+    fn page_by_desc(&self, before: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let page = |ids: &mut dyn Iterator<Item = &(R::Key, R::Id)>| {
+            ids.take(limit).map(|(_, id)| *id).collect::<Vec<_>>()
+        };
+        match before {
+            None => page(&mut self.index.iter().rev()),
+            Some(cursor) => page(&mut self.index.range((Unbounded, Excluded(cursor))).rev()),
+        }
+    }
 }
 
 // `QPR-FR-001` (ADR-0075): a range is one walk of the same set, guarded

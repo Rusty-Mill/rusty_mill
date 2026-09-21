@@ -3633,3 +3633,218 @@ fn ungrouped_reductions_from_one_fold_match_the_decoded_answers() {
         check(&mut client, "reminder", "due_at_unix_ms", where_, keep);
     }
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0089` / `docs/design/SERVER-PAGE-DESCENDING-DESIGN.md`, acceptance
+// criterion 3 (`PGD-FR-006`): `ORDER BY … DESC` over a real socket — the
+// exact reverse of the ascending answer, with `LIMIT`, with `WHERE`, on
+// the indexed field (`Memory`'s `updated_at_unix_ms`, `Reminder`'s
+// `due_at_unix_ms`) and on a scanned one; a cursor walk through
+// `page_desc` is disjoint and complete; `ASC` is the default spelled out.
+// ---------------------------------------------------------------------
+
+#[test]
+fn order_by_desc_is_the_exact_reverse_of_the_ascending_answer() {
+    let ids = |rows: &[(Uuid, Vec<(String, ScanValue)>)]| -> Vec<Uuid> {
+        rows.iter().map(|(id, _)| *id).collect()
+    };
+    for (start, table, indexed, scanned, where_) in [
+        (
+            start_memory_server as fn() -> SocketAddr,
+            "memory",
+            "updated_at_unix_ms",
+            "created_at_unix_ms",
+            "WHERE updated_at_unix_ms >= 2000",
+        ),
+        (
+            start_reminder_server as fn() -> SocketAddr,
+            "reminder",
+            "due_at_unix_ms",
+            "status",
+            "WHERE due_at_unix_ms <= 2000",
+        ),
+    ] {
+        let mut client = SchemaDrivenClient::connect(start()).unwrap();
+        for field in [indexed, scanned] {
+            let asc = rows(
+                client
+                    .query(&format!("SELECT * FROM {table} ORDER BY {field}"))
+                    .unwrap(),
+            );
+            let mut expected = ids(&asc);
+            expected.reverse();
+            let desc = rows(
+                client
+                    .query(&format!("SELECT * FROM {table} ORDER BY {field} DESC"))
+                    .unwrap(),
+            );
+            assert_eq!(ids(&desc), expected, "{table} {field}");
+            assert_eq!(
+                ids(&rows(
+                    client
+                        .query(&format!("SELECT * FROM {table} ORDER BY {field} ASC"))
+                        .unwrap()
+                )),
+                ids(&asc),
+                "ASC is the default"
+            );
+            let top2 = rows(
+                client
+                    .query(&format!(
+                        "SELECT * FROM {table} ORDER BY {field} DESC LIMIT 2"
+                    ))
+                    .unwrap(),
+            );
+            assert_eq!(
+                ids(&top2),
+                expected[..2].to_vec(),
+                "{table} {field} LIMIT 2"
+            );
+        }
+        // With a filter: the reverse of the filtered ascending page.
+        let asc = rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM {table} {where_} ORDER BY {indexed}"
+                ))
+                .unwrap(),
+        );
+        let mut expected = ids(&asc);
+        expected.reverse();
+        let desc = rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM {table} {where_} ORDER BY {indexed} DESC"
+                ))
+                .unwrap(),
+        );
+        assert_eq!(ids(&desc), expected, "{table} {where_}");
+        // A cursor walk of two rows at a time through `page_desc`:
+        // disjoint pages, greatest first, the whole table.
+        let mut walked = Vec::new();
+        let mut before = None;
+        loop {
+            let page = client.page_desc(indexed, before.take(), 2).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            let (last_id, last_fields) = page.last().unwrap();
+            before = Some((
+                last_fields
+                    .iter()
+                    .find(|(n, _)| n == indexed)
+                    .map(|(_, v)| v.clone())
+                    .unwrap(),
+                *last_id,
+            ));
+            walked.extend(ids(&page));
+            if page.len() < 2 {
+                break;
+            }
+        }
+        let mut all = ids(&rows(
+            client
+                .query(&format!("SELECT * FROM {table} ORDER BY {indexed}"))
+                .unwrap(),
+        ));
+        all.reverse();
+        assert_eq!(
+            walked, all,
+            "{table}: page_desc walks everything, greatest first"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// `ADR-0090` / `docs/design/SERVER-SQL-ID-PREDICATE-DESIGN.md`,
+// acceptance criterion 2 (`SID-FR-003`): `WHERE id = '<uuid>'` over a
+// real socket — one point read, exactly the scan's row for that id; the
+// other predicates re-checked; the `SELECT` list applied; an unknown id
+// empty; `LIMIT 0` empty; `!=`, a non-UUID, and two ids refused
+// client-side with no frame.
+// ---------------------------------------------------------------------
+
+#[test]
+fn where_id_equals_is_a_point_read_that_matches_the_scan() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let all = rows(client.query("SELECT * FROM memory").unwrap());
+    let (target, fields) = all
+        .iter()
+        .find(|(id, _)| *id == Uuid::from_u128(3))
+        .unwrap();
+    let category = str_field(fields, "category");
+    let got = rows(
+        client
+            .query(&format!("SELECT * FROM memory WHERE id = '{target}'"))
+            .unwrap(),
+    );
+    assert_eq!(got, vec![(*target, fields.clone())]);
+    // The other predicates are re-checked: one that holds, one that does not.
+    assert_eq!(
+        rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM memory WHERE id = '{target}' AND category = '{category}'"
+                ))
+                .unwrap()
+        )
+        .len(),
+        1
+    );
+    assert!(rows(
+        client
+            .query(&format!(
+                "SELECT * FROM memory WHERE category = 'no-such' AND id = '{target}'"
+            ))
+            .unwrap()
+    )
+    .is_empty());
+    // The SELECT list applies.
+    let projected = rows(
+        client
+            .query(&format!(
+                "SELECT content, category FROM memory WHERE id = '{target}'"
+            ))
+            .unwrap(),
+    );
+    assert_eq!(
+        projected[0]
+            .1
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        vec!["content", "category"]
+    );
+    // Unknown id, LIMIT 0.
+    assert!(rows(
+        client
+            .query(&format!(
+                "SELECT * FROM memory WHERE id = '{}'",
+                Uuid::from_u128(999)
+            ))
+            .unwrap()
+    )
+    .is_empty());
+    assert!(rows(
+        client
+            .query(&format!(
+                "SELECT * FROM memory WHERE id = '{target}' LIMIT 0"
+            ))
+            .unwrap()
+    )
+    .is_empty());
+    // Refused client-side, no frame: the wrong comparator, a non-UUID, two ids.
+    for sql in [
+        format!("SELECT * FROM memory WHERE id != '{target}'"),
+        "SELECT * FROM memory WHERE id = 'not-a-uuid'".to_string(),
+        format!(
+            "SELECT * FROM memory WHERE id = '{target}' AND id = '{}'",
+            Uuid::from_u128(1)
+        ),
+    ] {
+        assert!(
+            matches!(client.query(&sql), Err(ClientError::Sql(_))),
+            "{sql}"
+        );
+    }
+}

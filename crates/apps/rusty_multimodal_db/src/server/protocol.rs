@@ -82,6 +82,7 @@
 //! | 25 | `SERVER-001` v0.55.0 | + [`Request::FetchSnapshot`] (34), [`Response::Snapshot`] (23), and [`ErrorCode::TooLarge`] (14) — `RPL-FR-001`, ADR-0067: a full, lock-consistent snapshot of the connection's table's files, streamed back over the wire — every companion file's name and bytes, the same file set [`Request::Backup`] already enumerates, reused unchanged. Gated behind a new [`TokenClass::Replication`], never satisfied by `ReadOnly`/`ReadWrite` — the whole point: a shape [`Request::Backup`]'s own design once considered and declined ("a new bulk-exfiltration primitive") is safe now because nothing short of a separately-provisioned credential can ever reach it. `TooLarge` refuses a table whose on-disk size exceeds [`MAX_SNAPSHOT_BYTES`] before any byte is read. `Malformed` below 25 (rule 3). ADR-0067 |
 //! | 26 | `SERVER-001` v0.56.0 | + [`Request::FilteredPage`] (35) — `FPG-FR-001`, ADR-0068: [`Request::Page`]'s three fields (`order_by`, `after`, `limit`) plus `filter: Vec<Predicate>`, answered [`Response::Rows`] (reused, no new response variant) — an ordered keyset page over only the rows every filter predicate matches. Evaluated by one shared default correct for every domain, no adapter override this round: `ConnectionStore::scan_all`, filtered via the identical [`ErrorCode`]-and-`predicate_matches` logic [`Request::Query`]'s own filter already uses, then [`Request::Page`]'s own key selection over the filtered subset. `Memory`/`Relation`'s `Ordered` index gives no speed advantage to a filtered request this round — only the unfiltered `Page` fast path keeps it, untouched by this addition. Validated exactly as `Page`/`Query` already are — no new validation function. Gated as a **read**, `Page`'s own precedent; `Malformed` below 26 (rule 3). No new `ErrorCode`. ADR-0068 |
 //! | 27 | `SERVER-001` v0.57.0 | No new variant: `BeginWith` learns a fourth flag bit, [`SESSION_MVCC_ISOLATION`] (`MVCC2-FR-004`, `ADR-0072`) — real multi-version concurrency control for `Memory`/`Entity`/`Relation` (`MVCC2-FR-012`): `Begin` opens a snapshot at the table's current `last_committed_txn`; `GetById` while such a session is open answers with the version visible as of that snapshot, including against a conflicting *ordinary* (non-session) write from another connection, not only another session's commit (`MVCC2-FR-006`/`008`); `Commit`'s write-write conflict check reuses [`ErrorCode::Conflict`] and `Response::TransactionFailed { index: 0, .. }` — `SESSION_SNAPSHOT_ISOLATION`'s own precedent, no new `ErrorCode`. Unknown below 27 (rule 3), sent only after negotiating ≥ 27 (rule 4); composes independently with the three existing bits. `Dog`/`Order`/`Employee` unaffected — the bit is `Unsupported` there, the same domain-scoping precedent `Insert`/`Replace`/`Delete`/`Compact` already established. ADR-0072 |
+//! | 28 | `SERVER-001` v0.74.0 | + [`Request::PageDesc`] (36), [`Request::FilteredPageDesc`] (37) — `PGD-FR-001`, ADR-0089: [`Request::Page`]/[`Request::FilteredPage`] walked the other way — sorted *descending* by `(order_by, id)`, strictly *before* the `before` cursor, at most `limit` rows, answered [`Response::Rows`] (reused). The consumer's "latest N" shape (`ORDER BY updated_at DESC LIMIT 50`). `Memory`/`Relation`/`Reminder` answer `PageDesc` on their ordered field from the sorted index walked backward; every other shape from the scan. Validated exactly as `Page`/`FilteredPage`. Gated as a **read**; `Malformed` below 28 (rule 3). No new `ErrorCode`. ADR-0089 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -116,7 +117,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -225,6 +226,39 @@ pub enum ScanValue {
     /// connection negotiated below 11 (rule 3, the protocol's first
     /// content-rewriting downgrade).
     StrList(Vec<String>),
+}
+
+/// Whether `predicate` holds over one record's wire shape — a `Query`
+/// filter's per-row test, and (`GRD-FR-003`) the evaluation of a
+/// `ReplaceIf` guard against the stored record inside an adapter.
+pub fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate) -> bool {
+    fields
+        .iter()
+        .find(|(field, _)| *field == predicate.field)
+        .is_some_and(|(_, value)| compare(value, predicate.op, &predicate.value))
+}
+
+pub fn compare(actual: &ScanValue, op: CompareOp, expected: &ScanValue) -> bool {
+    match op {
+        CompareOp::Eq => actual == expected,
+        CompareOp::Ne => actual != expected,
+        CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => match (actual, expected) {
+            (ScanValue::U32(a), ScanValue::U32(b)) => ordering_matches(a.cmp(b), op),
+            (ScanValue::I64(a), ScanValue::I64(b)) => ordering_matches(a.cmp(b), op),
+            _ => false,
+        },
+    }
+}
+
+fn ordering_matches(ordering: std::cmp::Ordering, op: CompareOp) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    matches!(
+        (op, ordering),
+        (CompareOp::Lt, Less)
+            | (CompareOp::Gt, Greater)
+            | (CompareOp::Le, Less | Equal)
+            | (CompareOp::Ge, Greater | Equal)
+    )
 }
 
 /// One write within a [`Request::Transaction`] batch — the same three
@@ -1041,6 +1075,38 @@ pub enum Request {
         limit: u64,
         filter: Vec<Predicate>,
     },
+    /// Protocol 28 (`PGD-FR-001`, ADR-0089,
+    /// `docs/design/SERVER-PAGE-DESCENDING-DESIGN.md`): [`Request::Page`]
+    /// walked the other way — every record sorted *descending* by
+    /// `(order_by, id)`, strictly *before* the `before` cursor (`None`
+    /// for the first page, which starts at the greatest key), at most
+    /// `limit` rows. The consumer's "latest N" (`ORDER BY updated_at DESC
+    /// LIMIT 50`). The last row's `(value, id)` is the next call's
+    /// `before`. Answered [`Response::Rows`] (reused). Validated exactly
+    /// as `Page` (`validate_page`, the cursor's kind against the field's).
+    /// `Memory`/`Relation`/`Reminder` answer it on their ordered field
+    /// from the sorted index walked backward (`PageBy::page_by_desc`);
+    /// every other field from the scan. A read, gated exactly as `Page`;
+    /// `Malformed` below 28 (rule 3).
+    PageDesc {
+        order_by: FieldRef,
+        before: Option<(ScanValue, RecordId)>,
+        limit: u64,
+    },
+    /// Protocol 28 (`PGD-FR-002`, ADR-0089): [`Request::FilteredPage`]
+    /// walked the other way — `PageDesc`'s three fields plus the
+    /// `WHERE`-shaped `filter`, only the rows every predicate matches,
+    /// descending. Evaluated through the planner's candidate step
+    /// (`indexed_candidates`), every predicate re-checked, then the
+    /// descending key selection — no descending bounded walk this round
+    /// (a named option). Validated as `FilteredPage`. A read; `Malformed`
+    /// below 28.
+    FilteredPageDesc {
+        order_by: FieldRef,
+        before: Option<(ScanValue, RecordId)>,
+        limit: u64,
+        filter: Vec<Predicate>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
@@ -1226,6 +1292,7 @@ mod tests {
             "FetchSnapshot" | "Snapshot" | "Err(TooLarge)" => 25,
             "FilteredPage" => 26,
             "BeginWith(mvcc isolation)" | "BeginWith(all four bits)" => 27,
+            "PageDesc" | "FilteredPageDesc" => 28,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1642,6 +1709,53 @@ mod tests {
             },
             &bytes(&[
                 &[0x23, 0x00, 0x00, 0x00],                         // FilteredPage
+                &[0x01, 0x00],                                     // order_by
+                &[0x01],                                           // Some
+                &[0x01, 0x00, 0x00, 0x00],                         // ScanValue::I64
+                &[0xd0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 2000
+                &ID1,
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // limit 10
+                &LEN1,                                             // filter: one Predicate
+                &[0x02, 0x00],                                     // predicate field
+                &[0x00, 0x00, 0x00, 0x00],                         // CompareOp::Eq
+                &[0x00, 0x00, 0x00, 0x00],                         // ScanValue::U32
+                &[0x05, 0x00, 0x00, 0x00],                         // 5
+            ]),
+        );
+        // Protocol 28 (`PGD-FR-001`/`002`, ADR-0089): `PageDesc` at 36 and
+        // `FilteredPageDesc` at 37 — `Page`/`FilteredPage`'s own fields
+        // under the new tags (`before` in `after`'s place).
+        assert_golden(
+            "PageDesc",
+            &Request::PageDesc {
+                order_by: 1,
+                before: Some((ScanValue::I64(2_000), id)),
+                limit: 10,
+            },
+            &bytes(&[
+                &[0x24, 0x00, 0x00, 0x00],                         // PageDesc
+                &[0x01, 0x00],                                     // order_by
+                &[0x01],                                           // Some
+                &[0x01, 0x00, 0x00, 0x00],                         // ScanValue::I64
+                &[0xd0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 2000
+                &ID1,
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // limit 10
+            ]),
+        );
+        assert_golden(
+            "FilteredPageDesc",
+            &Request::FilteredPageDesc {
+                order_by: 1,
+                before: Some((ScanValue::I64(2_000), id)),
+                limit: 10,
+                filter: vec![Predicate {
+                    field: 2,
+                    op: CompareOp::Eq,
+                    value: ScanValue::U32(5),
+                }],
+            },
+            &bytes(&[
+                &[0x25, 0x00, 0x00, 0x00],                         // FilteredPageDesc
                 &[0x01, 0x00],                                     // order_by
                 &[0x01],                                           // Some
                 &[0x01, 0x00, 0x00, 0x00],                         // ScanValue::I64
@@ -2213,7 +2327,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

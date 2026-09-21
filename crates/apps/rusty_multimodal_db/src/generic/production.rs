@@ -511,6 +511,27 @@ impl<S> GenericProductionStore<S> {
             .page_by(after, limit)
     }
 
+    /// `PGD-FR-003` (ADR-0089): [`PageBy::page_by_desc`] under the read
+    /// lock — [`Self::page_by`] walked backward.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn page_by_desc<R, Marker>(
+        &self,
+        before: Option<(R::Key, R::Id)>,
+        limit: usize,
+    ) -> Vec<R::Id>
+    where
+        R: OrderedField<Marker>,
+        S: PageBy<R, Marker>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .page_by_desc(before, limit)
+    }
+
     /// Every id in one key range of `R`'s `Marker` field (`QPR-FR-001`,
     /// ADR-0075) — a range walk of the sorted index under the read lock,
     /// ascending by `(key, id)`; [`Self::page_by`]'s twin with two bounds

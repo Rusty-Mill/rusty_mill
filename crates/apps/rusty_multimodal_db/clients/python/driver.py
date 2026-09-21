@@ -129,6 +129,25 @@ def main() -> int:
         except UnsupportedError as e:
             print(f"filtered_page=unsupported:{e}")
 
+        # Protocol 28 (PGD-FR-007): the descending twins -- two pages of
+        # three walk every entity greatest-first, disjoint; the filtered
+        # one keeps only persons, greatest-first.
+        try:
+            first = c.page_desc("mention_count", None, 3)
+            rest = c.page_desc("mention_count", (dict(first[-1][1])["mention_count"], first[-1][0]), 100)
+            counts = [dict(f)["mention_count"] for _, f in first + rest]
+            print(f"page_desc_total={len(first) + len(rest)}")
+            print(f"page_desc_sorted={'yes' if counts == sorted(counts, reverse=True) else 'no'}")
+            print(f"page_desc_disjoint={'yes' if not {r for r, _ in first} & {r for r, _ in rest} else 'no'}")
+            persons = c.filtered_page_desc("mention_count", [("kind", CompareOp.Eq, "person")], None, 100)
+            counts = [dict(f)["mention_count"] for _, f in persons]
+            kinds = {dict(f)["kind"] for _, f in persons}
+            print(f"filtered_page_desc_total={len(persons)}")
+            print(f"filtered_page_desc_sorted={'yes' if counts == sorted(counts, reverse=True) else 'no'}")
+            print(f"filtered_page_desc_all_match={'yes' if kinds == {'person'} else 'no'}")
+        except UnsupportedError as e:
+            print(f"page_desc=unsupported:{e}")
+
         # Protocol 21 (CNT-FR-004): the edge count under a label — the one
         # runtime edge under mentored_by, the samples' relates_to, and an
         # unknown label Malformed.

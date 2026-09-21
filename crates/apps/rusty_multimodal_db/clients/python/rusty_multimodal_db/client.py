@@ -394,6 +394,67 @@ class Client:
             return [(rid, self._named(fields)) for rid, fields in reply.rows]
         raise ProtocolError(type(reply).__name__)
 
+    def page_desc(
+        self,
+        order_by: str,
+        before: Optional[Tuple[Any, uuid.UUID]] = None,
+        limit: int = 100,
+    ) -> List[Tuple[uuid.UUID, List[Tuple[str, Any]]]]:
+        """``page`` walked the other way (PGD-FR-007, ADR-0089, protocol
+        28): every record sorted *descending* by ``order_by`` with the id
+        as the tie-break, strictly before ``before`` (``None`` for the
+        first page, which starts at the greatest value), at most
+        ``limit`` rows — the "latest N". The last row's ``(value, id)``
+        is the next call's ``before``. ``page``'s own refusals; below 28
+        ``UnsupportedError`` with no frame sent."""
+        need = p.REQUEST_INTRODUCED_AT[p.PageDesc]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(f"PageDesc needs protocol {need}, negotiated {self.server_protocol_version}")
+        descriptor = self.field(order_by)
+        if descriptor.value_kind not in (p.ValueKind.U32, p.ValueKind.I64):
+            raise UnsupportedError(f"page order on {order_by!r}, a {descriptor.value_kind.name} field")
+        if limit <= 0:
+            raise UnsupportedError("page limit must be at least 1")
+        cursor = None
+        if before is not None:
+            value, record_id = before
+            cursor = (_to_scan_value(descriptor.value_kind, value), record_id)
+        reply = self._roundtrip(p.PageDesc(descriptor.tag, cursor, limit))
+        if isinstance(reply, p.Rows):
+            return [(rid, self._named(fields)) for rid, fields in reply.rows]
+        raise ProtocolError(type(reply).__name__)
+
+    def filtered_page_desc(
+        self,
+        order_by: str,
+        where: Sequence[Tuple[str, p.CompareOp, Any]] = (),
+        before: Optional[Tuple[Any, uuid.UUID]] = None,
+        limit: int = 100,
+    ) -> List[Tuple[uuid.UUID, List[Tuple[str, Any]]]]:
+        """``filtered_page`` walked the other way (PGD-FR-007, ADR-0089,
+        protocol 28): ``page_desc``'s contract over only the rows every
+        ``where`` predicate matches. Below 28 ``UnsupportedError`` with
+        no frame sent."""
+        need = p.REQUEST_INTRODUCED_AT[p.FilteredPageDesc]
+        if self.server_protocol_version < need:
+            raise UnsupportedError(
+                f"FilteredPageDesc needs protocol {need}, negotiated {self.server_protocol_version}"
+            )
+        descriptor = self.field(order_by)
+        if descriptor.value_kind not in (p.ValueKind.U32, p.ValueKind.I64):
+            raise UnsupportedError(f"page order on {order_by!r}, a {descriptor.value_kind.name} field")
+        if limit <= 0:
+            raise UnsupportedError("page limit must be at least 1")
+        cursor = None
+        if before is not None:
+            value, record_id = before
+            cursor = (_to_scan_value(descriptor.value_kind, value), record_id)
+        filter_ = tuple(self._predicates(where))
+        reply = self._roundtrip(p.FilteredPageDesc(descriptor.tag, cursor, limit, filter_))
+        if isinstance(reply, p.Rows):
+            return [(rid, self._named(fields)) for rid, fields in reply.rows]
+        raise ProtocolError(type(reply).__name__)
+
     def count_edges(self, relation: str) -> int:
         """How many edges the selected table holds under ``relation``
         (CNT-FR-004, protocol 21): each undirected edge once, a cross-table

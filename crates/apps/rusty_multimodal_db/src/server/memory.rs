@@ -26,9 +26,10 @@ use super::protocol::{
 };
 use super::{
     bounded_filtered_page, bounded_walk_applies, copy_table_files, filtered_page_by_candidates,
-    page_by_scan, page_key, predicate_matches, read_table_files, uuid_pair_bounds,
-    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, KeyStats,
-    LinkOutcome, PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
+    page_by_scan, page_by_scan_desc, page_key, predicate_matches, read_table_files,
+    uuid_pair_bounds, validate_predicate, BackupReport, ConnectionStore, DeleteOutcome,
+    InsertOutcome, KeyStats, LinkOutcome, PageRow, ReadTableFilesError, ReplaceIfOutcome,
+    ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
@@ -840,6 +841,30 @@ impl ConnectionStore for MemoryConnectionStore {
         Ok(self
             .store
             .page_by::<Memory, UpdatedAtOrder>(cursor, limit)
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect())
+    }
+
+    /// `PGD-FR-004` (ADR-0089): [`ConnectionStore::page`]'s twin walked
+    /// backward — the sorted index from the cursor down, the page's cost.
+    fn page_desc(
+        &self,
+        order_by: FieldRef,
+        before: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if order_by != FIELD_UPDATED_AT {
+            return Ok(page_by_scan_desc(self, order_by, before, limit));
+        }
+        let cursor = match before {
+            None => None,
+            Some((ScanValue::I64(stamp), id)) => Some((stamp, id)),
+            Some(_) => return Err(ErrorCode::Malformed),
+        };
+        Ok(self
+            .store
+            .page_by_desc::<Memory, UpdatedAtOrder>(cursor, limit)
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect())

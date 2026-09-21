@@ -708,6 +708,27 @@ fn bench_reminder_due() {
                 limit: None,
             },
         ),
+        // `ADR-0089`: the "latest N" — a descending page on the ordered
+        // field (the index walked backward) beside the same request on
+        // `status`, which has no index and pages the scan's keys.
+        (
+            "due-latest-50",
+            "PageDesc ORDER BY due_at_unix_ms DESC LIMIT 50",
+            Request::PageDesc {
+                order_by: FIELD_DUE_AT,
+                before: None,
+                limit: 50,
+            },
+        ),
+        (
+            "due-latest-scan-50",
+            "PageDesc ORDER BY status DESC LIMIT 50 (no index: the scan's keys)",
+            Request::PageDesc {
+                order_by: FIELD_STATUS,
+                before: None,
+                limit: 50,
+            },
+        ),
         (
             "due-window",
             "Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending",
