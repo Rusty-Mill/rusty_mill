@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-QUERY-CONTRADICTION` (`ADR-0091`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the round after PR #289 (`ADR-0089`/`ADR-0090`, merged on the owner's word); a protocol round (29), its PR waits on the owner's merge. `ADR-0076`–`ADR-0090` (PRs #276–#289) merged the same day.
+- `SERVER-DATA-DIR-LOCK` (`ADR-0092`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the first "do now" item of the release-readiness review the owner asked for ("harden"): one `memory_server` per `SERVER_DATA_DIR` (`DataDirLock`), directory `fsync` after every rename install, MSRV 1.89. Its PR waits on the owner. `ADR-0076`–`ADR-0091` (PRs #276–#290) merged the day before.
 
 ## Blocked
 

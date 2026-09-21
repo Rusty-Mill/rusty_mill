@@ -51,6 +51,14 @@
 //! silent recreation. Combine with `SERVER_TXN_JOURNAL_PATH` for
 //! crash-atomic batches; the two are independent settings.
 //!
+//! **One process per directory (`ADR-0092`).** Before any of the three
+//! files is opened, this binary claims `<dir>/.rusty_multimodal_db.lock`
+//! with an exclusive advisory lock (`server::data_lock::DataDirLock`)
+//! and holds it until it exits; a second `memory_server` pointed at
+//! the same directory refuses to start, naming that file. The kernel
+//! releases the lock however the process ends, so a killed server
+//! leaves nothing to clean up.
+//!
 //! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
 //!
 //! Opt-in, and only meaningful with `SERVER_DATA_DIR` also set (a
@@ -95,6 +103,7 @@ use rusty_multimodal_db::generic::relation::{
 };
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
+use rusty_multimodal_db::server::data_lock::DataDirLock;
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
@@ -197,6 +206,17 @@ fn main() {
         ),
     };
     let durable = matches!(data, DataLocation::Durable(_));
+    // `ADR-0092` (`DDL-FR-002`): one process per data directory. Taken
+    // before any store is opened, held until `main` returns; a second
+    // server on the same directory refuses to start, naming the holder's
+    // lock file. Scratch mode is a per-process path nobody else can
+    // share, so it takes no lock.
+    let _data_dir_lock = match &data {
+        DataLocation::Durable(dir) => Some(DataDirLock::acquire(dir).unwrap_or_else(|e| {
+            panic!("SERVER_DATA_DIR {dir:?}: {e} — one memory_server per data directory")
+        })),
+        DataLocation::Scratch(_) => None,
+    };
     let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
     // `SERVER_MVCC_ISOLATION` (`ADR-0072`, `MVCC2-FR-004`/`011`): opt-in,
     // unset by default — matching `with_mvcc`/`open_with_mvcc`'s own

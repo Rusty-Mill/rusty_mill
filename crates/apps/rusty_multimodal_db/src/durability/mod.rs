@@ -235,6 +235,31 @@ impl From<DurabilityError> for StoreError {
 // `CanonicalCachedState`, and the WAL helpers) — gated behind `research`
 // along with them.
 
+/// `fsync` the directory holding `path`, so a rename or create just made
+/// in it is itself on disk — a file's own `sync_all` covers its bytes,
+/// never the directory entry that names it (`ADR-0092`, `DDL-FR-004`).
+/// Every write-to-temp-then-rename install in this crate calls this
+/// after its rename. A `path` with no parent (bare relative name) syncs
+/// the current directory. On targets where a directory cannot be opened
+/// as a file (Windows) this is a no-op: the rename's visibility there is
+/// the filesystem's own promise, and this crate's servers are Linux-only
+/// in CI.
+pub(crate) fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Append one entry to `writer`, length-prefixed (a 4-byte little-endian
 /// length followed by that many bincode-serialized bytes) so a reader
 /// doesn't need to know each entry's size in advance and can detect a

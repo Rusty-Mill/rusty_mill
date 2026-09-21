@@ -45,6 +45,7 @@
 
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::SchemaTag;
+use crate::durability::sync_parent_dir;
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -199,6 +200,7 @@ fn upgrade_if_version_1(log: &Path, tag: &str) -> Result<(), DurabilityError> {
     file.sync_data()?;
     drop(file);
     std::fs::rename(&tmp, log)?;
+    sync_parent_dir(log)?;
     Ok(())
 }
 
