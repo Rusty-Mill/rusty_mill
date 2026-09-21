@@ -170,10 +170,11 @@
 
 use super::framing::{self, FrameError};
 use super::protocol::{
-    AggregateFn, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldDescriptor, FieldRef,
-    JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor, Request, Response, ScanValue,
-    Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION, SESSION_MVCC_ISOLATION,
-    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    predicate_matches, AggregateFn, AggregateSpec, CompareOp, DomainSchema, ErrorCode,
+    FieldDescriptor, FieldRef, JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor,
+    Request, Response, ScanValue, Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION,
+    SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -1254,7 +1255,35 @@ impl SchemaDrivenClient {
                 Selection::Fields(tags)
             }
         };
-        let filter = self.resolve_filter(&parsed.conditions)?;
+        // `SID-FR-001`/`002` (ADR-0090): `WHERE id = '<uuid>'` is a point
+        // read — one `GetById`, the other predicates re-checked here with
+        // the server's own evaluator, the `SELECT` list applied — with no
+        // wire change; `id` is never a schema field of any shipped domain.
+        let (by_id, rest) = self.split_id_conditions(&parsed.conditions)?;
+        let filter = self.resolve_filter(&rest)?;
+        if let Some(id) = by_id {
+            if parsed.limit == Some(0) {
+                return Ok(Vec::new());
+            }
+            return match self.roundtrip(Request::GetById { id })? {
+                Response::Record { id, fields }
+                    if filter.iter().all(|p| predicate_matches(&fields, p)) =>
+                {
+                    let named = fields
+                        .into_iter()
+                        .filter(|(tag, _)| match &select {
+                            Selection::All => true,
+                            Selection::Fields(tags) => tags.contains(tag),
+                        })
+                        .map(|(tag, value)| (self.field_name(tag), value))
+                        .collect();
+                    Ok(vec![(id, named)])
+                }
+                Response::Record { .. } | Response::NotFound => Ok(Vec::new()),
+                Response::Err { code, message } => Err(ClientError::Server(code, message)),
+                _ => Err(ClientError::UnexpectedResponse("Record")),
+            };
+        }
 
         match self.roundtrip(Request::Query {
             select,
@@ -1787,6 +1816,44 @@ impl SchemaDrivenClient {
         conditions: &[sql::ParsedCondition],
     ) -> Result<Vec<Predicate>, ClientError> {
         Self::resolve_filter_in(&self.schema, conditions)
+    }
+
+    /// `SID-FR-001` (ADR-0090): the one `id = '<uuid>'` condition, if
+    /// written, split from the rest — only when the schema has no field
+    /// called `id` (none shipped does; a domain that had one would keep
+    /// it). `id` takes `=` and a UUID string literal only, at most once;
+    /// anything else is [`ClientError::Sql`] with no frame sent.
+    fn split_id_conditions(
+        &self,
+        conditions: &[sql::ParsedCondition],
+    ) -> Result<(Option<RecordId>, Vec<sql::ParsedCondition>), ClientError> {
+        if self.field("id").is_ok() {
+            return Ok((None, conditions.to_vec()));
+        }
+        let mut by_id = None;
+        let mut rest = Vec::with_capacity(conditions.len());
+        for condition in conditions {
+            if condition.name != "id" {
+                rest.push(condition.clone());
+                continue;
+            }
+            if condition.op != CompareOp::Eq {
+                return Err(ClientError::Sql(
+                    "id: only = is supported (a point read)".into(),
+                ));
+            }
+            let sql::Literal::Str(text) = &condition.value else {
+                return Err(ClientError::Sql(
+                    "id: expected a UUID string literal".into(),
+                ));
+            };
+            let id = RecordId::parse_str(text)
+                .map_err(|_| ClientError::Sql(format!("id: {text:?} is not a UUID")))?;
+            if by_id.replace(id).is_some() {
+                return Err(ClientError::Sql("id: at most one id predicate".into()));
+            }
+        }
+        Ok((by_id, rest))
     }
 
     /// [`Self::resolve_filter`] against an arbitrary schema

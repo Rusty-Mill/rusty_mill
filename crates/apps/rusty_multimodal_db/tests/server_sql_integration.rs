@@ -3754,3 +3754,97 @@ fn order_by_desc_is_the_exact_reverse_of_the_ascending_answer() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0090` / `docs/design/SERVER-SQL-ID-PREDICATE-DESIGN.md`,
+// acceptance criterion 2 (`SID-FR-003`): `WHERE id = '<uuid>'` over a
+// real socket — one point read, exactly the scan's row for that id; the
+// other predicates re-checked; the `SELECT` list applied; an unknown id
+// empty; `LIMIT 0` empty; `!=`, a non-UUID, and two ids refused
+// client-side with no frame.
+// ---------------------------------------------------------------------
+
+#[test]
+fn where_id_equals_is_a_point_read_that_matches_the_scan() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let all = rows(client.query("SELECT * FROM memory").unwrap());
+    let (target, fields) = all
+        .iter()
+        .find(|(id, _)| *id == Uuid::from_u128(3))
+        .unwrap();
+    let category = str_field(fields, "category");
+    let got = rows(
+        client
+            .query(&format!("SELECT * FROM memory WHERE id = '{target}'"))
+            .unwrap(),
+    );
+    assert_eq!(got, vec![(*target, fields.clone())]);
+    // The other predicates are re-checked: one that holds, one that does not.
+    assert_eq!(
+        rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM memory WHERE id = '{target}' AND category = '{category}'"
+                ))
+                .unwrap()
+        )
+        .len(),
+        1
+    );
+    assert!(rows(
+        client
+            .query(&format!(
+                "SELECT * FROM memory WHERE category = 'no-such' AND id = '{target}'"
+            ))
+            .unwrap()
+    )
+    .is_empty());
+    // The SELECT list applies.
+    let projected = rows(
+        client
+            .query(&format!(
+                "SELECT content, category FROM memory WHERE id = '{target}'"
+            ))
+            .unwrap(),
+    );
+    assert_eq!(
+        projected[0]
+            .1
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        vec!["content", "category"]
+    );
+    // Unknown id, LIMIT 0.
+    assert!(rows(
+        client
+            .query(&format!(
+                "SELECT * FROM memory WHERE id = '{}'",
+                Uuid::from_u128(999)
+            ))
+            .unwrap()
+    )
+    .is_empty());
+    assert!(rows(
+        client
+            .query(&format!(
+                "SELECT * FROM memory WHERE id = '{target}' LIMIT 0"
+            ))
+            .unwrap()
+    )
+    .is_empty());
+    // Refused client-side, no frame: the wrong comparator, a non-UUID, two ids.
+    for sql in [
+        format!("SELECT * FROM memory WHERE id != '{target}'"),
+        "SELECT * FROM memory WHERE id = 'not-a-uuid'".to_string(),
+        format!(
+            "SELECT * FROM memory WHERE id = '{target}' AND id = '{}'",
+            Uuid::from_u128(1)
+        ),
+    ] {
+        assert!(
+            matches!(client.query(&sql), Err(ClientError::Sql(_))),
+            "{sql}"
+        );
+    }
+}

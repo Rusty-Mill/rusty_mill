@@ -228,6 +228,39 @@ pub enum ScanValue {
     StrList(Vec<String>),
 }
 
+/// Whether `predicate` holds over one record's wire shape — a `Query`
+/// filter's per-row test, and (`GRD-FR-003`) the evaluation of a
+/// `ReplaceIf` guard against the stored record inside an adapter.
+pub fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate) -> bool {
+    fields
+        .iter()
+        .find(|(field, _)| *field == predicate.field)
+        .is_some_and(|(_, value)| compare(value, predicate.op, &predicate.value))
+}
+
+pub fn compare(actual: &ScanValue, op: CompareOp, expected: &ScanValue) -> bool {
+    match op {
+        CompareOp::Eq => actual == expected,
+        CompareOp::Ne => actual != expected,
+        CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => match (actual, expected) {
+            (ScanValue::U32(a), ScanValue::U32(b)) => ordering_matches(a.cmp(b), op),
+            (ScanValue::I64(a), ScanValue::I64(b)) => ordering_matches(a.cmp(b), op),
+            _ => false,
+        },
+    }
+}
+
+fn ordering_matches(ordering: std::cmp::Ordering, op: CompareOp) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    matches!(
+        (op, ordering),
+        (CompareOp::Lt, Less)
+            | (CompareOp::Gt, Greater)
+            | (CompareOp::Le, Less | Equal)
+            | (CompareOp::Ge, Greater | Equal)
+    )
+}
+
 /// One write within a [`Request::Transaction`] batch — the same three
 /// fields `Request::UpdateField` already carries. See
 /// `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013, `TXN-FR-001`.

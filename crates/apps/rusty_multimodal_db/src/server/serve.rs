@@ -1904,15 +1904,7 @@ pub fn bounded_filtered_page<S: ConnectionStore + ?Sized>(
     }
 }
 
-/// Whether `predicate` holds over one record's wire shape — a `Query`
-/// filter's per-row test, and (`GRD-FR-003`) the evaluation of a
-/// `ReplaceIf` guard against the stored record inside an adapter.
-pub fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate) -> bool {
-    fields
-        .iter()
-        .find(|(field, _)| *field == predicate.field)
-        .is_some_and(|(_, value)| compare(value, predicate.op, &predicate.value))
-}
+pub use super::protocol::predicate_matches;
 
 /// The two `(key, id)` bounds of one `Ordered` walk over a `Uuid`-keyed,
 /// `i64`-ordered record — what [`uuid_pair_bounds`] produces and
@@ -1953,29 +1945,6 @@ pub fn uuid_pair_bounds(
 /// `Str`/`Bool` field before this ever runs, so the `_ => false` arm
 /// below is unreachable through `dispatch` — kept as a safe default
 /// rather than a `match` that could panic if that invariant ever broke.
-fn compare(actual: &ScanValue, op: CompareOp, expected: &ScanValue) -> bool {
-    match op {
-        CompareOp::Eq => actual == expected,
-        CompareOp::Ne => actual != expected,
-        CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => match (actual, expected) {
-            (ScanValue::U32(a), ScanValue::U32(b)) => ordering_matches(a.cmp(b), op),
-            (ScanValue::I64(a), ScanValue::I64(b)) => ordering_matches(a.cmp(b), op),
-            _ => false,
-        },
-    }
-}
-
-fn ordering_matches(ordering: std::cmp::Ordering, op: CompareOp) -> bool {
-    use std::cmp::Ordering::{Equal, Greater, Less};
-    matches!(
-        (op, ordering),
-        (CompareOp::Lt, Less)
-            | (CompareOp::Gt, Greater)
-            | (CompareOp::Le, Less | Equal)
-            | (CompareOp::Ge, Greater | Equal)
-    )
-}
-
 fn select_fields(
     fields: Vec<(FieldRef, ScanValue)>,
     select: &Selection,
