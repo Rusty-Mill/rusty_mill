@@ -167,9 +167,10 @@ binaries enforce this: a bind to anything but a loopback address refuses
 to start until both are configured, unless `SERVER_ALLOW_INSECURE=1` is
 set explicitly. **Durability.** Inserts, replaces, deletes, links, and
 journaled transaction batches are `fsync`ed before they are
-acknowledged; an in-place field update is acknowledged first and on disk
-at the next flush, checkpoint, or OS write-back unless
-`SERVER_SYNC_UPDATES=1` (`ADR-0097`) makes it `msync` first. See `src/server`'s own module docs and
+acknowledged; an in-place field update is `msync`ed first too by
+`memory_server`'s default (`ADR-0097`, on since `ADR-0099`;
+`SERVER_SYNC_UPDATES=0` takes the write-back window back, ~100 µs per
+update cheaper). See `src/server`'s own module docs and
 `docs/decisions/ADR-0010-server-query-layer-proposal.md` before using it.
 
 ```sh

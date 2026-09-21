@@ -239,6 +239,10 @@ required-features = ["server"]
 name = "memory_server_exposure"
 required-features = ["server"]
 
+[[test]]
+name = "memory_server_defaults"
+required-features = ["server"]
+
 # The crash-safety diagnosis harness's four trials as a CI gate
 # (ADR-0095): spawns `crash_writer`, so it needs the `research` feature
 # that binary is gated behind.

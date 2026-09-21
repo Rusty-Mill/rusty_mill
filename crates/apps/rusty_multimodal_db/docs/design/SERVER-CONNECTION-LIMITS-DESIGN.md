@@ -150,7 +150,10 @@ Independent review owed.
 
 ## Open questions
 
-- **Defaults on** — option (b).
+- **Defaults on** — option (b). *Taken: `ADR-0099` (2026-09-21) — idle
+  timeout 300 s and connection cap 1,024 on by default in
+  `memory_server`, `0` turning either off; the row cap stays opt-in,
+  since under it a `Query` with no `limit` is refused.*
 - **A `Busy` error frame** — option (c), if a client should tell a
   full server from a dead one.
 - **A scan budget** for `Aggregate`/`Join` — the planner's question,

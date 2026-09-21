@@ -132,7 +132,8 @@ Independent review owed.
 - **Ranged `msync`** — option (b), if the measured cost at 100K rows
   says the whole-mapping flush is paying for page-table walks.
 - **Journal `UpdateField`** — option (c).
-- **Defaults on** in `memory_server`.
+- **Defaults on** in `memory_server`. *Taken: `ADR-0099` (2026-09-21) —
+  on unless `SERVER_SYNC_UPDATES=0`.*
 
 ## Change history
 

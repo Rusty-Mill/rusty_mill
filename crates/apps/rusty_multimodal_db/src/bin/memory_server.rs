@@ -61,8 +61,11 @@
 //!
 //! # Connection limits — `SERVER_IDLE_TIMEOUT_SECS`, `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS` (ADR-0093)
 //!
-//! Each opt-in, each unset by default so an existing deployment sees
-//! no change. `SERVER_IDLE_TIMEOUT_SECS=<n>` closes a connection that
+//! Since `ADR-0099` the first two default on: unset,
+//! `SERVER_IDLE_TIMEOUT_SECS` is 300 and `SERVER_MAX_CONNECTIONS` is
+//! 1024; `0` turns either off. `SERVER_MAX_QUERY_ROWS` stays off unless
+//! set, because under a cap a `Query` with no `limit` is refused and
+//! every `SELECT` without `LIMIT` is one. `SERVER_IDLE_TIMEOUT_SECS=<n>` closes a connection that
 //! neither sends nor accepts a byte for `n` seconds (its session, if
 //! any, rolls back and its MVCC snapshot is released, exactly as on a
 //! disconnect). `SERVER_MAX_CONNECTIONS=<n>` closes the `n+1`th
@@ -70,8 +73,8 @@
 //! counts it in `dogserver_connections_refused_total`.
 //! `SERVER_MAX_QUERY_ROWS=<n>` refuses a `Query` with no `limit` or a
 //! `limit` above `n`, and any page whose `limit` is above `n`, with
-//! `TooLarge` before any read. A value that is not a positive integer
-//! is a startup error.
+//! `TooLarge` before any read. A value that is not a non-negative
+//! integer is a startup error.
 //!
 //! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
 //!
@@ -81,10 +84,11 @@
 //! `UpdateField`, and a `Transaction` batch on a table with no
 //! journal, is an in-place write to a mapped page: acknowledged at
 //! once, on disk at the next `Flush`, checkpoint, or OS write-back —
-//! it survives a process crash, not a power loss. Set
-//! `SERVER_SYNC_UPDATES=1` and those two paths `msync` the table's
-//! slot files before acknowledging, at roughly the cost of one
-//! `fsync` per update (`RESULTS.md`'s per-write mmap flush row).
+//! it survives a process crash, not a power loss. Since `ADR-0099`
+//! those two paths `msync` the table's slot files before acknowledging
+//! by default, at roughly the cost of one `fsync` per update
+//! (`RESULTS.md`: ~100 µs); `SERVER_SYNC_UPDATES=0` turns that off and
+//! takes the write-back window back.
 //!
 //! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
 //!
@@ -229,13 +233,42 @@ fn sample_mentions() -> Vec<(Uuid, Uuid)> {
 
 /// `LIM-FR-005` (ADR-0093): an opt-in positive-integer setting — `None`
 /// when unset; a startup error when set to anything else.
-fn positive_env(name: &str) -> Option<u64> {
-    let raw = std::env::var(name).ok()?;
+/// `LIM-FR-005` (ADR-0093) as amended by `DEF-FR-001` (ADR-0099): a
+/// bounded setting with a default — unset is `default`; `0` is "off"
+/// (`None`); a positive integer is itself; anything else is a startup
+/// error.
+fn bounded_env(name: &str, default: Option<u64>) -> Option<u64> {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
     match raw.trim().parse::<u64>() {
-        Ok(n) if n > 0 => Some(n),
-        _ => panic!("{name}={raw:?} is not a positive integer"),
+        Ok(0) => None,
+        Ok(n) => Some(n),
+        Err(_) => panic!("{name}={raw:?} is not a non-negative integer (0 turns the limit off)"),
     }
 }
+
+/// `DEF-FR-002` (ADR-0099): an on/off setting that defaults to on —
+/// unset or `1` is on, `0` is off, anything else a startup error.
+fn switch_env(name: &str) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return true;
+    };
+    match raw.trim() {
+        "1" => true,
+        "0" => false,
+        _ => panic!("{name}={raw:?} is neither 0 nor 1"),
+    }
+}
+
+/// `DEF-FR-001` (ADR-0099): the idle timeout a deployment gets without
+/// asking — five minutes, long past any request's round trip and short
+/// enough that an abandoned session's MVCC snapshot is released the
+/// same hour.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+/// `DEF-FR-001` (ADR-0099): the connection cap a deployment gets without
+/// asking — a thread each, well under a Linux default thread limit.
+const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
 
 fn main() {
     let addr = std::env::args()
@@ -272,11 +305,12 @@ fn main() {
     // any of the three tables; unset, that bit is refused `Unsupported`
     // everywhere, exactly as it always was before this variable existed.
     let mvcc_enabled = std::env::var_os("SERVER_MVCC_ISOLATION").is_some();
-    // `SERVER_SYNC_UPDATES` (`ADR-0097`, `SYU-FR-004`): opt-in — set to
-    // `1`, every `UpdateField` and every non-journaled `Transaction`
-    // batch is `msync`ed before it is acknowledged; unset, the
-    // acknowledgement precedes durability by the OS's write-back.
-    let sync_updates = std::env::var("SERVER_SYNC_UPDATES").is_ok_and(|v| v.trim() == "1");
+    // `SERVER_SYNC_UPDATES` (`ADR-0097`, `SYU-FR-004`; on by default since
+    // `ADR-0099`, `DEF-FR-002`): every `UpdateField` and every
+    // non-journaled `Transaction` batch is `msync`ed before it is
+    // acknowledged; `0` turns it off and the acknowledgement precedes
+    // durability by the OS's write-back.
+    let sync_updates = switch_env("SERVER_SYNC_UPDATES");
     // These two do not compose safely today: `with_journal`'s own
     // `open_or_create_*_production_stack` call (inside `open_stores`,
     // below) already folds and clears the insert log for its own
@@ -501,15 +535,18 @@ fn main() {
     // `SERVER_MAX_QUERY_ROWS` (ADR-0093, `LIM-FR-005`): each opt-in; a
     // value that is not a positive integer is a startup error, this
     // binary's convention for every other misconfiguration.
-    let options = match positive_env("SERVER_IDLE_TIMEOUT_SECS") {
+    // Defaults since `ADR-0099` (`DEF-FR-001`): 300 s idle, 1,024
+    // connections; the row cap stays off (a `Query` with no `limit` is
+    // refused under a cap, which every `SELECT` without `LIMIT` is).
+    let options = match bounded_env("SERVER_IDLE_TIMEOUT_SECS", Some(DEFAULT_IDLE_TIMEOUT_SECS)) {
         Some(secs) => options.with_idle_timeout(std::time::Duration::from_secs(secs)),
         None => options,
     };
-    let options = match positive_env("SERVER_MAX_CONNECTIONS") {
+    let options = match bounded_env("SERVER_MAX_CONNECTIONS", Some(DEFAULT_MAX_CONNECTIONS)) {
         Some(max) => options.with_max_connections(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
     };
-    let options = match positive_env("SERVER_MAX_QUERY_ROWS") {
+    let options = match bounded_env("SERVER_MAX_QUERY_ROWS", None) {
         Some(max) => options.with_max_query_rows(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
     };
