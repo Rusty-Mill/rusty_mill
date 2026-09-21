@@ -731,8 +731,10 @@ impl ConnectionStore for RelationConnectionStore {
             .collect()
     }
 
-    /// `FPW-FR-001`–`003` (ADR-0076): see `MemoryConnectionStore::
-    /// filtered_page`; identical here over `UpdatedAtField`.
+    /// `FPW-FR-001`–`003` (ADR-0076), `FPM-FR-001`–`003` (ADR-0077): see
+    /// `MemoryConnectionStore::filtered_page`; identical here over
+    /// `UpdatedAtField`, `subject` the declared index equality-first
+    /// keeps.
     fn filtered_page(
         &self,
         order_by: FieldRef,
@@ -740,7 +742,7 @@ impl ConnectionStore for RelationConnectionStore {
         limit: usize,
         filter: &[Predicate],
     ) -> Result<Vec<PageRow>, ErrorCode> {
-        if !bounded_walk_applies(order_by, self.range_field(), filter) {
+        if !bounded_walk_applies(order_by, self.range_field(), &self.describe(), filter) {
             return Ok(filtered_page_by_candidates(
                 self, order_by, after, limit, filter,
             ));
@@ -748,6 +750,7 @@ impl ConnectionStore for RelationConnectionStore {
         bounded_filtered_page(
             self,
             |start, limit| self.store.page_by::<Relation, UpdatedAtField>(start, limit),
+            order_by,
             after,
             limit,
             filter,

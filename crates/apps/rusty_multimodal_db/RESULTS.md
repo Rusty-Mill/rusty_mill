@@ -1449,8 +1449,77 @@ its `query`/`count(*)` siblings, which are not pages, are unchanged
 be: an equality on `category` is not a bound on the ordered field.
 Not measured, named plainly: a *mixed* filter (`… AND category = …`),
 which stays on the `ADR-0075` path and pays the before number — this
-round's own option (b); and `Relation`, which routes through the
+round's own option (b) (*measured and taken the next day, `ADR-0077`,
+the section below*); and `Relation`, which routes through the
 identical `bounded_filtered_page` over `UpdatedAtField`.
+
+## Filtered page, walk-past-rejects — the mixed `since`-shaped listing before and after (`ADR-0077`, `SERVER-001` v0.62.0 / FR-074)
+
+`docs/design/SERVER-FILTERED-PAGE-WALK-MIXED-DESIGN.md`'s acceptance
+criterion 5, measured by two new `memory-planner` rows in
+`benches/server.rs` — the same 100,000-record `Memory` table, one
+connection, one untimed warm-up, 20 timed round trips — added and run on
+the pre-change code (`main` after PR #276, `ADR-0076`) **first**, then
+again with this round's widening. The request is the *mixed* `since`
+shape: `FilteredPage { order_by: updated_at_unix_ms, after: None, limit:
+50, filter: [updated_at_unix_ms >= 1000, source = 'c7'] }` — the bound
+admits ~99,000 records, the equality on the never-indexed `source` admits
+1% of those, paged by the range field. The control is the identical
+filter on `created_at_unix_ms` (identical values, never range-indexed)
+**paged by `created_at_unix_ms`** — a full scan either way. The
+`since-eq` twin puts the same equality on the declared `category` index
+instead: `plan_query`'s equality-first rule keeps the bucket there
+(`FPM-FR-001`), so that row is the rule's cost, unchanged by this round
+by construction. An idle 4-core Linux container
+(`std::thread::available_parallelism()` = 4), 2026-09-21, both binaries
+run back to back with nothing else on the machine.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0076` alone) | `IndexRange` walk, then `page_rows` | `WHERE updated_at_unix_ms >= 1000 AND source = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **129,732.5** |
+| | `FullScan` (control) | `WHERE created_at_unix_ms >= 1000 AND source = 'c7' ORDER BY created_at_unix_ms LIMIT 50` | 50 rows | 150,205.5 |
+| | `IndexEq` bucket, then `page_rows` | `WHERE updated_at_unix_ms >= 1000 AND category = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | 1,368.8 |
+| After (`ADR-0077`) | bounded walk past rejects | `WHERE updated_at_unix_ms >= 1000 AND source = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | **3,933.2** |
+| | `FullScan` (control) | `WHERE created_at_unix_ms >= 1000 AND source = 'c7' ORDER BY created_at_unix_ms LIMIT 50` | 50 rows | 139,143.4 |
+| | `IndexEq` bucket, then `page_rows` | `WHERE updated_at_unix_ms >= 1000 AND category = 'c7' ORDER BY updated_at_unix_ms LIMIT 50` | 50 rows | 1,100.4 |
+
+**Read it as**: before, the range walk named ~99,000 ids and the server
+decoded every one of them before `page_rows` sorted, filtered, and cut
+50 — within sight of the full-scan control, as `ADR-0076` predicted.
+After, the walk reads pairs from the composed cursor and passes the
+99-of-100 `source` rejects until 50 rows match: ~5,000 records read
+across ~100 chunks of 50, ~33× less than before. The equality
+twin is the bucket both times (1,000 `category = 'c7'` records read,
+sorted, cut) — and note that here the bucket *beats* the walk, which is
+exactly why equality-first stays: which wins depends on the two
+selectivities, and this crate keeps no estimate of either (option (b)
+of this round).
+
+**A second measurement this round did not set out to make.** The
+harness's control pages had always been ordered by `updated_at_unix_ms`,
+the range field — harmless while only a pure-bounds filter could walk.
+Under this round's widening every one of them became eligible, and the
+first clean before/after pair showed it: the *controls* moved. Those
+rows are real requests a consumer could issue, so their numbers are kept
+here (from that pair, same machine, same session, before the harness
+was corrected) rather than discarded:
+
+| Request (all `ORDER BY updated_at_unix_ms LIMIT 50`) | Before (`ADR-0076`) µs | After (`ADR-0077`) µs | What the walk did |
+|---|---|---|---|
+| `WHERE source = 'c7'` (no bound, an unindexed 1% equality) | 136,025.0 | 2,767.2 | walked from the start past rejects until 50 matched — ~49× |
+| `WHERE created_at_unix_ms >= 1000` (a bound on the *other* stamp) | 230,336.2 | 627.3 | walked from the start; the reject admits nearly every row, so ~50 read |
+| `WHERE 50000 <= created_at_unix_ms < 51000` (a 1% range on the other stamp) | 138,811.6 | 43,125.8 | walked ~50,000 rejects before the first match — the worst case, named |
+
+The first is the shape a consumer's `WHERE node_id = … ORDER BY
+updated_at LIMIT 50` listing takes when the field is unindexed — an
+unlooked-for ~49×. The third is the walk's honest worst case: a reject
+that admits nothing until deep into the index costs every pair up to
+there, and beats the default only because the default read all 100,000.
+Every other planner row (`index-eq` and `index-range` `query`/`count(*)`,
+`index-since`) is unchanged within noise, as it must be: they are not
+pages, or they were already the one-chunk walk. `Relation` routes
+through the identical `bounded_filtered_page` over `UpdatedAtField`;
+not separately measured.
 
 ## Open questions
 

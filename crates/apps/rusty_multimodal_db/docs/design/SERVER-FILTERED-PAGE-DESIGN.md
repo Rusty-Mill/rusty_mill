@@ -429,7 +429,11 @@ clippy --all-features -- -D warnings` clean.
   override `filtered_page` with the bounded `page_by` walk when
   `order_by` is the range field and every predicate is a bound on it,
   and answer every other shape through this design's default body,
-  factored into `filtered_page_by_candidates`.*
+  factored into `filtered_page_by_candidates`. `ADR-0077` (2026-09-21)
+  widened that walk to every page ordered by the range field whose
+  filter does not plan the declared equality index, passing any other
+  predicate's rejects until the page fills; the default body now
+  answers only the equality-index case on those two domains.*
 - **Is `page_rows`/`page_ids`'s existing selection helper directly
   reusable over an already-filtered `Vec<PageRow>`, or does it need a
   small signature adjustment?** **Resolved: directly reusable, no

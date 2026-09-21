@@ -650,15 +650,44 @@ fn since_filter(field: FieldRef) -> Vec<Predicate> {
 }
 
 /// The `since`-shaped page alone — `Query`/`Aggregate` over ~99,000 rows
-/// would measure response shipping, not the planner.
+/// would measure response shipping, not the planner. Paged by `field`
+/// itself: the indexed request by `updated_at_unix_ms`, the control by
+/// `created_at_unix_ms` (identical values, so the identical sequence —
+/// and, since `ADR-0077` widened the walk to every page ordered by the
+/// range field, the one way a control cannot walk).
 fn since_page_request(field: FieldRef) -> [(&'static str, Request); 1] {
     [(
         "fpage-50",
         Request::FilteredPage {
-            order_by: FIELD_UPDATED_AT,
+            order_by: field,
             after: None,
             limit: 50,
             filter: since_filter(field),
+        },
+    )]
+}
+
+/// `ADR-0077` acceptance criterion: the *mixed* `since`-shaped page —
+/// the same ~99% bound on `range_field` plus a 1%-selective equality on
+/// `eq_field` (`= 'c7'`), paged 50 at a time by the range field. With
+/// `eq_field` the never-indexed `source`, the walk-past-rejects round
+/// reads ~50 × 100 records and stops, where `ADR-0076` alone read every
+/// in-range record; with `eq_field` the declared `category` index the
+/// planner's equality-first rule keeps the bucket (`FPM-FR-001`), so
+/// that row measures what the rule costs, not what the walk saves.
+fn since_mixed_page_request(
+    range_field: FieldRef,
+    eq_field: FieldRef,
+) -> [(&'static str, Request); 1] {
+    let mut filter = since_filter(range_field);
+    filter.extend(c7_filter(eq_field));
+    [(
+        "fpage-50",
+        Request::FilteredPage {
+            order_by: range_field,
+            after: None,
+            limit: 50,
+            filter,
         },
     )]
 }
@@ -669,8 +698,13 @@ fn since_page_request(field: FieldRef) -> [(&'static str, Request); 1] {
 /// — its left side is this same candidate fetch and its cost is
 /// dominated by the per-left-row right-side lookups the planner does not
 /// touch (`SERVER-QUERY-PLANNER-CONSUMERS-DESIGN.md`, acceptance
-/// criterion 4).
-fn planner_requests(filter: Vec<Predicate>) -> [(&'static str, Request); 3] {
+/// criterion 4). The page is ordered by `page_by`: `updated_at_unix_ms`
+/// for the indexed request, `created_at_unix_ms` (identical values,
+/// identical sequence) for the control — since `ADR-0077` a page
+/// ordered by the range field walks whenever the filter does not plan
+/// the equality index, so a control ordered by it would no longer be a
+/// full scan.
+fn planner_requests(filter: Vec<Predicate>, page_by: FieldRef) -> [(&'static str, Request); 3] {
     [
         (
             "query",
@@ -695,7 +729,7 @@ fn planner_requests(filter: Vec<Predicate>) -> [(&'static str, Request); 3] {
         (
             "fpage-50",
             Request::FilteredPage {
-                order_by: FIELD_UPDATED_AT,
+                order_by: page_by,
                 after: None,
                 limit: 50,
                 filter,
@@ -753,18 +787,18 @@ fn bench_query_planner() {
     measure_planner_pair(
         addr,
         "index-eq",
-        planner_requests(c7_filter(FIELD_CATEGORY)),
+        planner_requests(c7_filter(FIELD_CATEGORY), FIELD_UPDATED_AT),
         "WHERE category = 'c7'",
-        planner_requests(c7_filter(FIELD_SOURCE)),
+        planner_requests(c7_filter(FIELD_SOURCE), FIELD_CREATED_AT),
         "WHERE source = 'c7'",
     );
     // `ADR-0075` acceptance criterion 7: the `Ordered` walk vs. the scan.
     measure_planner_pair(
         addr,
         "index-range",
-        planner_requests(range_filter(FIELD_UPDATED_AT)),
+        planner_requests(range_filter(FIELD_UPDATED_AT), FIELD_UPDATED_AT),
         "WHERE 50000 <= updated_at_unix_ms < 51000",
-        planner_requests(range_filter(FIELD_CREATED_AT)),
+        planner_requests(range_filter(FIELD_CREATED_AT), FIELD_CREATED_AT),
         "WHERE 50000 <= created_at_unix_ms < 51000",
     );
     // `ADR-0076`: the `since`-shaped page — a bound admitting ~99% of
@@ -775,6 +809,27 @@ fn bench_query_planner() {
         since_page_request(FIELD_UPDATED_AT),
         "WHERE updated_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms",
         since_page_request(FIELD_CREATED_AT),
-        "WHERE created_at_unix_ms >= 1000 ORDER BY updated_at_unix_ms",
+        "WHERE created_at_unix_ms >= 1000 ORDER BY created_at_unix_ms",
+    );
+    // `ADR-0077`: the mixed `since`-shaped page — the same bound plus an
+    // unindexed 1%-selective equality the walk must pass rejects for.
+    measure_planner_pair(
+        addr,
+        "since-mixed",
+        since_mixed_page_request(FIELD_UPDATED_AT, FIELD_SOURCE),
+        "WHERE updated_at_unix_ms >= 1000 AND source = 'c7' ORDER BY updated_at_unix_ms",
+        since_mixed_page_request(FIELD_CREATED_AT, FIELD_SOURCE),
+        "WHERE created_at_unix_ms >= 1000 AND source = 'c7' ORDER BY created_at_unix_ms",
+    );
+    // `ADR-0077`: the same shape with the equality on the *declared*
+    // index — equality-first keeps the bucket, so this row is the rule's
+    // cost, measured rather than assumed.
+    measure_planner_pair(
+        addr,
+        "since-eq",
+        since_mixed_page_request(FIELD_UPDATED_AT, FIELD_CATEGORY),
+        "WHERE updated_at_unix_ms >= 1000 AND category = 'c7' ORDER BY updated_at_unix_ms",
+        since_mixed_page_request(FIELD_CREATED_AT, FIELD_SOURCE),
+        "WHERE created_at_unix_ms >= 1000 AND source = 'c7' ORDER BY created_at_unix_ms",
     );
 }

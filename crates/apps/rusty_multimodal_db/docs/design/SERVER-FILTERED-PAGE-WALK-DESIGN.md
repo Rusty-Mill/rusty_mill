@@ -309,7 +309,12 @@ processes; a fresh Codex inspection of design and code owed.
 
 ## Open questions
 
-- **Walk-past-rejects for mixed filters** — option (b).
+- **Walk-past-rejects for mixed filters** — option (b). *Taken:
+  `ADR-0077` (2026-09-21), the round after PR #276 merged this one —
+  `docs/design/SERVER-FILTERED-PAGE-WALK-MIXED-DESIGN.md`. It also
+  found and fixed the one latent gap here: `bounded_walk_start`
+  computed a cursor from every `Gt`/`Ge`/`Eq` predicate, correct only
+  while `FPW-FR-001` kept every predicate on the walked field.*
 - **The same walk for `Query`/`Aggregate` with `LIMIT`** — a `Query`
   has no order, so a `LIMIT` there is "any *n*"; the walk would give a
   cheap, ordered *n*. Not asked for.
@@ -347,3 +352,5 @@ processes; a fresh Codex inspection of design and code owed.
   counter on the real adapter), so the cost claim rests on criterion
   5 alone, as the criterion itself anticipated. Still no independent
   review — owed.
+- 2026-09-21: merged unchanged as PR #276 (option (a) confirmed by the
+  owner's merge); option (b) taken as `ADR-0077` the same day.
