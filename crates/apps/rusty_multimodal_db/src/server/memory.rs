@@ -97,6 +97,11 @@ pub struct MemoryConnectionStore {
     journal: Option<CommitGroup>,
     /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
     backup_source: Option<PathBuf>,
+    /// `SYU-FR-001` (ADR-0097): when set, every in-place field write that
+    /// no journal covers is `msync`ed (the stack's `Flush`) before it is
+    /// acknowledged; unset, the acknowledgement precedes durability by
+    /// up to the OS's own write-back — the documented loss window.
+    sync_updates: bool,
     /// `ADR-0072`'s `MVCC2-FR-001`: `None` — the same "unset by default,
     /// opt in with the real path" shape `backup_source` already
     /// establishes — until [`Self::with_mvcc`] is called; `mvcc_supported`
@@ -112,6 +117,7 @@ impl MemoryConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            sync_updates: false,
             mvcc: None,
         }
     }
@@ -120,6 +126,28 @@ impl MemoryConnectionStore {
     pub fn with_backup_source(mut self, path: PathBuf) -> Self {
         self.backup_source = Some(path);
         self
+    }
+
+    /// `SYU-FR-001` (ADR-0097): acknowledge an in-place field update —
+    /// `UpdateField`, and a `Transaction` batch on a table with no
+    /// journal — only after `msync` has forced the slot to disk. Opt-in;
+    /// unset, the update sits in the page cache until `Flush`, a
+    /// checkpoint, or the OS's write-back, as every version before.
+    /// Journaled batches are unaffected: the redo entry is already
+    /// `fsync`ed before the first slot write.
+    pub fn with_synced_updates(mut self, enabled: bool) -> Self {
+        self.sync_updates = enabled;
+        self
+    }
+
+    /// `SYU-FR-002`: the `msync` `with_synced_updates` asks for, taken
+    /// under the store's write lock; a failure withholds the
+    /// acknowledgement as `Storage`.
+    fn sync_update_ack(&self) -> Result<(), ErrorCode> {
+        if !self.sync_updates {
+            return Ok(());
+        }
+        self.store.flush().map_err(|_| ErrorCode::Storage)
     }
 
     /// `ADR-0072`'s `MVCC2-FR-001`/`003`: enable real MVCC for this table,
@@ -204,6 +232,7 @@ impl MemoryConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            sync_updates: false,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
                 mmap_path: path.to_path_buf(),
@@ -282,6 +311,7 @@ impl MemoryConnectionStore {
             store,
             journal: Some(journal),
             backup_source: None,
+            sync_updates: false,
             mvcc: None,
         })
     }
@@ -1057,7 +1087,10 @@ impl ConnectionStore for MemoryConnectionStore {
                     return Err(ErrorCode::Malformed);
                 }
                 match self.store.update::<Memory, AccessCountField>(id, count) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => {
+                        self.sync_update_ack()?;
+                        Ok(true)
+                    }
                     Err(_not_found) => Ok(false),
                 }
             }
@@ -1448,6 +1481,11 @@ impl ConnectionStore for MemoryConnectionStore {
                 Self::validate_batch(updates, |id| GetById::<Memory>::get(inner, id).is_some())?;
                 Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
+                // `SYU-FR-003` (ADR-0097): no journal covers this batch,
+                // so force the slots to disk before acknowledging.
+                if self.sync_updates && inner.checkpoint_flush().is_err() {
+                    return Err((0, ErrorCode::Storage));
+                }
                 self.mvcc_record_transaction(updates);
                 // `ADR-0072`'s `MVCC2-FR-010`: no journal means no
                 // checkpoint boundary, so a committed transaction flushes
@@ -1511,6 +1549,11 @@ impl ConnectionStore for MemoryConnectionStore {
                 Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
+                // `SYU-FR-003` (ADR-0097): no journal covers this batch,
+                // so force the slots to disk before acknowledging.
+                if self.sync_updates && inner.checkpoint_flush().is_err() {
+                    return Err((0, ErrorCode::Storage));
+                }
                 self.mvcc_record_transaction(updates);
                 // See `apply_transaction`: no journal means no checkpoint
                 // boundary, so this commit flushes MVCC history now.
@@ -2095,6 +2138,55 @@ mod tests {
             adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
             ScanValue::I64(3),
             "the current value is never reclaimed"
+        );
+    }
+
+    /// `SYU-FR-001`–`003` (ADR-0097): with synced updates on, every
+    /// answer is the same as without — `UpdateField` and a non-journaled
+    /// `Transaction` batch acknowledge and read back — and a reopen from
+    /// the files alone sees the values without any explicit `Flush`.
+    /// What `msync` adds (durability past a power loss) is not
+    /// observable in-process; the test pins the contract's shape.
+    #[test]
+    fn synced_updates_answer_exactly_as_unsynced_and_a_reopen_sees_them() {
+        let dir = fresh_temp_dir("server_memory_synced_updates").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+                .with_synced_updates(true);
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+                Ok(true)
+            );
+            assert_eq!(
+                adapter.update_field(Uuid::from_u128(404), FIELD_ACCESS_COUNT, ScanValue::I64(1)),
+                Ok(false)
+            );
+            assert_eq!(
+                adapter.apply_transaction(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(8),
+                    }],
+                    &[],
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+                ScanValue::I64(8)
+            );
+        }
+        let stack = crate::generic::memory::open_memory_production_stack_portable(&path).unwrap();
+        let reopened = MemoryConnectionStore::new(GenericProductionStore::new(stack));
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(8)
         );
     }
 

@@ -68,6 +68,11 @@ pub struct RelationConnectionStore {
     journal: Option<CommitGroup>,
     /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
     backup_source: Option<PathBuf>,
+    /// `SYU-FR-001` (ADR-0097): when set, every in-place field write that
+    /// no journal covers is `msync`ed (the stack's `Flush`) before it is
+    /// acknowledged; unset, the acknowledgement precedes durability by
+    /// up to the OS's own write-back — the documented loss window.
+    sync_updates: bool,
     /// `ADR-0072`'s `MVCC2-FR-001` — see `MemoryConnectionStore`'s own
     /// `mvcc` field for the full contract; identical here.
     mvcc: Option<MvccHandle>,
@@ -79,6 +84,7 @@ impl RelationConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            sync_updates: false,
             mvcc: None,
         }
     }
@@ -87,6 +93,28 @@ impl RelationConnectionStore {
     pub fn with_backup_source(mut self, path: PathBuf) -> Self {
         self.backup_source = Some(path);
         self
+    }
+
+    /// `SYU-FR-001` (ADR-0097): acknowledge an in-place field update —
+    /// `UpdateField`, and a `Transaction` batch on a table with no
+    /// journal — only after `msync` has forced the slot to disk. Opt-in;
+    /// unset, the update sits in the page cache until `Flush`, a
+    /// checkpoint, or the OS's write-back, as every version before.
+    /// Journaled batches are unaffected: the redo entry is already
+    /// `fsync`ed before the first slot write.
+    pub fn with_synced_updates(mut self, enabled: bool) -> Self {
+        self.sync_updates = enabled;
+        self
+    }
+
+    /// `SYU-FR-002`: the `msync` `with_synced_updates` asks for, taken
+    /// under the store's write lock; a failure withholds the
+    /// acknowledgement as `Storage`.
+    fn sync_update_ack(&self) -> Result<(), ErrorCode> {
+        if !self.sync_updates {
+            return Ok(());
+        }
+        self.store.flush().map_err(|_| ErrorCode::Storage)
     }
 
     /// `ADR-0072`'s `MVCC2-FR-001`/`003` — see
@@ -129,6 +157,7 @@ impl RelationConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            sync_updates: false,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
                 mmap_path: path.to_path_buf(),
@@ -205,6 +234,7 @@ impl RelationConnectionStore {
             store,
             journal: Some(journal),
             backup_source: None,
+            sync_updates: false,
             mvcc: None,
         })
     }
@@ -913,7 +943,10 @@ impl ConnectionStore for RelationConnectionStore {
         match (field, value) {
             (FIELD_UPDATED_AT, ScanValue::I64(stamp)) => {
                 match self.store.update::<Relation, UpdatedAtField>(id, stamp) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => {
+                        self.sync_update_ack()?;
+                        Ok(true)
+                    }
                     Err(_not_found) => Ok(false),
                 }
             }
@@ -1145,6 +1178,11 @@ impl ConnectionStore for RelationConnectionStore {
                 Self::validate_batch(updates, |id| GetById::<Relation>::get(inner, id).is_some())?;
                 Self::check_read_set(read_set, |id| GetById::<Relation>::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
+                // `SYU-FR-003` (ADR-0097): no journal covers this batch,
+                // so force the slots to disk before acknowledging.
+                if self.sync_updates && inner.checkpoint_flush().is_err() {
+                    return Err((0, ErrorCode::Storage));
+                }
                 self.mvcc_record_transaction(updates);
                 // See `MemoryConnectionStore::apply_transaction`: no
                 // journal means no checkpoint boundary, so this commit
@@ -1203,6 +1241,11 @@ impl ConnectionStore for RelationConnectionStore {
                 Self::check_read_set(read_set, |id| GetById::<Relation>::get(inner, id))?;
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
+                // `SYU-FR-003` (ADR-0097): no journal covers this batch,
+                // so force the slots to disk before acknowledging.
+                if self.sync_updates && inner.checkpoint_flush().is_err() {
+                    return Err((0, ErrorCode::Storage));
+                }
                 self.mvcc_record_transaction(updates);
                 // See `MemoryConnectionStore::apply_transaction`: no
                 // journal means no checkpoint boundary, so this commit

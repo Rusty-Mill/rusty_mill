@@ -73,6 +73,19 @@
 //! `TooLarge` before any read. A value that is not a positive integer
 //! is a startup error.
 //!
+//! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
+//!
+//! An `Insert`/`Replace`/`Delete`/`Link` is `fsync`ed to the insert log
+//! before it is acknowledged, and a journaled `Transaction` batch
+//! (`SERVER_TXN_JOURNAL_PATH`) is `fsync`ed to the journal first. An
+//! `UpdateField`, and a `Transaction` batch on a table with no
+//! journal, is an in-place write to a mapped page: acknowledged at
+//! once, on disk at the next `Flush`, checkpoint, or OS write-back —
+//! it survives a process crash, not a power loss. Set
+//! `SERVER_SYNC_UPDATES=1` and those two paths `msync` the table's
+//! slot files before acknowledging, at roughly the cost of one
+//! `fsync` per update (`RESULTS.md`'s per-write mmap flush row).
+//!
 //! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
 //!
 //! Opt-in, and only meaningful with `SERVER_DATA_DIR` also set (a
@@ -259,6 +272,11 @@ fn main() {
     // any of the three tables; unset, that bit is refused `Unsupported`
     // everywhere, exactly as it always was before this variable existed.
     let mvcc_enabled = std::env::var_os("SERVER_MVCC_ISOLATION").is_some();
+    // `SERVER_SYNC_UPDATES` (`ADR-0097`, `SYU-FR-004`): opt-in — set to
+    // `1`, every `UpdateField` and every non-journaled `Transaction`
+    // batch is `msync`ed before it is acknowledged; unset, the
+    // acknowledgement precedes durability by the OS's write-back.
+    let sync_updates = std::env::var("SERVER_SYNC_UPDATES").is_ok_and(|v| v.trim() == "1");
     // These two do not compose safely today: `with_journal`'s own
     // `open_or_create_*_production_stack` call (inside `open_stores`,
     // below) already folds and clears the insert log for its own
@@ -323,11 +341,14 @@ fn main() {
         };
         // `BAK-FR-002` (ADR-0065): only a durable table has a directory
         // worth naming — a scratch table is gone on restart regardless.
-        if durable {
+        let adapter = if durable {
             adapter.with_backup_source(relations_path)
         } else {
             adapter
-        }
+        };
+        // `SYU-FR-004` (ADR-0097): `msync` before every in-place
+        // update's acknowledgement, when asked.
+        adapter.with_synced_updates(sync_updates)
     });
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
         let adapter = if mvcc_enabled && entities_existed {
@@ -344,11 +365,14 @@ fn main() {
                 adapter
             }
         };
-        if durable {
+        let adapter = if durable {
             adapter.with_backup_source(entities_path)
         } else {
             adapter
-        }
+        };
+        // `SYU-FR-004` (ADR-0097): `msync` before every in-place
+        // update's acknowledgement, when asked.
+        adapter.with_synced_updates(sync_updates)
     });
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
@@ -378,11 +402,14 @@ fn main() {
                 adapter
             }
         };
-        if durable {
+        let adapter = if durable {
             adapter.with_backup_source(memories_path)
         } else {
             adapter
-        }
+        };
+        // `SYU-FR-004` (ADR-0097): `msync` before every in-place
+        // update's acknowledgement, when asked.
+        adapter.with_synced_updates(sync_updates)
     });
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
@@ -498,7 +525,7 @@ fn main() {
         Err(_) => options,
     };
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -515,6 +542,7 @@ fn main() {
         options.idle_timeout(),
         options.max_connections(),
         options.max_query_rows(),
+        if sync_updates { "configured" } else { "NOT configured (write-back)" },
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary

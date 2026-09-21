@@ -165,7 +165,11 @@ authentication and TLS are configured together** — either alone leaves
 the other half of the gap open. Since `ADR-0094` the four shipped
 binaries enforce this: a bind to anything but a loopback address refuses
 to start until both are configured, unless `SERVER_ALLOW_INSECURE=1` is
-set explicitly. See `src/server`'s own module docs and
+set explicitly. **Durability.** Inserts, replaces, deletes, links, and
+journaled transaction batches are `fsync`ed before they are
+acknowledged; an in-place field update is acknowledged first and on disk
+at the next flush, checkpoint, or OS write-back unless
+`SERVER_SYNC_UPDATES=1` (`ADR-0097`) makes it `msync` first. See `src/server`'s own module docs and
 `docs/decisions/ADR-0010-server-query-layer-proposal.md` before using it.
 
 ```sh

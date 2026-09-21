@@ -1868,6 +1868,17 @@ as the ascending `Page` does. Before this round the only way to the
 latest 50 was every ascending page in turn. Every other row is
 unchanged.
 
+## Synced updates — the cost of `msync` per acknowledgement (`ADR-0097`, `SERVER-001` v0.81.0 / FR-093)
+
+`MemoryConnectionStore::update_field` (`access_count`, the consumer's most frequent write) with and without `with_synced_updates(true)`, release build, Linux container, 2026-09-21, 2,000 updates per row cycling over the table, one adapter call per update (no socket):
+
+| rows | unsynced (write-back) | synced (`msync` before the ack) |
+|---:|---:|---:|
+| 1,000 | 0.1 µs | 105.4 µs |
+| 100,000 | 0.2 µs | 99.7 µs |
+
+Read: the synced cost is one `msync` of the mapping's dirty pages — one page for one update — and it does not grow with the table (the 100K row is not slower than the 1K row), the same order as the insert log's per-entry `sync_data` and `RESULTS.md`'s own per-write mmap flush row above (55.3 µs on a different store and day). Unset, `update_field` is a bounded copy into a mapped page. The setting is the operator's: ~100 µs per acknowledged update for durability past a power loss, or ~0 for durability past a process crash only.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.
