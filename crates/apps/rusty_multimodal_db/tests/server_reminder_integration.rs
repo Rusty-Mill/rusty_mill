@@ -7,7 +7,8 @@
 
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::reminder::{
-    create_reminder_production_stack, Reminder, ReminderProductionStack, ReminderStatus,
+    create_reminder_production_stack, open_reminder_production_stack_portable, Reminder,
+    ReminderStatus,
 };
 use rusty_multimodal_db::server::client::{
     ClientError, QueryResult, SchemaDrivenClient, SessionOptions,
@@ -63,7 +64,7 @@ fn start_server_at(dir: std::path::PathBuf) -> SocketAddr {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("reminders.mmap");
     let stack = if path.exists() {
-        ReminderProductionStack::open_portable(&path).unwrap()
+        open_reminder_production_stack_portable(&path).unwrap()
     } else {
         create_reminder_production_stack(sample_reminders(), &path).unwrap()
     };

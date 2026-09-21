@@ -190,8 +190,9 @@ impl CheckpointFlush for crate::generic_spike::employee_impl::EmployeeProduction
 
 /// `RMD-FR-007` — not `research`-gated, matching `Reminder`'s own
 /// front-door status (`ADR-0036`): `ReminderProductionStack` is
-/// `GenericMmapStore` directly (no relation, so no `Symmetric`/
-/// `Reversed` wrapper), which already implements `Flush` generically.
+/// `GenericMmapStore` under an `Ordered` wrap since `ADR-0080` (no
+/// relation, so no `Symmetric`/`Reversed` layer), and `Ordered`
+/// forwards `Flush` to the core.
 impl CheckpointFlush for crate::generic::reminder::ReminderProductionStack {
     fn checkpoint_flush(&self) -> Result<(), DurabilityError> {
         crate::generic::store::Flush::flush(self)

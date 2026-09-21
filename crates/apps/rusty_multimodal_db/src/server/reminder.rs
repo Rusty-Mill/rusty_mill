@@ -33,15 +33,18 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::{
-    predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, ReplaceIfOutcome,
-    ReplaceOutcome,
+    bounded_filtered_page, bounded_walk_applies, filtered_page_by_candidates, page_by_scan,
+    predicate_matches, uuid_pair_bounds, ConnectionStore, DeleteOutcome, InsertOutcome, PageRow,
+    ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::reminder::{
-    status_from_u32, status_to_u32, DueAtField, Reminder, ReminderProductionStack, StatusField,
+    status_from_u32, status_to_u32, DueAtField, DueAtOrder, Reminder, ReminderProductionStack,
+    StatusField,
 };
 use crate::generic::{DeleteError, GuardedReplace, InsertError, ReplaceError};
+use std::ops::Bound;
 use std::path::Path;
 
 pub const FIELD_TITLE: FieldRef = 0;
@@ -218,6 +221,100 @@ impl ConnectionStore for ReminderConnectionStore {
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect()
+    }
+
+    /// `RDO-FR-002` (ADR-0080): a page ordered by `due_at_unix_ms` is a
+    /// range walk of the stack's sorted index — the page's cost, not the
+    /// table's (`ORD-FR-005`); any other orderable field takes the scan
+    /// path. `validate_page` has already matched the cursor's kind.
+    fn page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if order_by != FIELD_DUE_AT {
+            return Ok(page_by_scan(self, order_by, after, limit));
+        }
+        let cursor = match after {
+            None => None,
+            Some((ScanValue::I64(stamp), id)) => Some((stamp, id)),
+            Some(_) => return Err(ErrorCode::Malformed),
+        };
+        Ok(self
+            .store
+            .page_by::<Reminder, DueAtOrder>(cursor, limit)
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect())
+    }
+
+    /// `RDO-FR-003` (ADR-0080): a page ordered by `due_at_unix_ms` whose
+    /// filter does not plan the `due_at` equality index is the bounded
+    /// walk — bounds on `due_at` start and cut it, every other
+    /// predicate (`status = …`, the consumer's own) is passed over until
+    /// the page fills (`FPW-FR-001`–`003`, `FPM-FR-001`–`003`); every
+    /// other shape is the trait default's body.
+    fn filtered_page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+        filter: &[Predicate],
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if !bounded_walk_applies(order_by, self.range_field(), &self.describe(), filter) {
+            return Ok(filtered_page_by_candidates(
+                self, order_by, after, limit, filter,
+            ));
+        }
+        bounded_filtered_page(
+            self,
+            |start, limit| self.store.page_by::<Reminder, DueAtOrder>(start, limit),
+            order_by,
+            after,
+            limit,
+            filter,
+        )
+    }
+
+    /// `RDO-FR-002` (ADR-0080): the field the stack's sorted index is over.
+    fn range_field(&self) -> Option<FieldRef> {
+        Some(FIELD_DUE_AT)
+    }
+
+    /// `RDO-FR-002` (ADR-0080): a `WHERE` range on `due_at_unix_ms` is a
+    /// walk of the stack's sorted index between the two bounds — see
+    /// `MemoryConnectionStore::range_ids`; identical here over
+    /// `DueAtOrder`.
+    fn range_ids(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        if field != FIELD_DUE_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self.store.range_by::<Reminder, DueAtOrder>(lower, upper))
+    }
+
+    /// `RDO-FR-002` (ADR-0080): the budgeted walk (`QPB-FR-002`) — see
+    /// `MemoryConnectionStore::range_ids_limited`; identical here.
+    fn range_ids_limited(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+        limit: usize,
+    ) -> Result<Option<Vec<RecordId>>, ErrorCode> {
+        if field != FIELD_DUE_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self
+            .store
+            .range_by_limited::<Reminder, DueAtOrder>(lower, upper, limit))
     }
 
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
@@ -488,6 +585,90 @@ mod tests {
             ]
         );
         assert!(adapter.get(Uuid::from_u128(99)).is_none());
+    }
+
+    /// `RDO-FR-002`/`003` (ADR-0080): a page by `due_at_unix_ms` walks
+    /// the index (identical to the scan path's answer, from a cursor
+    /// too); `range_ids`/`range_ids_limited` walk between bounds and
+    /// refuse another field; a filtered page with a `status` reject
+    /// walks past it and equals the trait default's body exactly, as
+    /// does the `due_at` equality (the bucket, equality-first).
+    #[test]
+    fn due_at_pages_and_ranges_walk_the_index_and_match_the_default() {
+        use crate::server::protocol::CompareOp::{Eq, Ge, Le};
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128;
+        let ids = |rows: Vec<PageRow>| rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(adapter.range_field(), Some(FIELD_DUE_AT));
+        assert_eq!(
+            ids(adapter.page(FIELD_DUE_AT, None, 10).unwrap()),
+            vec![id(1), id(2)]
+        );
+        assert_eq!(
+            adapter.page(FIELD_DUE_AT, None, 10).unwrap(),
+            page_by_scan(&adapter, FIELD_DUE_AT, None, 10)
+        );
+        assert_eq!(
+            ids(adapter
+                .page(FIELD_DUE_AT, Some((ScanValue::I64(1_000), id(1))), 10)
+                .unwrap()),
+            vec![id(2)]
+        );
+        assert_eq!(
+            adapter.page(FIELD_DUE_AT, Some((ScanValue::U32(1), id(1))), 10),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            adapter.range_ids(
+                FIELD_DUE_AT,
+                Bound::Unbounded,
+                Bound::Included(ScanValue::I64(1_500))
+            ),
+            Ok(vec![id(1)])
+        );
+        assert_eq!(
+            adapter.range_ids_limited(FIELD_DUE_AT, Bound::Unbounded, Bound::Unbounded, 1),
+            Ok(None)
+        );
+        assert_eq!(
+            adapter.range_ids(FIELD_STATUS, Bound::Unbounded, Bound::Unbounded),
+            Err(ErrorCode::Unsupported)
+        );
+        let p = |field, op, value| Predicate { field, op, value };
+        let shapes = [
+            vec![
+                p(FIELD_DUE_AT, Le, ScanValue::I64(9_000)),
+                p(FIELD_STATUS, Eq, ScanValue::U32(2)),
+            ],
+            vec![p(FIELD_DUE_AT, Ge, ScanValue::I64(1_500))],
+            vec![p(FIELD_STATUS, Eq, ScanValue::U32(0))],
+            vec![p(FIELD_DUE_AT, Eq, ScanValue::I64(2_000))],
+            vec![],
+        ];
+        for filter in shapes {
+            assert_eq!(
+                adapter
+                    .filtered_page(FIELD_DUE_AT, None, 10, &filter)
+                    .unwrap(),
+                filtered_page_by_candidates(&adapter, FIELD_DUE_AT, None, 10, &filter),
+                "{filter:?}"
+            );
+        }
+        assert_eq!(
+            ids(adapter
+                .filtered_page(
+                    FIELD_DUE_AT,
+                    None,
+                    10,
+                    &[
+                        p(FIELD_DUE_AT, Le, ScanValue::I64(9_000)),
+                        p(FIELD_STATUS, Eq, ScanValue::U32(2)),
+                    ],
+                )
+                .unwrap()),
+            vec![id(2)],
+            "walked past 1 (pending) to 2 (snoozed)"
+        );
     }
 
     #[test]
