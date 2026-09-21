@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-SYNCED-UPDATES` (`ADR-0097`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the release-readiness review's remaining High finding, on the owner's word ("durability"): an opt-in `msync` before an in-place `UpdateField` or non-journaled `Transaction` batch is acknowledged (`SERVER_SYNC_UPDATES=1`). Its PR waits on the owner. `ADR-0092`–`ADR-0096` (PRs #292–#296) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before. With this, every write on the three deployment tables can be made durable-on-acknowledgement by configuration; what remains High in the review is independent review of the whole line.
+- `CI-FEATURE-SETS` (`ADR-0098`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), on the owner's word ("ci gate"): the monorepo CI now checks this crate under the default, `client`, `server`, and `research` feature sets with `--all-targets`, and the five server-only test targets never registered with `required-features` are. Its PR waits on the owner. `ADR-0092`–`ADR-0097` (PRs #292–#297) merged the same day. Every item of the release-readiness review that a push can address is now on `main` or in this PR; the remaining High finding is independent review.
 
 ## Blocked
 
