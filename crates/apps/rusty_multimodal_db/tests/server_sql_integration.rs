@@ -3451,3 +3451,107 @@ fn a_group_by_of_the_range_field_from_the_walked_keys_matches_the_decoded_groups
         check(&mut client, "reminder", "due_at_unix_ms", where_, keep);
     }
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0085` / `docs/design/SERVER-AGGREGATE-HASHED-BUCKET-DESIGN.md`,
+// acceptance criterion 2 (`AGB-FR-002`): the decode path's `GROUP BY`
+// — the shapes the walk cannot answer — buckets exactly as before over
+// a real socket: a second predicate beside the key, a `Str` key, a
+// composite key, `LIMIT` in first-seen order, and the whole-table bucket.
+// ---------------------------------------------------------------------
+
+#[test]
+fn group_by_through_the_decode_path_buckets_exactly_over_a_socket() {
+    type Row = [(String, ScanValue)];
+    let due = |f: &Row| i64_field(f, "due_at_unix_ms");
+    let status = |f: &Row| match f.iter().find(|(n, _)| n == "status") {
+        Some((_, ScanValue::U32(s))) => *s,
+        other => panic!("{other:?}"),
+    };
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    let all = rows(client.query("SELECT * FROM reminder").unwrap());
+
+    // The key beside a second predicate: one group per due stamp among
+    // the pending, in the order the walk names them (ascending).
+    let pending: Vec<&Row> = all
+        .iter()
+        .map(|(_, f)| f.as_slice())
+        .filter(|f| status(f) == 0)
+        .collect();
+    let mut stamps: Vec<i64> = pending.iter().map(|f| due(f)).collect();
+    stamps.sort_unstable();
+    stamps.dedup();
+    let got = groups(
+        client
+            .query(
+                "SELECT due_at_unix_ms, COUNT(*) FROM reminder \
+                 WHERE due_at_unix_ms >= 0 AND status = 0 GROUP BY due_at_unix_ms",
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        got.iter()
+            .map(|g| (g[0].1.clone(), g[1].1.clone()))
+            .collect::<Vec<_>>(),
+        stamps
+            .iter()
+            .map(|k| (
+                ScanValue::I64(*k),
+                ScanValue::I64(pending.iter().filter(|f| due(f) == *k).count() as i64)
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    // A composite key over the whole table (a scan): every distinct
+    // (status, due) pair once, each count the tally.
+    let composite = groups(
+        client
+            .query("SELECT status, due_at_unix_ms, COUNT(*) FROM reminder GROUP BY status, due_at_unix_ms")
+            .unwrap(),
+    );
+    let mut pairs: Vec<(u32, i64)> = all.iter().map(|(_, f)| (status(f), due(f))).collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    assert_eq!(composite.len(), pairs.len());
+    for g in &composite {
+        let (s, d) = match (&g[0].1, &g[1].1) {
+            (ScanValue::U32(s), ScanValue::I64(d)) => (*s, *d),
+            other => panic!("{other:?}"),
+        };
+        let tally = all
+            .iter()
+            .filter(|(_, f)| status(f) == s && due(f) == d)
+            .count() as i64;
+        assert_eq!(g[2].1, ScanValue::I64(tally), "({s}, {d})");
+    }
+
+    // `LIMIT` keeps first-seen order: the first group of the unlimited
+    // answer is the one group of `LIMIT 1`.
+    let unlimited = groups(
+        client
+            .query("SELECT status, COUNT(*) FROM reminder GROUP BY status")
+            .unwrap(),
+    );
+    let one = groups(
+        client
+            .query("SELECT status, COUNT(*) FROM reminder GROUP BY status LIMIT 1")
+            .unwrap(),
+    );
+    assert_eq!(one, vec![unlimited[0].clone()]);
+
+    // The whole-table bucket is untouched by the hash: one group, the
+    // row count, even over nothing.
+    assert_eq!(
+        groups(client.query("SELECT COUNT(*) FROM reminder").unwrap())[0][0].1,
+        ScanValue::I64(all.len() as i64)
+    );
+    assert_eq!(
+        groups(
+            client
+                .query("SELECT COUNT(*) FROM reminder WHERE status = 7")
+                .unwrap()
+        )[0][0]
+            .1,
+        ScanValue::I64(0)
+    );
+}

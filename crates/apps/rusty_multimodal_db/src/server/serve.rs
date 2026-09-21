@@ -2047,6 +2047,10 @@ fn validate_aggregate(
 /// `evaluate_query`'s own `limit` already has. `schema` resolves each
 /// `Sum`/`Avg`/`Min`/`Max` field's `ValueKind` for the one case a real
 /// observed value can't: the implicit whole-table bucket with zero rows.
+/// Since `AGB-FR-001` (ADR-0085) each row finds its bucket through a
+/// [`BucketKey`] hash rather than a linear search over the buckets so
+/// far — the same buckets in the same first-seen order, linear in the
+/// rows rather than quadratic in the groups.
 fn evaluate_aggregate(
     rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
     group_by: &[FieldRef],
@@ -2061,17 +2065,27 @@ fn evaluate_aggregate(
     } else {
         Vec::new()
     };
+    let mut slots: HashMap<Vec<(FieldRef, BucketKey)>, usize> = HashMap::new();
     for (_, fields) in rows
         .into_iter()
         .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
     {
+        if group_by.is_empty() {
+            buckets[0].1.push(fields);
+            continue;
+        }
         let key: Vec<(FieldRef, ScanValue)> = group_by
             .iter()
             .filter_map(|&tag| fields.iter().find(|(f, _)| *f == tag).cloned())
             .collect();
-        match buckets.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, group_rows)) => group_rows.push(fields),
-            None => buckets.push((key, vec![fields])),
+        let hashed: Vec<(FieldRef, BucketKey)> =
+            key.iter().map(|(f, v)| (*f, BucketKey::of(v))).collect();
+        match slots.get(&hashed) {
+            Some(&slot) => buckets[slot].1.push(fields),
+            None => {
+                slots.insert(hashed, buckets.len());
+                buckets.push((key, vec![fields]));
+            }
         }
     }
     let mut groups: Vec<AggregateGroup> = buckets
@@ -2088,6 +2102,35 @@ fn evaluate_aggregate(
         groups.truncate(limit);
     }
     groups
+}
+
+/// `AGB-FR-001` (ADR-0085): a [`ScanValue`] as a hashable bucket key —
+/// every variant carried as itself, `F64` by its bit pattern (no stored
+/// field is `F64`, so no group key ever is; the bits keep the function
+/// total without a panic or an `Eq` on `f64`). Two keys are equal
+/// exactly when `ScanValue`'s own `==` would call them equal, for every
+/// kind a group key can hold.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BucketKey {
+    U32(u32),
+    I64(i64),
+    Bool(bool),
+    Str(String),
+    F64Bits(u64),
+    StrList(Vec<String>),
+}
+
+impl BucketKey {
+    fn of(value: &ScanValue) -> Self {
+        match value {
+            ScanValue::U32(v) => Self::U32(*v),
+            ScanValue::I64(v) => Self::I64(*v),
+            ScanValue::Bool(v) => Self::Bool(*v),
+            ScanValue::Str(v) => Self::Str(v.clone()),
+            ScanValue::F64(v) => Self::F64Bits(v.to_bits()),
+            ScanValue::StrList(v) => Self::StrList(v.clone()),
+        }
+    }
 }
 
 /// One `AggregateSpec`'s result over one bucket's rows — `AGG-FR-008`.
@@ -7896,6 +7939,112 @@ mod tests {
             &sql_test_schema(),
         );
         assert_eq!(unbounded.len(), 2);
+    }
+
+    /// `AGB-FR-001`/`AGB-FR-002` (ADR-0085), acceptance criterion 1: the
+    /// hashed bucket yields exactly the buckets the linear search did —
+    /// first-seen order (rows arriving out of key order), a composite
+    /// `Str`+`Bool` key, a row lacking the group field (its key is the
+    /// shorter tuple, one bucket of its own), and a re-check of every
+    /// value kind a key can hold against `ScanValue`'s own equality.
+    #[test]
+    fn evaluate_aggregate_hashed_buckets_are_the_linear_search_s_buckets_in_first_seen_order() {
+        let row = |id: u128, fields: Vec<(FieldRef, ScanValue)>| (RecordId::from_u128(id), fields);
+        let rows = vec![
+            row(
+                1,
+                vec![(1, ScanValue::U32(9)), (2, ScanValue::Str("b".into()))],
+            ),
+            row(
+                2,
+                vec![(1, ScanValue::U32(3)), (2, ScanValue::Str("a".into()))],
+            ),
+            row(
+                3,
+                vec![(1, ScanValue::U32(9)), (2, ScanValue::Str("b".into()))],
+            ),
+            row(4, vec![(2, ScanValue::Str("a".into()))]),
+            row(
+                5,
+                vec![(1, ScanValue::U32(3)), (2, ScanValue::Str("a".into()))],
+            ),
+            row(
+                6,
+                vec![(1, ScanValue::U32(9)), (2, ScanValue::Str("a".into()))],
+            ),
+        ];
+        let count = AggregateSpec {
+            func: AggregateFn::Count,
+            field: None,
+        };
+        let groups = evaluate_aggregate(
+            rows.clone(),
+            &[1, 2],
+            &[],
+            std::slice::from_ref(&count),
+            None,
+            &planner_schema(),
+        );
+        let shape: Vec<(Vec<(FieldRef, ScanValue)>, i64)> = groups
+            .into_iter()
+            .map(|g| {
+                let n = match g.values[0] {
+                    ScanValue::I64(n) => n,
+                    ref other => panic!("{other:?}"),
+                };
+                (g.key, n)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (
+                    vec![(1, ScanValue::U32(9)), (2, ScanValue::Str("b".into()))],
+                    2
+                ),
+                (
+                    vec![(1, ScanValue::U32(3)), (2, ScanValue::Str("a".into()))],
+                    2
+                ),
+                (vec![(2, ScanValue::Str("a".into()))], 1),
+                (
+                    vec![(1, ScanValue::U32(9)), (2, ScanValue::Str("a".into()))],
+                    1
+                ),
+            ],
+            "first-seen order; a row lacking the field keys on what it has"
+        );
+        // `limit` still truncates the first-seen order.
+        let two = evaluate_aggregate(rows, &[1, 2], &[], &[count], Some(2), &planner_schema());
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[1].key[0], (1, ScanValue::U32(3)));
+        // Every kind a key can hold, equal exactly as `ScanValue` is.
+        for (a, b, same) in [
+            (ScanValue::U32(1), ScanValue::U32(1), true),
+            (ScanValue::U32(1), ScanValue::I64(1), false),
+            (ScanValue::I64(-1), ScanValue::I64(-1), true),
+            (ScanValue::Bool(true), ScanValue::Bool(false), false),
+            (ScanValue::Str("x".into()), ScanValue::Str("x".into()), true),
+            (
+                ScanValue::Str("x".into()),
+                ScanValue::Str("y".into()),
+                false,
+            ),
+            (
+                ScanValue::StrList(vec!["a".into()]),
+                ScanValue::StrList(vec!["a".into()]),
+                true,
+            ),
+            (ScanValue::F64(1.5), ScanValue::F64(1.5), true),
+            (ScanValue::F64(1.5), ScanValue::F64(2.5), false),
+        ] {
+            assert_eq!(
+                BucketKey::of(&a) == BucketKey::of(&b),
+                same,
+                "{a:?} vs {b:?}"
+            );
+            assert_eq!(a == b, same);
+        }
     }
 
     /// Spin up `serve` over `FixtureStore` on a loopback port with
