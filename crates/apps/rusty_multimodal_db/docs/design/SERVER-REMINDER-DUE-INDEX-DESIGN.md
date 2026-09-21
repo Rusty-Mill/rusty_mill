@@ -209,7 +209,8 @@ the `server` bench before and after. Independent review owed.
 - **A decode-free count** — `COUNT(*)` whose every predicate is a bound
   on the walked field is the walk's length; today `Aggregate` decodes
   every candidate (the `due-count` row: half the table). A planner
-  slice for `Aggregate` alone.
+  slice for `Aggregate` alone. *Taken: `ADR-0081` (2026-09-21) —
+  `docs/design/SERVER-QUERY-PLANNER-COUNTED-WALK-DESIGN.md`.*
 - **`Entity` under `Ordered`** (`mention_count`?) — when a consumer
   asks.
 

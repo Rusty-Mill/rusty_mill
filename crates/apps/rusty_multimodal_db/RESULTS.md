@@ -1640,6 +1640,36 @@ named in the design's open questions rather than taken here. Every
 other bench row is unchanged; `Reminder`'s open now pays `ADR-0059`'s
 one-decode-per-record index rebuild, not separately measured.
 
+## Query planner step six — a count that reads no record (`ADR-0081`, `SERVER-001` v0.66.0 / FR-078)
+
+`docs/design/SERVER-QUERY-PLANNER-COUNTED-WALK-DESIGN.md`'s acceptance
+criterion 5: the existing `reminder-due` `due-count` row (`ADR-0080`'s
+honest middle — the walk names 50,000 of 100,000 ids and `Aggregate`
+decoded every one) and the `memory-planner` `index-range` `count(*)`
+row (a 1%-range, 1,000 ids decoded), the pre-change binary (`main` after
+PR #280) and this round's run back to back on the same idle 4-core Linux
+container, 2026-09-21. Both counts are now the sorted index's own count
+between the bounds: one pair visited per id in range, no record read.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0080`) | `IndexRange` walk, every id decoded, then counted | `COUNT(*) WHERE due_at_unix_ms <= 50000` (50,000 of 100K reminders) | 1 group | **31,831.0** |
+| | `IndexRange` walk, every id decoded, then counted | `count(*) WHERE 50000 <= updated_at_unix_ms < 51000` (1,000 of 100K memories) | 1 group | **976.6** |
+| After (`ADR-0081`) | `range_count` — the index's count, no decode | `COUNT(*) WHERE due_at_unix_ms <= 50000` | 1 group | **290.0** |
+| | `range_count` | `count(*) WHERE 50000 <= updated_at_unix_ms < 51000` | 1 group | **105.4** |
+
+**Read it as**: the due count — 50,000 ids named and, before, 50,000
+decoded — is now one walk over 50,000 `BTreeSet` pairs and nothing
+else: ~110× less, ~6 ns per pair, and the remaining ~290 µs is mostly
+the round trip and the walk itself (this run's pre-change number,
+31,831.0 µs, sits above `ADR-0080`'s 22,312.4 for the same request —
+run-to-run variance on the container; both binaries were run back to
+back here). The 1%-range `count(*)` on `Memory` drops from ~1,000
+decodes to 1,000 pair visits, ~9×; what is left is the socket. Every
+other row is unchanged: `Query`/`FilteredPage` still decode what they
+return, and the `since-eq`/`eq-range` counts carry an equality and so
+still decode (an equality bucket is never trusted as a count).
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

@@ -290,4 +290,10 @@ where
         upper: Bound<(R::Key, R::Id)>,
         limit: usize,
     ) -> Option<Vec<R::Id>>;
+
+    /// `QCW-FR-001` (ADR-0081): how many ids lie within `lower..upper` —
+    /// [`Self::range_by`]'s length without the `Vec`, one pair visited
+    /// per id and no record read. Exact: the index holds one pair per
+    /// live record.
+    fn range_count(&self, lower: Bound<(R::Key, R::Id)>, upper: Bound<(R::Key, R::Id)>) -> usize;
 }

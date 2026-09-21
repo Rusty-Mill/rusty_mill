@@ -367,6 +367,22 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `QCW-FR-002` (ADR-0081): how many records lie within `lower..upper`
+    /// on [`Self::range_field`] — [`Self::range_ids`]'s length with no
+    /// `Vec` and no record read, the same errors. What a `COUNT(*)` whose
+    /// every predicate is a bound on the range field answers with
+    /// ([`counted_walk`]). The default answers `Unsupported`, as
+    /// `range_ids`'s does; `Memory`, `Relation`, and `Reminder` implement
+    /// it.
+    fn range_count(
+        &self,
+        _field: FieldRef,
+        _lower: Bound<ScanValue>,
+        _upper: Bound<ScanValue>,
+    ) -> Result<u64, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `FPG-FR-003`/`FPG-FR-004` (ADR-0068, protocol 26): one ordered
     /// keyset page over only the rows every predicate in `filter`
     /// matches — [`Self::page`]'s own contract plus a `WHERE`-shaped
@@ -1143,6 +1159,89 @@ pub fn intersect_ids(a: Vec<RecordId>, b: Vec<RecordId>) -> Vec<RecordId> {
         .into_iter()
         .filter(|id| members.contains(id))
         .collect()
+}
+
+/// `QCW-FR-003` (ADR-0081): whether a `Request::Aggregate` is a count of
+/// a range the `Ordered` index can answer without reading a record —
+/// no `group_by`, every aggregate `COUNT(*)`, a range field, and a
+/// filter that is nothing but bounds on it with at most one bound per
+/// side (an `Eq` is both sides; two lower or two upper bounds would
+/// need tightening, `ADR-0075`'s own declined question, so they take
+/// the decode path). An empty filter qualifies: the whole index. Any
+/// other predicate needs a re-check over decoded rows, so the walk's
+/// length would over-count. Pure.
+pub fn counted_walk_applies(
+    range_field: Option<FieldRef>,
+    group_by: &[FieldRef],
+    filter: &[Predicate],
+    aggregates: &[AggregateSpec],
+) -> bool {
+    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
+    let Some(field) = range_field else {
+        return false;
+    };
+    if !group_by.is_empty() || aggregates.is_empty() {
+        return false;
+    }
+    if !aggregates
+        .iter()
+        .all(|a| a.func == AggregateFn::Count && a.field.is_none())
+    {
+        return false;
+    }
+    let (mut lower, mut upper) = (0, 0);
+    for p in filter {
+        if p.field != field {
+            return false;
+        }
+        match p.op {
+            Gt | Ge => lower += 1,
+            Lt | Le => upper += 1,
+            Eq => {
+                lower += 1;
+                upper += 1;
+            }
+            _ => return false,
+        }
+    }
+    lower <= 1 && upper <= 1
+}
+
+/// `QCW-FR-004` (ADR-0081): the answer to an eligible count — the index's
+/// own count between the filter's bounds ([`ConnectionStore::range_count`]),
+/// once per `COUNT(*)` column, under the same one-group, `limit`-truncated
+/// shape [`evaluate_aggregate`] gives a `group_by`-less request. `None`
+/// when the request is not eligible ([`counted_walk_applies`]) or the
+/// adapter refuses the count (a declared range field whose `range_count`
+/// answers `Unsupported` — no shipped adapter), so the caller takes the
+/// decode path: the answer is the same either way, only the reading
+/// differs.
+pub fn counted_walk<S: ConnectionStore + ?Sized>(
+    store: &S,
+    group_by: &[FieldRef],
+    filter: &[Predicate],
+    aggregates: &[AggregateSpec],
+    limit: Option<usize>,
+) -> Option<Vec<AggregateGroup>> {
+    let field = store.range_field()?;
+    if !counted_walk_applies(Some(field), group_by, filter, aggregates) {
+        return None;
+    }
+    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
+    let side = |ops: &[protocol::CompareOp]| filter.iter().position(|p| ops.contains(&p.op));
+    let (lower, upper) = range_bounds(filter, side(&[Gt, Ge, Eq]), side(&[Lt, Le, Eq]));
+    let count = store.range_count(field, lower, upper).ok()?;
+    let mut groups = vec![AggregateGroup {
+        key: Vec::new(),
+        values: aggregates
+            .iter()
+            .map(|_| ScanValue::I64(count as i64))
+            .collect(),
+    }];
+    if let Some(limit) = limit {
+        groups.truncate(limit);
+    }
+    Some(groups)
 }
 
 /// `QPC-FR-001` (ADR-0074): the one candidate step every filtered read
@@ -2943,15 +3042,20 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         } => {
             let schema = store.describe();
             match validate_aggregate(&schema, &group_by, &filter, &aggregates) {
-                Ok(()) => Response::Groups {
-                    groups: evaluate_aggregate(
-                        indexed_candidates(store, &schema, &filter),
-                        &group_by,
-                        &filter,
-                        &aggregates,
-                        limit,
-                        &schema,
-                    ),
+                // `QCW-FR-004` (ADR-0081): a count of a range the sorted
+                // index answers on its own reads no record at all.
+                Ok(()) => match counted_walk(store, &group_by, &filter, &aggregates, limit) {
+                    Some(groups) => Response::Groups { groups },
+                    None => Response::Groups {
+                        groups: evaluate_aggregate(
+                            indexed_candidates(store, &schema, &filter),
+                            &group_by,
+                            &filter,
+                            &aggregates,
+                            limit,
+                            &schema,
+                        ),
+                    },
                 },
                 Err(code) => err_response(code),
             }
@@ -5064,6 +5168,7 @@ mod tests {
         gets: std::sync::atomic::AtomicUsize,
         scans: std::sync::atomic::AtomicUsize,
         limited_walks: std::sync::atomic::AtomicUsize,
+        range_counts: std::sync::atomic::AtomicUsize,
     }
 
     impl PlannerFixture {
@@ -5076,7 +5181,11 @@ mod tests {
                 gets: Default::default(),
                 scans: Default::default(),
                 limited_walks: Default::default(),
+                range_counts: Default::default(),
             }
+        }
+        fn range_counts(&self) -> usize {
+            self.range_counts.load(std::sync::atomic::Ordering::Relaxed)
         }
         fn limited_walks(&self) -> usize {
             self.limited_walks
@@ -5160,6 +5269,18 @@ mod tests {
                 .collect();
             keyed.sort();
             Ok(keyed.into_iter().map(|(_, id)| id).collect())
+        }
+        /// `QCW-FR-002`: the walk's length; counted, so a test can assert
+        /// the count came from the index and not from decoded rows.
+        fn range_count(
+            &self,
+            field: FieldRef,
+            lower: Bound<ScanValue>,
+            upper: Bound<ScanValue>,
+        ) -> Result<u64, ErrorCode> {
+            self.range_counts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.range_ids(field, lower, upper)?.len() as u64)
         }
         /// `QPB-FR-002`: the same walk, `None` past `limit` ids; counted,
         /// so a test can assert the budget was (or was not) consulted.
@@ -5837,6 +5958,163 @@ mod tests {
                 other => panic!("expected Rows, got {other:?}"),
             }
         }
+    }
+
+    /// `QCW-FR-003` (ADR-0081), acceptance criterion 1: eligible for an
+    /// empty filter, one bound, two bounds one per side, and `Eq`; not
+    /// for a `group_by`, a non-`Count` aggregate, a `COUNT(field)`, no
+    /// aggregate, no range field, a predicate on another field, `Ne`,
+    /// or two bounds on one side.
+    #[test]
+    fn counted_walk_applies_only_to_a_pure_range_count() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        let count = || AggregateSpec {
+            func: AggregateFn::Count,
+            field: None,
+        };
+        let applies = |group_by: &[FieldRef], filter: &[Predicate], aggs: &[AggregateSpec]| {
+            counted_walk_applies(Some(1), group_by, filter, aggs)
+        };
+        assert!(applies(&[], &[], &[count()]));
+        assert!(applies(&[], &[u32_pred(1, Ge, 1)], &[count()]));
+        assert!(applies(
+            &[],
+            &[u32_pred(1, Ge, 1), u32_pred(1, Lt, 9)],
+            &[count()]
+        ));
+        assert!(applies(&[], &[u32_pred(1, Eq, 5)], &[count()]));
+        assert!(
+            applies(&[], &[u32_pred(1, Gt, 1)], &[count(), count()]),
+            "two COUNT(*)"
+        );
+        assert!(
+            !applies(&[2], &[u32_pred(1, Ge, 1)], &[count()]),
+            "group_by"
+        );
+        assert!(
+            !applies(
+                &[],
+                &[u32_pred(1, Ge, 1)],
+                &[AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(1)
+                }]
+            ),
+            "SUM"
+        );
+        assert!(
+            !applies(
+                &[],
+                &[u32_pred(1, Ge, 1)],
+                &[
+                    count(),
+                    AggregateSpec {
+                        func: AggregateFn::Max,
+                        field: Some(1)
+                    }
+                ]
+            ),
+            "COUNT(*) beside MAX"
+        );
+        assert!(!applies(&[], &[u32_pred(1, Ge, 1)], &[]), "no aggregate");
+        assert!(
+            !counted_walk_applies(None, &[], &[u32_pred(1, Ge, 1)], &[count()]),
+            "no range field"
+        );
+        assert!(
+            !applies(&[], &[u32_pred(1, Ge, 1), u32_pred(3, Gt, 0)], &[count()]),
+            "another field"
+        );
+        assert!(!applies(&[], &[u32_pred(1, Ne, 1)], &[count()]), "Ne");
+        assert!(
+            !applies(&[], &[u32_pred(1, Ge, 1), u32_pred(1, Gt, 5)], &[count()]),
+            "two lower bounds"
+        );
+        assert!(
+            !applies(&[], &[u32_pred(1, Eq, 5), u32_pred(1, Le, 9)], &[count()]),
+            "Eq beside an upper bound"
+        );
+    }
+
+    /// `QCW-FR-004` (ADR-0081), acceptance criterion 2: the eligible
+    /// count comes from the index — no `get`, no scan — and `dispatch`
+    /// answers exactly what the decode path answers, `limit` included;
+    /// an ineligible shape still decodes.
+    #[test]
+    fn dispatch_counts_a_pure_range_from_the_index_without_reading_a_record() {
+        use CompareOp::{Ge, Gt, Lt};
+        let count = || AggregateSpec {
+            func: AggregateFn::Count,
+            field: None,
+        };
+        let groups_of = |response| match response {
+            Response::Groups { groups } => groups,
+            other => panic!("expected Groups, got {other:?}"),
+        };
+        let request = |filter: Vec<Predicate>, limit| Request::Aggregate {
+            group_by: vec![],
+            filter,
+            aggregates: vec![count()],
+            limit,
+        };
+        // field 1 > 3: rows 2 (5) and 3 (9).
+        let store = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(&store, request(vec![u32_pred(1, Gt, 3)], None)));
+        assert_eq!(
+            groups,
+            vec![AggregateGroup {
+                key: vec![],
+                values: vec![ScanValue::I64(2)]
+            }]
+        );
+        assert_eq!(
+            (store.gets(), store.scans(), store.range_counts()),
+            (0, 0, 1),
+            "counted from the index"
+        );
+        // The decode path's answer is identical.
+        let scanned = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        assert_eq!(
+            groups_of(dispatch(&scanned, request(vec![u32_pred(1, Gt, 3)], None))),
+            groups
+        );
+        assert_eq!(scanned.scans(), 1);
+        // No filter: the whole index. Two bounds. `limit: Some(0)`: no group.
+        let store = PlannerFixture::with_range(1);
+        assert_eq!(
+            groups_of(dispatch(&store, request(vec![], None)))[0].values,
+            vec![ScanValue::I64(3)]
+        );
+        assert_eq!(
+            groups_of(dispatch(
+                &store,
+                request(vec![u32_pred(1, Ge, 5), u32_pred(1, Lt, 9)], None)
+            ))[0]
+                .values,
+            vec![ScanValue::I64(1)]
+        );
+        assert!(groups_of(dispatch(&store, request(vec![u32_pred(1, Gt, 3)], Some(0)))).is_empty());
+        assert_eq!(
+            (store.gets(), store.scans(), store.range_counts()),
+            (0, 0, 3)
+        );
+        // Ineligible (a predicate on another field): decoded, still exact.
+        let store = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(
+            &store,
+            request(vec![u32_pred(1, Gt, 3), labrador()], None),
+        ));
+        assert_eq!(groups[0].values, vec![ScanValue::I64(1)]);
+        assert_eq!(store.range_counts(), 0, "never counted from the index");
+        assert!(
+            store.gets() + store.scans() > 0,
+            "decoded (the intersection's bucket refuses here, so it scanned)"
+        );
+        // A refusing adapter decodes, still exact.
+        let store = PlannerFixture::with_refusing_range(1);
+        let groups = groups_of(dispatch(&store, request(vec![u32_pred(1, Gt, 3)], None)));
+        assert_eq!(groups[0].values, vec![ScanValue::I64(2)]);
+        assert_eq!((store.range_counts(), store.scans()), (1, 1));
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's

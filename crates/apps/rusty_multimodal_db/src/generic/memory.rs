@@ -730,6 +730,33 @@ mod tests {
         );
     }
 
+    /// `QCW-FR-001` (ADR-0081): `range_count` is `range_by`'s length,
+    /// bounds and inversion included.
+    #[test]
+    fn range_count_is_the_range_s_length() {
+        use crate::generic::query::RangeBy;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let dir = fresh_temp_dir("memory_range_count").unwrap();
+        let path = dir.join("memories.mmap");
+        let (min, max) = (Uuid::nil(), Uuid::max());
+        let seeded = (1..=5).map(|n| memory(n, "general", false)).collect();
+        let store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        assert_eq!(store.range_count(Unbounded, Unbounded), 5);
+        assert_eq!(store.range_count(Included((2_000, min)), Unbounded), 4);
+        assert_eq!(
+            store.range_count(Excluded((2_000, max)), Included((4_000, max))),
+            2
+        );
+        assert_eq!(
+            store.range_count(Included((4_000, min)), Excluded((2_000, min))),
+            0
+        );
+        assert_eq!(
+            store.range_count(Included((2_000, min)), Unbounded),
+            store.range_by(Included((2_000, min)), Unbounded).len()
+        );
+    }
+
     #[test]
     fn range_by_updated_at_walks_the_sorted_index_between_two_bounds() {
         use crate::generic::query::RangeBy;
