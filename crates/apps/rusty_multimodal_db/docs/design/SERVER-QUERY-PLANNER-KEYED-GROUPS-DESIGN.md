@@ -176,7 +176,8 @@ owed.
 
 - **The decode path's bucket** — option (b); `evaluate_aggregate`'s
   linear `find` is quadratic in groups for every `GROUP BY`, not only
-  this one.
+  this one. *Taken: `ADR-0085` (2026-09-21) —
+  `docs/design/SERVER-AGGREGATE-HASHED-BUCKET-DESIGN.md`.*
 - **A fold that never materializes the keys** — unchanged from
   `ADR-0082`.
 - **Plan metrics** — still named, still not bundled.

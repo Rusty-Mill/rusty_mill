@@ -679,6 +679,35 @@ fn bench_reminder_due() {
                 limit: None,
             },
         ),
+        // `ADR-0085`: the decode path's own bucket — the same histogram
+        // with a second predicate, so the walk cannot answer it and
+        // `evaluate_aggregate` buckets decoded rows (1,250 groups over
+        // the 5,000-stamp window; every fourth reminder is pending).
+        (
+            "due-hist-5k-pending",
+            "due_at_unix_ms, COUNT(*) WHERE 50000 <= due_at_unix_ms < 55000 AND status = pending GROUP BY due_at_unix_ms",
+            Request::Aggregate {
+                group_by: vec![FIELD_DUE_AT],
+                filter: vec![
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Ge,
+                        value: ScanValue::I64(50_000),
+                    },
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Lt,
+                        value: ScanValue::I64(55_000),
+                    },
+                    pending.clone(),
+                ],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            },
+        ),
         (
             "due-window",
             "Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending",

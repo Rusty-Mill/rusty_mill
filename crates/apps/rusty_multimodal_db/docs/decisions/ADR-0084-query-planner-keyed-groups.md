@@ -82,3 +82,5 @@ The fork, held for the owner:
   2,491.3 → 299.8 µs and 38,638.8 → 1,437.1 —
   `RESULTS.md`. The fork above remains the owner's at review; (a) is
   what merges if the PR merges unchanged.
+- 2026-09-21: option (b) taken the same day as `ADR-0085` — the decode
+  path's bucket hashed.
