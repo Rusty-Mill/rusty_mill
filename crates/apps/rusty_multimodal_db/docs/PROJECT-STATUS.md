@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-MVCC-HISTORY-RECLAIM` (`ADR-0096`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the fifth and last "do now" item of the release-readiness review the owner asked for: `Compact` reclaims MVCC history at the oldest open snapshot. Its PR waits on the owner. `ADR-0092`–`ADR-0095` (PRs #292–#295) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before. With this the review's five-item list is closed; the update path's durability (an acknowledged `UpdateField` outside the journal is durable at the next `Flush`/checkpoint/write-back) remains the named, documented loss window.
+- `SERVER-SYNCED-UPDATES` (`ADR-0097`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the release-readiness review's remaining High finding, on the owner's word ("durability"): an opt-in `msync` before an in-place `UpdateField` or non-journaled `Transaction` batch is acknowledged (`SERVER_SYNC_UPDATES=1`). Its PR waits on the owner. `ADR-0092`–`ADR-0096` (PRs #292–#296) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before. With this, every write on the three deployment tables can be made durable-on-acknowledgement by configuration; what remains High in the review is independent review of the whole line.
 
 ## Blocked
 

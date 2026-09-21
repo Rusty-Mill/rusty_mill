@@ -165,6 +165,7 @@ pub mod employee;
 /// front-door precedent, not `order`/`employee`'s.
 #[cfg(feature = "server")]
 pub mod entity;
+#[cfg(feature = "server")]
 pub mod exposure;
 pub mod framing;
 #[cfg(feature = "server")]

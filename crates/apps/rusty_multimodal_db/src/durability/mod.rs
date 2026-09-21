@@ -244,12 +244,12 @@ impl From<DurabilityError> for StoreError {
 /// as a file (Windows) this is a no-op: the rename's visibility there is
 /// the filesystem's own promise, and this crate's servers are Linux-only
 /// in CI.
-pub(crate) fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let parent = match path.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
+            _ => std::path::Path::new("."),
         };
         std::fs::File::open(parent)?.sync_all()
     }

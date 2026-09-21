@@ -135,6 +135,16 @@ not a guess.
   dispatched request. **Since `ADR-0093`**:
   `dogserver_connections_refused_total`, accepts closed at the
   connection cap; still absent: queue depth, journal size.
+* **Durable acknowledgements for in-place updates.** Not named here
+  before: every write but the in-place field update was `fsync`ed
+  before its acknowledgement (insert log, journal); `UpdateField` and
+  a non-journaled `Transaction` batch reached disk at the next
+  `Flush`/checkpoint/write-back. *Since `ADR-0097`:* opt-in
+  `with_synced_updates` / `SERVER_SYNC_UPDATES=1` `msync`s the slot
+  files before acknowledging, on `Memory`/`Entity`/`Relation`, at
+  `update_field` on `Memory`, release build, this container, 2,000 updates each: 0.1 → 105.4 µs per update at 1K rows, 0.2 → 99.7 µs at 100K rows (unsynced → synced); the `msync` costs what the insert log's per-entry `sync_data` costs, and does not scale with the table. Still absent: defaults on, a ranged `msync` of the one slot,
+  `UpdateField` in the journal (group commit would amortize the sync),
+  and any of this for the research domains.
 * **MVCC history reclaimed.** `ADR-0072` accepted "unbounded between
   explicit `Compact` runs" and then no `Compact` reclaimed. *Since
   `ADR-0096`:* `Compact` on `Memory`/`Entity`/`Relation` drops every
