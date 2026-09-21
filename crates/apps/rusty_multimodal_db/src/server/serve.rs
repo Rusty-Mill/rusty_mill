@@ -26,6 +26,7 @@ use std::net::{IpAddr, TcpListener, TcpStream};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1017,15 +1018,14 @@ fn evaluate_query(
     filter: &[Predicate],
     limit: Option<usize>,
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
-    let mut matched: Vec<_> = rows
-        .into_iter()
+    // `LIM-FR-004` (ADR-0093): stop at `limit` while filtering, so at
+    // most `limit` projected rows are ever materialized — the same rows
+    // the truncate-after-collect it replaces produced.
+    rows.into_iter()
         .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
         .map(|(id, fields)| (id, select_fields(fields, select)))
-        .collect();
-    if let Some(limit) = limit {
-        matched.truncate(limit);
-    }
-    matched
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
 }
 
 /// `QPL-FR-001` (ADR-0073): how `dispatch` fetches a `Request::Query`'s
@@ -2435,6 +2435,35 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
     }
 }
 
+/// One in-flight connection slot claimed by `ServeOptions::try_admit`
+/// (`LIM-FR-002`); released on drop, so every return path of the
+/// connection's thread gives it back.
+struct InFlightGuard<'a>(&'a AtomicUsize);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// `LIM-FR-003` (ADR-0093): whether `req` asks for more rows than `cap`
+/// allows — a `Query` with no `limit` or one above `cap`, or a page
+/// whose `limit` is above it. Pure over the request; every other
+/// variant is never over the cap.
+pub fn request_exceeds_row_cap(req: &Request, cap: usize) -> bool {
+    match req {
+        Request::Query { limit, .. } => limit.is_none_or(|limit| limit > cap),
+        Request::Page { limit, .. }
+        | Request::FilteredPage { limit, .. }
+        | Request::PageDesc { limit, .. }
+        | Request::FilteredPageDesc { limit, .. } => match usize::try_from(*limit) {
+            Ok(limit) => limit > cap,
+            Err(_) => true,
+        },
+        _ => false,
+    }
+}
+
 fn err_response(code: ErrorCode) -> Response {
     Response::Err {
         code,
@@ -2597,6 +2626,18 @@ pub struct ServeOptions {
     /// never automatically holds it. `None` (the default) answers every
     /// `Request::FetchSnapshot` `Unauthorized` server-wide.
     replication_token: Option<String>,
+    /// `LIM-FR-001` (ADR-0093): read and write timeout on every accepted
+    /// socket; `None` waits forever, as every version before it did.
+    idle_timeout: Option<Duration>,
+    /// `LIM-FR-002` (ADR-0093): accepts beyond this many in-flight
+    /// connections are closed at once; `None` is unbounded.
+    max_connections: Option<usize>,
+    /// The in-flight count `max_connections` is checked against —
+    /// counted at accept, released when the connection's thread ends.
+    in_flight: AtomicUsize,
+    /// `LIM-FR-003` (ADR-0093): the most rows one `Query`/page may ask
+    /// for; `None` is unbounded and a `Query` may omit its `limit`.
+    max_query_rows: Option<usize>,
 }
 
 impl std::fmt::Debug for ServeOptions {
@@ -2655,6 +2696,9 @@ impl std::fmt::Debug for ServeOptions {
                     "none"
                 },
             )
+            .field("idle_timeout", &self.idle_timeout)
+            .field("max_connections", &self.max_connections)
+            .field("max_query_rows", &self.max_query_rows)
             .finish()
     }
 }
@@ -2680,7 +2724,69 @@ impl ServeOptions {
             metrics_http: None,
             backup_root: None,
             replication_token: None,
+            idle_timeout: None,
+            max_connections: None,
+            in_flight: AtomicUsize::new(0),
+            max_query_rows: None,
         }
+    }
+
+    /// `LIM-FR-001` (ADR-0093): close a connection that neither sends
+    /// nor accepts a byte for `timeout` — an idle client holds no thread,
+    /// no session, and no MVCC snapshot past it. Opt-in; unset, a
+    /// connection may sit forever, as every version before this did.
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = Some(timeout);
+        self
+    }
+
+    /// The configured idle timeout, or `None`.
+    pub fn idle_timeout(&self) -> Option<Duration> {
+        self.idle_timeout
+    }
+
+    /// `LIM-FR-002` (ADR-0093): at most `max` connections in flight;
+    /// an accept past it is closed at once, before any byte is read,
+    /// and counted in `dogserver_connections_refused_total`. Opt-in;
+    /// unset, one thread per accept without bound, as before.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = Some(max);
+        self
+    }
+
+    /// The configured connection cap, or `None`.
+    pub fn max_connections(&self) -> Option<usize> {
+        self.max_connections
+    }
+
+    /// `LIM-FR-003` (ADR-0093): the most rows one read may ask for — a
+    /// `Query` must carry a `limit` at or under it, and a page's `limit`
+    /// must be at or under it; past it the request is refused
+    /// `TooLarge` before any read (`Malformed` below protocol 25).
+    /// Opt-in; unset, a `Query` may omit its `limit` and materialize
+    /// every matching row, as before.
+    pub fn with_max_query_rows(mut self, max: usize) -> Self {
+        self.max_query_rows = Some(max);
+        self
+    }
+
+    /// The configured row cap, or `None`.
+    pub fn max_query_rows(&self) -> Option<usize> {
+        self.max_query_rows
+    }
+
+    /// `LIM-FR-002`: claim one in-flight slot at accept — `true` and the
+    /// count is up by one (released by the connection thread's
+    /// [`InFlightGuard`]); `false` and nothing changed, the cap is
+    /// already reached and the caller closes the socket. Counted even
+    /// with no cap, so the guard is always symmetric.
+    fn try_admit(&self) -> bool {
+        let before = self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if self.max_connections.is_none_or(|cap| before < cap) {
+            return true;
+        }
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        false
     }
 
     /// `CLS-FR-003` (ADR-0028): a client presenting a certificate whose
@@ -2759,6 +2865,10 @@ impl ServeOptions {
             metrics_http: None,
             backup_root: None,
             replication_token: std::env::var("SERVER_AUTH_REPLICATION_TOKEN").ok(),
+            idle_timeout: None,
+            max_connections: None,
+            in_flight: AtomicUsize::new(0),
+            max_query_rows: None,
         }
     }
 
@@ -3896,6 +4006,15 @@ fn handle_connection(
     // directly (a concurrent-client integration test went from ~36s to
     // well under a second after this one call).
     let _ = stream.set_nodelay(true);
+    // `LIM-FR-001` (ADR-0093): on the socket itself, before the TLS
+    // handshake, so a peer that stalls at any point — handshake, a half
+    // frame, an open session — is closed at the timeout. A timed-out
+    // read or write is an error to the framing layer, which ends the
+    // connection exactly as a disconnect does.
+    if let Some(timeout) = options.idle_timeout() {
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+    }
     // `AUD-FR-001`: the one identifying datum an audit event carries.
     let peer = stream.peer_addr().ok();
     let sink = options.audit();
@@ -4449,6 +4568,21 @@ fn handle_connection(
             ref filtered if negotiated >= 29 && request_contradicted(filtered) => {
                 err_response(ErrorCode::Malformed)
             }
+            // `LIM-FR-003` (ADR-0093): under an opt-in row cap, a read
+            // asking for more rows than it allows is refused before any
+            // read — `TooLarge` (protocol 25) at 25 or above, `Malformed`
+            // below (rule 3), since the cap is the operator's choice.
+            ref capped
+                if options
+                    .max_query_rows()
+                    .is_some_and(|cap| request_exceeds_row_cap(capped, cap)) =>
+            {
+                err_response(if negotiated >= 25 {
+                    ErrorCode::TooLarge
+                } else {
+                    ErrorCode::Malformed
+                })
+            }
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes
@@ -4571,9 +4705,22 @@ pub fn serve_tables(
             Ok(s) => s,
             Err(_) => continue, // one bad accept doesn't take down the server
         };
+        // `LIM-FR-002` (ADR-0093): the cap is checked here, at accept,
+        // before a thread exists for the connection; a refused socket
+        // is dropped (closed) with nothing written and counted. The
+        // claimed slot is released by the guard the thread holds, so
+        // it lives exactly as long as the connection.
+        if !options.try_admit() {
+            options.metrics().record_connection_refused();
+            drop(stream);
+            continue;
+        }
         let tables = Arc::clone(&tables);
         let options = Arc::clone(&options);
-        thread::spawn(move || handle_connection(stream, &tables, primary, options.as_ref()));
+        thread::spawn(move || {
+            let _slot = InFlightGuard(&options.in_flight);
+            handle_connection(stream, &tables, primary, options.as_ref())
+        });
     }
 }
 

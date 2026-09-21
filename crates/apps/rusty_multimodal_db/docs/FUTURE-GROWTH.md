@@ -132,7 +132,20 @@ not a guess.
   pure function of the request. **Since `ADR-0088`**: request latency —
   `dogserver_request_duration_seconds`, one histogram with sixteen
   fixed buckets (`SERVER-001` v0.73.0/FR-085), observed once per
-  dispatched request; still absent: queue depth, journal size.
+  dispatched request. **Since `ADR-0093`**:
+  `dogserver_connections_refused_total`, accepts closed at the
+  connection cap; still absent: queue depth, journal size.
+* **Limits on what one peer can cost the process.** Not named here
+  before. *Built since this was written:* `ADR-0093` — an opt-in idle
+  timeout on the accepted socket, a connection cap checked at accept
+  (`dogserver_connections_refused_total`), and a row cap on `Query`
+  and the pages (`TooLarge` before any read), each on `ServeOptions`
+  and each a `memory_server` setting (`SERVER_IDLE_TIMEOUT_SECS`,
+  `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS`); `evaluate_query`
+  now stops at `limit` while filtering. Still absent: defaults on (every
+  limit is unset unless the operator sets it), an error frame for a
+  refused accept (the client sees EOF), a scan budget for
+  `Aggregate`/`Join`, graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing

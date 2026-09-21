@@ -674,8 +674,13 @@ pub enum ErrorCode {
     GuardFailed,
     /// Protocol 25 (`RPL-FR-007`, ADR-0067). [`Request::FetchSnapshot`]'s
     /// table exceeds [`MAX_SNAPSHOT_BYTES`] — refused before any file is
-    /// read, nothing sent. Only ever answers a `FetchSnapshot`, which a
-    /// connection below 25 cannot send, so it needs no downgrade.
+    /// read, nothing sent. Only ever answered a `FetchSnapshot`, which a
+    /// connection below 25 cannot send, so it needed no downgrade —
+    /// until `LIM-FR-003` (ADR-0093): under an opt-in
+    /// `ServeOptions::max_query_rows`, a `Query` with no `limit` or a
+    /// `limit` above the cap, or a `Page`/`FilteredPage`/`PageDesc`/
+    /// `FilteredPageDesc` whose `limit` is above it, is refused with this
+    /// code before any read at 25 or above, `Malformed` below (rule 3).
     TooLarge,
 }
 
