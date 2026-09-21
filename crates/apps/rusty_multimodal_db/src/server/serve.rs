@@ -399,6 +399,22 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `QRF-FR-002` (ADR-0087): [`Self::range_keys`] reduced in one pass
+    /// — the count, sum, least and greatest of the keys within
+    /// `lower..upper` on [`Self::range_field`] — with no `Vec` of keys
+    /// materialized; the same errors as `range_ids`. What an ungrouped
+    /// aggregate over the range field answers with ([`keyed_walk`]). The
+    /// default answers `Unsupported`; `Memory`, `Relation`, and
+    /// `Reminder` implement it over [`crate::generic::query::RangeBy::range_fold`].
+    fn range_stats(
+        &self,
+        _field: FieldRef,
+        _lower: Bound<ScanValue>,
+        _upper: Bound<ScanValue>,
+    ) -> Result<KeyStats, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `FPG-FR-003`/`FPG-FR-004` (ADR-0068, protocol 26): one ordered
     /// keyset page over only the rows every predicate in `filter`
     /// matches — [`Self::page`]'s own contract plus a `WHERE`-shaped
@@ -1248,6 +1264,34 @@ pub fn counted_walk_applies(
         .all(|p| p.field == field && matches!(p.op, Gt | Ge | Lt | Le | Eq))
 }
 
+/// `QRF-FR-002` (ADR-0087): one pass over a range's keys, reduced —
+/// what every ungrouped reduction of the range field needs (`COUNT` the
+/// count, `SUM` the sum, `AVG` their quotient, `MIN`/`MAX` the extremes)
+/// and nothing more. `min`/`max` are `None` over an empty range, as the
+/// keys would be absent. The sum is the same `i64` addition
+/// `evaluate_aggregate`'s `Sum` performs over decoded rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeyStats {
+    pub count: u64,
+    pub sum: i64,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+}
+
+impl KeyStats {
+    /// The fold step: `self` with one more key — for
+    /// [`crate::generic::query::RangeBy::range_fold`], which visits keys
+    /// ascending, so `min` is the first and `max` the latest.
+    pub fn with(self, key: &i64) -> Self {
+        Self {
+            count: self.count + 1,
+            sum: self.sum + *key,
+            min: Some(self.min.map_or(*key, |m| m.min(*key))),
+            max: Some(self.max.map_or(*key, |m| m.max(*key))),
+        }
+    }
+}
+
 /// `QKW-FR-003` (ADR-0082): whether a `Request::Aggregate` is answerable
 /// from the walked keys alone — [`counted_walk_applies`]'s shape (a
 /// range field, a filter of nothing but bounds on it), with every
@@ -1293,7 +1337,9 @@ pub fn keyed_walk_applies(
 /// exactly as [`evaluate_aggregate`] reduces decoded rows: `COUNT` the
 /// length; `SUM` the `i64` sum; `AVG` an `F64` mean, `0.0` over nothing;
 /// `MIN`/`MAX` the extreme in the field's own kind, `0` over nothing —
-/// the same one-group, `limit`-truncated shape. Since `QKG-FR-002`
+/// the same one-group, `limit`-truncated shape; since `QRF-FR-003`
+/// (ADR-0087) that one group comes from [`ConnectionStore::range_stats`],
+/// a one-pass fold with no key materialized. Since `QKG-FR-002`
 /// (ADR-0084) a `group_by` of the range field yields one group per run
 /// of equal keys, keyed by that key in the field's kind, ascending —
 /// the decode path's own groups whenever a bound is present (its
@@ -1323,7 +1369,6 @@ pub fn keyed_walk<S: ConnectionStore + ?Sized>(
     }
     let (lower, upper) = tightest_bounds(Some(field), filter);
     let (lower, upper) = range_bounds(filter, lower, upper);
-    let keys = store.range_keys(field, lower, upper).ok()?;
     let kind = schema
         .fields
         .iter()
@@ -1333,33 +1378,36 @@ pub fn keyed_walk<S: ConnectionStore + ?Sized>(
         protocol::ValueKind::U32 => ScanValue::U32(v as u32),
         _ => ScanValue::I64(v),
     };
-    let reduce = |run: &[i64]| -> Vec<ScanValue> {
+    // `QRF-FR-003` (ADR-0087): every reduction from one `KeyStats` —
+    // over a run of equal keys when grouped, over the whole walk's
+    // one-pass fold when not, so the ungrouped shape materializes
+    // nothing.
+    let reduce = |stats: KeyStats| -> Vec<ScanValue> {
         aggregates
             .iter()
             .map(|a| match a.func {
-                AggregateFn::Count => ScanValue::I64(run.len() as i64),
-                AggregateFn::Sum => ScanValue::I64(run.iter().sum()),
-                AggregateFn::Avg if run.is_empty() => ScanValue::F64(0.0),
-                AggregateFn::Avg => {
-                    let sum: i64 = run.iter().sum();
-                    ScanValue::F64(sum as f64 / run.len() as f64)
-                }
-                AggregateFn::Min => render(run.first().copied().unwrap_or(0)),
-                AggregateFn::Max => render(run.last().copied().unwrap_or(0)),
+                AggregateFn::Count => ScanValue::I64(stats.count as i64),
+                AggregateFn::Sum => ScanValue::I64(stats.sum),
+                AggregateFn::Avg if stats.count == 0 => ScanValue::F64(0.0),
+                AggregateFn::Avg => ScanValue::F64(stats.sum as f64 / stats.count as f64),
+                AggregateFn::Min => render(stats.min.unwrap_or(0)),
+                AggregateFn::Max => render(stats.max.unwrap_or(0)),
             })
             .collect()
     };
     let mut groups: Vec<AggregateGroup> = if grouped {
+        let keys = store.range_keys(field, lower, upper).ok()?;
         keys.chunk_by(|a, b| a == b)
             .map(|run| AggregateGroup {
                 key: vec![(field, render(run[0]))],
-                values: reduce(run),
+                values: reduce(run.iter().fold(KeyStats::default(), KeyStats::with)),
             })
             .collect()
     } else {
+        let stats = store.range_stats(field, lower, upper).ok()?;
         vec![AggregateGroup {
             key: Vec::new(),
-            values: reduce(&keys),
+            values: reduce(stats),
         }]
     };
     if let Some(limit) = limit {
@@ -5453,6 +5501,11 @@ mod tests {
         scans: std::sync::atomic::AtomicUsize,
         limited_walks: std::sync::atomic::AtomicUsize,
         range_counts: std::sync::atomic::AtomicUsize,
+        /// `QRF-FR-004`: the keys materialized (`range_keys`) and the
+        /// folds (`range_stats`) apart, beside `range_counts`, which
+        /// counts every walk-only call.
+        key_walks: std::sync::atomic::AtomicUsize,
+        stat_folds: std::sync::atomic::AtomicUsize,
     }
 
     impl PlannerFixture {
@@ -5467,10 +5520,18 @@ mod tests {
                 scans: Default::default(),
                 limited_walks: Default::default(),
                 range_counts: Default::default(),
+                key_walks: Default::default(),
+                stat_folds: Default::default(),
             }
         }
         fn range_counts(&self) -> usize {
             self.range_counts.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn key_walks(&self) -> usize {
+            self.key_walks.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn stat_folds(&self) -> usize {
+            self.stat_folds.load(std::sync::atomic::Ordering::Relaxed)
         }
         fn limited_walks(&self) -> usize {
             self.limited_walks
@@ -5578,6 +5639,8 @@ mod tests {
         ) -> Result<Vec<i64>, ErrorCode> {
             self.range_counts
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.key_walks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let ids = self.range_ids(field, lower, upper)?;
             Ok(ids
                 .into_iter()
@@ -5590,6 +5653,21 @@ mod tests {
                     }
                 })
                 .collect())
+        }
+        /// `QRF-FR-004`: the fold — over the same keys `range_keys` would
+        /// give, counted apart so a test can assert which one ran.
+        fn range_stats(
+            &self,
+            field: FieldRef,
+            lower: Bound<ScanValue>,
+            upper: Bound<ScanValue>,
+        ) -> Result<KeyStats, ErrorCode> {
+            let keys = self.range_keys(field, lower, upper)?;
+            self.key_walks
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            self.stat_folds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(keys.iter().fold(KeyStats::default(), KeyStats::with))
         }
         /// `QCW-FR-002`: the walk's length; counted, so a test can assert
         /// the count came from the index and not from decoded rows.
@@ -7047,6 +7125,108 @@ mod tests {
         ] {
             assert_eq!(plan_of(&ranged, &req), None, "{req:?}");
         }
+    }
+
+    /// `QRF-FR-003`/`QRF-FR-004` (ADR-0087), acceptance criteria 1–2:
+    /// `KeyStats::with` folds count/sum/min/max exactly (empties `None`);
+    /// an ungrouped reduction of the range field takes one `range_stats`
+    /// fold and materializes no key, with the same answers `ADR-0082`
+    /// pinned (a range, everything, nothing — the empties included) and
+    /// the decode path's; a grouped one still takes the keys.
+    #[test]
+    fn dispatch_reduces_the_range_field_from_one_fold_without_materializing_keys() {
+        use CompareOp::{Ge, Gt, Lt};
+        assert_eq!(
+            [3i64, 5, 9]
+                .iter()
+                .fold(KeyStats::default(), KeyStats::with),
+            KeyStats {
+                count: 3,
+                sum: 17,
+                min: Some(3),
+                max: Some(9)
+            }
+        );
+        assert_eq!(
+            [9i64, -1, 4]
+                .iter()
+                .fold(KeyStats::default(), KeyStats::with),
+            KeyStats {
+                count: 3,
+                sum: 12,
+                min: Some(-1),
+                max: Some(9)
+            },
+            "order-independent"
+        );
+        assert_eq!(KeyStats::default().min, None);
+        let spec = |func, field| AggregateSpec { func, field };
+        let all = || {
+            vec![
+                spec(AggregateFn::Count, None),
+                spec(AggregateFn::Sum, Some(1)),
+                spec(AggregateFn::Avg, Some(1)),
+                spec(AggregateFn::Min, Some(1)),
+                spec(AggregateFn::Max, Some(1)),
+            ]
+        };
+        let groups_of = |response| match response {
+            Response::Groups { groups } => groups,
+            other => panic!("expected Groups, got {other:?}"),
+        };
+        let request = |group_by, filter: Vec<Predicate>| Request::Aggregate {
+            group_by,
+            filter,
+            aggregates: all(),
+            limit: None,
+        };
+        // field 1 (U32) is 3, 5, 9 on rows 1, 2, 3.
+        for filter in [
+            vec![],
+            vec![u32_pred(1, Gt, 3)],
+            vec![u32_pred(1, Ge, 5), u32_pred(1, Lt, 9)],
+            vec![u32_pred(1, Gt, 9)],
+        ] {
+            let keyed = PlannerFixture::with_range(1);
+            let scanned = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+            let a = groups_of(dispatch(&keyed, request(vec![], filter.clone())));
+            let b = groups_of(dispatch(&scanned, request(vec![], filter.clone())));
+            assert_eq!(a, b, "{filter:?}");
+            assert_eq!(
+                (keyed.gets(), keyed.stat_folds(), keyed.key_walks()),
+                (0, 1, 0),
+                "{filter:?}: one fold, no keys"
+            );
+        }
+        let keyed = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(&keyed, request(vec![], vec![u32_pred(1, Gt, 3)])));
+        assert_eq!(
+            groups[0].values,
+            vec![
+                ScanValue::I64(2),
+                ScanValue::I64(14),
+                ScanValue::F64(7.0),
+                ScanValue::U32(5),
+                ScanValue::U32(9)
+            ]
+        );
+        let keyed = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(&keyed, request(vec![], vec![u32_pred(1, Gt, 9)])));
+        assert_eq!(
+            groups[0].values,
+            vec![
+                ScanValue::I64(0),
+                ScanValue::I64(0),
+                ScanValue::F64(0.0),
+                ScanValue::U32(0),
+                ScanValue::U32(0)
+            ],
+            "over nothing: the empties"
+        );
+        // Grouped: the keys, since runs need them.
+        let keyed = PlannerFixture::with_range(1);
+        groups_of(dispatch(&keyed, request(vec![1], vec![u32_pred(1, Gt, 3)])));
+        assert_eq!((keyed.stat_folds(), keyed.key_walks()), (0, 1));
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's

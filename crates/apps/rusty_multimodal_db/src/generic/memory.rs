@@ -757,6 +757,42 @@ mod tests {
         );
     }
 
+    /// `QRF-FR-001` (ADR-0087): `range_fold` visits exactly `range_keys`'
+    /// keys in order — the same bounds, the same inversion — with
+    /// nothing collected.
+    #[test]
+    fn range_fold_visits_the_range_s_keys_in_order() {
+        use crate::generic::query::RangeBy;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let dir = fresh_temp_dir("memory_range_fold").unwrap();
+        let path = dir.join("memories.mmap");
+        let (min, max) = (Uuid::nil(), Uuid::max());
+        let mut seeded: Vec<Memory> = (1..=5).map(|n| memory(n, "general", false)).collect();
+        seeded[2].updated_at_unix_ms = 2_000;
+        let store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        let visited = |lower, upper| {
+            store.range_fold(lower, upper, Vec::new(), |mut acc: Vec<i64>, k: &i64| {
+                acc.push(*k);
+                acc
+            })
+        };
+        for (lower, upper) in [
+            (Unbounded, Unbounded),
+            (Excluded((2_000, max)), Included((4_000, max))),
+            (Included((4_000, min)), Excluded((2_000, min))),
+        ] {
+            assert_eq!(visited(lower, upper), store.range_keys(lower, upper));
+        }
+        assert_eq!(
+            store.range_fold(Unbounded, Unbounded, (0u64, 0i64), |(n, s), k| (
+                n + 1,
+                s + k
+            )),
+            (5, 14_000),
+            "a count and a sum in one pass"
+        );
+    }
+
     /// `QCW-FR-001` (ADR-0081): `range_count` is `range_by`'s length,
     /// bounds and inversion included.
     #[test]

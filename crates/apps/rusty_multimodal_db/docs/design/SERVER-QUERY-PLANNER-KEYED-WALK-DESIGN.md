@@ -192,6 +192,9 @@ owed.
   `Vec<i64>` (8 bytes per key); the `due-next` row's ~600 µs against
   `due-count`'s ~290 µs is that `Vec`. A generic `range_fold` would
   close it; taken only if a consumer aggregates a wide range in anger.
+  *Taken: `ADR-0087` (2026-09-21) — `RangeBy::range_fold`, `KeyStats`,
+  `ConnectionStore::range_stats`; the ungrouped walk materializes
+  nothing — `docs/design/SERVER-QUERY-PLANNER-RANGE-FOLD-DESIGN.md`.*
 - **An "exact" equality index** — unchanged from `ADR-0081`.
 - **Plan metrics** — still named, still not bundled. *Taken: `ADR-0086`
   (2026-09-21) — `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*

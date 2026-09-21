@@ -179,7 +179,8 @@ owed.
   this one. *Taken: `ADR-0085` (2026-09-21) —
   `docs/design/SERVER-AGGREGATE-HASHED-BUCKET-DESIGN.md`.*
 - **A fold that never materializes the keys** — unchanged from
-  `ADR-0082`.
+  `ADR-0082`. *Taken: `ADR-0087` (2026-09-21) —
+  `docs/design/SERVER-QUERY-PLANNER-RANGE-FOLD-DESIGN.md`.*
 - **Plan metrics** — still named, still not bundled. *Taken: `ADR-0086`
   (2026-09-21) — `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 

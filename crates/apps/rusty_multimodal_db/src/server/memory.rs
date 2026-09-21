@@ -27,8 +27,8 @@ use super::protocol::{
 use super::{
     bounded_filtered_page, bounded_walk_applies, copy_table_files, filtered_page_by_candidates,
     page_by_scan, page_key, predicate_matches, read_table_files, uuid_pair_bounds,
-    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
-    PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
+    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, KeyStats,
+    LinkOutcome, PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
@@ -958,6 +958,26 @@ impl ConnectionStore for MemoryConnectionStore {
         Ok(self
             .store
             .range_keys::<Memory, UpdatedAtOrder>(lower, upper))
+    }
+
+    /// `QRF-FR-002` (ADR-0087): the walk folded into [`KeyStats`] —
+    /// `range_keys` with nothing materialized.
+    fn range_stats(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<KeyStats, ErrorCode> {
+        if field != FIELD_UPDATED_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self.store.range_fold::<Memory, UpdatedAtOrder, _, _>(
+            lower,
+            upper,
+            KeyStats::default(),
+            KeyStats::with,
+        ))
     }
 
     fn range_ids_limited(

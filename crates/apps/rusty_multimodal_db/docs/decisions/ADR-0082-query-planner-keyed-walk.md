@@ -85,3 +85,6 @@ The fork, held for the owner:
   tightest two.
 - 2026-09-21: option (b) taken the same day as `ADR-0084` — `GROUP BY`
   the range field as one group per run of equal walked keys.
+- 2026-09-21: the "fold that never materializes the keys" open question
+  taken the same day as `ADR-0087` — the ungrouped walk over one
+  `range_stats` fold.

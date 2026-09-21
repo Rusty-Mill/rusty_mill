@@ -34,8 +34,8 @@ use super::protocol::{
 };
 use super::{
     bounded_filtered_page, bounded_walk_applies, filtered_page_by_candidates, page_by_scan,
-    predicate_matches, uuid_pair_bounds, ConnectionStore, DeleteOutcome, InsertOutcome, PageRow,
-    ReplaceIfOutcome, ReplaceOutcome,
+    predicate_matches, uuid_pair_bounds, ConnectionStore, DeleteOutcome, InsertOutcome, KeyStats,
+    PageRow, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
@@ -331,6 +331,26 @@ impl ConnectionStore for ReminderConnectionStore {
         }
         let (lower, upper) = uuid_pair_bounds(lower, upper)?;
         Ok(self.store.range_keys::<Reminder, DueAtOrder>(lower, upper))
+    }
+
+    /// `QRF-FR-002` (ADR-0087): the walk folded into [`KeyStats`] —
+    /// `range_keys` with nothing materialized.
+    fn range_stats(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<KeyStats, ErrorCode> {
+        if field != FIELD_DUE_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self.store.range_fold::<Reminder, DueAtOrder, _, _>(
+            lower,
+            upper,
+            KeyStats::default(),
+            KeyStats::with,
+        ))
     }
 
     fn range_ids_limited(

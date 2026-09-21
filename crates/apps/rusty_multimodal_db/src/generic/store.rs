@@ -2339,6 +2339,21 @@ where
             .collect()
     }
 
+    // `QRF-FR-001` (ADR-0087): the same guarded walk, folded.
+    fn range_fold<B, F>(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+        init: B,
+        mut f: F,
+    ) -> B
+    where
+        F: FnMut(B, &R::Key) -> B,
+    {
+        self.guarded_pairs(lower, upper)
+            .fold(init, |acc, (key, _)| f(acc, key))
+    }
+
     // `QCW-FR-001` (ADR-0081): the same guarded walk, counted.
     fn range_count(
         &self,

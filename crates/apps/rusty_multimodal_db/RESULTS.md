@@ -1809,6 +1809,29 @@ Linux container, 2026-09-21: every row moves in both directions by the container
 repeated here; the rows and their previous values stand in the
 sections above.
 
+## Query planner step ten — a fold that materializes no key (`ADR-0087`, `SERVER-001` v0.72.0 / FR-084)
+
+`docs/design/SERVER-QUERY-PLANNER-RANGE-FOLD-DESIGN.md`'s acceptance
+criterion 4: `ADR-0082`'s own `reminder-due` `due-next` and `due-mean`
+rows — `MIN(due_at_unix_ms) WHERE due_at_unix_ms > 50000` and
+`AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000`, each a walk over
+~50,000 pairs — the pre-change binary (`main` after PR #286,
+`ADR-0086`) and this round's back to back on the same idle 4-core Linux
+container, 2026-09-21. Before, the walk filled a `Vec<i64>` of every key
+in range (400 KB for 50,000 keys) and the reduction ran over it; after,
+one `KeyStats` fold and nothing allocated.
+
+| Round | Walk | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0086`) | `range_keys` — every key materialized, then reduced | `MIN(due_at_unix_ms) WHERE due_at_unix_ms > 50000` | 1 group | **610.3** |
+| | `range_keys` | `AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000` | 1 group | **705.9** |
+| After (`ADR-0087`) | `range_stats` — one fold, nothing materialized | `MIN(due_at_unix_ms) WHERE due_at_unix_ms > 50000` | 1 group | **581.6** |
+| | `range_stats` | `AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000` | 1 group | **574.0** |
+
+**Read it as**: `due-mean` falls ~19% (705.9 → 574.0 µs) and `due-next` ~5% (610.3 → 581.6): the `Vec` and the second pass over it were a smaller share of the walk than `ADR-0082` guessed. What still separates both rows from `due-count` (269.9 → 321.5 in the same run, the same ~50,000 pairs kept as nothing) is the fold step itself — a count, a sum, and two comparisons per pair against `range_count`'s bare increment — plus run-to-run spread; `ADR-0082`'s reading that the `Vec` was that whole gap was wrong, and this measurement corrects it. The allocation proportional to the range is gone either way. Every other row is unchanged; the
+grouped `due-hist` rows still materialize their keys (the runs need
+them) and are not expected to move.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.
