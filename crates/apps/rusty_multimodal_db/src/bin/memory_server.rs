@@ -101,6 +101,14 @@
 //! together. `FetchSnapshot` streams every file this table owns back
 //! over the connection, up to `MAX_SNAPSHOT_BYTES`. Unset, every
 //! `FetchSnapshot` request answers `Unauthorized`.
+//!
+//! # Exposure — a non-loopback bind needs auth and TLS (ADR-0094)
+//!
+//! Binding anything but a loopback address (`127.0.0.1`, `[::1]`) with
+//! no authentication configured, or with authentication but no TLS,
+//! refuses to start and says which is missing. `SERVER_ALLOW_INSECURE=1`
+//! turns that refusal into a warning for an operator who means it. A
+//! loopback bind needs nothing, as every version before.
 
 use rusty_multimodal_db::generic::entity::{
     create_entity_production_stack, open_or_create_entity_production_stack, Entity,
@@ -119,6 +127,7 @@ use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAcces
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::data_lock::DataDirLock;
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
+use rusty_multimodal_db::server::exposure::{allow_insecure_from_env, check_exposure};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{
@@ -430,6 +439,21 @@ fn main() {
         Some(tls) => auth.with_tls(tls),
         None => auth,
     };
+    // `EXP-FR-002`/`003` (ADR-0094): a non-loopback bind without both
+    // authentication and TLS is refused at startup; `SERVER_ALLOW_INSECURE=1`
+    // turns the refusal into a warning for the operator who means it.
+    if let Err(exposure) = check_exposure(&addr, &options) {
+        if allow_insecure_from_env() {
+            eprintln!(
+                "WARNING: listening on {addr} although {exposure} (SERVER_ALLOW_INSECURE=1 is set)"
+            );
+        } else {
+            panic!(
+                "refusing to listen on {addr}: {exposure}; bind a loopback address, configure \
+                 what is missing, or set SERVER_ALLOW_INSECURE=1 to serve anyway (ADR-0094)"
+            );
+        }
+    }
     // `SERVER_BACKUP_ROOT` (ADR-0065, `BAK-FR-003`): opt-in — unset,
     // every `Request::Backup` answers `Unsupported` server-wide, no new
     // filesystem-write surface at all.

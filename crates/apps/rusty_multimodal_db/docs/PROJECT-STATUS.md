@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-CONNECTION-LIMITS` (`ADR-0093`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the second "do now" item of the release-readiness review the owner asked for ("harden"): opt-in idle timeout, connection cap, and row cap on `ServeOptions`, `evaluate_query` bounded at `limit`, three `memory_server` settings. Its PR waits on the owner. `ADR-0092` (PR #292, the data-directory lock) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before.
+- `SERVER-EXPOSURE-CHECK` (`ADR-0094`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the third "do now" item of the release-readiness review the owner asked for: the four binaries refuse a non-loopback bind without both authentication and TLS unless `SERVER_ALLOW_INSECURE=1`. Its PR waits on the owner. `ADR-0092` (PR #292) and `ADR-0093` (PR #293) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before.
 
 ## Blocked
 

@@ -135,6 +135,13 @@ not a guess.
   dispatched request. **Since `ADR-0093`**:
   `dogserver_connections_refused_total`, accepts closed at the
   connection cap; still absent: queue depth, journal size.
+* **An exposed, unprotected listener refused at startup.** Not named
+  here before. *Built since this was written:* `ADR-0094` — every
+  binary refuses a non-loopback bind unless authentication and TLS are
+  both configured, `SERVER_ALLOW_INSECURE=1` the explicit override; the
+  library's `ServeOptions::default()` is still the original open server
+  for loopback and for tests. Still absent: the same rule inside
+  `serve` itself, and for the `/metrics` HTTP listener.
 * **Limits on what one peer can cost the process.** Not named here
   before. *Built since this was written:* `ADR-0093` — an opt-in idle
   timeout on the accepted socket, a connection cap checked at accept

@@ -162,7 +162,10 @@ idle timeout, connection cap, and row cap (`ADR-0093`);
 plaintext behavior exactly. **Do not expose a server built from this
 module beyond a trusted, localhost/development network unless both
 authentication and TLS are configured together** — either alone leaves
-the other half of the gap open. See `src/server`'s own module docs and
+the other half of the gap open. Since `ADR-0094` the four shipped
+binaries enforce this: a bind to anything but a loopback address refuses
+to start until both are configured, unless `SERVER_ALLOW_INSECURE=1` is
+set explicitly. See `src/server`'s own module docs and
 `docs/decisions/ADR-0010-server-query-layer-proposal.md` before using it.
 
 ```sh
