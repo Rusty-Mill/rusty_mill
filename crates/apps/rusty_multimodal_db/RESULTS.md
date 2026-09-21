@@ -1571,6 +1571,41 @@ number is here so that decision is made on a measurement. Every other
 planner row is unchanged within noise (`since-mixed` 3,933 → 2,710 µs
 is the same walk on a quieter run).
 
+## Query planner step five — a budget on the intersection's range walk (`ADR-0079`, `SERVER-001` v0.64.0 / FR-076)
+
+`docs/design/SERVER-QUERY-PLANNER-INTERSECT-BUDGET-DESIGN.md`'s acceptance
+criterion 5: the same `benches/server.rs` rows as step four, the
+pre-change binary (`main` after PR #278, `ADR-0078`) and this round's
+run back to back on the same idle 4-core Linux container, 2026-09-21.
+The `since-eq` page is `ADR-0078`'s own worst case — the range's
+~99,000-id walk, paid unconditionally, losing to the bucket alone by
+~4×; this round abandons that walk at 10,000 ids (ten per bucket id)
+and reads the bucket. The narrow `eq-range` rows (a 1,000-id range,
+within the budget) are the intersection both times.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0078`) | `IndexIntersect`, the whole ~99,000-id walk, then `page_rows` | `fpage-50 WHERE updated_at_unix_ms >= 1000 AND category = 'c7'` (wide) | 50 rows | **5,170.9** |
+| | `IndexIntersect` | `query WHERE category = 'c7' AND 50000 <= updated_at_unix_ms < 51000` | 10 rows | 97.5 |
+| | `IndexIntersect` | `count(*)` same filter | 1 group | 116.2 |
+| | `IndexIntersect`, then `page_rows` | `fpage-50` same filter | 10 rows | 111.2 |
+| After (`ADR-0079`) | `IndexIntersect`, the walk abandoned at 10,000 ids, the bucket read, then `page_rows` | `fpage-50 WHERE updated_at_unix_ms >= 1000 AND category = 'c7'` (wide) | 50 rows | **1,468.9** |
+| | `IndexIntersect` (within budget) | `query WHERE category = 'c7' AND 50000 <= updated_at_unix_ms < 51000` | 10 rows | 129.8 |
+| | `IndexIntersect` (within budget) | `count(*)` same filter | 1 group | 131.7 |
+| | `IndexIntersect` (within budget), then `page_rows` | `fpage-50` same filter | 10 rows | 106.7 |
+
+**Read it as**: the wide page falls from the whole-walk cost to within
+~150 µs of the bucket alone (the `since-eq` row measured 1,270–1,370 µs
+before `ADR-0078` took the intersection): the abandoned 10,000-id walk
+costs about what its budget predicted, and the bucket's 1,000 decodes
+are the rest. `ADR-0078`'s ~4× loss is a ~1.1× cost; the bound
+`QPB-FR-005` states (~1.4×) is the ceiling, not the typical case. The
+narrow rows are the same intersection both times — a 1,000-id range
+fits a 10,000-id budget — and move only with run-to-run noise (this
+pair's `eq-range` `query` sits at ~100–130 µs against the earlier
+pair's 174.3; the full-scan controls vary the same ~10%). Every other
+planner row is unchanged.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

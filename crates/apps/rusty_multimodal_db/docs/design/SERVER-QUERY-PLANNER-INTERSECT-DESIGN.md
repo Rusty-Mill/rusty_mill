@@ -242,7 +242,9 @@ inspection owed.
 
 ## Open questions
 
-- **A width guard** — option (b), the first estimate.
+- **A width guard** — option (b). *Taken: `ADR-0079` (2026-09-21),
+  as a budget on the walk (abandoned past ten ids per bucket id)
+  rather than an estimate of the range — no count, no size threshold.*
 - **Plan metrics** — a per-plan counter in `ServerMetrics`, now four
   plans wide; still named, still not bundled.
 - **Bound tightening** and **two equalities** — unchanged.

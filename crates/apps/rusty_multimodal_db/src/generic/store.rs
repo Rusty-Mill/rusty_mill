@@ -2325,6 +2325,41 @@ where
         lower: std::ops::Bound<(R::Key, R::Id)>,
         upper: std::ops::Bound<(R::Key, R::Id)>,
     ) -> Vec<R::Id> {
+        self.guarded_range(lower, upper).collect()
+    }
+
+    // `QPB-FR-001` (ADR-0079): the same guarded walk, abandoned — and
+    // never collected — at the first pair past the budget.
+    fn range_by_limited(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+        limit: usize,
+    ) -> Option<Vec<R::Id>> {
+        let mut ids = Vec::new();
+        for id in self.guarded_range(lower, upper) {
+            if ids.len() == limit {
+                return None;
+            }
+            ids.push(id);
+        }
+        Some(ids)
+    }
+}
+
+impl<S, R, Marker> Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    R::Id: Ord,
+{
+    /// The ids within `lower..upper`, ascending by `(key, id)`, as an
+    /// iterator — empty (never a panic) for the inverted or
+    /// equal-and-both-excluded pairs `BTreeSet::range` refuses.
+    fn guarded_range(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> impl Iterator<Item = R::Id> + '_ {
         use std::ops::Bound::{Excluded, Included, Unbounded};
         let inverted = match (&lower, &upper) {
             (Unbounded, _) | (_, Unbounded) => false,
@@ -2333,13 +2368,12 @@ where
             | (Excluded(a), Included(b)) => a > b,
             (Excluded(a), Excluded(b)) => a >= b,
         };
-        if inverted {
-            return Vec::new();
-        }
-        self.index
-            .range((lower, upper))
-            .map(|(_, id)| *id)
-            .collect()
+        let range = if inverted {
+            None
+        } else {
+            Some(self.index.range((lower, upper)))
+        };
+        range.into_iter().flatten().map(|(_, id)| *id)
     }
 }
 

@@ -278,4 +278,16 @@ where
     R: super::traits::OrderedField<Marker>,
 {
     fn range_by(&self, lower: Bound<(R::Key, R::Id)>, upper: Bound<(R::Key, R::Id)>) -> Vec<R::Id>;
+
+    /// `QPB-FR-001` (ADR-0079): [`Self::range_by`] with a budget — the
+    /// ids within `lower..upper` if there are at most `limit` of them,
+    /// `None` as soon as one more is seen, so a walk the caller cannot
+    /// afford costs at most `limit + 1` pairs and never materializes.
+    /// Exact, not an estimate: `Some` carries the whole range.
+    fn range_by_limited(
+        &self,
+        lower: Bound<(R::Key, R::Id)>,
+        upper: Bound<(R::Key, R::Id)>,
+        limit: usize,
+    ) -> Option<Vec<R::Id>>;
 }

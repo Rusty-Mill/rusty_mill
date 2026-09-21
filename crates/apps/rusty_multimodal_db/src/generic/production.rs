@@ -534,6 +534,30 @@ impl<S> GenericProductionStore<S> {
             .range_by(lower, upper)
     }
 
+    /// [`Self::range_by`] with a budget (`QPB-FR-001`, ADR-0079) — the
+    /// whole range if it holds at most `limit` ids, `None` otherwise,
+    /// the walk abandoned at the first id past the budget, under the
+    /// read lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn range_by_limited<R, Marker>(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+        limit: usize,
+    ) -> Option<Vec<R::Id>>
+    where
+        R: OrderedField<Marker>,
+        S: RangeBy<R, Marker>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .range_by_limited(lower, upper, limit)
+    }
+
     /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one
     /// read under the lock, `None` for an unknown label.
     ///
