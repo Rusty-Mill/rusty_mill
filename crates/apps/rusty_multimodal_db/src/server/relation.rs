@@ -16,9 +16,10 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    copy_table_files, page_by_scan, page_key, predicate_matches, read_table_files,
-    uuid_pair_bounds, validate_predicate, BackupReport, ConnectionStore, DeleteOutcome,
-    InsertOutcome, PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
+    bounded_filtered_page, bounded_walk_applies, copy_table_files, filtered_page_by_candidates,
+    page_by_scan, page_key, predicate_matches, read_table_files, uuid_pair_bounds,
+    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, PageRow,
+    ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
@@ -728,6 +729,29 @@ impl ConnectionStore for RelationConnectionStore {
                 Some((id, key))
             })
             .collect()
+    }
+
+    /// `FPW-FR-001`–`003` (ADR-0076): see `MemoryConnectionStore::
+    /// filtered_page`; identical here over `UpdatedAtField`.
+    fn filtered_page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+        filter: &[Predicate],
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if !bounded_walk_applies(order_by, self.range_field(), filter) {
+            return Ok(filtered_page_by_candidates(
+                self, order_by, after, limit, filter,
+            ));
+        }
+        bounded_filtered_page(
+            self,
+            |start, limit| self.store.page_by::<Relation, UpdatedAtField>(start, limit),
+            after,
+            limit,
+            filter,
+        )
     }
 
     /// `QPR-FR-002` (ADR-0075): the field [`RelationProductionStack`]'s

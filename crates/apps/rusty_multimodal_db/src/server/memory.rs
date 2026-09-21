@@ -25,9 +25,10 @@ use super::protocol::{
     TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    copy_table_files, page_by_scan, page_key, predicate_matches, read_table_files,
-    uuid_pair_bounds, validate_predicate, BackupReport, ConnectionStore, DeleteOutcome,
-    InsertOutcome, LinkOutcome, PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
+    bounded_filtered_page, bounded_walk_applies, copy_table_files, filtered_page_by_candidates,
+    page_by_scan, page_key, predicate_matches, read_table_files, uuid_pair_bounds,
+    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
+    PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
@@ -867,6 +868,32 @@ impl ConnectionStore for MemoryConnectionStore {
             .collect()
     }
 
+    /// `FPW-FR-001`–`003` (ADR-0076): a page ordered by
+    /// `updated_at_unix_ms` whose filter is only bounds on that field is
+    /// the bounded walk of the stack's sorted index — the cost of the
+    /// page, however many records the bounds admit (`Page`'s own
+    /// consistency class); every other shape is the trait default's body.
+    fn filtered_page(
+        &self,
+        order_by: FieldRef,
+        after: Option<(ScanValue, RecordId)>,
+        limit: usize,
+        filter: &[Predicate],
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if !bounded_walk_applies(order_by, self.range_field(), filter) {
+            return Ok(filtered_page_by_candidates(
+                self, order_by, after, limit, filter,
+            ));
+        }
+        bounded_filtered_page(
+            self,
+            |start, limit| self.store.page_by::<Memory, UpdatedAtOrder>(start, limit),
+            after,
+            limit,
+            filter,
+        )
+    }
+
     /// `QPR-FR-002` (ADR-0075): the field [`MemoryProductionStack`]'s
     /// sorted index is over (`ORD-FR-004`).
     fn range_field(&self) -> Option<FieldRef> {
@@ -1557,6 +1584,120 @@ mod tests {
 
     fn full_fields(n: u128) -> Vec<(FieldRef, ScanValue)> {
         MemoryConnectionStore::fields_of(memory(n, "decision", false))
+    }
+
+    /// `FPW-FR-004`/`FPW-FR-005` (ADR-0076), acceptance criterion 3: for
+    /// every eligible shape — each comparator, two-sided, `=`, a client
+    /// cursor combined with a lower bound in both orders, a cursor past
+    /// every row, an empty filter, every `limit` relation to the match
+    /// count, an inverted range, `i64::MIN`/`MAX` literals — the
+    /// override returns the identical sequence
+    /// [`filtered_page_by_candidates`] (the trait default's own body)
+    /// returns; and every ineligible shape (`Ne`, a second field,
+    /// another `order_by`) too, because it *is* the default there.
+    #[test]
+    fn filtered_page_bounded_walk_returns_the_default_body_s_exact_sequence() {
+        use crate::server::protocol::{CompareOp, Predicate};
+        let dir = fresh_temp_dir("server_memory_bounded_walk").unwrap();
+        let path = dir.join("memories.mmap");
+        // Stamps 1_000 * n, with 3 sharing 2's stamp for the id tie-break
+        // and 6 at the extremes' neighbours.
+        let mut seeded: Vec<Memory> = (1..=6)
+            .map(|n| memory(n, if n % 2 == 0 { "general" } else { "preference" }, false))
+            .collect();
+        seeded[2].updated_at_unix_ms = 2_000;
+        seeded[5].updated_at_unix_ms = 2_000;
+        let stack = create_memory_production_stack(seeded, &[], &path).unwrap();
+        let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack));
+        let p = |field: FieldRef, op, value: ScanValue| Predicate { field, op, value };
+        let i = |op, k: i64| p(FIELD_UPDATED_AT, op, ScanValue::I64(k));
+        use CompareOp::{Eq, Ge, Gt, Le, Lt, Ne};
+        let id = Uuid::from_u128;
+        let cursor = |k: i64, n: u128| Some((ScanValue::I64(k), id(n)));
+
+        type Shape = (
+            FieldRef,
+            Option<(ScanValue, RecordId)>,
+            usize,
+            Vec<Predicate>,
+        );
+        let shapes: Vec<Shape> = vec![
+            (FIELD_UPDATED_AT, None, 10, vec![]),
+            (FIELD_UPDATED_AT, None, 2, vec![]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Gt, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Ge, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Lt, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Le, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Eq, 2_000)]),
+            (FIELD_UPDATED_AT, None, 2, vec![i(Eq, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Ge, 2_000), i(Lt, 5_000)]),
+            (FIELD_UPDATED_AT, None, 2, vec![i(Ge, 2_000), i(Lt, 5_000)]),
+            (FIELD_UPDATED_AT, None, 3, vec![i(Ge, 2_000), i(Lt, 5_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Gt, 4_000), i(Lt, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Gt, 2_000), i(Lt, 2_000)]),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Gt, 1_000), i(Gt, 3_000)]),
+            (
+                FIELD_UPDATED_AT,
+                None,
+                10,
+                vec![i(Ge, i64::MIN), i(Le, i64::MAX)],
+            ),
+            (FIELD_UPDATED_AT, None, 10, vec![i(Gt, i64::MAX)]),
+            (FIELD_UPDATED_AT, cursor(2_000, 2), 10, vec![]),
+            (FIELD_UPDATED_AT, cursor(2_000, 2), 10, vec![i(Gt, 1_000)]),
+            (FIELD_UPDATED_AT, cursor(1_000, 1), 10, vec![i(Ge, 4_000)]),
+            (FIELD_UPDATED_AT, cursor(2_000, 3), 1, vec![i(Le, 4_000)]),
+            (FIELD_UPDATED_AT, cursor(9_000, 1), 10, vec![i(Ge, 1_000)]),
+            (FIELD_UPDATED_AT, cursor(2_000, 2), 10, vec![i(Eq, 2_000)]),
+            // Ineligible: the default, through the override.
+            (FIELD_UPDATED_AT, None, 10, vec![i(Ne, 2_000)]),
+            (
+                FIELD_UPDATED_AT,
+                None,
+                10,
+                vec![
+                    i(Ge, 2_000),
+                    p(FIELD_CATEGORY, Eq, ScanValue::Str("general".into())),
+                ],
+            ),
+            (FIELD_CREATED_AT, None, 10, vec![i(Ge, 2_000)]),
+            (FIELD_ACCESS_COUNT, cursor(2, 2), 2, vec![i(Gt, 1_000)]),
+        ];
+        for (order_by, after, limit, filter) in shapes {
+            let expected =
+                filtered_page_by_candidates(&adapter, order_by, after.clone(), limit, &filter);
+            let actual = adapter
+                .filtered_page(order_by, after.clone(), limit, &filter)
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "order_by {order_by}, after {after:?}, limit {limit}, filter {filter:?}"
+            );
+        }
+
+        // A few pinned answers, so the oracle itself is not trusted blindly.
+        let ids = |rows: Vec<PageRow>| rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(adapter
+                .filtered_page(FIELD_UPDATED_AT, None, 10, &[i(Eq, 2_000)])
+                .unwrap()),
+            vec![id(2), id(3), id(6)],
+            "key 2_000 in id order"
+        );
+        assert_eq!(
+            ids(adapter
+                .filtered_page(FIELD_UPDATED_AT, cursor(2_000, 3), 10, &[i(Le, 4_000)])
+                .unwrap()),
+            vec![id(6), id(4)],
+            "strictly after (2_000, 3): 6 at 2_000, then 4 at 4_000; 5 is cut"
+        );
+        assert_eq!(
+            ids(adapter
+                .filtered_page(FIELD_UPDATED_AT, None, 10, &[i(Gt, 4_000), i(Lt, 2_000)])
+                .unwrap()),
+            Vec::<Uuid>::new(),
+            "inverted: empty, no error"
+        );
     }
 
     /// `ADR-0072`: a table with two pre-existing records, built with

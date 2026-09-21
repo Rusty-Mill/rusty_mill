@@ -2293,3 +2293,150 @@ fn an_ordering_predicate_on_a_domain_with_no_range_field_still_matches_the_full_
     got.sort_by_key(|(id, _)| *id);
     assert_eq!(got, oracle);
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0076` / `docs/design/SERVER-FILTERED-PAGE-WALK-DESIGN.md`,
+// acceptance criterion 4 (`FPW-FR-004`/`005`): a page ordered by
+// `updated_at_unix_ms` whose `WHERE` is only bounds on that field is the
+// bounded walk of the `Ordered` index, and returns exactly the sequence
+// `page_rows` produces over the oracle rows; `!=` and a mixed filter
+// still answer exactly, through the default.
+// ---------------------------------------------------------------------
+
+/// The oracle sequence for `WHERE updated_at_unix_ms <clause> ORDER BY
+/// updated_at_unix_ms [LIMIT n]`: the unfiltered `SELECT *` filtered
+/// here, sorted by `(updated_at, id)`, truncated.
+fn since_page_oracle(
+    client: &mut SchemaDrivenClient,
+    table: &str,
+    clause: &[(&str, i64)],
+    limit: Option<usize>,
+) -> Vec<(Uuid, Vec<(String, ScanValue)>)> {
+    let mut oracle = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+    oracle.retain(|(_, f)| {
+        clause
+            .iter()
+            .all(|(op, k)| compares(i64_field(f, "updated_at_unix_ms"), op, *k))
+    });
+    oracle.sort_by_key(|(id, f)| (i64_field(f, "updated_at_unix_ms"), *id));
+    if let Some(n) = limit {
+        oracle.truncate(n);
+    }
+    oracle
+}
+
+fn since_page(
+    client: &mut SchemaDrivenClient,
+    table: &str,
+    clause: &[(&str, i64)],
+    limit: Option<usize>,
+) -> Vec<(Uuid, Vec<(String, ScanValue)>)> {
+    let where_ = clause
+        .iter()
+        .map(|(op, k)| format!("updated_at_unix_ms {op} {k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = match limit {
+        Some(n) => {
+            format!("SELECT * FROM {table} WHERE {where_} ORDER BY updated_at_unix_ms LIMIT {n}")
+        }
+        None => format!("SELECT * FROM {table} WHERE {where_} ORDER BY updated_at_unix_ms"),
+    };
+    rows(client.query(&sql).unwrap())
+}
+
+/// `FPW-FR-004`: every comparator, two-sided, `=`, with and without
+/// `LIMIT`, on `Memory` and `Relation`, then after runtime `Insert`,
+/// re-keying `Replace`, and `Delete`; `FPW-FR-005`: `!=` and a mixed
+/// filter through the default, still exact.
+#[test]
+fn since_shaped_filtered_page_walks_the_index_and_returns_the_exact_sequence() {
+    for (table, addr) in [
+        ("memory", start_memory_server()),
+        ("relation", start_relation_server()),
+    ] {
+        let mut client = SchemaDrivenClient::connect(addr).unwrap();
+        let check =
+            |client: &mut SchemaDrivenClient, clause: &[(&str, i64)], limit: Option<usize>| {
+                let want = since_page_oracle(client, table, clause, limit);
+                let got = since_page(client, table, clause, limit);
+                assert_eq!(got, want, "{table}: {clause:?} LIMIT {limit:?}");
+                got.len()
+            };
+        for limit in [None, Some(1), Some(2), Some(10)] {
+            check(&mut client, &[(">", 1_000)], limit);
+            check(&mut client, &[(">=", 2_000)], limit);
+            check(&mut client, &[("<", 3_000)], limit);
+            check(&mut client, &[("<=", 2_000)], limit);
+            check(&mut client, &[("=", 2_000)], limit);
+            check(&mut client, &[(">=", 2_000), ("<", 3_000)], limit);
+            check(&mut client, &[(">", 3_000), ("<", 2_000)], limit);
+        }
+        assert_eq!(check(&mut client, &[(">", 1_000)], Some(1)), 1);
+        assert_eq!(check(&mut client, &[(">", 3_000), ("<", 2_000)], None), 0);
+    }
+
+    // Runtime writes on `Memory` (ids 1–5 at 1_000 * n).
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let id = Uuid::from_u128;
+    let ids = |rows: Vec<(Uuid, Vec<(String, ScanValue)>)>| {
+        rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+    };
+    let check = |client: &mut SchemaDrivenClient, clause: &[(&str, i64)], limit: Option<usize>| {
+        let want = since_page_oracle(client, "memory", clause, limit);
+        let got = since_page(client, "memory", clause, limit);
+        assert_eq!(got, want, "memory: {clause:?} LIMIT {limit:?}");
+        ids(got)
+    };
+    client
+        .insert(id(6), &memory_fields_updated_at(6, "general", 2_500))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, &[(">", 1_000)], Some(3)),
+        vec![id(2), id(6), id(3)],
+        "the insert lands by its stamp"
+    );
+    client
+        .replace(id(2), &memory_fields_updated_at(2, "general", 9_000))
+        .unwrap();
+    assert_eq!(
+        check(&mut client, &[(">", 1_000)], None),
+        vec![id(6), id(3), id(4), id(5), id(2)],
+        "re-keyed to the end"
+    );
+    assert!(client.delete(id(3)).unwrap());
+    assert_eq!(
+        check(&mut client, &[(">=", 2_000), ("<=", 5_000)], Some(2)),
+        vec![id(6), id(4)]
+    );
+
+    // `FPW-FR-005`: ineligible shapes answer exactly through the default.
+    let mut oracle = rows(client.query("SELECT * FROM memory").unwrap());
+    oracle.retain(|(_, f)| i64_field(f, "updated_at_unix_ms") != 4_000);
+    oracle.sort_by_key(|(id, f)| (i64_field(f, "updated_at_unix_ms"), *id));
+    let got = rows(
+        client
+            .query(
+                "SELECT * FROM memory WHERE updated_at_unix_ms != 4000 ORDER BY updated_at_unix_ms",
+            )
+            .unwrap(),
+    );
+    assert_eq!(got, oracle, "!= through the default");
+    let mut oracle = rows(client.query("SELECT * FROM memory").unwrap());
+    oracle.retain(|(_, f)| {
+        i64_field(f, "updated_at_unix_ms") > 1_000
+            && f.iter()
+                .any(|(n, v)| n == "category" && *v == ScanValue::Str("general".into()))
+    });
+    oracle.sort_by_key(|(id, f)| (i64_field(f, "updated_at_unix_ms"), *id));
+    oracle.truncate(2);
+    let got = rows(
+        client
+            .query(
+                "SELECT * FROM memory WHERE updated_at_unix_ms > 1000 AND category = 'general' \
+                 ORDER BY updated_at_unix_ms LIMIT 2",
+            )
+            .unwrap(),
+    );
+    assert_eq!(got, oracle, "a mixed filter through the default");
+}

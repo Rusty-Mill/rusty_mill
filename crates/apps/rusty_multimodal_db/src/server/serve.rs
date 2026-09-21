@@ -366,13 +366,14 @@ pub trait ConnectionStore: Send + Sync {
     /// here. Since `QPR-FR-004` (ADR-0075) a range on `Memory`/
     /// `Relation`'s `Ordered` field (`ADR-0059`) is walked, not scanned,
     /// by that same candidate step — but the walk still reads every
-    /// in-range record before `page_rows` cuts the page; the O(page)
-    /// bounded walk from `max(cursor, lower)` is that design's own option
-    /// (b), not taken. The [`Self::page`] fast path's unfiltered case is
-    /// untouched. A trait method, not inlined in `dispatch` (unlike
-    /// `Query`), so a future round can still override it for a domain
-    /// that can narrow further, the same shape [`Self::page`] already
-    /// established.
+    /// in-range record before `page_rows` cuts the page. Since
+    /// `FPW-FR-003` (ADR-0076) `Memory`/`Relation` override this method
+    /// with [`bounded_filtered_page`] when `order_by` is the range field
+    /// and every predicate is a bound on it — the O(page) walk from
+    /// `max(cursor, tightest lower bound)`, cut at the first upper-bound
+    /// reject — and fall back to [`filtered_page_by_candidates`], this
+    /// default's own body, otherwise. The [`Self::page`] fast path's
+    /// unfiltered case is untouched.
     fn filtered_page(
         &self,
         order_by: FieldRef,
@@ -380,11 +381,9 @@ pub trait ConnectionStore: Send + Sync {
         limit: usize,
         filter: &[Predicate],
     ) -> Result<Vec<PageRow>, ErrorCode> {
-        let filtered: Vec<PageRow> = indexed_candidates(self, &self.describe(), filter)
-            .into_iter()
-            .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
-            .collect();
-        Ok(page_rows(filtered, order_by, after, limit))
+        Ok(filtered_page_by_candidates(
+            self, order_by, after, limit, filter,
+        ))
     }
 
     /// `CNT-FR-002` (ADR-0057, protocol 21): how many edges this table
@@ -1231,6 +1230,107 @@ pub fn page_rows(
         .into_iter()
         .filter_map(|id| by_id.remove(&id).map(|fields| (id, fields)))
         .collect()
+}
+
+/// `FPG-FR-003`/`QPC-FR-003`: the [`ConnectionStore::filtered_page`]
+/// default's body as a free function, so an adapter that overrides the
+/// method for one shape (`ADR-0076`'s bounded walk) can answer every
+/// other shape exactly as the default would — a Rust default body cannot
+/// be called from its override. Candidates through [`indexed_candidates`]
+/// (the equality bucket or the range walk when the filter allows,
+/// `scan_all` otherwise), every predicate re-checked, then [`page_rows`].
+pub fn filtered_page_by_candidates<S: ConnectionStore + ?Sized>(
+    store: &S,
+    order_by: FieldRef,
+    after: Option<(ScanValue, RecordId)>,
+    limit: usize,
+    filter: &[Predicate],
+) -> Vec<PageRow> {
+    let filtered: Vec<PageRow> = indexed_candidates(store, &store.describe(), filter)
+        .into_iter()
+        .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
+        .collect();
+    page_rows(filtered, order_by, after, limit)
+}
+
+/// `FPW-FR-001` (ADR-0076): whether a `FilteredPage` can be answered by
+/// the bounded walk — `order_by` is the adapter's range field and every
+/// predicate is a bound (any comparator but `Ne`) on that same field.
+/// An empty filter qualifies (it is the unfiltered `Page`). Pure.
+pub fn bounded_walk_applies(
+    order_by: FieldRef,
+    range_field: Option<FieldRef>,
+    filter: &[Predicate],
+) -> bool {
+    range_field == Some(order_by)
+        && filter
+            .iter()
+            .all(|p| p.field == order_by && p.op != CompareOp::Ne)
+}
+
+/// `FPW-FR-002` (ADR-0076): the pair the bounded walk starts strictly
+/// after — the later, in `(key, id)` order, of the client's cursor and
+/// every lower-bound predicate's own cursor: `key > k` is `(k, max)`;
+/// `key >= k` and `key = k` are `(k - 1, max)` (nothing lies strictly
+/// between `(k - 1, max)` and `(k, nil)`), or no cursor at all when `k`
+/// is `i64::MIN`. `Lt`/`Le` contribute nothing (they are the cut,
+/// [`bounded_filtered_page`]). `None` when nothing applies. Taking the
+/// tightest lower bound is exact, not a cost estimate — every bound is
+/// on the one walked key. `Malformed` for a non-`I64` literal or cursor
+/// value; unreachable through `dispatch`, which validated both.
+pub fn bounded_walk_start(
+    after: Option<(ScanValue, RecordId)>,
+    filter: &[Predicate],
+) -> Result<Option<(i64, RecordId)>, ErrorCode> {
+    let key = |value: &ScanValue| match value {
+        ScanValue::I64(k) => Ok(*k),
+        _ => Err(ErrorCode::Malformed),
+    };
+    let mut start: Option<(i64, RecordId)> = match after {
+        None => None,
+        Some((value, id)) => Some((key(&value)?, id)),
+    };
+    for predicate in filter {
+        let cursor = match predicate.op {
+            CompareOp::Gt => Some((key(&predicate.value)?, RecordId::max())),
+            CompareOp::Ge | CompareOp::Eq => key(&predicate.value)?
+                .checked_sub(1)
+                .map(|k| (k, RecordId::max())),
+            CompareOp::Lt | CompareOp::Le | CompareOp::Ne => None,
+        };
+        if let Some(cursor) = cursor {
+            start = Some(match start {
+                Some(current) if current >= cursor => current,
+                _ => cursor,
+            });
+        }
+    }
+    Ok(start)
+}
+
+/// `FPW-FR-003` (ADR-0076): the bounded walk — [`bounded_walk_start`],
+/// then `walk(start, limit)` (the adapter's own `page_by` over its
+/// `Ordered` index), each id read back through `get` (an id whose
+/// record vanished is dropped — `Page`'s consistency class,
+/// `ORD-FR-005`), and the longest prefix every predicate matches kept:
+/// the walk is ascending on the very key the bounds are on, so the
+/// first row an upper bound rejects ends the page and no later row
+/// could match. At most `limit` pairs walked and `limit` records read,
+/// however many the bounds admit. The caller has already checked
+/// [`bounded_walk_applies`].
+pub fn bounded_filtered_page<S: ConnectionStore + ?Sized>(
+    store: &S,
+    walk: impl Fn(Option<(i64, RecordId)>, usize) -> Vec<RecordId>,
+    after: Option<(ScanValue, RecordId)>,
+    limit: usize,
+    filter: &[Predicate],
+) -> Result<Vec<PageRow>, ErrorCode> {
+    let start = bounded_walk_start(after, filter)?;
+    Ok(walk(start, limit)
+        .into_iter()
+        .filter_map(|id| store.get(id).map(|fields| (id, fields)))
+        .take_while(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
+        .collect())
 }
 
 /// Whether `predicate` holds over one record's wire shape — a `Query`
@@ -5587,6 +5687,95 @@ mod tests {
                 Bound::Unbounded,
                 Bound::Excluded(ScanValue::Str("x".into()))
             ),
+            Err(ErrorCode::Malformed)
+        );
+    }
+
+    /// `FPW-FR-001` (ADR-0076), acceptance criterion 1: the walk applies
+    /// only when `order_by` is the range field and every predicate is a
+    /// non-`Ne` bound on it.
+    #[test]
+    fn bounded_walk_applies_only_to_bounds_on_the_ordered_field() {
+        use CompareOp::{Eq, Ge, Lt, Ne};
+        let i = |op, k| Predicate {
+            field: 6,
+            op,
+            value: ScanValue::I64(k),
+        };
+        assert!(bounded_walk_applies(6, Some(6), &[]));
+        assert!(bounded_walk_applies(6, Some(6), &[i(Ge, 1)]));
+        assert!(bounded_walk_applies(6, Some(6), &[i(Ge, 1), i(Lt, 9)]));
+        assert!(bounded_walk_applies(6, Some(6), &[i(Eq, 5)]));
+        assert!(!bounded_walk_applies(6, Some(6), &[i(Ne, 5)]), "Ne");
+        assert!(
+            !bounded_walk_applies(6, Some(6), &[i(Ge, 1), eq(2, ScanValue::Str("x".into()))]),
+            "a second field"
+        );
+        assert!(
+            !bounded_walk_applies(5, Some(6), &[i(Ge, 1)]),
+            "another order_by"
+        );
+        assert!(
+            !bounded_walk_applies(6, None, &[i(Ge, 1)]),
+            "no range field"
+        );
+        assert!(
+            !bounded_walk_applies(6, None, &[]),
+            "no range field, empty filter"
+        );
+    }
+
+    /// `FPW-FR-002` (ADR-0076), acceptance criterion 2: the start cursor
+    /// is the later of the client's cursor and every lower bound's own
+    /// cursor; `Lt`/`Le` contribute nothing; `i64::MIN` has no cursor;
+    /// a non-`I64` literal or cursor is `Malformed`.
+    #[test]
+    fn bounded_walk_start_is_the_later_of_the_cursor_and_the_tightest_lower_bound() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt};
+        let i = |op, k| Predicate {
+            field: 6,
+            op,
+            value: ScanValue::I64(k),
+        };
+        let (max, id7) = (RecordId::max(), RecordId::from_u128(7));
+        assert_eq!(bounded_walk_start(None, &[]), Ok(None));
+        assert_eq!(bounded_walk_start(None, &[i(Gt, 5)]), Ok(Some((5, max))));
+        assert_eq!(bounded_walk_start(None, &[i(Ge, 5)]), Ok(Some((4, max))));
+        assert_eq!(bounded_walk_start(None, &[i(Eq, 5)]), Ok(Some((4, max))));
+        assert_eq!(bounded_walk_start(None, &[i(Lt, 5), i(Le, 9)]), Ok(None));
+        assert_eq!(bounded_walk_start(None, &[i(Ge, i64::MIN)]), Ok(None));
+        assert_eq!(
+            bounded_walk_start(None, &[i(Gt, i64::MIN)]),
+            Ok(Some((i64::MIN, max)))
+        );
+        assert_eq!(
+            bounded_walk_start(None, &[i(Gt, 1), i(Gt, 5), i(Ge, 3)]),
+            Ok(Some((5, max))),
+            "the tightest lower bound"
+        );
+        let cursor = Some((ScanValue::I64(9), id7));
+        assert_eq!(
+            bounded_walk_start(cursor.clone(), &[i(Gt, 5)]),
+            Ok(Some((9, id7))),
+            "the cursor is later than the bound"
+        );
+        assert_eq!(
+            bounded_walk_start(cursor.clone(), &[i(Ge, 20)]),
+            Ok(Some((19, max))),
+            "the bound is later than the cursor"
+        );
+        assert_eq!(
+            bounded_walk_start(cursor.clone(), &[i(Gt, 9)]),
+            Ok(Some((9, max))),
+            "same key: (9, max) is later than (9, id 7)"
+        );
+        assert_eq!(bounded_walk_start(cursor, &[]), Ok(Some((9, id7))));
+        assert_eq!(
+            bounded_walk_start(Some((ScanValue::U32(9), id7)), &[]),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            bounded_walk_start(None, &[eq(6, ScanValue::Str("x".into()))]),
             Err(ErrorCode::Malformed)
         );
     }
