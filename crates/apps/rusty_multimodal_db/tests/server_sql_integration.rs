@@ -2016,15 +2016,16 @@ fn range_query_on_the_ordered_field_matches_the_full_scan_on_memory_and_relation
             "{table}: 2000 <= stamp < 4000"
         );
         assert_eq!(check(&mut client, &[("=", 2_000)]), 1, "{table} = 2000");
-        assert_eq!(
-            check(&mut client, &[(">", 4_000), ("<", 2_000)]),
-            0,
-            "{table}: an inverted range is empty, never an error"
+        // ADR-0091 (protocol 29): an inverted range and equal exclusive
+        // bounds are contradictions — `Malformed` before any read (they
+        // were "empty, never an error" from ADR-0075 to ADR-0090).
+        assert_malformed(
+            &mut client,
+            &format!("SELECT * FROM {table} WHERE updated_at_unix_ms > 4000 AND updated_at_unix_ms < 2000"),
         );
-        assert_eq!(
-            check(&mut client, &[(">", 2_000), ("<", 2_000)]),
-            0,
-            "{table}: equal exclusive bounds are empty, never an error"
+        assert_malformed(
+            &mut client,
+            &format!("SELECT * FROM {table} WHERE updated_at_unix_ms > 2000 AND updated_at_unix_ms < 2000"),
         );
         assert_eq!(
             check(&mut client, &[(">", 1_000), (">", 3_000)]),
@@ -2370,10 +2371,16 @@ fn since_shaped_filtered_page_walks_the_index_and_returns_the_exact_sequence() {
             check(&mut client, &[("<=", 2_000)], limit);
             check(&mut client, &[("=", 2_000)], limit);
             check(&mut client, &[(">=", 2_000), ("<", 3_000)], limit);
-            check(&mut client, &[(">", 3_000), ("<", 2_000)], limit);
         }
         assert_eq!(check(&mut client, &[(">", 1_000)], Some(1)), 1);
-        assert_eq!(check(&mut client, &[(">", 3_000), ("<", 2_000)], None), 0);
+        // ADR-0091 (protocol 29): the inverted range is `Malformed`.
+        assert_malformed(
+            &mut client,
+            &format!(
+                "SELECT * FROM {table} WHERE updated_at_unix_ms > 3000 AND updated_at_unix_ms < 2000 \
+                 ORDER BY updated_at_unix_ms"
+            ),
+        );
     }
 
     // Runtime writes on `Memory` (ids 1–5 at 1_000 * n).
@@ -2952,10 +2959,8 @@ fn a_pure_range_count_from_the_index_matches_the_decoded_count_exactly() {
         ),
         ("updated_at_unix_ms = 3000", &|f: &Row| updated(f) == 3_000),
         ("updated_at_unix_ms < 1000", &|f: &Row| updated(f) < 1_000),
-        (
-            "updated_at_unix_ms > 5000 AND updated_at_unix_ms < 1000",
-            &|f: &Row| updated(f) > 5_000 && updated(f) < 1_000,
-        ),
+        // ADR-0091 (protocol 29): the inverted range (`> 5000 AND < 1000`)
+        // that once counted zero is `Malformed`, asserted below the loop.
         // Ineligible: still the decoded count.
         (
             "updated_at_unix_ms >= 2000 AND category = 'general'",
@@ -2973,6 +2978,10 @@ fn a_pure_range_count_from_the_index_matches_the_decoded_count_exactly() {
             "memory: COUNT(*) WHERE {where_}"
         );
     }
+    assert_malformed(
+        &mut client,
+        "SELECT COUNT(*) FROM memory WHERE updated_at_unix_ms > 5000 AND updated_at_unix_ms < 1000",
+    );
     assert_eq!(
         count_where(&mut client, "memory", "updated_at_unix_ms >= 2000"),
         4
@@ -3253,16 +3262,11 @@ fn redundant_and_contradictory_bounds_on_the_range_field_answer_exactly() {
         check(&mut client, "memory", u, "updated_at_unix_ms >= 1000 AND updated_at_unix_ms = 3000 AND updated_at_unix_ms <= 5000", &|f: &Row| updated(f) == 3_000),
         1
     );
-    assert_eq!(
-        check(
-            &mut client,
-            "memory",
-            u,
-            "updated_at_unix_ms = 3000 AND updated_at_unix_ms > 3000",
-            &|f: &Row| updated(f) == 3_000 && updated(f) > 3_000
-        ),
-        0,
-        "contradictory: empty, no error"
+    // ADR-0091 (protocol 29): the contradiction is `Malformed` (it was
+    // "empty, no error" when this test was written under ADR-0083).
+    assert_malformed(
+        &mut client,
+        "SELECT * FROM memory WHERE updated_at_unix_ms = 3000 AND updated_at_unix_ms > 3000",
     );
     assert_eq!(
         check(
@@ -3847,4 +3851,125 @@ fn where_id_equals_is_a_point_read_that_matches_the_scan() {
             "{sql}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// `ADR-0091` / `docs/design/SERVER-QUERY-CONTRADICTION-DESIGN.md`,
+// acceptance criterion 2 (`QCX-FR-003`): over a real socket at protocol
+// 29 a contradictory `WHERE` is `Malformed` before any read — `Query`,
+// `COUNT(*)`, the ordered page, on the range field and on a `Str`
+// field — a satisfiable one still answers; and a connection negotiated
+// at 28 gets the empty answer every earlier version gave.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_contradictory_filter_is_malformed_at_29_and_empty_below() {
+    use rusty_multimodal_db::server::framing::{read_message, write_message};
+    use rusty_multimodal_db::server::protocol::{
+        CompareOp, ErrorCode, Predicate, Request, Response, Selection,
+    };
+    use std::io::{BufReader, BufWriter, Write};
+    use std::net::TcpStream;
+
+    let addr = start_memory_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    for sql in [
+        "SELECT * FROM memory WHERE updated_at_unix_ms > 5000 AND updated_at_unix_ms < 3000",
+        "SELECT * FROM memory WHERE updated_at_unix_ms = 3000 AND updated_at_unix_ms > 3000",
+        "SELECT COUNT(*) FROM memory WHERE updated_at_unix_ms >= 5000 AND updated_at_unix_ms < 5000",
+        "SELECT * FROM memory WHERE updated_at_unix_ms > 5000 AND updated_at_unix_ms < 3000 \
+         ORDER BY updated_at_unix_ms",
+        "SELECT * FROM memory WHERE category = 'general' AND category = 'decision'",
+        "SELECT * FROM memory WHERE category = 'general' AND category != 'general'",
+        "SELECT * FROM memory WHERE created_at_unix_ms > 5000 AND created_at_unix_ms < 3000",
+    ] {
+        assert!(
+            matches!(
+                client.query(sql),
+                Err(ClientError::Server(ErrorCode::Malformed, _))
+            ),
+            "{sql}"
+        );
+    }
+    // Satisfiable pairs still answer.
+    assert_eq!(
+        rows(client
+            .query("SELECT * FROM memory WHERE updated_at_unix_ms >= 3000 AND updated_at_unix_ms <= 3000")
+            .unwrap())
+        .len(),
+        1
+    );
+    assert!(client
+        .query("SELECT * FROM memory WHERE updated_at_unix_ms > 3000 AND updated_at_unix_ms < 5000")
+        .is_ok());
+
+    // At 28 the same request is the empty answer, no error.
+    let stream = TcpStream::connect(addr).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = BufWriter::new(stream);
+    let send =
+        |writer: &mut BufWriter<TcpStream>, reader: &mut BufReader<TcpStream>, req: &Request| {
+            write_message(writer, req).unwrap();
+            writer.flush().unwrap();
+            read_message::<_, Response>(reader).unwrap()
+        };
+    assert!(matches!(
+        send(
+            &mut writer,
+            &mut reader,
+            &Request::Hello {
+                protocol_version: 28
+            }
+        ),
+        Response::Hello {
+            protocol_version: 28
+        }
+    ));
+    let updated_at = client
+        .schema()
+        .fields
+        .iter()
+        .find(|f| f.name == "updated_at_unix_ms")
+        .unwrap()
+        .tag;
+    let contradiction = vec![
+        Predicate {
+            field: updated_at,
+            op: CompareOp::Gt,
+            value: ScanValue::I64(5_000),
+        },
+        Predicate {
+            field: updated_at,
+            op: CompareOp::Lt,
+            value: ScanValue::I64(3_000),
+        },
+    ];
+    match send(
+        &mut writer,
+        &mut reader,
+        &Request::Query {
+            select: Selection::All,
+            filter: contradiction,
+            limit: None,
+        },
+    ) {
+        Response::Rows { rows } => assert!(rows.is_empty(), "below 29: the empty answer"),
+        other => panic!("below 29 expected empty Rows, got {other:?}"),
+    }
+}
+
+/// `QCX-FR-003` (ADR-0091): `sql` is refused with `Malformed` at
+/// protocol 29 before any read — the assertion the four pre-existing
+/// contradictory shapes below moved to, named in the ADR.
+fn assert_malformed(client: &mut SchemaDrivenClient, sql: &str) {
+    assert!(
+        matches!(
+            client.query(sql),
+            Err(ClientError::Server(
+                rusty_multimodal_db::server::protocol::ErrorCode::Malformed,
+                _
+            ))
+        ),
+        "{sql}: a contradiction is Malformed since ADR-0091"
+    );
 }

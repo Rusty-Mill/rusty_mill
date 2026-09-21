@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.17.0 (protocol version 28 — `SERVER-001` v0.74.0,
+- Version: 0.18.0 (protocol version 29 — `SERVER-001` v0.76.0,
+  `QCX-FR-002`, `ADR-0091`, no new variant; 0.17.0 was protocol 28 — `SERVER-001` v0.74.0,
   `PGD-FR-001`/`002`, `ADR-0089`; 0.16.0 was protocol 27 — `SERVER-001` v0.57.0,
   `MVCC2-FR-004`, `ADR-0072`; 0.15.0 was protocol 26 — `SERVER-001` v0.56.0, `FPG-FR-005`,
   ADR-0068; 0.14.0 was protocol 25, `SERVER-001` v0.55.0, `RPL-FR-006`,
@@ -97,13 +98,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 28 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1c 00 00 00` (28).
+- `Request::Hello { protocol_version: 29 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1d 00 00 00` (29).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 28
+## 5. Types at protocol version 29
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -607,6 +608,20 @@ Each item names the `SERVER-001` requirement that owns it.
    index walked backward — the page's cost; every other shape pages the
    scan's keys (the filtered twin through the planner's candidate
    step). Reads, gated as `Page`. `Malformed` below 28. (`FR-086`)
+26. **Contradictory filters** (29, no new variant) — a `filter` no
+   record can satisfy is refused with `Err { Malformed }` before any
+   read, on a connection negotiated at 29 or above: on any kind, two
+   `Eq` with different literals or an `Eq` beside an `Ne` of the same
+   literal on one field; on `U32`/`I64`, a lower bound (`Gt`/`Ge`/`Eq`)
+   above an upper bound (`Lt`/`Le`/`Eq`) on one field, or equal to it
+   with either side exclusive (`a > 5 AND a < 3`, `a = 3 AND a > 3`,
+   `a >= 5 AND a < 5`). Decided between the literals, never against
+   the table; predicates on different fields never contradict. Applies
+   to items 8 (`Query`), 9 (`Join`, both sides), `Aggregate`, 24, and
+   25. Below 29 the request answers as every earlier version did — no
+   rows, an empty group set, an empty page — rule 3's nearest older
+   shape applied to a semantics change, as version 27 did for its flag
+   bit. (`FR-088`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -662,6 +677,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 26 | v0.56.0 | `FilteredPage` (35) |
 | 27 | v0.57.0 | flag bit 8, `SESSION_MVCC_ISOLATION` — no new variant |
 | 28 | v0.74.0 | `PageDesc` (36), `FilteredPageDesc` (37) |
+| 29 | v0.76.0 | no new variant — a contradictory filter is `Err { Malformed }` at ≥ 29 (§7 item 26) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -724,6 +740,12 @@ whichever is found — see `tests/server_python_client.rs`'s own
   their ordered field from the sorted index walked backward; the
   filtered twin takes the planner's candidate step then the descending
   key selection — no descending bounded walk this round, a named cost.
+- 0.18.0 (`SERVER-001` v0.76.0, `ADR-0091`, `QCX-FR-002`): protocol
+  version 29 — no new variant: a filter no record can satisfy is `Err
+  { Malformed }` before any read on a connection negotiated at 29 or
+  above (§7 item 26); below 29 the empty answer stands. §4's `Hello`
+  example, §5 header, §8 row 29; no fixture change. The reference
+  Python client declares 29.
 - 0.16.0 (`SERVER-001` v0.57.0, `ADR-0072`, `MVCC2-FR-004`): protocol
   version 27 — no new variant: `BeginWith` learns a fourth flag bit,
   `SESSION_MVCC_ISOLATION` (§7.6) — real multi-version concurrency

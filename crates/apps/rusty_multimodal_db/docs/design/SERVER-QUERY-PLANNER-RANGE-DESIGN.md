@@ -615,6 +615,8 @@ session as having covered it.
   one — `docs/design/SERVER-FILTERED-PAGE-WALK-DESIGN.md`.*
 - **A wire-visible range capability** — the `FieldCapabilities` flag,
   when a client has a reason to see it; a protocol round.
+- **A contradiction as an error** — *`ADR-0091` (2026-09-21, protocol
+  29): `Malformed` at 29 or above; the guarded empty walk stands below.*
 - **Descending walks** — `ORDER BY … DESC` on the wire, then
   `range(..).rev()`; unchanged from `ADR-0055`/`0059`. *Taken:
   `ADR-0089` (2026-09-21, protocol 28, awaiting the owner's review) —
