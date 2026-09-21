@@ -1797,6 +1797,18 @@ figure here (4,543.6) sits below this row's first pre-change run
 (5,544.5 µs) — run-to-run variance on the container; both binaries
 were run back to back for the table. Every other row is unchanged.
 
+## Query plan metrics — no regression (`ADR-0086`, `SERVER-001` v0.71.0 / FR-083)
+
+`docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`'s acceptance
+criterion 3: this round adds no fast path — it classifies each planned
+read before dispatch (`plan_of`: one `describe()` and a pure plan) and
+increments one atomic after — so the claim to measure is that the
+existing planner rows do not move. The pre-change binary (`main` after
+PR #285, `ADR-0085`) and this round's, back to back on an idle 4-core
+Linux container, 2026-09-21: every row moves in both directions by the container's usual run-to-run spread — `index-eq` `query` 1,195.6 → 1,412.8 µs, `eq-range` `query` 256.2 → 103.0, `range-tight` `count(*)` 48.2 → 53.9, `index-range` `fpage-50` 132.5 → 127.1, `due-window` 1,104.7 → 347.2 — with no row moving consistently one way and the sub-100 µs rows, where a per-read `describe()` would show first, within ~6 µs. The full table is not
+repeated here; the rows and their previous values stand in the
+sections above.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

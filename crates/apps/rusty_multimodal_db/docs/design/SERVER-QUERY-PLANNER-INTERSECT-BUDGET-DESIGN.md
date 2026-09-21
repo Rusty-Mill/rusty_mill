@@ -215,7 +215,8 @@ Codex inspection owed.
 
 - **The budget as a setting** — option (b).
 - **Plan metrics** — a per-plan counter (and now a "walk abandoned"
-  counter) in `ServerMetrics`; still named, still not bundled.
+  counter) in `ServerMetrics`; still named, still not bundled. *Taken: `ADR-0086` (2026-09-21) —
+  `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 - **Bound tightening** and **two equalities** — unchanged.
 
 ## Change history

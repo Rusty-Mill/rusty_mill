@@ -193,7 +193,8 @@ owed.
   `due-count`'s ~290 µs is that `Vec`. A generic `range_fold` would
   close it; taken only if a consumer aggregates a wide range in anger.
 - **An "exact" equality index** — unchanged from `ADR-0081`.
-- **Plan metrics** — still named, still not bundled.
+- **Plan metrics** — still named, still not bundled. *Taken: `ADR-0086`
+  (2026-09-21) — `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 
 ## Change history
 

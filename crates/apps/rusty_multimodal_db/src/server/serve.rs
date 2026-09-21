@@ -9,7 +9,7 @@
 //! `client` feature and compiles none of this file. See `super`'s own
 //! module docs for the server's contract; this file is its body.
 
-use super::metrics::{ConnectionMetricsGuard, ServerMetrics};
+use super::metrics::{ConnectionMetricsGuard, PlanKind, ServerMetrics};
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
@@ -3186,6 +3186,71 @@ impl Write for WriteHalf {
 /// entire request-handling logic, independent of framing or sockets, kept
 /// separate so it can be tested (see this module's tests) without a real
 /// TCP connection.
+/// `QPM-FR-001` (ADR-0086): the path `dispatch` will take for a planned
+/// read — `None` for every request that is not one (a write, a point
+/// read, `Page`, `Metrics`, …). A pure function of the request and the
+/// adapter's declarations (`describe`, `range_field`), computed from the
+/// same predicates the arms themselves consult — [`plan_query`] for the
+/// candidate step, [`bounded_walk_applies`] for the page walk,
+/// [`counted_walk_applies`]/[`keyed_walk_applies`] for the walk-only
+/// aggregates (a grouped walk with no bound and a `limit` decodes,
+/// `QKG-FR-003`, so it classifies as its candidate step) — so the
+/// classification never diverges from the path without a code change
+/// to both. Two named approximations: a request `dispatch` then refuses
+/// at validation is classified anyway (the caller records only an ok
+/// response, so it is never counted), and a walk-only aggregate whose
+/// adapter refuses the walk (`range_count`/`range_keys` `Unsupported` —
+/// no shipped adapter) is counted as the walk it asked for.
+pub fn plan_of<S: ConnectionStore + ?Sized>(store: &S, req: &Request) -> Option<PlanKind> {
+    let candidate_step = |schema: &DomainSchema, filter: &[Predicate]| match plan_query(
+        schema,
+        store.range_field(),
+        filter,
+    ) {
+        QueryPlan::FullScan => PlanKind::FullScan,
+        QueryPlan::IndexEq(_) => PlanKind::IndexEq,
+        QueryPlan::IndexRange { .. } => PlanKind::IndexRange,
+        QueryPlan::IndexIntersect { .. } => PlanKind::IndexIntersect,
+    };
+    match req {
+        Request::Query { filter, .. } => Some(candidate_step(&store.describe(), filter)),
+        Request::Aggregate {
+            group_by,
+            filter,
+            aggregates,
+            limit,
+        } => {
+            let range_field = store.range_field();
+            let walks = keyed_walk_applies(range_field, group_by, filter, aggregates)
+                && !(!group_by.is_empty() && filter.is_empty() && limit.is_some());
+            if !walks {
+                return Some(candidate_step(&store.describe(), filter));
+            }
+            let count_only = group_by.is_empty()
+                && counted_walk_applies(range_field, group_by, filter, aggregates);
+            Some(if count_only {
+                PlanKind::CountedWalk
+            } else {
+                PlanKind::KeyedWalk
+            })
+        }
+        Request::FilteredPage {
+            order_by, filter, ..
+        } => {
+            let schema = store.describe();
+            Some(
+                if bounded_walk_applies(*order_by, store.range_field(), &schema, filter) {
+                    PlanKind::BoundedWalk
+                } else {
+                    candidate_step(&schema, filter)
+                },
+            )
+        }
+        Request::Join(spec) => Some(candidate_step(&store.describe(), &spec.left_filter)),
+        _ => None,
+    }
+}
+
 pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Response {
     match req {
         Request::GetById { id } => match store.get(id) {
@@ -3933,6 +3998,10 @@ fn handle_connection(
         // `continue`) — so `request_kind` is captured now, before the
         // match below consumes `req`.
         let request_kind = audit::RequestKind::of(&req);
+        // `QPM-FR-003` (ADR-0086): the plan a planned read will take,
+        // classified before the match consumes `req`; recorded below
+        // only when the response carries no error.
+        let plan = plan_of(store, &req);
 
         // `SESS-FR-002`/`SESS-FR-004`/`SESS-FR-006`: the session intercepts.
         let resp = match req {
@@ -4226,9 +4295,11 @@ fn handle_connection(
         let resp = downgrade_for_version(resp, negotiated);
         // `MET-FR-003` (ADR-0064): the identical call site `AccessEvent`
         // is recorded at — one increment per dispatched request.
-        options
-            .metrics()
-            .record_request(matches!(outcome_of(&resp), access::Outcome::Ok));
+        let ok = matches!(outcome_of(&resp), access::Outcome::Ok);
+        options.metrics().record_request(ok);
+        if let (true, Some(kind)) = (ok, plan) {
+            options.metrics().record_plan(kind);
+        }
         // `ACC-FR-004`: after the audit log's own recording for this path
         // (if any — the gates above already returned), one access event
         // per dispatched request, before the response is sent.
@@ -6858,6 +6929,124 @@ mod tests {
             ]
         );
         assert_eq!((k.gets(), k.range_counts()), (0, 1));
+    }
+
+    /// `QPM-FR-001` (ADR-0086), acceptance criterion 1: every planned
+    /// read classifies as the path `dispatch` takes — the four candidate
+    /// plans, the three walk-only paths, the held-back grouped shape as
+    /// its candidate step — and every other request as `None`.
+    #[test]
+    fn plan_of_names_the_path_each_planned_read_takes() {
+        use CompareOp::{Ge, Gt};
+        let spec = |func, field| AggregateSpec { func, field };
+        let count = || vec![spec(AggregateFn::Count, None)];
+        let query = |filter| Request::Query {
+            select: Selection::All,
+            filter,
+            limit: None,
+        };
+        let aggregate = |group_by, filter, aggregates, limit| Request::Aggregate {
+            group_by,
+            filter,
+            aggregates,
+            limit,
+        };
+        let page = |order_by, filter| Request::FilteredPage {
+            order_by,
+            after: None,
+            limit: 10,
+            filter,
+        };
+        let ranged = PlannerFixture::with_range(1);
+        let eq_only = PlannerFixture::with_index(Ok(vec![]));
+        // The candidate step, per consumer.
+        assert_eq!(plan_of(&ranged, &query(vec![])), Some(PlanKind::FullScan));
+        assert_eq!(
+            plan_of(&eq_only, &query(vec![labrador()])),
+            Some(PlanKind::IndexEq)
+        );
+        assert_eq!(
+            plan_of(&ranged, &query(vec![u32_pred(1, Gt, 3)])),
+            Some(PlanKind::IndexRange)
+        );
+        assert_eq!(
+            plan_of(&ranged, &query(vec![labrador(), u32_pred(1, Gt, 3)])),
+            Some(PlanKind::IndexIntersect)
+        );
+        assert_eq!(
+            plan_of(&ranged, &page(2, vec![u32_pred(1, Gt, 3)])),
+            Some(PlanKind::IndexRange),
+            "a page not ordered by the range field: its candidate step"
+        );
+        assert_eq!(
+            plan_of(&ranged, &page(1, vec![u32_pred(1, Gt, 3)])),
+            Some(PlanKind::BoundedWalk)
+        );
+        assert_eq!(
+            plan_of(
+                &ranged,
+                &Request::Join(JoinSpec {
+                    left_filter: vec![u32_pred(1, Ge, 1)],
+                    ..join_spec(JoinRelation::Neighbors(None))
+                })
+            ),
+            Some(PlanKind::IndexRange)
+        );
+        // The walk-only aggregates.
+        assert_eq!(
+            plan_of(
+                &ranged,
+                &aggregate(vec![], vec![u32_pred(1, Gt, 3)], count(), None)
+            ),
+            Some(PlanKind::CountedWalk)
+        );
+        assert_eq!(
+            plan_of(
+                &ranged,
+                &aggregate(vec![], vec![], vec![spec(AggregateFn::Min, Some(1))], None)
+            ),
+            Some(PlanKind::KeyedWalk)
+        );
+        assert_eq!(
+            plan_of(&ranged, &aggregate(vec![1], vec![], count(), None)),
+            Some(PlanKind::KeyedWalk),
+            "grouped by the key: the keys, even for a count"
+        );
+        assert_eq!(
+            plan_of(&ranged, &aggregate(vec![1], vec![], count(), Some(1))),
+            Some(PlanKind::FullScan),
+            "grouped, no bound, a limit: decodes (QKG-FR-003)"
+        );
+        assert_eq!(
+            plan_of(
+                &ranged,
+                &aggregate(vec![], vec![u32_pred(1, Gt, 3), labrador()], count(), None)
+            ),
+            Some(PlanKind::IndexIntersect),
+            "a second field: the candidate step"
+        );
+        assert_eq!(
+            plan_of(&eq_only, &aggregate(vec![], vec![], count(), None)),
+            Some(PlanKind::FullScan),
+            "no range field: never a walk"
+        );
+        // Not a planned read.
+        for req in [
+            Request::GetById {
+                id: RecordId::from_u128(1),
+            },
+            Request::Page {
+                order_by: 1,
+                after: None,
+                limit: 1,
+            },
+            Request::Metrics,
+            Request::Delete {
+                id: RecordId::from_u128(1),
+            },
+        ] {
+            assert_eq!(plan_of(&ranged, &req), None, "{req:?}");
+        }
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's
