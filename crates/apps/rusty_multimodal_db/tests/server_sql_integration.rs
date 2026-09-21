@@ -3633,3 +3633,124 @@ fn ungrouped_reductions_from_one_fold_match_the_decoded_answers() {
         check(&mut client, "reminder", "due_at_unix_ms", where_, keep);
     }
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0089` / `docs/design/SERVER-PAGE-DESCENDING-DESIGN.md`, acceptance
+// criterion 3 (`PGD-FR-006`): `ORDER BY … DESC` over a real socket — the
+// exact reverse of the ascending answer, with `LIMIT`, with `WHERE`, on
+// the indexed field (`Memory`'s `updated_at_unix_ms`, `Reminder`'s
+// `due_at_unix_ms`) and on a scanned one; a cursor walk through
+// `page_desc` is disjoint and complete; `ASC` is the default spelled out.
+// ---------------------------------------------------------------------
+
+#[test]
+fn order_by_desc_is_the_exact_reverse_of_the_ascending_answer() {
+    let ids = |rows: &[(Uuid, Vec<(String, ScanValue)>)]| -> Vec<Uuid> {
+        rows.iter().map(|(id, _)| *id).collect()
+    };
+    for (start, table, indexed, scanned, where_) in [
+        (
+            start_memory_server as fn() -> SocketAddr,
+            "memory",
+            "updated_at_unix_ms",
+            "created_at_unix_ms",
+            "WHERE updated_at_unix_ms >= 2000",
+        ),
+        (
+            start_reminder_server as fn() -> SocketAddr,
+            "reminder",
+            "due_at_unix_ms",
+            "status",
+            "WHERE due_at_unix_ms <= 2000",
+        ),
+    ] {
+        let mut client = SchemaDrivenClient::connect(start()).unwrap();
+        for field in [indexed, scanned] {
+            let asc = rows(
+                client
+                    .query(&format!("SELECT * FROM {table} ORDER BY {field}"))
+                    .unwrap(),
+            );
+            let mut expected = ids(&asc);
+            expected.reverse();
+            let desc = rows(
+                client
+                    .query(&format!("SELECT * FROM {table} ORDER BY {field} DESC"))
+                    .unwrap(),
+            );
+            assert_eq!(ids(&desc), expected, "{table} {field}");
+            assert_eq!(
+                ids(&rows(
+                    client
+                        .query(&format!("SELECT * FROM {table} ORDER BY {field} ASC"))
+                        .unwrap()
+                )),
+                ids(&asc),
+                "ASC is the default"
+            );
+            let top2 = rows(
+                client
+                    .query(&format!(
+                        "SELECT * FROM {table} ORDER BY {field} DESC LIMIT 2"
+                    ))
+                    .unwrap(),
+            );
+            assert_eq!(
+                ids(&top2),
+                expected[..2].to_vec(),
+                "{table} {field} LIMIT 2"
+            );
+        }
+        // With a filter: the reverse of the filtered ascending page.
+        let asc = rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM {table} {where_} ORDER BY {indexed}"
+                ))
+                .unwrap(),
+        );
+        let mut expected = ids(&asc);
+        expected.reverse();
+        let desc = rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM {table} {where_} ORDER BY {indexed} DESC"
+                ))
+                .unwrap(),
+        );
+        assert_eq!(ids(&desc), expected, "{table} {where_}");
+        // A cursor walk of two rows at a time through `page_desc`:
+        // disjoint pages, greatest first, the whole table.
+        let mut walked = Vec::new();
+        let mut before = None;
+        loop {
+            let page = client.page_desc(indexed, before.take(), 2).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            let (last_id, last_fields) = page.last().unwrap();
+            before = Some((
+                last_fields
+                    .iter()
+                    .find(|(n, _)| n == indexed)
+                    .map(|(_, v)| v.clone())
+                    .unwrap(),
+                *last_id,
+            ));
+            walked.extend(ids(&page));
+            if page.len() < 2 {
+                break;
+            }
+        }
+        let mut all = ids(&rows(
+            client
+                .query(&format!("SELECT * FROM {table} ORDER BY {indexed}"))
+                .unwrap(),
+        ));
+        all.reverse();
+        assert_eq!(
+            walked, all,
+            "{table}: page_desc walks everything, greatest first"
+        );
+    }
+}

@@ -259,6 +259,12 @@ where
     R: super::traits::OrderedField<Marker>,
 {
     fn page_by(&self, after: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id>;
+
+    /// `PGD-FR-003` (ADR-0089): [`Self::page_by`] walked the other way —
+    /// the ids of the `limit` pairs strictly *before* `before` in
+    /// `(key, id)` order, greatest first; `None` starts at the greatest
+    /// pair. The same sorted set, read backward.
+    fn page_by_desc(&self, before: Option<(R::Key, R::Id)>, limit: usize) -> Vec<R::Id>;
 }
 
 /// Every id whose `(key, id)` pair lies within `lower..upper` on an

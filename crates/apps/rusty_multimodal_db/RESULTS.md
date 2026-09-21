@@ -1843,6 +1843,31 @@ Linux container, 2026-09-21: two after-runs were taken because the first showed 
 repeated here; the rows and their previous values stand in the
 sections above.
 
+## `ORDER BY … DESC` on the wire — the "latest N" (`ADR-0089`, `SERVER-001` v0.74.0 / FR-086, protocol 28)
+
+`docs/design/SERVER-PAGE-DESCENDING-DESIGN.md`'s acceptance criterion
+3, measured by two new `reminder-due` rows in `benches/server.rs` — the
+same 100,000-record `Reminder` table: `due-latest-50` is `PageDesc`
+on `due_at_unix_ms` (the sorted index walked backward, 50 rows) and
+`due-latest-scan-50` the same request on `status`, a field with no
+index, which pages the scan's keys backward. A new request has no
+pre-change twin, so this is one run of this round's binary on an idle
+4-core Linux container, 2026-09-21; the ascending `due-page-50` row
+from the same run is the like-for-like.
+
+| Request | Path | Returned | µs per request |
+|---|---|---|---|
+| `PageDesc ORDER BY due_at_unix_ms DESC LIMIT 50` | the index, backward | 50 rows | **73.2** |
+| `PageDesc ORDER BY status DESC LIMIT 50` | the scan's keys, backward | 50 rows | **54,154.4** |
+| `FilteredPage … ORDER BY due_at_unix_ms LIMIT 50` (ascending, same run) | the index, forward | 50 rows | 85.3 |
+
+**Read it as**: the "latest 50" on the ordered field costs the page,
+the same as the ascending page in the same run; on an unindexed field
+it costs the scan's keys (100,000 of them, one `select_nth_unstable`),
+as the ascending `Page` does. Before this round the only way to the
+latest 50 was every ascending page in turn. Every other row is
+unchanged.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

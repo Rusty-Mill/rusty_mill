@@ -48,7 +48,10 @@ and `SERVER-002` v0.9.0 (`PAG-FR-006`).
   not a guess.
 - **Descending order.** Ascending only; a caller wanting the newest
   first reads the tail by a large cursor and reverses. Named so a later
-  `descending: bool` is one appended field if ever needed.
+  `descending: bool` is one appended field if ever needed. *Taken:
+  `ADR-0089` (2026-09-21) — as two appended variants (`PageDesc`,
+  `FilteredPageDesc`, protocol 28) rather than a retyped field, which
+  rule 1 forbids; awaiting the owner's review.*
 - **Ordering by a `Str` field.** `U32`/`I64` only — the one kind pair
   with an order this wire already recognizes (`CompareOp::is_ordering`).
   String collation is a design of its own.

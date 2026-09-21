@@ -455,6 +455,36 @@ pub trait ConnectionStore: Send + Sync {
         ))
     }
 
+    /// `PGD-FR-004` (ADR-0089, protocol 28): [`Self::page`] walked the
+    /// other way — descending by `(order_by, id)`, strictly before
+    /// `before`, at most `limit` rows. The default pages the scan's keys
+    /// backward ([`page_by_scan_desc`]); `Memory`/`Relation`/`Reminder`
+    /// override it for their ordered field.
+    fn page_desc(
+        &self,
+        order_by: FieldRef,
+        before: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        Ok(page_by_scan_desc(self, order_by, before, limit))
+    }
+
+    /// `PGD-FR-004` (ADR-0089, protocol 28): [`Self::filtered_page`]
+    /// walked the other way — the planner's candidates, every predicate
+    /// re-checked, then the descending key selection. No adapter
+    /// overrides it this round.
+    fn filtered_page_desc(
+        &self,
+        order_by: FieldRef,
+        before: Option<(ScanValue, RecordId)>,
+        limit: usize,
+        filter: &[Predicate],
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        Ok(filtered_page_by_candidates_desc(
+            self, order_by, before, limit, filter,
+        ))
+    }
+
     /// `CNT-FR-002` (ADR-0057, protocol 21): how many edges this table
     /// holds under `relation`, each undirected edge once, a cross-table
     /// label included. `Malformed` for a label the table has no relation
@@ -1597,6 +1627,86 @@ pub fn page_by_scan<S: ConnectionStore + ?Sized>(
         .into_iter()
         .filter_map(|id| store.get(id).map(|fields| (id, fields)))
         .collect()
+}
+
+/// `PGD-FR-004` (ADR-0089): [`page_ids`] walked the other way — every
+/// entry strictly *less* than `before`'s key, the greatest `limit` of
+/// them, descending by `(key, id)`. The same one-pass selection
+/// (`select_nth_unstable` on the complement, then a sort of the page).
+pub fn page_ids_desc(
+    keys: Vec<(RecordId, i128)>,
+    before: Option<(ScanValue, RecordId)>,
+    limit: usize,
+) -> Vec<RecordId> {
+    let cursor = before.map(|(value, id)| (page_key_value(&value).unwrap_or(i128::MIN), id));
+    let mut keyed: Vec<(i128, RecordId)> = keys
+        .into_iter()
+        .map(|(id, key)| (key, id))
+        .filter(|key| match cursor {
+            None => true,
+            Some(cursor) => *key < cursor,
+        })
+        .collect();
+    if limit == 0 {
+        return Vec::new();
+    }
+    if limit < keyed.len() {
+        let drop = keyed.len() - limit;
+        keyed.select_nth_unstable(drop);
+        keyed.drain(..drop);
+    }
+    keyed.sort_unstable_by(|a, b| b.cmp(a));
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// `PGD-FR-004`: [`page_by_scan`] walked the other way.
+pub fn page_by_scan_desc<S: ConnectionStore + ?Sized>(
+    store: &S,
+    order_by: FieldRef,
+    before: Option<(ScanValue, RecordId)>,
+    limit: usize,
+) -> Vec<PageRow> {
+    let winners = page_ids_desc(store.page_keys(order_by), before, limit);
+    winners
+        .into_iter()
+        .filter_map(|id| store.get(id).map(|fields| (id, fields)))
+        .collect()
+}
+
+/// `PGD-FR-004`: [`page_rows`] walked the other way.
+pub fn page_rows_desc(
+    rows: Vec<PageRow>,
+    order_by: FieldRef,
+    before: Option<(ScanValue, RecordId)>,
+    limit: usize,
+) -> Vec<PageRow> {
+    let keys = rows
+        .iter()
+        .map(|(id, fields)| (*id, page_key(fields, order_by, *id).0))
+        .collect();
+    let winners = page_ids_desc(keys, before, limit);
+    let mut by_id: std::collections::HashMap<RecordId, Vec<(FieldRef, ScanValue)>> =
+        rows.into_iter().collect();
+    winners
+        .into_iter()
+        .filter_map(|id| by_id.remove(&id).map(|fields| (id, fields)))
+        .collect()
+}
+
+/// `PGD-FR-004`: [`filtered_page_by_candidates`] walked the other way —
+/// the same candidate step and re-check, then [`page_rows_desc`].
+pub fn filtered_page_by_candidates_desc<S: ConnectionStore + ?Sized>(
+    store: &S,
+    order_by: FieldRef,
+    before: Option<(ScanValue, RecordId)>,
+    limit: usize,
+    filter: &[Predicate],
+) -> Vec<PageRow> {
+    let filtered: Vec<PageRow> = indexed_candidates(store, &store.describe(), filter)
+        .into_iter()
+        .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
+        .collect();
+    page_rows_desc(filtered, order_by, before, limit)
 }
 
 /// `PAG-FR-002` (ADR-0055): one ordered keyset page over already
@@ -3294,6 +3404,9 @@ pub fn plan_of<S: ConnectionStore + ?Sized>(store: &S, req: &Request) -> Option<
                 },
             )
         }
+        // `PGD-FR-004`: the descending filtered page takes the candidate
+        // step only (no descending bounded walk this round).
+        Request::FilteredPageDesc { filter, .. } => Some(candidate_step(&store.describe(), filter)),
         Request::Join(spec) => Some(candidate_step(&store.describe(), &spec.left_filter)),
         _ => None,
     }
@@ -3591,6 +3704,37 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             &filter,
         ) {
             Ok(()) => match store.filtered_page(order_by, after, limit as usize, &filter) {
+                Ok(rows) => Response::Rows { rows },
+                Err(code) => err_response(code),
+            },
+            Err(code) => err_response(code),
+        },
+        // `PGD-FR-004` (ADR-0089): the two descending twins — `Page`'s
+        // and `FilteredPage`'s own validation, then the reversed walk.
+        Request::PageDesc {
+            order_by,
+            before,
+            limit,
+        } => match validate_page(&store.describe(), order_by, before.as_ref(), limit) {
+            Ok(()) => match store.page_desc(order_by, before, limit as usize) {
+                Ok(rows) => Response::Rows { rows },
+                Err(code) => err_response(code),
+            },
+            Err(code) => err_response(code),
+        },
+        Request::FilteredPageDesc {
+            order_by,
+            before,
+            limit,
+            filter,
+        } => match validate_filtered_page(
+            &store.describe(),
+            order_by,
+            before.as_ref(),
+            limit,
+            &filter,
+        ) {
+            Ok(()) => match store.filtered_page_desc(order_by, before, limit as usize, &filter) {
                 Ok(rows) => Response::Rows { rows },
                 Err(code) => err_response(code),
             },
@@ -4309,6 +4453,10 @@ fn handle_connection(
             // version that introduced it. Falls through to `dispatch`'s
             // own `Request::FilteredPage` arm via the `other =>` fallback.
             Request::FilteredPage { .. } if negotiated < 26 => err_response(ErrorCode::Malformed),
+            // `PGD-FR-005` (ADR-0089), rule 3: reads, gated like `Page`.
+            Request::PageDesc { .. } | Request::FilteredPageDesc { .. } if negotiated < 28 => {
+                err_response(ErrorCode::Malformed)
+            }
             // `TBL-FR-002`/`003` (ADR-0050): both protocol-16 requests are
             // gated like the session requests (rule 3); `Use` inside a
             // session is `SessionOpen`, since a session's staged writes
@@ -7231,6 +7379,140 @@ mod tests {
         let keyed = PlannerFixture::with_range(1);
         groups_of(dispatch(&keyed, request(vec![1], vec![u32_pred(1, Gt, 3)])));
         assert_eq!((keyed.stat_folds(), keyed.key_walks()), (0, 1));
+    }
+
+    /// `PGD-FR-004` (ADR-0089), acceptance criterion 1: `page_ids_desc`
+    /// is `page_ids` read backward — greatest first, strictly before the
+    /// cursor, `limit`-bounded, the id as the tie-break, empty at zero —
+    /// and the two descending arms answer through `dispatch` on the
+    /// scan-backed fixture exactly as the ascending ones, reversed; the
+    /// filtered twin takes the candidate step (`plan_of`) and re-checks.
+    #[test]
+    fn descending_pages_are_the_ascending_pages_read_backward() {
+        use CompareOp::Gt;
+        let id = RecordId::from_u128;
+        let keys = vec![(id(1), 3), (id(2), 5), (id(3), 9), (id(4), 5)];
+        let all_desc = page_ids_desc(keys.clone(), None, 10);
+        assert_eq!(
+            all_desc,
+            vec![id(3), id(4), id(2), id(1)],
+            "(9,3) (5,4) (5,2) (3,1)"
+        );
+        let mut asc = page_ids(keys.clone(), None, 10);
+        asc.reverse();
+        assert_eq!(all_desc, asc);
+        assert_eq!(page_ids_desc(keys.clone(), None, 2), vec![id(3), id(4)]);
+        assert_eq!(
+            page_ids_desc(keys.clone(), Some((ScanValue::U32(5), id(4))), 10),
+            vec![id(2), id(1)],
+            "strictly before (5, id 4)"
+        );
+        assert_eq!(
+            page_ids_desc(keys.clone(), Some((ScanValue::U32(3), id(1))), 10),
+            Vec::<RecordId>::new(),
+            "nothing before the least"
+        );
+        assert_eq!(page_ids_desc(keys, None, 0), Vec::<RecordId>::new());
+
+        // Through dispatch, on the three-row fixture (field 1: 3, 5, 9).
+        let rows_of = |response| match response {
+            Response::Rows { rows } => rows,
+            other => panic!("expected Rows, got {other:?}"),
+        };
+        let store = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+        let desc = rows_of(dispatch(
+            &store,
+            Request::PageDesc {
+                order_by: 1,
+                before: None,
+                limit: 2,
+            },
+        ));
+        assert_eq!(
+            desc.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![id(3), id(2)]
+        );
+        let next = rows_of(dispatch(
+            &store,
+            Request::PageDesc {
+                order_by: 1,
+                before: Some((ScanValue::U32(5), id(2))),
+                limit: 2,
+            },
+        ));
+        assert_eq!(
+            next.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![id(1)]
+        );
+        let filtered = rows_of(dispatch(
+            &store,
+            Request::FilteredPageDesc {
+                order_by: 1,
+                before: None,
+                limit: 10,
+                filter: vec![u32_pred(1, Gt, 3)],
+            },
+        ));
+        assert_eq!(
+            filtered.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![id(3), id(2)]
+        );
+        // The same validation as the ascending twins.
+        assert!(matches!(
+            dispatch(
+                &store,
+                Request::PageDesc {
+                    order_by: 99,
+                    before: None,
+                    limit: 1
+                }
+            ),
+            Response::Err {
+                code: ErrorCode::UnknownField,
+                ..
+            }
+        ));
+        assert!(matches!(
+            dispatch(
+                &store,
+                Request::FilteredPageDesc {
+                    order_by: 1,
+                    before: None,
+                    limit: 0,
+                    filter: vec![]
+                }
+            ),
+            Response::Err {
+                code: ErrorCode::Malformed,
+                ..
+            }
+        ));
+        // `plan_of`: the filtered twin classifies as its candidate step;
+        // the plain one is not a planned read.
+        let ranged = PlannerFixture::with_range(1);
+        assert_eq!(
+            plan_of(
+                &ranged,
+                &Request::FilteredPageDesc {
+                    order_by: 1,
+                    before: None,
+                    limit: 1,
+                    filter: vec![u32_pred(1, Gt, 3)]
+                }
+            ),
+            Some(PlanKind::IndexRange)
+        );
+        assert_eq!(
+            plan_of(
+                &ranged,
+                &Request::PageDesc {
+                    order_by: 1,
+                    before: None,
+                    limit: 1
+                }
+            ),
+            None
+        );
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's

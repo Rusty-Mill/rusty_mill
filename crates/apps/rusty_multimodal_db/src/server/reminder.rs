@@ -34,8 +34,8 @@ use super::protocol::{
 };
 use super::{
     bounded_filtered_page, bounded_walk_applies, filtered_page_by_candidates, page_by_scan,
-    predicate_matches, uuid_pair_bounds, ConnectionStore, DeleteOutcome, InsertOutcome, KeyStats,
-    PageRow, ReplaceIfOutcome, ReplaceOutcome,
+    page_by_scan_desc, predicate_matches, uuid_pair_bounds, ConnectionStore, DeleteOutcome,
+    InsertOutcome, KeyStats, PageRow, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
@@ -244,6 +244,30 @@ impl ConnectionStore for ReminderConnectionStore {
         Ok(self
             .store
             .page_by::<Reminder, DueAtOrder>(cursor, limit)
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect())
+    }
+
+    /// `PGD-FR-004` (ADR-0089): [`ConnectionStore::page`]'s twin walked
+    /// backward — the sorted index from the cursor down, the page's cost.
+    fn page_desc(
+        &self,
+        order_by: FieldRef,
+        before: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<PageRow>, ErrorCode> {
+        if order_by != FIELD_DUE_AT {
+            return Ok(page_by_scan_desc(self, order_by, before, limit));
+        }
+        let cursor = match before {
+            None => None,
+            Some((ScanValue::I64(stamp), id)) => Some((stamp, id)),
+            Some(_) => return Err(ErrorCode::Malformed),
+        };
+        Ok(self
+            .store
+            .page_by_desc::<Reminder, DueAtOrder>(cursor, limit)
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect())

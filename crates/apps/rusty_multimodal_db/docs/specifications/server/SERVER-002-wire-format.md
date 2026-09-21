@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.16.0 (protocol version 27 — `SERVER-001` v0.57.0,
+- Version: 0.17.0 (protocol version 28 — `SERVER-001` v0.74.0,
+  `PGD-FR-001`/`002`, `ADR-0089`; 0.16.0 was protocol 27 — `SERVER-001` v0.57.0,
   `MVCC2-FR-004`, `ADR-0072`; 0.15.0 was protocol 26 — `SERVER-001` v0.56.0, `FPG-FR-005`,
   ADR-0068; 0.14.0 was protocol 25, `SERVER-001` v0.55.0, `RPL-FR-006`,
   ADR-0067; 0.13.0 was protocol 24, `SERVER-001` v0.54.0, `BAK-FR-006`,
@@ -96,13 +97,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 27 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1b 00 00 00` (27).
+- `Request::Hello { protocol_version: 28 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1c 00 00 00` (28).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 27
+## 5. Types at protocol version 28
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -226,6 +227,8 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 33 | `Backup` | `name: String` | 24 | `BackedUp` |
 | 34 | `FetchSnapshot` | — | 25 | `Snapshot` |
 | 35 | `FilteredPage` | `order_by: FieldRef`, `after: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `Page`'s three fields plus a `WHERE`-shaped filter | 26 | `Rows` |
+| 36 | `PageDesc` | `order_by: FieldRef`, `before: Option<(ScanValue, RecordId)>`, `limit: u64` — `Page` walked the other way | 28 | `Rows` |
+| 37 | `FilteredPageDesc` | `order_by: FieldRef`, `before: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `FilteredPage` walked the other way | 28 | `Rows` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -592,6 +595,18 @@ Each item names the `SERVER-001` requirement that owns it.
    faster path a given server build gives it. A read: no `SessionOpen`
    gate, not restricted to a read-write token. `Malformed` below 26.
    (`FR-068`)
+25. **`PageDesc`** / **`FilteredPageDesc`** (28) — items 18 and 24
+   walked the other way: sorted *descending* by `(order_by, id)`,
+   strictly *before* the `before` cursor (`None` for the first page,
+   which starts at the greatest key), at most `limit` rows; the
+   filtered twin over only the rows every predicate matches. The last
+   row's `(value, id)` is the next call's `before`. Answered `Rows`
+   (reused). Validated exactly as items 18/24 (`UnknownField`/
+   `Malformed` for `order_by`/`before`/`limit`, and per predicate).
+   `PageDesc` on a field a server build keeps a sorted index over is the
+   index walked backward — the page's cost; every other shape pages the
+   scan's keys (the filtered twin through the planner's candidate
+   step). Reads, gated as `Page`. `Malformed` below 28. (`FR-086`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -646,6 +661,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 25 | v0.55.0 | `FetchSnapshot` (34), `Snapshot` (23), `ErrorCode::TooLarge` (14) |
 | 26 | v0.56.0 | `FilteredPage` (35) |
 | 27 | v0.57.0 | flag bit 8, `SESSION_MVCC_ISOLATION` — no new variant |
+| 28 | v0.74.0 | `PageDesc` (36), `FilteredPageDesc` (37) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -657,7 +673,7 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 3. **The server answers in the nearest older shape.** A connection
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
-   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25, `FilteredPage` below 26); an error code introduced later
+   `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25, `FilteredPage` below 26, `PageDesc`/`FilteredPageDesc` below 28); an error code introduced later
    is reported as `Unsupported`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
    so an older client sees exactly the record shape it knew.
@@ -693,6 +709,21 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.17.0 (`SERVER-001` v0.74.0, `ADR-0089`, `PGD-FR-001`/`002`):
+  protocol version 28 — `Request::PageDesc` (36) and
+  `Request::FilteredPageDesc` (37), answered `Response::Rows` (reused,
+  no new response variant) — `Page`/`FilteredPage`'s own fields with
+  `before` in `after`'s place, walked the other way: descending by
+  `(order_by, id)`, strictly before the cursor. The consumer's "latest
+  N" (`ORDER BY … DESC LIMIT n`), which every prior version answered
+  only by walking the whole table ascending. §5 header, §5.6, §7 item
+  25, §8 row 28 and rule 3's list; fixture at 78 vectors
+  (`Request/PageDesc`, `Request/FilteredPageDesc`); the reference
+  Python client gains `page_desc`/`filtered_page_desc`. No new
+  `ErrorCode`. `Memory`/`Relation`/`Reminder` answer `PageDesc` on
+  their ordered field from the sorted index walked backward; the
+  filtered twin takes the planner's candidate step then the descending
+  key selection — no descending bounded walk this round, a named cost.
 - 0.16.0 (`SERVER-001` v0.57.0, `ADR-0072`, `MVCC2-FR-004`): protocol
   version 27 — no new variant: `BeginWith` learns a fourth flag bit,
   `SESSION_MVCC_ISOLATION` (§7.6) — real multi-version concurrency

@@ -793,6 +793,32 @@ mod tests {
         );
     }
 
+    /// `PGD-FR-003` (ADR-0089): `page_by_desc` is `page_by` read backward
+    /// — greatest pair first, strictly before the cursor, `limit`-bounded.
+    #[test]
+    fn page_by_desc_is_page_by_read_backward() {
+        use crate::generic::query::PageBy;
+        let dir = fresh_temp_dir("memory_page_by_desc").unwrap();
+        let path = dir.join("memories.mmap");
+        let mut seeded: Vec<Memory> = (1..=5).map(|n| memory(n, "general", false)).collect();
+        seeded[2].updated_at_unix_ms = 2_000;
+        let store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        let mut forward = store.page_by(None, 10);
+        forward.reverse();
+        assert_eq!(store.page_by_desc(None, 10), forward);
+        assert_eq!(store.page_by_desc(None, 2), forward[..2].to_vec());
+        let cursor = (2_000, Uuid::from_u128(3));
+        assert_eq!(
+            store.page_by_desc(Some(cursor), 10),
+            vec![Uuid::from_u128(2), Uuid::from_u128(1)],
+            "strictly before (2000, id 3): (2000, id 2) then (1000, id 1)"
+        );
+        assert_eq!(
+            store.page_by_desc(Some((1_000, Uuid::from_u128(1))), 10),
+            Vec::<Uuid>::new()
+        );
+    }
+
     /// `QCW-FR-001` (ADR-0081): `range_count` is `range_by`'s length,
     /// bounds and inversion included.
     #[test]

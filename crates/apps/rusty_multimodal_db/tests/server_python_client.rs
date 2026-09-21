@@ -220,6 +220,15 @@ fn the_python_reference_client_speaks_the_protocol_at_24_and_at_10() {
     assert_eq!(get("filtered_page_total"), "3");
     assert_eq!(get("filtered_page_sorted"), "yes");
     assert_eq!(get("filtered_page_all_match"), "yes");
+    // `PGD-FR-007` (ADR-0089): the descending twins from Python — two
+    // pages greatest-first walk every entity, disjoint; the filtered one
+    // keeps only the three persons, greatest-first.
+    assert_eq!(get("page_desc_total"), "6");
+    assert_eq!(get("page_desc_sorted"), "yes");
+    assert_eq!(get("page_desc_disjoint"), "yes");
+    assert_eq!(get("filtered_page_desc_total"), "3");
+    assert_eq!(get("filtered_page_desc_sorted"), "yes");
+    assert_eq!(get("filtered_page_desc_all_match"), "yes");
     // `CNT-FR-004` (ADR-0057): the edge count from Python — the one
     // runtime `mentored_by` edge, an unknown label `Malformed`.
     assert_eq!(get("count_edges"), "1");

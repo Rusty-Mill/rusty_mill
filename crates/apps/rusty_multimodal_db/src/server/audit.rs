@@ -105,6 +105,9 @@ pub enum RequestKind {
     FetchSnapshot,
     /// Protocol 26, ADR-0068.
     FilteredPage,
+    /// `PGD-FR-005` (ADR-0089, protocol 28): the descending twins.
+    PageDesc,
+    FilteredPageDesc,
 }
 
 impl RequestKind {
@@ -146,6 +149,8 @@ impl RequestKind {
             Request::Backup { .. } => RequestKind::Backup,
             Request::FetchSnapshot => RequestKind::FetchSnapshot,
             Request::FilteredPage { .. } => RequestKind::FilteredPage,
+            Request::PageDesc { .. } => RequestKind::PageDesc,
+            Request::FilteredPageDesc { .. } => RequestKind::FilteredPageDesc,
         }
     }
 }

@@ -25,7 +25,7 @@
 //! comparator       := "=" | "!=" | "<" | "<=" | ">" | ">="
 //! literal          := number | "'" ... "'" | "true" | "false"
 //! group_by_clause  := "GROUP" "BY" ident ("," ident)*
-//! order_by_clause  := "ORDER" "BY" ident                        -- OBY-FR-001, ADR-0061
+//! order_by_clause  := "ORDER" "BY" ident ["ASC" | "DESC"]       -- OBY-FR-001, ADR-0061; PGD-FR-006, ADR-0089
 //! limit_clause     := "LIMIT" number
 //! ```
 //!
@@ -153,6 +153,9 @@ pub(crate) struct ParsedQuery {
     /// exclusive with `conditions`, `join`, and `group_by`/an aggregate
     /// column, enforced at parse time (`OBY-FR-002`).
     pub order_by: Option<String>,
+    /// `ORDER BY … DESC` — `PGD-FR-006`, ADR-0089; `false` for `ASC` or
+    /// neither. Meaningful only with `order_by`.
+    pub descending: bool,
     pub limit: Option<usize>,
 }
 
@@ -691,10 +694,19 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
     }
 
     let mut order_by = None;
+    let mut descending = false;
     if parser.peek_keyword("ORDER") {
         parser.advance();
         parser.expect_keyword("BY")?;
         order_by = Some(parser.ident()?);
+        // `PGD-FR-006` (ADR-0089): an optional direction; `ASC` is the
+        // default and says nothing new.
+        if parser.peek_keyword("DESC") {
+            parser.advance();
+            descending = true;
+        } else if parser.peek_keyword("ASC") {
+            parser.advance();
+        }
     }
 
     let mut limit = None;
@@ -715,6 +727,7 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
         conditions,
         group_by,
         order_by,
+        descending,
         limit,
     };
     validate_qualifiers(&query)?;
@@ -1165,6 +1178,34 @@ mod tests {
             parse("SELECT a.label FROM entity a JOIN entity b WHERE a.kind = 'x'"),
             Err(SqlParseError::Expected { .. })
         ));
+    }
+
+    /// `PGD-FR-006` (ADR-0089): `DESC` sets `descending`; `ASC` and no
+    /// direction leave it unset; the direction sits before `LIMIT`.
+    #[test]
+    fn parses_order_by_direction() {
+        assert!(
+            !parse("SELECT * FROM memory ORDER BY updated_at")
+                .unwrap()
+                .descending
+        );
+        assert!(
+            !parse("SELECT * FROM memory ORDER BY updated_at asc")
+                .unwrap()
+                .descending
+        );
+        let q = parse("SELECT * FROM memory WHERE x = 1 ORDER BY updated_at DESC LIMIT 5").unwrap();
+        assert!(q.descending);
+        assert_eq!(q.order_by, Some("updated_at".into()));
+        assert_eq!(q.limit, Some(5));
+        // `DESC` alone after `BY` is an identifier, as any bare word is —
+        // the parser reserves no keywords; the client rejects the field.
+        assert_eq!(
+            parse("SELECT * FROM memory ORDER BY DESC")
+                .unwrap()
+                .order_by,
+            Some("DESC".into())
+        );
     }
 
     #[test]

@@ -46,7 +46,9 @@ wire, and every constructor signature are unchanged.
 - Named, not hidden: rebuilt at every open, one decode per record
   (81 ms per 100K here); a persisted index is the day that matters.
 - Named, not hidden: one field per stack, ascending only; descending
-  and a range are one walk each of the same set, unrequested.
+  and a range are one walk each of the same set, unrequested. *The
+  range: `ADR-0075`; descending: `ADR-0089` (protocol 28, awaiting the
+  owner's review).*
 - Named, not hidden: a field that is both scannable and ordered must
   share one marker type, or an `update` leaves the index stale — a
   rule the layer's docs state and `Relation` follows.

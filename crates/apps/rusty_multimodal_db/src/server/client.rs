@@ -1342,11 +1342,23 @@ impl SchemaDrivenClient {
             }
         };
 
+        // `PGD-FR-006` (ADR-0089): `DESC` needs protocol 28, refused
+        // client-side with no frame sent, `order by`'s own posture.
+        let descending = parsed.descending;
+        if descending && self.server_protocol_version < 28 {
+            return Err(ClientError::Unsupported("order by desc"));
+        }
         let mut rows: Vec<QueryRow> = Vec::new();
         match parsed.limit {
             Some(0) => return Err(ClientError::Unsupported("order by limit")),
             Some(limit) => {
-                rows.extend(self.fetch_ordered_page(order_by_tag, None, limit as u64, &filter)?);
+                rows.extend(self.fetch_ordered_page(
+                    order_by_tag,
+                    None,
+                    limit as u64,
+                    &filter,
+                    descending,
+                )?);
             }
             None => {
                 let mut after = None;
@@ -1356,6 +1368,7 @@ impl SchemaDrivenClient {
                         after.take(),
                         ORDER_BY_PAGE_CHUNK,
                         &filter,
+                        descending,
                     )?;
                     let page_len = page.len() as u64;
                     if let Some((id, fields)) = page.last() {
@@ -1431,14 +1444,43 @@ impl SchemaDrivenClient {
     fn fetch_ordered_page(
         &mut self,
         order_by: FieldRef,
-        after: Option<(ScanValue, RecordId)>,
+        cursor: Option<(ScanValue, RecordId)>,
         limit: u64,
         filter: &[Predicate],
+        descending: bool,
     ) -> Result<Vec<QueryRow>, ClientError> {
-        if filter.is_empty() {
-            self.fetch_page(order_by, after, limit)
-        } else {
-            self.fetch_filtered_page(order_by, after, limit, filter.to_vec())
+        // `PGD-FR-006` (ADR-0089): the descending twins carry the same
+        // fields under `before`; `Rows` back either way.
+        let request = match (filter.is_empty(), descending) {
+            (true, false) => return self.fetch_page(order_by, cursor, limit),
+            (false, false) => {
+                return self.fetch_filtered_page(order_by, cursor, limit, filter.to_vec())
+            }
+            (true, true) => Request::PageDesc {
+                order_by,
+                before: cursor,
+                limit,
+            },
+            (false, true) => Request::FilteredPageDesc {
+                order_by,
+                before: cursor,
+                limit,
+                filter: filter.to_vec(),
+            },
+        };
+        match self.roundtrip(request)? {
+            Response::Rows { rows } => Ok(rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let named = fields
+                        .into_iter()
+                        .map(|(tag, value)| (self.field_name(tag), value))
+                        .collect();
+                    (id, named)
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Rows")),
         }
     }
 
@@ -2118,6 +2160,31 @@ impl SchemaDrivenClient {
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Rows")),
         }
+    }
+
+    /// `PGD-FR-006` (ADR-0089): [`Self::page`] walked the other way —
+    /// every record sorted *descending* by `order_by` with the id as the
+    /// tie-break, strictly before `before` (`None` for the first page,
+    /// which starts at the greatest value), at most `limit` rows; the
+    /// consumer's "latest N". The same client-side refusals as `page`;
+    /// [`ClientError::Unsupported`]`("page desc")` below 28 (rule 4).
+    pub fn page_desc(
+        &mut self,
+        order_by: &str,
+        before: Option<(ScanValue, RecordId)>,
+        limit: usize,
+    ) -> Result<Vec<QueryRow>, ClientError> {
+        if self.server_protocol_version() < 28 {
+            return Err(ClientError::Unsupported("page desc"));
+        }
+        let descriptor = self.field(order_by)?;
+        if !matches!(descriptor.value_kind, ValueKind::U32 | ValueKind::I64) {
+            return Err(ClientError::Unsupported("page order"));
+        }
+        if limit == 0 {
+            return Err(ClientError::Unsupported("page limit"));
+        }
+        self.fetch_ordered_page(descriptor.tag, before, limit as u64, &[], true)
     }
 
     /// How many edges the selected table holds under `relation`

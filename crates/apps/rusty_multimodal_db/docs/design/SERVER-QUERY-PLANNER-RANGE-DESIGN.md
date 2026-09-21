@@ -616,7 +616,9 @@ session as having covered it.
 - **A wire-visible range capability** — the `FieldCapabilities` flag,
   when a client has a reason to see it; a protocol round.
 - **Descending walks** — `ORDER BY … DESC` on the wire, then
-  `range(..).rev()`; unchanged from `ADR-0055`/`0059`.
+  `range(..).rev()`; unchanged from `ADR-0055`/`0059`. *Taken:
+  `ADR-0089` (2026-09-21, protocol 28, awaiting the owner's review) —
+  `docs/design/SERVER-PAGE-DESCENDING-DESIGN.md`.*
 - **Bound tightening / index intersection** — the first cost-model
   question with a concrete shape (`a > 1 AND a > 5`; `IndexEq ∩
   IndexRange`); declined three rounds running. *The intersection
