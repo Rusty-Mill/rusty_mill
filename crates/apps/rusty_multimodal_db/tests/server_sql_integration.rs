@@ -3176,3 +3176,114 @@ fn aggregates_over_the_range_field_from_the_walked_keys_match_the_decoded_answer
         "the next due"
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0083` / `docs/design/SERVER-QUERY-PLANNER-BOUND-TIGHTENING-DESIGN.md`,
+// acceptance criterion 4 (`QBT-FR-004`): several bounds on one side of
+// the range field answer exactly — `Query`, `COUNT(*)`, the page — the
+// walk between the two tightest, on `Memory` and `Reminder`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn redundant_and_contradictory_bounds_on_the_range_field_answer_exactly() {
+    type Row = [(String, ScanValue)];
+    let updated = |f: &Row| i64_field(f, "updated_at_unix_ms");
+    let due = |f: &Row| i64_field(f, "due_at_unix_ms");
+    let check =
+        |client: &mut SchemaDrivenClient, table: &str, order: &str, where_: &str, keep: Keep| {
+            let mut oracle = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+            oracle.retain(|(_, f)| keep(f));
+            let mut got = rows(
+                client
+                    .query(&format!("SELECT * FROM {table} WHERE {where_}"))
+                    .unwrap(),
+            );
+            got.sort_by_key(|(id, _)| *id);
+            oracle.sort_by_key(|(id, _)| *id);
+            assert_eq!(got, oracle, "{table}: {where_}");
+            let counted = groups(
+                client
+                    .query(&format!("SELECT COUNT(*) FROM {table} WHERE {where_}"))
+                    .unwrap(),
+            );
+            assert_eq!(
+                counted[0][0].1,
+                ScanValue::I64(oracle.len() as i64),
+                "{table}: COUNT(*) WHERE {where_}"
+            );
+            oracle.sort_by_key(|(id, f)| (i64_field(f, order), *id));
+            oracle.truncate(2);
+            let paged = rows(
+                client
+                    .query(&format!(
+                        "SELECT * FROM {table} WHERE {where_} ORDER BY {order} LIMIT 2"
+                    ))
+                    .unwrap(),
+            );
+            assert_eq!(paged, oracle, "{table}: paged WHERE {where_}");
+            got.len()
+        };
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let u = "updated_at_unix_ms";
+    assert_eq!(
+        check(
+            &mut client,
+            "memory",
+            u,
+            "updated_at_unix_ms >= 1000 AND updated_at_unix_ms >= 3000",
+            &|f: &Row| updated(f) >= 3_000
+        ),
+        3
+    );
+    assert_eq!(
+        check(
+            &mut client,
+            "memory",
+            u,
+            "updated_at_unix_ms > 3000 AND updated_at_unix_ms >= 3000",
+            &|f: &Row| updated(f) > 3_000
+        ),
+        2
+    );
+    assert_eq!(
+        check(&mut client, "memory", u, "updated_at_unix_ms <= 4000 AND updated_at_unix_ms < 4000 AND updated_at_unix_ms <= 9000", &|f: &Row| updated(f) < 4_000),
+        3
+    );
+    assert_eq!(
+        check(&mut client, "memory", u, "updated_at_unix_ms >= 1000 AND updated_at_unix_ms = 3000 AND updated_at_unix_ms <= 5000", &|f: &Row| updated(f) == 3_000),
+        1
+    );
+    assert_eq!(
+        check(
+            &mut client,
+            "memory",
+            u,
+            "updated_at_unix_ms = 3000 AND updated_at_unix_ms > 3000",
+            &|f: &Row| updated(f) == 3_000 && updated(f) > 3_000
+        ),
+        0,
+        "contradictory: empty, no error"
+    );
+    assert_eq!(
+        check(
+            &mut client,
+            "memory",
+            u,
+            "updated_at_unix_ms >= 2000 AND updated_at_unix_ms >= 4000 AND category = 'general'",
+            &|f: &Row| updated(f) >= 4_000 && str_field(f, "category") == "general"
+        ),
+        1,
+        "with a second field: still exact through the decode path"
+    );
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    assert_eq!(
+        check(
+            &mut client,
+            "reminder",
+            "due_at_unix_ms",
+            "due_at_unix_ms > 500 AND due_at_unix_ms > 1500 AND due_at_unix_ms < 9000",
+            &|f: &Row| due(f) > 1_500
+        ),
+        1
+    );
+}

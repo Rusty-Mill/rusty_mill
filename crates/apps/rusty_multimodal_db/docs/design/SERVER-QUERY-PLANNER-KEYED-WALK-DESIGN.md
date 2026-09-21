@@ -54,7 +54,9 @@ changed (`QKW-FR-006`).
   possible (`GROUP BY due_at` is the run-length of equal keys) but a
   new shape; named, not taken.
 - **Bound tightening**, two bounds on a side, `Ne`: the decode path, as
-  under `ADR-0081`.
+  under `ADR-0081`. *Two bounds on a side taken: `ADR-0083`
+  (2026-09-21) — the walk runs between the tightest two; `Ne` still
+  decodes.*
 - **Any change to `evaluate_aggregate`, `plan_query`, or the wire.**
 
 ## Context and terminology

@@ -777,6 +777,18 @@ fn range_filter(field: FieldRef) -> Vec<Predicate> {
     ]
 }
 
+/// `ADR-0083`: [`range_filter`] with a looser lower bound first in wire
+/// order — redundant, since the tighter one implies it.
+fn loose_range_filter(field: FieldRef) -> Vec<Predicate> {
+    let mut filter = vec![Predicate {
+        field,
+        op: CompareOp::Ge,
+        value: ScanValue::I64(PLANNER_RANGE_LOWER - 10_000),
+    }];
+    filter.extend(range_filter(field));
+    filter
+}
+
 /// `ADR-0076` acceptance criterion: the `since`-shaped listing — one
 /// lower bound admitting ~99% of the table (`field >= 1_000`), paged 50
 /// at a time by the same field. Under `ADR-0075` alone the walk reads
@@ -943,6 +955,19 @@ fn bench_query_planner() {
         "WHERE 50000 <= updated_at_unix_ms < 51000",
         planner_requests(range_filter(FIELD_CREATED_AT), FIELD_CREATED_AT),
         "WHERE 50000 <= created_at_unix_ms < 51000",
+    );
+    // `ADR-0083`: the same 1% range with a looser, redundant lower bound
+    // ahead of it in wire order (`>= 40000 AND >= 50000 AND < 51000`).
+    // Before tightening the planner walked from the first lower bound
+    // (10,000 extra records decoded, then re-checked); after, from the
+    // tightest. The control is the identical filter on the unindexed twin.
+    measure_planner_pair(
+        addr,
+        "range-tight",
+        planner_requests(loose_range_filter(FIELD_UPDATED_AT), FIELD_UPDATED_AT),
+        "WHERE updated_at_unix_ms >= 40000 AND 50000 <= updated_at_unix_ms < 51000",
+        planner_requests(loose_range_filter(FIELD_CREATED_AT), FIELD_CREATED_AT),
+        "WHERE created_at_unix_ms >= 40000 AND 50000 <= created_at_unix_ms < 51000",
     );
     // `ADR-0076`: the `since`-shaped page — a bound admitting ~99% of
     // the table, paged by the same field.

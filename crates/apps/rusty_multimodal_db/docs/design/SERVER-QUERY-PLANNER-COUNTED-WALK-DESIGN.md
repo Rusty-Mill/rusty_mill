@@ -58,7 +58,8 @@ changed (`QCW-FR-006`).
   not the count in general; a `FieldCapabilities`-level "exact" flag
   would be a protocol round.
 - **Bound tightening** (`a >= 1 AND a >= 3`): two bounds on one side
-  take the decode path, as under `ADR-0075`.
+  take the decode path, as under `ADR-0075`. *Taken: `ADR-0083`
+  (2026-09-21) — the count walks between the tightest two.*
 - **Any change to `evaluate_aggregate`, `plan_query`, or the wire.**
 
 ## Context and terminology
