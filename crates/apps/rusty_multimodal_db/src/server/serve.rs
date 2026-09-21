@@ -949,52 +949,62 @@ enum QueryPlan {
         lower: Option<usize>,
         upper: Option<usize>,
     },
+    /// `QPI-FR-001` (ADR-0078): both — the equality index's bucket and
+    /// the range walk's ids, intersected before any record is read;
+    /// `eq` is what `IndexEq` would have carried, the bounds what
+    /// `IndexRange` would have.
+    IndexIntersect {
+        eq: usize,
+        lower: Option<usize>,
+        upper: Option<usize>,
+    },
 }
 
-/// `QPL-FR-001` (ADR-0073) then `QPR-FR-003` (ADR-0075): the plan, from
-/// `schema`, the adapter's `range_field`, and `filter` alone. First the
-/// equality rule, unchanged — the first `Eq` predicate, in wire order,
-/// on a field `schema` reports `filter_eq: true` for. Only if no
-/// predicate qualifies, the range rule: on the field `range_field`
-/// names, the first `Gt`/`Ge`/`Eq` in wire order supplies the lower
-/// bound and the first `Lt`/`Le`/`Eq` the upper (one `Eq` may supply
-/// both; `Ne` never contributes); `IndexRange` if either side is found.
-/// A full scan otherwise. Equality-first is a compatibility rule, not a
-/// selectivity claim: every filter that planned `IndexEq` before
-/// `ADR-0075` still does, so the range path reaches only filters that
-/// full-scanned before. Deterministic and value-blind: neither the
-/// table's size nor the literals are consulted (no cost model, no bound
-/// tightening — both rounds' own Non-goal). `validate_query` has already
-/// rejected unknown tags, so a tag `schema` lacks simply never plans.
+/// `QPL-FR-001` (ADR-0073), `QPR-FR-003` (ADR-0075), `QPI-FR-001`
+/// (ADR-0078): the plan for a `WHERE` — the first `Eq` predicate in wire
+/// order whose field the schema declares `filter_eq: true` names the
+/// bucket to read; independently, the first lower bound (`Gt`/`Ge`/
+/// `Eq`) and the first upper bound (`Lt`/`Le`/`Eq`) on the adapter's
+/// `range_field` name a walk. Both present → `IndexIntersect` (the
+/// bucket's ids and the walk's ids, intersected, then read); the
+/// bucket alone → `IndexEq`; the walk alone → `IndexRange`; neither →
+/// `FullScan`. Since ADR-0078 the equality no longer *hides* a range
+/// beside it — the one deliberate change to the equality-first rule,
+/// and the result set is unchanged by construction since every
+/// consumer re-checks every predicate. Still deterministic and
+/// value-blind: neither the table's size nor the literals are consulted
+/// (no cost model, no bound tightening — every round's own Non-goal);
+/// the intersection needs no estimate because both id lists are exact.
+/// `validate_query` has already rejected unknown tags, so a tag
+/// `schema` lacks simply never plans.
 fn plan_query(
     schema: &DomainSchema,
     range_field: Option<FieldRef>,
     filter: &[Predicate],
 ) -> QueryPlan {
     use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
-    if let Some(i) = filter.iter().position(|p| {
+    let eq = filter.iter().position(|p| {
         p.op == Eq
             && schema
                 .fields
                 .iter()
                 .any(|f| f.tag == p.field && f.capabilities.filter_eq)
-    }) {
-        return QueryPlan::IndexEq(i);
-    }
-    let Some(field) = range_field else {
-        return QueryPlan::FullScan;
-    };
+    });
     let first = |ops: &[protocol::CompareOp]| {
-        filter
-            .iter()
-            .position(|p| p.field == field && ops.contains(&p.op))
+        range_field.and_then(|field| {
+            filter
+                .iter()
+                .position(|p| p.field == field && ops.contains(&p.op))
+        })
     };
     let lower = first(&[Gt, Ge, Eq]);
     let upper = first(&[Lt, Le, Eq]);
-    if lower.is_none() && upper.is_none() {
-        return QueryPlan::FullScan;
+    match (eq, lower.is_some() || upper.is_some()) {
+        (Some(eq), true) => QueryPlan::IndexIntersect { eq, lower, upper },
+        (Some(eq), false) => QueryPlan::IndexEq(eq),
+        (None, true) => QueryPlan::IndexRange { lower, upper },
+        (None, false) => QueryPlan::FullScan,
     }
-    QueryPlan::IndexRange { lower, upper }
 }
 
 /// `QPR-FR-004` (ADR-0075): the two `Bound`s a range walk takes, from the
@@ -1039,21 +1049,30 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
     plan: QueryPlan,
     filter: &[Predicate],
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+    let bucket = |i: usize| store.filter_eq(filter[i].field, &filter[i].value);
+    let walk = |lower: Option<usize>, upper: Option<usize>| {
+        // `plan_query` never builds a range with neither side; a refusal
+        // is the honest answer if one ever appears, and the caller scans.
+        let Some(i) = lower.or(upper) else {
+            return Err(ErrorCode::Unsupported);
+        };
+        let (lower, upper) = range_bounds(filter, lower, upper);
+        store.range_ids(filter[i].field, lower, upper)
+    };
     let ids = match plan {
         QueryPlan::FullScan => return store.scan_all(),
-        QueryPlan::IndexEq(i) => {
-            let predicate = &filter[i];
-            store.filter_eq(predicate.field, &predicate.value)
-        }
-        QueryPlan::IndexRange { lower, upper } => {
-            // `plan_query` never builds an `IndexRange` with neither side;
-            // the scan is the honest answer if one ever appears.
-            let Some(i) = lower.or(upper) else {
-                return store.scan_all();
-            };
-            let (lower, upper) = range_bounds(filter, lower, upper);
-            store.range_ids(filter[i].field, lower, upper)
-        }
+        QueryPlan::IndexEq(i) => bucket(i),
+        QueryPlan::IndexRange { lower, upper } => walk(lower, upper),
+        // `QPI-FR-002` (ADR-0078): both id lists, no record read for
+        // either, intersected — the smaller hashed, the larger filtered,
+        // so the order is the larger list's. A walk refusal degrades to
+        // the bucket alone (what `IndexEq` read before this round); a
+        // bucket refusal to the scan, as `IndexEq`'s always did.
+        QueryPlan::IndexIntersect { eq, lower, upper } => match (bucket(eq), walk(lower, upper)) {
+            (Ok(bucket), Ok(walked)) => Ok(intersect_ids(bucket, walked)),
+            (Ok(bucket), Err(_)) => Ok(bucket),
+            (Err(code), _) => Err(code),
+        },
     };
     match ids {
         Ok(ids) => ids
@@ -1062,6 +1081,19 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
             .collect(),
         Err(_) => store.scan_all(),
     }
+}
+
+/// `QPI-FR-002` (ADR-0078): the ids in both lists, in the larger list's
+/// order — the smaller list is hashed, the larger walked once. Exact:
+/// no estimate of either side is taken or needed, and the cost is the
+/// two lists' lengths in id-level work, never a record decode.
+pub fn intersect_ids(a: Vec<RecordId>, b: Vec<RecordId>) -> Vec<RecordId> {
+    let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let members: std::collections::HashSet<RecordId> = smaller.into_iter().collect();
+    larger
+        .into_iter()
+        .filter(|id| members.contains(id))
+        .collect()
 }
 
 /// `QPC-FR-001` (ADR-0074): the one candidate step every filtered read
@@ -1259,7 +1291,8 @@ pub fn filtered_page_by_candidates<S: ConnectionStore + ?Sized>(
 /// a `FilteredPage` can be answered by the bounded walk — `order_by` is
 /// the adapter's range field, and the filter does not plan the declared
 /// equality index ([`plan_query`]'s own equality-first rule: a request
-/// that read a `filter_eq` bucket before this round still does, so the
+/// that read a `filter_eq` bucket before this round still does — since
+/// `QPI-FR-003` (ADR-0078) intersected with the range's ids — so the
 /// walk reaches only filters that walked or scanned every in-range
 /// record). Any other predicate — a bound on the walked field, a
 /// comparison on another field, `Ne` on either — is the walk's to cut
@@ -1272,9 +1305,9 @@ pub fn bounded_walk_applies(
     filter: &[Predicate],
 ) -> bool {
     range_field == Some(order_by)
-        && !matches!(
+        && matches!(
             plan_query(schema, range_field, filter),
-            QueryPlan::IndexEq(_)
+            QueryPlan::FullScan | QueryPlan::IndexRange { .. }
         )
 }
 
@@ -5477,14 +5510,187 @@ mod tests {
                 f,
                 &[u32_pred(1, Gt, 1), eq(2, ScanValue::Str("x".into()))]
             ),
-            QueryPlan::IndexEq(1),
-            "an eligible equality anywhere in the filter wins over a range"
+            QueryPlan::IndexIntersect {
+                eq: 1,
+                lower: Some(0),
+                upper: None
+            },
+            "an eligible equality anywhere in the filter, with a range: both (ADR-0078)"
         );
         assert_eq!(
             plan_query(&schema, f, &[u32_pred(3, Ne, 1), u32_pred(1, Lt, 9)]),
             range(None, Some(1)),
             "an ineligible predicate ahead of the bound"
         );
+    }
+
+    /// `QPI-FR-001` (ADR-0078), acceptance criterion 1: an eligible
+    /// equality beside a bound on the range field plans the
+    /// intersection — one side, both sides, `Eq` on the range field as
+    /// both — in either wire order; the equality alone (no range field,
+    /// no bound, an ordering on a field that is not the range field)
+    /// still plans `IndexEq`, and a bound alone still `IndexRange`.
+    #[test]
+    fn plan_query_intersects_an_indexed_equality_with_a_range() {
+        use CompareOp::{Eq, Ge, Gt, Le, Lt};
+        let schema = planner_schema();
+        let x = || eq(2, ScanValue::Str("x".into()));
+        let f = Some(1);
+        let both = |eq, lower, upper| QueryPlan::IndexIntersect { eq, lower, upper };
+        assert_eq!(
+            plan_query(&schema, f, &[x(), u32_pred(1, Gt, 1)]),
+            both(0, Some(1), None)
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[x(), u32_pred(1, Le, 9)]),
+            both(0, None, Some(1))
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[u32_pred(1, Ge, 1), x(), u32_pred(1, Lt, 9)]),
+            both(1, Some(0), Some(2)),
+            "the equality's position and each bound's, in wire order"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[x(), u32_pred(1, Eq, 5)]),
+            both(0, Some(1), Some(1)),
+            "Eq on the range field supplies both sides"
+        );
+        assert_eq!(
+            plan_query(
+                &schema,
+                f,
+                &[eq(3, ScanValue::U32(7)), x(), u32_pred(1, Gt, 1)]
+            ),
+            both(0, Some(2), None),
+            "two eligible equalities: the first in wire order"
+        );
+        assert_eq!(
+            plan_query(&schema, None, &[x(), u32_pred(1, Gt, 1)]),
+            QueryPlan::IndexEq(0),
+            "no range field: the bucket alone"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[x(), u32_pred(3, Gt, 1)]),
+            QueryPlan::IndexEq(0),
+            "an ordering on a field that is not the range field"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[x(), u32_pred(1, CompareOp::Ne, 1)]),
+            QueryPlan::IndexEq(0),
+            "Ne on the range field is not a bound"
+        );
+        assert_eq!(
+            plan_query(&schema, f, &[eq(1, ScanValue::U32(5))]),
+            QueryPlan::IndexRange {
+                lower: Some(0),
+                upper: Some(0)
+            },
+            "Eq on the (not filter_eq) range field alone is still the one-key walk"
+        );
+    }
+
+    /// `QPI-FR-002` (ADR-0078): the ids in both lists, in the larger
+    /// list's order; either side empty is empty; duplicates in the
+    /// larger list survive as the larger list carries them.
+    #[test]
+    fn intersect_ids_keeps_the_larger_list_s_order() {
+        let id = RecordId::from_u128;
+        assert_eq!(
+            intersect_ids(vec![id(3), id(1)], vec![id(1), id(2), id(3), id(4)]),
+            vec![id(1), id(3)]
+        );
+        assert_eq!(
+            intersect_ids(vec![id(4), id(3), id(2), id(1)], vec![id(3), id(9)]),
+            vec![id(3)],
+            "the smaller list is hashed whichever side it is on"
+        );
+        assert_eq!(intersect_ids(vec![], vec![id(1)]), Vec::<RecordId>::new());
+        assert_eq!(intersect_ids(vec![id(1)], vec![]), Vec::<RecordId>::new());
+        assert_eq!(
+            intersect_ids(vec![id(1)], vec![id(1), id(1)]),
+            vec![id(1), id(1)]
+        );
+    }
+
+    /// `QPI-FR-002`/`003` (ADR-0078), acceptance criterion 2: the
+    /// intersection reads only the ids in both the bucket and the walk —
+    /// one `get` each, no scan; a walk refusal reads the bucket alone
+    /// (what `IndexEq` read before this round); a bucket refusal scans,
+    /// as `IndexEq`'s always did; and `dispatch` answers `Rows` on every
+    /// path with the identical set.
+    #[test]
+    fn query_candidates_intersection_reads_only_the_ids_in_both() {
+        use CompareOp::Gt;
+        let id = RecordId::from_u128;
+        let labradors = || Ok(vec![id(1), id(3)]);
+        let filter = [labrador(), u32_pred(1, Gt, 3)];
+        let expect_plan = QueryPlan::IndexIntersect {
+            eq: 0,
+            lower: Some(1),
+            upper: None,
+        };
+
+        let store = PlannerFixture {
+            range_field: Some(1),
+            ..PlannerFixture::with_index(labradors())
+        };
+        let plan = plan_query(&store.describe(), store.range_field(), &filter);
+        assert_eq!(plan, expect_plan);
+        let candidates = query_candidates(&store, plan, &filter);
+        assert_eq!(
+            ids_of(&candidates),
+            vec![id(3)],
+            "labradors are 1 and 3; field 1 > 3 admits 2 and 3; both: 3"
+        );
+        assert_eq!(
+            (store.gets(), store.scans()),
+            (1, 0),
+            "one get, for the one id in both"
+        );
+
+        let store = PlannerFixture {
+            range_refuses: true,
+            range_field: Some(1),
+            ..PlannerFixture::with_index(labradors())
+        };
+        let candidates = query_candidates(&store, expect_plan, &filter);
+        assert_eq!(ids_of(&candidates), vec![id(1), id(3)], "the bucket alone");
+        assert_eq!((store.gets(), store.scans()), (2, 0));
+
+        let store = PlannerFixture {
+            range_field: Some(1),
+            ..PlannerFixture::with_index(Err(ErrorCode::Unsupported))
+        };
+        // Its own plan is `IndexRange` (nothing declares field 2 refusing);
+        // hand it the intersection plan to exercise the bucket refusal.
+        let candidates = query_candidates(&store, expect_plan, &filter);
+        assert_eq!(ids_of(&candidates), ids_of(&sql_test_rows()));
+        assert_eq!((store.gets(), store.scans()), (0, 1));
+
+        for store in [
+            PlannerFixture {
+                range_field: Some(1),
+                ..PlannerFixture::with_index(labradors())
+            },
+            PlannerFixture {
+                range_refuses: true,
+                range_field: Some(1),
+                ..PlannerFixture::with_index(labradors())
+            },
+            PlannerFixture::with_index(Err(ErrorCode::Unsupported)),
+        ] {
+            match dispatch(
+                &store,
+                Request::Query {
+                    select: Selection::All,
+                    filter: filter.to_vec(),
+                    limit: None,
+                },
+            ) {
+                Response::Rows { rows } => assert_eq!(ids_of(&rows), vec![id(3)]),
+                other => panic!("expected Rows, got {other:?}"),
+            }
+        }
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's

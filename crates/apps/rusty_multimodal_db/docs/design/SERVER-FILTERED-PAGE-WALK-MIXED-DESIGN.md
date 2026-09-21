@@ -316,8 +316,10 @@ built by Claude; a fresh Codex inspection of design and code owed.
 
 ## Open questions
 
-- **Intersecting the equality index with the range** — option (b),
-  the first selectivity estimate.
+- **Intersecting the equality index with the range** — option (b).
+  *Taken: `ADR-0078` (2026-09-21) — and it needed no estimate: both
+  indexes answer ids without a decode, so the intersection is exact;
+  what stays open there is a width guard on the range's id walk.*
 - **A growing chunk** — measured only if a `LIMIT 1`-against-rare-match
   shape ever shows up in a consumer.
 - **The same walk for `Query`/`Aggregate` with `LIMIT`** — unchanged

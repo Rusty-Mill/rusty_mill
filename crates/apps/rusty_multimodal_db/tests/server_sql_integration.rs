@@ -2643,3 +2643,138 @@ fn mixed_filtered_page_walks_past_rejects_and_returns_the_exact_sequence() {
     );
     assert_eq!(ids(got), vec![id(1)]);
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0078` / `docs/design/SERVER-QUERY-PLANNER-INTERSECT-DESIGN.md`,
+// acceptance criterion 4 (`QPI-FR-003`/`004`): a `WHERE` carrying both
+// an equality on the declared index and a bound on the range field
+// answers `Query`, `COUNT(*)`, and a page ordered by the range field
+// exactly as before — the intersection changes what is read, never what
+// is returned — on `Memory` (`category` × `updated_at_unix_ms`) and
+// `Relation` (`subject` × `updated_at_unix_ms`), through runtime writes.
+// ---------------------------------------------------------------------
+
+/// `QPI-FR-004`: the intersected shapes as the exact oracle's set,
+/// count, and sequence.
+#[test]
+fn an_indexed_equality_with_a_range_returns_the_exact_set_count_and_sequence() {
+    let id = Uuid::from_u128;
+    let updated = |f: &[(String, ScanValue)]| i64_field(f, "updated_at_unix_ms");
+    let sorted = |mut rows: Vec<(Uuid, Vec<(String, ScanValue)>)>| {
+        rows.sort_by_key(|(id, _)| *id);
+        rows
+    };
+    let check = |client: &mut SchemaDrivenClient,
+                 table: &str,
+                 where_: &str,
+                 keep: Keep,
+                 pinned: Option<&[Uuid]>| {
+        let mut oracle = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+        oracle.retain(|(_, f)| keep(f));
+        let got = rows(
+            client
+                .query(&format!("SELECT * FROM {table} WHERE {where_}"))
+                .unwrap(),
+        );
+        assert_eq!(
+            sorted(got.clone()),
+            sorted(oracle.clone()),
+            "{table}: {where_}"
+        );
+        let counted = groups(
+            client
+                .query(&format!("SELECT COUNT(*) FROM {table} WHERE {where_}"))
+                .unwrap(),
+        );
+        assert_eq!(
+            counted[0],
+            vec![("COUNT(*)".to_string(), ScanValue::I64(oracle.len() as i64))],
+            "{table}: COUNT(*) WHERE {where_}"
+        );
+        let paged = rows(
+            client
+                .query(&format!(
+                    "SELECT * FROM {table} WHERE {where_} ORDER BY updated_at_unix_ms LIMIT 2"
+                ))
+                .unwrap(),
+        );
+        oracle.sort_by_key(|(id, f)| (updated(f), *id));
+        oracle.truncate(2);
+        assert_eq!(paged, oracle, "{table}: paged WHERE {where_}");
+        if let Some(pinned) = pinned {
+            let mut ids: Vec<Uuid> = got.into_iter().map(|(id, _)| id).collect();
+            ids.sort();
+            assert_eq!(ids, pinned, "{table}: {where_}");
+        }
+    };
+
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let general = |f: &[(String, ScanValue)]| str_field(f, "category") == "general";
+    check(
+        &mut client,
+        "memory",
+        "category = 'general' AND updated_at_unix_ms >= 3000",
+        &|f| general(f) && updated(f) >= 3_000,
+        Some(&[id(3), id(5)]),
+    );
+    check(
+        &mut client,
+        "memory",
+        "updated_at_unix_ms > 1000 AND category = 'general' AND updated_at_unix_ms < 5000",
+        &|f| general(f) && updated(f) > 1_000 && updated(f) < 5_000,
+        Some(&[id(3)]),
+    );
+    check(
+        &mut client,
+        "memory",
+        "category = 'general' AND updated_at_unix_ms = 1000",
+        &|f| general(f) && updated(f) == 1_000,
+        Some(&[id(1)]),
+    );
+    check(
+        &mut client,
+        "memory",
+        "category = 'decision' AND updated_at_unix_ms >= 5000",
+        &|f| str_field(f, "category") == "decision" && updated(f) >= 5_000,
+        Some(&[]),
+    );
+    check(
+        &mut client,
+        "memory",
+        "category = 'nobody' AND updated_at_unix_ms >= 1000",
+        &|f| str_field(f, "category") == "nobody" && updated(f) >= 1_000,
+        Some(&[]),
+    );
+    // Runtime writes: an insert into the bucket lands in the range, a
+    // re-key moves a record out of it, a delete removes one.
+    client
+        .insert(id(6), &memory_fields_updated_at(6, "general", 3_500))
+        .unwrap();
+    client
+        .replace(id(5), &memory_fields_updated_at(5, "general", 500))
+        .unwrap();
+    assert!(client.delete(id(3)).unwrap());
+    check(
+        &mut client,
+        "memory",
+        "category = 'general' AND updated_at_unix_ms >= 3000",
+        &|f| general(f) && updated(f) >= 3_000,
+        Some(&[id(6)]),
+    );
+
+    let mut client = SchemaDrivenClient::connect(start_relation_server()).unwrap();
+    check(
+        &mut client,
+        "relation",
+        "subject = 'ada' AND updated_at_unix_ms >= 2000",
+        &|f| str_field(f, "subject") == "ada" && updated(f) >= 2_000,
+        Some(&[id(3)]),
+    );
+    check(
+        &mut client,
+        "relation",
+        "updated_at_unix_ms <= 2000 AND subject = 'ada'",
+        &|f| str_field(f, "subject") == "ada" && updated(f) <= 2_000,
+        Some(&[id(1)]),
+    );
+}

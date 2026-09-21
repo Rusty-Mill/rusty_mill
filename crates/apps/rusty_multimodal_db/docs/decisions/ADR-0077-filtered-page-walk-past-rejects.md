@@ -113,3 +113,8 @@ The fork, held for the owner:
   — ~33×; the `since-eq` twin 1,368.8 → 1,100.4 µs,
   unchanged by construction — `RESULTS.md`. The fork above remains the
   owner's at review; (a) is what merges if the PR merges unchanged.
+- 2026-09-21: option (b) taken the same day as `ADR-0078`
+  (`docs/design/SERVER-QUERY-PLANNER-INTERSECT-DESIGN.md`), which
+  found no estimate was needed: both indexes answer ids without a
+  decode, so the intersection is exact. `bounded_walk_applies` now
+  also stands aside for the intersection plan.
