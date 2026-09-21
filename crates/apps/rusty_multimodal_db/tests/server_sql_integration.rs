@@ -2440,3 +2440,206 @@ fn since_shaped_filtered_page_walks_the_index_and_returns_the_exact_sequence() {
     );
     assert_eq!(got, oracle, "a mixed filter through the default");
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0077` / `docs/design/SERVER-FILTERED-PAGE-WALK-MIXED-DESIGN.md`,
+// acceptance criterion 4 (`FPM-FR-004`/`005`): a page ordered by
+// `updated_at_unix_ms` whose `WHERE` mixes bounds on that field with
+// predicates on other, unindexed fields (or `!=` on it) walks the
+// `Ordered` index past the rejects and returns exactly the sorted
+// oracle's sequence; an equality on the declared index still answers
+// exactly, through the default's bucket.
+// ---------------------------------------------------------------------
+
+/// The oracle for `SELECT * FROM {table} WHERE {where} ORDER BY
+/// updated_at_unix_ms [LIMIT n]`: every row, kept by `keep`, sorted by
+/// `(updated_at, id)`, truncated.
+fn mixed_page_oracle(
+    client: &mut SchemaDrivenClient,
+    table: &str,
+    keep: impl Fn(&[(String, ScanValue)]) -> bool,
+    limit: Option<usize>,
+) -> Vec<(Uuid, Vec<(String, ScanValue)>)> {
+    let mut oracle = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+    oracle.retain(|(_, f)| keep(f));
+    oracle.sort_by_key(|(id, f)| (i64_field(f, "updated_at_unix_ms"), *id));
+    if let Some(n) = limit {
+        oracle.truncate(n);
+    }
+    oracle
+}
+
+/// A row-level predicate the oracle keeps rows by.
+type Keep<'a> = &'a dyn Fn(&[(String, ScanValue)]) -> bool;
+
+fn str_field(fields: &[(String, ScanValue)], name: &str) -> String {
+    match fields.iter().find(|(n, _)| n == name) {
+        Some((_, ScanValue::Str(s))) => s.clone(),
+        other => panic!("{name}: expected a Str field, got {other:?}"),
+    }
+}
+
+/// `FPM-FR-004`: on `Memory` (`content` unique per record, `source`
+/// shared by every record, neither indexed) and `Relation` (`object`
+/// unindexed, `subject` the declared index), with and without `LIMIT`,
+/// then after runtime `Insert`, re-keying `Replace`, and `Delete`;
+/// `FPM-FR-005`: an equality on the declared index, still exact.
+#[test]
+fn mixed_filtered_page_walks_past_rejects_and_returns_the_exact_sequence() {
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let id = Uuid::from_u128;
+    let ids = |rows: Vec<(Uuid, Vec<(String, ScanValue)>)>| {
+        rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+    };
+    let check = |client: &mut SchemaDrivenClient,
+                 where_: &str,
+                 keep: Keep,
+                 limit: Option<usize>| {
+        let want = mixed_page_oracle(client, "memory", keep, limit);
+        let sql = match limit {
+            Some(n) => {
+                format!("SELECT * FROM memory WHERE {where_} ORDER BY updated_at_unix_ms LIMIT {n}")
+            }
+            None => format!("SELECT * FROM memory WHERE {where_} ORDER BY updated_at_unix_ms"),
+        };
+        let got = rows(client.query(&sql).unwrap());
+        assert_eq!(got, want, "memory: {where_} LIMIT {limit:?}");
+        ids(got)
+    };
+    let updated = |f: &[(String, ScanValue)]| i64_field(f, "updated_at_unix_ms");
+    let content = |f: &[(String, ScanValue)]| str_field(f, "content");
+    let source = |f: &[(String, ScanValue)]| str_field(f, "source");
+
+    for limit in [None, Some(1), Some(2), Some(10)] {
+        // Every record's `source` is "manual": rejects nothing, walks on.
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND source = 'manual'",
+            &|f| updated(f) > 1_000 && source(f) == "manual",
+            limit,
+        );
+        // Rejects everything: an empty page after the whole walk.
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND source != 'manual'",
+            &|f| updated(f) > 1_000 && source(f) != "manual",
+            limit,
+        );
+        // Walks past 2 and 3 to 4, then 5 is rejected and the index ends.
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND content = 'memory 4'",
+            &|f| updated(f) > 1_000 && content(f) == "memory 4",
+            limit,
+        );
+        // `!=` on the walked field is a reject, not a cut.
+        check(
+            &mut client,
+            "updated_at_unix_ms != 3000",
+            &|f| updated(f) != 3_000,
+            limit,
+        );
+        check(
+            &mut client,
+            "updated_at_unix_ms >= 2000 AND updated_at_unix_ms != 3000 AND content != 'memory 5'",
+            &|f| updated(f) >= 2_000 && updated(f) != 3_000 && content(f) != "memory 5",
+            limit,
+        );
+        // `FPM-FR-005`: the declared `category` index, equality-first.
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND category = 'general'",
+            &|f| updated(f) > 1_000 && str_field(f, "category") == "general",
+            limit,
+        );
+    }
+    assert_eq!(
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND content = 'memory 4'",
+            &|f| updated(f) > 1_000 && content(f) == "memory 4",
+            Some(2),
+        ),
+        vec![id(4)]
+    );
+    assert_eq!(
+        check(
+            &mut client,
+            "updated_at_unix_ms != 3000",
+            &|f| updated(f) != 3_000,
+            Some(3),
+        ),
+        vec![id(1), id(2), id(4)]
+    );
+
+    // Runtime writes: an insert the rejects admit lands by its stamp, a
+    // re-keyed record moves, a deleted one is walked past.
+    client
+        .insert(id(6), &memory_fields_updated_at(6, "general", 2_500))
+        .unwrap();
+    assert_eq!(
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND source = 'manual' AND content != 'memory 3'",
+            &|f| updated(f) > 1_000 && source(f) == "manual" && content(f) != "memory 3",
+            Some(3),
+        ),
+        vec![id(2), id(6), id(4)]
+    );
+    client
+        .replace(id(2), &memory_fields_updated_at(2, "general", 9_000))
+        .unwrap();
+    assert!(client.delete(id(3)).unwrap());
+    assert_eq!(
+        check(
+            &mut client,
+            "updated_at_unix_ms > 1000 AND content != 'memory 4'",
+            &|f| updated(f) > 1_000 && content(f) != "memory 4",
+            None,
+        ),
+        vec![id(6), id(5), id(2)]
+    );
+
+    // `Relation`: `object` is unindexed (a reject), `subject` the
+    // declared index (equality-first, the default's bucket).
+    let mut client = SchemaDrivenClient::connect(start_relation_server()).unwrap();
+    for (where_, keep) in [
+        (
+            "updated_at_unix_ms >= 1000 AND object = 'adr-0046'",
+            &(|f: &[(String, ScanValue)]| {
+                updated(f) >= 1_000 && str_field(f, "object") == "adr-0046"
+            }) as Keep,
+        ),
+        (
+            "updated_at_unix_ms < 3000 AND object != 'adr-0046'",
+            &|f: &[(String, ScanValue)]| updated(f) < 3_000 && str_field(f, "object") != "adr-0046",
+        ),
+        (
+            "updated_at_unix_ms >= 1000 AND subject = 'ada'",
+            &|f: &[(String, ScanValue)]| updated(f) >= 1_000 && str_field(f, "subject") == "ada",
+        ),
+    ] {
+        for limit in [None, Some(1), Some(5)] {
+            let want = mixed_page_oracle(&mut client, "relation", keep, limit);
+            let sql = match limit {
+                Some(n) => format!(
+                    "SELECT * FROM relation WHERE {where_} ORDER BY updated_at_unix_ms LIMIT {n}"
+                ),
+                None => {
+                    format!("SELECT * FROM relation WHERE {where_} ORDER BY updated_at_unix_ms")
+                }
+            };
+            let got = rows(client.query(&sql).unwrap());
+            assert_eq!(got, want, "relation: {where_} LIMIT {limit:?}");
+        }
+    }
+    let got = rows(
+        client
+            .query(
+                "SELECT * FROM relation WHERE updated_at_unix_ms >= 1000 AND object = 'adr-0046' \
+                 ORDER BY updated_at_unix_ms LIMIT 1",
+            )
+            .unwrap(),
+    );
+    assert_eq!(ids(got), vec![id(1)]);
+}

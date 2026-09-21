@@ -868,11 +868,14 @@ impl ConnectionStore for MemoryConnectionStore {
             .collect()
     }
 
-    /// `FPW-FR-001`–`003` (ADR-0076): a page ordered by
-    /// `updated_at_unix_ms` whose filter is only bounds on that field is
-    /// the bounded walk of the stack's sorted index — the cost of the
-    /// page, however many records the bounds admit (`Page`'s own
-    /// consistency class); every other shape is the trait default's body.
+    /// `FPW-FR-001`–`003` (ADR-0076), `FPM-FR-001`–`003` (ADR-0077): a
+    /// page ordered by `updated_at_unix_ms` is the bounded walk of the
+    /// stack's sorted index — bounds on that field start and cut it,
+    /// every other predicate is passed over until the page fills — the
+    /// cost of the page for bounds alone, the page divided by the
+    /// rejects' selectivity otherwise (`Page`'s own consistency class);
+    /// a filter that plans the declared `category` index is the trait
+    /// default's body, bucket first.
     fn filtered_page(
         &self,
         order_by: FieldRef,
@@ -880,7 +883,7 @@ impl ConnectionStore for MemoryConnectionStore {
         limit: usize,
         filter: &[Predicate],
     ) -> Result<Vec<PageRow>, ErrorCode> {
-        if !bounded_walk_applies(order_by, self.range_field(), filter) {
+        if !bounded_walk_applies(order_by, self.range_field(), &self.describe(), filter) {
             return Ok(filtered_page_by_candidates(
                 self, order_by, after, limit, filter,
             ));
@@ -888,6 +891,7 @@ impl ConnectionStore for MemoryConnectionStore {
         bounded_filtered_page(
             self,
             |start, limit| self.store.page_by::<Memory, UpdatedAtOrder>(start, limit),
+            order_by,
             after,
             limit,
             filter,
@@ -1586,15 +1590,17 @@ mod tests {
         MemoryConnectionStore::fields_of(memory(n, "decision", false))
     }
 
-    /// `FPW-FR-004`/`FPW-FR-005` (ADR-0076), acceptance criterion 3: for
-    /// every eligible shape — each comparator, two-sided, `=`, a client
-    /// cursor combined with a lower bound in both orders, a cursor past
-    /// every row, an empty filter, every `limit` relation to the match
-    /// count, an inverted range, `i64::MIN`/`MAX` literals — the
-    /// override returns the identical sequence
+    /// `FPW-FR-004`/`FPW-FR-005` (ADR-0076) and `FPM-FR-004` (ADR-0077),
+    /// acceptance criterion 3: for every eligible shape — each
+    /// comparator, two-sided, `=`, a client cursor combined with a lower
+    /// bound in both orders, a cursor past every row, an empty filter,
+    /// every `limit` relation to the match count, an inverted range,
+    /// `i64::MIN`/`MAX` literals, and (since ADR-0077) `Ne` on the walked
+    /// field and predicates on an unindexed second field the walk must
+    /// pass rejects for — the override returns the identical sequence
     /// [`filtered_page_by_candidates`] (the trait default's own body)
-    /// returns; and every ineligible shape (`Ne`, a second field,
-    /// another `order_by`) too, because it *is* the default there.
+    /// returns; and every ineligible shape (an equality on the declared
+    /// index, another `order_by`) too, because it *is* the default there.
     #[test]
     fn filtered_page_bounded_walk_returns_the_default_body_s_exact_sequence() {
         use crate::server::protocol::{CompareOp, Predicate};
@@ -1649,8 +1655,54 @@ mod tests {
             (FIELD_UPDATED_AT, cursor(2_000, 3), 1, vec![i(Le, 4_000)]),
             (FIELD_UPDATED_AT, cursor(9_000, 1), 10, vec![i(Ge, 1_000)]),
             (FIELD_UPDATED_AT, cursor(2_000, 2), 10, vec![i(Eq, 2_000)]),
-            // Ineligible: the default, through the override.
+            // `FPM-FR-002`/`003` (ADR-0077): rejects the walk passes —
+            // `Ne` on the walked field, a predicate on an unindexed
+            // field (every record's `source` is "manual"; `content` is
+            // unique per record), with and without a cursor, a page the
+            // rejects leave short or empty.
             (FIELD_UPDATED_AT, None, 10, vec![i(Ne, 2_000)]),
+            (
+                FIELD_UPDATED_AT,
+                None,
+                1,
+                vec![i(Ge, 1_000), i(Ne, 1_000), i(Ne, 2_000)],
+            ),
+            (
+                FIELD_UPDATED_AT,
+                None,
+                2,
+                vec![
+                    i(Gt, 1_000),
+                    p(FIELD_CONTENT, Eq, ScanValue::Str("memory 4".into())),
+                ],
+            ),
+            (
+                FIELD_UPDATED_AT,
+                None,
+                3,
+                vec![
+                    i(Le, 4_000),
+                    p(FIELD_CONTENT, Ne, ScanValue::Str("memory 2".into())),
+                ],
+            ),
+            (
+                FIELD_UPDATED_AT,
+                cursor(2_000, 2),
+                2,
+                vec![p(FIELD_SOURCE, Ne, ScanValue::Str("manual".into()))],
+            ),
+            (
+                FIELD_UPDATED_AT,
+                cursor(2_000, 2),
+                2,
+                vec![
+                    i(Lt, 5_000),
+                    p(FIELD_SOURCE, Eq, ScanValue::Str("manual".into())),
+                ],
+            ),
+            // Ineligible: the default, through the override — an
+            // equality on the declared `category` index (equality-first,
+            // `FPM-FR-001`), another `order_by`.
             (
                 FIELD_UPDATED_AT,
                 None,
@@ -1697,6 +1749,28 @@ mod tests {
                 .unwrap()),
             Vec::<Uuid>::new(),
             "inverted: empty, no error"
+        );
+        assert_eq!(
+            ids(adapter
+                .filtered_page(FIELD_UPDATED_AT, None, 10, &[i(Ne, 2_000)])
+                .unwrap()),
+            vec![id(1), id(4), id(5)],
+            "`Ne` on the walked field: the three at other stamps, walked past 2, 3, 6"
+        );
+        assert_eq!(
+            ids(adapter
+                .filtered_page(
+                    FIELD_UPDATED_AT,
+                    None,
+                    2,
+                    &[
+                        i(Gt, 1_000),
+                        p(FIELD_CONTENT, Eq, ScanValue::Str("memory 4".into())),
+                    ],
+                )
+                .unwrap()),
+            vec![id(4)],
+            "walked past 2, 3, 6 (rejected) to 4; 5 rejected; the index ends"
         );
     }
 
