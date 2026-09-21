@@ -348,6 +348,25 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `QPB-FR-002` (ADR-0079): [`Self::range_ids`] with a budget — the
+    /// whole range if it holds at most `limit` ids, `Ok(None)` if it
+    /// holds more (the walk abandoned at the first id past the budget),
+    /// the same errors as `range_ids`. What the intersection plan
+    /// (`QPI-FR-002`) walks with, so a range far wider than the
+    /// equality bucket costs at most the budget in id-level work and
+    /// then yields to the bucket alone. The default answers
+    /// `Unsupported`, as `range_ids`'s does; `Memory` and `Relation`
+    /// implement it.
+    fn range_ids_limited(
+        &self,
+        _field: FieldRef,
+        _lower: Bound<ScanValue>,
+        _upper: Bound<ScanValue>,
+        _limit: usize,
+    ) -> Result<Option<Vec<RecordId>>, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `FPG-FR-003`/`FPG-FR-004` (ADR-0068, protocol 26): one ordered
     /// keyset page over only the rows every predicate in `filter`
     /// matches — [`Self::page`]'s own contract plus a `WHERE`-shaped
@@ -1050,14 +1069,17 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
     filter: &[Predicate],
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
     let bucket = |i: usize| store.filter_eq(filter[i].field, &filter[i].value);
-    let walk = |lower: Option<usize>, upper: Option<usize>| {
-        // `plan_query` never builds a range with neither side; a refusal
-        // is the honest answer if one ever appears, and the caller scans.
-        let Some(i) = lower.or(upper) else {
-            return Err(ErrorCode::Unsupported);
-        };
-        let (lower, upper) = range_bounds(filter, lower, upper);
-        store.range_ids(filter[i].field, lower, upper)
+    // `plan_query` never builds a range with neither side; a refusal is
+    // the honest answer if one ever appears, and the caller scans.
+    let bounds = |lower: Option<usize>, upper: Option<usize>| {
+        lower
+            .or(upper)
+            .map(|i| (filter[i].field, range_bounds(filter, lower, upper)))
+            .ok_or(ErrorCode::Unsupported)
+    };
+    let walk = |lower, upper| {
+        let (field, (lower, upper)) = bounds(lower, upper)?;
+        store.range_ids(field, lower, upper)
     };
     let ids = match plan {
         QueryPlan::FullScan => return store.scan_all(),
@@ -1065,14 +1087,27 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
         QueryPlan::IndexRange { lower, upper } => walk(lower, upper),
         // `QPI-FR-002` (ADR-0078): both id lists, no record read for
         // either, intersected — the smaller hashed, the larger filtered,
-        // so the order is the larger list's. A walk refusal degrades to
-        // the bucket alone (what `IndexEq` read before this round); a
+        // so the order is the larger list's. Since `QPB-FR-003`
+        // (ADR-0079) the walk carries a budget of `INTERSECT_WALK_BUDGET`
+        // ids per bucket id: a range wider than that is abandoned at the
+        // first id past it and the bucket alone is read — the worst case
+        // is the bucket's cost plus a bounded id walk, not an unbounded
+        // one. An empty bucket walks nothing. A walk refusal degrades to
+        // the bucket alone (what `IndexEq` read before ADR-0078); a
         // bucket refusal to the scan, as `IndexEq`'s always did.
-        QueryPlan::IndexIntersect { eq, lower, upper } => match (bucket(eq), walk(lower, upper)) {
-            (Ok(bucket), Ok(walked)) => Ok(intersect_ids(bucket, walked)),
-            (Ok(bucket), Err(_)) => Ok(bucket),
-            (Err(code), _) => Err(code),
-        },
+        QueryPlan::IndexIntersect { eq, lower, upper } => bucket(eq).map(|bucket| {
+            if bucket.is_empty() {
+                return bucket;
+            }
+            let budget = bucket.len().saturating_mul(INTERSECT_WALK_BUDGET);
+            let walked = bounds(lower, upper).and_then(|(field, (lower, upper))| {
+                store.range_ids_limited(field, lower, upper, budget)
+            });
+            match walked {
+                Ok(Some(walked)) => intersect_ids(bucket, walked),
+                Ok(None) | Err(_) => bucket,
+            }
+        }),
     };
     match ids {
         Ok(ids) => ids
@@ -1082,6 +1117,20 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
         Err(_) => store.scan_all(),
     }
 }
+
+/// `QPB-FR-003` (ADR-0079): how many range-walk ids the intersection
+/// plan may visit per equality-bucket id before giving the walk up and
+/// reading the bucket alone. Set from this crate's own measurement
+/// (`RESULTS.md`, step four): a record decode costs ~1 µs on the
+/// planner table, a `BTreeSet` id visit plus a hash lookup ~40 ns, so
+/// the intersection stops paying for itself once the range holds
+/// roughly twenty-five ids per bucket id; ten keeps the abandoned
+/// walk's cost under half of one bucket read, so the worst case for a
+/// filter carrying both indexes is ~1.4× the bucket alone, never the
+/// range's whole id list. A constant, not a setting — named as this
+/// crate's first cost ratio, and the one number a future cost model
+/// would replace.
+pub const INTERSECT_WALK_BUDGET: usize = 10;
 
 /// `QPI-FR-002` (ADR-0078): the ids in both lists, in the larger list's
 /// order — the smaller list is hashed, the larger walked once. Exact:
@@ -5009,8 +5058,12 @@ mod tests {
         /// declaring it (the contract-mismatch fallback case).
         range_field: Option<FieldRef>,
         range_refuses: bool,
+        /// `QPB-FR-003`: answer every budgeted walk "over budget" — the
+        /// three-row fixture can never exceed a real budget on its own.
+        range_over_budget: bool,
         gets: std::sync::atomic::AtomicUsize,
         scans: std::sync::atomic::AtomicUsize,
+        limited_walks: std::sync::atomic::AtomicUsize,
     }
 
     impl PlannerFixture {
@@ -5019,9 +5072,15 @@ mod tests {
                 index,
                 range_field: None,
                 range_refuses: false,
+                range_over_budget: false,
                 gets: Default::default(),
                 scans: Default::default(),
+                limited_walks: Default::default(),
             }
+        }
+        fn limited_walks(&self) -> usize {
+            self.limited_walks
+                .load(std::sync::atomic::Ordering::Relaxed)
         }
         /// An equality index that refuses and an exact sorted index over
         /// `field` (`Ordered`'s shape: every row's `(value, id)`, walked
@@ -5101,6 +5160,20 @@ mod tests {
                 .collect();
             keyed.sort();
             Ok(keyed.into_iter().map(|(_, id)| id).collect())
+        }
+        /// `QPB-FR-002`: the same walk, `None` past `limit` ids; counted,
+        /// so a test can assert the budget was (or was not) consulted.
+        fn range_ids_limited(
+            &self,
+            field: FieldRef,
+            lower: Bound<ScanValue>,
+            upper: Bound<ScanValue>,
+            limit: usize,
+        ) -> Result<Option<Vec<RecordId>>, ErrorCode> {
+            self.limited_walks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let ids = self.range_ids(field, lower, upper)?;
+            Ok((!self.range_over_budget && ids.len() <= limit).then_some(ids))
         }
         fn scan_field(&self, _field: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
             Err(ErrorCode::Unsupported)
@@ -5679,6 +5752,79 @@ mod tests {
             },
             PlannerFixture::with_index(Err(ErrorCode::Unsupported)),
         ] {
+            match dispatch(
+                &store,
+                Request::Query {
+                    select: Selection::All,
+                    filter: filter.to_vec(),
+                    limit: None,
+                },
+            ) {
+                Response::Rows { rows } => assert_eq!(ids_of(&rows), vec![id(3)]),
+                other => panic!("expected Rows, got {other:?}"),
+            }
+        }
+    }
+
+    /// `QPB-FR-003` (ADR-0079), acceptance criterion 2: the intersection
+    /// walks with a budget of `INTERSECT_WALK_BUDGET` ids per bucket id
+    /// — within it, the intersection; past it, the bucket alone with no
+    /// id materialized; an empty bucket walks nothing at all; and
+    /// `dispatch` answers the identical rows either way.
+    #[test]
+    fn query_candidates_intersection_yields_to_the_bucket_past_the_walk_budget() {
+        use CompareOp::Gt;
+        let id = RecordId::from_u128;
+        let filter = [labrador(), u32_pred(1, Gt, 3)];
+        let plan = QueryPlan::IndexIntersect {
+            eq: 0,
+            lower: Some(1),
+            upper: None,
+        };
+
+        // Within budget: two bucket ids allow twenty walked; three exist.
+        let store = PlannerFixture {
+            range_field: Some(1),
+            ..PlannerFixture::with_index(Ok(vec![id(1), id(3)]))
+        };
+        assert_eq!(
+            ids_of(&query_candidates(&store, plan, &filter)),
+            vec![id(3)]
+        );
+        assert_eq!((store.gets(), store.limited_walks()), (1, 1));
+
+        // Past it: the bucket alone, every bucket id read.
+        let store = PlannerFixture {
+            range_field: Some(1),
+            range_over_budget: true,
+            ..PlannerFixture::with_index(Ok(vec![id(1), id(3)]))
+        };
+        assert_eq!(
+            ids_of(&query_candidates(&store, plan, &filter)),
+            vec![id(1), id(3)]
+        );
+        assert_eq!(
+            (store.gets(), store.scans(), store.limited_walks()),
+            (2, 0, 1)
+        );
+
+        // An empty bucket: nothing walked, nothing read.
+        let store = PlannerFixture {
+            range_field: Some(1),
+            ..PlannerFixture::with_index(Ok(vec![]))
+        };
+        assert!(query_candidates(&store, plan, &filter).is_empty());
+        assert_eq!(
+            (store.gets(), store.scans(), store.limited_walks()),
+            (0, 0, 0)
+        );
+
+        for over_budget in [false, true] {
+            let store = PlannerFixture {
+                range_field: Some(1),
+                range_over_budget: over_budget,
+                ..PlannerFixture::with_index(Ok(vec![id(1), id(3)]))
+            };
             match dispatch(
                 &store,
                 Request::Query {

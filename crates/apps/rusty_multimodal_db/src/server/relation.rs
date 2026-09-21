@@ -782,6 +782,24 @@ impl ConnectionStore for RelationConnectionStore {
             .range_by::<Relation, UpdatedAtField>(lower, upper))
     }
 
+    /// `QPB-FR-002` (ADR-0079): see `MemoryConnectionStore::
+    /// range_ids_limited`; identical here over `UpdatedAtField`.
+    fn range_ids_limited(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+        limit: usize,
+    ) -> Result<Option<Vec<RecordId>>, ErrorCode> {
+        if field != FIELD_UPDATED_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self
+            .store
+            .range_by_limited::<Relation, UpdatedAtField>(lower, upper, limit))
+    }
+
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
         match (field, value) {
             (FIELD_SUBJECT, ScanValue::Str(subject)) => {

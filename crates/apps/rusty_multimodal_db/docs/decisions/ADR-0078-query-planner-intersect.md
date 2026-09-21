@@ -102,3 +102,8 @@ The fork, held for the owner:
   `fpage-50` 1,270.7 → 5,030.0 — `RESULTS.md`. The fork above
   remains the owner's at review; (a) is what merges if the PR merges
   unchanged.
+- 2026-09-21: option (b) taken the same day as `ADR-0079`
+  (`docs/design/SERVER-QUERY-PLANNER-INTERSECT-BUDGET-DESIGN.md`) —
+  read as a *budget* on the walk rather than an estimate of the range:
+  the walk is abandoned at the first id past ten per bucket id, so the
+  worst case above is bounded without a count or a size threshold.

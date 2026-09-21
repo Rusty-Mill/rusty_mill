@@ -692,6 +692,44 @@ mod tests {
     /// pair bound), the id as the tie-break within one key, unbounded on
     /// either side — and an inverted range, or the equal-and-both-
     /// excluded pair `BTreeSet::range` panics on, is empty, not a panic.
+    /// `QPB-FR-001` (ADR-0079): `range_by_limited` is `range_by` while the
+    /// range fits the budget — exactly at it included — and `None` past
+    /// it; an inverted range is `Some(empty)`, never a panic.
+    #[test]
+    fn range_by_limited_answers_the_whole_range_within_the_budget_and_none_past_it() {
+        use crate::generic::query::RangeBy;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let dir = fresh_temp_dir("memory_range_by_limited").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128;
+        let (min, max) = (Uuid::nil(), Uuid::max());
+        let seeded = (1..=5).map(|n| memory(n, "general", false)).collect();
+        let store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        // key >= 2_000: four ids.
+        let lower = || Included((2_000, min));
+        assert_eq!(
+            store.range_by_limited(lower(), Unbounded, 4),
+            Some(vec![id(2), id(3), id(4), id(5)]),
+            "exactly the budget"
+        );
+        assert_eq!(
+            store.range_by_limited(lower(), Unbounded, 10),
+            Some(vec![id(2), id(3), id(4), id(5)])
+        );
+        assert_eq!(store.range_by_limited(lower(), Unbounded, 3), None);
+        assert_eq!(store.range_by_limited(lower(), Unbounded, 0), None);
+        assert_eq!(
+            store.range_by_limited(Excluded((9_000, max)), Unbounded, 0),
+            Some(vec![]),
+            "an empty range fits any budget"
+        );
+        assert_eq!(
+            store.range_by_limited(Included((4_000, min)), Excluded((2_000, min)), 10),
+            Some(vec![]),
+            "inverted: empty, no panic"
+        );
+    }
+
     #[test]
     fn range_by_updated_at_walks_the_sorted_index_between_two_bounds() {
         use crate::generic::query::RangeBy;

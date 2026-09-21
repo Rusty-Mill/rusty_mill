@@ -922,6 +922,24 @@ impl ConnectionStore for MemoryConnectionStore {
         Ok(self.store.range_by::<Memory, UpdatedAtOrder>(lower, upper))
     }
 
+    /// `QPB-FR-002` (ADR-0079): [`Self::range_ids`] with a budget — the
+    /// stack's `range_by_limited`, `None` past `limit` ids.
+    fn range_ids_limited(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+        limit: usize,
+    ) -> Result<Option<Vec<RecordId>>, ErrorCode> {
+        if field != FIELD_UPDATED_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self
+            .store
+            .range_by_limited::<Memory, UpdatedAtOrder>(lower, upper, limit))
+    }
+
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
         match (field, value) {
             (FIELD_CATEGORY, ScanValue::Str(category)) => {
@@ -1771,6 +1789,38 @@ mod tests {
                 .unwrap()),
             vec![id(4)],
             "walked past 2, 3, 6 (rejected) to 4; 5 rejected; the index ends"
+        );
+    }
+
+    /// `QPB-FR-002` (ADR-0079): the adapter's budgeted walk — the whole
+    /// range within the budget, `None` past it, `Unsupported` for any
+    /// field but `updated_at_unix_ms`, `Malformed` for a non-`I64` bound.
+    #[test]
+    fn range_ids_limited_walks_within_the_budget_and_yields_past_it() {
+        let adapter = sample_adapter();
+        let id = Uuid::from_u128;
+        let lower = || Bound::Included(ScanValue::I64(1_000));
+        assert_eq!(
+            adapter.range_ids_limited(FIELD_UPDATED_AT, lower(), Bound::Unbounded, 3),
+            Ok(Some(vec![id(1), id(2), id(3)])),
+            "exactly the budget"
+        );
+        assert_eq!(
+            adapter.range_ids_limited(FIELD_UPDATED_AT, lower(), Bound::Unbounded, 2),
+            Ok(None)
+        );
+        assert_eq!(
+            adapter.range_ids_limited(FIELD_CREATED_AT, lower(), Bound::Unbounded, 9),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            adapter.range_ids_limited(
+                FIELD_UPDATED_AT,
+                Bound::Included(ScanValue::Str("x".into())),
+                Bound::Unbounded,
+                9
+            ),
+            Err(ErrorCode::Malformed)
         );
     }
 
