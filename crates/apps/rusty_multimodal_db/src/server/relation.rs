@@ -802,6 +802,24 @@ impl ConnectionStore for RelationConnectionStore {
             .range_count::<Relation, UpdatedAtField>(lower, upper) as u64)
     }
 
+    /// `QKW-FR-002` (ADR-0082): the `field_updated_at` keys a `WHERE`
+    /// range admits, ascending — the sorted index's own keys between
+    /// the bounds, no record read.
+    fn range_keys(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<Vec<i64>, ErrorCode> {
+        if field != FIELD_UPDATED_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self
+            .store
+            .range_keys::<Relation, UpdatedAtField>(lower, upper))
+    }
+
     fn range_ids_limited(
         &self,
         field: FieldRef,

@@ -1670,6 +1670,36 @@ other row is unchanged: `Query`/`FilteredPage` still decode what they
 return, and the `since-eq`/`eq-range` counts carry an equality and so
 still decode (an equality bucket is never trusted as a count).
 
+## Query planner step seven — aggregates over the walked key (`ADR-0082`, `SERVER-001` v0.67.0 / FR-079)
+
+`docs/design/SERVER-QUERY-PLANNER-KEYED-WALK-DESIGN.md`'s acceptance
+criterion 5, measured by two new `reminder-due` rows in
+`benches/server.rs` — the same 100,000-record `Reminder` table — added
+and run on the pre-change code (`main` after PR #281, `ADR-0081`)
+**first**, then again with this round's reductions. `due-next` is the
+consumer's "next due": `MIN(due_at_unix_ms) WHERE due_at_unix_ms >
+50000`, a bound admitting ~50,000 records; `due-mean` is
+`AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000`, the other half.
+Before, `Aggregate` decoded every candidate the walk named and reduced
+the rows; after, the walk yields the keys and the reduction runs over
+them. An idle 4-core Linux container, 2026-09-21.
+
+| Round | Plan | Request | Returned | µs per request |
+|---|---|---|---|---|
+| Before (`ADR-0081`) | `IndexRange` walk, every id decoded, `MIN` over rows | `MIN(due_at_unix_ms) WHERE due_at_unix_ms > 50000` | 1 group | **26,800.6** |
+| | `IndexRange` walk, every id decoded, `AVG` over rows | `AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000` | 1 group | **30,822.6** |
+| After (`ADR-0082`) | `range_keys` — the walked keys, no decode | `MIN(due_at_unix_ms) WHERE due_at_unix_ms > 50000` | 1 group | **624.7** |
+| | `range_keys` | `AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000` | 1 group | **679.5** |
+
+**Read it as**: both reductions fall ~45×: the walk over ~50,000
+pairs, an `i64` per pair, and one fold replace 50,000 decodes. The
+remaining ~600–700 µs is the walk itself plus the `Vec<i64>` it fills
+(400 KB for 50,000 keys) and the round trip — noticeably more than the
+`due-count` row's 290 µs, which counts the same pairs without keeping
+them; a fold that never materializes the keys would close that gap and
+is the obvious refinement if a consumer ever aggregates a wide range in
+anger. Every other row is unchanged.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

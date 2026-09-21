@@ -594,6 +594,39 @@ fn bench_reminder_due() {
                 limit: None,
             },
         ),
+        // `ADR-0082`: aggregates over the walked key — the next due
+        // stamp and the mean due stamp, each a pure range on the
+        // ordered field, no other predicate.
+        (
+            "due-next",
+            "MIN(due_at_unix_ms) WHERE due_at_unix_ms > 50000",
+            Request::Aggregate {
+                group_by: vec![],
+                filter: vec![Predicate {
+                    field: FIELD_DUE_AT,
+                    op: CompareOp::Gt,
+                    value: ScanValue::I64(50_000),
+                }],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Min,
+                    field: Some(FIELD_DUE_AT),
+                }],
+                limit: None,
+            },
+        ),
+        (
+            "due-mean",
+            "AVG(due_at_unix_ms) WHERE due_at_unix_ms <= 50000",
+            Request::Aggregate {
+                group_by: vec![],
+                filter: vec![due_before(50_000)],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Avg,
+                    field: Some(FIELD_DUE_AT),
+                }],
+                limit: None,
+            },
+        ),
         (
             "due-window",
             "Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending",

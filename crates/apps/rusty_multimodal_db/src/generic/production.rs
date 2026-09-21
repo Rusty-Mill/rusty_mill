@@ -580,6 +580,28 @@ impl<S> GenericProductionStore<S> {
             .range_count(lower, upper)
     }
 
+    /// The keys in one key range of `R`'s `Marker` field, ascending
+    /// (`QKW-FR-001`, ADR-0082) — the walk yielding keys, under the read
+    /// lock, no record read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn range_keys<R, Marker>(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> Vec<R::Key>
+    where
+        R: OrderedField<Marker>,
+        S: RangeBy<R, Marker>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .range_keys(lower, upper)
+    }
+
     /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one
     /// read under the lock, `None` for an unknown label.
     ///

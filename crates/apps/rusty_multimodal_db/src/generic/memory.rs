@@ -730,6 +730,33 @@ mod tests {
         );
     }
 
+    /// `QKW-FR-001` (ADR-0082): `range_keys` is the walk's keys, ascending,
+    /// bounds and inversion included; empty over an empty range.
+    #[test]
+    fn range_keys_are_the_range_s_keys_in_order() {
+        use crate::generic::query::RangeBy;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let dir = fresh_temp_dir("memory_range_keys").unwrap();
+        let path = dir.join("memories.mmap");
+        let (min, max) = (Uuid::nil(), Uuid::max());
+        let mut seeded: Vec<Memory> = (1..=5).map(|n| memory(n, "general", false)).collect();
+        seeded[2].updated_at_unix_ms = 2_000;
+        let store = create_memory_production_stack(seeded, &[], &path).unwrap();
+        assert_eq!(
+            store.range_keys(Unbounded, Unbounded),
+            vec![1_000, 2_000, 2_000, 4_000, 5_000]
+        );
+        assert_eq!(
+            store.range_keys(Excluded((2_000, max)), Included((4_000, max))),
+            vec![4_000]
+        );
+        assert_eq!(
+            store.range_keys(Included((4_000, min)), Excluded((2_000, min))),
+            Vec::<i64>::new(),
+            "inverted"
+        );
+    }
+
     /// `QCW-FR-001` (ADR-0081): `range_count` is `range_by`'s length,
     /// bounds and inversion included.
     #[test]

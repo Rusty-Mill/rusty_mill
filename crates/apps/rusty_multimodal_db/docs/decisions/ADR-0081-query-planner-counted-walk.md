@@ -87,3 +87,5 @@ The fork, held for the owner:
   `memory-planner` `index-range` `count(*)` 976.6 → 105.4 —
   `RESULTS.md`. The fork above remains the owner's at review; (a) is
   what merges if the PR merges unchanged.
+- 2026-09-21: option (b) taken the same day as `ADR-0082`, widened to
+  the four reductions of the range field over the walked keys.

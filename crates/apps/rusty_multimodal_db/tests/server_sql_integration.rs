@@ -3048,3 +3048,131 @@ fn a_pure_range_count_from_the_index_matches_the_decoded_count_exactly() {
         2
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0082` / `docs/design/SERVER-QUERY-PLANNER-KEYED-WALK-DESIGN.md`,
+// acceptance criterion 4 (`QKW-FR-005`): `SUM`/`AVG`/`MIN`/`MAX` of the
+// range field over a pure range answer from the walked keys, no record
+// read, and equal the decode path exactly — on `Memory` and `Reminder`,
+// over a range, everything, and nothing; an aggregate over another
+// field, or a second predicate, still decodes and is still exact.
+// ---------------------------------------------------------------------
+
+#[test]
+fn aggregates_over_the_range_field_from_the_walked_keys_match_the_decoded_answers() {
+    let scalar = |client: &mut SchemaDrivenClient, sql: &str| -> ScanValue {
+        groups(client.query(sql).unwrap())[0][0].1.clone()
+    };
+    let keys =
+        |client: &mut SchemaDrivenClient, table: &str, field: &str, keep: Keep| -> Vec<i64> {
+            let mut all = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+            all.retain(|(_, f)| keep(f));
+            all.iter().map(|(_, f)| i64_field(f, field)).collect()
+        };
+    let expect = |ks: &[i64], func: &str| -> ScanValue {
+        match func {
+            "SUM" => ScanValue::I64(ks.iter().sum()),
+            "AVG" if ks.is_empty() => ScanValue::F64(0.0),
+            "AVG" => ScanValue::F64(ks.iter().sum::<i64>() as f64 / ks.len() as f64),
+            "MIN" => ScanValue::I64(ks.iter().copied().min().unwrap_or(0)),
+            "MAX" => ScanValue::I64(ks.iter().copied().max().unwrap_or(0)),
+            other => panic!("{other}"),
+        }
+    };
+    type Row = [(String, ScanValue)];
+    let updated = |f: &Row| i64_field(f, "updated_at_unix_ms");
+    let due = |f: &Row| i64_field(f, "due_at_unix_ms");
+
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("WHERE updated_at_unix_ms >= 2000", &|f: &Row| {
+            updated(f) >= 2_000
+        }),
+        (
+            "WHERE updated_at_unix_ms > 2000 AND updated_at_unix_ms < 5000",
+            &|f: &Row| updated(f) > 2_000 && updated(f) < 5_000,
+        ),
+        ("WHERE updated_at_unix_ms > 9000", &|f: &Row| {
+            updated(f) > 9_000
+        }),
+        // Ineligible (a second predicate): decoded, still exact.
+        (
+            "WHERE updated_at_unix_ms >= 2000 AND category = 'general'",
+            &|f: &Row| updated(f) >= 2_000 && str_field(f, "category") == "general",
+        ),
+    ] {
+        let ks = keys(&mut client, "memory", "updated_at_unix_ms", keep);
+        for func in ["SUM", "AVG", "MIN", "MAX"] {
+            assert_eq!(
+                scalar(
+                    &mut client,
+                    &format!("SELECT {func}(updated_at_unix_ms) FROM memory {where_}")
+                ),
+                expect(&ks, func),
+                "memory: {func} {where_}"
+            );
+        }
+        // An aggregate over another field beside a pure range: decoded.
+        let created: Vec<i64> = {
+            let mut all = rows(client.query("SELECT * FROM memory").unwrap());
+            all.retain(|(_, f)| keep(f));
+            all.iter()
+                .map(|(_, f)| i64_field(f, "created_at_unix_ms"))
+                .collect()
+        };
+        assert_eq!(
+            scalar(
+                &mut client,
+                &format!("SELECT MAX(created_at_unix_ms) FROM memory {where_}")
+            ),
+            expect(&created, "MAX"),
+            "memory: MAX(created_at) {where_}"
+        );
+    }
+    assert_eq!(
+        scalar(
+            &mut client,
+            "SELECT MIN(updated_at_unix_ms) FROM memory WHERE updated_at_unix_ms > 2000"
+        ),
+        ScanValue::I64(3_000)
+    );
+    // A runtime re-key moves the extreme with the index.
+    client
+        .replace(
+            Uuid::from_u128(1),
+            &memory_fields_updated_at(1, "general", 9_000),
+        )
+        .unwrap();
+    assert_eq!(
+        scalar(&mut client, "SELECT MAX(updated_at_unix_ms) FROM memory"),
+        ScanValue::I64(9_000)
+    );
+
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("WHERE due_at_unix_ms > 1000", &|f: &Row| due(f) > 1_000),
+        ("WHERE due_at_unix_ms > 5000", &|f: &Row| due(f) > 5_000),
+    ] {
+        let ks = keys(&mut client, "reminder", "due_at_unix_ms", keep);
+        for func in ["SUM", "AVG", "MIN", "MAX"] {
+            assert_eq!(
+                scalar(
+                    &mut client,
+                    &format!("SELECT {func}(due_at_unix_ms) FROM reminder {where_}")
+                ),
+                expect(&ks, func),
+                "reminder: {func} {where_}"
+            );
+        }
+    }
+    assert_eq!(
+        scalar(
+            &mut client,
+            "SELECT MIN(due_at_unix_ms) FROM reminder WHERE due_at_unix_ms > 1000"
+        ),
+        ScanValue::I64(2_000),
+        "the next due"
+    );
+}
