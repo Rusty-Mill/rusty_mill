@@ -244,8 +244,11 @@ impl MvccIndex {
     /// newest one at or below the boundary, retaining that newest one —
     /// which is always at least the chain's own current (newest overall)
     /// entry, so a live key's current value is never lost.
-    pub fn gc(&mut self, min_open_snapshot: Option<TxnId>) {
+    ///
+    /// Returns how many entries were dropped (`HRC-FR-001`, ADR-0096).
+    pub fn gc(&mut self, min_open_snapshot: Option<TxnId>) -> usize {
         let boundary = min_open_snapshot.unwrap_or(TxnId::MAX);
+        let mut dropped = 0;
         for chain in self.chains.values_mut() {
             let Some(keep_from) = chain.entries.iter().rposition(|e| e.txn_id <= boundary) else {
                 continue;
@@ -259,8 +262,16 @@ impl MvccIndex {
                 chain.reclaimed_through =
                     chain.reclaimed_through.max(chain.entries[keep_from].txn_id);
                 chain.entries.drain(0..keep_from);
+                dropped += keep_from;
             }
         }
+        dropped
+    }
+
+    /// Every chain entry currently held, across every key — the size
+    /// [`Self::gc`] bounds (`HRC-FR-001`, ADR-0096).
+    pub fn history_len(&self) -> usize {
+        self.chains.values().map(|chain| chain.entries.len()).sum()
     }
 
     /// Every `(key, txn_id, value)` triple currently held, for the
@@ -519,6 +530,21 @@ impl MvccState {
     pub fn with_index<T>(&self, f: impl FnOnce(&mut MvccIndex) -> T) -> T {
         f(&mut self.index.lock().unwrap())
     }
+
+    /// `HRC-FR-002` (ADR-0096): reclaim every chain entry no open
+    /// snapshot can still need — [`MvccIndex::gc`] at the oldest open
+    /// snapshot's txn id (everything below the current state when none
+    /// is open). Called by an adapter's `Compact` inside its exclusive
+    /// section, before the history flush, so what is flushed is the
+    /// reclaimed index. Returns the number of entries dropped; `0` when
+    /// MVCC was never activated.
+    pub fn reclaim(&self) -> usize {
+        if !self.is_active() {
+            return 0;
+        }
+        let boundary = self.open_snapshots.minimum();
+        self.with_index(|index| index.gc(boundary))
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +651,75 @@ mod tests {
             index.read(&k, index.last_committed()),
             Ok(Some(ScanValue::I64(6)))
         );
+    }
+
+    /// `HRC-FR-001` (ADR-0096): `gc` reports what it dropped and
+    /// `history_len` is what remains — nothing below the boundary's
+    /// kept entry survives, and with no snapshot open one entry per
+    /// chain does.
+    #[test]
+    fn gc_reports_the_entries_it_dropped_and_history_len_what_remains() {
+        let mut index = MvccIndex::default();
+        let (a, b) = (key(1, 0), key(2, 0));
+        for txn in 1..=5 {
+            index.record_write(a, txn, Some(ScanValue::I64(txn as i64)));
+        }
+        index.record_write(b, 6, Some(ScanValue::I64(60)));
+        assert_eq!(index.history_len(), 6);
+        assert_eq!(
+            index.gc(Some(3)),
+            2,
+            "txn 1 and 2 are below the kept entry at 3"
+        );
+        assert_eq!(index.history_len(), 4);
+        assert_eq!(index.gc(Some(3)), 0, "idempotent at the same boundary");
+        assert_eq!(
+            index.gc(None),
+            2,
+            "no snapshot open: one entry per chain remains"
+        );
+        assert_eq!(index.history_len(), 2);
+        assert_eq!(
+            index.read(&a, index.last_committed()),
+            Ok(Some(ScanValue::I64(5)))
+        );
+        assert_eq!(
+            index.read(&b, index.last_committed()),
+            Ok(Some(ScanValue::I64(60)))
+        );
+    }
+
+    /// `HRC-FR-002` (ADR-0096): `MvccState::reclaim` is a no-op until
+    /// MVCC is activated, then reclaims at the oldest open snapshot.
+    #[test]
+    fn state_reclaim_honours_activation_and_the_oldest_open_snapshot() {
+        let state = MvccState {
+            active: AtomicBool::new(false),
+            counter: TxnCounter::seeded_at(BASELINE_TXN),
+            index: Mutex::new(MvccIndex::default()),
+            open_snapshots: OpenSnapshots::default(),
+        };
+        let k = key(1, 0);
+        state.with_index(|index| {
+            for txn in 1..=4 {
+                index.record_write(k, txn, Some(ScanValue::I64(txn as i64)));
+            }
+        });
+        assert_eq!(state.reclaim(), 0, "not active: nothing reclaimed");
+        state.activate();
+        state.open_snapshots().register(2);
+        assert_eq!(
+            state.reclaim(),
+            1,
+            "only txn 1 is below the open snapshot at 2"
+        );
+        state.open_snapshots().deregister(2);
+        assert_eq!(
+            state.reclaim(),
+            2,
+            "nothing open: only the current entry remains"
+        );
+        assert_eq!(state.with_index(|index| index.history_len()), 1);
     }
 
     #[test]
