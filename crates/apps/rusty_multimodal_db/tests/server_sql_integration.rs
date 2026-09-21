@@ -3555,3 +3555,81 @@ fn group_by_through_the_decode_path_buckets_exactly_over_a_socket() {
         ScanValue::I64(0)
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0087` / `docs/design/SERVER-QUERY-PLANNER-RANGE-FOLD-DESIGN.md`,
+// acceptance criterion 3 (`QRF-FR-004`): the ungrouped reductions of the
+// range field — now one fold, no key materialized — still answer
+// exactly over a real socket, on `Memory` and `Reminder`, two-sided,
+// one-sided, over everything, and over nothing.
+// ---------------------------------------------------------------------
+
+#[test]
+fn ungrouped_reductions_from_one_fold_match_the_decoded_answers() {
+    type Row = [(String, ScanValue)];
+    let row = |client: &mut SchemaDrivenClient, sql: &str| -> Vec<ScanValue> {
+        groups(client.query(sql).unwrap())[0]
+            .iter()
+            .map(|(_, v)| v.clone())
+            .collect()
+    };
+    let expect = |ks: &[i64]| -> Vec<ScanValue> {
+        let n = ks.len() as i64;
+        let sum: i64 = ks.iter().sum();
+        vec![
+            ScanValue::I64(n),
+            ScanValue::I64(sum),
+            if n == 0 {
+                ScanValue::F64(0.0)
+            } else {
+                ScanValue::F64(sum as f64 / n as f64)
+            },
+            ScanValue::I64(ks.iter().copied().min().unwrap_or(0)),
+            ScanValue::I64(ks.iter().copied().max().unwrap_or(0)),
+        ]
+    };
+    let check =
+        |client: &mut SchemaDrivenClient, table: &str, field: &str, where_: &str, keep: Keep| {
+            let mut all = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+            all.retain(|(_, f)| keep(f));
+            let ks: Vec<i64> = all.iter().map(|(_, f)| i64_field(f, field)).collect();
+            assert_eq!(
+                row(
+                    client,
+                    &format!(
+                        "SELECT COUNT(*), SUM({field}), AVG({field}), MIN({field}), MAX({field}) \
+                     FROM {table} {where_}"
+                    )
+                ),
+                expect(&ks),
+                "{table} {where_}"
+            );
+        };
+    let updated = |f: &Row| i64_field(f, "updated_at_unix_ms");
+    let due = |f: &Row| i64_field(f, "due_at_unix_ms");
+
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("WHERE updated_at_unix_ms >= 2000", &|f: &Row| {
+            updated(f) >= 2_000
+        }),
+        (
+            "WHERE updated_at_unix_ms > 1000 AND updated_at_unix_ms <= 4000",
+            &|f: &Row| updated(f) > 1_000 && updated(f) <= 4_000,
+        ),
+        ("WHERE updated_at_unix_ms > 9000", &|f: &Row| {
+            updated(f) > 9_000
+        }),
+    ] {
+        check(&mut client, "memory", "updated_at_unix_ms", where_, keep);
+    }
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("WHERE due_at_unix_ms <= 1000", &|f: &Row| due(f) <= 1_000),
+        ("WHERE due_at_unix_ms > 9000", &|f: &Row| due(f) > 9_000),
+    ] {
+        check(&mut client, "reminder", "due_at_unix_ms", where_, keep);
+    }
+}

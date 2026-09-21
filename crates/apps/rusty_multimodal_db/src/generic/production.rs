@@ -602,6 +602,30 @@ impl<S> GenericProductionStore<S> {
             .range_keys(lower, upper)
     }
 
+    /// `QRF-FR-001` (ADR-0087): [`RangeBy::range_fold`] under the read
+    /// lock — the walk folded, nothing materialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn range_fold<R, Marker, B, F>(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+        init: B,
+        f: F,
+    ) -> B
+    where
+        R: OrderedField<Marker>,
+        S: RangeBy<R, Marker>,
+        F: FnMut(B, &R::Key) -> B,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .range_fold(lower, upper, init, f)
+    }
+
     /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one
     /// read under the lock, `None` for an unknown label.
     ///

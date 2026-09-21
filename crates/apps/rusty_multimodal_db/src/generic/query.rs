@@ -307,4 +307,19 @@ where
         lower: Bound<(R::Key, R::Id)>,
         upper: Bound<(R::Key, R::Id)>,
     ) -> Vec<R::Key>;
+
+    /// `QRF-FR-001` (ADR-0087): [`Self::range_keys`] folded instead of
+    /// collected — `f` applied to `init` and each key within
+    /// `lower..upper`, ascending, one pair visited per key and nothing
+    /// materialized. What a reduction over the ordered field (`COUNT`,
+    /// `SUM`, `MIN`, `MAX` of it) needs when the keys themselves are not.
+    fn range_fold<B, F>(
+        &self,
+        lower: Bound<(R::Key, R::Id)>,
+        upper: Bound<(R::Key, R::Id)>,
+        init: B,
+        f: F,
+    ) -> B
+    where
+        F: FnMut(B, &R::Key) -> B;
 }

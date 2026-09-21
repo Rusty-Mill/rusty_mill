@@ -164,7 +164,8 @@ owed.
 - **A "walk abandoned" counter** — option (b)'s threading would make it
   exact; named.
 - **A fold that never materializes the keys** — unchanged from
-  `ADR-0082`.
+  `ADR-0082`. *Taken: `ADR-0087` (2026-09-21) —
+  `docs/design/SERVER-QUERY-PLANNER-RANGE-FOLD-DESIGN.md`.*
 
 ## Change history
 
