@@ -317,6 +317,22 @@ impl ConnectionStore for ReminderConnectionStore {
         Ok(self.store.range_count::<Reminder, DueAtOrder>(lower, upper) as u64)
     }
 
+    /// `QKW-FR-002` (ADR-0082): the `field_due_at` keys a `WHERE`
+    /// range admits, ascending — the sorted index's own keys between
+    /// the bounds, no record read.
+    fn range_keys(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<Vec<i64>, ErrorCode> {
+        if field != FIELD_DUE_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self.store.range_keys::<Reminder, DueAtOrder>(lower, upper))
+    }
+
     fn range_ids_limited(
         &self,
         field: FieldRef,

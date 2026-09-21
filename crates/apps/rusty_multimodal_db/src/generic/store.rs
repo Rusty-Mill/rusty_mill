@@ -2328,6 +2328,17 @@ where
         self.guarded_range(lower, upper).collect()
     }
 
+    // `QKW-FR-001` (ADR-0082): the same guarded walk, keys only.
+    fn range_keys(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> Vec<R::Key> {
+        self.guarded_pairs(lower, upper)
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
     // `QCW-FR-001` (ADR-0081): the same guarded walk, counted.
     fn range_count(
         &self,
@@ -2369,6 +2380,16 @@ where
         lower: std::ops::Bound<(R::Key, R::Id)>,
         upper: std::ops::Bound<(R::Key, R::Id)>,
     ) -> impl Iterator<Item = R::Id> + '_ {
+        self.guarded_pairs(lower, upper).map(|(_, id)| *id)
+    }
+
+    /// The pairs within `lower..upper`, ascending — [`Self::guarded_range`]
+    /// before the id is taken off each.
+    fn guarded_pairs(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> impl Iterator<Item = &(R::Key, R::Id)> + '_ {
         use std::ops::Bound::{Excluded, Included, Unbounded};
         let inverted = match (&lower, &upper) {
             (Unbounded, _) | (_, Unbounded) => false,
@@ -2382,7 +2403,7 @@ where
         } else {
             Some(self.index.range((lower, upper)))
         };
-        range.into_iter().flatten().map(|(_, id)| *id)
+        range.into_iter().flatten()
     }
 }
 

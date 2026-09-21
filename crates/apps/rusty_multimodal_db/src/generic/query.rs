@@ -296,4 +296,15 @@ where
     /// per id and no record read. Exact: the index holds one pair per
     /// live record.
     fn range_count(&self, lower: Bound<(R::Key, R::Id)>, upper: Bound<(R::Key, R::Id)>) -> usize;
+
+    /// `QKW-FR-001` (ADR-0082): the keys of every pair within
+    /// `lower..upper`, ascending — [`Self::range_by`]'s walk yielding the
+    /// key instead of the id, no record read. What an aggregate over
+    /// the ordered field itself (`MIN`/`MAX`/`SUM`/`AVG` of it) needs
+    /// and nothing more.
+    fn range_keys(
+        &self,
+        lower: Bound<(R::Key, R::Id)>,
+        upper: Bound<(R::Key, R::Id)>,
+    ) -> Vec<R::Key>;
 }

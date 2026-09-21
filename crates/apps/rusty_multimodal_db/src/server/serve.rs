@@ -383,6 +383,22 @@ pub trait ConnectionStore: Send + Sync {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `QKW-FR-002` (ADR-0082): the keys within `lower..upper` on
+    /// [`Self::range_field`], ascending — the walk yielding the key of
+    /// each pair instead of its id, no record read; the same errors as
+    /// `range_ids`. What an aggregate over the range field itself
+    /// (`MIN`/`MAX`/`SUM`/`AVG` of it) answers with ([`keyed_walk`]).
+    /// Every shipped range field is `I64`. The default answers
+    /// `Unsupported`; `Memory`, `Relation`, and `Reminder` implement it.
+    fn range_keys(
+        &self,
+        _field: FieldRef,
+        _lower: Bound<ScanValue>,
+        _upper: Bound<ScanValue>,
+    ) -> Result<Vec<i64>, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `FPG-FR-003`/`FPG-FR-004` (ADR-0068, protocol 26): one ordered
     /// keyset page over only the rows every predicate in `filter`
     /// matches — [`Self::page`]'s own contract plus a `WHERE`-shaped
@@ -1205,6 +1221,102 @@ pub fn counted_walk_applies(
         }
     }
     lower <= 1 && upper <= 1
+}
+
+/// `QKW-FR-003` (ADR-0082): whether a `Request::Aggregate` is answerable
+/// from the walked keys alone — [`counted_walk_applies`]'s shape (no
+/// `group_by`, a range field, a filter of at most one bound per side on
+/// it), with every aggregate either `COUNT(*)` or `SUM`/`AVG`/`MIN`/`MAX`
+/// *of the range field itself*. Any aggregate over another field needs
+/// that field's value, hence a decode. Pure.
+pub fn keyed_walk_applies(
+    range_field: Option<FieldRef>,
+    group_by: &[FieldRef],
+    filter: &[Predicate],
+    aggregates: &[AggregateSpec],
+) -> bool {
+    let Some(field) = range_field else {
+        return false;
+    };
+    let over_the_key = |a: &AggregateSpec| match a.func {
+        AggregateFn::Count => a.field.is_none(),
+        AggregateFn::Sum | AggregateFn::Avg | AggregateFn::Min | AggregateFn::Max => {
+            a.field == Some(field)
+        }
+    };
+    let counts_only: Vec<AggregateSpec> = aggregates
+        .iter()
+        .filter(|a| over_the_key(a))
+        .map(|_| AggregateSpec {
+            func: AggregateFn::Count,
+            field: None,
+        })
+        .collect();
+    counts_only.len() == aggregates.len()
+        && counted_walk_applies(range_field, group_by, filter, &counts_only)
+}
+
+/// `QKW-FR-004` (ADR-0082): the answer to an eligible keyed aggregate —
+/// [`counted_walk`] when every column is `COUNT(*)` (no key
+/// materialized), otherwise the walk's keys once
+/// ([`ConnectionStore::range_keys`]) and each column reduced over them
+/// exactly as [`evaluate_aggregate`] reduces decoded rows: `COUNT` the
+/// length; `SUM` the `i64` sum; `AVG` an `F64` mean, `0.0` over nothing;
+/// `MIN`/`MAX` the extreme in the field's own kind, `0` over nothing —
+/// the same one-group, `limit`-truncated shape. `None` when ineligible
+/// ([`keyed_walk_applies`]) or refused, so the caller decodes.
+pub fn keyed_walk<S: ConnectionStore + ?Sized>(
+    store: &S,
+    schema: &DomainSchema,
+    group_by: &[FieldRef],
+    filter: &[Predicate],
+    aggregates: &[AggregateSpec],
+    limit: Option<usize>,
+) -> Option<Vec<AggregateGroup>> {
+    let field = store.range_field()?;
+    if !keyed_walk_applies(Some(field), group_by, filter, aggregates) {
+        return None;
+    }
+    if aggregates.iter().all(|a| a.func == AggregateFn::Count) {
+        return counted_walk(store, group_by, filter, aggregates, limit);
+    }
+    use protocol::CompareOp::{Eq, Ge, Gt, Le, Lt};
+    let side = |ops: &[protocol::CompareOp]| filter.iter().position(|p| ops.contains(&p.op));
+    let (lower, upper) = range_bounds(filter, side(&[Gt, Ge, Eq]), side(&[Lt, Le, Eq]));
+    let keys = store.range_keys(field, lower, upper).ok()?;
+    let kind = schema
+        .fields
+        .iter()
+        .find(|f| f.tag == field)
+        .map(|f| f.value_kind)?;
+    let extreme = |value: Option<i64>| match (kind, value) {
+        (protocol::ValueKind::U32, Some(v)) => ScanValue::U32(v as u32),
+        (protocol::ValueKind::U32, None) => ScanValue::U32(0),
+        (_, Some(v)) => ScanValue::I64(v),
+        (_, None) => ScanValue::I64(0),
+    };
+    let values = aggregates
+        .iter()
+        .map(|a| match a.func {
+            AggregateFn::Count => ScanValue::I64(keys.len() as i64),
+            AggregateFn::Sum => ScanValue::I64(keys.iter().sum()),
+            AggregateFn::Avg if keys.is_empty() => ScanValue::F64(0.0),
+            AggregateFn::Avg => {
+                let sum: i64 = keys.iter().sum();
+                ScanValue::F64(sum as f64 / keys.len() as f64)
+            }
+            AggregateFn::Min => extreme(keys.first().copied()),
+            AggregateFn::Max => extreme(keys.last().copied()),
+        })
+        .collect();
+    let mut groups = vec![AggregateGroup {
+        key: Vec::new(),
+        values,
+    }];
+    if let Some(limit) = limit {
+        groups.truncate(limit);
+    }
+    Some(groups)
 }
 
 /// `QCW-FR-004` (ADR-0081): the answer to an eligible count — the index's
@@ -3042,21 +3154,25 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         } => {
             let schema = store.describe();
             match validate_aggregate(&schema, &group_by, &filter, &aggregates) {
-                // `QCW-FR-004` (ADR-0081): a count of a range the sorted
-                // index answers on its own reads no record at all.
-                Ok(()) => match counted_walk(store, &group_by, &filter, &aggregates, limit) {
-                    Some(groups) => Response::Groups { groups },
-                    None => Response::Groups {
-                        groups: evaluate_aggregate(
-                            indexed_candidates(store, &schema, &filter),
-                            &group_by,
-                            &filter,
-                            &aggregates,
-                            limit,
-                            &schema,
-                        ),
-                    },
-                },
+                // `QCW-FR-004` (ADR-0081) / `QKW-FR-004` (ADR-0082): a
+                // count of a range, or an aggregate over the walked key
+                // itself, the sorted index answers on its own — no
+                // record read at all.
+                Ok(()) => {
+                    match keyed_walk(store, &schema, &group_by, &filter, &aggregates, limit) {
+                        Some(groups) => Response::Groups { groups },
+                        None => Response::Groups {
+                            groups: evaluate_aggregate(
+                                indexed_candidates(store, &schema, &filter),
+                                &group_by,
+                                &filter,
+                                &aggregates,
+                                limit,
+                                &schema,
+                            ),
+                        },
+                    }
+                }
                 Err(code) => err_response(code),
             }
         }
@@ -5270,6 +5386,31 @@ mod tests {
             keyed.sort();
             Ok(keyed.into_iter().map(|(_, id)| id).collect())
         }
+        /// `QKW-FR-002`: the walked keys (field 1 is `U32`), as `i64`;
+        /// counted with `range_counts`, and the `get`s it borrows to read
+        /// the fixture's key are given back so a test can still assert
+        /// "no record decoded".
+        fn range_keys(
+            &self,
+            field: FieldRef,
+            lower: Bound<ScanValue>,
+            upper: Bound<ScanValue>,
+        ) -> Result<Vec<i64>, ErrorCode> {
+            self.range_counts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let ids = self.range_ids(field, lower, upper)?;
+            Ok(ids
+                .into_iter()
+                .filter_map(|id| {
+                    let fields = self.get(id)?;
+                    self.gets.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    match fields.iter().find(|(f, _)| *f == field)?.1 {
+                        ScanValue::U32(v) => Some(i64::from(v)),
+                        _ => None,
+                    }
+                })
+                .collect())
+        }
         /// `QCW-FR-002`: the walk's length; counted, so a test can assert
         /// the count came from the index and not from decoded rows.
         fn range_count(
@@ -6115,6 +6256,175 @@ mod tests {
         let groups = groups_of(dispatch(&store, request(vec![u32_pred(1, Gt, 3)], None)));
         assert_eq!(groups[0].values, vec![ScanValue::I64(2)]);
         assert_eq!((store.range_counts(), store.scans()), (1, 1));
+    }
+
+    /// `QKW-FR-003` (ADR-0082), acceptance criterion 1: eligible for
+    /// `SUM`/`AVG`/`MIN`/`MAX` of the range field, alone or beside
+    /// `COUNT(*)`, over `counted_walk_applies`'s shapes; not for an
+    /// aggregate over another field, a `group_by`, or a second field in
+    /// the filter.
+    #[test]
+    fn keyed_walk_applies_only_to_aggregates_over_the_range_field() {
+        use CompareOp::{Ge, Gt};
+        let spec = |func, field| AggregateSpec { func, field };
+        let applies = |group_by: &[FieldRef], filter: &[Predicate], aggs: &[AggregateSpec]| {
+            keyed_walk_applies(Some(1), group_by, filter, aggs)
+        };
+        for func in [
+            AggregateFn::Sum,
+            AggregateFn::Avg,
+            AggregateFn::Min,
+            AggregateFn::Max,
+        ] {
+            assert!(
+                applies(&[], &[u32_pred(1, Ge, 1)], &[spec(func, Some(1))]),
+                "{func:?}"
+            );
+            assert!(
+                applies(&[], &[], &[spec(func, Some(1))]),
+                "{func:?}, no filter"
+            );
+            assert!(
+                !applies(&[], &[u32_pred(1, Ge, 1)], &[spec(func, Some(3))]),
+                "{func:?} over another field"
+            );
+        }
+        assert!(applies(
+            &[],
+            &[u32_pred(1, Gt, 1)],
+            &[
+                spec(AggregateFn::Count, None),
+                spec(AggregateFn::Min, Some(1)),
+                spec(AggregateFn::Max, Some(1))
+            ]
+        ));
+        assert!(
+            !applies(&[2], &[], &[spec(AggregateFn::Min, Some(1))]),
+            "group_by"
+        );
+        assert!(
+            !applies(
+                &[],
+                &[u32_pred(1, Ge, 1), labrador()],
+                &[spec(AggregateFn::Max, Some(1))]
+            ),
+            "a second field in the filter"
+        );
+        assert!(
+            !applies(
+                &[],
+                &[],
+                &[
+                    spec(AggregateFn::Count, None),
+                    spec(AggregateFn::Sum, Some(3))
+                ]
+            ),
+            "COUNT(*) beside a SUM over another field"
+        );
+        assert!(!keyed_walk_applies(
+            None,
+            &[],
+            &[],
+            &[spec(AggregateFn::Min, Some(1))]
+        ));
+    }
+
+    /// `QKW-FR-004` (ADR-0082), acceptance criterion 2: `SUM`/`AVG`/`MIN`/
+    /// `MAX` of the range field come from the walked keys with no record
+    /// decoded, in the field's own kind, and equal the decode path's
+    /// answers — over a range, over everything, and over nothing (the
+    /// `0`/`0.0` empties); a count-only request still takes
+    /// `counted_walk` (no keys); an aggregate over another field decodes.
+    #[test]
+    fn dispatch_reduces_the_range_field_from_the_walked_keys_without_reading_a_record() {
+        use CompareOp::{Ge, Gt, Lt};
+        let spec = |func, field| AggregateSpec { func, field };
+        let all = || {
+            vec![
+                spec(AggregateFn::Count, None),
+                spec(AggregateFn::Sum, Some(1)),
+                spec(AggregateFn::Avg, Some(1)),
+                spec(AggregateFn::Min, Some(1)),
+                spec(AggregateFn::Max, Some(1)),
+            ]
+        };
+        let groups_of = |response| match response {
+            Response::Groups { groups } => groups,
+            other => panic!("expected Groups, got {other:?}"),
+        };
+        let request = |filter: Vec<Predicate>, aggregates| Request::Aggregate {
+            group_by: vec![],
+            filter,
+            aggregates,
+            limit: None,
+        };
+        // field 1 (U32) is 3, 5, 9 on rows 1, 2, 3.
+        for filter in [
+            vec![],
+            vec![u32_pred(1, Gt, 3)],
+            vec![u32_pred(1, Ge, 5), u32_pred(1, Lt, 9)],
+            vec![u32_pred(1, Gt, 9)],
+        ] {
+            let keyed = PlannerFixture::with_range(1);
+            let scanned = PlannerFixture::with_index(Err(ErrorCode::Unsupported));
+            let a = groups_of(dispatch(&keyed, request(filter.clone(), all())));
+            let b = groups_of(dispatch(&scanned, request(filter.clone(), all())));
+            assert_eq!(a, b, "{filter:?}");
+            assert_eq!(
+                (keyed.gets(), keyed.scans(), keyed.range_counts()),
+                (0, 0, 1),
+                "{filter:?}: keys only"
+            );
+            assert_eq!(scanned.scans(), 1);
+        }
+        let keyed = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(&keyed, request(vec![u32_pred(1, Gt, 3)], all())));
+        assert_eq!(
+            groups[0].values,
+            vec![
+                ScanValue::I64(2),
+                ScanValue::I64(14),
+                ScanValue::F64(7.0),
+                ScanValue::U32(5),
+                ScanValue::U32(9)
+            ],
+            "5 and 9: count 2, sum 14, mean 7, min 5, max 9 in the field's kind"
+        );
+        let keyed = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(&keyed, request(vec![u32_pred(1, Gt, 9)], all())));
+        assert_eq!(
+            groups[0].values,
+            vec![
+                ScanValue::I64(0),
+                ScanValue::I64(0),
+                ScanValue::F64(0.0),
+                ScanValue::U32(0),
+                ScanValue::U32(0)
+            ],
+            "over nothing: the decode path's own empties"
+        );
+        // Count only: `counted_walk`, no keys materialized.
+        let keyed = PlannerFixture::with_range(1);
+        groups_of(dispatch(
+            &keyed,
+            request(
+                vec![u32_pred(1, Gt, 3)],
+                vec![spec(AggregateFn::Count, None)],
+            ),
+        ));
+        assert_eq!((keyed.gets(), keyed.range_counts()), (0, 1));
+        // An aggregate over another field decodes.
+        let keyed = PlannerFixture::with_range(1);
+        let groups = groups_of(dispatch(
+            &keyed,
+            request(
+                vec![u32_pred(1, Gt, 3)],
+                vec![spec(AggregateFn::Max, Some(3))],
+            ),
+        ));
+        assert_eq!(keyed.range_counts(), 0);
+        assert!(keyed.gets() > 0);
+        assert_eq!(groups.len(), 1);
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's

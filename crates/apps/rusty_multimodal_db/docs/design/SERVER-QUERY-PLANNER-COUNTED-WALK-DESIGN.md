@@ -187,7 +187,9 @@ owed.
 
 ## Open questions
 
-- **`MIN`/`MAX` of the range field** — option (b).
+- **`MIN`/`MAX` of the range field** — option (b). *Taken: `ADR-0082`
+  (2026-09-21), widened to `SUM`/`AVG`/`MIN`/`MAX` of the range field —
+  `docs/design/SERVER-QUERY-PLANNER-KEYED-WALK-DESIGN.md`.*
 - **An "exact" equality index** — a capability flag so a bucket's
   length could count too; a protocol round.
 - **Plan metrics** — still named, still not bundled.
