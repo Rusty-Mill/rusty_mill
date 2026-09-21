@@ -627,6 +627,58 @@ fn bench_reminder_due() {
                 limit: None,
             },
         ),
+        // `ADR-0084`: `GROUP BY` the walked key — one group per distinct
+        // due stamp in a window, `COUNT(*)` each; 1,000 and 5,000 groups
+        // (every stamp here is distinct, the most groups a window can
+        // yield).
+        (
+            "due-hist",
+            "due_at_unix_ms, COUNT(*) WHERE 50000 <= due_at_unix_ms < 51000 GROUP BY due_at_unix_ms",
+            Request::Aggregate {
+                group_by: vec![FIELD_DUE_AT],
+                filter: vec![
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Ge,
+                        value: ScanValue::I64(50_000),
+                    },
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Lt,
+                        value: ScanValue::I64(51_000),
+                    },
+                ],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            },
+        ),
+        (
+            "due-hist-5k",
+            "due_at_unix_ms, COUNT(*) WHERE 50000 <= due_at_unix_ms < 55000 GROUP BY due_at_unix_ms",
+            Request::Aggregate {
+                group_by: vec![FIELD_DUE_AT],
+                filter: vec![
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Ge,
+                        value: ScanValue::I64(50_000),
+                    },
+                    Predicate {
+                        field: FIELD_DUE_AT,
+                        op: CompareOp::Lt,
+                        value: ScanValue::I64(55_000),
+                    },
+                ],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            },
+        ),
         (
             "due-window",
             "Query WHERE 50000 <= due_at_unix_ms < 51000 AND status = pending",

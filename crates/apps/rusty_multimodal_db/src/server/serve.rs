@@ -1249,11 +1249,13 @@ pub fn counted_walk_applies(
 }
 
 /// `QKW-FR-003` (ADR-0082): whether a `Request::Aggregate` is answerable
-/// from the walked keys alone — [`counted_walk_applies`]'s shape (no
-/// `group_by`, a range field, a filter of at most one bound per side on
-/// it), with every aggregate either `COUNT(*)` or `SUM`/`AVG`/`MIN`/`MAX`
-/// *of the range field itself*. Any aggregate over another field needs
-/// that field's value, hence a decode. Pure.
+/// from the walked keys alone — [`counted_walk_applies`]'s shape (a
+/// range field, a filter of nothing but bounds on it), with every
+/// aggregate either `COUNT(*)` or `SUM`/`AVG`/`MIN`/`MAX` *of the range
+/// field itself*. Any aggregate over another field needs that field's
+/// value, hence a decode. Since `QKG-FR-001` (ADR-0084) `group_by` may
+/// also be exactly the range field: a group per distinct key is a run
+/// of equal keys in the walk. Any other `group_by` needs a decode. Pure.
 pub fn keyed_walk_applies(
     range_field: Option<FieldRef>,
     group_by: &[FieldRef],
@@ -1263,6 +1265,9 @@ pub fn keyed_walk_applies(
     let Some(field) = range_field else {
         return false;
     };
+    if !(group_by.is_empty() || group_by == [field]) {
+        return false;
+    }
     let over_the_key = |a: &AggregateSpec| match a.func {
         AggregateFn::Count => a.field.is_none(),
         AggregateFn::Sum | AggregateFn::Avg | AggregateFn::Min | AggregateFn::Max => {
@@ -1278,7 +1283,7 @@ pub fn keyed_walk_applies(
         })
         .collect();
     counts_only.len() == aggregates.len()
-        && counted_walk_applies(range_field, group_by, filter, &counts_only)
+        && counted_walk_applies(range_field, &[], filter, &counts_only)
 }
 
 /// `QKW-FR-004` (ADR-0082): the answer to an eligible keyed aggregate —
@@ -1288,7 +1293,14 @@ pub fn keyed_walk_applies(
 /// exactly as [`evaluate_aggregate`] reduces decoded rows: `COUNT` the
 /// length; `SUM` the `i64` sum; `AVG` an `F64` mean, `0.0` over nothing;
 /// `MIN`/`MAX` the extreme in the field's own kind, `0` over nothing —
-/// the same one-group, `limit`-truncated shape. `None` when ineligible
+/// the same one-group, `limit`-truncated shape. Since `QKG-FR-002`
+/// (ADR-0084) a `group_by` of the range field yields one group per run
+/// of equal keys, keyed by that key in the field's kind, ascending —
+/// the decode path's own groups whenever a bound is present (its
+/// candidates are the same walk); with no bound the decode path
+/// buckets in scan order, so the groups are the same set in another
+/// order, and a `limit` there would truncate a different set: that one
+/// shape decodes (`QKG-FR-003`). `None` when ineligible
 /// ([`keyed_walk_applies`]) or refused, so the caller decodes.
 pub fn keyed_walk<S: ConnectionStore + ?Sized>(
     store: &S,
@@ -1302,8 +1314,12 @@ pub fn keyed_walk<S: ConnectionStore + ?Sized>(
     if !keyed_walk_applies(Some(field), group_by, filter, aggregates) {
         return None;
     }
-    if aggregates.iter().all(|a| a.func == AggregateFn::Count) {
+    let grouped = !group_by.is_empty();
+    if !grouped && aggregates.iter().all(|a| a.func == AggregateFn::Count) {
         return counted_walk(store, group_by, filter, aggregates, limit);
+    }
+    if grouped && filter.is_empty() && limit.is_some() {
+        return None;
     }
     let (lower, upper) = tightest_bounds(Some(field), filter);
     let (lower, upper) = range_bounds(filter, lower, upper);
@@ -1313,30 +1329,39 @@ pub fn keyed_walk<S: ConnectionStore + ?Sized>(
         .iter()
         .find(|f| f.tag == field)
         .map(|f| f.value_kind)?;
-    let extreme = |value: Option<i64>| match (kind, value) {
-        (protocol::ValueKind::U32, Some(v)) => ScanValue::U32(v as u32),
-        (protocol::ValueKind::U32, None) => ScanValue::U32(0),
-        (_, Some(v)) => ScanValue::I64(v),
-        (_, None) => ScanValue::I64(0),
+    let render = |v: i64| match kind {
+        protocol::ValueKind::U32 => ScanValue::U32(v as u32),
+        _ => ScanValue::I64(v),
     };
-    let values = aggregates
-        .iter()
-        .map(|a| match a.func {
-            AggregateFn::Count => ScanValue::I64(keys.len() as i64),
-            AggregateFn::Sum => ScanValue::I64(keys.iter().sum()),
-            AggregateFn::Avg if keys.is_empty() => ScanValue::F64(0.0),
-            AggregateFn::Avg => {
-                let sum: i64 = keys.iter().sum();
-                ScanValue::F64(sum as f64 / keys.len() as f64)
-            }
-            AggregateFn::Min => extreme(keys.first().copied()),
-            AggregateFn::Max => extreme(keys.last().copied()),
-        })
-        .collect();
-    let mut groups = vec![AggregateGroup {
-        key: Vec::new(),
-        values,
-    }];
+    let reduce = |run: &[i64]| -> Vec<ScanValue> {
+        aggregates
+            .iter()
+            .map(|a| match a.func {
+                AggregateFn::Count => ScanValue::I64(run.len() as i64),
+                AggregateFn::Sum => ScanValue::I64(run.iter().sum()),
+                AggregateFn::Avg if run.is_empty() => ScanValue::F64(0.0),
+                AggregateFn::Avg => {
+                    let sum: i64 = run.iter().sum();
+                    ScanValue::F64(sum as f64 / run.len() as f64)
+                }
+                AggregateFn::Min => render(run.first().copied().unwrap_or(0)),
+                AggregateFn::Max => render(run.last().copied().unwrap_or(0)),
+            })
+            .collect()
+    };
+    let mut groups: Vec<AggregateGroup> = if grouped {
+        keys.chunk_by(|a, b| a == b)
+            .map(|run| AggregateGroup {
+                key: vec![(field, render(run[0]))],
+                values: reduce(run),
+            })
+            .collect()
+    } else {
+        vec![AggregateGroup {
+            key: Vec::new(),
+            values: reduce(&keys),
+        }]
+    };
     if let Some(limit) = limit {
         groups.truncate(limit);
     }
@@ -3177,9 +3202,10 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         } => {
             let schema = store.describe();
             match validate_aggregate(&schema, &group_by, &filter, &aggregates) {
-                // `QCW-FR-004` (ADR-0081) / `QKW-FR-004` (ADR-0082): a
-                // count of a range, or an aggregate over the walked key
-                // itself, the sorted index answers on its own — no
+                // `QCW-FR-004` (ADR-0081) / `QKW-FR-004` (ADR-0082) /
+                // `QKG-FR-002` (ADR-0084): a count of a range, an
+                // aggregate over the walked key itself, or a `GROUP BY`
+                // that key, the sorted index answers on its own — no
                 // record read at all.
                 Ok(()) => {
                     match keyed_walk(store, &schema, &group_by, &filter, &aggregates, limit) {
@@ -5294,8 +5320,13 @@ mod tests {
     /// refusal — and which counts every `get` and `scan_all`, so a test
     /// asserts what the planner actually read rather than inferring it.
     /// Schema is [`planner_schema`]; rows are [`sql_test_rows`].
+    type FixtureRow = (RecordId, Vec<(FieldRef, ScanValue)>);
+
     struct PlannerFixture {
         index: Result<Vec<RecordId>, ErrorCode>,
+        /// `QKG-FR-004`: the fixture's rows when not `sql_test_rows()` —
+        /// a table with repeated keys for the grouped walk.
+        rows: Option<Vec<FixtureRow>>,
         /// `QPR-FR-002` (ADR-0075): the field the fixture's sorted index
         /// is over, if any, and whether `range_ids` refuses despite
         /// declaring it (the contract-mismatch fallback case).
@@ -5314,6 +5345,7 @@ mod tests {
         fn with_index(index: Result<Vec<RecordId>, ErrorCode>) -> Self {
             Self {
                 index,
+                rows: None,
                 range_field: None,
                 range_refuses: false,
                 range_over_budget: false,
@@ -5339,6 +5371,16 @@ mod tests {
                 ..Self::with_index(Err(ErrorCode::Unsupported))
             }
         }
+        /// `with_range` over `rows` instead of `sql_test_rows()`.
+        fn with_range_over(field: FieldRef, rows: Vec<FixtureRow>) -> Self {
+            Self {
+                rows: Some(rows),
+                ..Self::with_range(field)
+            }
+        }
+        fn rows(&self) -> Vec<FixtureRow> {
+            self.rows.clone().unwrap_or_else(sql_test_rows)
+        }
         /// Declares `field` range-indexed but refuses every walk.
         fn with_refusing_range(field: FieldRef) -> Self {
             Self {
@@ -5357,7 +5399,7 @@ mod tests {
     impl ConnectionStore for PlannerFixture {
         fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
             self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            sql_test_rows()
+            self.rows()
                 .into_iter()
                 .find(|(row_id, _)| *row_id == id)
                 .map(|(_, fields)| fields)
@@ -5365,7 +5407,7 @@ mod tests {
         fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
             self.scans
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            sql_test_rows()
+            self.rows()
         }
         fn filter_eq(
             &self,
@@ -5397,7 +5439,8 @@ mod tests {
                 other => panic!("the fixture's range field is U32, got {other:?}"),
             };
             let range = (key(lower), key(upper));
-            let mut keyed: Vec<(u32, RecordId)> = sql_test_rows()
+            let mut keyed: Vec<(u32, RecordId)> = self
+                .rows()
                 .into_iter()
                 .filter_map(
                     |(id, fields)| match fields.iter().find(|(f, _)| *f == field)?.1 {
@@ -6566,6 +6609,212 @@ mod tests {
         assert_eq!(keyed.range_counts(), 0);
         assert!(keyed.gets() > 0);
         assert_eq!(groups.len(), 1);
+    }
+
+    /// `QKG-FR-001` (ADR-0084), acceptance criterion 1: a `group_by` of
+    /// exactly the range field is eligible — beside `COUNT(*)` and the
+    /// four reductions, with or without bounds; any other `group_by`,
+    /// or the range field beside another, is not.
+    #[test]
+    fn keyed_walk_applies_to_a_group_by_of_the_range_field() {
+        use CompareOp::Ge;
+        let spec = |func, field| AggregateSpec { func, field };
+        let applies = |group_by: &[FieldRef], filter: &[Predicate], aggs: &[AggregateSpec]| {
+            keyed_walk_applies(Some(1), group_by, filter, aggs)
+        };
+        let count = spec(AggregateFn::Count, None);
+        assert!(applies(&[1], &[], std::slice::from_ref(&count)));
+        assert!(applies(
+            &[1],
+            &[u32_pred(1, Ge, 1)],
+            std::slice::from_ref(&count)
+        ));
+        for func in [
+            AggregateFn::Sum,
+            AggregateFn::Avg,
+            AggregateFn::Min,
+            AggregateFn::Max,
+        ] {
+            assert!(
+                applies(
+                    &[1],
+                    &[u32_pred(1, Ge, 1)],
+                    &[count.clone(), spec(func, Some(1))]
+                ),
+                "{func:?}"
+            );
+            assert!(
+                !applies(&[1], &[], &[spec(func, Some(3))]),
+                "{func:?} over another field"
+            );
+        }
+        assert!(
+            !applies(&[2], &[], std::slice::from_ref(&count)),
+            "another field"
+        );
+        assert!(
+            !applies(&[1, 2], &[], std::slice::from_ref(&count)),
+            "the key beside another"
+        );
+        assert!(
+            !applies(&[2, 1], &[], std::slice::from_ref(&count)),
+            "another beside the key"
+        );
+        assert!(
+            !applies(
+                &[1],
+                &[u32_pred(1, Ge, 1), labrador()],
+                std::slice::from_ref(&count)
+            ),
+            "a second field in the filter"
+        );
+        assert!(!keyed_walk_applies(None, &[1], &[], &[count]));
+    }
+
+    /// `QKG-FR-002`/`QKG-FR-003` (ADR-0084), acceptance criterion 2: a
+    /// `group_by` of the range field is one group per run of equal keys
+    /// in the walk, keyed in the field's kind, each column reduced over
+    /// the run, no record decoded — the decode path's identical groups
+    /// under a bound (over a range, over nothing); the same set over
+    /// everything; `limit` truncating the groups; the one shape that
+    /// still decodes (a `limit` with no bound); a count-only grouped
+    /// request taking the keys, not `counted_walk`.
+    #[test]
+    fn dispatch_groups_the_walked_keys_by_run_without_reading_a_record() {
+        use CompareOp::{Ge, Gt, Lt};
+        let spec = |func, field| AggregateSpec { func, field };
+        let all = || {
+            vec![
+                spec(AggregateFn::Count, None),
+                spec(AggregateFn::Sum, Some(1)),
+                spec(AggregateFn::Avg, Some(1)),
+                spec(AggregateFn::Min, Some(1)),
+                spec(AggregateFn::Max, Some(1)),
+            ]
+        };
+        // Field 1 (U32): 3, 3, 5, 9, 9, 9 on ids 1..=6 — two runs of
+        // repeated keys and one singleton.
+        let rows = || -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+            [3u32, 3, 5, 9, 9, 9]
+                .into_iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    (
+                        RecordId::from_u128(i as u128 + 1),
+                        vec![(1, ScanValue::U32(key)), (2, ScanValue::Str("x".into()))],
+                    )
+                })
+                .collect()
+        };
+        let keyed = || PlannerFixture::with_range_over(1, rows());
+        let scanned = || PlannerFixture {
+            rows: Some(rows()),
+            ..PlannerFixture::with_index(Err(ErrorCode::Unsupported))
+        };
+        let groups_of = |response| match response {
+            Response::Groups { groups } => groups,
+            other => panic!("expected Groups, got {other:?}"),
+        };
+        let request = |filter: Vec<Predicate>, aggregates, limit| Request::Aggregate {
+            group_by: vec![1],
+            filter,
+            aggregates,
+            limit,
+        };
+        // Under a bound: the decode path's identical groups, in order.
+        for (filter, limit) in [
+            (vec![u32_pred(1, Gt, 3)], None),
+            (vec![u32_pred(1, Ge, 3), u32_pred(1, Lt, 9)], None),
+            (vec![u32_pred(1, Ge, 3)], Some(2)),
+            (vec![u32_pred(1, Gt, 9)], None),
+        ] {
+            let (k, d) = (keyed(), scanned());
+            let a = groups_of(dispatch(&k, request(filter.clone(), all(), limit)));
+            let b = groups_of(dispatch(&d, request(filter.clone(), all(), limit)));
+            assert_eq!(a, b, "{filter:?} {limit:?}");
+            assert_eq!(
+                (k.gets(), k.scans(), k.range_counts()),
+                (0, 0, 1),
+                "{filter:?}: keys only"
+            );
+            assert_eq!(d.scans(), 1);
+        }
+        let k = keyed();
+        let groups = groups_of(dispatch(&k, request(vec![u32_pred(1, Gt, 3)], all(), None)));
+        assert_eq!(
+            groups,
+            vec![
+                AggregateGroup {
+                    key: vec![(1, ScanValue::U32(5))],
+                    values: vec![
+                        ScanValue::I64(1),
+                        ScanValue::I64(5),
+                        ScanValue::F64(5.0),
+                        ScanValue::U32(5),
+                        ScanValue::U32(5)
+                    ],
+                },
+                AggregateGroup {
+                    key: vec![(1, ScanValue::U32(9))],
+                    values: vec![
+                        ScanValue::I64(3),
+                        ScanValue::I64(27),
+                        ScanValue::F64(9.0),
+                        ScanValue::U32(9),
+                        ScanValue::U32(9)
+                    ],
+                },
+            ],
+            "one group per run, keyed in the field's kind"
+        );
+        let k = keyed();
+        let groups = groups_of(dispatch(&k, request(vec![u32_pred(1, Gt, 9)], all(), None)));
+        assert!(groups.is_empty(), "over nothing: no keyed group");
+        // Over everything: the same set as the decode path (which
+        // buckets in scan order — here id order, which is key order).
+        let (k, d) = (keyed(), scanned());
+        let mut a = groups_of(dispatch(&k, request(vec![], all(), None)));
+        let mut b = groups_of(dispatch(&d, request(vec![], all(), None)));
+        assert_eq!(a.len(), 3);
+        let by_key = |g: &AggregateGroup| match g.key[0].1 {
+            ScanValue::U32(k) => k,
+            ref other => panic!("{other:?}"),
+        };
+        a.sort_by_key(by_key);
+        b.sort_by_key(by_key);
+        assert_eq!(a, b);
+        assert_eq!((k.gets(), k.range_counts()), (0, 1));
+        // A `limit` with no bound: decodes, so the truncated set is the
+        // decode path's own.
+        let k = keyed();
+        let groups = groups_of(dispatch(
+            &k,
+            request(vec![], vec![spec(AggregateFn::Count, None)], Some(1)),
+        ));
+        assert_eq!(groups.len(), 1);
+        assert_eq!((k.range_counts(), k.scans()), (0, 1));
+        // Count-only but grouped: the keys, not `counted_walk`'s count.
+        let k = keyed();
+        let groups = groups_of(dispatch(
+            &k,
+            request(
+                vec![u32_pred(1, Ge, 3)],
+                vec![spec(AggregateFn::Count, None)],
+                None,
+            ),
+        ));
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| (g.key[0].1.clone(), g.values[0].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ScanValue::U32(3), ScanValue::I64(2)),
+                (ScanValue::U32(5), ScanValue::I64(1)),
+                (ScanValue::U32(9), ScanValue::I64(3)),
+            ]
+        );
+        assert_eq!((k.gets(), k.range_counts()), (0, 1));
     }
 
     /// `QPR-FR-004` (ADR-0075), acceptance criterion 3: each comparator's

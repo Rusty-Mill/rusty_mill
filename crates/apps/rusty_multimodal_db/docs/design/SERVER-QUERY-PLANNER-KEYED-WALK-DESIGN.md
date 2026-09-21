@@ -185,7 +185,9 @@ owed.
 
 ## Open questions
 
-- **`GROUP BY` the range field** — option (b).
+- **`GROUP BY` the range field** — option (b). *Taken: `ADR-0084`
+  (2026-09-21) — one group per run of equal walked keys —
+  `docs/design/SERVER-QUERY-PLANNER-KEYED-GROUPS-DESIGN.md`.*
 - **A fold that never materializes the keys** — `range_keys` fills a
   `Vec<i64>` (8 bytes per key); the `due-next` row's ~600 µs against
   `due-count`'s ~290 µs is that `Vec`. A generic `range_fold` would
