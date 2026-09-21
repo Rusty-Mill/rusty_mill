@@ -193,7 +193,8 @@ owed.
   `docs/design/SERVER-QUERY-PLANNER-KEYED-WALK-DESIGN.md`.*
 - **An "exact" equality index** — a capability flag so a bucket's
   length could count too; a protocol round.
-- **Plan metrics** — still named, still not bundled.
+- **Plan metrics** — still named, still not bundled. *Taken: `ADR-0086`
+  (2026-09-21) — `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 
 ## Change history
 

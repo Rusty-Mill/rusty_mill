@@ -246,7 +246,8 @@ inspection owed.
   as a budget on the walk (abandoned past ten ids per bucket id)
   rather than an estimate of the range — no count, no size threshold.*
 - **Plan metrics** — a per-plan counter in `ServerMetrics`, now four
-  plans wide; still named, still not bundled.
+  plans wide; still named, still not bundled. *Taken: `ADR-0086` (2026-09-21) —
+  `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 - **Bound tightening** and **two equalities** — unchanged.
 
 ## Change history

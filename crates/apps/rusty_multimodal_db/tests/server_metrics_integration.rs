@@ -184,3 +184,93 @@ fn connections_active_returns_to_zero_after_disconnect() {
         "text: {text}"
     );
 }
+
+/// `QPM-FR-003` (ADR-0086, `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`),
+/// acceptance criterion 2: over a real socket on `Memory` (`category`
+/// equality-indexed, `updated_at_unix_ms` range-indexed), one read of
+/// each planned shape moves exactly its own `plan` label by one, a
+/// refused read moves none, and a read that is not planned (`Page`,
+/// `GetById`, `Metrics` itself) moves none.
+#[test]
+fn query_plans_total_counts_each_planned_read_on_its_own_label() {
+    let mut client =
+        SchemaDrivenClient::connect(start_server(ServeOptions::new(None, None))).unwrap();
+    let plan = |text: &str, label: &str| -> u64 {
+        metric_value(
+            text,
+            &format!("dogserver_query_plans_total{{plan=\"{label}\"}}"),
+        )
+    };
+    let labels = [
+        "full_scan",
+        "index_eq",
+        "index_range",
+        "index_intersect",
+        "bounded_walk",
+        "counted_walk",
+        "keyed_walk",
+    ];
+    let snapshot = |client: &mut SchemaDrivenClient| -> Vec<u64> {
+        let text = client.metrics().unwrap();
+        labels.iter().map(|l| plan(&text, l)).collect()
+    };
+    let before = snapshot(&mut client);
+    assert_eq!(before, vec![0; 7], "a fresh server: every label at zero");
+
+    // One read per plan, in label order; each must be answered without
+    // an error to count.
+    client.query("SELECT * FROM memory").unwrap();
+    client
+        .query("SELECT * FROM memory WHERE category = 'general'")
+        .unwrap();
+    client
+        .query("SELECT * FROM memory WHERE updated_at_unix_ms >= 0")
+        .unwrap();
+    client
+        .query("SELECT * FROM memory WHERE category = 'general' AND updated_at_unix_ms >= 0")
+        .unwrap();
+    client
+        .query(
+            "SELECT * FROM memory WHERE updated_at_unix_ms >= 0 \
+             ORDER BY updated_at_unix_ms LIMIT 5",
+        )
+        .unwrap();
+    client
+        .query("SELECT COUNT(*) FROM memory WHERE updated_at_unix_ms >= 0")
+        .unwrap();
+    client
+        .query("SELECT MAX(updated_at_unix_ms) FROM memory")
+        .unwrap();
+    assert_eq!(snapshot(&mut client), vec![1; 7], "one read per label");
+
+    // Not planned reads: `Page` (no `WHERE`), a point read, `Metrics`.
+    client
+        .query("SELECT * FROM memory ORDER BY updated_at_unix_ms LIMIT 5")
+        .unwrap();
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+    assert_eq!(
+        snapshot(&mut client),
+        vec![1; 7],
+        "unplanned reads move nothing"
+    );
+
+    // A refused planned read (an unknown field) counts nowhere.
+    assert!(client
+        .query("SELECT * FROM memory WHERE no_such_field = 1")
+        .is_err());
+    assert_eq!(
+        snapshot(&mut client),
+        vec![1; 7],
+        "a refused read moves nothing"
+    );
+
+    // Repeats accumulate on their own label only.
+    for _ in 0..3 {
+        client
+            .query("SELECT * FROM memory WHERE category = 'general'")
+            .unwrap();
+    }
+    let after = snapshot(&mut client);
+    assert_eq!(after[1], 4, "index_eq");
+    assert_eq!(after.iter().sum::<u64>(), 10);
+}

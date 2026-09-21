@@ -126,7 +126,11 @@ not a guess.
   existing binary wire protocol is untouched and still works exactly
   as before. (The Prometheus-text metrics the differential test suite
   exercises belong to the *consumer's* hub layer, `rusty_remind_me`,
-  not this crate.)
+  not this crate.) **Since `ADR-0086`**: one index stat —
+  `dogserver_query_plans_total{plan="…"}`, the path each planned read
+  took (`SERVER-001` v0.71.0/FR-083), classified before dispatch by a
+  pure function of the request; still absent: latency, queue depth,
+  journal size.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing

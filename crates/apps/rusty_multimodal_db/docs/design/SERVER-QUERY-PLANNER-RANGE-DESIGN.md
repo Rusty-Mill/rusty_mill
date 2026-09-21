@@ -623,7 +623,8 @@ session as having covered it.
   taken: `ADR-0078` (2026-09-21), exact and estimate-free since both
   indexes answer ids without a decode. Bound tightening taken: `ADR-0083` (2026-09-21) — read as a comparison between literals rather than a cost model; the walk runs between the tightest lower and tightest upper — `docs/design/SERVER-QUERY-PLANNER-BOUND-TIGHTENING-DESIGN.md`.*
 - **Plan metrics** — a per-plan counter in `ServerMetrics`, now three
-  plans wide; still named, still not bundled.
+  plans wide; still named, still not bundled. *Taken: `ADR-0086` (2026-09-21) —
+  `docs/design/SERVER-QUERY-PLAN-METRICS-DESIGN.md`.*
 - **A second `Ordered` wrap** (`created_at_unix_ms`) and `Reminder`
   under `Ordered` — each a wrap and a `range_field` change, if a
   consumer asks. *`Reminder` taken: `ADR-0080` (2026-09-21).*
