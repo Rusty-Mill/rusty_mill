@@ -537,6 +537,34 @@ jobs:
   # `alloc`-only (no hardware/platform-specific code), so the host triple
   # is sufficient -- no `--target` cross-compile is needed the way
   # rusty_win32's check above needs one.
+  # rusty_multimodal_db's library and test targets are built by every
+  # other job with --all-features only, which is not what a deployment
+  # builds: `memory_server` is `--features server`, a client is
+  # `--features client`, and the default build has neither. Two of those
+  # broke (a `research`-gated import used by both, a module ungated behind
+  # `client`) and stayed broken across several merged PRs before a local
+  # `cargo check --features server` found them (ADR-0098). This job builds
+  # the crate's shipped feature sets, all targets, so the gap stays closed.
+  multimodal-db-feature-sets:
+    name: rusty_multimodal_db feature sets (default, client, server, research)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: multimodal-db-feature-sets
+      - name: cargo check -p rusty_multimodal_db (default features)
+        run: cargo check -p rusty_multimodal_db --all-targets
+      - name: cargo check -p rusty_multimodal_db --features client
+        run: cargo check -p rusty_multimodal_db --features client --all-targets
+      - name: cargo check -p rusty_multimodal_db --features server
+        run: cargo check -p rusty_multimodal_db --features server --all-targets
+      - name: cargo check -p rusty_multimodal_db --features research
+        run: cargo check -p rusty_multimodal_db --features research --all-targets
+
   rusty-config-no-std-check:
     name: rusty_config no_std (--no-default-features)
     needs: plan

@@ -207,6 +207,30 @@ required-features = ["server"]
 name = "memory_server_data_dir_lock"
 required-features = ["server"]
 
+# Five server-only test targets that were never registered (ADR-0098):
+# each imports `rusty_multimodal_db::server::{memory,entity,relation,...}`,
+# so without `required-features` they fail to compile under any feature
+# set that lacks `server` -- invisible to CI's `--all-features` run.
+[[test]]
+name = "memory_server_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_memory_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_entity_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_relation_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_replication_integration"
+required-features = ["server"]
+
 [[test]]
 name = "server_limits_integration"
 required-features = ["server"]
