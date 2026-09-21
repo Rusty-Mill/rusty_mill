@@ -1204,6 +1204,11 @@ impl ConnectionStore for MemoryConnectionStore {
                 .as_ref()
                 .map(CommitGroup::entries_since_checkpoint)
                 .unwrap_or(0);
+            // `HRC-FR-002` (ADR-0096): reclaim history no open snapshot
+            // needs, then flush — the flushed store is the reclaimed one.
+            if let Some(mvcc) = &self.mvcc {
+                mvcc.state.reclaim();
+            }
             if !self.mvcc_flush_now(journal_entries) {
                 return Err(ErrorCode::Storage);
             }
@@ -2030,6 +2035,69 @@ mod tests {
     /// full, correct history from before that `Compact` — a snapshot
     /// taken before a write still sees the pre-write value, and a fresh
     /// snapshot after reopen sees the write.
+    /// `HRC-FR-002`/`003` (ADR-0096): `Compact` reclaims every history
+    /// entry below the oldest open snapshot and nothing that snapshot
+    /// still needs; with no snapshot open, one entry per chain remains
+    /// and the current value still reads.
+    #[test]
+    fn compact_reclaims_history_below_the_oldest_open_snapshot() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let history_len = || {
+            adapter
+                .mvcc
+                .as_ref()
+                .unwrap()
+                .state
+                .with_index(|index| index.history_len())
+        };
+        let write = |value: i64| {
+            let snapshot = adapter.mvcc_begin();
+            adapter
+                .apply_transaction_mvcc(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(value),
+                    }],
+                    &[],
+                    snapshot,
+                )
+                .unwrap();
+            adapter.mvcc_release(snapshot);
+        };
+        write(1);
+        let held = adapter.mvcc_begin();
+        write(2);
+        write(3);
+        let before = history_len();
+
+        adapter.compact().unwrap();
+        let with_snapshot_open = history_len();
+        assert!(
+            with_snapshot_open < before,
+            "nothing reclaimed with a snapshot open at {held}: {before} -> {with_snapshot_open}"
+        );
+        assert_eq!(
+            adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(1),
+            "the open snapshot still reads the value it was opened on"
+        );
+
+        adapter.mvcc_release(held);
+        adapter.compact().unwrap();
+        let after = history_len();
+        assert!(
+            after < with_snapshot_open,
+            "releasing the snapshot must let Compact reclaim more: {with_snapshot_open} -> {after}"
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(3),
+            "the current value is never reclaimed"
+        );
+    }
+
     #[test]
     fn compact_flushes_mvcc_history_and_a_reopen_reconstructs_it() {
         let dir = fresh_temp_dir("server_memory_mvcc_compact").unwrap();

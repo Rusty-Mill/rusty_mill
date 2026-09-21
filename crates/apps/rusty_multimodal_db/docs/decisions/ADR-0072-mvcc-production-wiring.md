@@ -438,7 +438,9 @@ own assumptions, both confirmed by direct code reading:
   longer-lived must outlive their own reclamation). It grows roughly
   one entry per commit, not only per superseded key, reclaimed only at
   the next `Compact` — the same accepted "unbounded between explicit
-  Compact runs" cost `ADR-0071` already named. Unlike a naive per-write
+  Compact runs" cost `ADR-0071` already named. *Note (`ADR-0096`, 2026-09-21):
+  until that round no `Compact` actually called `MvccIndex::gc`; it
+  does now, at the oldest open snapshot, before the flush.* Unlike a naive per-write
   sidecar, though, it is only *flushed* at existing checkpoint/compact
   boundaries (piggybacking on locks and gates that already exist), not
   on every write — bounding the durability cost even though the

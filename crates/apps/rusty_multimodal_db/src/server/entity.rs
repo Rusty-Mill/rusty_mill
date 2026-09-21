@@ -847,6 +847,11 @@ impl ConnectionStore for EntityConnectionStore {
                 .as_ref()
                 .map(CommitGroup::entries_since_checkpoint)
                 .unwrap_or(0);
+            // `HRC-FR-002` (ADR-0096): reclaim history no open snapshot
+            // needs, then flush — the flushed store is the reclaimed one.
+            if let Some(mvcc) = &self.mvcc {
+                mvcc.state.reclaim();
+            }
             if !self.mvcc_flush_now(journal_entries) {
                 return Err(ErrorCode::Storage);
             }

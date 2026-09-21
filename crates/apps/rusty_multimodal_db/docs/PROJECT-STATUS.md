@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `STORAGE-CRASH-SAFETY-GATE` (`ADR-0095`, `STORAGE-021`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the fourth "do now" item of the release-readiness review the owner asked for: the crash harness's four trials as CI tests (`tests/crash_safety.rs`). Its PR waits on the owner. `ADR-0092` (PR #292), `ADR-0093` (PR #293), and `ADR-0094` (PR #294) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before.
+- `SERVER-MVCC-HISTORY-RECLAIM` (`ADR-0096`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the fifth and last "do now" item of the release-readiness review the owner asked for: `Compact` reclaims MVCC history at the oldest open snapshot. Its PR waits on the owner. `ADR-0092`–`ADR-0095` (PRs #292–#295) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before. With this the review's five-item list is closed; the update path's durability (an acknowledged `UpdateField` outside the journal is durable at the next `Flush`/checkpoint/write-back) remains the named, documented loss window.
 
 ## Blocked
 

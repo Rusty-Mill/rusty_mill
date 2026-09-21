@@ -135,6 +135,14 @@ not a guess.
   dispatched request. **Since `ADR-0093`**:
   `dogserver_connections_refused_total`, accepts closed at the
   connection cap; still absent: queue depth, journal size.
+* **MVCC history reclaimed.** `ADR-0072` accepted "unbounded between
+  explicit `Compact` runs" and then no `Compact` reclaimed. *Since
+  `ADR-0096`:* `Compact` on `Memory`/`Entity`/`Relation` drops every
+  chain entry below the oldest open snapshot before flushing the
+  history store. Still absent: an automatic trigger (a size threshold
+  or timer), a `dogserver_mvcc_history_entries` metric, and any
+  reclamation for the research domains, which answer `Compact` with
+  `Unsupported`.
 * **An exposed, unprotected listener refused at startup.** Not named
   here before. *Built since this was written:* `ADR-0094` — every
   binary refuses a non-loopback bind unless authentication and TLS are
