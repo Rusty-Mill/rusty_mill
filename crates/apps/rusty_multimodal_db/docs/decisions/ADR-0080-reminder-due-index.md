@@ -87,3 +87,5 @@ The fork, held for the owner:
   121.9 µs, the due count 52,913.6 → 22,312.4, the due window
   56,733.3 → 476.6 — `RESULTS.md`. The fork above remains the
   owner's at review; (a) is what merges if the PR merges unchanged.
+- 2026-09-21: the decode-free count this ADR named from its own
+  `due-count` measurement taken the same day as `ADR-0081`.

@@ -924,6 +924,24 @@ impl ConnectionStore for MemoryConnectionStore {
 
     /// `QPB-FR-002` (ADR-0079): [`Self::range_ids`] with a budget — the
     /// stack's `range_by_limited`, `None` past `limit` ids.
+    /// `QCW-FR-002` (ADR-0081): how many records a `WHERE` range on
+    /// `field_updated_at` admits — the sorted index's own count between the
+    /// bounds, no record read.
+    fn range_count(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<u64, ErrorCode> {
+        if field != FIELD_UPDATED_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self
+            .store
+            .range_count::<Memory, UpdatedAtOrder>(lower, upper) as u64)
+    }
+
     fn range_ids_limited(
         &self,
         field: FieldRef,

@@ -301,6 +301,22 @@ impl ConnectionStore for ReminderConnectionStore {
 
     /// `RDO-FR-002` (ADR-0080): the budgeted walk (`QPB-FR-002`) — see
     /// `MemoryConnectionStore::range_ids_limited`; identical here.
+    /// `QCW-FR-002` (ADR-0081): how many records a `WHERE` range on
+    /// `field_due_at` admits — the sorted index's own count between the
+    /// bounds, no record read.
+    fn range_count(
+        &self,
+        field: FieldRef,
+        lower: Bound<ScanValue>,
+        upper: Bound<ScanValue>,
+    ) -> Result<u64, ErrorCode> {
+        if field != FIELD_DUE_AT {
+            return Err(ErrorCode::Unsupported);
+        }
+        let (lower, upper) = uuid_pair_bounds(lower, upper)?;
+        Ok(self.store.range_count::<Reminder, DueAtOrder>(lower, upper) as u64)
+    }
+
     fn range_ids_limited(
         &self,
         field: FieldRef,

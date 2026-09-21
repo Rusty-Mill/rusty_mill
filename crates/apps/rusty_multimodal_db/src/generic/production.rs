@@ -558,6 +558,28 @@ impl<S> GenericProductionStore<S> {
             .range_by_limited(lower, upper, limit)
     }
 
+    /// How many ids lie in one key range of `R`'s `Marker` field
+    /// (`QCW-FR-001`, ADR-0081) — [`Self::range_by`]'s length without
+    /// the `Vec`, under the read lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn range_count<R, Marker>(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> usize
+    where
+        R: OrderedField<Marker>,
+        S: RangeBy<R, Marker>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .range_count(lower, upper)
+    }
+
     /// How many edges `relation` holds (`CNT-FR-001`, ADR-0057) — one
     /// read under the lock, `None` for an unknown label.
     ///

@@ -2328,6 +2328,15 @@ where
         self.guarded_range(lower, upper).collect()
     }
 
+    // `QCW-FR-001` (ADR-0081): the same guarded walk, counted.
+    fn range_count(
+        &self,
+        lower: std::ops::Bound<(R::Key, R::Id)>,
+        upper: std::ops::Bound<(R::Key, R::Id)>,
+    ) -> usize {
+        self.guarded_range(lower, upper).count()
+    }
+
     // `QPB-FR-001` (ADR-0079): the same guarded walk, abandoned — and
     // never collected — at the first pair past the budget.
     fn range_by_limited(

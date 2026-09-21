@@ -2909,3 +2909,142 @@ fn reminder_due_at_range_and_page_return_the_exact_sequence() {
         vec![id(1), id(3), id(2)]
     );
 }
+
+// ---------------------------------------------------------------------
+// `ADR-0081` / `docs/design/SERVER-QUERY-PLANNER-COUNTED-WALK-DESIGN.md`,
+// acceptance criterion 4 (`QCW-FR-005`): a `COUNT(*)` whose filter is
+// only bounds on the range field answers from the sorted index with
+// no record read, and is exactly the decode path's count — on `Memory`,
+// `Relation`, and `Reminder`, with and without a filter, through
+// runtime writes; every ineligible count shape still exact.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_pure_range_count_from_the_index_matches_the_decoded_count_exactly() {
+    let count_where = |client: &mut SchemaDrivenClient, table: &str, where_: &str| -> i64 {
+        let sql = if where_.is_empty() {
+            format!("SELECT COUNT(*) FROM {table}")
+        } else {
+            format!("SELECT COUNT(*) FROM {table} WHERE {where_}")
+        };
+        match &groups(client.query(&sql).unwrap())[0][0] {
+            (_, ScanValue::I64(n)) => *n,
+            other => panic!("{other:?}"),
+        }
+    };
+    let oracle = |client: &mut SchemaDrivenClient, table: &str, keep: Keep| -> i64 {
+        let mut all = rows(client.query(&format!("SELECT * FROM {table}")).unwrap());
+        all.retain(|(_, f)| keep(f));
+        all.len() as i64
+    };
+    let updated = |f: &[(String, ScanValue)]| i64_field(f, "updated_at_unix_ms");
+    let due = |f: &[(String, ScanValue)]| i64_field(f, "due_at_unix_ms");
+
+    let mut client = SchemaDrivenClient::connect(start_memory_server()).unwrap();
+    let id = Uuid::from_u128;
+    type Row = [(String, ScanValue)];
+    for (where_, keep) in [
+        ("", &(|_: &Row| true) as Keep),
+        ("updated_at_unix_ms >= 2000", &|f: &Row| updated(f) >= 2_000),
+        (
+            "updated_at_unix_ms > 2000 AND updated_at_unix_ms <= 4000",
+            &|f: &Row| updated(f) > 2_000 && updated(f) <= 4_000,
+        ),
+        ("updated_at_unix_ms = 3000", &|f: &Row| updated(f) == 3_000),
+        ("updated_at_unix_ms < 1000", &|f: &Row| updated(f) < 1_000),
+        (
+            "updated_at_unix_ms > 5000 AND updated_at_unix_ms < 1000",
+            &|f: &Row| updated(f) > 5_000 && updated(f) < 1_000,
+        ),
+        // Ineligible: still the decoded count.
+        (
+            "updated_at_unix_ms >= 2000 AND category = 'general'",
+            &|f: &Row| updated(f) >= 2_000 && str_field(f, "category") == "general",
+        ),
+        ("updated_at_unix_ms != 2000", &|f: &Row| updated(f) != 2_000),
+        (
+            "updated_at_unix_ms >= 1000 AND updated_at_unix_ms >= 3000",
+            &|f: &Row| updated(f) >= 3_000,
+        ),
+    ] {
+        assert_eq!(
+            count_where(&mut client, "memory", where_),
+            oracle(&mut client, "memory", keep),
+            "memory: COUNT(*) WHERE {where_}"
+        );
+    }
+    assert_eq!(
+        count_where(&mut client, "memory", "updated_at_unix_ms >= 2000"),
+        4
+    );
+    // Runtime writes move the count with the index.
+    client
+        .insert(id(6), &memory_fields_updated_at(6, "general", 2_500))
+        .unwrap();
+    assert_eq!(
+        count_where(&mut client, "memory", "updated_at_unix_ms >= 2000"),
+        5
+    );
+    client
+        .replace(id(6), &memory_fields_updated_at(6, "general", 500))
+        .unwrap();
+    assert_eq!(
+        count_where(&mut client, "memory", "updated_at_unix_ms >= 2000"),
+        4
+    );
+    assert!(client.delete(id(5)).unwrap());
+    assert_eq!(
+        count_where(&mut client, "memory", "updated_at_unix_ms >= 2000"),
+        3
+    );
+    assert_eq!(count_where(&mut client, "memory", ""), 5);
+
+    let mut client = SchemaDrivenClient::connect(start_relation_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &[(String, ScanValue)]| true) as Keep),
+        ("updated_at_unix_ms <= 2000", &|f: &[(
+            String,
+            ScanValue,
+        )]| {
+            updated(f) <= 2_000
+        }),
+    ] {
+        assert_eq!(
+            count_where(&mut client, "relation", where_),
+            oracle(&mut client, "relation", keep),
+            "relation: {where_}"
+        );
+    }
+
+    let mut client = SchemaDrivenClient::connect(start_reminder_server()).unwrap();
+    for (where_, keep) in [
+        ("", &(|_: &[(String, ScanValue)]| true) as Keep),
+        ("due_at_unix_ms <= 1500", &|f: &[(String, ScanValue)]| {
+            due(f) <= 1_500
+        }),
+        ("due_at_unix_ms <= 1500 AND status = 0", &|f: &[(
+            String,
+            ScanValue,
+        )]| {
+            due(f) <= 1_500
+                && matches!(
+                    f.iter().find(|(n, _)| n == "status"),
+                    Some((_, ScanValue::U32(0)))
+                )
+        }),
+        // `due_at = k` plans the equality bucket, not the walk: decoded.
+        ("due_at_unix_ms = 1000", &|f: &[(String, ScanValue)]| {
+            due(f) == 1_000
+        }),
+    ] {
+        assert_eq!(
+            count_where(&mut client, "reminder", where_),
+            oracle(&mut client, "reminder", keep),
+            "reminder: {where_}"
+        );
+    }
+    assert_eq!(
+        count_where(&mut client, "reminder", "due_at_unix_ms <= 1500"),
+        2
+    );
+}
