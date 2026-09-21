@@ -59,6 +59,20 @@
 //! releases the lock however the process ends, so a killed server
 //! leaves nothing to clean up.
 //!
+//! # Connection limits — `SERVER_IDLE_TIMEOUT_SECS`, `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS` (ADR-0093)
+//!
+//! Each opt-in, each unset by default so an existing deployment sees
+//! no change. `SERVER_IDLE_TIMEOUT_SECS=<n>` closes a connection that
+//! neither sends nor accepts a byte for `n` seconds (its session, if
+//! any, rolls back and its MVCC snapshot is released, exactly as on a
+//! disconnect). `SERVER_MAX_CONNECTIONS=<n>` closes the `n+1`th
+//! concurrent connection at accept, before any byte is read, and
+//! counts it in `dogserver_connections_refused_total`.
+//! `SERVER_MAX_QUERY_ROWS=<n>` refuses a `Query` with no `limit` or a
+//! `limit` above `n`, and any page whose `limit` is above `n`, with
+//! `TooLarge` before any read. A value that is not a positive integer
+//! is a startup error.
+//!
 //! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
 //!
 //! Opt-in, and only meaningful with `SERVER_DATA_DIR` also set (a
@@ -189,6 +203,16 @@ fn sample_mentions() -> Vec<(Uuid, Uuid)> {
         (Uuid::from_u128(2), Uuid::from_u128(0x46)),
         (Uuid::from_u128(3), Uuid::from_u128(0x47)),
     ]
+}
+
+/// `LIM-FR-005` (ADR-0093): an opt-in positive-integer setting — `None`
+/// when unset; a startup error when set to anything else.
+fn positive_env(name: &str) -> Option<u64> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().parse::<u64>() {
+        Ok(n) if n > 0 => Some(n),
+        _ => panic!("{name}={raw:?} is not a positive integer"),
+    }
 }
 
 fn main() {
@@ -422,6 +446,22 @@ fn main() {
         Err(_) => options,
     };
     let replication_tokened = std::env::var_os("SERVER_AUTH_REPLICATION_TOKEN").is_some();
+    // `SERVER_IDLE_TIMEOUT_SECS` / `SERVER_MAX_CONNECTIONS` /
+    // `SERVER_MAX_QUERY_ROWS` (ADR-0093, `LIM-FR-005`): each opt-in; a
+    // value that is not a positive integer is a startup error, this
+    // binary's convention for every other misconfiguration.
+    let options = match positive_env("SERVER_IDLE_TIMEOUT_SECS") {
+        Some(secs) => options.with_idle_timeout(std::time::Duration::from_secs(secs)),
+        None => options,
+    };
+    let options = match positive_env("SERVER_MAX_CONNECTIONS") {
+        Some(max) => options.with_max_connections(usize::try_from(max).unwrap_or(usize::MAX)),
+        None => options,
+    };
+    let options = match positive_env("SERVER_MAX_QUERY_ROWS") {
+        Some(max) => options.with_max_query_rows(usize::try_from(max).unwrap_or(usize::MAX)),
+        None => options,
+    };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
     let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {
@@ -434,7 +474,7 @@ fn main() {
         Err(_) => options,
     };
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -448,6 +488,9 @@ fn main() {
         if access_logged { "configured" } else { "NOT configured" },
         if backup_rooted { "configured" } else { "NOT configured" },
         if replication_tokened { "configured" } else { "NOT configured" },
+        options.idle_timeout(),
+        options.max_connections(),
+        options.max_query_rows(),
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary

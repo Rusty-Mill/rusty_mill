@@ -207,6 +207,10 @@ required-features = ["server"]
 name = "memory_server_data_dir_lock"
 required-features = ["server"]
 
+[[test]]
+name = "server_limits_integration"
+required-features = ["server"]
+
 # `ADR-0065`: a live snapshot copy into a `SERVER_BACKUP_ROOT`-relative
 # directory, reopened via `open_memory_production_stack_portable` to
 # prove the copy is real — `server` alone.

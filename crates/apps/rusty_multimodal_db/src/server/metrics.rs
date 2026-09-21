@@ -45,6 +45,9 @@ pub struct ServerMetrics {
     requests_ok_total: AtomicU64,
     requests_err_total: AtomicU64,
     connections_total: AtomicU64,
+    /// `LIM-FR-002` (ADR-0093): accepts closed at once because the
+    /// connection cap was reached.
+    connections_refused_total: AtomicU64,
     connections_active: AtomicI64,
     /// `QPM-FR-002`: one counter per [`PlanKind`], indexed by
     /// [`PlanKind::index`].
@@ -127,6 +130,7 @@ impl Default for ServerMetrics {
             requests_ok_total: AtomicU64::new(0),
             requests_err_total: AtomicU64::new(0),
             connections_total: AtomicU64::new(0),
+            connections_refused_total: AtomicU64::new(0),
             connections_active: AtomicI64::new(0),
             plans: Default::default(),
             latency_buckets: Default::default(),
@@ -147,6 +151,14 @@ impl ServerMetrics {
     pub(crate) fn record_connection_opened(&self) {
         self.connections_total.fetch_add(1, Ordering::Relaxed);
         self.connections_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `LIM-FR-002` (ADR-0093): one accept closed at once because
+    /// `ServeOptions::max_connections` was already reached — never
+    /// counted in `connections_total`, never opened.
+    pub(crate) fn record_connection_refused(&self) {
+        self.connections_refused_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// The matching close — always called exactly once per
@@ -261,6 +273,9 @@ impl ServerMetrics {
              # HELP dogserver_connections_active Connections currently open.\n\
              # TYPE dogserver_connections_active gauge\n\
              dogserver_connections_active {}\n\
+             # HELP dogserver_connections_refused_total Accepts closed at once because the connection cap was reached.\n\
+             # TYPE dogserver_connections_refused_total counter\n\
+             dogserver_connections_refused_total {}\n\
              # HELP dogserver_query_plans_total Planned reads answered without an error, by the path taken.\n\
              # TYPE dogserver_query_plans_total counter\n\
              {}\
@@ -275,6 +290,7 @@ impl ServerMetrics {
             self.requests_err_total.load(Ordering::Relaxed),
             self.connections_total.load(Ordering::Relaxed),
             self.connections_active.load(Ordering::Relaxed),
+            self.connections_refused_total.load(Ordering::Relaxed),
             plans,
             self.render_latency(),
             uptime,
@@ -308,7 +324,20 @@ mod tests {
         assert!(text.contains("dogserver_requests_err_total 0\n"));
         assert!(text.contains("dogserver_connections_total 0\n"));
         assert!(text.contains("dogserver_connections_active 0\n"));
+        assert!(text.contains("dogserver_connections_refused_total 0\n"));
         assert!(text.contains("dogserver_uptime_seconds "));
+    }
+
+    /// `LIM-FR-002` (ADR-0093): a refused accept moves only its own
+    /// counter — never `connections_total` or the active gauge.
+    #[test]
+    fn a_refused_connection_counts_only_as_refused() {
+        let m = ServerMetrics::new();
+        m.record_connection_refused();
+        let text = m.render();
+        assert!(text.contains("dogserver_connections_refused_total 1\n"));
+        assert!(text.contains("dogserver_connections_total 0\n"));
+        assert!(text.contains("dogserver_connections_active 0\n"));
     }
 
     #[test]

@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-DATA-DIR-LOCK` (`ADR-0092`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the first "do now" item of the release-readiness review the owner asked for ("harden"): one `memory_server` per `SERVER_DATA_DIR` (`DataDirLock`), directory `fsync` after every rename install, MSRV 1.89. Its PR waits on the owner. `ADR-0076`–`ADR-0091` (PRs #276–#290) merged the day before.
+- `SERVER-CONNECTION-LIMITS` (`ADR-0093`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the second "do now" item of the release-readiness review the owner asked for ("harden"): opt-in idle timeout, connection cap, and row cap on `ServeOptions`, `evaluate_query` bounded at `limit`, three `memory_server` settings. Its PR waits on the owner. `ADR-0092` (PR #292, the data-directory lock) merged the same day; `ADR-0076`–`ADR-0091` (PRs #276–#290) the day before.
 
 ## Blocked
 
