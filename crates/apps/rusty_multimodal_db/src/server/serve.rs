@@ -2452,7 +2452,9 @@ impl Drop for InFlightGuard<'_> {
 /// variant is never over the cap.
 pub fn request_exceeds_row_cap(req: &Request, cap: usize) -> bool {
     match req {
-        Request::Query { limit, .. } => limit.is_none_or(|limit| limit > cap),
+        // `CLP-FR-001` (ADR-0102): a `Query` with no `limit` is clamped by
+        // `clamp_missing_limit` before this check, never refused.
+        Request::Query { limit, .. } => limit.is_some_and(|limit| limit > cap),
         Request::Page { limit, .. }
         | Request::FilteredPage { limit, .. }
         | Request::PageDesc { limit, .. }
@@ -2461,6 +2463,31 @@ pub fn request_exceeds_row_cap(req: &Request, cap: usize) -> bool {
             Err(_) => true,
         },
         _ => false,
+    }
+}
+
+/// `CLP-FR-001` (ADR-0102): under a row cap, a `Query` that names no
+/// `limit` asks for every matching row — the one shape the cap exists
+/// to bound — so it is answered as if it had asked for `cap`: the first
+/// `cap` matches in scan order, exactly what `limit: Some(cap)` would
+/// return. Pure; returns the request (rewritten or not) and whether it
+/// was clamped, so the caller can count it. An explicit `limit`, at or
+/// above the cap, is left for `request_exceeds_row_cap`.
+pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
+    match req {
+        Request::Query {
+            select,
+            filter,
+            limit: None,
+        } => (
+            Request::Query {
+                select,
+                filter,
+                limit: Some(cap),
+            },
+            true,
+        ),
+        other => (other, false),
     }
 }
 
@@ -4143,6 +4170,19 @@ fn handle_connection(
         let req: Request = match framing::read_message(&mut reader) {
             Ok(req) => req,
             Err(_) => return, // client disconnected, or a framing/decode error — end the connection
+        };
+        // `CLP-FR-001`/`002` (ADR-0102): under a row cap, a `Query` with no
+        // `limit` is clamped to the cap here, before anything else reads
+        // the request, and counted so an operator can see it happening.
+        let req = match options.max_query_rows() {
+            Some(cap) => {
+                let (req, clamped) = clamp_missing_limit(req, cap);
+                if clamped {
+                    options.metrics().record_query_clamped();
+                }
+                req
+            }
+            None => req,
         };
 
         // `RLH-FR-003` (ADR-0088): the request's arrival — its frame fully

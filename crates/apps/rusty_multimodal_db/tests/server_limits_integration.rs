@@ -6,7 +6,7 @@
 
 use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memory};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
-use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
+use rusty_multimodal_db::server::client::{ClientError, QueryResult, SchemaDrivenClient};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::memory::{MemoryConnectionStore, FIELD_UPDATED_AT};
 use rusty_multimodal_db::server::protocol::{
@@ -205,19 +205,20 @@ fn a_connection_past_the_cap_is_closed_at_accept_and_counted() {
     );
 }
 
-/// `LIM-FR-003`: under a row cap of two, a `Query` with no `limit` or
-/// a `limit` of three is `TooLarge` before any read, a `Query` at the
-/// cap answers, and a page is capped the same way; the schema-driven
-/// client surfaces the code unchanged.
+/// `LIM-FR-003` as amended by `CLP-FR-001` (ADR-0102): under a row cap
+/// of two, a `Query` with no `limit` answers the first two rows (clamped,
+/// and counted), a `Query` with a `limit` of three is `TooLarge` before
+/// any read, a `Query` at the cap answers, and a page is capped the same
+/// way; the schema-driven client surfaces the code unchanged.
 #[test]
 fn a_read_asking_for_more_rows_than_the_cap_is_too_large_before_any_read() {
     let addr = start_server(ServeOptions::new(None, None).with_max_query_rows(2));
     let (mut reader, mut writer) = raw_connection(addr);
 
-    assert_eq!(
-        error_code(round_trip(&mut reader, &mut writer, &query(None))),
-        ErrorCode::TooLarge
-    );
+    match round_trip(&mut reader, &mut writer, &query(None)) {
+        Response::Rows { rows } => assert_eq!(rows.len(), 2, "clamped to the cap"),
+        other => panic!("expected Rows clamped to the cap, got {other:?}"),
+    }
     assert_eq!(
         error_code(round_trip(&mut reader, &mut writer, &query(Some(3)))),
         ErrorCode::TooLarge
@@ -234,15 +235,26 @@ fn a_read_asking_for_more_rows_than_the_cap_is_too_large_before_any_read() {
         Response::Rows { rows } => assert_eq!(rows.len(), 2),
         other => panic!("expected Rows, got {other:?}"),
     }
-    // A refused read is an error the metrics see; a `Metrics` request
-    // itself is never capped.
+    // A refused read is an error the metrics see; the clamped one is
+    // counted on its own family; a `Metrics` request itself is never
+    // capped.
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
     let text = client.metrics().unwrap();
     assert!(
-        text.contains("dogserver_requests_err_total 3\n"),
+        text.contains("dogserver_requests_err_total 2\n"),
         "text: {text}"
     );
-    match client.query("SELECT * FROM memory") {
+    assert!(
+        text.contains("dogserver_query_rows_clamped_total 1\n"),
+        "text: {text}"
+    );
+    // `CLP-FR-001` through the client: a `SELECT` with no `LIMIT` is
+    // answered, clamped; one with a `LIMIT` above the cap is refused.
+    match client.query("SELECT * FROM memory").unwrap() {
+        QueryResult::Rows(rows) => assert_eq!(rows.len(), 2, "clamped through the client"),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+    match client.query("SELECT * FROM memory LIMIT 3") {
         Err(ClientError::Server(code, _)) => assert_eq!(code, ErrorCode::TooLarge),
         other => panic!("expected TooLarge through the client, got {other:?}"),
     }

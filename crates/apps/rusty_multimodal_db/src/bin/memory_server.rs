@@ -61,19 +61,19 @@
 //!
 //! # Connection limits — `SERVER_IDLE_TIMEOUT_SECS`, `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS` (ADR-0093)
 //!
-//! Since `ADR-0099` the first two default on: unset,
-//! `SERVER_IDLE_TIMEOUT_SECS` is 300 and `SERVER_MAX_CONNECTIONS` is
-//! 1024; `0` turns either off. `SERVER_MAX_QUERY_ROWS` stays off unless
-//! set, because under a cap a `Query` with no `limit` is refused and
-//! every `SELECT` without `LIMIT` is one. `SERVER_IDLE_TIMEOUT_SECS=<n>` closes a connection that
+//! Since `ADR-0099`/`ADR-0102` all three default on: unset,
+//! `SERVER_IDLE_TIMEOUT_SECS` is 300, `SERVER_MAX_CONNECTIONS` is 1024,
+//! and `SERVER_MAX_QUERY_ROWS` is 10000; `0` turns any of them off.
+//! `SERVER_IDLE_TIMEOUT_SECS=<n>` closes a connection that
 //! neither sends nor accepts a byte for `n` seconds (its session, if
 //! any, rolls back and its MVCC snapshot is released, exactly as on a
 //! disconnect). `SERVER_MAX_CONNECTIONS=<n>` closes the `n+1`th
 //! concurrent connection at accept, before any byte is read, and
 //! counts it in `dogserver_connections_refused_total`.
-//! `SERVER_MAX_QUERY_ROWS=<n>` refuses a `Query` with no `limit` or a
-//! `limit` above `n`, and any page whose `limit` is above `n`, with
-//! `TooLarge` before any read. A value that is not a non-negative
+//! `SERVER_MAX_QUERY_ROWS=<n>` answers a `Query` with no `limit` as if it
+//! had asked for `n` rows (counted in `dogserver_query_rows_clamped_total`,
+//! ADR-0102), and refuses a `Query` or page whose `limit` is above `n`
+//! with `TooLarge` before any read. A value that is not a non-negative
 //! integer is a startup error.
 //!
 //! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
@@ -269,6 +269,10 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 /// `DEF-FR-001` (ADR-0099): the connection cap a deployment gets without
 /// asking — a thread each, well under a Linux default thread limit.
 const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
+/// `CLP-FR-003` (ADR-0102): the row cap a deployment gets without asking
+/// — a `Query` with no `limit` is answered as if it had asked for this
+/// many rows (and counted); an explicit `limit` above it is refused.
+const DEFAULT_MAX_QUERY_ROWS: u64 = 10_000;
 
 fn main() {
     let addr = std::env::args()
@@ -536,8 +540,8 @@ fn main() {
     // value that is not a positive integer is a startup error, this
     // binary's convention for every other misconfiguration.
     // Defaults since `ADR-0099` (`DEF-FR-001`): 300 s idle, 1,024
-    // connections; the row cap stays off (a `Query` with no `limit` is
-    // refused under a cap, which every `SELECT` without `LIMIT` is).
+    // connections; since `ADR-0102` (`CLP-FR-003`) 10,000 rows, now that a
+    // `Query` with no `limit` is clamped under the cap rather than refused.
     let options = match bounded_env("SERVER_IDLE_TIMEOUT_SECS", Some(DEFAULT_IDLE_TIMEOUT_SECS)) {
         Some(secs) => options.with_idle_timeout(std::time::Duration::from_secs(secs)),
         None => options,
@@ -546,7 +550,7 @@ fn main() {
         Some(max) => options.with_max_connections(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
     };
-    let options = match bounded_env("SERVER_MAX_QUERY_ROWS", None) {
+    let options = match bounded_env("SERVER_MAX_QUERY_ROWS", Some(DEFAULT_MAX_QUERY_ROWS)) {
         Some(max) => options.with_max_query_rows(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
     };

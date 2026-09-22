@@ -1,7 +1,7 @@
 //! `ADR-0099` (`DEF-FR-001`–`DEF-FR-003`) against the compiled
 //! `memory_server`: with nothing set, the idle timeout, the connection
-//! cap, and synced updates are on at their defaults and the row cap is
-//! off; `0` turns each off; a malformed value refuses to start. The
+//! cap, the row cap (`ADR-0102`), and synced updates are on at their
+//! defaults; `0` turns each off; a malformed value refuses to start. The
 //! ready banner on stderr is the observable — it prints the effective
 //! values — since a 300 s timeout and a 1,024-connection cap are not
 //! things a test can afford to trip.
@@ -66,14 +66,17 @@ fn banner(env: &[(&str, &str)]) -> String {
 }
 
 #[test]
-fn with_nothing_set_the_limits_and_synced_updates_are_on_and_the_row_cap_is_off() {
+fn with_nothing_set_the_limits_and_synced_updates_are_on() {
     let text = banner(&[]);
     assert!(text.contains("idle timeout: Some(300s)"), "banner: {text}");
     assert!(
         text.contains("max connections: Some(1024)"),
         "banner: {text}"
     );
-    assert!(text.contains("max query rows: None"), "banner: {text}");
+    assert!(
+        text.contains("max query rows: Some(10000)"),
+        "banner: {text}"
+    );
     assert!(
         text.contains("synced updates: configured"),
         "banner: {text}"

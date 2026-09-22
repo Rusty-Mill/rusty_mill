@@ -171,9 +171,11 @@ not a guess.
   `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS`); `evaluate_query`
   now stops at `limit` while filtering. *Since `ADR-0099`:* the idle
   timeout (300 s) and the connection cap (1,024) are on by default in
-  `memory_server`, `0` turning either off; the row cap is still opt-in
-  (under it a `Query` with no `limit` is refused). Still absent: a
-  clamping row cap, an error frame for a
+  `memory_server`, `0` turning either off; *since `ADR-0102`:* the row
+  cap too (10,000), a `Query` with no `limit` clamped to it and counted
+  in `dogserver_query_rows_clamped_total` rather than refused. Still
+  absent: a "truncated" mark on a clamped reply (a wire change), an
+  error frame for a
   refused accept (the client sees EOF), a scan budget for
   `Aggregate`/`Join`, graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
