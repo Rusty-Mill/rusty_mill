@@ -1,5 +1,5 @@
 //! The naive baseline for `Order belongs_to Customer`: linear scan, no
-//! index at all — the directed-relation analogue of [`AosStore`]'s own
+//! index at all — the directed-relation analogue of [`crate::store::AosStore`]'s own
 //! `neighbors` (`src/store/aos.rs`), which scans `edges: Vec<(Uuid,
 //! Uuid)>` linearly rather than consulting an adjacency index. This
 //! exists purely as this round's speedup baseline (per the task: "the

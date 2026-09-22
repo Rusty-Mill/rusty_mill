@@ -5,17 +5,17 @@
 //! disk I/O per write at all, so its cost should be indistinguishable
 //! from the non-durable `CanonicalCachedStore` baseline (see
 //! `RESULTS.md`'s durability section for the measured number). Durability
-//! comes entirely from an explicit [`Self::checkpoint`] call, which
+//! comes entirely from an explicit [`SnapshotRebuildStore::checkpoint`] call, which
 //! persists **only the canonical source data** — `records` and `edges`,
 //! the same two inputs `CanonicalCachedState::new` is built from — not
 //! the derived breed index, age cache, position index, or adjacency
-//! index. [`Self::open`] rebuilds all four of those on load, via the
+//! index. [`SnapshotRebuildStore::open`] rebuilds all four of those on load, via the
 //! exact same construction path `create` uses. This mirrors
 //! `CanonicalStore`/`CanonicalCachedStore`'s own "views, not copies"
 //! philosophy (ADR-0001) at the persistence layer: the *persisted*
 //! artifact is canonical-only too.
 //!
-//! Unlike the WAL variants, this format is self-sufficient: [`Self::open`]
+//! Unlike the WAL variants, this format is self-sufficient: [`SnapshotRebuildStore::open`]
 //! needs only a path, not an externally-supplied base dataset, since
 //! `records`/`edges` — the actual source of truth — are exactly what's on
 //! disk.

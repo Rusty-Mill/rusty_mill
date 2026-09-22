@@ -1,13 +1,13 @@
 //! Process-wide server metrics (`SERVER-001` FR, ADR-0064,
 //! `docs/design/SERVER-METRICS-DESIGN.md`): a small, fixed set of atomic
-//! counters, readable over the existing wire as [`Request::Metrics`]
+//! counters, readable over the existing wire as [`crate::server::protocol::Request::Metrics`]
 //! (`super::protocol::Request::Metrics`), rendered as Prometheus text
 //! exposition format — no new dependency, no second listener. See the
 //! design document's own "Non-goals" for what this deliberately does not
 //! provide (per-`RequestKind` cardinality, latency histograms, a
 //! standalone HTTP endpoint).
 //!
-//! [`ServerMetrics`] lives on [`super::ServeOptions`] (one instance per
+//! [`crate::server::metrics::ServerMetrics`] lives on [`crate::server::ServeOptions`] (one instance per
 //! `serve`/`serve_tables` call, shared via the same `Arc<ServeOptions>`
 //! every connection thread already holds) rather than as a separate
 //! parameter — `ServeOptions` already carries live, shared, mutable

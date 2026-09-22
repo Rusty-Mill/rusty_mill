@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `CI-STANDALONE-FOLDED-IN` (`ADR-0100`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), on the owner's word ("msrv"): the standalone workflow's uncovered checks (per-feature clippy, client-only tests, Python wire vectors, `cargo doc`, MSRV 1.89) now run in the monorepo. Its PR waits on the owner. `ADR-0092`–`ADR-0099` (PRs #292–#299) merged 2026-09-21.
+- `RUSTDOC-CLEAN` (`ADR-0101`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), on the owner's word ("rustdoc"): the 82 rustdoc warnings fixed and the monorepo's doc step now denies warnings. Docs-only. Its PR waits on the owner. `ADR-0092`–`ADR-0100` (PRs #292–#300) merged.
 
 ## Blocked
 

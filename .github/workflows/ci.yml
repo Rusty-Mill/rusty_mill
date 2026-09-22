@@ -581,11 +581,13 @@ jobs:
       # `ubuntu-latest`; the live half runs inside `cargo test --all-features` above.
       - name: python reference client (offline conformance vectors)
         run: python3 -m unittest discover -s crates/apps/rusty_multimodal_db/clients/python/tests -v
-      # As the standalone workflow ran it: warnings allowed. The crate's rustdoc
-      # currently emits ~80 (unresolved intra-doc links and the like, ADR-0100's
-      # named follow-up); `-D warnings` here would be red on day one.
+      # Warnings denied since ADR-0101: the 82 rustdoc warnings ADR-0100 found
+      # (unresolved intra-doc links, public docs linking private items) are
+      # fixed, and this step keeps them at zero.
       - name: cargo doc -p rusty_multimodal_db --all-features --no-deps
         run: cargo doc -p rusty_multimodal_db --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   # `Cargo.toml`'s `rust-version` is only a promise if something builds at
   # it (ADR-0100, from the crate's standalone workflow). Keep the version

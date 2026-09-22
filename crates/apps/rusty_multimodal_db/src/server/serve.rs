@@ -423,11 +423,11 @@ pub trait ConnectionStore: Send + Sync {
     /// `limit` (`validate_page`'s checks) and every `filter` predicate
     /// (`validate_predicate`, `Request::Query`'s own rule). The default
     /// answers every domain correctly: the candidate rows — since
-    /// `QPC-FR-003` (ADR-0074), `Query`'s own [`indexed_candidates`]: the
+    /// `QPC-FR-003` (ADR-0074), `Query`'s own `indexed_candidates`: the
     /// declared equality index's bucket when `filter` has an `Eq` on an
     /// indexed field, [`Self::scan_all`] otherwise — keep only rows
     /// [`predicate_matches`] every predicate for (the identical filter
-    /// step `Request::Query`'s own [`evaluate_query`] uses), then
+    /// step `Request::Query`'s own `evaluate_query` uses), then
     /// [`page_rows`] over that already-filtered, already-materialized
     /// subset. The page's order is [`page_rows`]'s `(key, id)` order over
     /// the filtered *set*, so which plan gathered the set is invisible
@@ -1364,7 +1364,7 @@ pub fn keyed_walk_applies(
 /// [`counted_walk`] when every column is `COUNT(*)` (no key
 /// materialized), otherwise the walk's keys once
 /// ([`ConnectionStore::range_keys`]) and each column reduced over them
-/// exactly as [`evaluate_aggregate`] reduces decoded rows: `COUNT` the
+/// exactly as `evaluate_aggregate` reduces decoded rows: `COUNT` the
 /// length; `SUM` the `i64` sum; `AVG` an `F64` mean, `0.0` over nothing;
 /// `MIN`/`MAX` the extreme in the field's own kind, `0` over nothing —
 /// the same one-group, `limit`-truncated shape; since `QRF-FR-003`
@@ -1449,7 +1449,7 @@ pub fn keyed_walk<S: ConnectionStore + ?Sized>(
 /// `QCW-FR-004` (ADR-0081): the answer to an eligible count — the index's
 /// own count between the filter's bounds ([`ConnectionStore::range_count`]),
 /// once per `COUNT(*)` column, under the same one-group, `limit`-truncated
-/// shape [`evaluate_aggregate`] gives a `group_by`-less request. `None`
+/// shape `evaluate_aggregate` gives a `group_by`-less request. `None`
 /// when the request is not eligible ([`counted_walk_applies`]) or the
 /// adapter refuses the count (a declared range field whose `range_count`
 /// answers `Unsupported` — no shipped adapter), so the caller takes the
@@ -1483,7 +1483,7 @@ pub fn counted_walk<S: ConnectionStore + ?Sized>(
 }
 
 /// `QPC-FR-001` (ADR-0074): the one candidate step every filtered read
-/// shares — [`plan_query`] then [`query_candidates`] — so `Query`,
+/// shares — `plan_query` then [`query_candidates`] — so `Query`,
 /// `Aggregate`, the default [`ConnectionStore::filtered_page`], and
 /// `Join`'s left side all narrow the same way and none narrows
 /// differently. Since `QPR-FR-004` (ADR-0075) the plan also sees the
@@ -1736,7 +1736,7 @@ pub fn page_rows(
 /// default's body as a free function, so an adapter that overrides the
 /// method for one shape (`ADR-0076`'s bounded walk) can answer every
 /// other shape exactly as the default would — a Rust default body cannot
-/// be called from its override. Candidates through [`indexed_candidates`]
+/// be called from its override. Candidates through `indexed_candidates`
 /// (the equality bucket or the range walk when the filter allows,
 /// `scan_all` otherwise), every predicate re-checked, then [`page_rows`].
 pub fn filtered_page_by_candidates<S: ConnectionStore + ?Sized>(
@@ -1756,7 +1756,7 @@ pub fn filtered_page_by_candidates<S: ConnectionStore + ?Sized>(
 /// `FPW-FR-001` (ADR-0076) as widened by `FPM-FR-001` (ADR-0077): whether
 /// a `FilteredPage` can be answered by the bounded walk — `order_by` is
 /// the adapter's range field, and the filter does not plan the declared
-/// equality index ([`plan_query`]'s own equality-first rule: a request
+/// equality index (`plan_query`'s own equality-first rule: a request
 /// that read a `filter_eq` bucket before this round still does — since
 /// `QPI-FR-003` (ADR-0078) intersected with the range's ids — so the
 /// walk reaches only filters that walked or scanned every in-range
@@ -3427,7 +3427,7 @@ impl Write for WriteHalf {
 /// read — `None` for every request that is not one (a write, a point
 /// read, `Page`, `Metrics`, …). A pure function of the request and the
 /// adapter's declarations (`describe`, `range_field`), computed from the
-/// same predicates the arms themselves consult — [`plan_query`] for the
+/// same predicates the arms themselves consult — `plan_query` for the
 /// candidate step, [`bounded_walk_applies`] for the page walk,
 /// [`counted_walk_applies`]/[`keyed_walk_applies`] for the walk-only
 /// aggregates (a grouped walk with no bound and a `limit` decodes,

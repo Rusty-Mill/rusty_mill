@@ -4,10 +4,10 @@
 //! Durability model: `update_age` appends a [`super::WalEntry`] (buffered,
 //! not fsync'd — see below for why) then mutates in-memory state, same
 //! per-write shape as [`super::WalBufferedStore`] (variant 2).
-//! [`Self::checkpoint`] writes a snapshot of the *full* current state
+//! [`HybridStore::checkpoint`] writes a snapshot of the *full* current state
 //! (same "save-as-is" shape as variant 4) tagged with the sequence number
 //! of the last entry it covers — but, unlike the WAL variants' checkpoint,
-//! **does not truncate the WAL**. [`Self::open`] reads the latest
+//! **does not truncate the WAL**. [`HybridStore::open`] reads the latest
 //! snapshot, then replays only the WAL entries whose sequence number is
 //! strictly greater than the snapshot's recorded cutoff — the "restore
 //! the snapshot then replay only entries after its cutoff" design this
