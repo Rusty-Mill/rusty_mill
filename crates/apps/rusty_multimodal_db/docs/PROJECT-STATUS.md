@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-MEMORY-SERVER-DEFAULTS` (`ADR-0099`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the owner's "Defaults": `memory_server` starts with the idle timeout (300 s), the connection cap (1,024), and synced updates on; `0` turns each off; the row cap stays opt-in. Its PR waits on the owner. `ADR-0092`–`ADR-0098` (PRs #292–#298) merged the same day.
+- `CI-STANDALONE-FOLDED-IN` (`ADR-0100`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), on the owner's word ("msrv"): the standalone workflow's uncovered checks (per-feature clippy, client-only tests, Python wire vectors, `cargo doc`, MSRV 1.89) now run in the monorepo. Its PR waits on the owner. `ADR-0092`–`ADR-0099` (PRs #292–#299) merged 2026-09-21.
 
 ## Blocked
 
