@@ -1,6 +1,6 @@
 //! Tier 1, variant 1: write-ahead log, fsync on every write.
 //!
-//! Durability model: `update_age` appends a [`WalEntry`] to the WAL file
+//! Durability model: `update_age` appends a [`super::WalEntry`] to the WAL file
 //! and calls `File::sync_all` (fsync) *before* mutating in-memory state
 //! and returning `Ok`. If the process dies at any point after that
 //! `sync_all` returns, the entry is guaranteed to be on physical disk —

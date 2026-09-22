@@ -9,7 +9,7 @@
 //! library. What remains in this module is the two pieces that are
 //! genuinely spike-only, not real API surface:
 //!
-//! - [`dog_impl`] — `DogRecord`'s generic trait impls (`Record`,
+//! - [`crate::generic_spike::dog_impl`] — `DogRecord`'s generic trait impls (`Record`,
 //!   `IndexedField<Breed>`, `ScannableField<Age>`,
 //!   `SymmetricRelation<LittermateOf>`) and `benches/generic_spike.rs`'s
 //!   `get`/`scan_ages` overhead measurement against `crate::generic`.
@@ -17,19 +17,19 @@
 //!   domain — every generalization round from the second spike forward
 //!   targeted `Order`/`Customer`), so this stays historical reference, not
 //!   promoted or extended further.
-//! - [`order_naive`]/[`order_bench_support`] — the naive linear-scan
+//! - [`crate::generic_spike::order_naive`]/[`crate::generic_spike::order_bench_support`] — the naive linear-scan
 //!   baseline and synthetic dataset generator `benches/order_relation_spike.rs`
 //!   used to measure whether the adjacency-index pattern generalizes to a
 //!   directed relation. The measurement question this answered is closed
 //!   (see `crate::generic`'s docs and `RESULTS.md`'s `## Generic schema
 //!   library` section); the naive baseline itself has no reason to become
 //!   real API, so it stays here.
-//! - [`rule_trace`]/[`rule_bench_support`] — a fifth spike round, testing
+//! - [`crate::generic_spike::rule_trace`]/[`crate::generic_spike::rule_bench_support`] — a fifth spike round, testing
 //!   `crate::generic` against a real, external requirements-traceability
 //!   domain (`Rule`/`RuleRelation`) rather than another synthetic
 //!   two-domain-validation exercise: recursive parent-chain traversal
 //!   (composes cleanly via a plain loop over `Parent`, no new trait
-//!   needed — see [`rule_trace`]'s own module docs for the one real
+//!   needed — see [`crate::generic_spike::rule_trace`]'s own module docs for the one real
 //!   schema wrinkle this surfaced) and multiple relation kinds between
 //!   the same record type (hits the identical `E0119` coherence conflict
 //!   multiple `ScannableField`s did, fixed by the identical
@@ -39,12 +39,12 @@
 //!   this one). `rule_trace` also carries `SelectionGroup` (a sixth-round
 //!   addition, kept alongside `Rule` since its membership relation is
 //!   modeled as `Rule` being a `ChildOf` a `SelectionGroup`).
-//! - [`source`]/[`source_bench_support`] — the sixth spike round's
+//! - [`crate::generic_spike::source`]/[`crate::generic_spike::source_bench_support`] — the sixth spike round's
 //!   `Source` piece: the same optional-nested-parent-chain shape `Rule`
 //!   already established, applied to a different record, plus a
 //!   root-lookup query (`domain_tags` only live on the root; a nested
 //!   `Source`'s effective tags come from walking up to it).
-//! - [`rule_derivation`] — the sixth spike round's `RuleDerivation`
+//! - [`crate::generic_spike::rule_derivation`] — the sixth spike round's `RuleDerivation`
 //!   piece: a directed `Rule`-to-`Rule` "elaborates on" link, deliberately
 //!   modeled via a *separate* trait triad from `rule_trace`'s own
 //!   `RuleRelation` one (`DerivationRelation`/`DerivesFrom`/`Derived`,
@@ -52,7 +52,7 @@
 //!   module's own docs for why derivation links are firewalled from
 //!   `RuleRelation`'s binding-dependency graph at the type level, not
 //!   just by convention.
-//! - [`employee_impl`] — a seventh spike round, purpose-built (not
+//! - [`crate::generic_spike::employee_impl`] — a seventh spike round, purpose-built (not
 //!   motivated by an external reference domain the way `Order`/`Customer`
 //!   or `Rule` were) to exercise `SymmetricRelation` and `ChildOf`
 //!   together on one self-referential record type (`Employee`:
@@ -69,7 +69,7 @@
 //!
 //! Nothing here — or in `crate::generic` — touches
 //! [`crate::production::ProductionStore`], [`crate::store::DogStore`], or
-//! any benchmarked backend. [`dog_impl::DogRecord`] impls are additive
+//! any benchmarked backend. [`crate::record::DogRecord`] impls in [`crate::generic_spike::dog_impl`] are additive
 //! `impl` blocks on the existing [`crate::record::DogRecord`] type.
 
 pub mod dog_impl;

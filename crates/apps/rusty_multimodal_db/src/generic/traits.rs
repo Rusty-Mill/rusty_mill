@@ -94,7 +94,7 @@ pub trait ScannableField<Marker>: Record {
 
     /// Write a new value into this field on the record itself (not into
     /// any store-side cache) — added during promotion, not part of the
-    /// original design doc. [`super::mmap_store::GenericMmapStore::get`]
+    /// original design doc. [`super::mmap_store::GenericMmapStore`]`::get`
     /// needs this to keep `GetById::get` write-through consistent with
     /// `UpdateField::update`, the same way every hand-written backend in
     /// this crate (`CanonicalCachedStore::update_age` included) mutates

@@ -112,7 +112,7 @@ pub fn build_derivation_chain(depth: usize) -> (Vec<Rule>, Vec<(Uuid, Uuid)>) {
 /// A generated `RuleRelation` dataset: `n` rules (no parent-chain
 /// structure — irrelevant to this benchmark, so every rule is a root),
 /// plus a `requires` and an `implements` edge list, each with
-/// [`AVG_OUT_DEGREE`] average out-degree, plus a pre-selected rotation
+/// `AVG_OUT_DEGREE` average out-degree, plus a pre-selected rotation
 /// pool of ids to query against.
 pub struct RuleRelationDataset {
     pub rules: Vec<Rule>,

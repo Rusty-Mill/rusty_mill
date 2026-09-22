@@ -15,7 +15,7 @@
 //! Instead: **only `age` — the one field that ever mutates — lives in the
 //! memory-mapped region**. `update_age` writes straight into mapped
 //! memory; the OS's own page-cache write-back handles getting it to disk,
-//! with [`Self::flush`] available to force that (via `msync`) when a
+//! with [`MmapAgeStore::flush`] available to force that (via `msync`) when a
 //! caller wants a durability guarantee before moving on — the direct mmap
 //! analogue of every other variant's `checkpoint`. Records/edges
 //! (immutable after construction) are supplied externally at `open`/
@@ -71,7 +71,7 @@
 //! commit markers (1 byte each) — where `N` is derived from the file's
 //! total length (`(len - HEADER_LEN) / 21`), not stored separately, since
 //! the three regions' combined per-record cost is fixed at 21 bytes
-//! regardless of how they're arranged. [`Self::open`] reads every
+//! regardless of how they're arranged. [`MmapAgeStore::open`] reads every
 //! *committed* `(id, age)` pair (marker byte `COMMITTED`, skipping
 //! anything else — a slot never reached, or a crash mid-write, both read
 //! the same safe way: absent) into an `id -> (position, age)` map, then

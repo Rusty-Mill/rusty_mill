@@ -1,8 +1,8 @@
 //! A generic record/schema/query library: any domain that implements the
-//! trait set in [`traits`] gets equality-indexed lookup, scannable-field
+//! trait set in [`crate::generic::traits`] gets equality-indexed lookup, scannable-field
 //! access, and symmetric/directed relationship traversal, composed from
-//! reusable store layers ([`store`]) — including real durability via mmap
-//! ([`mmap_store`]) and concurrent access via `RwLock` ([`production`]),
+//! reusable store layers ([`crate::generic::store`]) — including real durability via mmap
+//! ([`crate::generic::mmap_store`]) and concurrent access via `RwLock` ([`crate::generic::production`]),
 //! the same recipe `crate::production::ProductionStore` uses for `Dog`,
 //! generalized.
 //!
@@ -33,11 +33,11 @@
 //!
 //! Every risk `docs/design/GENERIC-SCHEMA-DESIGN.md` §4 named has now been
 //! individually resolved with real data. This module is that validated
-//! design, promoted: [`traits`]/[`query`]/[`store`] are the same trait/
+//! design, promoted: [`crate::generic::traits`]/[`crate::generic::query`]/[`crate::generic::store`] are the same trait/
 //! wrapper shapes the spikes proved out (not a rewrite), and
-//! [`order_customer`] is the `Order`/`Customer` domain promoted from
+//! [`crate::generic::order_customer`] is the `Order`/`Customer` domain promoted from
 //! prototype status to this library's real reference implementation.
-//! [`mmap_store`]/[`production`] are new this round — the actual point of
+//! [`crate::generic::mmap_store`]/[`crate::generic::production`] are new this round — the actual point of
 //! the whole arc: a real generalized *production* store, not just traits
 //! that compile in isolation. See ADR-0009 (now Accepted) for the full
 //! acceptance record.
@@ -54,19 +54,19 @@
 //! # Write-through consistency, in both the durable and in-memory paths
 //!
 //! `GetById::get` reflects a field `UpdateField::update` just wrote, on
-//! both the durable core ([`mmap_store::GenericMmapStore`]) and the
-//! purely in-memory [`store::BaseStore`]/[`store::Indexed`]/[`store::Scanned`]
+//! both the durable core ([`crate::generic::mmap_store::GenericMmapStore`]) and the
+//! purely in-memory [`crate::generic::store::BaseStore`]/[`crate::generic::store::Indexed`]/[`crate::generic::store::Scanned`]
 //! composition — the same guarantee every hand-written backend in this
 //! crate has (`CanonicalCachedStore::update_age` mutates both its
 //! canonical record and its cache). The two paths get there by different
 //! mechanisms, since they have structurally different shapes:
 //!
-//! - [`mmap_store::GenericMmapStore`] is a single hand-fused struct that
+//! - [`crate::generic::mmap_store::GenericMmapStore`] is a single hand-fused struct that
 //!   owns both the (possibly stale) constructed-from record and the live
 //!   mmap value directly — its `get` merges the two on read, via
-//!   [`traits::ScannableField::set_scannable_value`].
-//! - [`store::Scanned`] is a separate struct layered *on top of* whatever
-//!   owns the record (typically [`store::BaseStore`], several layers
+//!   [`crate::generic::traits::ScannableField::set_scannable_value`].
+//! - [`crate::generic::store::Scanned`] is a separate struct layered *on top of* whatever
+//!   owns the record (typically [`crate::generic::store::BaseStore`], several layers
 //!   down) — it has no way to reach down and mutate that owner's storage.
 //!   Its `GetById` forwarding impl instead patches the record it gets
 //!   back from its inner store with its own cached value, using the same
@@ -76,7 +76,7 @@
 //!   the stack, so the record is fully consistent by the time it reaches
 //!   the caller — no change needed in `Indexed`/`Symmetric`/`Reversed`,
 //!   none of which own any `ScannableField` data to patch.
-//! - [`mmap_scanned::MmapScanned`] is `Scanned`'s durable twin: the same
+//! - [`crate::generic::mmap_scanned::MmapScanned`] is `Scanned`'s durable twin: the same
 //!   layered shape, but its one field lives in its own slot file (the same
 //!   engine `GenericMmapStore` uses) rather than a `HashMap`, so a stack
 //!   can hold more than one mutable-and-durable field without
@@ -139,7 +139,7 @@ pub use production::GenericProductionStore;
 use crate::durability::DurabilityError;
 use std::fmt;
 
-/// Error returned by [`query::UpdateField::update`] when `id` has no
+/// Error returned by [`crate::generic::query::UpdateField::update`] when `id` has no
 /// record — the generic analogue of `StoreError::NotFound`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotFound<Id>(pub Id);
@@ -152,7 +152,7 @@ impl<Id: fmt::Debug> fmt::Display for NotFound<Id> {
 
 impl<Id: fmt::Debug> std::error::Error for NotFound<Id> {}
 
-/// Error returned by [`query::Insert::insert`] (`INS-FR-001`, ADR-0046):
+/// Error returned by [`crate::generic::query::Insert::insert`] (`INS-FR-001`, ADR-0046):
 /// either `id` already has a record — nothing was written, at any layer
 /// — or the innermost durable store could not make the new record
 /// durable (its insert log or slot append failed).
@@ -188,7 +188,7 @@ impl<Id> From<DurabilityError> for InsertError<Id> {
     }
 }
 
-/// Error returned by [`query::Replace::replace`] (`REP-FR-001`, ADR-0049):
+/// Error returned by [`crate::generic::query::Replace::replace`] (`REP-FR-001`, ADR-0049):
 /// either `id` has no record — nothing was written, at any layer — or
 /// the innermost durable store could not make the new version durable
 /// (its insert log append failed).
@@ -236,8 +236,8 @@ impl<Id> From<DurabilityError> for ReplaceError<Id> {
     }
 }
 
-/// Error returned by [`query::Delete::delete`] and
-/// [`query::Detach::detach`] (`DEL-FR-001`, ADR-0051): either the id (or,
+/// Error returned by [`crate::generic::query::Delete::delete`] and
+/// [`crate::generic::query::Detach::detach`] (`DEL-FR-001`, ADR-0051): either the id (or,
 /// for `detach`, the label) is unknown — nothing was written, at any
 /// layer — or the innermost durable store could not make the tombstone
 /// durable.
@@ -274,7 +274,7 @@ impl<Id> From<DurabilityError> for DeleteError<Id> {
     }
 }
 
-/// What one [`query::Compact::compact`] reclaimed (`CMP-FR-001`,
+/// What one [`crate::generic::query::Compact::compact`] reclaimed (`CMP-FR-001`,
 /// ADR-0052), summed across every layer of a stack.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactionReport {
@@ -300,7 +300,7 @@ impl CompactionReport {
     }
 }
 
-/// What [`query::Link::link`] / [`query::MultiLink::link`] did
+/// What [`crate::generic::query::Link::link`] / [`crate::generic::query::MultiLink::link`] did
 /// (`LNK-FR-001`, ADR-0047): the edge is new, or it was already present
 /// and nothing was written — the consumer's insert-or-ignore, a normal
 /// outcome rather than an error.
@@ -310,7 +310,7 @@ pub enum LinkOutcome {
     AlreadyLinked,
 }
 
-/// Error returned by [`query::Link::link`] / [`query::MultiLink::link`]
+/// Error returned by [`crate::generic::query::Link::link`] / [`crate::generic::query::MultiLink::link`]
 /// (`LNK-FR-001`, ADR-0047). Every variant but `Durability` is refused
 /// before anything is written, at every layer.
 #[derive(Debug)]
@@ -320,7 +320,7 @@ pub enum LinkError<Id> {
     /// Both endpoints are the same record.
     SelfLoop(Id),
     /// The relation label is not a valid one — see
-    /// [`store::valid_relation_label`].
+    /// [`crate::generic::store::valid_relation_label`].
     InvalidLabel(String),
     /// The edge could not be made durable; see the inner error.
     Durability(DurabilityError),

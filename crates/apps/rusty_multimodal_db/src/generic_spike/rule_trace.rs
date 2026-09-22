@@ -115,7 +115,7 @@
 //! Marker`, so the generic impl and `DirectedRelated`'s own direct impl
 //! for its own marker are seen as potentially the same impl. **The same
 //! `forward_scannable_pairs!` rotating-accumulator macro pattern extends
-//! directly** — see [`forward_related_to_pairs`]'s invocation below,
+//! directly** — see `forward_related_to_pairs!`'s invocation below,
 //! generating the one ordered pair two markers produce
 //! (`Requires`-forwarded-through-`Implements` and vice versa). This is a
 //! clean, positive "targeted fix, same shape as before" outcome, not a

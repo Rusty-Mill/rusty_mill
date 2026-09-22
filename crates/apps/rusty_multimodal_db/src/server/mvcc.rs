@@ -23,7 +23,7 @@
 //! untouched fields to fill in a complete snapshot.
 //!
 //! Record existence is tracked the same way, under the reserved
-//! [`EXISTENCE_FIELD`] key: an `Insert` writes it `Some(Bool(true))`; a
+//! [`crate::server::mvcc::EXISTENCE_FIELD`] key: an `Insert` writes it `Some(Bool(true))`; a
 //! `Delete` writes it `None` — a tombstone, in exactly the sense every
 //! other key's "no qualifying entry" already carries. `EXISTENCE_FIELD`
 //! is never a real domain field tag — every domain's tags are small and
@@ -39,10 +39,10 @@
 //! apply time under the store's own exclusive section — can be assigned
 //! a *higher* id while applying *first*, corrupting the id-order/
 //! apply-order correspondence a snapshot's read depends on. The fix:
-//! every write path calls [`TxnCounter::next`] from *inside* the same
+//! every write path calls [`crate::server::mvcc::TxnCounter::next`] from *inside* the same
 //! `with_exclusive` critical section that already runs `apply_batch`/
 //! `apply_prepared`, immediately before folding the write into
-//! [`MvccIndex`] — never earlier. This makes a txn id a purely
+//! [`crate::server::mvcc::MvccIndex`] — never earlier. This makes a txn id a purely
 //! reconstructed quantity, like `last_committed_txn` already is,
 //! re-derived by folding log entries in log order at open — so no new
 //! insert-log/journal entry kind is needed at all; today's entries carry
@@ -51,7 +51,7 @@
 //! # Server-layer, not generic-layer
 //!
 //! Lives under `src/server/`, not `src/generic/`, because it is keyed by
-//! [`crate::server::protocol::FieldRef`]/[`ScanValue`] — the wire shape
+//! [`crate::server::protocol::FieldRef`]/[`crate::server::protocol::ScanValue`] — the wire shape
 //! only the server layer has an opinion about. `crate::generic::insert_log`
 //! carries no MVCC-specific payload and needs no changes: an adapter
 //! folds its own record type into this module's shape (via its existing
@@ -69,7 +69,7 @@ pub type TxnId = u64;
 
 /// Reserved for a baseline entry seeded at MVCC activation
 /// (`MVCC2-FR-001`). Every real, assigned id starts at `1`
-/// ([`TxnCounter::next`]), so a baseline entry is always the oldest
+/// ([`crate::server::mvcc::TxnCounter::next`]), so a baseline entry is always the oldest
 /// possible entry in any chain.
 pub const BASELINE_TXN: TxnId = 0;
 
@@ -116,7 +116,7 @@ pub struct HistoryReclaimed;
 struct Entry {
     txn_id: TxnId,
     /// `None` — a tombstone: this key had no value as of this txn (a
-    /// `Delete`'s [`EXISTENCE_FIELD`] entry). Absence and deletion are
+    /// `Delete`'s [`crate::server::mvcc::EXISTENCE_FIELD`] entry). Absence and deletion are
     /// the same "no qualifying entry" shape to a reader — see
     /// [`MvccIndex::read`].
     value: Option<ScanValue>,
@@ -175,7 +175,7 @@ impl MvccIndex {
 
     /// `MVCC2-FR-008`: record one live or replayed write — the caller's
     /// own already-serialized apply already assigned `txn_id`
-    /// ([`TxnCounter::next`]); this only updates the in-memory index.
+    /// ([`crate::server::mvcc::TxnCounter::next`]); this only updates the in-memory index.
     pub fn record_write(
         &mut self,
         key: (RecordId, FieldRef),
