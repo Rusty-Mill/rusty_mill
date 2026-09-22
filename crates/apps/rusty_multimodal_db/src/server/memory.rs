@@ -102,6 +102,9 @@ pub struct MemoryConnectionStore {
     /// acknowledged; unset, the acknowledgement precedes durability by
     /// up to the OS's own write-back — the documented loss window.
     sync_updates: bool,
+    /// `ART-FR-002` (ADR-0105): the automatic reclaim threshold, kept
+    /// here so `with_mvcc` can apply it whichever order the builders run.
+    mvcc_reclaim_every: Option<usize>,
     /// `ADR-0072`'s `MVCC2-FR-001`: `None` — the same "unset by default,
     /// opt in with the real path" shape `backup_source` already
     /// establishes — until [`Self::with_mvcc`] is called; `mvcc_supported`
@@ -118,6 +121,7 @@ impl MemoryConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            mvcc_reclaim_every: None,
             mvcc: None,
         }
     }
@@ -137,6 +141,19 @@ impl MemoryConnectionStore {
     /// `fsync`ed before the first slot write.
     pub fn with_synced_updates(mut self, enabled: bool) -> Self {
         self.sync_updates = enabled;
+        self
+    }
+
+    /// `ART-FR-002` (ADR-0105): reclaim MVCC history automatically once
+    /// `every` entries have been appended since the last reclaim
+    /// (`None` — never: `Compact` only, the `ADR-0096` behaviour).
+    /// Applies to the MVCC state this adapter holds now or activates
+    /// later; a no-op on a table that never goes MVCC-active.
+    pub fn with_mvcc_reclaim_every(mut self, every: Option<usize>) -> Self {
+        self.mvcc_reclaim_every = every;
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.state.set_reclaim_every(every);
+        }
         self
     }
 
@@ -193,6 +210,9 @@ impl MemoryConnectionStore {
         let log = insert_log::log_path(mmap_path);
         let entries = insert_log::read_entries(&log, Memory::SCHEMA_TAG)?;
         Self::fold_pending_log_entries(&reconstructed, entries);
+        reconstructed
+            .state
+            .set_reclaim_every(self.mvcc_reclaim_every);
         self.mvcc = Some(MvccHandle {
             state: reconstructed.state,
             mmap_path: mmap_path.to_path_buf(),
@@ -233,6 +253,7 @@ impl MemoryConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            mvcc_reclaim_every: None,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
                 mmap_path: path.to_path_buf(),
@@ -312,6 +333,7 @@ impl MemoryConnectionStore {
             journal: Some(journal),
             backup_source: None,
             sync_updates: false,
+            mvcc_reclaim_every: None,
             mvcc: None,
         })
     }
@@ -2137,6 +2159,75 @@ mod tests {
         assert_eq!(
             adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
             ScanValue::I64(3),
+            "the current value is never reclaimed"
+        );
+    }
+
+    /// `ART-FR-002`/`005` (ADR-0105): through the adapter, a threshold
+    /// reclaims without any `Compact` — the held snapshot still reads
+    /// its value, the current value reads, and a reopen reconstructs
+    /// a consistent index.
+    #[test]
+    fn a_reclaim_threshold_bounds_history_without_a_compact() {
+        let adapter = sample_adapter_with_mvcc().with_mvcc_reclaim_every(Some(2));
+        let id = Uuid::from_u128(1);
+        let state = || &adapter.mvcc.as_ref().unwrap().state;
+        let history_len = || state().with_index(|index| index.history_len());
+        let write = |value: i64| {
+            let snapshot = adapter.mvcc_begin();
+            adapter
+                .apply_transaction_mvcc(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(value),
+                    }],
+                    &[],
+                    snapshot,
+                )
+                .unwrap();
+            adapter.mvcc_release(snapshot);
+        };
+        assert_eq!(state().reclaim_every(), Some(2));
+        write(1);
+        let held = adapter.mvcc_begin();
+        let before = history_len();
+        for value in 2..=9 {
+            write(value);
+        }
+        let reclaims_while_held = state().auto_reclaims();
+        assert!(
+            reclaims_while_held >= 1,
+            "eight appends past a threshold of two must have reclaimed"
+        );
+        // Every entry after the held snapshot is one it may still need,
+        // so history grows while it is open — the trigger fires and
+        // keeps them, exactly as `Compact` would.
+        let while_held = history_len();
+        assert!(while_held > before, "{before} -> {while_held}");
+        assert_eq!(
+            adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(1),
+            "the open snapshot still reads the value it was opened on"
+        );
+        adapter.mvcc_release(held);
+        write(10);
+        write(11);
+        assert!(
+            state().auto_reclaims() > reclaims_while_held,
+            "the next threshold after the release reclaims again"
+        );
+        // The reclaim runs inside the committing session, whose own
+        // snapshot (the previous commit) is still registered — so the
+        // written chain keeps that one entry beside the current.
+        assert!(
+            history_len() <= before + 1,
+            "nothing held: the history is back to a bounded size, {while_held} -> {}",
+            history_len()
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(11),
             "the current value is never reclaimed"
         );
     }

@@ -81,6 +81,10 @@ fn with_nothing_set_the_limits_and_synced_updates_are_on() {
         text.contains("synced updates: configured"),
         "banner: {text}"
     );
+    assert!(
+        text.contains("MVCC reclaim every: Some(10000)"),
+        "banner: {text}"
+    );
 }
 
 #[test]
@@ -90,7 +94,9 @@ fn zero_turns_each_default_off_and_a_positive_value_sets_it() {
         ("SERVER_MAX_CONNECTIONS", "7"),
         ("SERVER_MAX_QUERY_ROWS", "50"),
         ("SERVER_SYNC_UPDATES", "0"),
+        ("SERVER_MVCC_RECLAIM_EVERY", "0"),
     ]);
+    assert!(text.contains("MVCC reclaim every: None"), "banner: {text}");
     assert!(text.contains("idle timeout: None"), "banner: {text}");
     assert!(text.contains("max connections: Some(7)"), "banner: {text}");
     assert!(text.contains("max query rows: Some(50)"), "banner: {text}");

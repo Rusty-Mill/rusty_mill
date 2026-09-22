@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-SYNCED-UPDATES` fork (b), ranged `msync` — measured and declined on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "2": whole-mapping and one-page `msync` cost the same from 100 KiB to 3.8 GiB (`RESULTS.md`), so no plumbing was built; fork (c), a journaled `UpdateField`, held for a multi-writer deployment. `ADR-0092`–`ADR-0104` and the workspace Windows CI fix (PRs #292–#305) merged.
+- `SERVER-MVCC-AUTO-RECLAIM` (`ADR-0105`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "2": the MVCC version index reclaims the history no open snapshot needs every N appended entries (`SERVER_MVCC_RECLAIM_EVERY`, default 10,000), so a deployment that never compacts is bounded too; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0104` and the ranged-`msync` measurement (PRs #292–#306) merged.
 
 ## Blocked
 

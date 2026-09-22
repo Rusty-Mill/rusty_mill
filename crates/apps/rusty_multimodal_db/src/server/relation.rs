@@ -73,6 +73,9 @@ pub struct RelationConnectionStore {
     /// acknowledged; unset, the acknowledgement precedes durability by
     /// up to the OS's own write-back — the documented loss window.
     sync_updates: bool,
+    /// `ART-FR-002` (ADR-0105): the automatic reclaim threshold, kept
+    /// here so `with_mvcc` can apply it whichever order the builders run.
+    mvcc_reclaim_every: Option<usize>,
     /// `ADR-0072`'s `MVCC2-FR-001` — see `MemoryConnectionStore`'s own
     /// `mvcc` field for the full contract; identical here.
     mvcc: Option<MvccHandle>,
@@ -85,6 +88,7 @@ impl RelationConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            mvcc_reclaim_every: None,
             mvcc: None,
         }
     }
@@ -107,6 +111,19 @@ impl RelationConnectionStore {
         self
     }
 
+    /// `ART-FR-002` (ADR-0105): reclaim MVCC history automatically once
+    /// `every` entries have been appended since the last reclaim
+    /// (`None` — never: `Compact` only, the `ADR-0096` behaviour).
+    /// Applies to the MVCC state this adapter holds now or activates
+    /// later; a no-op on a table that never goes MVCC-active.
+    pub fn with_mvcc_reclaim_every(mut self, every: Option<usize>) -> Self {
+        self.mvcc_reclaim_every = every;
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.state.set_reclaim_every(every);
+        }
+        self
+    }
+
     /// `SYU-FR-002`: the `msync` `with_synced_updates` asks for, taken
     /// under the store's write lock; a failure withholds the
     /// acknowledgement as `Storage`.
@@ -126,6 +143,9 @@ impl RelationConnectionStore {
         let log = insert_log::log_path(mmap_path);
         let entries = insert_log::read_entries(&log, Relation::SCHEMA_TAG)?;
         Self::fold_pending_log_entries(&reconstructed, entries);
+        reconstructed
+            .state
+            .set_reclaim_every(self.mvcc_reclaim_every);
         self.mvcc = Some(MvccHandle {
             state: reconstructed.state,
             mmap_path: mmap_path.to_path_buf(),
@@ -158,6 +178,7 @@ impl RelationConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            mvcc_reclaim_every: None,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
                 mmap_path: path.to_path_buf(),
@@ -235,6 +256,7 @@ impl RelationConnectionStore {
             journal: Some(journal),
             backup_source: None,
             sync_updates: false,
+            mvcc_reclaim_every: None,
             mvcc: None,
         })
     }

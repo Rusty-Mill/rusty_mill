@@ -126,7 +126,10 @@ Independent review owed.
 
 ## Open questions
 
-- **An automatic trigger** — option (b).
+- **An automatic trigger** — option (b). *Taken: `ADR-0105`
+  (2026-09-22) — a running count of appended entries in the index, a
+  threshold on the state checked in `with_index`, `gc` at the oldest
+  open snapshot; `SERVER_MVCC_RECLAIM_EVERY` default 10,000.*
 - **A history-size metric** — `dogserver_mvcc_history_entries`, the
   natural next `ServerMetrics` family.
 
