@@ -142,7 +142,9 @@ not a guess.
   `Flush`/checkpoint/write-back. *Since `ADR-0097`:* opt-in
   `with_synced_updates` / `SERVER_SYNC_UPDATES=1` `msync`s the slot
   files before acknowledging, on `Memory`/`Entity`/`Relation`, at
-  `update_field` on `Memory`, release build, this container, 2,000 updates each: 0.1 → 105.4 µs per update at 1K rows, 0.2 → 99.7 µs at 100K rows (unsynced → synced); the `msync` costs what the insert log's per-entry `sync_data` costs, and does not scale with the table. Still absent: defaults on, a ranged `msync` of the one slot,
+  `update_field` on `Memory`, release build, this container, 2,000 updates each: 0.1 → 105.4 µs per update at 1K rows, 0.2 → 99.7 µs at 100K rows (unsynced → synced); the `msync` costs what the insert log's per-entry `sync_data` costs, and does not scale with the table. On by default in `memory_server` since `ADR-0099`
+  (`SERVER_SYNC_UPDATES=0` turns it off). Still absent: a ranged
+  `msync` of the one slot,
   `UpdateField` in the journal (group commit would amortize the sync),
   and any of this for the research domains.
 * **MVCC history reclaimed.** `ADR-0072` accepted "unbounded between
@@ -167,8 +169,11 @@ not a guess.
   and the pages (`TooLarge` before any read), each on `ServeOptions`
   and each a `memory_server` setting (`SERVER_IDLE_TIMEOUT_SECS`,
   `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS`); `evaluate_query`
-  now stops at `limit` while filtering. Still absent: defaults on (every
-  limit is unset unless the operator sets it), an error frame for a
+  now stops at `limit` while filtering. *Since `ADR-0099`:* the idle
+  timeout (300 s) and the connection cap (1,024) are on by default in
+  `memory_server`, `0` turning either off; the row cap is still opt-in
+  (under it a `Query` with no `limit` is refused). Still absent: a
+  clamping row cap, an error frame for a
   refused accept (the client sees EOF), a scan budget for
   `Aggregate`/`Join`, graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*

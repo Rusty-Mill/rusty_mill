@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `CI-FEATURE-SETS` (`ADR-0098`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), on the owner's word ("ci gate"): the monorepo CI now checks this crate under the default, `client`, `server`, and `research` feature sets with `--all-targets`, and the five server-only test targets never registered with `required-features` are. Its PR waits on the owner. `ADR-0092`–`ADR-0097` (PRs #292–#297) merged the same day. Every item of the release-readiness review that a push can address is now on `main` or in this PR; the remaining High finding is independent review.
+- `SERVER-MEMORY-SERVER-DEFAULTS` (`ADR-0099`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-21), the owner's "Defaults": `memory_server` starts with the idle timeout (300 s), the connection cap (1,024), and synced updates on; `0` turns each off; the row cap stays opt-in. Its PR waits on the owner. `ADR-0092`–`ADR-0098` (PRs #292–#298) merged the same day.
 
 ## Blocked
 
