@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.19.0 (protocol version 30 — `SERVER-001` v0.84.0,
+- Version: 0.19.1 (protocol version 30, unchanged — `SERVER-001` v0.85.0,
+  `BTL-FR-001`, `ADR-0104`: `Busy` under TLS too; 0.19.0 was `SERVER-001` v0.84.0,
   `WCB-FR-005`, `ADR-0103`: `RowsClamped` (24), `ErrorCode::Busy` (15);
   0.18.0 was protocol 29 — `SERVER-001` v0.76.0,
   `QCX-FR-002`, `ADR-0091`, no new variant; 0.17.0 was protocol 28 — `SERVER-001` v0.74.0,
@@ -311,8 +312,11 @@ an empty response.
 Since 30 there is one frame a server may write *before* reading
 anything: a server at its connection limit answers a connection it
 refuses at accept with `Err { Busy, message }` (§7 item 27) and then
-closes it, on a plaintext listener only — under TLS the refused
-connection is closed with nothing written, as before. A client that
+closes it. Under TLS the server completes the handshake first and
+writes the frame inside it (since `SERVER-001` v0.85.0; before that a
+TLS refusal was a silent close); a server under a flood of refusals
+may still close some silently, so a client must treat a close without
+the frame as a failed connect, not as "not full". A client that
 sent `Hello` and reads `Err { Busy }` should treat the server as full,
 not dead, and retry later; a client below 30 cannot decode the code
 and must treat the frame as undecodable (a failed connect), which is
@@ -646,9 +650,10 @@ Each item names the `SERVER-001` requirement that owns it.
    cap, a page, an aggregate, a join: never `RowsClamped`; a `limit`
    or page above the cap is `Err { TooLarge }` (since 25; `Malformed`
    below). A server may also be configured with a *connection cap*;
-   a connection refused under it on a plaintext listener is written one
-   `Err { Busy }` frame before it is closed (§6.3), the only frame a
-   server ever sends before negotiation. (`FR-096`)
+   a connection refused under it is written one `Err { Busy }` frame
+   before it is closed (§6.3; under TLS after the handshake, since
+   `SERVER-001` v0.85.0), the only frame a server ever sends before
+   negotiation. (`FR-096`, `FR-097`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -756,6 +761,11 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.19.1 (`SERVER-001` v0.85.0, `ADR-0104`, `BTL-FR-001`): no wire
+  change — the `Busy` frame is now also written under TLS, after the
+  handshake, from a bounded pool of refusal threads; a refusal past
+  that pool is still a silent close. §6.3, §7 item 27. No fixture or
+  client change.
 - 0.19.0 (`SERVER-001` v0.84.0, `ADR-0103`, `WCB-FR-005`): protocol
   version 30 — `Response::RowsClamped` (24): `Rows` plus the row cap
   a `Query` with no `limit` was clamped to, sent at ≥ 30 and as `Rows`

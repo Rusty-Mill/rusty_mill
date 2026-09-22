@@ -2689,6 +2689,11 @@ pub struct ServeOptions {
     /// `LIM-FR-003` (ADR-0093): the most rows one `Query`/page may ask
     /// for; `None` is unbounded and a `Query` may omit its `limit`.
     max_query_rows: Option<usize>,
+    /// `BTL-FR-002` (ADR-0104): refusal threads alive right now — a
+    /// refused connection's `Busy` frame is written from a thread that
+    /// lives at most a few `BUSY_REFUSAL_TIMEOUT`s; at most
+    /// `MAX_BUSY_REFUSALS` of them at once, the rest closed silently.
+    busy_refusals: AtomicUsize,
 }
 
 impl std::fmt::Debug for ServeOptions {
@@ -2779,6 +2784,7 @@ impl ServeOptions {
             max_connections: None,
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
+            busy_refusals: AtomicUsize::new(0),
         }
     }
 
@@ -2920,6 +2926,7 @@ impl ServeOptions {
             max_connections: None,
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
+            busy_refusals: AtomicUsize::new(0),
         }
     }
 
@@ -4783,7 +4790,7 @@ pub fn serve_tables(
         // it lives exactly as long as the connection.
         if !options.try_admit() {
             options.metrics().record_connection_refused();
-            refuse_busy(stream, options.as_ref());
+            refuse_busy(stream, &options);
             continue;
         }
         let tables = Arc::clone(&tables);
@@ -4796,29 +4803,80 @@ pub fn serve_tables(
 }
 
 /// `WCB-FR-002` (ADR-0103): a connection refused at accept
-/// (`LIM-FR-002`) is told so — one `Err { Busy }` frame, written on the
-/// accept thread before the socket is dropped, on a plaintext listener
-/// only. It is the one frame ever sent before negotiation: a client at
-/// 30 or above reads "full, retry later"; one below 30 cannot decode
-/// the code and fails the connect as it failed on the silent close
-/// before. Under TLS nothing is written: a handshake would cost the
-/// thread the cap exists to save, so the socket is closed as `ADR-0093`
-/// left it. The write is bounded by [`BUSY_WRITE_TIMEOUT`] — the frame
-/// is smaller than any socket send buffer, so it never blocks the
-/// accept loop in practice — and a failed write is not an error: the
-/// client sees the close either way.
-fn refuse_busy(mut stream: TcpStream, options: &ServeOptions) {
-    if options.tls().is_some() {
-        return;
+/// (`LIM-FR-002`) is told so — one `Err { Busy }` frame before the
+/// socket is closed. It is the one frame ever sent before negotiation:
+/// a client at 30 or above reads "full, retry later"; one below 30
+/// cannot decode the code and fails the connect as it failed on the
+/// silent close before. A failed write is not an error: the client
+/// sees the close either way.
+///
+/// `BTL-FR-001`/`002` (ADR-0104): the refusal runs on a thread of its
+/// own, never the accept thread — under TLS it needs the handshake
+/// first, and on any listener the close must wait for the peer (below),
+/// and neither may stall the next accept. The socket's read and write
+/// timeouts are set to [`BUSY_REFUSAL_TIMEOUT`] first, so each blocking
+/// step gives up after that long; at most [`MAX_BUSY_REFUSALS`] refusal
+/// threads exist at once (`ServeOptions::busy_refusals`), and a refusal
+/// past that is closed silently, as `ADR-0093` closed every one — so a
+/// flood of refused connects holds at most that many short-lived
+/// threads, never the unbounded pool the connection cap exists to
+/// prevent.
+///
+/// `BTL-FR-004`: the close is a `FIN`, not an `RST`. The client sends
+/// its `Hello` as soon as it connects, so that frame is sitting unread
+/// in this socket's receive buffer when the `Busy` frame goes out —
+/// and a socket closed with unread data is reset, which lets the
+/// peer's kernel discard the `Busy` bytes it already holds. So after
+/// the frame the thread shuts down its write side and reads until the
+/// peer closes (or the timeout), and only then drops the socket.
+fn refuse_busy(stream: TcpStream, options: &Arc<ServeOptions>) {
+    if options.busy_refusals.fetch_add(1, Ordering::AcqRel) >= MAX_BUSY_REFUSALS {
+        options.busy_refusals.fetch_sub(1, Ordering::AcqRel);
+        return; // closed silently: the refusal pool is full too
     }
-    let _ = stream.set_write_timeout(Some(BUSY_WRITE_TIMEOUT));
-    let _ = framing::write_message(&mut stream, &err_response(ErrorCode::Busy));
-    let _ = stream.flush();
+    let options = Arc::clone(options);
+    thread::spawn(move || {
+        let _slot = InFlightGuard(&options.busy_refusals);
+        let _ = stream.set_read_timeout(Some(BUSY_REFUSAL_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(BUSY_REFUSAL_TIMEOUT));
+        let Ok(raw) = stream.try_clone() else {
+            return;
+        };
+        let written = match options.tls() {
+            None => write_busy(&mut &stream),
+            Some(tls) => {
+                let Ok(mut tls_stream) = tls.acceptor.accept(stream) else {
+                    return;
+                };
+                tls_stream.complete_handshake().is_ok() && write_busy(&mut tls_stream)
+            }
+        };
+        if !written {
+            return;
+        }
+        let _ = raw.shutdown(std::net::Shutdown::Write);
+        let mut sink = [0u8; 256];
+        let mut raw = &raw;
+        while matches!(raw.read(&mut sink), Ok(n) if n > 0) {}
+    });
 }
 
-/// How long `refuse_busy` will wait to hand its one frame to the
-/// kernel before giving up and closing the socket anyway.
-const BUSY_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+/// The one `Busy` frame, written and flushed; `false` on any failure.
+fn write_busy<W: Write>(w: &mut W) -> bool {
+    framing::write_message(w, &err_response(ErrorCode::Busy)).is_ok() && w.flush().is_ok()
+}
+
+/// `BTL-FR-002` (ADR-0104): the read and write timeout on a refused
+/// socket while its refusal thread runs the TLS handshake (if any),
+/// writes the one frame, and waits for the peer's close — each blocking
+/// step gives up after this long.
+pub const BUSY_REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// `BTL-FR-002` (ADR-0104): the most refusal threads alive at once.
+/// Small on purpose: a refusal is a courtesy to a client that will
+/// retry, not a service, and past this the refused socket is closed
+/// silently as it was before `ADR-0103`.
+pub const MAX_BUSY_REFUSALS: usize = 16;
 
 /// `TBL-FR-004` (ADR-0050): [`Request::Join`] with `right_table: Some`
 /// — validated with the right table's own schema, evaluated with the
