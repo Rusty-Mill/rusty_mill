@@ -177,10 +177,11 @@ not a guess.
   `ADR-0103` (protocol 30):* a clamped `Query` is answered
   `RowsClamped { rows, cap }` on a connection at 30 or above
   (`SchemaDrivenClient::last_clamp`), and a connection refused at the
-  connection cap on a plaintext listener reads one `Err { Busy }`
-  frame before the close. Still absent: `Busy` under TLS (the accept
-  thread would have to run the handshake), a scan budget for
-  `Aggregate`/`Join`, graceful drain, and any per-peer cap.
+  connection cap reads one `Err { Busy }` frame before the close —
+  *since `ADR-0104`* under TLS too, after the handshake, from a pool of
+  at most sixteen short-lived refusal threads. Still absent: a
+  retry-after hint in `Busy`, a scan budget for `Aggregate`/`Join`,
+  graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing

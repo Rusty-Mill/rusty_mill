@@ -153,7 +153,9 @@ review owed.
 
 - **`Busy` under TLS** — option (b), if a TLS deployment wants it and
   accepts the handshake on the accept thread (or a small pool for
-  refusals).
+  refusals). *Taken: `ADR-0104` (2026-09-22) — the small pool: one
+  refusal thread per refused TLS socket under a 2 s timeout, at most
+  sixteen alive, past which the silent close.*
 - **A retry-after hint** — a `Busy { after_ms }` variant would be a
   protocol round of its own.
 
