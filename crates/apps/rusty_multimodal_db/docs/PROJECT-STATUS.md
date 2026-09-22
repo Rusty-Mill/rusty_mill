@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `RUSTDOC-CLEAN` (`ADR-0101`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), on the owner's word ("rustdoc"): the 82 rustdoc warnings fixed and the monorepo's doc step now denies warnings. Docs-only. Its PR waits on the owner. `ADR-0092`–`ADR-0100` (PRs #292–#300) merged.
+- `SERVER-ROW-CAP-CLAMP` (`ADR-0102`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "clamp": a `Query` with no `limit` under a row cap is clamped to the cap and counted, so `memory_server` now defaults the cap to 10,000 and all three limits default on. Its PR waits on the owner. `ADR-0092`–`ADR-0101` (PRs #292–#301) merged.
 
 ## Blocked
 

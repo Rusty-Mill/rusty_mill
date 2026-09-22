@@ -152,8 +152,11 @@ Independent review owed.
 
 - **Defaults on** — option (b). *Taken: `ADR-0099` (2026-09-21) — idle
   timeout 300 s and connection cap 1,024 on by default in
-  `memory_server`, `0` turning either off; the row cap stays opt-in,
-  since under it a `Query` with no `limit` is refused.*
+  `memory_server`, `0` turning either off; the row cap stayed opt-in,
+  since under it a `Query` with no `limit` was refused — until
+  `ADR-0102` (2026-09-22) clamped that case to the cap instead (counted in
+  `dogserver_query_rows_clamped_total`) and defaulted the cap to
+  10,000.*
 - **A `Busy` error frame** — option (c), if a client should tell a
   full server from a dead one.
 - **A scan budget** for `Aggregate`/`Join` — the planner's question,
