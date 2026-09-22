@@ -543,8 +543,15 @@ jobs:
   # `--features client`, and the default build has neither. Two of those
   # broke (a `research`-gated import used by both, a module ungated behind
   # `client`) and stayed broken across several merged PRs before a local
-  # `cargo check --features server` found them (ADR-0098). This job builds
-  # the crate's shipped feature sets, all targets, so the gap stays closed.
+  # `cargo check --features server` found them (ADR-0098). This job lints
+  # the crate's shipped feature sets, all targets, so the gap stays closed
+  # -- clippy rather than check since ADR-0100, because `--all-features`
+  # alone lets dead code hide behind `research`-gated callers (the crate's
+  # standalone workflow's own reason for per-feature clippy). The same
+  # job carries the rest of that standalone workflow, which the monorepo
+  # never ran: the client-only test run (a consumer compiles no server),
+  # the Python reference client's offline wire-vector conformance test,
+  # and `cargo doc`. The MSRV check is its own job below (other toolchain).
   multimodal-db-feature-sets:
     name: rusty_multimodal_db feature sets (default, client, server, research)
     needs: plan
@@ -553,17 +560,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: multimodal-db-feature-sets
-      - name: cargo check -p rusty_multimodal_db (default features)
-        run: cargo check -p rusty_multimodal_db --all-targets
-      - name: cargo check -p rusty_multimodal_db --features client
-        run: cargo check -p rusty_multimodal_db --features client --all-targets
-      - name: cargo check -p rusty_multimodal_db --features server
-        run: cargo check -p rusty_multimodal_db --features server --all-targets
-      - name: cargo check -p rusty_multimodal_db --features research
-        run: cargo check -p rusty_multimodal_db --features research --all-targets
+      - name: cargo clippy -p rusty_multimodal_db (default features)
+        run: cargo clippy -p rusty_multimodal_db --all-targets -- -D warnings
+      - name: cargo clippy -p rusty_multimodal_db --features client
+        run: cargo clippy -p rusty_multimodal_db --features client --all-targets -- -D warnings
+      - name: cargo clippy -p rusty_multimodal_db --features server
+        run: cargo clippy -p rusty_multimodal_db --features server --all-targets -- -D warnings
+      - name: cargo clippy -p rusty_multimodal_db --features research
+        run: cargo clippy -p rusty_multimodal_db --features research --all-targets -- -D warnings
+      # `ECO-FR-003` (ADR-0043): the client-only feature set tests with no server compiled.
+      - name: cargo test -p rusty_multimodal_db --features client
+        run: cargo test -p rusty_multimodal_db --features client
+      # `ECO-FR-008` (ADR-0043): every line of the crate's wire-vector fixture decodes and
+      # re-encodes byte-for-byte through the stdlib-only Python client. `python3` is part of
+      # `ubuntu-latest`; the live half runs inside `cargo test --all-features` above.
+      - name: python reference client (offline conformance vectors)
+        run: python3 -m unittest discover -s crates/apps/rusty_multimodal_db/clients/python/tests -v
+      # As the standalone workflow ran it: warnings allowed. The crate's rustdoc
+      # currently emits ~80 (unresolved intra-doc links and the like, ADR-0100's
+      # named follow-up); `-D warnings` here would be red on day one.
+      - name: cargo doc -p rusty_multimodal_db --all-features --no-deps
+        run: cargo doc -p rusty_multimodal_db --all-features --no-deps
+
+  # `Cargo.toml`'s `rust-version` is only a promise if something builds at
+  # it (ADR-0100, from the crate's standalone workflow). Keep the version
+  # below equal to `rust-version` in crates/apps/rusty_multimodal_db/Cargo.toml.
+  # `--all-features` pulls DuckDB's amalgamation, so a cold run is long; the
+  # cache is keyed on the rustc version, so this job warms its own.
+  multimodal-db-msrv:
+    name: rusty_multimodal_db msrv (rust-version 1.89)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: multimodal-db-msrv
+      - name: cargo check on the declared rust-version
+        run: cargo check -p rusty_multimodal_db --all-features --all-targets
 
   rusty-config-no-std-check:
     name: rusty_config no_std (--no-default-features)

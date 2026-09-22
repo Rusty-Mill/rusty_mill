@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 # The oldest compiler that builds this crate: `std::fs::File::try_lock` (the data-
 # directory lock, `ADR-0092`) is stable since 1.89.0, one minor above the 1.88.0
-# ceiling every dependency declares (`time` 0.3.55). Checked by CI's `msrv` job, so
-# a dependency bump that raises it fails there rather than on whoever builds next.
+# ceiling every dependency declares (`time` 0.3.55). Checked by the monorepo's
+# `multimodal-db-msrv` job (and the standalone workflow's `msrv`), so a dependency
+# bump that raises it fails there rather than on whoever builds next.
 rust-version = "1.89"
 description = "Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends"
 repository = "https://github.com/baileyrd/rusty_multimodal_db"

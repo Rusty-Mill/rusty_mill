@@ -1,3 +1,10 @@
+# NOTE (ADR-0100): inside the rusty_mill monorepo this file never runs --
+# GitHub only reads workflows under the repository root. Every job below
+# now has a monorepo counterpart in the root `.github/workflows/ci.yml`
+# (`multimodal-db-feature-sets` and `multimodal-db-msrv`, plus the shared
+# fmt/clippy/test jobs); keep the two in step, and keep the MSRV pin in
+# both equal to `rust-version` in `Cargo.toml`. Retained for the crate's
+# standalone mirror repository, where it is the whole CI.
 name: CI
 
 on:
