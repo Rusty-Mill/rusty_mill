@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 29
+PROTOCOL_VERSION = 30
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -75,6 +75,9 @@ class ErrorCode(IntEnum):
     Storage = 12
     GuardFailed = 13
     TooLarge = 14
+    # WCB-FR-002, ADR-0103 (protocol 30): the server is at its connection
+    # cap; this frame is the one a refused connect reads before the close.
+    Busy = 15
 
 
 # ---- ScanValue (enum family) ----
@@ -939,10 +942,26 @@ class Snapshot:
         )
 
 
+@_variant(24, [("rows", ("vec", ("tuple", "uuid", FIELDS))), ("cap", "u64")])
+class RowsClamped:
+    """WCB-FR-001, ADR-0103 (protocol 30). `Rows` plus the row cap the
+    answer was clamped to: what a `Query` with no `limit` is answered
+    with under the server's row cap — the first `cap` matches in scan
+    order, not every match."""
+
+    rows: Tuple[Tuple[uuid.UUID, Tuple[Tuple[int, Any], ...]], ...]
+    cap: int
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "rows", tuple((rid, tuple(tuple(f) for f in fields)) for rid, fields in self.rows)
+        )
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
-    BatchResults, MetricsResp, BackedUp, Snapshot,
+    BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped,
 ]
 
 

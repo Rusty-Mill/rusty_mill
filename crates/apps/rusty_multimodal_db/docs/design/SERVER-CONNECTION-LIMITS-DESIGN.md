@@ -158,7 +158,9 @@ Independent review owed.
   `dogserver_query_rows_clamped_total`) and defaulted the cap to
   10,000.*
 - **A `Busy` error frame** — option (c), if a client should tell a
-  full server from a dead one.
+  full server from a dead one. *Taken: `ADR-0103` (2026-09-22) —
+  protocol 30, `ErrorCode::Busy` written to a refused connection on a
+  plaintext listener before the close; under TLS still nothing.*
 - **A scan budget** for `Aggregate`/`Join` — the planner's question,
   not this round's.
 

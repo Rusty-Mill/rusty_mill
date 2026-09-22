@@ -874,6 +874,7 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::TooLarge => {
             "this table's on-disk size exceeds the snapshot size limit; nothing was read"
         }
+        ErrorCode::Busy => "the server is at its connection limit; retry later",
     }
 }
 
@@ -2382,6 +2383,12 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
         matches!(pair.1, ScanValue::StrList(_))
     }
     match resp {
+        // `WCB-FR-001` (ADR-0103): below 30 the clamp mark is dropped and
+        // the rows go as `Rows` — through this function again, so a
+        // connection below 11 also loses its `StrList` fields.
+        Response::RowsClamped { rows, .. } if negotiated < 30 => {
+            downgrade_for_version(Response::Rows { rows }, negotiated)
+        }
         Response::Record { id, fields } if negotiated < 11 => Response::Record {
             id,
             fields: fields.into_iter().filter(|p| !is_str_list(p)).collect(),
@@ -2491,6 +2498,22 @@ pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
     }
 }
 
+/// `WCB-FR-001` (ADR-0103): the rows of a clamped `Query`
+/// (`clamp_missing_limit`) marked with the cap they were clamped to.
+/// Pure; any response that is not `Rows` — an error, a page — is
+/// returned unchanged, since only a `Query`'s rows are ever clamped.
+/// Applied before `downgrade_for_version`, which turns the mark back
+/// into `Rows` for a connection below 30.
+pub fn mark_clamped(resp: Response, cap: usize) -> Response {
+    match resp {
+        Response::Rows { rows } => Response::RowsClamped {
+            rows,
+            cap: cap as u64,
+        },
+        other => other,
+    }
+}
+
 fn err_response(code: ErrorCode) -> Response {
     Response::Err {
         code,
@@ -2576,7 +2599,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::BatchResults { .. }
         | Response::Metrics { .. }
         | Response::BackedUp { .. }
-        | Response::Snapshot { .. } => access::Outcome::Ok,
+        | Response::Snapshot { .. }
+        | Response::RowsClamped { .. } => access::Outcome::Ok,
     }
 }
 
@@ -4174,15 +4198,15 @@ fn handle_connection(
         // `CLP-FR-001`/`002` (ADR-0102): under a row cap, a `Query` with no
         // `limit` is clamped to the cap here, before anything else reads
         // the request, and counted so an operator can see it happening.
-        let req = match options.max_query_rows() {
+        let (req, clamped) = match options.max_query_rows() {
             Some(cap) => {
                 let (req, clamped) = clamp_missing_limit(req, cap);
                 if clamped {
                     options.metrics().record_query_clamped();
                 }
-                req
+                (req, clamped)
             }
-            None => req,
+            None => (req, false),
         };
 
         // `RLH-FR-003` (ADR-0088): the request's arrival — its frame fully
@@ -4657,6 +4681,13 @@ fn handle_connection(
             Request::Delete { id } => delete_across(tables, store, id),
             other => dispatch(store, other),
         };
+        // `WCB-FR-001` (ADR-0103): a clamped `Query`'s rows carry the cap
+        // they were clamped to — `RowsClamped` at 30 and above, `Rows`
+        // below (`downgrade_for_version`, rule 3).
+        let resp = match (clamped, options.max_query_rows()) {
+            (true, Some(cap)) => mark_clamped(resp, cap),
+            _ => resp,
+        };
         let resp = downgrade_for_version(resp, negotiated);
         // `MET-FR-003` (ADR-0064): the identical call site `AccessEvent`
         // is recorded at — one increment per dispatched request.
@@ -4752,7 +4783,7 @@ pub fn serve_tables(
         // it lives exactly as long as the connection.
         if !options.try_admit() {
             options.metrics().record_connection_refused();
-            drop(stream);
+            refuse_busy(stream, options.as_ref());
             continue;
         }
         let tables = Arc::clone(&tables);
@@ -4763,6 +4794,31 @@ pub fn serve_tables(
         });
     }
 }
+
+/// `WCB-FR-002` (ADR-0103): a connection refused at accept
+/// (`LIM-FR-002`) is told so — one `Err { Busy }` frame, written on the
+/// accept thread before the socket is dropped, on a plaintext listener
+/// only. It is the one frame ever sent before negotiation: a client at
+/// 30 or above reads "full, retry later"; one below 30 cannot decode
+/// the code and fails the connect as it failed on the silent close
+/// before. Under TLS nothing is written: a handshake would cost the
+/// thread the cap exists to save, so the socket is closed as `ADR-0093`
+/// left it. The write is bounded by [`BUSY_WRITE_TIMEOUT`] — the frame
+/// is smaller than any socket send buffer, so it never blocks the
+/// accept loop in practice — and a failed write is not an error: the
+/// client sees the close either way.
+fn refuse_busy(mut stream: TcpStream, options: &ServeOptions) {
+    if options.tls().is_some() {
+        return;
+    }
+    let _ = stream.set_write_timeout(Some(BUSY_WRITE_TIMEOUT));
+    let _ = framing::write_message(&mut stream, &err_response(ErrorCode::Busy));
+    let _ = stream.flush();
+}
+
+/// How long `refuse_busy` will wait to hand its one frame to the
+/// kernel before giving up and closing the socket anyway.
+const BUSY_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// `TBL-FR-004` (ADR-0050): [`Request::Join`] with `right_table: Some`
 /// — validated with the right table's own schema, evaluated with the

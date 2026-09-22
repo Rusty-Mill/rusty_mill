@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-ROW-CAP-CLAMP` (`ADR-0102`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "clamp": a `Query` with no `limit` under a row cap is clamped to the cap and counted, so `memory_server` now defaults the cap to 10,000 and all three limits default on. Its PR waits on the owner. `ADR-0092`–`ADR-0101` (PRs #292–#301) merged.
+- `SERVER-WIRE-CLAMP-BUSY` (`ADR-0103`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "2": protocol 30 — `Response::RowsClamped` marks a clamped `Query`'s rows with the cap (`Rows` below 30), and `ErrorCode::Busy` is written to a connection refused at the connection cap on a plaintext listener before the close; both clients at parity, `SERVER-002` 0.19.0. Its PR waits on the owner. `ADR-0092`–`ADR-0102` and the workspace Windows CI fix (PRs #292–#303) merged.
 
 ## Blocked
 

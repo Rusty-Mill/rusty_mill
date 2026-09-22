@@ -815,6 +815,10 @@ pub struct SchemaDrivenClient {
     /// `TBL-FR-009`: other tables' schemas, fetched once each for a
     /// cross-table `JOIN` (see [`Self::schema_of`]).
     table_schemas: HashMap<String, DomainSchema>,
+    /// `WCB-FR-001` (ADR-0103): the row cap the most recent `Query`'s
+    /// answer was clamped to, when the server said it was — see
+    /// [`Self::last_clamp`].
+    last_clamp: Option<u64>,
 }
 
 impl SchemaDrivenClient {
@@ -871,6 +875,9 @@ impl SchemaDrivenClient {
             },
         ) {
             Ok(Response::Hello { protocol_version }) => protocol_version,
+            // `WCB-FR-002` (ADR-0103): a server at its connection cap
+            // answers the connect itself with `Err { Busy }` and closes.
+            Ok(Response::Err { code, message }) => return Err(ClientError::Server(code, message)),
             Ok(_) => return Err(ClientError::UnexpectedResponse("Hello")),
             // `FR-026`: the peer closed the connection under the `Hello`
             // with no reply — what a pre-hello server does. Reconnect
@@ -917,6 +924,7 @@ impl SchemaDrivenClient {
             server_protocol_version,
             current_table: None,
             table_schemas: HashMap::new(),
+            last_clamp: None,
         })
     }
 
@@ -1009,6 +1017,17 @@ impl SchemaDrivenClient {
     /// `PROTOCOL_VERSION` against a server from the same build.
     pub fn server_protocol_version(&self) -> u32 {
         self.server_protocol_version
+    }
+
+    /// `WCB-FR-001` (ADR-0103): whether the most recent [`Self::query`]
+    /// answered by rows was clamped by the server's row cap — `Some(cap)`
+    /// when it was (the rows are the first `cap` matches in scan order,
+    /// not every match), `None` when it was not, or when the server
+    /// speaks a protocol below 30 and cannot say. Reset by every `Query`
+    /// the server answers with rows; untouched by an error, a page, an
+    /// aggregate, or a join.
+    pub fn last_clamp(&self) -> Option<u64> {
+        self.last_clamp
     }
 
     /// Open a transaction session on this connection (`FR-024`; see this
@@ -1285,24 +1304,34 @@ impl SchemaDrivenClient {
             };
         }
 
-        match self.roundtrip(Request::Query {
+        // `WCB-FR-001` (ADR-0103): `RowsClamped` is `Rows` plus the cap;
+        // the cap is kept for `last_clamp`, the rows go the same way.
+        let rows = match self.roundtrip(Request::Query {
             select,
             filter,
             limit: parsed.limit,
         })? {
-            Response::Rows { rows } => Ok(rows
-                .into_iter()
-                .map(|(id, fields)| {
-                    let named = fields
-                        .into_iter()
-                        .map(|(tag, value)| (self.field_name(tag), value))
-                        .collect();
-                    (id, named)
-                })
-                .collect()),
-            Response::Err { code, message } => Err(ClientError::Server(code, message)),
-            _ => Err(ClientError::UnexpectedResponse("Rows")),
-        }
+            Response::Rows { rows } => {
+                self.last_clamp = None;
+                rows
+            }
+            Response::RowsClamped { rows, cap } => {
+                self.last_clamp = Some(cap);
+                rows
+            }
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("Rows")),
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(id, fields)| {
+                let named = fields
+                    .into_iter()
+                    .map(|(tag, value)| (self.field_name(tag), value))
+                    .collect();
+                (id, named)
+            })
+            .collect())
     }
 
     /// `OBY-FR-003`/`004` (ADR-0061); `FPG-FR-005`/`006` (ADR-0068):
