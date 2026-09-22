@@ -1741,6 +1741,14 @@ pub unsafe fn thread_times(thread: RawHandle) -> Result<ThreadTimes, Win32Error>
 
 #[cfg(test)]
 mod tests {
+    /// A well-known long-running system command, by absolute path: in a
+    /// full-workspace `cargo test`/nextest run cargo prepends dozens of
+    /// `target\...` entries to `PATH`, pushing it past the 8,191
+    /// characters `cmd.exe` reads, so a bare `ping` is "not recognized"
+    /// there while the same test passes when this crate runs alone.
+    /// `%SystemRoot%` is short and always expands.
+    const PING_30S: &str = "cmd.exe /c %SystemRoot%\\System32\\ping.exe -n 30 127.0.0.1 >nul";
+
     use super::*;
 
     #[test]
@@ -1971,9 +1979,8 @@ mod tests {
         // resulting exit code.
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned =
-            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, false, None) }
-                .expect("CreateProcessW should succeed");
+        let spawned = unsafe { spawn_suspended(PING_30S, false, false, None) }
+            .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
@@ -2038,9 +2045,8 @@ mod tests {
 
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned =
-            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, true, None) }
-                .expect("CreateProcessW should succeed");
+        let spawned = unsafe { spawn_suspended(PING_30S, false, true, None) }
+            .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
@@ -2464,9 +2470,8 @@ mod tests {
     fn list_threads_open_thread_suspend_and_resume_round_trip() {
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned =
-            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, false, None) }
-                .expect("CreateProcessW should succeed");
+        let spawned = unsafe { spawn_suspended(PING_30S, false, false, None) }
+            .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
@@ -2507,9 +2512,8 @@ mod tests {
 
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned =
-            unsafe { spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", false, false, None) }
-                .expect("CreateProcessW should succeed");
+        let spawned = unsafe { spawn_suspended(PING_30S, false, false, None) }
+            .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
