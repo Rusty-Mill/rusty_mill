@@ -1,6 +1,8 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.18.0 (protocol version 29 — `SERVER-001` v0.76.0,
+- Version: 0.19.0 (protocol version 30 — `SERVER-001` v0.84.0,
+  `WCB-FR-005`, `ADR-0103`: `RowsClamped` (24), `ErrorCode::Busy` (15);
+  0.18.0 was protocol 29 — `SERVER-001` v0.76.0,
   `QCX-FR-002`, `ADR-0091`, no new variant; 0.17.0 was protocol 28 — `SERVER-001` v0.74.0,
   `PGD-FR-001`/`002`, `ADR-0089`; 0.16.0 was protocol 27 — `SERVER-001` v0.57.0,
   `MVCC2-FR-004`, `ADR-0072`; 0.15.0 was protocol 26 — `SERVER-001` v0.56.0, `FPG-FR-005`,
@@ -98,13 +100,13 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 29 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1d 00 00 00` (29).
+- `Request::Hello { protocol_version: 30 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1e 00 00 00` (30).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 29
+## 5. Types at protocol version 30
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -118,12 +120,12 @@ unmarked is version 1.
 
 ### 5.2 Fieldless enums (a `u32` index)
 
-| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | | | |
-| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | | | |
-| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | | | |
-| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) | `TooLarge` (25) |
+| Enum | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | | | | |
+| `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | | | | |
+| `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | | | | |
+| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) | `TooLarge` (25) | `Busy` (30) |
 
 ### 5.3 `ScanValue` — a field's value
 
@@ -262,6 +264,7 @@ server does not know closes the connection with no reply (§6.3).
 | 21 | `Metrics` | `text: String` | 23 |
 | 22 | `BackedUp` | `files: u64`, `bytes: u64` | 24 |
 | 23 | `Snapshot` | `files: Vec<(String, Vec<u8>)>` | 25 |
+| 24 | `RowsClamped` | `rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>`, `cap: u64` — `Rows`'s exact payload followed by the row cap the answer was clamped to | 30 |
 
 ## 6. Connection lifecycle
 
@@ -304,6 +307,16 @@ the server). Any other malformed payload — a bad variant index inside a
 value, a truncated field — is also treated as undecodable and closed. A
 client must treat an EOF after sending a frame as one of these, not as
 an empty response.
+
+Since 30 there is one frame a server may write *before* reading
+anything: a server at its connection limit answers a connection it
+refuses at accept with `Err { Busy, message }` (§7 item 27) and then
+closes it, on a plaintext listener only — under TLS the refused
+connection is closed with nothing written, as before. A client that
+sent `Hello` and reads `Err { Busy }` should treat the server as full,
+not dead, and retry later; a client below 30 cannot decode the code
+and must treat the frame as undecodable (a failed connect), which is
+what the silent close already was.
 
 ### 6.4 `DescribeSchema` — every field by name
 
@@ -622,6 +635,20 @@ Each item names the `SERVER-001` requirement that owns it.
    rows, an empty group set, an empty page — rule 3's nearest older
    shape applied to a semantics change, as version 27 did for its flag
    bit. (`FR-088`)
+27. **`RowsClamped`** / **`Busy`** (30) — the two things a server
+   knew and did not say. A server may be configured with a *row cap*;
+   under it item 8's `Query` with no `limit` is answered with the
+   first `cap` matching rows in scan order, exactly as `limit: cap`
+   would be. On a connection negotiated at 30 or above that answer is
+   `RowsClamped { rows, cap }` instead of `Rows` — the identical rows,
+   plus the cap — so the client can see it is short; below 30 it is
+   `Rows` (rule 3). A `Query` with an explicit `limit` at or under the
+   cap, a page, an aggregate, a join: never `RowsClamped`; a `limit`
+   or page above the cap is `Err { TooLarge }` (since 25; `Malformed`
+   below). A server may also be configured with a *connection cap*;
+   a connection refused under it on a plaintext listener is written one
+   `Err { Busy }` frame before it is closed (§6.3), the only frame a
+   server ever sends before negotiation. (`FR-096`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -678,6 +705,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 27 | v0.57.0 | flag bit 8, `SESSION_MVCC_ISOLATION` — no new variant |
 | 28 | v0.74.0 | `PageDesc` (36), `FilteredPageDesc` (37) |
 | 29 | v0.76.0 | no new variant — a contradictory filter is `Err { Malformed }` at ≥ 29 (§7 item 26) |
+| 30 | v0.84.0 | `RowsClamped` (24), `ErrorCode::Busy` (15) — `Rows` below 30 for a clamped `Query` (§7 item 27); `Busy` written only before negotiation, never as an answer |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -690,9 +718,12 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
    negotiated at *N* never receives a variant introduced after *N*: a
    request it could not send is `Err { Malformed }` (sessions below 3,
    `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25, `FilteredPage` below 26, `PageDesc`/`FilteredPageDesc` below 28); an error code introduced later
-   is reported as `Unsupported`; and — the one *content* rewrite — a
+   is reported as `Unsupported`; a `RowsClamped` below 30 is sent as
+   `Rows`; and — the one *content* rewrite — a
    `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
-   so an older client sees exactly the record shape it knew.
+   so an older client sees exactly the record shape it knew. `Busy`
+   is the one exception to the rule's premise: it is written before a
+   version is negotiated, so it cannot be gated on one (§6.3).
 4. **The client never sends above the negotiated version.** A conformant
    client implements a version, says so in `Hello`, and never sends a
    request, flag bit, or value variant introduced after `min(its
@@ -725,6 +756,17 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.19.0 (`SERVER-001` v0.84.0, `ADR-0103`, `WCB-FR-005`): protocol
+  version 30 — `Response::RowsClamped` (24): `Rows` plus the row cap
+  a `Query` with no `limit` was clamped to, sent at ≥ 30 and as `Rows`
+  below; `ErrorCode::Busy` (15): the one frame a server writes before
+  negotiation, to a connection refused at its connection cap on a
+  plaintext listener, then closed (nothing written under TLS). §4's
+  `Hello` example, §5 header, §5.2, §5.7 row 24, §6.3, §7 item 27, §8
+  row 30 and rule 3; fixture at 84 vectors (`Response/RowsClamped`,
+  `Response/Err(Busy)`). The reference Python client declares 30,
+  gains `RowsClamped`/`Busy` and `Client.last_clamp`, and raises
+  `ServerError(Busy)` from `connect`.
 - 0.17.0 (`SERVER-001` v0.74.0, `ADR-0089`, `PGD-FR-001`/`002`):
   protocol version 28 — `Request::PageDesc` (36) and
   `Request::FilteredPageDesc` (37), answered `Response::Rows` (reused,

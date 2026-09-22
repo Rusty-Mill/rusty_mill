@@ -173,10 +173,13 @@ not a guess.
   timeout (300 s) and the connection cap (1,024) are on by default in
   `memory_server`, `0` turning either off; *since `ADR-0102`:* the row
   cap too (10,000), a `Query` with no `limit` clamped to it and counted
-  in `dogserver_query_rows_clamped_total` rather than refused. Still
-  absent: a "truncated" mark on a clamped reply (a wire change), an
-  error frame for a
-  refused accept (the client sees EOF), a scan budget for
+  in `dogserver_query_rows_clamped_total` rather than refused; *since
+  `ADR-0103` (protocol 30):* a clamped `Query` is answered
+  `RowsClamped { rows, cap }` on a connection at 30 or above
+  (`SchemaDrivenClient::last_clamp`), and a connection refused at the
+  connection cap on a plaintext listener reads one `Err { Busy }`
+  frame before the close. Still absent: `Busy` under TLS (the accept
+  thread would have to run the handshake), a scan budget for
   `Aggregate`/`Join`, graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct

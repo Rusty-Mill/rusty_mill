@@ -81,6 +81,10 @@ class Client:
         # once each for a cross-table join.
         self.table: Optional[str] = None
         self._table_schemas: Dict[str, p.DomainSchema] = {}
+        # WCB-FR-001 (protocol 30): the row cap the most recent ``query``
+        # answered by rows was clamped to, or None (not clamped, or a
+        # server below 30 that cannot say).
+        self.last_clamp: Optional[int] = None
 
     # ---- connection lifecycle ----
 
@@ -104,6 +108,10 @@ class Client:
             sock = ctx.wrap_socket(raw, server_hostname=tls.server_name)
         # Hello is the optional first frame; a server answers min(client, server).
         reply = _exchange(sock, p.Hello(protocol_version))
+        if isinstance(reply, p.Err):
+            # WCB-FR-002 (protocol 30): a server at its connection cap
+            # answers the connect itself with Err { Busy } and closes.
+            raise ServerError(reply.code, reply.message)
         if not isinstance(reply, p.HelloResp):
             raise ProtocolError(f"expected Hello, got {type(reply).__name__}")
         negotiated = reply.protocol_version
@@ -648,6 +656,10 @@ class Client:
     ) -> List[Tuple[uuid.UUID, List[Tuple[str, Any]]]]:
         reply = self._roundtrip(p.Query(self._selection(select), tuple(self._predicates(where)), limit))
         if isinstance(reply, p.Rows):
+            self.last_clamp = None
+            return [(rid, self._named(fields)) for rid, fields in reply.rows]
+        if isinstance(reply, p.RowsClamped):
+            self.last_clamp = reply.cap
             return [(rid, self._named(fields)) for rid, fields in reply.rows]
         raise ProtocolError(type(reply).__name__)
 

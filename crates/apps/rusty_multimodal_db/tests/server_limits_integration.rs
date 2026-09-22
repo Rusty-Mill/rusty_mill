@@ -66,6 +66,15 @@ fn start_server(options: ServeOptions) -> SocketAddr {
 /// and acknowledged — so the tests can send one exact `Request` shape
 /// and read one exact `Response`.
 fn raw_connection(addr: SocketAddr) -> (BufReader<TcpStream>, BufWriter<TcpStream>) {
+    raw_connection_at(addr, PROTOCOL_VERSION)
+}
+
+/// `raw_connection` negotiated at an older `version` — how a client
+/// from before a wire change sees the same server (rule 3).
+fn raw_connection_at(
+    addr: SocketAddr,
+    version: u32,
+) -> (BufReader<TcpStream>, BufWriter<TcpStream>) {
     let stream = TcpStream::connect(addr).unwrap();
     stream.set_nodelay(true).unwrap();
     stream
@@ -76,13 +85,13 @@ fn raw_connection(addr: SocketAddr) -> (BufReader<TcpStream>, BufWriter<TcpStrea
     write_message(
         &mut writer,
         &Request::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: version,
         },
     )
     .unwrap();
     writer.flush().unwrap();
     match read_message::<_, Response>(&mut reader).unwrap() {
-        Response::Hello { .. } => {}
+        Response::Hello { protocol_version } => assert_eq!(protocol_version, version),
         other => panic!("expected Hello, got {other:?}"),
     }
     (reader, writer)
@@ -164,8 +173,9 @@ fn a_connection_past_the_cap_is_closed_at_accept_and_counted() {
         "text: {text}"
     );
 
-    // The second: the server closes it before reading a byte, so the
-    // `Hello` the client sends is answered by EOF or a reset.
+    // The second: `WCB-FR-002` (ADR-0103) — the server writes one
+    // `Err { Busy }` frame before reading a byte and closes, so the
+    // `Hello` the client sends is answered by `Busy`, then EOF.
     let refused = TcpStream::connect(addr).unwrap();
     refused
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -179,14 +189,25 @@ fn a_connection_past_the_cap_is_closed_at_accept_and_counted() {
     );
     let _ = writer.flush();
     let mut reader = BufReader::new(refused);
+    assert_eq!(
+        error_code(read_message::<_, Response>(&mut reader).unwrap()),
+        ErrorCode::Busy,
+        "a connection past the cap is told so"
+    );
     assert!(
         read_message::<_, Response>(&mut reader).is_err(),
-        "a connection past the cap was answered"
+        "the refused connection stays open past its one frame"
     );
+    // Through the client: the connect itself fails with the code.
+    match SchemaDrivenClient::connect(addr) {
+        Err(ClientError::Server(code, _)) => assert_eq!(code, ErrorCode::Busy),
+        Err(other) => panic!("expected Busy through the client, got {other:?}"),
+        Ok(_) => panic!("a connection past the cap was admitted"),
+    }
 
     let text = first.metrics().unwrap();
     assert!(
-        text.contains("dogserver_connections_refused_total 1\n"),
+        text.contains("dogserver_connections_refused_total 2\n"),
         "text: {text}"
     );
     assert!(
@@ -205,26 +226,39 @@ fn a_connection_past_the_cap_is_closed_at_accept_and_counted() {
     );
 }
 
-/// `LIM-FR-003` as amended by `CLP-FR-001` (ADR-0102): under a row cap
-/// of two, a `Query` with no `limit` answers the first two rows (clamped,
-/// and counted), a `Query` with a `limit` of three is `TooLarge` before
-/// any read, a `Query` at the cap answers, and a page is capped the same
-/// way; the schema-driven client surfaces the code unchanged.
+/// `LIM-FR-003` as amended by `CLP-FR-001` (ADR-0102) and marked by
+/// `WCB-FR-001` (ADR-0103): under a row cap of two, a `Query` with no
+/// `limit` answers the first two rows as `RowsClamped { cap: 2 }` at
+/// protocol 30 (clamped, marked, and counted) and as plain `Rows` on a
+/// connection negotiated at 29; a `Query` with a `limit` of three is
+/// `TooLarge` before any read, a `Query` at the cap answers unmarked,
+/// and a page is capped the same way; the schema-driven client surfaces
+/// the code unchanged and the mark through `last_clamp`.
 #[test]
 fn a_read_asking_for_more_rows_than_the_cap_is_too_large_before_any_read() {
     let addr = start_server(ServeOptions::new(None, None).with_max_query_rows(2));
     let (mut reader, mut writer) = raw_connection(addr);
 
     match round_trip(&mut reader, &mut writer, &query(None)) {
-        Response::Rows { rows } => assert_eq!(rows.len(), 2, "clamped to the cap"),
-        other => panic!("expected Rows clamped to the cap, got {other:?}"),
+        Response::RowsClamped { rows, cap } => {
+            assert_eq!(rows.len(), 2, "clamped to the cap");
+            assert_eq!(cap, 2);
+        }
+        other => panic!("expected RowsClamped, got {other:?}"),
+    }
+    // Rule 3: a client from before the mark sees `Rows`, and nothing
+    // else about the answer changes.
+    let (mut old_reader, mut old_writer) = raw_connection_at(addr, 29);
+    match round_trip(&mut old_reader, &mut old_writer, &query(None)) {
+        Response::Rows { rows } => assert_eq!(rows.len(), 2, "clamped to the cap, unmarked"),
+        other => panic!("expected Rows below 30, got {other:?}"),
     }
     assert_eq!(
         error_code(round_trip(&mut reader, &mut writer, &query(Some(3)))),
         ErrorCode::TooLarge
     );
     match round_trip(&mut reader, &mut writer, &query(Some(2))) {
-        Response::Rows { rows } => assert_eq!(rows.len(), 2),
+        Response::Rows { rows } => assert_eq!(rows.len(), 2, "an explicit limit is not a clamp"),
         other => panic!("expected Rows, got {other:?}"),
     }
     assert_eq!(
@@ -245,15 +279,27 @@ fn a_read_asking_for_more_rows_than_the_cap_is_too_large_before_any_read() {
         "text: {text}"
     );
     assert!(
-        text.contains("dogserver_query_rows_clamped_total 1\n"),
+        text.contains("dogserver_query_rows_clamped_total 2\n"),
         "text: {text}"
     );
     // `CLP-FR-001` through the client: a `SELECT` with no `LIMIT` is
-    // answered, clamped; one with a `LIMIT` above the cap is refused.
+    // answered, clamped and marked (`WCB-FR-001`); one at the cap is
+    // unmarked; one with a `LIMIT` above the cap is refused.
+    assert_eq!(client.last_clamp(), None);
     match client.query("SELECT * FROM memory").unwrap() {
         QueryResult::Rows(rows) => assert_eq!(rows.len(), 2, "clamped through the client"),
         other => panic!("expected Rows, got {other:?}"),
     }
+    assert_eq!(client.last_clamp(), Some(2));
+    match client.query("SELECT * FROM memory LIMIT 2").unwrap() {
+        QueryResult::Rows(rows) => assert_eq!(rows.len(), 2),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+    assert_eq!(
+        client.last_clamp(),
+        None,
+        "an explicit limit is not a clamp"
+    );
     match client.query("SELECT * FROM memory LIMIT 3") {
         Err(ClientError::Server(code, _)) => assert_eq!(code, ErrorCode::TooLarge),
         other => panic!("expected TooLarge through the client, got {other:?}"),
