@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-BUSY-UNDER-TLS` (`ADR-0104`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "2": a connection refused at the connection cap on a TLS listener reads the `Busy` frame after the handshake, from a pool of at most sixteen short-lived refusal threads; no wire change, `SERVER-002` 0.19.1. Its PR waits on the owner. `ADR-0092`–`ADR-0103` and the workspace Windows CI fix (PRs #292–#304) merged.
+- `SERVER-SYNCED-UPDATES` fork (b), ranged `msync` — measured and declined on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "2": whole-mapping and one-page `msync` cost the same from 100 KiB to 3.8 GiB (`RESULTS.md`), so no plumbing was built; fork (c), a journaled `UpdateField`, held for a multi-writer deployment. `ADR-0092`–`ADR-0104` and the workspace Windows CI fix (PRs #292–#305) merged.
 
 ## Blocked
 
