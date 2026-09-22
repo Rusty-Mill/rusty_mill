@@ -377,9 +377,28 @@ jobs:
       # for having nothing to test). `warn` still logs it -- so a crate that
       # silently loses all its tests some other way isn't swept under the
       # rug -- without failing a PR whose whole point is scaffolding.
+      # `--no-fail-fast`: nextest stops the whole shard at its first failure
+      # by default, so a full-workspace run showed exactly one failing test
+      # per shard and hid the rest behind it -- three runs, three rounds of
+      # "fix one, find the next". Running every test costs nothing extra on a
+      # shard that was going to build everything anyway, and the summary then
+      # names every failure at once.
+      #
+      # Windows, full-workspace runs specifically: cargo prepends the target
+      # `deps` dir and every build script's link-search `out` dir to `PATH`
+      # for each test binary. With `--all-features` across the whole
+      # workspace that is dozens of long `target\debug\build\...\out` entries
+      # ahead of the system's own, and `cmd.exe` reads at most 8,191
+      # characters of a variable -- so `C:\Windows\System32` falls off the
+      # end and any test that shells out through `cmd /C` to an external
+      # program (`ping`, `sort`, `git`) fails "not recognized", while the same
+      # test passes when its crate runs alone. The affected tests now hand
+      # `cmd` a `PATH` without the `target\` entries (see
+      # `rusty_tokio/tests/process_windows.rs`); a new test that shells out
+      # on Windows must do the same.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
 
       # Runs once per OS, not once per shard -- it's cheap and not worth
       # partitioning, and nextest's own partitioning above doesn't cover a
