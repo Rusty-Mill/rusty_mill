@@ -61,7 +61,7 @@ use super::protocol::{FieldRef, RecordId, ScanValue};
 use crate::durability::sync_parent_dir;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// A table-local commit sequence number (`MVCC2-FR-002`).
@@ -150,6 +150,10 @@ pub struct MvccIndex {
     /// The highest txn id ever recorded — `0` if MVCC has never produced
     /// a real (non-baseline) entry on this table.
     last_committed: TxnId,
+    /// `ART-FR-001` (ADR-0105): entries appended since the last
+    /// [`Self::gc`] — what an automatic reclaim's threshold is measured
+    /// against, a running count so no write pays for a walk of every chain.
+    appended_since_gc: usize,
 }
 
 impl MvccIndex {
@@ -171,6 +175,13 @@ impl MvccIndex {
         let pos = chain.entries.partition_point(|e| e.txn_id < txn_id);
         chain.entries.insert(pos, Entry { txn_id, value });
         self.last_committed = self.last_committed.max(txn_id);
+        self.appended_since_gc += 1;
+    }
+
+    /// `ART-FR-001` (ADR-0105): entries appended since the last
+    /// [`Self::gc`], live or replayed.
+    pub fn appended_since_gc(&self) -> usize {
+        self.appended_since_gc
     }
 
     /// `MVCC2-FR-008`: record one live or replayed write — the caller's
@@ -248,6 +259,7 @@ impl MvccIndex {
     /// Returns how many entries were dropped (`HRC-FR-001`, ADR-0096).
     pub fn gc(&mut self, min_open_snapshot: Option<TxnId>) -> usize {
         let boundary = min_open_snapshot.unwrap_or(TxnId::MAX);
+        self.appended_since_gc = 0;
         let mut dropped = 0;
         for chain in self.chains.values_mut() {
             let Some(keep_from) = chain.entries.iter().rposition(|e| e.txn_id <= boundary) else {
@@ -333,6 +345,12 @@ pub struct MvccState {
     counter: TxnCounter,
     index: Mutex<MvccIndex>,
     open_snapshots: OpenSnapshots,
+    /// `ART-FR-002` (ADR-0105): reclaim automatically once this many
+    /// entries have been appended since the last reclaim — `0` never
+    /// (the `ADR-0096` behaviour: `Compact` only).
+    reclaim_every: AtomicUsize,
+    /// `ART-FR-003`: automatic reclaims run so far.
+    auto_reclaims: AtomicUsize,
 }
 
 /// `<path>.mvcc` — the persistent MVCC history store (`MVCC2-FR-010`):
@@ -403,6 +421,8 @@ impl MvccState {
                         counter: TxnCounter::seeded_at(BASELINE_TXN),
                         index: Mutex::new(MvccIndex::default()),
                         open_snapshots: OpenSnapshots::default(),
+                        reclaim_every: AtomicUsize::new(0),
+                        auto_reclaims: AtomicUsize::new(0),
                     },
                     insert_log_entries_reflected: 0,
                     journal_entries_reflected: 0,
@@ -429,6 +449,8 @@ impl MvccState {
                 counter: TxnCounter::seeded_at(index.last_committed),
                 index: Mutex::new(index),
                 open_snapshots: OpenSnapshots::default(),
+                reclaim_every: AtomicUsize::new(0),
+                auto_reclaims: AtomicUsize::new(0),
             },
             insert_log_entries_reflected: persisted.insert_log_entries_reflected,
             journal_entries_reflected: persisted.journal_entries_reflected,
@@ -528,7 +550,39 @@ impl MvccState {
     /// held across I/O (`ADR-0072`'s "in-memory decision, not a
     /// durability step").
     pub fn with_index<T>(&self, f: impl FnOnce(&mut MvccIndex) -> T) -> T {
-        f(&mut self.index.lock().unwrap())
+        let mut index = self.index.lock().unwrap();
+        let out = f(&mut index);
+        // `ART-FR-002` (ADR-0105): the automatic trigger — under the
+        // same lock, right after the call that may have appended, at
+        // the oldest open snapshot exactly as `reclaim` would. Cheap
+        // when it does not fire (one compare); `gc` resets the count,
+        // so it fires once per threshold's worth of appends.
+        let every = self.reclaim_every.load(Ordering::Relaxed);
+        if every > 0 && index.appended_since_gc() >= every && self.is_active() {
+            index.gc(self.open_snapshots.minimum());
+            self.auto_reclaims.fetch_add(1, Ordering::Relaxed);
+        }
+        out
+    }
+
+    /// `ART-FR-002` (ADR-0105): reclaim history automatically every
+    /// `every` appended entries (`None` — never, `Compact` only).
+    pub fn set_reclaim_every(&self, every: Option<usize>) {
+        self.reclaim_every
+            .store(every.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// `ART-FR-002`: the threshold [`Self::set_reclaim_every`] set.
+    pub fn reclaim_every(&self) -> Option<usize> {
+        match self.reclaim_every.load(Ordering::Relaxed) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    /// `ART-FR-003`: how many automatic reclaims have run.
+    pub fn auto_reclaims(&self) -> usize {
+        self.auto_reclaims.load(Ordering::Relaxed)
     }
 
     /// `HRC-FR-002` (ADR-0096): reclaim every chain entry no open
@@ -693,12 +747,7 @@ mod tests {
     /// MVCC is activated, then reclaims at the oldest open snapshot.
     #[test]
     fn state_reclaim_honours_activation_and_the_oldest_open_snapshot() {
-        let state = MvccState {
-            active: AtomicBool::new(false),
-            counter: TxnCounter::seeded_at(BASELINE_TXN),
-            index: Mutex::new(MvccIndex::default()),
-            open_snapshots: OpenSnapshots::default(),
-        };
+        let state = fresh_state();
         let k = key(1, 0);
         state.with_index(|index| {
             for txn in 1..=4 {
@@ -706,6 +755,7 @@ mod tests {
             }
         });
         assert_eq!(state.reclaim(), 0, "not active: nothing reclaimed");
+        assert_eq!(state.reclaim_every(), None, "off unless set (ART-FR-002)");
         state.activate();
         state.open_snapshots().register(2);
         assert_eq!(
@@ -720,6 +770,77 @@ mod tests {
             "nothing open: only the current entry remains"
         );
         assert_eq!(state.with_index(|index| index.history_len()), 1);
+    }
+
+    fn fresh_state() -> MvccState {
+        MvccState {
+            active: AtomicBool::new(false),
+            counter: TxnCounter::seeded_at(BASELINE_TXN),
+            index: Mutex::new(MvccIndex::default()),
+            open_snapshots: OpenSnapshots::default(),
+            reclaim_every: AtomicUsize::new(0),
+            auto_reclaims: AtomicUsize::new(0),
+        }
+    }
+
+    /// `ART-FR-001`–`003` (ADR-0105): with a threshold set, the index
+    /// reclaims itself under `with_index` once that many entries have
+    /// been appended since the last reclaim — at the oldest open
+    /// snapshot, never before activation — and the count restarts.
+    #[test]
+    fn a_threshold_reclaims_automatically_after_that_many_appends() {
+        let state = fresh_state();
+        state.set_reclaim_every(Some(3));
+        assert_eq!(state.reclaim_every(), Some(3));
+        let k = key(1, 0);
+        let write = |txn: TxnId| {
+            state.with_index(|index| index.record_write(k, txn, Some(ScanValue::I64(txn as i64))));
+        };
+        write(1);
+        write(2);
+        write(3);
+        assert_eq!(state.auto_reclaims(), 0, "never before activation");
+        assert_eq!(state.with_index(|index| index.history_len()), 3);
+
+        state.activate();
+        state.open_snapshots().register(3);
+        write(4);
+        assert_eq!(
+            state.auto_reclaims(),
+            1,
+            "the fourth append crossed the threshold"
+        );
+        assert_eq!(
+            state.with_index(|index| index.history_len()),
+            2,
+            "kept: the entry at the open snapshot (3) and the current one (4)"
+        );
+        assert_eq!(state.with_index(|index| index.appended_since_gc()), 0);
+        write(5);
+        write(6);
+        assert_eq!(
+            state.auto_reclaims(),
+            1,
+            "two appends since: below the threshold"
+        );
+        state.open_snapshots().deregister(3);
+        write(7);
+        assert_eq!(state.auto_reclaims(), 2);
+        assert_eq!(
+            state.with_index(|index| index.history_len()),
+            1,
+            "nothing open: only the current entry remains"
+        );
+        assert_eq!(
+            state.with_index(|index| index.read(&k, 7)),
+            Ok(Some(ScanValue::I64(7)))
+        );
+        state.set_reclaim_every(None);
+        write(8);
+        write(9);
+        write(10);
+        write(11);
+        assert_eq!(state.auto_reclaims(), 2, "off again: Compact only");
     }
 
     #[test]

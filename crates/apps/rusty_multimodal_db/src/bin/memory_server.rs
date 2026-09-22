@@ -90,6 +90,17 @@
 //! (`RESULTS.md`: ~100 µs); `SERVER_SYNC_UPDATES=0` turns that off and
 //! takes the write-back window back.
 //!
+//! # MVCC history bounded — `SERVER_MVCC_RECLAIM_EVERY` (ADR-0105)
+//!
+//! With `SERVER_MVCC_ISOLATION` set, every committed write appends a
+//! version entry that some open snapshot might still need. `ADR-0096`
+//! reclaimed the entries no open snapshot needs at `Compact` only; by
+//! default the server now also reclaims them on its own every 10,000
+//! appended entries (`SERVER_MVCC_RECLAIM_EVERY`; `0` leaves it to
+//! `Compact`), inside the same lock the write took, at the oldest
+//! open snapshot — so a deployment that never compacts no longer
+//! holds every version ever written.
+//!
 //! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
 //!
 //! Opt-in, and only meaningful with `SERVER_DATA_DIR` also set (a
@@ -273,6 +284,10 @@ const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
 /// — a `Query` with no `limit` is answered as if it had asked for this
 /// many rows (and counted); an explicit `limit` above it is refused.
 const DEFAULT_MAX_QUERY_ROWS: u64 = 10_000;
+/// `ART-FR-004` (ADR-0105): with MVCC on, reclaim history every this
+/// many appended entries without waiting for a `Compact` — a bound on
+/// the version index a deployment gets without asking.
+const DEFAULT_MVCC_RECLAIM_EVERY: u64 = 10_000;
 
 fn main() {
     let addr = std::env::args()
@@ -315,6 +330,14 @@ fn main() {
     // acknowledged; `0` turns it off and the acknowledgement precedes
     // durability by the OS's write-back.
     let sync_updates = switch_env("SERVER_SYNC_UPDATES");
+    // `SERVER_MVCC_RECLAIM_EVERY` (`ADR-0105`, `ART-FR-004`): with MVCC
+    // on, history no open snapshot needs is reclaimed automatically
+    // every this many appended entries; `0` leaves it to `Compact`.
+    let mvcc_reclaim_every = bounded_env(
+        "SERVER_MVCC_RECLAIM_EVERY",
+        Some(DEFAULT_MVCC_RECLAIM_EVERY),
+    )
+    .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
     // These two do not compose safely today: `with_journal`'s own
     // `open_or_create_*_production_stack` call (inside `open_stores`,
     // below) already folds and clears the insert log for its own
@@ -386,7 +409,9 @@ fn main() {
         };
         // `SYU-FR-004` (ADR-0097): `msync` before every in-place
         // update's acknowledgement, when asked.
-        adapter.with_synced_updates(sync_updates)
+        adapter
+            .with_synced_updates(sync_updates)
+            .with_mvcc_reclaim_every(mvcc_reclaim_every)
     });
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
         let adapter = if mvcc_enabled && entities_existed {
@@ -410,7 +435,9 @@ fn main() {
         };
         // `SYU-FR-004` (ADR-0097): `msync` before every in-place
         // update's acknowledgement, when asked.
-        adapter.with_synced_updates(sync_updates)
+        adapter
+            .with_synced_updates(sync_updates)
+            .with_mvcc_reclaim_every(mvcc_reclaim_every)
     });
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
@@ -447,7 +474,9 @@ fn main() {
         };
         // `SYU-FR-004` (ADR-0097): `msync` before every in-place
         // update's acknowledgement, when asked.
-        adapter.with_synced_updates(sync_updates)
+        adapter
+            .with_synced_updates(sync_updates)
+            .with_mvcc_reclaim_every(mvcc_reclaim_every)
     });
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
@@ -566,7 +595,7 @@ fn main() {
         Err(_) => options,
     };
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {}, MVCC reclaim every: {:?} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -584,6 +613,7 @@ fn main() {
         options.max_connections(),
         options.max_query_rows(),
         if sync_updates { "configured" } else { "NOT configured (write-back)" },
+        mvcc_reclaim_every,
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary

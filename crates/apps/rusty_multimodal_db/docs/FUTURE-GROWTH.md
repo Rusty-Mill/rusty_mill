@@ -154,10 +154,12 @@ not a guess.
   explicit `Compact` runs" and then no `Compact` reclaimed. *Since
   `ADR-0096`:* `Compact` on `Memory`/`Entity`/`Relation` drops every
   chain entry below the oldest open snapshot before flushing the
-  history store. Still absent: an automatic trigger (a size threshold
-  or timer), a `dogserver_mvcc_history_entries` metric, and any
-  reclamation for the research domains, which answer `Compact` with
-  `Unsupported`.
+  history store. *Since `ADR-0105`:* the index reclaims itself every
+  N appended entries (`SERVER_MVCC_RECLAIM_EVERY`, default 10,000,
+  `0` leaving it to `Compact`), at the oldest open snapshot, inside
+  the lock the write already holds. Still absent: a
+  `dogserver_mvcc_history_entries` metric, and any reclamation for the
+  research domains, which answer `Compact` with `Unsupported`.
 * **An exposed, unprotected listener refused at startup.** Not named
   here before. *Built since this was written:* `ADR-0094` — every
   binary refuses a non-loopback bind unless authentication and TLS are
