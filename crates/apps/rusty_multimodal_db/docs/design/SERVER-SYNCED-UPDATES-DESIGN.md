@@ -131,7 +131,16 @@ Independent review owed.
 
 - **Ranged `msync`** — option (b), if the measured cost at 100K rows
   says the whole-mapping flush is paying for page-table walks.
-- **Journal `UpdateField`** — option (c).
+  *Measured and declined (2026-09-22, the owner's "2"): whole-mapping
+  and one-page `msync` are the same number from 100 KiB to 3.8 GiB
+  (`RESULTS.md`, "Ranged `msync` — measured and declined"); the
+  kernel already flushes only the dirty pages, so the range changes
+  nothing and the plumbing was not built.*
+- **Journal `UpdateField`** — option (c). *Not taken with (b): a
+  journal commit is one `fsync` of its own, the same floor for a
+  single connection; group commit amortizes it only across concurrent
+  writers, which the consumer is not. Open for a multi-writer
+  deployment.*
 - **Defaults on** in `memory_server`. *Taken: `ADR-0099` (2026-09-21) —
   on unless `SERVER_SYNC_UPDATES=0`.*
 

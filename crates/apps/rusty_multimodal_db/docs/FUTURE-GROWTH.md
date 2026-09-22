@@ -143,10 +143,13 @@ not a guess.
   `with_synced_updates` / `SERVER_SYNC_UPDATES=1` `msync`s the slot
   files before acknowledging, on `Memory`/`Entity`/`Relation`, at
   `update_field` on `Memory`, release build, this container, 2,000 updates each: 0.1 → 105.4 µs per update at 1K rows, 0.2 → 99.7 µs at 100K rows (unsynced → synced); the `msync` costs what the insert log's per-entry `sync_data` costs, and does not scale with the table. On by default in `memory_server` since `ADR-0099`
-  (`SERVER_SYNC_UPDATES=0` turns it off). Still absent: a ranged
-  `msync` of the one slot,
-  `UpdateField` in the journal (group commit would amortize the sync),
-  and any of this for the research domains.
+  (`SERVER_SYNC_UPDATES=0` turns it off). *Measured and declined
+  (2026-09-22):* a ranged `msync` of the one slot — whole-mapping and
+  one-page `msync` cost the same from 100 KiB to 3.8 GiB, the kernel
+  already flushing only the dirty pages (`RESULTS.md`). Still absent:
+  `UpdateField` in the journal (group commit would amortize the sync
+  across concurrent writers only — no gain for one connection), and
+  any of this for the research domains.
 * **MVCC history reclaimed.** `ADR-0072` accepted "unbounded between
   explicit `Compact` runs" and then no `Compact` reclaimed. *Since
   `ADR-0096`:* `Compact` on `Memory`/`Entity`/`Relation` drops every

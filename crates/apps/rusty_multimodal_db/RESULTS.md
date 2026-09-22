@@ -1879,6 +1879,19 @@ unchanged.
 
 Read: the synced cost is one `msync` of the mapping's dirty pages — one page for one update — and it does not grow with the table (the 100K row is not slower than the 1K row), the same order as the insert log's per-entry `sync_data` and `RESULTS.md`'s own per-write mmap flush row above (55.3 µs on a different store and day). Unset, `update_field` is a bounded copy into a mapped page. The setting is the operator's: ~100 µs per acknowledged update for durability past a power loss, or ~0 for durability past a process crash only.
 
+### Ranged `msync` — measured and declined (2026-09-22, the owner's "2")
+
+`ADR-0097`'s option (b) was a ranged `msync` of the one dirty slot, on the theory that the whole-mapping flush pays for a page-table walk that grows with the file. A throwaway probe (not shipped) mapped a file of `pages` × 4 KiB, dirtied one page per iteration at a stride, and timed `MmapMut::flush()` (whole mapping) against `flush_range(page, 4096)` (that one page), release build, Linux container, 200 iterations each:
+
+| mapping | whole-mapping `msync` | one-page `msync` |
+|---:|---:|---:|
+| 25 pages (100 KiB) | 104.4 µs | 102.6 µs |
+| 25,000 pages (98 MiB) | 1,120.0 µs | 1,245.6 µs |
+| 250,000 pages (977 MiB) | 1,625.0 µs | 1,618.4 µs |
+| 1,000,000 pages (3.8 GiB) | 1,738.7 µs | 1,546.5 µs |
+
+Read: the two columns are the same number at every size — the kernel already limits the whole-mapping flush to the dirty pages, so restricting the range restricts nothing. The cost is the device's and the filesystem's sync of one page, not a walk; what grows with the file here (≈100 µs → ≈1.6 ms) grows for both columns alike and is the filesystem's per-file write-back and journal work on a large sparse file in this container, not something a narrower `msync` reaches. Option (b) is therefore declined on evidence: a path from the adapter through every layer to `SlotFile::flush_range` would add plumbing and change no number. Option (c), `UpdateField` in the journal, would not lower a single connection's cost either — a journal commit is one `fsync` of its own, the same floor — and only amortizes it across *concurrent* writers through group commit (`ADR-0026`); `rusty_remind_me` is one connection, so it stays an open fork for a multi-writer deployment, not this one.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.
