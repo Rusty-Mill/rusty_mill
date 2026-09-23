@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-MVCC-AUTO-RECLAIM` (`ADR-0105`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-22), the owner's "2": the MVCC version index reclaims the history no open snapshot needs every N appended entries (`SERVER_MVCC_RECLAIM_EVERY`, default 10,000), so a deployment that never compacts is bounded too; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0104` and the ranged-`msync` measurement (PRs #292–#306) merged.
+- `SERVER-WIRE-CLAMP-BUSY` fork, a retry-after hint in `Busy` — declined on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "Decline": the server has no honest estimate of when a slot frees, so the frame would carry nothing the client did not already know; recorded in the design doc's open questions. `ADR-0092`–`ADR-0105` (PRs #292–#307) merged.
 
 ## Blocked
 

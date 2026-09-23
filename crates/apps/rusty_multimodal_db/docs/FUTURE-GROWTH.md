@@ -184,9 +184,11 @@ not a guess.
   (`SchemaDrivenClient::last_clamp`), and a connection refused at the
   connection cap reads one `Err { Busy }` frame before the close —
   *since `ADR-0104`* under TLS too, after the handshake, from a pool of
-  at most sixteen short-lived refusal threads. Still absent: a
-  retry-after hint in `Busy`, a scan budget for `Aggregate`/`Join`,
-  graceful drain, and any per-peer cap.
+  at most sixteen short-lived refusal threads. *Declined
+  (2026-09-23):* a retry-after hint in `Busy` — the server has no
+  honest estimate of when a slot frees, and a constant is one the
+  client can hold itself. Still absent: a scan budget for
+  `Aggregate`/`Join`, graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing
