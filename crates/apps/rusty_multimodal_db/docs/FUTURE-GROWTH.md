@@ -42,11 +42,11 @@ The big three:
 
 Smaller, but still real:
 
-* Dynamic/runtime schema (`ALTER TABLE`-style changes). Schema here is a compile-time Rust concept, and a record layout is unversioned: adding a field is a schema-tag bump that refuses old directories distinctly (`ADR-0056`), with an in-place upgrade named as the round for the first directory that cannot be re-pushed.
-* Null. The wire has no null; two domains carry documented per-field sentinels instead (`ADR-0056`: `0` for a timestamp, `""` for a node id — lossless for those columns). A nullable `ScanValue` at a protocol bump is the general answer, deferred until a column arrives with no lossless sentinel; the scoring floats the consumer keeps also need a float kind first.
+* Dynamic/runtime schema (`ALTER TABLE`-style changes). Schema here is a compile-time Rust concept. A record layout is versioned by its schema tag (`memory::Memory@2`): adding a field is a tag bump that refuses old directories distinctly (`ADR-0056`), and the upgrade path is `STORAGE-019`'s migration tooling (`ADR-0066`) — a copy into a fresh directory through the existing open and create paths, one tool per layout change, `examples/migrate_memory_v1_to_v2.rs` the first; since `ADR-0116` the refusal itself names that tool or a re-push. Still absent: any runtime schema change, and tolerant decoding (`bincode` writes no field markers).
+* Null. *Since `ADR-0117`, protocol 31:* the wire has `ScanValue::Null`, stripped below 31. No shipped column is nullable yet — two domains keep their documented per-field sentinels (`ADR-0056`: `0` for a timestamp, `""` for a node id, lossless for those columns) — so a server never emits it and refuses it where a value is read. Still absent: a nullable field capability and a SQL `NULL`, the first nullable column's round; the scoring floats the consumer keeps also need a stored float kind first.
 * A query optimizer for aggregation (`GROUP BY`, `AVG`, multi-table joins) — DuckDB's core identity is vectorized execution over exactly this. A bounded `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` exists (`ADR-0035`) as a full scan then a bucket, with no optimizer of any kind — except, since `ADR-0081`, a `COUNT(*)` whose filter is only bounds on a range-indexed field, which is the sorted index's own count between the bounds with no record read (and, since `ADR-0082`, `SUM`/`AVG`/`MIN`/`MAX` of that field are reductions over the walked keys, no record read either; an aggregate over any other field still decodes; since `ADR-0084` a `GROUP BY` of that field over a pure range is one group per run of equal walked keys, and every other `GROUP BY` still decodes — since `ADR-0085` through a hashed bucket, linear in the rows).
 * Client ecosystem — drivers for other languages, a CLI, general tooling. A byte-level wire specification and a stdlib-only Python client exist (`ADR-0043`); everything else on this list does not.
-* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison. *Since `ADR-0095`:* the crash-safety trials the diagnosis harness once ran by hand are a CI gate (`tests/crash_safety.rs`, `STORAGE-021`) — a regression in the commit marker, the reopen reconciliation, or `Flush` fails `cargo test`; still a process-kill proof, not a power-loss one.
+* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison. *Since `ADR-0095`:* the crash-safety trials the diagnosis harness once ran by hand are a CI gate (`tests/crash_safety.rs`, `STORAGE-021`) — a regression in the commit marker, the reopen reconciliation, or `Flush` fails `cargo test`; still a process-kill proof, not a power-loss one. *Since `ADR-0119`:* the power-loss proof is designed (`docs/design/STORAGE-POWER-LOSS-DESIGN.md`) and its runbook ships (`scripts/power_loss_trial.sh`, `dm-log-writes` on a root Linux host); unrun, so the claim stands as before until an operator runs it.
 
 ## Operational maturity — not named in this document before
 
@@ -102,11 +102,10 @@ not a guess.
   replay against an already-identical starting snapshot); no automatic
   failover or promotion — a refreshed replica is a manually-promoted
   cold standby only; no write forwarding — a replica never proxies
-  writes to a primary; no cluster membership, gossip, or consensus; no
-  replica-refresh daemon shipped by this crate — an operator's own
-  script fetches, writes to local disk, and restarts a second
-  `memory_server` pointed at it (`Backup`'s own "restore needs no new
-  code" precedent).
+  writes to a primary; no cluster membership, gossip, or consensus. *Since `ADR-0118`:*
+  the refresh script ships — `examples/replica_refresh.rs` fetches a
+  snapshot into a fresh, verified directory once or on an interval,
+  pruning old ones; the standby's restart is still the operator's.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
   (`ADR-0064`, protocol 23) renders a bounded, fixed set of
@@ -134,7 +133,10 @@ not a guess.
   fixed buckets (`SERVER-001` v0.73.0/FR-085), observed once per
   dispatched request. **Since `ADR-0093`**:
   `dogserver_connections_refused_total`, accepts closed at the
-  connection cap; still absent: queue depth, journal size.
+  connection cap. **Since `ADR-0115`**: `dogserver_journal_bytes`,
+  `dogserver_journal_entries_since_checkpoint` and
+  `dogserver_journal_waiting_writers` (the commit group's queue depth)
+  per journaled table — the last two this list named absent.
 * **Durable acknowledgements for in-place updates.** Not named here
   before: every write but the in-place field update was `fsync`ed
   before its acknowledgement (insert log, journal); `UpdateField` and

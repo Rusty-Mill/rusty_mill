@@ -5,6 +5,7 @@ re-encodes byte-for-byte. No server, no Rust toolchain."""
 import os
 import sys
 import unittest
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -64,13 +65,13 @@ class WireVectors(unittest.TestCase):
             bytes.fromhex("1c000000" "00000000" "1000000000000000" + "00" * 15 + "01"),
         )
 
-    def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_30(self):
+    def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_31(self):
         # MVCC2-FR-004/011, ADR-0072: real MVCC's BeginWith bit — this
-        # client declares protocol 30, so it may send it (compatibility
+        # client declares protocol 31, so it may send it (compatibility
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
-        self.assertEqual(p.PROTOCOL_VERSION, 30)
+        self.assertEqual(p.PROTOCOL_VERSION, 31)
         req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
         data = p.encode_request(req)
         self.assertEqual(p.decode_request(data), req)
@@ -87,6 +88,16 @@ class WireVectors(unittest.TestCase):
         combined_data = p.encode_request(combined)
         self.assertEqual(p.decode_request(combined_data), combined)
         self.assertEqual(combined_data, bytes.fromhex("0e0000000f000000"))
+
+
+    def test_null_is_variant_6_and_decodes_to_none(self):
+        # NUL-FR-001, ADR-0117 (protocol 31): a unit variant, the index
+        # alone on the wire; scan_value_py reads it as None.
+        record = p.Record(uuid.UUID(int=1), ((11, p.Null()),))
+        data = p.encode_response(record)
+        self.assertTrue(data.endswith(bytes.fromhex("0b00" "06000000")))
+        self.assertEqual(p.decode_response(data), record)
+        self.assertIsNone(p.scan_value_py(p.Null()))
 
 
 if __name__ == "__main__":

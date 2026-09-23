@@ -724,6 +724,40 @@ enum TableOpen<S> {
     ReopenWithMvcc,
 }
 
+/// `SCE-FR-001` (ADR-0116): the startup error for a table that will not
+/// open, and — when the cause is a schema-tag mismatch, the distinct
+/// refusal `ADR-0056` gives a directory written at an older layout —
+/// the remedy: the migration tool `ADR-0066` ships for `Memory`, or a
+/// re-push from the consumer, the source of truth, for every table.
+fn open_error(table: &str, path: &Path, error: &dyn std::fmt::Display) -> String {
+    let text = error.to_string();
+    let mut message = format!(
+        "SERVER_DATA_DIR: opening {} ({table}): {text}",
+        path.display()
+    );
+    if text.contains("schema tag mismatch") {
+        message.push_str(
+            "\nThis directory was written at an older layout of this table than this binary \
+             serves (ADR-0056). It is refused, never mis-read and never recreated.",
+        );
+        if table == "memory" {
+            message.push_str(
+                "\nRemedy: migrate it into a fresh directory with\n  cargo run -p \
+                 rusty_multimodal_db --example migrate_memory_v1_to_v2 -- <old_path> <new_path>\n\
+                 (ADR-0066, STORAGE-019) and point SERVER_DATA_DIR at <new_path>; or re-push \
+                 the table from the consumer, the source of truth.",
+            );
+        } else {
+            message.push_str(
+                "\nRemedy: re-push the table from the consumer, the source of truth (no \
+                 migration tool ships for this table yet — ADR-0066's three-step pattern \
+                 applies when one is needed).",
+            );
+        }
+    }
+    message
+}
+
 /// The three tables as `open_stores` leaves them, with their file paths.
 struct OpenedStores {
     store: TableOpen<MemoryProductionStack>,
@@ -753,7 +787,7 @@ fn open_stores(data: &DataLocation, mvcc_enabled: bool) -> Result<OpenedStores, 
         } else {
             TableOpen::Opened(
                 open_or_create_memory_production_stack(&memories)
-                    .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", memories.display()))?,
+                    .map_err(|e| open_error("memory", &memories, &e))?,
             )
         };
         let entity_store = if mvcc_enabled && entities.exists() {
@@ -761,16 +795,15 @@ fn open_stores(data: &DataLocation, mvcc_enabled: bool) -> Result<OpenedStores, 
         } else {
             TableOpen::Opened(
                 open_or_create_entity_production_stack(&entities)
-                    .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?,
+                    .map_err(|e| open_error("entity", &entities, &e))?,
             )
         };
         let relation_store = if mvcc_enabled && relations.exists() {
             TableOpen::ReopenWithMvcc
         } else {
             TableOpen::Opened(
-                open_or_create_relation_production_stack(&relations).map_err(|e| {
-                    format!("SERVER_DATA_DIR: opening {}: {e}", relations.display())
-                })?,
+                open_or_create_relation_production_stack(&relations)
+                    .map_err(|e| open_error("relation", &relations, &e))?,
             )
         };
         return Ok(OpenedStores {

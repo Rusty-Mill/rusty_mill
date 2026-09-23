@@ -10,7 +10,9 @@
 //! (`Reversed` never forwarded `Neighbors`; `GenericProductionStore` had
 //! no `neighbors` method) before this adapter could even be written.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::journal::{
+    CheckpointFlush, CommitError, CommitGroup, JournalError, JournalStats, JournaledBatch,
+};
 use super::mvcc::{self, MvccState};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
@@ -227,6 +229,12 @@ impl EmployeeConnectionStore {
 }
 
 impl ConnectionStore for EmployeeConnectionStore {
+    /// `JSM-FR-001` (ADR-0115): the journal's live figures, when there
+    /// is one.
+    fn journal_stats(&self) -> Option<JournalStats> {
+        self.journal.as_ref().map(CommitGroup::stats)
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Employee>(id).map(|employee| {
             vec![

@@ -107,6 +107,21 @@ pub(crate) enum ReplayedBatch {
     },
 }
 
+/// `JSM-FR-001` (ADR-0115): a journaled table's live journal figures,
+/// as `CommitGroup::stats` reads them and
+/// `ConnectionStore::journal_stats` reports them for the
+/// `dogserver_journal_*` gauges.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JournalStats {
+    /// The journal file's size in bytes, header included.
+    pub bytes: u64,
+    /// Entries appended since the last checkpoint truncated the file.
+    pub entries_since_checkpoint: u64,
+    /// Writers parked for their apply turn right now — the group's
+    /// queue depth.
+    pub waiting_writers: u64,
+}
+
 /// Everything that can go wrong opening, appending to, or replaying a
 /// batch journal.
 #[derive(Debug)]
@@ -398,7 +413,6 @@ impl BatchJournal {
     }
 
     /// The journal's size in bytes, header included.
-    #[cfg(test)]
     pub(crate) fn len_bytes(&self) -> u64 {
         self.len
     }
@@ -719,6 +733,23 @@ impl CommitGroup {
             .lock()
             .map(|s| s.journal.len_bytes())
             .unwrap_or(0)
+    }
+
+    /// `JSM-FR-001` (ADR-0115): the three gauges an operator watches
+    /// on a journaled table, read under the group's own lock in one go
+    /// so they describe one instant: the file's size, the entries the
+    /// next checkpoint will drop, and the writers parked for their turn
+    /// (`GRP-FR-003`) — the group's queue depth. A poisoned lock reads
+    /// as zeros: a scrape must never fail on a journal that has.
+    pub fn stats(&self) -> JournalStats {
+        self.state
+            .lock()
+            .map(|s| JournalStats {
+                bytes: s.journal.len_bytes(),
+                entries_since_checkpoint: s.since_checkpoint,
+                waiting_writers: s.turn_waiters.len() as u64,
+            })
+            .unwrap_or_default()
     }
 
     /// `ADR-0072`'s `MVCC2-FR-010`: how many entries have been appended

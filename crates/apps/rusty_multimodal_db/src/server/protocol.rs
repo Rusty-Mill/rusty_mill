@@ -85,6 +85,7 @@
 //! | 28 | `SERVER-001` v0.74.0 | + [`Request::PageDesc`] (36), [`Request::FilteredPageDesc`] (37) — `PGD-FR-001`, ADR-0089: [`Request::Page`]/[`Request::FilteredPage`] walked the other way — sorted *descending* by `(order_by, id)`, strictly *before* the `before` cursor, at most `limit` rows, answered [`Response::Rows`] (reused). The consumer's "latest N" shape (`ORDER BY updated_at DESC LIMIT 50`). `Memory`/`Relation`/`Reminder` answer `PageDesc` on their ordered field from the sorted index walked backward; every other shape from the scan. Validated exactly as `Page`/`FilteredPage`. Gated as a **read**; `Malformed` below 28 (rule 3). No new `ErrorCode`. ADR-0089 |
 //! | 29 | `SERVER-001` v0.76.0 | No new variant: a filter no record can satisfy — two bounds on one field whose intersection is empty (`a > 5 AND a < 3`, `a = 3 AND a > 3`, `a = 1 AND a = 2`, `a = 1 AND a != 1`) — is refused with `Err { Malformed }` before any read, on a connection negotiated at 29 or above (`QCX-FR-002`, `ADR-0091`); below 29 it keeps the empty answer every earlier version gave (rule 3's nearest older shape, applied to a semantics change as version 27 did). Pure over the request ([`contradicted`]); `Query`, `Aggregate`, `FilteredPage`/`FilteredPageDesc`, and both sides of `Join`. ADR-0091 |
 //! | 30 | `SERVER-001` v0.84.0 | + [`Response::RowsClamped`] (24) and [`ErrorCode::Busy`] (15) — `WCB-FR-001`/`002`, ADR-0103: the two wire-level forks `ADR-0093`/`ADR-0102` held open. `RowsClamped { rows, cap }` is [`Response::Rows`] plus the cap it was clamped to — what a `Query` with no `limit` under `ServeOptions::max_query_rows` (`CLP-FR-001`) is answered with, so the client can see its answer is short; `Rows` below 30 (rule 3, `serve::downgrade_for_version`). `Err { Busy }` is the one frame a server ever writes *before* negotiation: on a plaintext listener a connection refused at accept under `max_connections` (`LIM-FR-002`) is answered `Err { Busy, .. }` then closed instead of closed silently, so a client can tell a full server from a dead one; a client below 30 cannot decode index 15 and fails the connect as it failed on the EOF before; since ADR-0104 every refusal, plaintext or TLS, runs on one of at most [`super::serve::MAX_BUSY_REFUSALS`] short-lived refusal threads (`BTL-FR-001`/`002`) — the handshake first under TLS, then the frame, then a wait for the peer's close so the frame is never lost to a reset (`BTL-FR-004`) — past which the socket is closed silently. ADR-0103, ADR-0104 |
+//! | 31 | `SERVER-001` v0.96.0 | + [`ScanValue::Null`] (6) — `NUL-FR-001`, ADR-0117: the absence of a value, a unit variant. No shipped column is nullable yet, so a server never emits it and answers `Malformed` to any request carrying it where a value is read (a write, a predicate, a transaction op, a guard). Stripped from `Record`/`Rows` below 31 by `downgrade_for_version` (rule 3, `StrList`'s precedent). No new `Request`/`ErrorCode`. ADR-0117 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -119,7 +120,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -228,6 +229,16 @@ pub enum ScanValue {
     /// connection negotiated below 11 (rule 3, the protocol's first
     /// content-rewriting downgrade).
     StrList(Vec<String>),
+    /// Protocol 31, `NUL-FR-001` (ADR-0117): the absence of a value.
+    /// No shipped column carries it yet — `Memory`'s `deleted_at` and
+    /// `node_id` keep their lossless sentinels (`ADR-0056`) — so today a
+    /// server never emits it and refuses it everywhere a value is read:
+    /// a write, a predicate, a transaction op or a guard carrying `Null`
+    /// is `Malformed`, because no field is nullable. The variant exists
+    /// so the first column with no lossless sentinel needs no protocol
+    /// bump, only a field marked nullable. Stripped from `Record`/`Rows`
+    /// by `downgrade_for_version` below 31 (rule 3, as `StrList` below 11).
+    Null,
 }
 
 /// Whether `predicate` holds over one record's wire shape — a `Query`
@@ -1378,6 +1389,7 @@ mod tests {
             "BeginWith(mvcc isolation)" | "BeginWith(all four bits)" => 27,
             "PageDesc" | "FilteredPageDesc" => 28,
             "RowsClamped" | "Err(Busy)" => 30,
+            "Record(Null)" | "Rows(Null)" => 31,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -2183,6 +2195,37 @@ mod tests {
                 b"Ada",
             ]),
         );
+        // Protocol 31 (`NUL-FR-001`, ADR-0117): `ScanValue::Null` at 6, a
+        // unit variant — the index alone — pinned in the two ungated
+        // response shapes that can carry a field value.
+        assert_golden_eq(
+            "Record(Null)",
+            &Response::Record {
+                id,
+                fields: vec![(11, ScanValue::Null)],
+            },
+            &bytes(&[
+                &[0x00, 0x00, 0x00, 0x00], // Record
+                &ID1,
+                &LEN1,                     // fields: one (tag, value) pair
+                &[0x0b, 0x00],             // field tag
+                &[0x06, 0x00, 0x00, 0x00], // ScanValue::Null
+            ]),
+        );
+        assert_golden_eq(
+            "Rows(Null)",
+            &Response::Rows {
+                rows: vec![(id, vec![(11, ScanValue::Null)])],
+            },
+            &bytes(&[
+                &[0x0c, 0x00, 0x00, 0x00], // Rows
+                &LEN1,                     // rows: one (id, fields) pair
+                &ID1,
+                &LEN1,                     // fields: one (tag, value) pair
+                &[0x0b, 0x00],             // field tag
+                &[0x06, 0x00, 0x00, 0x00], // ScanValue::Null
+            ]),
+        );
         assert_golden_eq(
             "Schema(StrList)",
             &Response::Schema(DomainSchema {
@@ -2472,7 +2515,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

@@ -4,7 +4,9 @@
 //! `Children` are unsupported here — see [`super::order`] for the
 //! complementary case).
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::journal::{
+    CheckpointFlush, CommitError, CommitGroup, JournalError, JournalStats, JournaledBatch,
+};
 use super::mvcc::{self, MvccState};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
@@ -268,6 +270,12 @@ impl<S: DogStore + ConcurrentStore + TransactionalStore + AllIds + Send + Sync> 
 where
     S::Exclusive: CheckpointFlush,
 {
+    /// `JSM-FR-001` (ADR-0115): the journal's live figures, when there
+    /// is one.
+    fn journal_stats(&self) -> Option<JournalStats> {
+        self.journal.as_ref().map(CommitGroup::stats)
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         DogStore::get(&self.store, id).map(|record| {
             vec![

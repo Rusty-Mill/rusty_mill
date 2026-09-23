@@ -9,6 +9,7 @@
 //! `client` feature and compiles none of this file. See `super`'s own
 //! module docs for the server's contract; this file is its body.
 
+use super::journal::JournalStats;
 use super::metrics::{ConnectionMetricsGuard, PlanKind, ServerMetrics};
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
@@ -747,6 +748,15 @@ pub trait ConnectionStore: Send + Sync {
     /// not been activated. Read by `ServeOptions::render_metrics` for
     /// `dogserver_mvcc_history_entries{table="…"}`.
     fn mvcc_history_entries(&self) -> Option<u64> {
+        None
+    }
+
+    /// `JSM-FR-001` (ADR-0115): this table's live journal figures —
+    /// `None` for a table without a journal, so the metric has no
+    /// line for it. Read by `ServeOptions::render_metrics` for the
+    /// `dogserver_journal_bytes`, `dogserver_journal_entries_since_checkpoint`
+    /// and `dogserver_journal_waiting_writers` gauges.
+    fn journal_stats(&self) -> Option<JournalStats> {
         None
     }
 }
@@ -2261,6 +2271,7 @@ enum BucketKey {
     Str(String),
     F64Bits(u64),
     StrList(Vec<String>),
+    Null,
 }
 
 impl BucketKey {
@@ -2272,6 +2283,7 @@ impl BucketKey {
             ScanValue::Str(v) => Self::Str(v.clone()),
             ScanValue::F64(v) => Self::F64Bits(v.to_bits()),
             ScanValue::StrList(v) => Self::StrList(v.clone()),
+            ScanValue::Null => Self::Null,
         }
     }
 }
@@ -2397,6 +2409,12 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
     fn is_str_list(pair: &(FieldRef, ScanValue)) -> bool {
         matches!(pair.1, ScanValue::StrList(_))
     }
+    // `NUL-FR-002` (ADR-0117): below 31 a `Null` pair is stripped as a
+    // `StrList` pair is below 11 — the same rule, one more variant.
+    let unknown_below = |pair: &(FieldRef, ScanValue)| {
+        (negotiated < 11 && is_str_list(pair))
+            || (negotiated < 31 && matches!(pair.1, ScanValue::Null))
+    };
     match resp {
         // `WCB-FR-001` (ADR-0103): below 30 the clamp mark is dropped and
         // the rows go as `Rows` — through this function again, so a
@@ -2404,14 +2422,19 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
         Response::RowsClamped { rows, .. } if negotiated < 30 => {
             downgrade_for_version(Response::Rows { rows }, negotiated)
         }
-        Response::Record { id, fields } if negotiated < 11 => Response::Record {
+        Response::Record { id, fields } if negotiated < 31 => Response::Record {
             id,
-            fields: fields.into_iter().filter(|p| !is_str_list(p)).collect(),
+            fields: fields.into_iter().filter(|p| !unknown_below(p)).collect(),
         },
-        Response::Rows { rows } if negotiated < 11 => Response::Rows {
+        Response::Rows { rows } if negotiated < 31 => Response::Rows {
             rows: rows
                 .into_iter()
-                .map(|(id, fields)| (id, fields.into_iter().filter(|p| !is_str_list(p)).collect()))
+                .map(|(id, fields)| {
+                    (
+                        id,
+                        fields.into_iter().filter(|p| !unknown_below(p)).collect(),
+                    )
+                })
                 .collect(),
         },
         Response::Schema(mut schema) if negotiated < 11 => {
@@ -2504,6 +2527,32 @@ pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
 
 /// `RVL-FR-007` (ADR-0112): a Prometheus label value — backslash, double
 /// quote, and newline escaped as the exposition format requires, so a
+/// `MHE-FR-002`/`JSM-FR-002`: one per-table gauge family — the
+/// `# HELP`/`# TYPE` header and one `<name>{table="…"} <value>` sample
+/// per entry — appended only when there is at least one sample.
+fn push_gauge_family<'a>(
+    text: &mut String,
+    name: &str,
+    help: &str,
+    samples: impl Iterator<Item = (&'a String, u64)>,
+) {
+    let samples: Vec<String> = samples
+        .map(|(table, value)| {
+            format!(
+                "{name}{{table=\"{}\"}} {value}\n",
+                escape_label_value(table)
+            )
+        })
+        .collect();
+    if samples.is_empty() {
+        return;
+    }
+    text.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+    for sample in samples {
+        text.push_str(&sample);
+    }
+}
+
 /// table name a library caller chose cannot break the scrape.
 fn escape_label_value(value: &str) -> String {
     value
@@ -2997,27 +3046,42 @@ impl ServeOptions {
         let Some(tables) = &self.metric_tables else {
             return text;
         };
-        let samples: Vec<String> = tables
-            .iter()
-            .filter_map(|(name, table)| {
-                table.mvcc_history_entries().map(|n| {
-                    format!(
-                        "dogserver_mvcc_history_entries{{table=\"{}\"}} {n}\n",
-                        escape_label_value(name)
-                    )
-                })
-            })
-            .collect();
-        if samples.is_empty() {
-            return text;
-        }
-        text.push_str(
-            "# HELP dogserver_mvcc_history_entries Version-index entries held per MVCC table.\n\
-             # TYPE dogserver_mvcc_history_entries gauge\n",
+        push_gauge_family(
+            &mut text,
+            "dogserver_mvcc_history_entries",
+            "Version-index entries held per MVCC table.",
+            tables
+                .iter()
+                .filter_map(|(name, table)| Some((name, table.mvcc_history_entries()?))),
         );
-        for sample in samples {
-            text.push_str(&sample);
-        }
+        // `JSM-FR-002` (ADR-0115): the journal gauges, one family each,
+        // read once per table so the three describe one instant.
+        let journals: Vec<(&String, JournalStats)> = tables
+            .iter()
+            .filter_map(|(name, table)| Some((name, table.journal_stats()?)))
+            .collect();
+        push_gauge_family(
+            &mut text,
+            "dogserver_journal_bytes",
+            "Transaction journal size in bytes per journaled table, header included.",
+            journals.iter().map(|(name, stats)| (*name, stats.bytes)),
+        );
+        push_gauge_family(
+            &mut text,
+            "dogserver_journal_entries_since_checkpoint",
+            "Journal entries appended since the last checkpoint per journaled table.",
+            journals
+                .iter()
+                .map(|(name, stats)| (*name, stats.entries_since_checkpoint)),
+        );
+        push_gauge_family(
+            &mut text,
+            "dogserver_journal_waiting_writers",
+            "Writers parked for their commit turn per journaled table (queue depth).",
+            journals
+                .iter()
+                .map(|(name, stats)| (*name, stats.waiting_writers)),
+        );
         text
     }
 
@@ -5646,6 +5710,65 @@ mod tests {
                 index: 0,
                 code: ErrorCode::Unsupported,
                 message: error_message(ErrorCode::Unsupported).to_string(),
+            }
+        );
+    }
+
+    /// `NUL-FR-002` (ADR-0117): a `Null` pair is dropped from `Record`
+    /// and `Rows` (and `RowsClamped` through `Rows`) below 31, kept at
+    /// 31 and above — one rule with the `StrList` strip, so a
+    /// connection below 11 loses both kinds of pair.
+    #[test]
+    fn downgrade_strips_null_pairs_below_31() {
+        let id = uuid::Uuid::from_u128(1);
+        let fields = || {
+            vec![
+                (0u16, ScanValue::Str("Ada".into())),
+                (3u16, ScanValue::StrList(vec!["Countess".into()])),
+                (11u16, ScanValue::Null),
+            ]
+        };
+        let record = Response::Record {
+            id,
+            fields: fields(),
+        };
+        let rows = Response::Rows {
+            rows: vec![(id, fields())],
+        };
+        let clamped = Response::RowsClamped {
+            rows: vec![(id, fields())],
+            cap: 1,
+        };
+        let without_null = || vec![fields()[0].clone(), fields()[1].clone()];
+        let only_str = || vec![fields()[0].clone()];
+
+        assert_eq!(downgrade_for_version(record.clone(), 31), record);
+        assert_eq!(downgrade_for_version(rows.clone(), 31), rows);
+        assert_eq!(downgrade_for_version(clamped.clone(), 31), clamped);
+        assert_eq!(
+            downgrade_for_version(record.clone(), 30),
+            Response::Record {
+                id,
+                fields: without_null()
+            }
+        );
+        assert_eq!(
+            downgrade_for_version(clamped.clone(), 29),
+            Response::Rows {
+                rows: vec![(id, without_null())]
+            }
+        );
+        assert_eq!(
+            downgrade_for_version(rows.clone(), 10),
+            Response::Rows {
+                rows: vec![(id, only_str())]
+            }
+        );
+        assert_eq!(
+            downgrade_for_version(record, 1),
+            Response::Record {
+                id,
+                fields: only_str()
             }
         );
     }

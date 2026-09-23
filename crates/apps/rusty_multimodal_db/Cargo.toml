@@ -295,6 +295,25 @@ name = "restore_backup"
 [[test]]
 name = "restore_backup"
 
+# `ADR-0118`: the replica-refresh CLI — `FetchSnapshot` into a fresh,
+# verified directory, once or on an interval. Needs the client half
+# (`SchemaDrivenClient`); the shared main-less module lives under
+# examples/support/ like the restore and migration tools' own.
+[[example]]
+name = "replica_refresh"
+required-features = ["client"]
+
+# Its integration test serves a real table, so it needs `server`; the
+# file is `#![cfg(feature = "server")]` as well.
+[[test]]
+name = "replica_refresh"
+required-features = ["server"]
+
+# `ADR-0115`: the journal gauges over a real served pair of tables.
+[[test]]
+name = "server_journal_metrics_integration"
+required-features = ["server"]
+
 # `crash_writer`/`crash_safety_harness` (the crash-safety diagnosis
 # harness) build `Order`/`Customer` datasets via `generic::order_customer`
 # and use `bench_support::fresh_temp_dir` — both research-gated. Explicit

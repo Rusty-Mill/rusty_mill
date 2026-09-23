@@ -29,7 +29,9 @@
 //! relation (`docs/design/GENERIC-SCHEMA-DESIGN.md` §4.3), not a
 //! convenience this adapter invents.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::journal::{
+    CheckpointFlush, CommitError, CommitGroup, JournalError, JournalStats, JournaledBatch,
+};
 use super::mvcc::{self, MvccState};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
@@ -267,6 +269,12 @@ impl OrderConnectionStore {
 }
 
 impl ConnectionStore for OrderConnectionStore {
+    /// `JSM-FR-001` (ADR-0115): the journal's live figures, when there
+    /// is one.
+    fn journal_stats(&self) -> Option<JournalStats> {
+        self.journal.as_ref().map(CommitGroup::stats)
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Order>(id).map(|order| {
             vec![
