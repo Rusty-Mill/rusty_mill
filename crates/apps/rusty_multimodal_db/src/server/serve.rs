@@ -2544,8 +2544,6 @@ pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
     }
 }
 
-/// `RVL-FR-007` (ADR-0112): a Prometheus label value — backslash, double
-/// quote, and newline escaped as the exposition format requires, so a
 /// `MHE-FR-002`/`JSM-FR-002`: one per-table gauge family — the
 /// `# HELP`/`# TYPE` header and one `<name>{table="…"} <value>` sample
 /// per entry — appended only when there is at least one sample.
@@ -2572,6 +2570,8 @@ fn push_gauge_family<'a>(
     }
 }
 
+/// `RVL-FR-007` (ADR-0112): a Prometheus label value — backslash, double
+/// quote, and newline escaped as the exposition format requires, so a
 /// table name a library caller chose cannot break the scrape.
 fn escape_label_value(value: &str) -> String {
     value
@@ -4924,6 +4924,15 @@ pub fn serve_tables(
         primary < tables.len(),
         "serve_tables: primary {primary} is not one of the {} tables",
         tables.len()
+    );
+    // `RGL-FR-006` (ADR-0122): a duplicate table name would render
+    // duplicate metric series, which a scraper rejects.
+    debug_assert!(
+        tables
+            .iter()
+            .enumerate()
+            .all(|(i, (name, _))| !tables[..i].iter().any(|(n, _)| n == name)),
+        "serve_tables: table names must be unique"
     );
     let tables = Arc::new(tables);
     // `MHE-FR-002` (ADR-0109): the metrics renderer reads each table's

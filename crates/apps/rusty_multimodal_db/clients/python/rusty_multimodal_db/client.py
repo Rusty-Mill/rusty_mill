@@ -11,6 +11,7 @@ implemented (see ADR-0043's Non-goals). No SQL front end: build
 
 from __future__ import annotations
 
+import dataclasses
 import socket
 import ssl
 from dataclasses import dataclass
@@ -795,13 +796,18 @@ def _write_result_str(r) -> str:
 
 
 def _carries_null(value) -> bool:
-    """Whether a request (or anything inside it) holds a ``Null`` value."""
+    """Whether a request (or anything inside it) holds a ``Null`` value.
+
+    Walks instance fields only: a dataclass *class* (a variant family
+    entry) and the ``ClassVar`` specs are not values."""
     if isinstance(value, p.Null):
         return True
+    if isinstance(value, type):
+        return False
     if isinstance(value, (tuple, list)):
         return any(_carries_null(v) for v in value)
-    if hasattr(value, "__dataclass_fields__"):
-        return any(_carries_null(getattr(value, f)) for f in value.__dataclass_fields__)
+    if dataclasses.is_dataclass(value):
+        return any(_carries_null(getattr(value, f.name)) for f in dataclasses.fields(value))
     return False
 
 

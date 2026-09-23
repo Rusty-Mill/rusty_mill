@@ -2459,7 +2459,7 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 30 added `Response::RowsClamped` and
+    /// module docs' table — version 31 added `ScanValue::Null`, 30 `Response::RowsClamped` and
     /// `ErrorCode::Busy` (29 refused contradictory filters, 28
     /// `Request::PageDesc`/`FilteredPageDesc`, 27 added
     /// `SESSION_MVCC_ISOLATION` (26 `Request::FilteredPage`, 25 `Request::FetchSnapshot`/`Response::Snapshot`

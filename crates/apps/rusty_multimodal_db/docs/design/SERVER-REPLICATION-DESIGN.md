@@ -185,7 +185,8 @@ Read from `src/server/{serve,journal,protocol,client}.rs`,
   operator's script follows (fetch, write to local disk, restart a
   second `memory_server` pointed at it) — real, concrete, and provably
   correct against this crate's own `open_portable` contract, but not
-  code this crate runs on a schedule.
+  code this crate runs on a schedule. *Since `ADR-0118`:* it ships as
+  `examples/replica_refresh.rs`, once or on an interval.
 - `RPL-FR-007` **A size ceiling, named explicitly, not left
   implicit.** Streaming every file's full bytes in one response departs
   from every prior request's small, bounded payload shape — the
@@ -273,7 +274,8 @@ Result<Snapshot, ClientError>`; `Snapshot { files: Vec<(String,
 Vec<u8>)> }` (or equivalent) as a new public type.
 
 An operator's replica-refresh recipe this round makes possible, real
-and concrete but **not shipped as running code**:
+and concrete but **not shipped as running code** (*shipped since
+`ADR-0118` as `examples/replica_refresh.rs`*):
 
 ```text
 1. connect(replica_credentials_with_replication_token)

@@ -104,8 +104,9 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 30 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1e 00 00 00` (30).
+- `Request::Hello { protocol_version: 2 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `02 00 00 00` (2) — the
+  fixture's own `Request/Hello`; a current client sends 31 (`1f 00 00 00`).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
@@ -745,8 +746,9 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
    request it could not send is `Err { Malformed }` (sessions below 3,
    `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25, `FilteredPage` below 26, `PageDesc`/`FilteredPageDesc` below 28); an error code introduced later
    is reported as `Unsupported`; a `RowsClamped` below 30 is sent as
-   `Rows`; and — the one *content* rewrite — a
-   `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
+   `Rows`; and — the *content* rewrites — a
+   `StrList` field is removed from `Record`/`Rows`/`Schema` below 11, a
+   `Null` field pair from `Record`/`Rows`/`JoinedRows` below 31 (item 28),
    so an older client sees exactly the record shape it knew. `Busy`
    is the one exception to the rule's premise: it is written before a
    version is negotiated, so it cannot be gated on one (§6.3).

@@ -102,7 +102,7 @@
     `memory_server`'s module docs omit `SERVER_METRICS_HTTP_ADDR`.
     CONFIRMED.
 
-## Low — housekeeping
+## Low — housekeeping (*fixed or recorded in place by `ADR-0122`; three tests not added, named there*)
 
 16. Persisted `.mvcc` chains folded at open count toward the automatic
     reclaim (`MvccState::open` never resets the append count).

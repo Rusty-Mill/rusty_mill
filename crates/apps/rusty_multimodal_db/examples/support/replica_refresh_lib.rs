@@ -293,12 +293,37 @@ pub fn snapshots(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(dirs.into_iter().map(|(_, _, _, path)| path).collect())
 }
 
+/// How old a leftover staging directory must be before `prune` removes
+/// it (`RGL-FR-003`): well past any refresh still in flight.
+const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// `RRF-FR-004`: remove every snapshot directory but the newest `keep`;
 /// returns what was removed. `keep == 0` is refused as a no-op: a loop
-/// must never delete the directory it just made.
+/// must never delete the directory it just made. Also removes
+/// `.refresh-tmp-*` directories older than an hour — a refresh that
+/// crashed between creating one and renaming it (`RGL-FR-003`). A
+/// `.failed-*` directory is never removed here: it is kept for the
+/// operator to inspect and delete. Ordering is by the name's stamp, so
+/// a clock stepped backwards can make the newest sort first; `keep`
+/// should leave room for that.
 pub fn prune(root: &Path, keep: usize) -> io::Result<Vec<PathBuf>> {
     if keep == 0 {
         return Ok(Vec::new());
+    }
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let is_stale_staging = entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".refresh-tmp-")
+            && entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().unwrap_or_default() > STALE_STAGING)
+                .unwrap_or(false);
+        if is_stale_staging {
+            std::fs::remove_dir_all(entry.path())?;
+        }
     }
     let all = snapshots(root)?;
     let excess = all.len().saturating_sub(keep);

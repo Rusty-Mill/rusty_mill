@@ -157,7 +157,7 @@ and `Employee` (both relation kinds on one self-referential record).
 `rusty_tls` (`ADR-0014`), mutual TLS with class-from-certificate, rate
 limiting and lockout, and audit and access logs are all implemented and
 all opt-in through one `ServeOptions` value (`ADR-0032`), as are the
-idle timeout, connection cap, and row cap (`ADR-0093`);
+idle timeout and connection cap (`ADR-0093`), and row cap (`ADR-0102`);
 `ServeOptions::default()` reproduces the original unauthenticated,
 plaintext behavior exactly. **Do not expose a server built from this
 module beyond a trusted, localhost/development network unless both

@@ -215,6 +215,8 @@ fn memory_server_refuses_an_old_layout_and_names_the_migration_tool() {
     )
     .unwrap();
 
+    let slot_file = dir.join("memories.mmap");
+    let before = std::fs::read(&slot_file).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_memory_server"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("SERVER_") {
@@ -254,8 +256,9 @@ fn memory_server_refuses_an_old_layout_and_names_the_migration_tool() {
         !stderr.contains("listening on"),
         "refused before listening: {stderr}"
     );
-    assert!(
-        std::fs::metadata(dir.join("memories.mmap")).is_ok(),
-        "the old directory is untouched"
+    assert_eq!(
+        std::fs::read(&slot_file).unwrap(),
+        before,
+        "the old slot file is byte-for-byte untouched"
     );
 }

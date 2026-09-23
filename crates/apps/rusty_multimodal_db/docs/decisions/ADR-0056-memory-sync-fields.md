@@ -51,7 +51,8 @@ meaning to `deleted_at`; `Delete` stays the hard delete.
 
 Null: **(N1) sentinels** — recommended; **(N2) a nullable `ScanValue`**
 at a protocol bump — the general answer, deferred until a column has
-no lossless sentinel; **(N3) presence fields** — pairs that can
+no lossless sentinel (*built by `ADR-0117` at protocol 31; the
+sentinels stay*); **(N3) presence fields** — pairs that can
 disagree. Layout: **(L1) tag bump, distinct failure, no upgrade** —
 recommended now; **(L2) a layout version on the record type with an
 in-place upgrade** — the principled follow-up; **(L3) tolerant

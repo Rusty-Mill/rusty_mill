@@ -648,8 +648,10 @@ fn main() {
     };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
+    // `RGL-FR-005` (ADR-0122): exported but empty is unset, as for every
+    // other variable (`RVL-FR-005`).
     let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {
-        Ok(addr) => {
+        Ok(addr) if !addr.is_empty() => {
             // `RVM-FR-004` (ADR-0111): the same rule as the wire listener,
             // stricter — this one has no auth or TLS to configure.
             if let Err(exposure) = check_metrics_exposure(&addr) {
@@ -669,7 +671,7 @@ fn main() {
             eprintln!("memory_server metrics HTTP listening on {addr} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
             options.with_metrics_http(listener)
         }
-        Err(_) => options,
+        _ => options,
     };
     eprintln!(
         "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {}, MVCC reclaim every: {:?}, journaled updates: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",

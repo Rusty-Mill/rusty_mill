@@ -86,4 +86,4 @@
 ## Acceptance and implementation
 
 - 2026-09-23: implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` as `SERVER-001` v0.99.0 / `FR-112`, `SERVER-002` 0.20.1, in one PR with `ADR-0120` and `ADR-0122`.
-  `cargo fmt -p rusty_multimodal_db -- --check` clean; `cargo clippy -p rusty_multimodal_db --features server,research --all-targets -- -D warnings` clean; `cargo test -p rusty_multimodal_db --features server,research` — «TESTS» tests across «TARGETS» targets, 0 failed; Python «PY» tests OK. Builder: Claude.
+  `cargo fmt -p rusty_multimodal_db -- --check` clean; `cargo clippy -p rusty_multimodal_db --features server,research --all-targets -- -D warnings` clean; `cargo test -p rusty_multimodal_db --features server,research` — 994 tests across 46 targets, 0 failed; Python 7 tests OK. Builder: Claude.

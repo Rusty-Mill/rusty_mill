@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- The five growth items (`ADR-0115`–`ADR-0119`) — implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23) in one PR: the journal gauges (`FR-107`), the old-layout refusal's remedy (`FR-108`), `ScanValue::Null` at protocol 31 (`FR-109`, `SERVER-002` 0.20.0, wire change), the replica-refresh CLI (`FR-110`), and the power-loss proof's design and runbooks. Merged as PR #317. The crash-prefix power-loss trial then ran in the session's guest (`RESULTS.md`: flushed 500/500, unflushed 0/500, torn slot excluded); the `dm-log-writes` replay is still owed. `ADR-0092`–`ADR-0119` (PRs #292–#317) merged.
+- The growth-line review's fix rounds (`ADR-0120`–`ADR-0122`) — implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23) in one PR: the three Highs (the inactive-index fold, the runbook's marks, the old-layout hint), the twelve Mediums (the fsync-follower gauge, one refusal deadline, the capped scrape listener, `Null` on `JoinedRows` and in both clients, the refresh CLI's naming and file-name checks, the reopen's flush order, `Compact`'s post-clear flush, doc drift) and the Lows. `SERVER-001` v0.98.0–v0.100.0 / `FR-111`–`FR-113`, `SERVER-002` 0.20.1; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0119` (PRs #292–#318) merged.
 
 ## Blocked
 

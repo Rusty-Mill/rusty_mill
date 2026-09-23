@@ -120,7 +120,7 @@ fn an_exposed_metrics_bind_refuses_even_when_the_wire_bind_is_loopback() {
     let port = free_port();
     let bind = format!("127.0.0.1:{port}");
     let metrics = format!("0.0.0.0:{}", free_port());
-    let child = ChildGuard(
+    let mut child = ChildGuard(
         memory_server(
             &bind,
             &[
@@ -132,6 +132,14 @@ fn an_exposed_metrics_bind_refuses_even_when_the_wire_bind_is_loopback() {
         .unwrap(),
     );
     wait_for_listener(format!("127.0.0.1:{port}").parse().unwrap());
+    // `RGL-FR-004` (ADR-0122): the override's warning names the metrics
+    // listener it applies to, not only the wire one.
+    let stderr = stderr_until_listening(&mut child.0);
+    assert!(
+        stderr.contains("WARNING: metrics listening on")
+            && stderr.contains("SERVER_ALLOW_INSECURE=1 is set"),
+        "the override did not warn about the metrics listener: {stderr}"
+    );
     drop(child);
 }
 
