@@ -104,6 +104,37 @@ fn an_exposed_bind_with_a_token_but_no_tls_refuses_and_names_tls() {
     );
 }
 
+/// `RVM-FR-004` (ADR-0111): the metrics HTTP listener is held to the
+/// same rule — a non-loopback metrics bind is refused even when the wire
+/// listener is loopback, naming the variable; `SERVER_ALLOW_INSECURE=1`
+/// turns it into a warning.
+#[test]
+fn an_exposed_metrics_bind_refuses_even_when_the_wire_bind_is_loopback() {
+    let bind = format!("127.0.0.1:{}", free_port());
+    let metrics = format!("0.0.0.0:{}", free_port());
+    let stderr = refusal(&bind, &[("SERVER_METRICS_HTTP_ADDR", &metrics)]);
+    assert!(
+        stderr.contains("SERVER_METRICS_HTTP_ADDR"),
+        "the refusal did not name the metrics listener: {stderr}"
+    );
+    let port = free_port();
+    let bind = format!("127.0.0.1:{port}");
+    let metrics = format!("0.0.0.0:{}", free_port());
+    let child = ChildGuard(
+        memory_server(
+            &bind,
+            &[
+                ("SERVER_METRICS_HTTP_ADDR", &metrics),
+                ("SERVER_ALLOW_INSECURE", "1"),
+            ],
+        )
+        .spawn()
+        .unwrap(),
+    );
+    wait_for_listener(format!("127.0.0.1:{port}").parse().unwrap());
+    drop(child);
+}
+
 #[test]
 fn allow_insecure_turns_the_refusal_into_a_warning_and_the_server_serves() {
     let port = free_port();

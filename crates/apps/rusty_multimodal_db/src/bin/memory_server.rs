@@ -168,7 +168,9 @@ use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAcces
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::data_lock::DataDirLock;
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
-use rusty_multimodal_db::server::exposure::{allow_insecure_from_env, check_exposure};
+use rusty_multimodal_db::server::exposure::{
+    allow_insecure_from_env, check_exposure, check_metrics_exposure,
+};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{
@@ -611,6 +613,20 @@ fn main() {
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
     let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {
         Ok(addr) => {
+            // `RVM-FR-004` (ADR-0111): the same rule as the wire listener,
+            // stricter — this one has no auth or TLS to configure.
+            if let Err(exposure) = check_metrics_exposure(&addr) {
+                if allow_insecure_from_env() {
+                    eprintln!(
+                        "WARNING: metrics listening on {addr} although {exposure} (SERVER_ALLOW_INSECURE=1 is set)"
+                    );
+                } else {
+                    panic!(
+                        "refusing to listen on {addr}: {exposure}; bind the metrics listener to a \
+                         loopback address, or set SERVER_ALLOW_INSECURE=1 to serve anyway (ADR-0111)"
+                    );
+                }
+            }
             let listener = TcpListener::bind(&addr)
                 .expect("binding SERVER_METRICS_HTTP_ADDR for the HTTP metrics listener");
             eprintln!("memory_server metrics HTTP listening on {addr} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");

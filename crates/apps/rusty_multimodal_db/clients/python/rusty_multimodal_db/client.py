@@ -82,8 +82,9 @@ class Client:
         self.table: Optional[str] = None
         self._table_schemas: Dict[str, p.DomainSchema] = {}
         # WCB-FR-001 (protocol 30): the row cap the most recent ``query``
-        # answered by rows was clamped to, or None (not clamped, or a
-        # server below 30 that cannot say).
+        # was cut at — it answered exactly that many rows and more may
+        # match — or None (complete, or a server below 30 that cannot
+        # say). Reset by every ``query``.
         self.last_clamp: Optional[int] = None
 
     # ---- connection lifecycle ----

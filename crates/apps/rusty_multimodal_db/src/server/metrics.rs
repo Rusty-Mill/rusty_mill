@@ -165,8 +165,10 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// `CLP-FR-002` (ADR-0102): one `Query` with no `limit` answered as
-    /// if it had asked for `ServeOptions::max_query_rows`.
+    /// `CLP-FR-002` (ADR-0102) as amended by `RVM-FR-001` (ADR-0111): one
+    /// `Query` with no `limit` whose answer was cut at
+    /// `ServeOptions::max_query_rows` — counted where the answer is
+    /// marked, never for a request that was refused.
     pub(crate) fn record_query_clamped(&self) {
         self.query_rows_clamped_total
             .fetch_add(1, Ordering::Relaxed);
@@ -287,7 +289,7 @@ impl ServerMetrics {
              # HELP dogserver_connections_refused_total Accepts closed at once because the connection cap was reached.\n\
              # TYPE dogserver_connections_refused_total counter\n\
              dogserver_connections_refused_total {}\n\
-             # HELP dogserver_query_rows_clamped_total Queries with no limit answered as if they had asked for the row cap.\n\
+             # HELP dogserver_query_rows_clamped_total Queries with no limit whose answer was cut at the row cap.\n\
              # TYPE dogserver_query_rows_clamped_total counter\n\
              dogserver_query_rows_clamped_total {}\n\
              # HELP dogserver_query_plans_total Planned reads answered without an error, by the path taken.\n\

@@ -1320,9 +1320,11 @@ pub enum Response {
     /// Protocol 30 (`WCB-FR-001`, ADR-0103). [`Response::Rows`] plus
     /// the row cap it was clamped to: what a [`Request::Query`] with no
     /// `limit` is answered with under `ServeOptions::max_query_rows`
-    /// (`CLP-FR-001`, ADR-0102), so the client can see that its answer
-    /// holds the first `cap` matches in scan order and not every match.
-    /// `rows` is exactly what `Rows` would have carried. Sent only on a
+    /// (`CLP-FR-001`, ADR-0102) *when the answer was cut at the cap* —
+    /// it holds exactly `cap` rows, the first in scan order, and more
+    /// may have matched (`RVM-FR-002`, ADR-0111; an answer shorter than
+    /// the cap is complete and goes as `Rows`). `rows` is exactly what
+    /// `Rows` would have carried. Sent only on a
     /// connection negotiated at 30 or above; `Rows` below (rule 3,
     /// `serve::downgrade_for_version`).
     RowsClamped {

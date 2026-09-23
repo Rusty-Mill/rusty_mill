@@ -10,7 +10,7 @@ use rusty_multimodal_db::server::client::{ClientError, QueryResult, SchemaDriven
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::memory::{MemoryConnectionStore, FIELD_UPDATED_AT};
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, Request, Response, Selection, PROTOCOL_VERSION,
+    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, Selection, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -260,6 +260,24 @@ fn a_read_asking_for_more_rows_than_the_cap_is_too_large_before_any_read() {
     match round_trip(&mut reader, &mut writer, &query(Some(2))) {
         Response::Rows { rows } => assert_eq!(rows.len(), 2, "an explicit limit is not a clamp"),
         other => panic!("expected Rows, got {other:?}"),
+    }
+    // `RVM-FR-002` (ADR-0111): a clamped `Query` whose answer is shorter
+    // than the cap is complete — plain `Rows`, unmarked, uncounted.
+    match round_trip(
+        &mut reader,
+        &mut writer,
+        &Request::Query {
+            select: Selection::All,
+            filter: vec![Predicate {
+                field: FIELD_UPDATED_AT,
+                op: CompareOp::Lt,
+                value: ScanValue::I64(i64::MIN + 1),
+            }],
+            limit: None,
+        },
+    ) {
+        Response::Rows { rows } => assert!(rows.is_empty(), "no row matches"),
+        other => panic!("expected an unmarked empty Rows, got {other:?}"),
     }
     assert_eq!(
         error_code(round_trip(&mut reader, &mut writer, &page(3))),
