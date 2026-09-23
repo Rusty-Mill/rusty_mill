@@ -73,7 +73,8 @@ Implement all three:
 - Named, not hidden: a *journaled* batch's index record between
   checkpoints has the same restart gap (journal replay feeds the
   store, not the index) — the review's Medium 12 neighbourhood,
-  pre-existing since `ADR-0072`, not touched here.
+  pre-existing since `ADR-0072`, not touched here. *Closed by
+  `ADR-0113`: `with_mvcc` folds the ops `with_journal` replayed.*
 
 ## Acceptance and implementation
 

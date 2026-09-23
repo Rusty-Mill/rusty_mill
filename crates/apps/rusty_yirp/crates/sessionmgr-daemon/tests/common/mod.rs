@@ -57,22 +57,28 @@ pub struct TempRoot(PathBuf);
 /// `Errored`, and the very same test passes when this crate runs alone
 /// (a 3 KB `PATH`). Every process a test starts -- client, daemon,
 /// worker, the session's own `cmd` -- inherits from here, and none of
-/// them needs anything under `target\`. nextest runs each test in its
-/// own process, so mutating the process environment here is private
-/// to the test.
+/// them needs anything under `target\`. Under nextest each test is its
+/// own process; under a plain `cargo test` several test threads share
+/// this process, so the mutation runs exactly once (`Once`) and is
+/// idempotent (it only removes entries) -- a thread spawning a child
+/// while another trims sees either the full or the trimmed `PATH`, both
+/// of which work.
 #[cfg(windows)]
 fn trim_cargo_target_dirs_from_path() {
-    let Some(path) = std::env::var_os("PATH") else {
-        return;
-    };
-    let kept = std::env::split_paths(&path).filter(|dir| {
-        !dir.to_string_lossy()
-            .to_ascii_lowercase()
-            .contains("\\target\\")
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(path) = std::env::var_os("PATH") else {
+            return;
+        };
+        let kept = std::env::split_paths(&path).filter(|dir| {
+            !dir.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("\\target\\")
+        });
+        if let Ok(joined) = std::env::join_paths(kept) {
+            std::env::set_var("PATH", joined);
+        }
     });
-    if let Ok(joined) = std::env::join_paths(kept) {
-        std::env::set_var("PATH", joined);
-    }
 }
 
 #[cfg(not(windows))]

@@ -618,7 +618,10 @@ jobs:
   # `--all-features` pulls DuckDB's amalgamation, so a cold run is long; the
   # cache is keyed on the rustc version, so this job warms its own.
   multimodal-db-msrv:
-    name: rusty_multimodal_db msrv (rust-version 1.89)
+    # The pin lives in the toolchain step below (keep it equal to `rust-version`
+    # in the crate's Cargo.toml); the check's name carries no literal so a pin
+    # bump does not rename a check a branch protection might require.
+    name: rusty_multimodal_db msrv (rust-version)
     needs: plan
     if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
     runs-on: ubuntu-latest

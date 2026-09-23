@@ -139,11 +139,38 @@ fn an_exposed_metrics_bind_refuses_even_when_the_wire_bind_is_loopback() {
 fn allow_insecure_turns_the_refusal_into_a_warning_and_the_server_serves() {
     let port = free_port();
     let bind = format!("0.0.0.0:{port}");
-    let child = ChildGuard(
+    let mut child = ChildGuard(
         memory_server(&bind, &[("SERVER_ALLOW_INSECURE", "1")])
             .spawn()
             .unwrap(),
     );
     wait_for_listener(format!("127.0.0.1:{port}").parse().unwrap());
+    let stderr = stderr_until_listening(&mut child.0);
+    assert!(
+        stderr.contains("WARNING: listening on")
+            && stderr.contains("SERVER_ALLOW_INSECURE=1 is set"),
+        "the override did not print its warning before the listening banner: {stderr}"
+    );
+    assert!(
+        !stderr.contains("refusing to listen on"),
+        "the override still refused: {stderr}"
+    );
     drop(child);
+}
+
+/// Reads the child's stderr line by line until the listening banner, so the
+/// assertion sees exactly what an operator sees before the server serves.
+fn stderr_until_listening(child: &mut Child) -> String {
+    use std::io::BufRead;
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut collected = String::new();
+    for line in std::io::BufReader::new(stderr).lines() {
+        let line = line.unwrap();
+        collected.push_str(&line);
+        collected.push('\n');
+        if line.starts_with("memory_server listening on") {
+            return collected;
+        }
+    }
+    panic!("stderr closed before the listening banner: {collected}");
 }
