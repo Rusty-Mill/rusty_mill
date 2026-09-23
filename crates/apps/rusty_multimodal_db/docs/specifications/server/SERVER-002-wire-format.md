@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.20.0 (protocol version 31 — `SERVER-001` v0.96.0,
+- Version: 0.20.1 (protocol version 31, unchanged — `SERVER-001` v0.99.0,
+  `RGM-FR-004`, `ADR-0121`: the `Null` strip below 31 covers `JoinedRows` too; 0.20.0 was `SERVER-001` v0.96.0,
   `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
   `BTL-FR-001`, `ADR-0104`: `Busy` under TLS too; 0.19.0 was `SERVER-001` v0.84.0,
@@ -663,9 +664,9 @@ Each item names the `SERVER-001` requirement that owns it.
    negotiation. (`FR-096`, `FR-097`)
 28. **`Null`** (31) — `ScanValue::Null` (§5.3, index 6) is the absence
    of a value. On a connection negotiated at 31 or above a server may
-   send it inside a `Record` or `Rows` field pair for a nullable field;
-   below 31 the pair is dropped from the answer, as a `StrList` pair is
-   below 11 (rule 3). No shipped table has a nullable field yet, so no
+   send it inside a `Record`, `Rows` or `JoinedRows` field pair for a
+   nullable field; below 31 the pair is dropped from the answer, as a
+   `StrList` pair is below 11 (rule 3). No shipped table has a nullable field yet, so no
    server sends it today; a request carrying `Null` where a value is
    read — an `Insert`/`Replace`/`ReplaceIf`/`WriteBatch` field, a
    predicate, a `Transaction` op, an `UpdateField`, a guard — is
@@ -781,6 +782,10 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.20.1 (`SERVER-001` v0.99.0, `ADR-0121`, `RGM-FR-004`): no wire
+  change — the `Null` strip below 31 also covers both field lists of a
+  `JoinedRows` row; §7 item 28. A client below 31 must not send `Null`
+  (rule 4); both reference clients now refuse it locally.
 - 0.20.0 (`SERVER-001` v0.96.0, `ADR-0117`, `NUL-FR-001`/`002`): protocol
   version 31 — `ScanValue::Null` (6), the absence of a value; stripped
   from `Record`/`Rows` below 31; `Malformed` wherever a request carries

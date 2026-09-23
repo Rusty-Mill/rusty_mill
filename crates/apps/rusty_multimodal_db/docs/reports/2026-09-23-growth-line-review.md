@@ -49,7 +49,7 @@
    fresh empty `entities.mmap`/`relations.mmap`. The test pins only the
    substrings. CONFIRMED.
 
-## Medium — fix in the next round
+## Medium — fix in the next round (*all twelve fixed by `ADR-0121`; item 11's test found the real fix was `Compact`'s post-clear flush*)
 
 4. **`dogserver_journal_waiting_writers` reads 0 during a stalled
    `fsync`.** `src/server/journal.rs` `stats` counts `turn_waiters`,

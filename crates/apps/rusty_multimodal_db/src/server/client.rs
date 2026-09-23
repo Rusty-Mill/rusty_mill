@@ -1172,6 +1172,13 @@ impl SchemaDrivenClient {
     }
 
     fn roundtrip(&mut self, req: Request) -> Result<Response, ClientError> {
+        // `RGM-FR-005` (ADR-0121), compatibility rule 4: a value variant
+        // is never sent to a server negotiated below the version that
+        // added it — an older server closes the connection on an unknown
+        // index with no reply, which is worse than a local error.
+        if self.server_protocol_version < 31 && carries_null(&req) {
+            return Err(ClientError::Unsupported("a Null value needs protocol 31"));
+        }
         Self::exchange(&mut self.stream, &req)
     }
 
@@ -2727,5 +2734,110 @@ impl SchemaDrivenClient {
         let mut result: Vec<(RecordId, usize)> = visited.into_iter().collect();
         result.sort_by_key(|(_, depth)| *depth);
         Ok(result)
+    }
+}
+
+/// `RGM-FR-005` (ADR-0121): whether `req` carries a [`ScanValue::Null`]
+/// anywhere a value can sit — a field list, a predicate, a transaction
+/// op, a guard, a page cursor. Every value-bearing request variant is
+/// listed; a variant with no value is `false`.
+fn carries_null(req: &Request) -> bool {
+    fn null(v: &ScanValue) -> bool {
+        matches!(v, ScanValue::Null)
+    }
+    fn fields(fields: &[(FieldRef, ScanValue)]) -> bool {
+        fields.iter().any(|(_, v)| null(v))
+    }
+    fn preds(filter: &[Predicate]) -> bool {
+        filter.iter().any(|p| null(&p.value))
+    }
+    fn cursor(c: &Option<(ScanValue, RecordId)>) -> bool {
+        c.as_ref().is_some_and(|(v, _)| null(v))
+    }
+    match req {
+        Request::Insert { fields: f, .. } | Request::Replace { fields: f, .. } => fields(f),
+        Request::ReplaceIf {
+            fields: f, guard, ..
+        } => fields(f) || null(&guard.value),
+        Request::UpdateField { value, .. } | Request::FilterEq { value, .. } => null(value),
+        Request::Transaction { updates } => updates.iter().any(|op| null(&op.value)),
+        Request::WriteBatch { ops, .. } => ops.iter().any(|op| match op {
+            WriteOp::Insert { fields: f, .. } | WriteOp::Replace { fields: f, .. } => fields(f),
+            WriteOp::ReplaceIf {
+                fields: f, guard, ..
+            } => fields(f) || null(&guard.value),
+            WriteOp::Delete { .. } | WriteOp::Link { .. } => false,
+        }),
+        Request::Query { filter, .. } | Request::Aggregate { filter, .. } => preds(filter),
+        Request::Page { after, .. } => cursor(after),
+        Request::PageDesc { before, .. } => cursor(before),
+        Request::FilteredPage { after, filter, .. } => cursor(after) || preds(filter),
+        Request::FilteredPageDesc { before, filter, .. } => cursor(before) || preds(filter),
+        Request::Join(spec) => preds(&spec.left_filter) || preds(&spec.right_filter),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod carries_null_tests {
+    use super::*;
+    use crate::server::protocol::{CompareOp, TransactionOp};
+
+    /// `RGM-FR-005` (ADR-0121): the gate sees a `Null` wherever a value
+    /// can sit, and nothing else.
+    #[test]
+    fn carries_null_finds_a_null_in_every_value_position() {
+        let id = RecordId::from_u128(1);
+        let pred = |value: ScanValue| Predicate {
+            field: 1,
+            op: CompareOp::Eq,
+            value,
+        };
+        assert!(carries_null(&Request::Insert {
+            id,
+            fields: vec![(0, ScanValue::Str("a".into())), (1, ScanValue::Null)],
+        }));
+        assert!(!carries_null(&Request::Insert {
+            id,
+            fields: vec![(0, ScanValue::Str("a".into()))],
+        }));
+        assert!(carries_null(&Request::ReplaceIf {
+            id,
+            fields: vec![],
+            guard: pred(ScanValue::Null),
+        }));
+        assert!(carries_null(&Request::UpdateField {
+            id,
+            field: 1,
+            value: ScanValue::Null,
+        }));
+        assert!(carries_null(&Request::Transaction {
+            updates: vec![TransactionOp {
+                id,
+                field: 1,
+                value: ScanValue::Null,
+            }],
+        }));
+        assert!(carries_null(&Request::WriteBatch {
+            ops: vec![WriteOp::Replace {
+                id,
+                fields: vec![(2, ScanValue::Null)],
+            }],
+            atomic: true,
+        }));
+        assert!(carries_null(&Request::Query {
+            select: Selection::All,
+            filter: vec![pred(ScanValue::Null)],
+            limit: None,
+        }));
+        assert!(carries_null(&Request::Page {
+            order_by: 1,
+            after: Some((ScanValue::Null, id)),
+            limit: 1,
+        }));
+        assert!(!carries_null(&Request::GetById { id }));
+        assert!(!carries_null(&Request::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }));
     }
 }

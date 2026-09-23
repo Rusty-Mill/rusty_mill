@@ -177,6 +177,14 @@ class Client:
 
     def _roundtrip(self, req):
         self._gate(req)
+        # RGM-FR-005 (ADR-0121), compatibility rule 4: a value variant is
+        # never sent to a server negotiated below the version that added
+        # it — an older server closes the connection on an unknown index
+        # with no reply, which is worse than a local error.
+        if self.server_protocol_version < 31 and _carries_null(req):
+            raise UnsupportedError(
+                f"a Null value needs protocol 31, negotiated {self.server_protocol_version}"
+            )
         reply = _exchange(self._sock, req)
         if isinstance(reply, p.Err):
             raise ServerError(reply.code, reply.message)
@@ -784,6 +792,17 @@ def _write_result_str(r) -> str:
     if isinstance(r, p.WrFailed):
         return f"failed:{r.code.name}"
     return names[type(r)]
+
+
+def _carries_null(value) -> bool:
+    """Whether a request (or anything inside it) holds a ``Null`` value."""
+    if isinstance(value, p.Null):
+        return True
+    if isinstance(value, (tuple, list)):
+        return any(_carries_null(v) for v in value)
+    if hasattr(value, "__dataclass_fields__"):
+        return any(_carries_null(getattr(value, f)) for f in value.__dataclass_fields__)
+    return False
 
 
 def _exchange(sock, req):

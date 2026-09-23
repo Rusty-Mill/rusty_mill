@@ -159,6 +159,14 @@
 //! refuses to start and says which is missing. `SERVER_ALLOW_INSECURE=1`
 //! turns that refusal into a warning for an operator who means it. A
 //! loopback bind needs nothing, as every version before.
+//!
+//! # Metrics scrape — `SERVER_METRICS_HTTP_ADDR` (ADR-0069, ADR-0111)
+//!
+//! Set to `host:port` to bind a second listener answering a plain
+//! `GET /metrics` with the same Prometheus text `Request::Metrics`
+//! carries; unset, no listener. It has no authentication of its own, so
+//! a non-loopback address is refused at startup (`RVM-FR-004`) unless
+//! `SERVER_ALLOW_INSECURE=1`, which turns the refusal into a warning.
 
 use rusty_multimodal_db::generic::entity::{
     create_entity_production_stack, open_or_create_entity_production_stack, Entity,

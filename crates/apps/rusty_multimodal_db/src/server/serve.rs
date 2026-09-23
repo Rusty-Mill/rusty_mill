@@ -2437,6 +2437,18 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
                 })
                 .collect(),
         },
+        // `RGM-FR-004` (ADR-0121): a joined row carries two field lists;
+        // both lose their unknown-below pairs, as `Record` does.
+        Response::JoinedRows { rows } if negotiated < 31 => Response::JoinedRows {
+            rows: rows
+                .into_iter()
+                .map(|mut row| {
+                    row.left.retain(|p| !unknown_below(p));
+                    row.right.retain(|p| !unknown_below(p));
+                    row
+                })
+                .collect(),
+        },
         Response::Schema(mut schema) if negotiated < 11 => {
             schema
                 .fields
@@ -2445,16 +2457,23 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
         }
         Response::ScanValues { ref values } => {
             debug_assert!(
-                !values.iter().any(|v| matches!(v, ScanValue::StrList(_))),
-                "a StrList field is never scannable (ENT4-FR-003)"
+                !values
+                    .iter()
+                    .any(|v| matches!(v, ScanValue::StrList(_) | ScanValue::Null)),
+                "a StrList field is never scannable (ENT4-FR-003); no field is nullable yet (RGM-FR-004)"
             );
             resp
         }
         Response::Groups { ref groups } => {
             debug_assert!(
-                !groups.iter().any(|g| g.key.iter().any(is_str_list)
-                    || g.values.iter().any(|v| matches!(v, ScanValue::StrList(_)))),
-                "a StrList field is never groupable or aggregatable (ENT4-FR-003)"
+                !groups.iter().any(|g| g
+                    .key
+                    .iter()
+                    .any(|p| is_str_list(p) || matches!(p.1, ScanValue::Null))
+                    || g.values
+                        .iter()
+                        .any(|v| matches!(v, ScanValue::StrList(_) | ScanValue::Null))),
+                "a StrList field is never groupable or aggregatable (ENT4-FR-003); no field is nullable yet (RGM-FR-004)"
             );
             resp
         }
@@ -5009,6 +5028,18 @@ fn refuse_busy(stream: TcpStream, options: &Arc<ServeOptions>) {
         let Ok(raw) = stream.try_clone() else {
             return;
         };
+        // `RGM-FR-002` (ADR-0121): one deadline for the whole refusal —
+        // handshake, frame and drain. The socket timeouts restart per
+        // read, so a peer trickling a byte per timeout through a TLS
+        // handshake could otherwise hold this slot for hours; the
+        // watchdog shuts the socket down at the deadline whatever step
+        // is blocked on it.
+        if let Ok(watch) = raw.try_clone() {
+            let _ = thread::Builder::new().spawn(move || {
+                thread::sleep(BUSY_REFUSAL_TOTAL);
+                let _ = watch.shutdown(std::net::Shutdown::Both);
+            });
+        }
         let written = match options.tls() {
             None => write_busy(&mut &stream),
             Some(tls) => {
@@ -5042,6 +5073,11 @@ fn write_busy<W: Write>(w: &mut W) -> bool {
 /// writes the one frame, and waits for the peer's close — each blocking
 /// step gives up after this long.
 pub const BUSY_REFUSAL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// `RGM-FR-002` (ADR-0121): the most a refusal may take end to end —
+/// the TLS handshake, the frame, and the drain together — after which
+/// the socket is shut down from a watchdog whatever it is blocked on.
+pub const BUSY_REFUSAL_TOTAL: Duration = Duration::from_secs(6);
 
 /// `BTL-FR-002` (ADR-0104): the most refusal threads alive at once.
 /// Small on purpose: a refusal is a courtesy to a client that will
@@ -5769,6 +5805,27 @@ mod tests {
             Response::Record {
                 id,
                 fields: only_str()
+            }
+        );
+        // `RGM-FR-004`: a joined row's two field lists are stripped too.
+        let joined = Response::JoinedRows {
+            rows: vec![protocol::JoinedRow {
+                left_id: id,
+                left: fields(),
+                right_id: id,
+                right: fields(),
+            }],
+        };
+        assert_eq!(downgrade_for_version(joined.clone(), 31), joined);
+        assert_eq!(
+            downgrade_for_version(joined, 30),
+            Response::JoinedRows {
+                rows: vec![protocol::JoinedRow {
+                    left_id: id,
+                    left: without_null(),
+                    right_id: id,
+                    right: without_null(),
+                }],
             }
         );
     }

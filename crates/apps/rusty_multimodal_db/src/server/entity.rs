@@ -235,10 +235,37 @@ impl EntityConnectionStore {
     ) -> Result<Self, JournalError> {
         let log = insert_log::log_path(path);
         let pending_entries = insert_log::read_entries(&log, Entity::SCHEMA_TAG)?;
+        Self::persist_pending_history(path, pending_entries)?;
         let stack = open_entity_production_stack_portable(path)?;
-        Self::with_journal(GenericProductionStore::new(stack), journal_path)?
-            .attach_mvcc(path, pending_entries)
-            .map_err(JournalError::from)
+        // `RGM-FR-009`: replay without truncating, fold and flush, then
+        // truncate — the journal outlives the index's record of it.
+        let adapter =
+            Self::with_journal_inner(GenericProductionStore::new(stack), journal_path, false)?
+                .attach_mvcc(path, Vec::new())?;
+        if let Some(journal) = &adapter.journal {
+            journal.truncate()?;
+        }
+        Ok(adapter)
+    }
+
+    /// `RGM-FR-009` (ADR-0121): before the reopen clears the insert log,
+    /// fold its pending entries into the reconstructed index and flush
+    /// the history, so the entries have a durable home *before* their
+    /// only other one is destroyed. Nothing for an inactive index
+    /// (`RGF-FR-001`) or an empty log.
+    fn persist_pending_history(
+        mmap_path: &Path,
+        pending: Vec<LogEntry<Entity, RecordId>>,
+    ) -> Result<(), DurabilityError> {
+        let total = pending.len();
+        let reconstructed = MvccState::open(mmap_path)?;
+        if !reconstructed.state.is_active() || total == 0 {
+            return Ok(());
+        }
+        if Self::fold_pending_log_entries(&reconstructed, pending) == 0 {
+            return Ok(());
+        }
+        reconstructed.state.flush(mmap_path, total, 0)
     }
 
     /// The shared tail of [`Self::with_mvcc`], [`Self::open_with_mvcc`] and
@@ -269,7 +296,8 @@ impl EntityConnectionStore {
             .state
             .set_reclaim_every(self.mvcc_reclaim_every);
         let replayed = std::mem::take(&mut self.replayed);
-        let fold_replayed = reconstructed.state.is_active() && !replayed.is_empty();
+        let active = reconstructed.state.is_active();
+        let fold_replayed = active && !replayed.is_empty();
         self.mvcc = Some(MvccHandle {
             state: reconstructed.state,
             mmap_path: mmap_path.to_path_buf(),
@@ -284,7 +312,10 @@ impl EntityConnectionStore {
                 }
             }
         }
-        if folded_pending > 0 || fold_replayed {
+        // `RGM-FR-009`: an active index is flushed at every open — the
+        // reopen just reset the insert log, so the recorded "entries
+        // reflected" must be reset with it, fold or no fold.
+        if active || folded_pending > 0 || fold_replayed {
             let journal_count = self
                 .journal
                 .as_ref()
@@ -313,8 +344,9 @@ impl EntityConnectionStore {
         // Read the pending log first — before the reopen below clears it.
         let log = insert_log::log_path(path);
         let pending_entries = insert_log::read_entries(&log, Entity::SCHEMA_TAG)?;
+        Self::persist_pending_history(path, pending_entries)?;
         let stack = open_entity_production_stack_portable(path)?;
-        Self::new(GenericProductionStore::new(stack)).attach_mvcc(path, pending_entries)
+        Self::new(GenericProductionStore::new(stack)).attach_mvcc(path, Vec::new())
     }
 
     /// Shared by [`Self::with_mvcc`] and [`Self::open_with_mvcc`] — see
@@ -356,6 +388,19 @@ impl EntityConnectionStore {
     pub fn with_journal(
         store: GenericProductionStore<EntityProductionStack>,
         journal_path: &Path,
+    ) -> Result<Self, JournalError> {
+        Self::with_journal_inner(store, journal_path, true)
+    }
+
+    /// `RGM-FR-009` (ADR-0121): [`Self::with_journal`] with the truncate
+    /// held back — for [`Self::open_with_mvcc_journaled`], which folds
+    /// the replay into the version index and flushes it *before* the
+    /// journal is dropped, so a crash between the two replays again
+    /// instead of losing the batches from the index.
+    fn with_journal_inner(
+        store: GenericProductionStore<EntityProductionStack>,
+        journal_path: &Path,
+        truncate: bool,
     ) -> Result<Self, JournalError> {
         let (journal, batches) = CommitGroup::open(journal_path)?;
         let mut replayed = Vec::new();
@@ -402,7 +447,11 @@ impl EntityConnectionStore {
                 }
             }
             inner.checkpoint_flush()?;
-            journal.truncate()
+            if truncate {
+                journal.truncate()
+            } else {
+                Ok(())
+            }
         })?;
         Ok(Self {
             store,
@@ -1125,7 +1174,18 @@ impl ConnectionStore for EntityConnectionStore {
             if !self.mvcc_flush_now(journal_entries) {
                 return Err(ErrorCode::Storage);
             }
-            crate::generic::query::Compact::compact(inner).map_err(|_| ErrorCode::Storage)
+            let report =
+                crate::generic::query::Compact::compact(inner).map_err(|_| ErrorCode::Storage)?;
+            // `RGM-FR-010` (ADR-0121): the clear emptied the insert log, so
+            // the history's "entries reflected" must say so — left at the
+            // pre-clear count, the next reopen skipped that many *new*
+            // entries, and a journaled insert among them (a `Duplicate`
+            // on replay, the store having folded the log first) never
+            // reached the index.
+            if !self.mvcc_flush_now(journal_entries) {
+                return Err(ErrorCode::Storage);
+            }
+            Ok(report)
         })
     }
 

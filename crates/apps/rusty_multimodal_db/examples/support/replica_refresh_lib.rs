@@ -95,8 +95,13 @@ impl std::fmt::Display for RefreshError {
             }
             Self::Verification { path, source } => write!(
                 f,
-                "verification reopen of {} failed: {source}; kept for inspection",
-                path.display()
+                "verification reopen of {} failed: {source}; {}",
+                path.display(),
+                if path.exists() {
+                    "kept for inspection"
+                } else {
+                    "removed (it could not be renamed aside)"
+                }
             ),
         }
     }
@@ -149,9 +154,28 @@ pub fn refresh(
         .unwrap_or(0);
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let name = format!("{stamp}-{}-{seq}", std::process::id());
+    // `RGM-FR-006` (ADR-0121): a fixed prefix and a plausible epoch, so
+    // `snapshots`/`prune` can never mistake a directory the operator
+    // keeps here (an ISO date is three numbers too) for one of ours.
+    let name = format!("{SNAPSHOT_PREFIX}{stamp}-{}-{seq}", std::process::id());
     let staging_dir = root.join(format!(".refresh-tmp-{name}"));
     let final_dir = root.join(&name);
+
+    // `RGM-FR-008` (ADR-0121): the server names the files; only a single
+    // normal path component may be joined under the staging directory.
+    for (file_name, _) in &files {
+        if !is_plain_file_name(file_name) {
+            return Err(RefreshError::Staging {
+                path: staging_dir,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the snapshot names a file that is not a plain file name: {file_name:?}"
+                    ),
+                ),
+            });
+        }
+    }
 
     std::fs::create_dir(&staging_dir).map_err(|e| staging(&staging_dir, e))?;
     let mut bytes = 0u64;
@@ -197,12 +221,19 @@ pub fn refresh(
     let records = match records {
         Ok(n) => n,
         Err(source) => {
+            // `RGM-FR-007` (ADR-0121): a directory that does not reopen
+            // must not stay under a name a refresh loop would pick. Kept
+            // under `.failed-` for inspection when the rename works;
+            // removed when it does not, and the error says which.
             let failed = root.join(format!(".failed-{name}"));
-            let _ = std::fs::rename(&final_dir, &failed);
-            return Err(RefreshError::Verification {
-                path: failed,
-                source,
-            });
+            let path = match std::fs::rename(&final_dir, &failed) {
+                Ok(()) => failed,
+                Err(_) => {
+                    let _ = std::fs::remove_dir_all(&final_dir);
+                    final_dir
+                }
+            };
+            return Err(RefreshError::Verification { path, source });
         }
     };
     Ok(RefreshReport {
@@ -213,9 +244,27 @@ pub fn refresh(
     })
 }
 
+/// The prefix every snapshot directory name carries (`RGM-FR-006`).
+pub const SNAPSHOT_PREFIX: &str = "refresh-";
+
+/// The earliest `<secs>` a snapshot name can carry: 2001-09-09, so a
+/// small number that happens to parse (an ISO date's year) never does.
+const EARLIEST_STAMP: u64 = 1_000_000_000;
+
+/// `RGM-FR-008`: exactly one normal path component — no separator, no
+/// `..`, no root, nothing empty.
+pub fn is_plain_file_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !name.contains(['/', '\\'])
+}
+
 /// `RRF-FR-004`: the snapshot directories under `root`, oldest first —
-/// only names a refresh made (`<secs>-<pid>-<seq>`), never a staging or
-/// failed one, never anything else the operator keeps there.
+/// only names a refresh made (`refresh-<secs>-<pid>-<seq>` with a
+/// plausible epoch), never a staging or failed one, never anything else
+/// the operator keeps there.
 pub fn snapshots(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut dirs: Vec<(u64, u64, u64, PathBuf)> = Vec::new();
     for entry in std::fs::read_dir(root)? {
@@ -225,6 +274,9 @@ pub fn snapshots(root: &Path) -> io::Result<Vec<PathBuf>> {
         }
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
+        let Some(name) = name.strip_prefix(SNAPSHOT_PREFIX) else {
+            continue;
+        };
         let mut parts = name.splitn(3, '-');
         let key = (
             parts.next().and_then(|p| p.parse::<u64>().ok()),
@@ -232,7 +284,9 @@ pub fn snapshots(root: &Path) -> io::Result<Vec<PathBuf>> {
             parts.next().and_then(|p| p.parse::<u64>().ok()),
         );
         if let (Some(secs), Some(pid), Some(seq)) = key {
-            dirs.push((secs, pid, seq, entry.path()));
+            if secs >= EARLIEST_STAMP {
+                dirs.push((secs, pid, seq, entry.path()));
+            }
         }
     }
     dirs.sort();
