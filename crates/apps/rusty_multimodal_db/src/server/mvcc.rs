@@ -154,6 +154,10 @@ pub struct MvccIndex {
     /// [`Self::gc`] — what an automatic reclaim's threshold is measured
     /// against, a running count so no write pays for a walk of every chain.
     appended_since_gc: usize,
+    /// `RVL-FR-001` (ADR-0112): entries held across every chain, kept
+    /// as a running count so [`Self::history_len`] is O(1) — a metrics
+    /// scrape must not walk every chain under the index lock.
+    entries: usize,
 }
 
 impl MvccIndex {
@@ -176,6 +180,14 @@ impl MvccIndex {
         chain.entries.insert(pos, Entry { txn_id, value });
         self.last_committed = self.last_committed.max(txn_id);
         self.appended_since_gc += 1;
+        self.entries += 1;
+    }
+
+    /// `RVL-FR-002` (ADR-0112): forget the appends so far — called after
+    /// a baseline seeding or a log replay, so the automatic reclaim
+    /// counts live writes only.
+    pub fn reset_append_count(&mut self) {
+        self.appended_since_gc = 0;
     }
 
     /// `ART-FR-001` (ADR-0105): entries appended since the last
@@ -277,13 +289,14 @@ impl MvccIndex {
                 dropped += keep_from;
             }
         }
+        self.entries -= dropped;
         dropped
     }
 
     /// Every chain entry currently held, across every key — the size
     /// [`Self::gc`] bounds (`HRC-FR-001`, ADR-0096).
     pub fn history_len(&self) -> usize {
-        self.chains.values().map(|chain| chain.entries.len()).sum()
+        self.entries
     }
 
     /// Every `(key, txn_id, value)` triple currently held, for the
@@ -565,6 +578,17 @@ impl MvccState {
         out
     }
 
+    /// `RVL-FR-002` (ADR-0112): exclusive access to the index with the
+    /// automatic reclaim trigger held off and the append count reset
+    /// after — for a baseline seeding or a log replay, which are not
+    /// live writes and must not fire or count toward a reclaim.
+    pub fn with_index_quiet<T>(&self, f: impl FnOnce(&mut MvccIndex) -> T) -> T {
+        let mut index = self.index.lock().unwrap();
+        let out = f(&mut index);
+        index.reset_append_count();
+        out
+    }
+
     /// `ART-FR-002` (ADR-0105): reclaim history automatically every
     /// `every` appended entries (`None` — never, `Compact` only).
     pub fn set_reclaim_every(&self, every: Option<usize>) {
@@ -825,7 +849,7 @@ mod tests {
         assert_eq!(
             state.auto_reclaims(),
             1,
-            "the fourth append crossed the threshold"
+            "the first append past the threshold after activation fires"
         );
         assert_eq!(
             state.with_index(|index| index.history_len()),
@@ -883,6 +907,38 @@ mod tests {
         );
         state.open_snapshots().deregister(snapshot);
         assert_eq!(state.reclaim(), 1, "released: the entry at 1 goes");
+    }
+
+    /// `RVL-FR-001`/`002` (ADR-0112): `history_len` is a running count
+    /// that survives `gc`, and `with_index_quiet` neither fires the
+    /// trigger nor leaves its appends counted toward the next one.
+    #[test]
+    fn history_len_is_a_running_count_and_quiet_access_does_not_count_or_fire() {
+        let state = fresh_state();
+        state.activate();
+        state.set_reclaim_every(Some(2));
+        let k = key(1, 0);
+        state.with_index_quiet(|index| {
+            for txn in 1..=5 {
+                index.record_write(k, txn, Some(ScanValue::I64(txn as i64)));
+            }
+        });
+        assert_eq!(state.auto_reclaims(), 0, "quiet: no trigger");
+        assert_eq!(state.with_index(|index| index.history_len()), 5);
+        assert_eq!(state.with_index(|index| index.appended_since_gc()), 0);
+        state.with_index(|index| index.record_write(k, 6, Some(ScanValue::I64(6))));
+        assert_eq!(
+            state.auto_reclaims(),
+            0,
+            "one live append: under the threshold"
+        );
+        state.with_index(|index| index.record_write(k, 7, Some(ScanValue::I64(7))));
+        assert_eq!(state.auto_reclaims(), 1);
+        assert_eq!(
+            state.with_index(|index| index.history_len()),
+            1,
+            "the running count followed the reclaim"
+        );
     }
 
     #[test]

@@ -66,7 +66,7 @@ class WireVectors(unittest.TestCase):
 
     def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_30(self):
         # MVCC2-FR-004/011, ADR-0072: real MVCC's BeginWith bit — this
-        # client declares protocol 27, so it may send it (compatibility
+        # client declares protocol 30, so it may send it (compatibility
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)

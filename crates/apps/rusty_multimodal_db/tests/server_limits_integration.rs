@@ -159,11 +159,12 @@ fn an_idle_connection_is_closed_at_the_idle_timeout_and_a_busy_one_is_not() {
     assert!(closed, "the idle connection was not closed by the server");
 }
 
-/// `LIM-FR-002`: with a cap of one, a second concurrent connection is
-/// closed at accept with nothing written, the refusal is counted, and
-/// once the first connection ends a new one is admitted.
+/// `LIM-FR-002` as amended by `WCB-FR-002` (ADR-0103): with a cap of
+/// one, a second concurrent connection is told `Busy` and closed, the
+/// refusal is counted, and once the first connection ends a new one is
+/// admitted.
 #[test]
-fn a_connection_past_the_cap_is_closed_at_accept_and_counted() {
+fn a_connection_past_the_cap_is_told_busy_closed_and_counted() {
     let addr = start_server(ServeOptions::new(None, None).with_max_connections(1));
 
     let mut first = SchemaDrivenClient::connect(addr).unwrap();
@@ -196,7 +197,7 @@ fn a_connection_past_the_cap_is_closed_at_accept_and_counted() {
     );
     assert!(
         read_message::<_, Response>(&mut reader).is_err(),
-        "the refused connection stays open past its one frame"
+        "the refused connection is closed after its one frame"
     );
     // Through the client: the connect itself fails with the code.
     match SchemaDrivenClient::connect(addr) {

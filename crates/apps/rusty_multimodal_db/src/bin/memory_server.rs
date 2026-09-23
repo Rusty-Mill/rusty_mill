@@ -267,9 +267,16 @@ fn bounded_env(name: &str, default: Option<u64>) -> Option<u64> {
     let Ok(raw) = std::env::var(name) else {
         return default;
     };
+    // `RVL-FR-005` (ADR-0112): an exported-but-empty variable is unset.
+    if raw.trim().is_empty() {
+        return default;
+    }
     match raw.trim().parse::<u64>() {
         Ok(0) => None,
         Ok(n) => Some(n),
+        Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
+            panic!("{name}={raw:?} is larger than a 64-bit integer allows")
+        }
         Err(_) => panic!("{name}={raw:?} is not a non-negative integer (0 turns the limit off)"),
     }
 }
@@ -277,10 +284,18 @@ fn bounded_env(name: &str, default: Option<u64>) -> Option<u64> {
 /// `DEF-FR-002` (ADR-0099): an on/off setting that defaults to on —
 /// unset or `1` is on, `0` is off, anything else a startup error.
 fn switch_env(name: &str) -> bool {
+    switch_env_with_default(name, true)
+}
+
+/// `RVL-FR-005` (ADR-0112): an on/off setting with a stated default —
+/// unset or empty is the default, `1` on, `0` off, anything else a
+/// startup error.
+fn switch_env_with_default(name: &str, default: bool) -> bool {
     let Ok(raw) = std::env::var(name) else {
-        return true;
+        return default;
     };
     match raw.trim() {
+        "" => default,
         "1" => true,
         "0" => false,
         _ => panic!("{name}={raw:?} is neither 0 nor 1"),
@@ -333,9 +348,9 @@ fn main() {
     let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
     // `SERVER_JOURNAL_UPDATES` (`ADR-0107`, `JUF-FR-003`): with a journal,
     // every `UpdateField` is committed through it (group commit) instead
-    // of `msync`ing the mapping; presence-gated, off by default, a no-op
-    // without `SERVER_TXN_JOURNAL_PATH`.
-    let journal_updates = std::env::var_os("SERVER_JOURNAL_UPDATES").is_some();
+    // of `msync`ing the mapping; a `0`/`1` switch, off by default
+    // (`RVL-FR-005`, ADR-0112), an error without `SERVER_TXN_JOURNAL_PATH`.
+    let journal_updates = switch_env_with_default("SERVER_JOURNAL_UPDATES", false);
     if journal_updates && !journaled {
         panic!("SERVER_JOURNAL_UPDATES needs SERVER_TXN_JOURNAL_PATH: there is no journal to commit through");
     }

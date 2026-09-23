@@ -57,7 +57,7 @@
    server speaks it, or make the fallback re-send `Hello` and fail if
    the second dial does not answer it.
 
-## Medium — fix in the next round (*4–8 fixed by `ADR-0111`; 9–14 open*)
+## Medium — fix in the next round (*4–8 fixed by `ADR-0111`; 9–14 by `ADR-0112`*)
 
 4. **`dogserver_query_rows_clamped_total` counts before
    authentication and before validation** (`serve.rs`, the clamp step
@@ -109,7 +109,7 @@
     pin literal, so a pin bump renames the check any name-based branch
     protection would require. PLAUSIBLE on the protection.
 
-## Low — housekeeping
+## Low — housekeeping (*fixed by `ADR-0112` except the items it names as recorded, not changed*)
 
 15. `SERVER_JOURNAL_UPDATES` is presence-gated while
     `SERVER_SYNC_UPDATES` is a `0`/`1` switch two lines away;

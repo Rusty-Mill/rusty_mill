@@ -48,7 +48,10 @@ history back to a bounded size and the current value reads.
 - Negative / tradeoffs: a policy with a number in it — 10,000 is a
   default, not a measurement; a very long-held snapshot still pins
   everything after it (by design, the same as `Compact`). The reclaim
-  runs inside the committing session, whose own snapshot is registered,
+  runs inside the committing session, whose own snapshot is registered
+  (*corrected by `ADR-0112`: only for a session commit; other write
+  paths reclaim with no snapshot of their own, and seeding and replay
+  no longer fire or count*),
   so the just-written chain keeps one prior entry until the next
   trigger — a bound of one entry, not a leak.
 - Named, not hidden: the count is not yet a metric

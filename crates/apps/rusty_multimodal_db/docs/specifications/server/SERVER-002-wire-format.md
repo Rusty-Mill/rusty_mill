@@ -303,7 +303,8 @@ TLS handshake → `Hello` → `Authenticate` → everything else.
 ### 6.3 Close-without-reply
 
 The server closes the connection with no response frame in exactly two
-cases: a frame whose length exceeds 16 MiB (§3), and a payload whose
+request-time cases (a third, before any request is read, is described
+below): a frame whose length exceeds 16 MiB (§3), and a payload whose
 request index it does not know (a client speaking a newer protocol than
 the server). Any other malformed payload — a bad variant index inside a
 value, a truncated field — is also treated as undecodable and closed. A

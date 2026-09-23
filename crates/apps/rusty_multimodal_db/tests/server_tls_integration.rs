@@ -300,7 +300,7 @@ fn a_tls_connection_past_the_cap_reads_busy_after_the_handshake() {
     }
     assert!(
         read_message::<_, Response>(&mut refused).is_err(),
-        "the refused connection stays open past its one frame"
+        "the refused connection is closed after its one frame"
     );
 
     drop(first);
