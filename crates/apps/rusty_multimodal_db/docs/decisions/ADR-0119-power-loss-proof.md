@@ -39,8 +39,17 @@ device-mapper target and root, or a machine whose power can be cut.
 - `crash_writer reopen-check <path>`: reopen through the real
   `GenericMmapStore::open`, print the record count and how many carry
   an update, exit `0`, or print the error and exit `1`.
-- Not run here: this container has no root device-mapper access. The
-  trial's results, when an operator runs it, go to `RESULTS.md`.
+- The `dm-log-writes` runbook could not run here: the session's guest
+  kernel has no device-mapper (`CONFIG_BLK_DEV_DM` absent). On the
+  owner's "Power", a second runbook was written and run:
+  `scripts/power_loss_trial_loop.sh`, the crash-prefix snapshot — ext4
+  on a `--direct-io=on` loop device, the backing file copied at the
+  `SIGKILL` instant before dirty-page expiry, mounted with ext4's own
+  journal replay and reopened. Three repeats per mode: `flushed` 500 of
+  500 updates present; `unflushed` 0 of 500; `torn-write` the flushed
+  seed intact and the torn slot absent. Recorded in `RESULTS.md`. One
+  prefix per run, no block reordering: weaker than the replay, stronger
+  than the process-kill gate.
 - Declined: a VM power-off loop (one non-deterministic sample per
   boot) and a userspace fault layer (cannot see writeback order).
 
@@ -48,13 +57,15 @@ device-mapper target and root, or a machine whose power can be cut.
 
 - Positive: the claim is stated precisely, the method is the standard
   one, and the runbook is one command on a disposable Linux host.
-- Negative / tradeoffs: unrun. Until someone runs it the crate's
-  durability claim is still the process-kill one; this ADR does not
-  change the readiness verdict.
+- Negative / tradeoffs: the fuller `dm-log-writes` replay is still
+  unrun; the crash-prefix trial covers one prefix per run and no
+  device-side reordering. The readiness verdict does not change on one
+  session's trial, but the claim is now measured at the device, not
+  only at the page cache.
 - Named, not hidden: `STORAGE-021` remains the only automated proof;
   a self-hosted root runner could make the trial nightly — an open
   question, not a plan.
 
 ## Acceptance and implementation
 
-- 2026-09-23: on `claude/pr-276-multimodal-db-growth-4lkjx8`, in one PR with `ADR-0115`–`ADR-0118`. `scripts/power_loss_trial.sh` refuses without root and without the tools, by inspection; `crash_writer reopen-check` builds under `research`. Trial not run (no root device-mapper access here). Builder: Claude.
+- 2026-09-23: on `claude/pr-276-multimodal-db-growth-4lkjx8`, in one PR with `ADR-0115`–`ADR-0118`. `scripts/power_loss_trial.sh` refuses without root and without the tools, by inspection; `crash_writer reopen-check` builds under `research`. The `dm-log-writes` trial not run (no device-mapper in this kernel); the crash-prefix trial (`scripts/power_loss_trial_loop.sh`) run here, 9 of 9 as expected, recorded in `RESULTS.md`. Builder: Claude.

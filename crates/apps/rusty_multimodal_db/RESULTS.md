@@ -1907,6 +1907,38 @@ Read: the two columns are the same number at every size — the kernel already l
 
 Read: for one writer on a small table the journal path costs more — the entry's `fsync` and then the slot write, against one `msync` — as the previous subsection predicted. Two things it did not predict. Under concurrent writers the journal's group commit (`ADR-0026`) covers several updates with one `fsync` and the per-update cost halves, while the `msync` path gets *slower* with more writers (every `msync` runs under the table's write lock, serialized, and the flush itself costs more with more dirty pages queued). And at 1M rows the journal path wins even for one writer: the `msync` of a 250 MB mapping costs ~310 µs (the filesystem's per-file work on a large file, the same growth the ranged-`msync` probe showed for both columns), the sequential append to a small journal does not. So the setting is worth having, opt-in, with the crossover named: a single-writer deployment on a small table keeps `msync`; a multi-writer one, or a large table, takes the journal.
 
+## Power loss — the crash-prefix trial (`ADR-0119`, 2026-09-23, the owner's "Power")
+
+The first durability result in this file that does not consult the page
+cache. Run here, in the session's Firecracker guest (kernel
+6.18.44-fc, root, loop devices; **no device-mapper** — `CONFIG_BLK_DEV_DM`
+absent, so `scripts/power_loss_trial.sh`'s `dm-log-writes` replay could
+not run), with `scripts/power_loss_trial_loop.sh`: ext4 on a loop device
+opened `--direct-io=on`, so the backing file holds exactly what the
+filesystem pushed to the device; at the sync point the writer is
+`SIGKILL`ed and the backing file copied at once, before the kernel's
+30 s dirty-page expiry can write anything more back; the copy is
+mounted on a second loop device (ext4 replays its journal, as after a
+real cut) and reopened through `crash_writer reopen-check`. Three
+repeats per mode, 500 records.
+
+| Mode | Cut at | Reopened | Result |
+|---|---|---|---|
+| `flushed-updates` | after `FLUSHED` (`Flush::flush` returned) | 500 records, **500 updated**, ×3 | every flushed update reached the device |
+| `unflushed-updates` | after `ALL_DONE` (no `Flush`) | 500 records, **0 updated**, ×3 | nothing unflushed reached the device — the page-cache gap the harness warned about, now measured at the device |
+| `torn-write` | after `VALUE_WRITTEN`, before the commit marker | **3 records** (the flushed seed), the fourth absent, ×3 | the torn slot is excluded; the seed is intact |
+
+What this says: `Flush` is a device-level durability point, not a
+page-cache one — the claim `ADR-0097`/`ADR-0099` rest on for the synced
+`UpdateField` acknowledgement; an unflushed in-place update is exactly
+as volatile as the design says (`0` of 500), which is why the server
+`msync`s before acknowledging by default; and the `COMMITTED` marker
+(`STORAGE-017`) excludes a torn slot on a device-level prefix, not only
+after a process kill. What it does not say: anything about block
+reordering inside a device, or about a firmware that acknowledges a
+flush it has not written — the `dm-log-writes` runbook, on a host with
+device-mapper, remains the fuller proof (`STORAGE-POWER-LOSS-DESIGN`).
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

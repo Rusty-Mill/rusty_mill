@@ -96,6 +96,12 @@ writes completed and the rest did not; **replay to a mark** is
   Cannot observe writeback ordering of a memory-mapped file; would
   prove the wrong thing.
 - **(d) Decline.** Keep `STORAGE-021` as the only proof and say so.
+- **(e) The crash-prefix snapshot — run, alongside (a).** ext4 on a
+  loop device opened `--direct-io=on`; at the sync point the writer is
+  killed and the backing file copied at once, before dirty-page expiry;
+  the copy is mounted (ext4 journal replay) and reopened. Needs only
+  loop devices and root, so it runs where (a) cannot. One prefix per
+  run, no device-side reordering. `scripts/power_loss_trial_loop.sh`.
 
 The owner's shorthand: **(a)** the runbook; **(b)** the VM loop
 instead; **(d)** decline and keep the caveat.
@@ -154,3 +160,7 @@ history. Not part of `cargo test`.
 ## Change history
 
 - 2026-09-23: proposed with the runbook (`ADR-0119`).
+- 2026-09-23: option (e) added and run in the session's guest (no
+  device-mapper there): `flushed` 500/500, `unflushed` 0/500,
+  `torn-write` seed intact and torn slot absent, three repeats each —
+  `RESULTS.md`.
