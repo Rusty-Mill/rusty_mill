@@ -63,7 +63,8 @@ large table take the journal.
   the setting off) has never recorded its write in the MVCC version
   index — an ordinary write invisible to `mvcc_get`'s history, a
   pre-existing gap found while building this and left for the
-  independent review, not widened or narrowed here.
+  independent review, not widened or narrowed here. *Closed by
+  `ADR-0108` (2026-09-23).*
 
 ## Acceptance and implementation
 

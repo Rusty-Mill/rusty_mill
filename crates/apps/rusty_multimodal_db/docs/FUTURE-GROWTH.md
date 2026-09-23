@@ -160,8 +160,9 @@ not a guess.
   history store. *Since `ADR-0105`:* the index reclaims itself every
   N appended entries (`SERVER_MVCC_RECLAIM_EVERY`, default 10,000,
   `0` leaving it to `Compact`), at the oldest open snapshot, inside
-  the lock the write already holds. Still absent: a
-  `dogserver_mvcc_history_entries` metric, and any reclamation for the
+  the lock the write already holds; *since `ADR-0109`:*
+  `dogserver_mvcc_history_entries{table}` on `Metrics` and the scrape,
+  one gauge per MVCC table. Still absent: any reclamation for the
   research domains, which answer `Compact` with `Unsupported`.
 * **An exposed, unprotected listener refused at startup.** Not named
   here before. *Built since this was written:* `ADR-0094` — every
