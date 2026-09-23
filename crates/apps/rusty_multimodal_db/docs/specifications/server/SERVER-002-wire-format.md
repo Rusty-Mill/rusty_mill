@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.19.1 (protocol version 30, unchanged — `SERVER-001` v0.85.0,
+- Version: 0.19.2 (protocol version 30, unchanged — `SERVER-001` v0.90.0,
+  `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
   `BTL-FR-001`, `ADR-0104`: `Busy` under TLS too; 0.19.0 was `SERVER-001` v0.84.0,
   `WCB-FR-005`, `ADR-0103`: `RowsClamped` (24), `ErrorCode::Busy` (15);
   0.18.0 was protocol 29 — `SERVER-001` v0.76.0,
@@ -643,10 +644,13 @@ Each item names the `SERVER-001` requirement that owns it.
    knew and did not say. A server may be configured with a *row cap*;
    under it item 8's `Query` with no `limit` is answered with the
    first `cap` matching rows in scan order, exactly as `limit: cap`
-   would be. On a connection negotiated at 30 or above that answer is
-   `RowsClamped { rows, cap }` instead of `Rows` — the identical rows,
-   plus the cap — so the client can see it is short; below 30 it is
-   `Rows` (rule 3). A `Query` with an explicit `limit` at or under the
+   would be. On a connection negotiated at 30 or above, an answer that
+   was *cut at the cap* — exactly `cap` rows, more may have matched —
+   is `RowsClamped { rows, cap }` instead of `Rows`, the identical rows
+   plus the cap, so the client can see it may be short (since
+   `SERVER-001` v0.90.0; before it every clamped `Query` was marked,
+   complete or not); an answer shorter than the cap is complete and is
+   `Rows`; below 30 it is `Rows` either way (rule 3). A `Query` with an explicit `limit` at or under the
    cap, a page, an aggregate, a join: never `RowsClamped`; a `limit`
    or page above the cap is `Err { TooLarge }` (since 25; `Malformed`
    below). A server may also be configured with a *connection cap*;
@@ -761,6 +765,10 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.19.2 (`SERVER-001` v0.90.0, `ADR-0111`, `RVM-FR-002`): no wire
+  change — `RowsClamped` is sent only when the clamped answer holds
+  exactly `cap` rows (more may have matched); a shorter answer is
+  complete and is `Rows`. §7 item 27. No fixture or client change.
 - 0.19.1 (`SERVER-001` v0.85.0, `ADR-0104`, `BTL-FR-001`): no wire
   change — the `Busy` frame is now also written under TLS, after the
   handshake, from a bounded pool of refusal threads; a refusal past

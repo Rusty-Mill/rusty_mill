@@ -57,7 +57,7 @@
    server speaks it, or make the fallback re-send `Hello` and fail if
    the second dial does not answer it.
 
-## Medium — fix in the next round
+## Medium — fix in the next round (*4–8 fixed by `ADR-0111`; 9–14 open*)
 
 4. **`dogserver_query_rows_clamped_total` counts before
    authentication and before validation** (`serve.rs`, the clamp step

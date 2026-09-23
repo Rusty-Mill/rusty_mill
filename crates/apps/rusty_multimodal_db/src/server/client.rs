@@ -1052,13 +1052,13 @@ impl SchemaDrivenClient {
         self.server_protocol_version
     }
 
-    /// `WCB-FR-001` (ADR-0103): whether the most recent [`Self::query`]
-    /// answered by rows was clamped by the server's row cap — `Some(cap)`
-    /// when it was (the rows are the first `cap` matches in scan order,
-    /// not every match), `None` when it was not, or when the server
-    /// speaks a protocol below 30 and cannot say. Reset by every `Query`
-    /// the server answers with rows; untouched by an error, a page, an
-    /// aggregate, or a join.
+    /// `WCB-FR-001` (ADR-0103) as amended by `RVM-FR-002`/`003`
+    /// (ADR-0111): whether the most recent [`Self::query`]'s answer was
+    /// cut at the server's row cap — `Some(cap)` when it holds exactly
+    /// `cap` rows and more may have matched, `None` when it is complete,
+    /// took a path the cap never touches (a point read, `ORDER BY`, an
+    /// aggregate, a join), failed, or the server speaks a protocol below
+    /// 30 and cannot say. Reset at the start of every `query`.
     pub fn last_clamp(&self) -> Option<u64> {
         self.last_clamp
     }
@@ -1267,6 +1267,9 @@ impl SchemaDrivenClient {
     /// `OBY-FR-003`).
     pub fn query(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         let parsed = sql::parse(sql).map_err(|e| ClientError::Sql(e.to_string()))?;
+        // `RVM-FR-003` (ADR-0111): every `query` starts unclamped; only a
+        // `RowsClamped` answer on the wire path sets it.
+        self.last_clamp = None;
         if parsed.join.is_some() {
             return self.query_join(parsed).map(QueryResult::Joined);
         }

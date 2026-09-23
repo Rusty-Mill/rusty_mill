@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-REVIEW-HIGHS` (`ADR-0110`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the independent review's three Highs fixed — the in-place MVCC record flushed, the snapshot registered under the index lock, the client's pre-hello fallback opt-in. Its PR waits on the owner. The review report (`docs/reports/2026-09-23-hardening-line-review.md`) and `ADR-0092`–`ADR-0109` (PRs #292–#311) merged; the review's Mediums are the next round.
+- `SERVER-REVIEW-MEDIUMS` (`ADR-0111`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the review's Mediums 4–8 fixed — the clamp counter after dispatch, `RowsClamped` only for an answer cut at the cap, `last_clamp` reset per query, the metrics listener's exposure check, the refusal drain's deadline; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0110` and the review report (PRs #292–#312) merged; Mediums 9–14 are next.
 
 ## Blocked
 

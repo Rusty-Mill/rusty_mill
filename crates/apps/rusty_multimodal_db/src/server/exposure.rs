@@ -43,6 +43,10 @@ pub enum Exposure {
     /// Authentication is configured but the transport is plaintext:
     /// every token would cross the network in the clear.
     NoTls,
+    /// `RVM-FR-004` (ADR-0111): the metrics HTTP listener has no
+    /// authentication and no TLS at all, so a non-loopback bind would
+    /// serve counters, table names, and traffic shape to the network.
+    MetricsListener,
 }
 
 impl fmt::Display for Exposure {
@@ -57,6 +61,10 @@ impl fmt::Display for Exposure {
                 "TLS is not configured (set SERVER_TLS_CERT_CHAIN_PATH and \
                  SERVER_TLS_PRIVATE_KEY_PATH), so every token would cross the network in \
                  the clear",
+            ),
+            Self::MetricsListener => f.write_str(
+                "the metrics HTTP listener (SERVER_METRICS_HTTP_ADDR) has no authentication \
+                 and no TLS, so every peer on the network could read the scrape",
             ),
         }
     }
@@ -87,6 +95,16 @@ pub fn check_exposure(addr: &str, options: &ServeOptions) -> Result<(), Exposure
         return Err(Exposure::NoTls);
     }
     Ok(())
+}
+
+/// `RVM-FR-004` (ADR-0111): the metrics HTTP listener has no protection
+/// of its own, so only a loopback bind is ever `Ok`.
+pub fn check_metrics_exposure(addr: &str) -> Result<(), Exposure> {
+    if bind_is_loopback(addr) {
+        Ok(())
+    } else {
+        Err(Exposure::MetricsListener)
+    }
 }
 
 /// `EXP-FR-003`: whether the operator has set [`ALLOW_INSECURE_VAR`] to

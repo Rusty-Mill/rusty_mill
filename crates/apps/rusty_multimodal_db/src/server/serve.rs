@@ -2513,15 +2513,17 @@ pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
     }
 }
 
-/// `WCB-FR-001` (ADR-0103): the rows of a clamped `Query`
-/// (`clamp_missing_limit`) marked with the cap they were clamped to.
-/// Pure; any response that is not `Rows` — an error, a page — is
-/// returned unchanged, since only a `Query`'s rows are ever clamped.
+/// `WCB-FR-001` (ADR-0103) as amended by `RVM-FR-002` (ADR-0111): the
+/// rows of a clamped `Query` (`clamp_missing_limit`) marked with the
+/// cap — *only when the answer was actually cut at it*, that is, holds
+/// exactly `cap` rows, so more may have matched. An answer shorter than
+/// the cap is complete and goes as plain `Rows`. Pure; any response
+/// that is not `Rows` — an error, a page — is returned unchanged.
 /// Applied before `downgrade_for_version`, which turns the mark back
 /// into `Rows` for a connection below 30.
 pub fn mark_clamped(resp: Response, cap: usize) -> Response {
     match resp {
-        Response::Rows { rows } => Response::RowsClamped {
+        Response::Rows { rows } if rows.len() >= cap => Response::RowsClamped {
             rows,
             cap: cap as u64,
         },
@@ -4258,14 +4260,10 @@ fn handle_connection(
         // `CLP-FR-001`/`002` (ADR-0102): under a row cap, a `Query` with no
         // `limit` is clamped to the cap here, before anything else reads
         // the request, and counted so an operator can see it happening.
+        // `RVM-FR-001` (ADR-0111): counted where the answer is marked,
+        // after dispatch — never for a request later refused.
         let (req, clamped) = match options.max_query_rows() {
-            Some(cap) => {
-                let (req, clamped) = clamp_missing_limit(req, cap);
-                if clamped {
-                    options.metrics().record_query_clamped();
-                }
-                (req, clamped)
-            }
+            Some(cap) => clamp_missing_limit(req, cap),
             None => (req, false),
         };
 
@@ -4745,7 +4743,15 @@ fn handle_connection(
         // they were clamped to — `RowsClamped` at 30 and above, `Rows`
         // below (`downgrade_for_version`, rule 3).
         let resp = match (clamped, options.max_query_rows()) {
-            (true, Some(cap)) => mark_clamped(resp, cap),
+            (true, Some(cap)) => {
+                let marked = mark_clamped(resp, cap);
+                if matches!(marked, Response::RowsClamped { .. }) {
+                    // `RVM-FR-001` (ADR-0111): one count per answer that
+                    // was cut at the cap — not per request that asked.
+                    options.metrics().record_query_clamped();
+                }
+                marked
+            }
             _ => resp,
         };
         let resp = downgrade_for_version(resp, negotiated);
@@ -4911,9 +4917,13 @@ fn refuse_busy(stream: TcpStream, options: &Arc<ServeOptions>) {
             return;
         }
         let _ = raw.shutdown(std::net::Shutdown::Write);
+        // `RVM-FR-005` (ADR-0111): the drain has a deadline of its own —
+        // each read restarts the socket timeout, so a peer trickling a
+        // byte per timeout could otherwise hold the thread forever.
+        let deadline = Instant::now() + BUSY_REFUSAL_TIMEOUT;
         let mut sink = [0u8; 256];
         let mut raw = &raw;
-        while matches!(raw.read(&mut sink), Ok(n) if n > 0) {}
+        while Instant::now() < deadline && matches!(raw.read(&mut sink), Ok(n) if n > 0) {}
     });
 }
 
