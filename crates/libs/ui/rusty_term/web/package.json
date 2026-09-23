@@ -13,7 +13,7 @@
     "test:live-bridge": "node e2e/live-bridge.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.126.0",
+    "@anthropic-ai/sdk": "^0.127.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "react": "^18.3.1",
