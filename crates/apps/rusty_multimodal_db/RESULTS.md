@@ -1892,6 +1892,21 @@ Read: the synced cost is one `msync` of the mapping's dirty pages — one page f
 
 Read: the two columns are the same number at every size — the kernel already limits the whole-mapping flush to the dirty pages, so restricting the range restricts nothing. The cost is the device's and the filesystem's sync of one page, not a walk; what grows with the file here (≈100 µs → ≈1.6 ms) grows for both columns alike and is the filesystem's per-file write-back and journal work on a large sparse file in this container, not something a narrower `msync` reaches. Option (b) is therefore declined on evidence: a path from the adapter through every layer to `SlotFile::flush_range` would add plumbing and change no number. Option (c), `UpdateField` in the journal, would not lower a single connection's cost either — a journal commit is one `fsync` of its own, the same floor — and only amortizes it across *concurrent* writers through group commit (`ADR-0026`); `rusty_remind_me` is one connection, so it stays an open fork for a multi-writer deployment, not this one.
 
+### `UpdateField` through the journal — measured, shipped opt-in (2026-09-23, `ADR-0107`, `SERVER-001` v0.87.0 / FR-099)
+
+`MemoryConnectionStore::update_field` with `with_synced_updates(true)` (`msync` of the mapping before the acknowledgement, `ADR-0097`) against `with_journal(..).with_journaled_updates(true)` (the update committed through the journal as a one-operation batch, `ADR-0107`), release build, Linux container, 2,000 updates cycling over the table at a stride, one thread and eight threads sharing one adapter (2,000 updates in total either way; wall-clock per update, aggregate), a throwaway probe not shipped:
+
+| rows | writers | `msync` before the ack | journal commit |
+|---:|---:|---:|---:|
+| 1,000 | 1 | 144.5 µs | 219.7 µs |
+| 1,000 | 8 | 176.8 µs | 91.0 µs |
+| 100,000 | 1 | 147.1 µs | 202.4 µs |
+| 100,000 | 8 | 178.6 µs | 87.8 µs |
+| 1,000,000 | 1 | 313.7 µs | 242.1 µs |
+| 1,000,000 | 8 | 280.1 µs | 94.8 µs |
+
+Read: for one writer on a small table the journal path costs more — the entry's `fsync` and then the slot write, against one `msync` — as the previous subsection predicted. Two things it did not predict. Under concurrent writers the journal's group commit (`ADR-0026`) covers several updates with one `fsync` and the per-update cost halves, while the `msync` path gets *slower* with more writers (every `msync` runs under the table's write lock, serialized, and the flush itself costs more with more dirty pages queued). And at 1M rows the journal path wins even for one writer: the `msync` of a 250 MB mapping costs ~310 µs (the filesystem's per-file work on a large file, the same growth the ranged-`msync` probe showed for both columns), the sequential append to a small journal does not. So the setting is worth having, opt-in, with the crossover named: a single-writer deployment on a small table keeps `msync`; a multi-writer one, or a large table, takes the journal.
+
 ## Open questions
 
 - **An ordered index behind `Page`**: measured, then built — at 100K `Memory` records one page of 50 cost 100 ms after the v0.48.1 key-only selection (292 ms before), against 14 µs for SQLite's indexed `ORDER BY … LIMIT`; `ADR-0059` (v0.49.0) added a memory-only sorted index over `updated_at_unix_ms` on `Memory` and `Relation`, and a page is now ~155 µs at every size (see "Regression check through v0.48.0" above); with the same work on both sides (every column owned, in-process) this crate is 2× ahead of indexed SQLite. Still open: the open-time rebuild (81 ms per 100K records, one decode each) is the cost that would motivate a persisted index; descending order and a range on the wire are one walk each of the same set; the reference domains keep the scan path.

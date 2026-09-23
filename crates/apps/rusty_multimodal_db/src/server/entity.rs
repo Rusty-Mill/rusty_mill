@@ -94,6 +94,9 @@ pub struct EntityConnectionStore {
     /// acknowledged; unset, the acknowledgement precedes durability by
     /// up to the OS's own write-back — the documented loss window.
     sync_updates: bool,
+    /// `JUF-FR-001` (ADR-0107): `with_journaled_updates` — in-place
+    /// updates committed through the journal when there is one.
+    journal_updates: bool,
     /// `ART-FR-002` (ADR-0105): the automatic reclaim threshold, kept
     /// here so `with_mvcc` can apply it whichever order the builders run.
     mvcc_reclaim_every: Option<usize>,
@@ -109,6 +112,7 @@ impl EntityConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            journal_updates: false,
             mvcc_reclaim_every: None,
             mvcc: None,
         }
@@ -155,6 +159,39 @@ impl EntityConnectionStore {
         self.store.flush().map_err(|_| ErrorCode::Storage)
     }
 
+    /// `JUF-FR-001` (ADR-0107): opt in to committing every in-place
+    /// field update through the journal as a one-operation batch — the
+    /// redo entry `fsync`ed (group-committed with any concurrent batch)
+    /// before the slot is written, no `msync` of the mapping, replayed
+    /// at the next open like any journaled batch. Durable past a power
+    /// loss like `with_synced_updates`, at a different cost: more for a
+    /// single writer (the entry and the slot), less per update under
+    /// concurrent writers (one `fsync` covers a group) — `RESULTS.md`.
+    /// A no-op on an adapter with no journal.
+    pub fn with_journaled_updates(mut self, enabled: bool) -> Self {
+        self.journal_updates = enabled;
+        self
+    }
+
+    /// `JUF-FR-001` (ADR-0107): the journaled commit of one in-place
+    /// update — `Ok(false)` for a missing record, `update_field`'s own
+    /// contract; `Journal` when the entry could not be made durable,
+    /// nothing applied.
+    fn journaled_update(&self, op: TransactionOp) -> Result<bool, ErrorCode> {
+        match self.apply_transaction(std::slice::from_ref(&op), &[]) {
+            Ok(()) => Ok(true),
+            Err((_, ErrorCode::RecordNotFound)) => Ok(false),
+            Err((_, code)) => Err(code),
+        }
+    }
+
+    /// `JUF-FR-001`: whether `update_field` goes through the journal —
+    /// only when there is one and the operator asked; otherwise the
+    /// in-place write (and `msync`, if asked) as before.
+    fn journals_updates(&self) -> bool {
+        self.journal.is_some() && self.journal_updates
+    }
+
     /// `ADR-0072`'s `MVCC2-FR-001`/`003` — see
     /// `MemoryConnectionStore::with_mvcc` for the full contract
     /// (including its own documented restart-recovery gap); identical
@@ -198,6 +235,7 @@ impl EntityConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            journal_updates: false,
             mvcc_reclaim_every: None,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
@@ -276,6 +314,7 @@ impl EntityConnectionStore {
             journal: Some(journal),
             backup_source: None,
             sync_updates: false,
+            journal_updates: false,
             mvcc_reclaim_every: None,
             mvcc: None,
         })
@@ -757,6 +796,13 @@ impl ConnectionStore for EntityConnectionStore {
     ) -> Result<bool, ErrorCode> {
         match (field, value) {
             (FIELD_MENTION_COUNT, ScanValue::I64(mention_count)) => {
+                if self.journals_updates() {
+                    return self.journaled_update(TransactionOp {
+                        id,
+                        field: FIELD_MENTION_COUNT,
+                        value: ScanValue::I64(mention_count),
+                    });
+                }
                 match self
                     .store
                     .update::<Entity, MentionCountField>(id, mention_count)

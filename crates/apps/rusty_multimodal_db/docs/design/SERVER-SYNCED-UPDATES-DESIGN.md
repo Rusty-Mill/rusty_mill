@@ -140,7 +140,11 @@ Independent review owed.
   journal commit is one `fsync` of its own, the same floor for a
   single connection; group commit amortizes it only across concurrent
   writers, which the consumer is not. Open for a multi-writer
-  deployment.*
+  deployment.* *Taken: `ADR-0107` (2026-09-23), the owner's "3" —
+  opt-in `with_journaled_updates(true)` / `SERVER_JOURNAL_UPDATES=1`
+  on a journaled adapter; measured: slower for one writer on a small
+  table (≈220 vs ≈145 µs), faster at 1M rows (≈240 vs ≈310 µs), and
+  half the cost under eight writers (≈90 vs ≈180 µs) — `RESULTS.md`.*
 - **Defaults on** in `memory_server`. *Taken: `ADR-0099` (2026-09-21) —
   on unless `SERVER_SYNC_UPDATES=0`.*
 
