@@ -52,7 +52,9 @@ forwarding and membership are a different system.
 - Not built, on evidence: TLS in the CLI. `ConnectOptions::tls` exists
   and the library's `Target.options` carries it; the CLI reads no
   certificate paths yet, so it runs on the server's host or a trusted
-  network, said in its usage.
+  network, said in its usage. *Since `ADR-0123`:* built —
+  `REPLICA_REFRESH_TLS_SERVER_NAME` and `Target::with_tls`, system
+  trust, `SSL_CERT_FILE` for a private CA.
 
 ## Consequences
 

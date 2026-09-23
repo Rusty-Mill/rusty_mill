@@ -30,7 +30,9 @@
   0` assertion (needs a stalled `fsync` to stage), a `.failed-`
   rename test and an `--every` test (the CLI loop is `main`'s), and a
   fix for the `free_port()` race (every server test in the crate
-  shares it; a bind-and-hand-over would be its own round).
+  shares it; a bind-and-hand-over would be its own round). *Since
+  `ADR-0123`:* all four added — the banner prints the bound address,
+  the binary tests spawn on port 0.
 - `RGL-FR-005` (18) — `SERVER_METRICS_HTTP_ADDR=""` is unset.
 - `RGL-FR-006` (19) — `escape_label_value` has its doc back;
   `serve_tables` debug-asserts unique table names; `ADR-0115` says

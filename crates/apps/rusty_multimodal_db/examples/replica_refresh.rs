@@ -13,13 +13,16 @@
 //! point its `SERVER_DATA_DIR` at that directory, start it. `--every`
 //! repeats until interrupted; `--keep` removes all but the newest `n`
 //! after each refresh. The token comes from the environment, never
-//! the command line, so it is not in the process list. Plaintext
-//! transport: run it on the server's host or a trusted network, or
-//! front the server with TLS and add `ConnectOptions::tls` here.
+//! the command line, so it is not in the process list. Set
+//! `REPLICA_REFRESH_TLS_SERVER_NAME=<name>` to connect over TLS to a
+//! server presenting a certificate for `<name>`, verified against the
+//! operating system's trust anchors (`SSL_CERT_FILE` names a private
+//! CA's bundle); unset, the transport is plaintext, for the server's
+//! own host or a trusted network only (`ADR-0123`).
 #[path = "support/replica_refresh_lib.rs"]
 mod replica_refresh;
 
-use replica_refresh::{prune, refresh, Domain, Target};
+use replica_refresh::{prune, refresh, refresh_loop, Domain, RefreshError, RefreshReport, Target};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -63,41 +66,63 @@ fn main() -> ExitCode {
         );
         return usage();
     };
-    let target = Target::new(addr, &token.to_string_lossy());
+    let token = token.to_string_lossy();
+    let target = match std::env::var("REPLICA_REFRESH_TLS_SERVER_NAME") {
+        Ok(name) if !name.is_empty() => Target::with_tls(addr, &token, &name),
+        _ => Target::new(addr, &token),
+    };
 
-    loop {
-        match refresh(&target, &root, domain) {
+    let print = |outcome: &Result<RefreshReport, RefreshError>,
+                 pruned: &std::io::Result<Vec<PathBuf>>| {
+        match outcome {
+            Ok(report) => println!(
+                "refreshed {} file(s), {} byte(s), {} record(s) into {}",
+                report.files,
+                report.bytes,
+                report.records,
+                report.directory.display()
+            ),
+            Err(error) => eprintln!("refresh failed: {error}"),
+        }
+        match pruned {
+            Ok(removed) => {
+                for dir in removed {
+                    println!("removed {}", dir.display());
+                }
+            }
+            Err(error) => eprintln!("pruning {}: {error}", root.display()),
+        }
+    };
+
+    let Some(secs) = every else {
+        let outcome = refresh(&target, &root, domain);
+        let pruned = if outcome.is_ok() {
+            prune(&root, keep)
+        } else {
+            Ok(Vec::new())
+        };
+        print(&outcome, &pruned);
+        return match outcome {
             Ok(report) => {
                 println!(
-                    "refreshed {} file(s), {} byte(s), {} record(s) into {}",
-                    report.files,
-                    report.bytes,
-                    report.records,
+                    "Stop the standby server, set SERVER_DATA_DIR to {} and start it.",
                     report.directory.display()
                 );
-                match prune(&root, keep) {
-                    Ok(removed) => {
-                        for dir in removed {
-                            println!("removed {}", dir.display());
-                        }
-                    }
-                    Err(error) => eprintln!("pruning {}: {error}", root.display()),
-                }
-                if every.is_none() {
-                    println!(
-                        "Stop the standby server, set SERVER_DATA_DIR to {} and start it.",
-                        report.directory.display()
-                    );
-                    return ExitCode::SUCCESS;
-                }
+                ExitCode::SUCCESS
             }
-            Err(error) => {
-                eprintln!("refresh failed: {error}");
-                if every.is_none() {
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_secs(every.unwrap_or(0)));
-    }
+            Err(_) => ExitCode::FAILURE,
+        };
+    };
+    refresh_loop(
+        &target,
+        &root,
+        domain,
+        keep,
+        Duration::from_secs(secs),
+        |outcome, pruned| {
+            print(outcome, pruned);
+            true
+        },
+    );
+    ExitCode::SUCCESS
 }

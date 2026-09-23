@@ -974,6 +974,42 @@ mod tests {
         assert_eq!(*applied.lock().unwrap(), journaled);
     }
 
+    /// `RGT-FR-002` (ADR-0123): while a leader is held in its `sync_data`,
+    /// the followers parked for it count as waiting writers — the gauge a
+    /// stalled `fsync` is meant to move (`RGM-FR-001`).
+    #[test]
+    fn stats_count_the_followers_parked_for_a_held_leader() {
+        use std::sync::Arc;
+        let (group, _path) = open_group("journal_group_waiting_writers");
+        let group = Arc::new(group);
+        let (hook, entered, release, _syncs) = holding_hook(false);
+        group.set_sync_hook(hook);
+        assert_eq!(group.stats().waiting_writers, 0);
+        let spawn = |v: u32| {
+            let group = Arc::clone(&group);
+            std::thread::spawn(move || {
+                group.commit(&[op(v as u128, v)], |_turn| Ok::<bool, ()>(false))
+            })
+        };
+        let a = spawn(1);
+        entered.recv().unwrap();
+        let b = spawn(2);
+        let c = spawn(3);
+        wait_until("both followers to park for the held leader", || {
+            group.stats().waiting_writers == 2
+        });
+        assert_eq!(group.stats().entries_since_checkpoint, 3);
+        release.send(()).unwrap();
+        for t in [a, b, c] {
+            t.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            group.stats().waiting_writers,
+            0,
+            "nobody waits once durable"
+        );
+    }
+
     /// `GRP-FR-002` (design criterion 2): while one leader is held before
     /// its `sync_data`, two more batches append; the leader's single sync
     /// covers all three.

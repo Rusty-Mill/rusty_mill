@@ -106,6 +106,9 @@ not a guess.
   the refresh script ships — `examples/replica_refresh.rs` fetches a
   snapshot into a fresh, verified directory once or on an interval,
   pruning old ones; the standby's restart is still the operator's.
+  *Since `ADR-0123`:* the script connects over TLS when
+  `REPLICA_REFRESH_TLS_SERVER_NAME` is set, so a standby can sit
+  across an untrusted network.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
   (`ADR-0064`, protocol 23) renders a bounded, fixed set of

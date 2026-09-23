@@ -8,10 +8,9 @@
 
 #![cfg(unix)]
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 fn unique_dir(label: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,16 +19,63 @@ fn unique_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{label}_{}_{n}", std::process::id()))
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// `RGT-FR-004` (ADR-0123): a server spawned on port 0, its bound address
+/// read from the listening banner — no port is picked ahead of the bind,
+/// so two tests can never race for one. `before_banner` is every stderr
+/// line the server wrote before it; the pipe stays open for its lifetime.
+struct Server {
+    child: Child,
+    #[allow(dead_code)]
+    addr: SocketAddr,
+    // The same helper in every binary test; each reads the fields it needs.
+    #[allow(dead_code)]
+    before_banner: String,
+    /// The listening banner itself, the server's own account of its settings.
+    #[allow(dead_code)]
+    banner: String,
+    _stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
 }
 
-fn memory_server(env: &[(&str, &str)]) -> (Command, SocketAddr) {
-    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_listening(mut command: Command) -> Server {
+    use std::io::BufRead;
+    let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut lines = std::io::BufReader::new(stderr).lines();
+    let mut before_banner = String::new();
+    let (addr, banner) = loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("stderr closed before the listening banner: {before_banner}"))
+            .unwrap();
+        if let Some(rest) = line.strip_prefix("memory_server listening on ") {
+            let addr = rest
+                .split(' ')
+                .next()
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap();
+            break (addr, line);
+        }
+        before_banner.push_str(&line);
+        before_banner.push('\n');
+    };
+    Server {
+        child,
+        addr,
+        before_banner,
+        banner,
+        _stderr: lines,
+    }
+}
+
+fn memory_server(env: &[(&str, &str)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_memory_server"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("SERVER_") {
@@ -37,32 +83,21 @@ fn memory_server(env: &[(&str, &str)]) -> (Command, SocketAddr) {
         }
     }
     command
-        .arg(addr.to_string())
+        .arg("127.0.0.1:0")
         .env("SERVER_DATA_DIR", unique_dir("memory_server_defaults"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     for (k, v) in env {
         command.env(k, v);
     }
-    (command, addr)
+    command
 }
 
-/// Start, wait for the listener, kill, and return everything the
-/// server wrote to stderr (the ready banner is the last line).
+/// Start, read stderr up to and including the ready banner, kill, and
+/// return it (the banner is the last line).
 fn banner(env: &[(&str, &str)]) -> String {
-    let (mut command, addr) = memory_server(env);
-    let mut child: Child = command.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while TcpStream::connect(addr).is_err() {
-        assert!(
-            Instant::now() < deadline,
-            "memory_server never listened on {addr}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    String::from_utf8_lossy(&output.stderr).into_owned()
+    let server = spawn_listening(memory_server(env));
+    format!("{}{}\n", server.before_banner, server.banner)
 }
 
 #[test]
@@ -117,7 +152,7 @@ fn a_malformed_setting_is_a_startup_error_that_names_it() {
         ("SERVER_MAX_CONNECTIONS", "-1"),
         ("SERVER_SYNC_UPDATES", "yes"),
     ] {
-        let (mut command, addr) = memory_server(&[(name, value)]);
+        let mut command = memory_server(&[(name, value)]);
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -128,6 +163,5 @@ fn a_malformed_setting_is_a_startup_error_that_names_it() {
             stderr.contains(name),
             "the refusal did not name {name}: {stderr}"
         );
-        assert!(TcpStream::connect(addr).is_err());
     }
 }

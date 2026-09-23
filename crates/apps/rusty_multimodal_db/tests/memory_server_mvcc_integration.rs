@@ -24,10 +24,10 @@ use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, WriteOp, WriteResult, PROTOCOL_VERSION,
     SESSION_MVCC_ISOLATION,
 };
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 
 fn unique_dir(label: &str) -> PathBuf {
@@ -42,37 +42,67 @@ fn unique_dir(label: &str) -> PathBuf {
 /// ephemeral port it bound (its own ready banner prints the CLI argument
 /// string, not `listener.local_addr()`), so the caller must pick a real
 /// port up front instead of asking for one.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// `RGT-FR-004` (ADR-0123): a server spawned on port 0, its bound address
+/// read from the listening banner — no port is picked ahead of the bind,
+/// so two tests can never race for one. `before_banner` is every stderr
+/// line the server wrote before it; the pipe stays open for its lifetime.
+struct Server {
+    child: Child,
+    addr: SocketAddr,
+    // The same helper in every binary test; each reads the fields it needs.
+    #[allow(dead_code)]
+    before_banner: String,
+    /// The listening banner itself, the server's own account of its settings.
+    #[allow(dead_code)]
+    banner: String,
+    _stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
 }
 
-/// Kills the child on drop so a failing assertion never leaks a
-/// `memory_server` process still holding its `SERVER_DATA_DIR` mmap
-/// files open (which would break a later test reusing the same path).
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
+impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
-fn spawn_memory_server(data_dir: &Path, mvcc: bool, addr: SocketAddr) -> ChildGuard {
-    spawn_memory_server_with(data_dir, mvcc, None, addr)
+fn spawn_listening(mut command: Command) -> Server {
+    use std::io::BufRead;
+    let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut lines = std::io::BufReader::new(stderr).lines();
+    let mut before_banner = String::new();
+    let (addr, banner) = loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("stderr closed before the listening banner: {before_banner}"))
+            .unwrap();
+        if let Some(rest) = line.strip_prefix("memory_server listening on ") {
+            let addr = rest
+                .split(' ')
+                .next()
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap();
+            break (addr, line);
+        }
+        before_banner.push_str(&line);
+        before_banner.push('\n');
+    };
+    Server {
+        child,
+        addr,
+        before_banner,
+        banner,
+        _stderr: lines,
+    }
+}
+
+fn spawn_memory_server(data_dir: &Path, mvcc: bool) -> Server {
+    spawn_memory_server_with(data_dir, mvcc, None)
 }
 
 /// `JMC-FR-003` (ADR-0114): the same, with `SERVER_TXN_JOURNAL_PATH` too.
-fn spawn_memory_server_with(
-    data_dir: &Path,
-    mvcc: bool,
-    journal: Option<&Path>,
-    addr: SocketAddr,
-) -> ChildGuard {
+fn spawn_memory_server_with(data_dir: &Path, mvcc: bool, journal: Option<&Path>) -> Server {
     let mut command = Command::new(env!("CARGO_BIN_EXE_memory_server"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("SERVER_") {
@@ -80,34 +110,16 @@ fn spawn_memory_server_with(
         }
     }
     command
-        .arg(addr.to_string())
+        .arg("127.0.0.1:0")
         .env("SERVER_DATA_DIR", data_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::null());
     if mvcc {
         command.env("SERVER_MVCC_ISOLATION", "1");
     }
     if let Some(journal) = journal {
         command.env("SERVER_TXN_JOURNAL_PATH", journal);
     }
-    let child = command.spawn().unwrap();
-    wait_for_listener(addr);
-    ChildGuard(child)
-}
-
-/// Polls a real connect attempt — the ready banner goes to stderr, which
-/// is discarded above rather than parsed, so this is the only signal.
-fn wait_for_listener(addr: SocketAddr) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("memory_server never started listening on {addr}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    spawn_listening(command)
 }
 
 fn connect(addr: SocketAddr) -> TcpStream {
@@ -194,8 +206,8 @@ fn full_fields_with_content(content: &str) -> Vec<(u16, ScanValue)> {
 #[test]
 fn real_binary_refuses_the_mvcc_bit_when_server_mvcc_isolation_is_unset() {
     let dir = unique_dir("memory_server_mvcc_disabled");
-    let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
-    let _server = spawn_memory_server(&dir, false, addr);
+    let server = spawn_memory_server(&dir, false);
+    let addr = server.addr;
 
     let mut c = connect_negotiated(addr);
     match begin_mvcc(&mut c) {
@@ -218,8 +230,8 @@ fn real_binary_refuses_the_mvcc_bit_when_server_mvcc_isolation_is_unset() {
 #[test]
 fn real_binary_serves_a_working_mvcc_session_and_survives_a_concurrent_ordinary_write() {
     let dir = unique_dir("memory_server_mvcc_enabled");
-    let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
-    let _server = spawn_memory_server(&dir, true, addr);
+    let server = spawn_memory_server(&dir, true);
+    let addr = server.addr;
     let id = Uuid::from_u128(1);
 
     let mut seed = connect_negotiated(addr);
@@ -292,8 +304,8 @@ fn real_binary_reopening_with_mvcc_preserves_a_committed_write_across_restart() 
     let pending = Uuid::from_u128(2);
 
     {
-        let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
-        let _server = spawn_memory_server(&dir, true, addr);
+        let server = spawn_memory_server(&dir, true);
+        let addr = server.addr;
         let mut seed = connect_negotiated(addr);
         assert_eq!(
             roundtrip(
@@ -339,11 +351,11 @@ fn real_binary_reopening_with_mvcc_preserves_a_committed_write_across_restart() 
     }
 
     {
-        let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
         // Must start up and serve at all — not panic, not lose or roll
         // back the underlying record — reopening via `open_with_mvcc`
         // against a directory an MVCC-active process already wrote to.
-        let _server = spawn_memory_server(&dir, true, addr);
+        let server = spawn_memory_server(&dir, true);
+        let addr = server.addr;
         let mut c = connect(addr);
         match roundtrip(&mut c, Request::GetById { id }) {
             Response::Record { fields, .. } => {
@@ -390,8 +402,8 @@ fn real_binary_composes_the_journal_with_mvcc_across_a_restart() {
     let (updated, inserted) = (Uuid::from_u128(1), Uuid::from_u128(2));
 
     {
-        let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
-        let _server = spawn_memory_server_with(&dir, true, Some(&journal), addr);
+        let server = spawn_memory_server_with(&dir, true, Some(&journal));
+        let addr = server.addr;
         let mut seed = connect_negotiated(addr);
         assert_eq!(
             roundtrip(
@@ -435,8 +447,8 @@ fn real_binary_composes_the_journal_with_mvcc_across_a_restart() {
     }
 
     {
-        let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
-        let _server = spawn_memory_server_with(&dir, true, Some(&journal), addr);
+        let server = spawn_memory_server_with(&dir, true, Some(&journal));
+        let addr = server.addr;
         let mut fresh = connect_negotiated(addr);
         assert_eq!(begin_mvcc(&mut fresh), Response::Ok);
         match roundtrip(&mut fresh, Request::GetById { id: updated }) {
