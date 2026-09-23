@@ -235,7 +235,15 @@ impl RelationConnectionStore {
         pending: Vec<LogEntry<Relation, RecordId>>,
     ) -> Result<Self, DurabilityError> {
         let reconstructed = MvccState::open(mmap_path)?;
-        let folded_pending = Self::fold_pending_log_entries(&reconstructed, pending);
+        // `RGF-FR-001` (ADR-0120): an inactive index folds nothing — its
+        // first `Begin` seeds the baseline from the live store, which
+        // already holds the log; a fold here would sit *above* that
+        // baseline and a fresh snapshot would read the older value.
+        let folded_pending = if reconstructed.state.is_active() {
+            Self::fold_pending_log_entries(&reconstructed, pending)
+        } else {
+            0
+        };
         reconstructed
             .state
             .set_reclaim_every(self.mvcc_reclaim_every);

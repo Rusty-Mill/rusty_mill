@@ -302,7 +302,15 @@ impl MemoryConnectionStore {
         pending: Vec<LogEntry<Memory, RecordId>>,
     ) -> Result<Self, DurabilityError> {
         let reconstructed = MvccState::open(mmap_path)?;
-        let folded_pending = Self::fold_pending_log_entries(&reconstructed, pending);
+        // `RGF-FR-001` (ADR-0120): an inactive index folds nothing — its
+        // first `Begin` seeds the baseline from the live store, which
+        // already holds the log; a fold here would sit *above* that
+        // baseline and a fresh snapshot would read the older value.
+        let folded_pending = if reconstructed.state.is_active() {
+            Self::fold_pending_log_entries(&reconstructed, pending)
+        } else {
+            0
+        };
         reconstructed
             .state
             .set_reclaim_every(self.mvcc_reclaim_every);
@@ -3223,6 +3231,49 @@ mod tests {
             reopened.get(replaced).unwrap()[FIELD_ACCESS_COUNT as usize].1,
             ScanValue::I64(5),
             "the store agrees with the index"
+        );
+    }
+
+    /// `RGF-FR-001` (ADR-0120, the growth-line review's High 1): enabling
+    /// MVCC on a table that was never MVCC-active. An ordinary insert
+    /// leaves a pending insert-log entry; an in-place update then changes
+    /// the record without touching the log (and, the index inactive,
+    /// flushes nothing). The reopen must fold nothing into the inactive
+    /// index: the first `Begin` seeds the baseline from the live store,
+    /// and a fresh snapshot reads the updated value. Before the gate the
+    /// pending entry was folded at txn 1, above the later baseline at
+    /// txn 0, and the snapshot read the stale insert.
+    #[test]
+    fn enabling_mvcc_on_a_never_active_table_reads_the_live_store_not_the_pending_log() {
+        let dir = fresh_temp_dir("server_memory_mvcc_first_activation").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(7);
+        {
+            let stack = create_memory_production_stack(vec![], &[], &path).unwrap();
+            let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+                .with_mvcc(&path)
+                .unwrap();
+            assert_eq!(
+                adapter.insert_record(id, full_fields(7)),
+                Ok(InsertOutcome::Inserted)
+            );
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+                Ok(true)
+            );
+            // Never activated: no `.mvcc`, the insert pending in the log.
+            drop(adapter);
+        }
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        let snapshot = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, snapshot).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+            "the first snapshot after activation sees the live store's value"
+        );
+        assert_eq!(
+            reopened.get(id).unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(7))
         );
     }
 

@@ -18,7 +18,7 @@
   path the binary takes when MVCC is first enabled on an existing
   table, so it goes first.
 
-## High — fix now
+## High — fix now (*all three fixed by `ADR-0120`, the round after this report*)
 
 1. **`attach_mvcc` folds the pending insert log into an inactive index,
    so the later baseline seed lands below it and a fresh snapshot reads

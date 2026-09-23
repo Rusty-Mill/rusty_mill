@@ -241,6 +241,15 @@ fn memory_server_refuses_an_old_layout_and_names_the_migration_tool() {
         stderr.contains("migrate_memory_v1_to_v2") && stderr.contains("ADR-0066"),
         "the refusal names the migration tool: {stderr}"
     );
+    // `RGF-FR-003` (ADR-0120): the hint's paths are the slot files, the
+    // variable takes the directory, and the two sibling tables are named.
+    assert!(
+        stderr.contains("<old_dir>/memories.mmap <new_dir>/memories.mmap")
+            && stderr.contains("SERVER_DATA_DIR=<new_dir>")
+            && stderr.contains("entities.mmap")
+            && stderr.contains("relations.mmap"),
+        "the remedy names slot-file paths, the directory, and the sibling tables: {stderr}"
+    );
     assert!(
         !stderr.contains("listening on"),
         "refused before listening: {stderr}"

@@ -412,7 +412,10 @@ fn main() {
         let adapter = match relation_store {
             TableOpen::ReopenWithMvcc => RelationConnectionStore::open_with_mvcc(&relations_path)
                 .unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: reopening {relations_path:?} for relation: {e}")
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("relation", &relations_path, &e)
+                    )
                 }),
             TableOpen::Opened(relation_store) => {
                 let adapter =
@@ -444,7 +447,10 @@ fn main() {
         let adapter = match entity_store {
             TableOpen::ReopenWithMvcc => EntityConnectionStore::open_with_mvcc(&entities_path)
                 .unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: reopening {entities_path:?} for entity: {e}")
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("entity", &entities_path, &e)
+                    )
                 }),
             TableOpen::Opened(entity_store) => {
                 let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
@@ -483,13 +489,16 @@ fn main() {
                     MemoryConnectionStore::open_with_mvcc_journaled(&memories_path, journal_path)
                         .unwrap_or_else(|e| {
                             panic!(
-                                "SERVER_MVCC_ISOLATION with SERVER_TXN_JOURNAL_PATH: reopening \
-                                 {memories_path:?} for memory: {e}"
+                                "SERVER_MVCC_ISOLATION with SERVER_TXN_JOURNAL_PATH: {}",
+                                open_error("memory", &memories_path, &e)
                             )
                         })
                 }
                 None => MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: reopening {memories_path:?} for memory: {e}")
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("memory", &memories_path, &e)
+                    )
                 }),
             },
             TableOpen::Opened(store) => {
@@ -741,11 +750,19 @@ fn open_error(table: &str, path: &Path, error: &dyn std::fmt::Display) -> String
              serves (ADR-0056). It is refused, never mis-read and never recreated.",
         );
         if table == "memory" {
+            // `RGF-FR-003` (ADR-0120): the tool takes the two *slot file*
+            // paths and copies only this table, so the remedy names the
+            // directory `SERVER_DATA_DIR` must point at and the two
+            // sibling tables the operator carries over unchanged.
             message.push_str(
-                "\nRemedy: migrate it into a fresh directory with\n  cargo run -p \
-                 rusty_multimodal_db --example migrate_memory_v1_to_v2 -- <old_path> <new_path>\n\
-                 (ADR-0066, STORAGE-019) and point SERVER_DATA_DIR at <new_path>; or re-push \
-                 the table from the consumer, the source of truth.",
+                "\nRemedy: migrate it into a fresh directory <new_dir>:\n  cargo run -p \
+                 rusty_multimodal_db --example migrate_memory_v1_to_v2 -- \
+                 <old_dir>/memories.mmap <new_dir>/memories.mmap\n(ADR-0066, STORAGE-019; \
+                 <new_dir>/memories.mmap must not exist yet). The tool migrates the memory \
+                 table only: copy every entities.mmap* and relations.mmap* file from <old_dir> \
+                 into <new_dir> unchanged (their layouts have not changed), then set \
+                 SERVER_DATA_DIR=<new_dir>. Or re-push the table from the consumer, the source \
+                 of truth.",
             );
         } else {
             message.push_str(
