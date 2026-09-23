@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-JOURNAL-MVCC-RESTART` (`ADR-0113`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): a journaled batch reaches the MVCC index after a restart, and the items `ADR-0112` recorded are changed (two tests, two Windows harnesses, the MSRV check name); no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0112` (PRs #292–#314) merged.
+- `SERVER-JOURNAL-MVCC-COMPOSE` (`ADR-0114`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the journal and MVCC compose on a reopened table and `memory_server` no longer refuses the pair; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0113` (PRs #292–#315) merged.
 
 ## Blocked
 

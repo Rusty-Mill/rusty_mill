@@ -42,7 +42,7 @@
 //! always holds exactly the batches applied since the last moment every
 //! slot write was known to be on disk.
 
-use super::protocol::{ErrorCode, TransactionOp, WriteOp};
+use super::protocol::{ErrorCode, TransactionOp, WriteOp, WriteResult};
 use crate::durability::DurabilityError;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -91,6 +91,20 @@ pub(crate) enum JournalEntry<'a> {
 pub(crate) enum JournaledBatch {
     Transaction(Vec<TransactionOp>),
     Write(Vec<WriteOp>),
+}
+
+/// `JMC-FR-001` (ADR-0114): what an adapter's `with_journal` replay
+/// actually applied, in journal order, kept for the MVCC index to fold
+/// when it is attached after the replay — the journal is truncated by
+/// then, so this is the replay's only record. A `Transaction` holds the
+/// ops that applied (`RVL-FR-004` skips the moot ones); a `Write` pairs
+/// every op with its outcome, exactly as the live record does.
+pub(crate) enum ReplayedBatch {
+    Transaction(Vec<TransactionOp>),
+    Write {
+        ops: Vec<WriteOp>,
+        results: Vec<WriteResult>,
+    },
 }
 
 /// Everything that can go wrong opening, appending to, or replaying a

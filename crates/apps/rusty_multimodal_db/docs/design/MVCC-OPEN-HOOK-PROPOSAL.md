@@ -282,7 +282,9 @@ depends on closing this.
   `with_journal`) is structurally the same shape but touches
   `journal.rs`'s replay path instead of `mmap_store.rs::open` — worth a
   follow-up decision on whether to fold both into one round or keep them
-  separate; not decided here.
+  separate; not decided here. *Closed by `ADR-0113` (replayed
+  transactions) and `ADR-0114` (every replayed batch, the pending log
+  read ahead of a journaled reopen — `open_with_mvcc_journaled`).*
 - Whether `open_with_mvcc` should also subsume `Compact`'s own existing
   flush-before-clear responsibility, or remain purely an open-time
   concern — this document assumes the latter (no change to `compact()`
