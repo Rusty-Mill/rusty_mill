@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-REVIEW-REMAINDER` (`ADR-0112`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the review's Mediums 9–14 and Lows 15–23 fixed, one requirement each; no wire change. Its PR waits on the owner. With it every finding of `docs/reports/2026-09-23-hardening-line-review.md` that lives in this crate or its CI is closed. `ADR-0092`–`ADR-0111` (PRs #292–#313) merged.
+- `SERVER-JOURNAL-MVCC-RESTART` (`ADR-0113`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): a journaled batch reaches the MVCC index after a restart, and the items `ADR-0112` recorded are changed (two tests, two Windows harnesses, the MSRV check name); no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0112` (PRs #292–#314) merged.
 
 ## Blocked
 

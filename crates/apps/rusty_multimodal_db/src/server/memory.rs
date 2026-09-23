@@ -105,6 +105,10 @@ pub struct MemoryConnectionStore {
     /// `JUF-FR-001` (ADR-0107): `with_journaled_updates` — in-place
     /// updates committed through the journal when there is one.
     journal_updates: bool,
+    /// `JMR-FR-001` (ADR-0113): the field updates `with_journal` replayed
+    /// at open, kept until `with_mvcc` folds them into the version index
+    /// — the journal is truncated by then, so this is their only record.
+    replayed_updates: Vec<TransactionOp>,
     /// `ART-FR-002` (ADR-0105): the automatic reclaim threshold, kept
     /// here so `with_mvcc` can apply it whichever order the builders run.
     mvcc_reclaim_every: Option<usize>,
@@ -125,6 +129,7 @@ impl MemoryConnectionStore {
             backup_source: None,
             sync_updates: false,
             journal_updates: false,
+            replayed_updates: Vec::new(),
             mvcc_reclaim_every: None,
             mvcc: None,
         }
@@ -250,10 +255,36 @@ impl MemoryConnectionStore {
         reconstructed
             .state
             .set_reclaim_every(self.mvcc_reclaim_every);
+        // `JMR-FR-001` (ADR-0113): the field updates `with_journal` replayed
+        // into the store are in no log the index reads — fold them in at
+        // one fresh txn, on an already-active index only (an inactive one
+        // is seeded from the live store at its first `Begin`).
+        let replayed = std::mem::take(&mut self.replayed_updates);
+        let fold_replayed = reconstructed.state.is_active() && !replayed.is_empty();
+        if fold_replayed {
+            let txn_id = reconstructed.state.counter().next();
+            reconstructed.state.with_index_quiet(|index| {
+                for op in &replayed {
+                    index.record_write((op.id, op.field), txn_id, Some(op.value.clone()));
+                }
+            });
+        }
         self.mvcc = Some(MvccHandle {
             state: reconstructed.state,
             mmap_path: mmap_path.to_path_buf(),
         });
+        if fold_replayed {
+            let journal_count = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            if !self.mvcc_flush_now(journal_count) {
+                return Err(DurabilityError::Io(std::io::Error::other(
+                    "flushing the MVCC history after folding replayed journal updates",
+                )));
+            }
+        }
         Ok(self)
     }
 
@@ -291,6 +322,7 @@ impl MemoryConnectionStore {
             backup_source: None,
             sync_updates: false,
             journal_updates: false,
+            replayed_updates: Vec::new(),
             mvcc_reclaim_every: None,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
@@ -339,6 +371,7 @@ impl MemoryConnectionStore {
         journal_path: &Path,
     ) -> Result<Self, JournalError> {
         let (journal, batches) = CommitGroup::open(journal_path)?;
+        let mut replayed_updates = Vec::new();
         store.with_exclusive(|inner| -> Result<(), JournalError> {
             let schema = Self::schema();
             for (batch_index, batch) in batches.iter().enumerate() {
@@ -350,7 +383,8 @@ impl MemoryConnectionStore {
                         // not the journal corrupt — skip it, replay the rest.
                         for (index, op) in ops.iter().enumerate() {
                             match Self::apply_batch(inner, std::slice::from_ref(op)) {
-                                Ok(()) | Err((_, ErrorCode::RecordNotFound)) => {}
+                                Ok(()) => replayed_updates.push(op.clone()),
+                                Err((_, ErrorCode::RecordNotFound)) => {}
                                 Err((_, code)) => {
                                     return Err(JournalError::Replay {
                                         batch: batch_index,
@@ -381,6 +415,7 @@ impl MemoryConnectionStore {
             backup_source: None,
             sync_updates: false,
             journal_updates: false,
+            replayed_updates,
             mvcc_reclaim_every: None,
             mvcc: None,
         })
@@ -2940,6 +2975,66 @@ mod tests {
             reopened.mvcc_get(id, after).unwrap().unwrap()[10],
             (FIELD_ACCESS_COUNT, ScanValue::I64(11)),
             "a fresh snapshot after reopen sees the commit apply_transaction_mvcc flushed"
+        );
+    }
+
+    /// `JMR-FR-001` (ADR-0113): a journaled batch commits to the index
+    /// in memory but only the journal reaches disk before the
+    /// acknowledgement, so before this ADR a restart that replayed the
+    /// journal into the store left the MVCC index without the batch —
+    /// a fresh snapshot after reopen read the pre-commit value while a
+    /// plain `GetById` read the committed one. The reopen now folds
+    /// what `with_journal` replayed into the reconstructed index.
+    #[test]
+    fn a_journaled_batch_reaches_the_mvcc_index_after_a_restart() {
+        let dir = fresh_temp_dir("server_memory_journaled_batch_mvcc_restart").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap()
+                    .with_mvcc(&path)
+                    .unwrap();
+            // Activate the index and flush its baseline, as the first
+            // `Begin` of a served table does.
+            let baseline = adapter.mvcc_begin();
+            adapter.mvcc_release(baseline);
+            assert_eq!(
+                adapter.apply_transaction(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(5),
+                    }],
+                    &[],
+                ),
+                Ok(())
+            );
+            // No checkpoint: the batch is in the journal and nowhere else.
+            drop(adapter);
+        }
+
+        let stack = open_memory_production_stack_portable(&path).unwrap();
+        let reopened =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap()
+                .with_mvcc(&path)
+                .unwrap();
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(5),
+            "the journal replay reached the store"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(5)),
+            "a fresh snapshot after reopen sees the journaled batch"
         );
     }
 

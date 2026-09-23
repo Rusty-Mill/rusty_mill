@@ -101,6 +101,10 @@ fn a_second_memory_server_on_the_same_data_dir_refuses_to_start_until_the_first_
         "the refusal did not name the holder's lock file: {stderr}"
     );
     assert!(
+        !stderr.contains("listening on"),
+        "the refused server printed a listening banner before refusing: {stderr}"
+    );
+    assert!(
         TcpStream::connect(second_addr).is_err(),
         "the refused server is listening on {second_addr}"
     );
