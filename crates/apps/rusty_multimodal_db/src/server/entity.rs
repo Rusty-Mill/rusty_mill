@@ -803,16 +803,26 @@ impl ConnectionStore for EntityConnectionStore {
                         value: ScanValue::I64(mention_count),
                     });
                 }
-                match self
-                    .store
-                    .update::<Entity, MentionCountField>(id, mention_count)
-                {
-                    Ok(()) => {
-                        self.sync_update_ack()?;
-                        Ok(true)
+                // `MUR-FR-001` (ADR-0108): the in-place write and its MVCC
+                // record in one exclusive section, as a batch's are.
+                let written = self.store.with_exclusive(|inner| {
+                    let written =
+                        UpdateField::<Entity, MentionCountField>::update(inner, id, mention_count)
+                            .is_ok();
+                    if written {
+                        self.mvcc_record_transaction(&[TransactionOp {
+                            id,
+                            field: FIELD_MENTION_COUNT,
+                            value: ScanValue::I64(mention_count),
+                        }]);
                     }
-                    Err(_not_found) => Ok(false),
+                    written
+                });
+                if !written {
+                    return Ok(false);
                 }
+                self.sync_update_ack()?;
+                Ok(true)
             }
             (FIELD_MENTION_COUNT, _) => Err(ErrorCode::Malformed),
             (FIELD_LABEL | FIELD_KIND | FIELD_ALIASES, _) => Err(ErrorCode::Unsupported),
@@ -1331,6 +1341,14 @@ impl ConnectionStore for EntityConnectionStore {
         if let Some(mvcc) = &self.mvcc {
             mvcc.state.open_snapshots().deregister(snapshot_txn);
         }
+    }
+
+    /// `MHE-FR-001` (ADR-0109): the version-index entries this table
+    /// holds — `None` before `with_mvcc`/`open_with_mvcc`.
+    fn mvcc_history_entries(&self) -> Option<u64> {
+        self.mvcc
+            .as_ref()
+            .map(|mvcc| mvcc.state.with_index(|index| index.history_len()) as u64)
     }
 
     /// `ADR-0072`'s `MVCC2-FR-006` — see `MemoryConnectionStore::

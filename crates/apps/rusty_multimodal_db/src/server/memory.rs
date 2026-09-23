@@ -1154,13 +1154,25 @@ impl ConnectionStore for MemoryConnectionStore {
                         value: ScanValue::I64(count),
                     });
                 }
-                match self.store.update::<Memory, AccessCountField>(id, count) {
-                    Ok(()) => {
-                        self.sync_update_ack()?;
-                        Ok(true)
+                // `MUR-FR-001` (ADR-0108): the in-place write and its MVCC
+                // record in one exclusive section, as a batch's are.
+                let written = self.store.with_exclusive(|inner| {
+                    let written =
+                        UpdateField::<Memory, AccessCountField>::update(inner, id, count).is_ok();
+                    if written {
+                        self.mvcc_record_transaction(&[TransactionOp {
+                            id,
+                            field: FIELD_ACCESS_COUNT,
+                            value: ScanValue::I64(count),
+                        }]);
                     }
-                    Err(_not_found) => Ok(false),
+                    written
+                });
+                if !written {
+                    return Ok(false);
                 }
+                self.sync_update_ack()?;
+                Ok(true)
             }
             (FIELD_ACCESS_COUNT, _) => Err(ErrorCode::Malformed),
             (field, _) if READ_ONLY_FIELDS.contains(&field) => Err(ErrorCode::Unsupported),
@@ -1708,6 +1720,14 @@ impl ConnectionStore for MemoryConnectionStore {
         if let Some(mvcc) = &self.mvcc {
             mvcc.state.open_snapshots().deregister(snapshot_txn);
         }
+    }
+
+    /// `MHE-FR-001` (ADR-0109): the version-index entries this table
+    /// holds — `None` before `with_mvcc`/`open_with_mvcc`.
+    fn mvcc_history_entries(&self) -> Option<u64> {
+        self.mvcc
+            .as_ref()
+            .map(|mvcc| mvcc.state.with_index(|index| index.history_len()) as u64)
     }
 
     /// `ADR-0072`'s `MVCC2-FR-006`: `id`'s value as of `snapshot_txn` —
@@ -2403,6 +2423,74 @@ mod tests {
             reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
             ScanValue::I64(7)
         );
+    }
+
+    /// `MUR-FR-001`/`002` (ADR-0108): an in-place `UpdateField` on an
+    /// MVCC-active table records its write in the version index like a
+    /// batch does — a snapshot opened before it still reads the old
+    /// value, the current value reads the new one, and the history
+    /// grew by the one entry. Before this, the in-place path wrote the
+    /// slot and told the index nothing.
+    #[test]
+    fn an_in_place_update_is_recorded_in_the_mvcc_index() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let state = || &adapter.mvcc.as_ref().unwrap().state;
+        let held = adapter.mvcc_begin();
+        let before = state().with_index(|index| index.history_len());
+        let old = adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize]
+            .1
+            .clone();
+        assert_eq!(
+            adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(41)),
+            Ok(true)
+        );
+        assert_eq!(
+            state().with_index(|index| index.history_len()),
+            before + 1,
+            "one entry for the one in-place write"
+        );
+        assert_eq!(
+            adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            old,
+            "the snapshot opened before the update still reads the old value"
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(41)
+        );
+        adapter.mvcc_release(held);
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(404), FIELD_ACCESS_COUNT, ScanValue::I64(1)),
+            Ok(false)
+        );
+        assert_eq!(
+            state().with_index(|index| index.history_len()),
+            before + 1,
+            "a missing record records nothing"
+        );
+    }
+
+    /// `MHE-FR-001` (ADR-0109): the history-size accessor behind the
+    /// metric — `None` without MVCC state, the index's entry count with.
+    #[test]
+    fn mvcc_history_entries_is_none_without_mvcc_and_the_count_with() {
+        assert_eq!(sample_adapter().mvcc_history_entries(), None);
+        let adapter = sample_adapter_with_mvcc();
+        assert_eq!(
+            adapter.mvcc_history_entries(),
+            Some(0),
+            "state, not yet activated"
+        );
+        let _snapshot = adapter.mvcc_begin();
+        let expected = adapter
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .state
+            .with_index(|index| index.history_len()) as u64;
+        assert!(expected > 0, "activation seeds a baseline");
+        assert_eq!(adapter.mvcc_history_entries(), Some(expected));
     }
 
     #[test]

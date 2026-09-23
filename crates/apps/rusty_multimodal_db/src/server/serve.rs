@@ -110,6 +110,11 @@ pub struct BackupReport {
     pub bytes: u64,
 }
 
+/// The tables one `serve_tables` call serves, by name — what
+/// `ServeOptions::metric_tables` (`MHE-FR-002`, ADR-0109) reads at
+/// render time.
+pub type ServedTables = Vec<(String, Arc<dyn ConnectionStore>)>;
+
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
     /// outcome, not an error, matching [`crate::store::DogStore::get`]'s
@@ -733,6 +738,16 @@ pub trait ConnectionStore: Send + Sync {
         _snapshot_txn: u64,
     ) -> Result<Option<Vec<(FieldRef, ScanValue)>>, ErrorCode> {
         Ok(None)
+    }
+
+    /// `MHE-FR-001` (ADR-0109): how many version-index entries this
+    /// table holds right now — `None` for a table with no MVCC state
+    /// (never `with_mvcc`'d, or a domain without MVCC), so the metric
+    /// has no line for it; `Some(0)` for one that has state but has
+    /// not been activated. Read by `ServeOptions::render_metrics` for
+    /// `dogserver_mvcc_history_entries{table="…"}`.
+    fn mvcc_history_entries(&self) -> Option<u64> {
+        None
     }
 }
 
@@ -2662,6 +2677,11 @@ pub struct ServeOptions {
     /// `Option`, unlike every sink above, since rendering them costs
     /// nothing and needs no operator opt-in.
     metrics: ServerMetrics,
+    /// `MHE-FR-002` (ADR-0109): the tables `serve_tables` serves, kept
+    /// so `render_metrics` can read each one's live MVCC history size
+    /// at render time — on the wire and on the HTTP scrape alike.
+    /// `None` until `serve_tables` runs.
+    metric_tables: Option<Arc<ServedTables>>,
     /// `MHTTP-FR-001` (ADR-0069): an already-bound, opt-in HTTP scrape
     /// listener. Taken by `serve_tables` before sharing the options;
     /// `None` opens no second listener and preserves the wire-only default.
@@ -2777,6 +2797,7 @@ impl ServeOptions {
             access_log: None,
             tls: None,
             metrics: ServerMetrics::new(),
+            metric_tables: None,
             metrics_http: None,
             backup_root: None,
             replication_token: None,
@@ -2919,6 +2940,7 @@ impl ServeOptions {
             access_log: None,
             tls: None,
             metrics: ServerMetrics::new(),
+            metric_tables: None,
             metrics_http: None,
             backup_root: None,
             replication_token: std::env::var("SERVER_AUTH_REPLICATION_TOKEN").ok(),
@@ -2953,6 +2975,37 @@ impl ServeOptions {
     /// always present, never an `Option`.
     pub fn metrics(&self) -> &ServerMetrics {
         &self.metrics
+    }
+
+    /// `MHE-FR-002` (ADR-0109): the Prometheus text `Metrics` and the
+    /// HTTP scrape answer — [`ServerMetrics::render`]'s process-wide
+    /// families followed by one `dogserver_mvcc_history_entries` gauge
+    /// sample per table that has MVCC state, read live from the table.
+    /// No sample and no header when no table has MVCC state.
+    pub fn render_metrics(&self) -> String {
+        let mut text = self.metrics.render();
+        let Some(tables) = &self.metric_tables else {
+            return text;
+        };
+        let samples: Vec<String> = tables
+            .iter()
+            .filter_map(|(name, table)| {
+                table
+                    .mvcc_history_entries()
+                    .map(|n| format!("dogserver_mvcc_history_entries{{table=\"{name}\"}} {n}\n"))
+            })
+            .collect();
+        if samples.is_empty() {
+            return text;
+        }
+        text.push_str(
+            "# HELP dogserver_mvcc_history_entries Version-index entries held per MVCC table.\n\
+             # TYPE dogserver_mvcc_history_entries gauge\n",
+        );
+        for sample in samples {
+            text.push_str(&sample);
+        }
+        text
     }
 
     /// `MHTTP-FR-001` (ADR-0069): serve `GET /metrics` on this separate,
@@ -4606,7 +4659,7 @@ fn handle_connection(
             // reaches `ConnectionStore` at all).
             Request::Metrics if negotiated < 23 => err_response(ErrorCode::Malformed),
             Request::Metrics => Response::Metrics {
-                text: options.metrics().render(),
+                text: options.render_metrics(),
             },
             // `BAK-FR-001` (ADR-0065): the same two gates every other
             // operator write uses (`Compact`'s precedent), at 24; the
@@ -4762,7 +4815,7 @@ pub fn serve<S: ConnectionStore + 'static>(
 /// misconfiguration at startup, not a runtime condition.
 pub fn serve_tables(
     listener: TcpListener,
-    tables: Vec<(String, Arc<dyn ConnectionStore>)>,
+    tables: ServedTables,
     primary: usize,
     mut options: ServeOptions,
 ) {
@@ -4773,6 +4826,9 @@ pub fn serve_tables(
         tables.len()
     );
     let tables = Arc::new(tables);
+    // `MHE-FR-002` (ADR-0109): the metrics renderer reads each table's
+    // MVCC history size live, so it needs the tables.
+    options.metric_tables = Some(Arc::clone(&tables));
     let options = Arc::new(options);
     if let Some(listener) = metrics_listener {
         let options = Arc::clone(&options);

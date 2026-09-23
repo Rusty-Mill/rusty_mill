@@ -131,7 +131,9 @@ Independent review owed.
   threshold on the state checked in `with_index`, `gc` at the oldest
   open snapshot; `SERVER_MVCC_RECLAIM_EVERY` default 10,000.*
 - **A history-size metric** — `dogserver_mvcc_history_entries`, the
-  natural next `ServerMetrics` family.
+  natural next `ServerMetrics` family. *Taken: `ADR-0109`
+  (2026-09-23) — one gauge sample per table with MVCC state, read live
+  through `ConnectionStore::mvcc_history_entries` at render time.*
 
 ## Change history
 

@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-JOURNALED-UPDATES` (`ADR-0107`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "3": an in-place `UpdateField` can be committed through the journal instead of `msync`ed, opt-in (`SERVER_JOURNAL_UPDATES=1` with a journal); measured at half the per-update cost under eight writers and a win at 1M rows, slower for one writer on a small table; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0106` and two declined forks (PRs #292–#309) merged.
+- `SERVER-IN-PLACE-UPDATE-MVCC-RECORD` (`ADR-0108`) and `SERVER-MVCC-HISTORY-METRIC` (`ADR-0109`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "2 and 3": an in-place `UpdateField` now records into the MVCC index (the gap `ADR-0107` named), and `Metrics`/the HTTP scrape carry `dogserver_mvcc_history_entries{table}`; no wire change. Their PR waits on the owner. `ADR-0092`–`ADR-0107` and two declined forks (PRs #292–#310) merged.
 
 ## Blocked
 

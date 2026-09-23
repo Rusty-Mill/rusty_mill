@@ -52,7 +52,7 @@ history back to a bounded size and the current value reads.
   so the just-written chain keeps one prior entry until the next
   trigger — a bound of one entry, not a leak.
 - Named, not hidden: the count is not yet a metric
-  (`dogserver_mvcc_history_entries`, the design's other open question)
+  (`dogserver_mvcc_history_entries`, the design's other open question; *built by `ADR-0109`*)
   — the adapters do not hold `ServerMetrics`.
 
 ## Acceptance and implementation

@@ -40,7 +40,7 @@ fn handle_metrics_http_connection(stream: TcpStream, options: &ServeOptions) {
         Err(_) => return,
     };
     let (status, reason, body) = match (head.method, head.target.as_str()) {
-        (Method::Get, "/metrics") => (StatusCode::OK, "OK", options.metrics().render()),
+        (Method::Get, "/metrics") => (StatusCode::OK, "OK", options.render_metrics()),
         _ => (StatusCode::NOT_FOUND, "Not Found", String::new()),
     };
     let mut headers = HeaderMap::new();
