@@ -134,7 +134,10 @@ not a guess.
   fixed buckets (`SERVER-001` v0.73.0/FR-085), observed once per
   dispatched request. **Since `ADR-0093`**:
   `dogserver_connections_refused_total`, accepts closed at the
-  connection cap; still absent: queue depth, journal size.
+  connection cap. **Since `ADR-0115`**: `dogserver_journal_bytes`,
+  `dogserver_journal_entries_since_checkpoint` and
+  `dogserver_journal_waiting_writers` (the commit group's queue depth)
+  per journaled table — the last two this list named absent.
 * **Durable acknowledgements for in-place updates.** Not named here
   before: every write but the in-place field update was `fsync`ed
   before its acknowledgement (insert log, journal); `UpdateField` and

@@ -9,6 +9,7 @@
 //! `client` feature and compiles none of this file. See `super`'s own
 //! module docs for the server's contract; this file is its body.
 
+use super::journal::JournalStats;
 use super::metrics::{ConnectionMetricsGuard, PlanKind, ServerMetrics};
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
@@ -747,6 +748,15 @@ pub trait ConnectionStore: Send + Sync {
     /// not been activated. Read by `ServeOptions::render_metrics` for
     /// `dogserver_mvcc_history_entries{table="…"}`.
     fn mvcc_history_entries(&self) -> Option<u64> {
+        None
+    }
+
+    /// `JSM-FR-001` (ADR-0115): this table's live journal figures —
+    /// `None` for a table without a journal, so the metric has no
+    /// line for it. Read by `ServeOptions::render_metrics` for the
+    /// `dogserver_journal_bytes`, `dogserver_journal_entries_since_checkpoint`
+    /// and `dogserver_journal_waiting_writers` gauges.
+    fn journal_stats(&self) -> Option<JournalStats> {
         None
     }
 }
@@ -2504,6 +2514,32 @@ pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
 
 /// `RVL-FR-007` (ADR-0112): a Prometheus label value — backslash, double
 /// quote, and newline escaped as the exposition format requires, so a
+/// `MHE-FR-002`/`JSM-FR-002`: one per-table gauge family — the
+/// `# HELP`/`# TYPE` header and one `<name>{table="…"} <value>` sample
+/// per entry — appended only when there is at least one sample.
+fn push_gauge_family<'a>(
+    text: &mut String,
+    name: &str,
+    help: &str,
+    samples: impl Iterator<Item = (&'a String, u64)>,
+) {
+    let samples: Vec<String> = samples
+        .map(|(table, value)| {
+            format!(
+                "{name}{{table=\"{}\"}} {value}\n",
+                escape_label_value(table)
+            )
+        })
+        .collect();
+    if samples.is_empty() {
+        return;
+    }
+    text.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
+    for sample in samples {
+        text.push_str(&sample);
+    }
+}
+
 /// table name a library caller chose cannot break the scrape.
 fn escape_label_value(value: &str) -> String {
     value
@@ -2997,27 +3033,42 @@ impl ServeOptions {
         let Some(tables) = &self.metric_tables else {
             return text;
         };
-        let samples: Vec<String> = tables
-            .iter()
-            .filter_map(|(name, table)| {
-                table.mvcc_history_entries().map(|n| {
-                    format!(
-                        "dogserver_mvcc_history_entries{{table=\"{}\"}} {n}\n",
-                        escape_label_value(name)
-                    )
-                })
-            })
-            .collect();
-        if samples.is_empty() {
-            return text;
-        }
-        text.push_str(
-            "# HELP dogserver_mvcc_history_entries Version-index entries held per MVCC table.\n\
-             # TYPE dogserver_mvcc_history_entries gauge\n",
+        push_gauge_family(
+            &mut text,
+            "dogserver_mvcc_history_entries",
+            "Version-index entries held per MVCC table.",
+            tables
+                .iter()
+                .filter_map(|(name, table)| Some((name, table.mvcc_history_entries()?))),
         );
-        for sample in samples {
-            text.push_str(&sample);
-        }
+        // `JSM-FR-002` (ADR-0115): the journal gauges, one family each,
+        // read once per table so the three describe one instant.
+        let journals: Vec<(&String, JournalStats)> = tables
+            .iter()
+            .filter_map(|(name, table)| Some((name, table.journal_stats()?)))
+            .collect();
+        push_gauge_family(
+            &mut text,
+            "dogserver_journal_bytes",
+            "Transaction journal size in bytes per journaled table, header included.",
+            journals.iter().map(|(name, stats)| (*name, stats.bytes)),
+        );
+        push_gauge_family(
+            &mut text,
+            "dogserver_journal_entries_since_checkpoint",
+            "Journal entries appended since the last checkpoint per journaled table.",
+            journals
+                .iter()
+                .map(|(name, stats)| (*name, stats.entries_since_checkpoint)),
+        );
+        push_gauge_family(
+            &mut text,
+            "dogserver_journal_waiting_writers",
+            "Writers parked for their commit turn per journaled table (queue depth).",
+            journals
+                .iter()
+                .map(|(name, stats)| (*name, stats.waiting_writers)),
+        );
         text
     }
 

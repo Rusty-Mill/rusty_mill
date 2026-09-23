@@ -47,7 +47,8 @@
 //! exactly the three-field shape `FR-042` returned.
 
 use super::journal::{
-    CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch, ReplayedBatch,
+    CheckpointFlush, CommitError, CommitGroup, JournalError, JournalStats, JournaledBatch,
+    ReplayedBatch,
 };
 use super::mvcc::{self, MvccIndex, MvccState, TxnId};
 use super::protocol::{
@@ -859,6 +860,12 @@ impl EntityConnectionStore {
 }
 
 impl ConnectionStore for EntityConnectionStore {
+    /// `JSM-FR-001` (ADR-0115): the journal's live figures, when there
+    /// is one.
+    fn journal_stats(&self) -> Option<JournalStats> {
+        self.journal.as_ref().map(CommitGroup::stats)
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Entity>(id).map(Self::fields_of)
     }
