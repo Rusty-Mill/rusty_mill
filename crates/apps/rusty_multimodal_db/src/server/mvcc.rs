@@ -596,8 +596,25 @@ impl MvccState {
         if !self.is_active() {
             return 0;
         }
-        let boundary = self.open_snapshots.minimum();
-        self.with_index(|index| index.gc(boundary))
+        // `RVW-FR-002` (ADR-0110): the boundary is read under the index
+        // lock, so a snapshot registered by `open_snapshot` is either
+        // already the minimum or not yet begun — never in between.
+        self.with_index(|index| index.gc(self.open_snapshots.minimum()))
+    }
+
+    /// `RVW-FR-002` (ADR-0110): begin a snapshot — read the current
+    /// `last_committed` and register it as open in one critical section
+    /// under the index lock, so no reclaim (`Compact`'s or the automatic
+    /// trigger's, both of which read the oldest open snapshot under that
+    /// same lock) can run between the read and the registration and
+    /// drop the entries this snapshot is about to depend on. Returns the
+    /// snapshot's txn id; release it with `open_snapshots().deregister`.
+    pub fn open_snapshot(&self) -> TxnId {
+        self.with_index(|index| {
+            let snapshot_txn = index.last_committed();
+            self.open_snapshots.register(snapshot_txn);
+            snapshot_txn
+        })
     }
 }
 
@@ -841,6 +858,31 @@ mod tests {
         write(10);
         write(11);
         assert_eq!(state.auto_reclaims(), 2, "off again: Compact only");
+    }
+
+    /// `RVW-FR-002` (ADR-0110): a snapshot begun through `open_snapshot`
+    /// is registered before any reclaim can see the index without it —
+    /// with the automatic trigger at one append, the write right after
+    /// the begin reclaims at the snapshot, not below it.
+    #[test]
+    fn open_snapshot_registers_under_the_index_lock_so_the_next_reclaim_keeps_it() {
+        let state = fresh_state();
+        state.activate();
+        state.set_reclaim_every(Some(1));
+        let k = key(1, 0);
+        state.with_index(|index| index.record_write(k, 1, Some(ScanValue::I64(1))));
+        let snapshot = state.open_snapshot();
+        assert_eq!(snapshot, 1);
+        assert_eq!(state.open_snapshots().minimum(), Some(1));
+        state.with_index(|index| index.record_write(k, 2, Some(ScanValue::I64(2))));
+        assert!(state.auto_reclaims() >= 1, "the append fired the trigger");
+        assert_eq!(
+            state.with_index(|index| index.read(&k, snapshot)),
+            Ok(Some(ScanValue::I64(1))),
+            "the open snapshot still reads its value"
+        );
+        state.open_snapshots().deregister(snapshot);
+        assert_eq!(state.reclaim(), 1, "released: the entry at 1 goes");
     }
 
     #[test]

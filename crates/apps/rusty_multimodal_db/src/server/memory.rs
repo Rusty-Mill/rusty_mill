@@ -1171,6 +1171,18 @@ impl ConnectionStore for MemoryConnectionStore {
                 if !written {
                     return Ok(false);
                 }
+                // `RVW-FR-001` (ADR-0110): no journal covers an in-place
+                // update, so its MVCC record must reach `.mvcc` now —
+                // exactly as the non-journaled batch arm flushes — or a
+                // restart would reconstruct an index without it.
+                let journal_count = self
+                    .journal
+                    .as_ref()
+                    .map(CommitGroup::entries_since_checkpoint)
+                    .unwrap_or(0);
+                if !self.mvcc_flush_now(journal_count) {
+                    return Err(ErrorCode::Storage);
+                }
                 self.sync_update_ack()?;
                 Ok(true)
             }
@@ -1711,9 +1723,8 @@ impl ConnectionStore for MemoryConnectionStore {
                 .unwrap_or(0);
             let _ = self.mvcc_flush_now(journal_count);
         }
-        let snapshot_txn = mvcc.state.with_index(|index| index.last_committed());
-        mvcc.state.open_snapshots().register(snapshot_txn);
-        snapshot_txn
+        // `RVW-FR-002` (ADR-0110): read and register under one lock.
+        mvcc.state.open_snapshot()
     }
 
     fn mvcc_release(&self, snapshot_txn: u64) {
@@ -2549,6 +2560,44 @@ mod tests {
     /// write). `with_mvcc` alone cannot handle this: by the time it would
     /// run after the normal portable-open path, `GenericMmapStore::open`
     /// has already cleared the insert log this test relies on.
+    /// `RVW-FR-001` (ADR-0110): an in-place `UpdateField` on an
+    /// MVCC-active table survives a restart in the version index — no
+    /// `Compact`, no session, no journal: the update's record is flushed
+    /// to `.mvcc` before the acknowledgement, so `open_with_mvcc` rebuilds
+    /// an index whose newest entry is the update, and a fresh snapshot
+    /// reads the new value through `mvcc_get` as `get` does.
+    #[test]
+    fn an_in_place_update_survives_a_restart_in_the_mvcc_index() {
+        let dir = fresh_temp_dir("server_memory_in_place_restart").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+                .with_mvcc(&path)
+                .unwrap();
+            let activated = adapter.mvcc_begin();
+            adapter.mvcc_release(activated);
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(41)),
+                Ok(true)
+            );
+        }
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        let fresh = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, fresh).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(41),
+            "the index rebuilt from .mvcc holds the in-place update"
+        );
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(41)
+        );
+    }
+
     #[test]
     fn open_with_mvcc_reconstructs_a_pending_unflushed_insert_log_entry() {
         let dir = fresh_temp_dir("server_memory_mvcc_open_hook").unwrap();

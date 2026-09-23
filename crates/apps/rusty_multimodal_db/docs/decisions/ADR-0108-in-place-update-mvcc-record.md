@@ -41,6 +41,7 @@ current value reads the new one, and a missing record adds nothing.
 
 ## Consequences
 
+- *Amended by `ADR-0110`: the record was not flushed to `.mvcc`, so it held only until a restart; fixed.*
 - Positive: `MVCC2-FR-008` holds on every write path; the two
   in-process reads (`mvcc_get` at a snapshot, the conflict check at
   commit) are correct against the consumer's most frequent write.
