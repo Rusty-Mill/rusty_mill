@@ -85,6 +85,10 @@ fn with_nothing_set_the_limits_and_synced_updates_are_on() {
         text.contains("MVCC reclaim every: Some(10000)"),
         "banner: {text}"
     );
+    assert!(
+        text.contains("journaled updates: NOT configured"),
+        "banner: {text}"
+    );
 }
 
 #[test]

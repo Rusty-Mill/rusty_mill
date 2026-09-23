@@ -90,6 +90,19 @@
 //! (`RESULTS.md`: ~100 µs); `SERVER_SYNC_UPDATES=0` turns that off and
 //! takes the write-back window back.
 //!
+//! # Updates through the journal — `SERVER_JOURNAL_UPDATES` (ADR-0107)
+//!
+//! With `SERVER_TXN_JOURNAL_PATH` set, `SERVER_JOURNAL_UPDATES=1` commits
+//! every `UpdateField` through the journal as a one-operation batch —
+//! the redo entry `fsync`ed before the slot is written, replayed on the
+//! next start — instead of `msync`ing the table's mapping. Durable past
+//! a power loss either way; the cost differs: for one writer the journal
+//! path is slower on a small table (~220 vs ~145 µs) and faster on a
+//! large one (~240 vs ~310 µs at 1M rows); under eight concurrent
+//! writers one `fsync` covers a group and the per-update cost halves
+//! (~90 vs ~180 µs) — `RESULTS.md`. Off by default; an error without a
+//! journal.
+//!
 //! # MVCC history bounded — `SERVER_MVCC_RECLAIM_EVERY` (ADR-0105)
 //!
 //! With `SERVER_MVCC_ISOLATION` set, every committed write appends a
@@ -316,6 +329,14 @@ fn main() {
         DataLocation::Scratch(_) => None,
     };
     let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
+    // `SERVER_JOURNAL_UPDATES` (`ADR-0107`, `JUF-FR-003`): with a journal,
+    // every `UpdateField` is committed through it (group commit) instead
+    // of `msync`ing the mapping; presence-gated, off by default, a no-op
+    // without `SERVER_TXN_JOURNAL_PATH`.
+    let journal_updates = std::env::var_os("SERVER_JOURNAL_UPDATES").is_some();
+    if journal_updates && !journaled {
+        panic!("SERVER_JOURNAL_UPDATES needs SERVER_TXN_JOURNAL_PATH: there is no journal to commit through");
+    }
     // `SERVER_MVCC_ISOLATION` (`ADR-0072`, `MVCC2-FR-004`/`011`): opt-in,
     // unset by default — matching `with_mvcc`/`open_with_mvcc`'s own
     // "unset by default" framing and `SERVER_BACKUP_ROOT`/
@@ -412,6 +433,7 @@ fn main() {
         adapter
             .with_synced_updates(sync_updates)
             .with_mvcc_reclaim_every(mvcc_reclaim_every)
+            .with_journaled_updates(journal_updates)
     });
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
         let adapter = if mvcc_enabled && entities_existed {
@@ -438,6 +460,7 @@ fn main() {
         adapter
             .with_synced_updates(sync_updates)
             .with_mvcc_reclaim_every(mvcc_reclaim_every)
+            .with_journaled_updates(journal_updates)
     });
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
@@ -477,6 +500,7 @@ fn main() {
         adapter
             .with_synced_updates(sync_updates)
             .with_mvcc_reclaim_every(mvcc_reclaim_every)
+            .with_journaled_updates(journal_updates)
     });
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
@@ -595,7 +619,7 @@ fn main() {
         Err(_) => options,
     };
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {}, MVCC reclaim every: {:?} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {}, MVCC reclaim every: {:?}, journaled updates: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -614,6 +638,7 @@ fn main() {
         options.max_query_rows(),
         if sync_updates { "configured" } else { "NOT configured (write-back)" },
         mvcc_reclaim_every,
+        if journal_updates { "configured" } else { "NOT configured" },
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary

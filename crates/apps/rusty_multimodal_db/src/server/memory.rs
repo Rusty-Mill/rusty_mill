@@ -102,6 +102,9 @@ pub struct MemoryConnectionStore {
     /// acknowledged; unset, the acknowledgement precedes durability by
     /// up to the OS's own write-back — the documented loss window.
     sync_updates: bool,
+    /// `JUF-FR-001` (ADR-0107): `with_journaled_updates` — in-place
+    /// updates committed through the journal when there is one.
+    journal_updates: bool,
     /// `ART-FR-002` (ADR-0105): the automatic reclaim threshold, kept
     /// here so `with_mvcc` can apply it whichever order the builders run.
     mvcc_reclaim_every: Option<usize>,
@@ -121,6 +124,7 @@ impl MemoryConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            journal_updates: false,
             mvcc_reclaim_every: None,
             mvcc: None,
         }
@@ -165,6 +169,39 @@ impl MemoryConnectionStore {
             return Ok(());
         }
         self.store.flush().map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `JUF-FR-001` (ADR-0107): opt in to committing every in-place
+    /// field update through the journal as a one-operation batch — the
+    /// redo entry `fsync`ed (group-committed with any concurrent batch)
+    /// before the slot is written, no `msync` of the mapping, replayed
+    /// at the next open like any journaled batch. Durable past a power
+    /// loss like `with_synced_updates`, at a different cost: more for a
+    /// single writer (the entry and the slot), less per update under
+    /// concurrent writers (one `fsync` covers a group) — `RESULTS.md`.
+    /// A no-op on an adapter with no journal.
+    pub fn with_journaled_updates(mut self, enabled: bool) -> Self {
+        self.journal_updates = enabled;
+        self
+    }
+
+    /// `JUF-FR-001` (ADR-0107): the journaled commit of one in-place
+    /// update — `Ok(false)` for a missing record, `update_field`'s own
+    /// contract; `Journal` when the entry could not be made durable,
+    /// nothing applied.
+    fn journaled_update(&self, op: TransactionOp) -> Result<bool, ErrorCode> {
+        match self.apply_transaction(std::slice::from_ref(&op), &[]) {
+            Ok(()) => Ok(true),
+            Err((_, ErrorCode::RecordNotFound)) => Ok(false),
+            Err((_, code)) => Err(code),
+        }
+    }
+
+    /// `JUF-FR-001`: whether `update_field` goes through the journal —
+    /// only when there is one and the operator asked; otherwise the
+    /// in-place write (and `msync`, if asked) as before.
+    fn journals_updates(&self) -> bool {
+        self.journal.is_some() && self.journal_updates
     }
 
     /// `ADR-0072`'s `MVCC2-FR-001`/`003`: enable real MVCC for this table,
@@ -253,6 +290,7 @@ impl MemoryConnectionStore {
             journal: None,
             backup_source: None,
             sync_updates: false,
+            journal_updates: false,
             mvcc_reclaim_every: None,
             mvcc: Some(MvccHandle {
                 state: reconstructed.state,
@@ -333,6 +371,7 @@ impl MemoryConnectionStore {
             journal: Some(journal),
             backup_source: None,
             sync_updates: false,
+            journal_updates: false,
             mvcc_reclaim_every: None,
             mvcc: None,
         })
@@ -1107,6 +1146,13 @@ impl ConnectionStore for MemoryConnectionStore {
             (FIELD_ACCESS_COUNT, ScanValue::I64(count)) => {
                 if !valid_access_count(count) {
                     return Err(ErrorCode::Malformed);
+                }
+                if self.journals_updates() {
+                    return self.journaled_update(TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(count),
+                    });
                 }
                 match self.store.update::<Memory, AccessCountField>(id, count) {
                     Ok(()) => {
@@ -2278,6 +2324,84 @@ mod tests {
         assert_eq!(
             reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
             ScanValue::I64(8)
+        );
+    }
+
+    /// `JUF-FR-001`/`002` (ADR-0107): with a journal and the setting,
+    /// `UpdateField` is a journaled one-operation batch — the entry is
+    /// in the journal before the acknowledgement, the answers are the
+    /// same as the in-place path's (`Ok(true)`, `Ok(false)` for a
+    /// missing record, `Malformed` for a bad value), and a reopen
+    /// through the journal sees the value. Without the setting the
+    /// journaled adapter still writes in place, nothing journaled.
+    #[test]
+    fn journaled_synced_updates_go_through_the_journal_and_survive_a_reopen() {
+        let dir = fresh_temp_dir("server_memory_journaled_updates").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let unsynced =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap();
+            assert!(!unsynced.journals_updates());
+            let unsynced = unsynced.with_synced_updates(true);
+            assert!(
+                !unsynced.journals_updates(),
+                "synced alone is msync, not the journal"
+            );
+            assert_eq!(
+                unsynced.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(5)),
+                Ok(true)
+            );
+            assert_eq!(
+                unsynced
+                    .journal
+                    .as_ref()
+                    .unwrap()
+                    .entries_since_checkpoint(),
+                0,
+                "unsynced: in place, nothing journaled"
+            );
+            let adapter = unsynced.with_journaled_updates(true);
+            assert!(adapter.journals_updates());
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+                Ok(true)
+            );
+            assert_eq!(
+                adapter.journal.as_ref().unwrap().entries_since_checkpoint(),
+                1,
+                "synced: one journal entry per update"
+            );
+            assert_eq!(
+                adapter.update_field(Uuid::from_u128(404), FIELD_ACCESS_COUNT, ScanValue::I64(1)),
+                Ok(false)
+            );
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(-1)),
+                Err(ErrorCode::Malformed)
+            );
+            assert_eq!(
+                adapter.journal.as_ref().unwrap().entries_since_checkpoint(),
+                1,
+                "a refused update journals nothing"
+            );
+            assert_eq!(
+                adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+                ScanValue::I64(7)
+            );
+        }
+        let stack = crate::generic::memory::open_memory_production_stack_portable(&path).unwrap();
+        let reopened =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(7)
         );
     }
 

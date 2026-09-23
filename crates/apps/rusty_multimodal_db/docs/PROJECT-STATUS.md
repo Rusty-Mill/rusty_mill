@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `CI-STANDALONE-RETIRED` (`ADR-0106`) — implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "2": the crate's standalone `.github/workflows/ci.yml` deleted — it never ran inside the monorepo, every job has run from the root workflow since `ADR-0098`/`ADR-0100`, and the mirror repository it was kept for is archived. Its PR waits on the owner. `ADR-0092`–`ADR-0105` and two declined forks (PRs #292–#308) merged.
+- `SERVER-JOURNALED-UPDATES` (`ADR-0107`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "3": an in-place `UpdateField` can be committed through the journal instead of `msync`ed, opt-in (`SERVER_JOURNAL_UPDATES=1` with a journal); measured at half the per-update cost under eight writers and a win at 1M rows, slower for one writer on a small table; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0106` and two declined forks (PRs #292–#309) merged.
 
 ## Blocked
 

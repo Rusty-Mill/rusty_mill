@@ -148,7 +148,10 @@ not a guess.
   one-page `msync` cost the same from 100 KiB to 3.8 GiB, the kernel
   already flushing only the dirty pages (`RESULTS.md`). Still absent:
   `UpdateField` in the journal (group commit would amortize the sync
-  across concurrent writers only — no gain for one connection), and
+  across concurrent writers only — no gain for one connection; *built
+  since, `ADR-0107`:* opt-in `SERVER_JOURNAL_UPDATES=1` on a journaled
+  server, measured at half the per-update cost under eight writers and
+  a win at 1M rows even for one), and
   any of this for the research domains.
 * **MVCC history reclaimed.** `ADR-0072` accepted "unbounded between
   explicit `Compact` runs" and then no `Compact` reclaimed. *Since
