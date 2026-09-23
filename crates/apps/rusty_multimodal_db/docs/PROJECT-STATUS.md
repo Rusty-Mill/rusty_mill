@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-JOURNAL-MVCC-COMPOSE` (`ADR-0114`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the journal and MVCC compose on a reopened table and `memory_server` no longer refuses the pair; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0113` (PRs #292–#315) merged.
+- The five growth items (`ADR-0115`–`ADR-0119`) — implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23) in one PR: the journal gauges (`FR-107`), the old-layout refusal's remedy (`FR-108`), `ScanValue::Null` at protocol 31 (`FR-109`, `SERVER-002` 0.20.0, wire change), the replica-refresh CLI (`FR-110`), and the power-loss proof's design and runbook (unrun). Its PR waits on the owner. `ADR-0092`–`ADR-0114` (PRs #292–#316) merged.
 
 ## Blocked
 

@@ -46,7 +46,7 @@ Smaller, but still real:
 * Null. *Since `ADR-0117`, protocol 31:* the wire has `ScanValue::Null`, stripped below 31. No shipped column is nullable yet — two domains keep their documented per-field sentinels (`ADR-0056`: `0` for a timestamp, `""` for a node id, lossless for those columns) — so a server never emits it and refuses it where a value is read. Still absent: a nullable field capability and a SQL `NULL`, the first nullable column's round; the scoring floats the consumer keeps also need a stored float kind first.
 * A query optimizer for aggregation (`GROUP BY`, `AVG`, multi-table joins) — DuckDB's core identity is vectorized execution over exactly this. A bounded `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` exists (`ADR-0035`) as a full scan then a bucket, with no optimizer of any kind — except, since `ADR-0081`, a `COUNT(*)` whose filter is only bounds on a range-indexed field, which is the sorted index's own count between the bounds with no record read (and, since `ADR-0082`, `SUM`/`AVG`/`MIN`/`MAX` of that field are reductions over the walked keys, no record read either; an aggregate over any other field still decodes; since `ADR-0084` a `GROUP BY` of that field over a pure range is one group per run of equal walked keys, and every other `GROUP BY` still decodes — since `ADR-0085` through a hashed bucket, linear in the rows).
 * Client ecosystem — drivers for other languages, a CLI, general tooling. A byte-level wire specification and a stdlib-only Python client exist (`ADR-0043`); everything else on this list does not.
-* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison. *Since `ADR-0095`:* the crash-safety trials the diagnosis harness once ran by hand are a CI gate (`tests/crash_safety.rs`, `STORAGE-021`) — a regression in the commit marker, the reopen reconciliation, or `Flush` fails `cargo test`; still a process-kill proof, not a power-loss one.
+* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison. *Since `ADR-0095`:* the crash-safety trials the diagnosis harness once ran by hand are a CI gate (`tests/crash_safety.rs`, `STORAGE-021`) — a regression in the commit marker, the reopen reconciliation, or `Flush` fails `cargo test`; still a process-kill proof, not a power-loss one. *Since `ADR-0119`:* the power-loss proof is designed (`docs/design/STORAGE-POWER-LOSS-DESIGN.md`) and its runbook ships (`scripts/power_loss_trial.sh`, `dm-log-writes` on a root Linux host); unrun, so the claim stands as before until an operator runs it.
 
 ## Operational maturity — not named in this document before
 
@@ -102,11 +102,10 @@ not a guess.
   replay against an already-identical starting snapshot); no automatic
   failover or promotion — a refreshed replica is a manually-promoted
   cold standby only; no write forwarding — a replica never proxies
-  writes to a primary; no cluster membership, gossip, or consensus; no
-  replica-refresh daemon shipped by this crate — an operator's own
-  script fetches, writes to local disk, and restarts a second
-  `memory_server` pointed at it (`Backup`'s own "restore needs no new
-  code" precedent).
+  writes to a primary; no cluster membership, gossip, or consensus. *Since `ADR-0118`:*
+  the refresh script ships — `examples/replica_refresh.rs` fetches a
+  snapshot into a fresh, verified directory once or on an interval,
+  pruning old ones; the standby's restart is still the operator's.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
   (`ADR-0064`, protocol 23) renders a bounded, fixed set of

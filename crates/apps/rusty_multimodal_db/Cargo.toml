@@ -309,6 +309,11 @@ required-features = ["client"]
 name = "replica_refresh"
 required-features = ["server"]
 
+# `ADR-0115`: the journal gauges over a real served pair of tables.
+[[test]]
+name = "server_journal_metrics_integration"
+required-features = ["server"]
+
 # `crash_writer`/`crash_safety_harness` (the crash-safety diagnosis
 # harness) build `Order`/`Customer` datasets via `generic::order_customer`
 # and use `bench_support::fresh_temp_dir` — both research-gated. Explicit

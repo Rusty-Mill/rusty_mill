@@ -108,7 +108,7 @@ pub(crate) enum ReplayedBatch {
 }
 
 /// `JSM-FR-001` (ADR-0115): a journaled table's live journal figures,
-/// as [`CommitGroup::stats`] reads them and
+/// as `CommitGroup::stats` reads them and
 /// `ConnectionStore::journal_stats` reports them for the
 /// `dogserver_journal_*` gauges.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -727,6 +727,7 @@ impl CommitGroup {
     }
 
     /// The journal's size in bytes, header included.
+    #[cfg(test)]
     pub(crate) fn len_bytes(&self) -> u64 {
         self.state
             .lock()

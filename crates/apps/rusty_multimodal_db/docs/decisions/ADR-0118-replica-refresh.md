@@ -68,4 +68,4 @@ forwarding and membership are a different system.
 ## Acceptance and implementation
 
 - 2026-09-23: implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` as `SERVER-001` v0.97.0 / `FR-110`, in one PR with `ADR-0115`–`ADR-0117`, `ADR-0119`.
-  `cargo fmt -p rusty_multimodal_db -- --check` clean; `cargo clippy -p rusty_multimodal_db --features server,research --all-targets -- -D warnings` clean; `cargo test -p rusty_multimodal_db --features server,research` — «TESTS» tests across «TARGETS» targets, 0 failed. Builder: Claude.
+  `cargo fmt -p rusty_multimodal_db -- --check` clean; `cargo clippy -p rusty_multimodal_db --features server,research --all-targets -- -D warnings` clean; `cargo test -p rusty_multimodal_db --features server,research` — 990 tests across 46 targets, 0 failed. Builder: Claude.

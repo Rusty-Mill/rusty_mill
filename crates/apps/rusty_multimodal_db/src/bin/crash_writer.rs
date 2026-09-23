@@ -16,6 +16,11 @@
 //! - `flushed-updates <path> <count>` — identical, but calls
 //!   `Flush::flush` once after all `count` updates, printing `FLUSHED`
 //!   before sleeping.
+//! - `reopen-check <path>` (`ADR-0119`, `PLP-FR-003`) — reopen the store
+//!   at `path` through the real `GenericMmapStore::open`, print
+//!   `REOPENED <records> records, <updated> updated` and exit `0`, or
+//!   print the error and exit `1` — what `scripts/power_loss_trial.sh`
+//!   runs against each replayed device state.
 //! - `torn-write <path> <existing_slot_count> <new_id_u128> <new_value>`
 //!   — appends exactly one new slot to an already-valid store file (built
 //!   beforehand by the harness itself via the real `GenericMmapStore::create`,
@@ -44,7 +49,7 @@ use std::time::Duration;
 
 use rusty_multimodal_db::generic::mmap_store::GenericMmapStore;
 use rusty_multimodal_db::generic::order_customer::{Amount, Order, OrderStatus, Status};
-use rusty_multimodal_db::generic::query::UpdateField;
+use rusty_multimodal_db::generic::query::{AllIds, GetById, UpdateField};
 use rusty_multimodal_db::generic::store::Flush;
 use uuid::Uuid;
 
@@ -167,9 +172,39 @@ fn run_torn_update(path: &str, id_u128: u128, iterations: u64) -> ! {
     sleep_forever()
 }
 
+/// `ADR-0119`: reopen and report — the check the power-loss runbook runs
+/// against each replayed device state.
+fn run_reopen_check(path: &str) -> ! {
+    let store = match GenericMmapStore::<Order, Status, Amount>::open_portable(path.as_ref()) {
+        Ok(store) => store,
+        Err(error) => {
+            print_line(&format!("REOPEN FAILED: {error}"));
+            std::process::exit(1);
+        }
+    };
+    let ids = store.all_ids();
+    let updated = ids
+        .iter()
+        .filter(|id| {
+            GetById::<Order>::get(&store, **id)
+                .map(|order| order.amount_cents >= 1_000_000)
+                .unwrap_or(false)
+        })
+        .count();
+    print_line(&format!(
+        "REOPENED {} records, {updated} updated",
+        ids.len()
+    ));
+    std::process::exit(0)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("reopen-check") => {
+            let path = args.get(2).expect("path arg");
+            run_reopen_check(path);
+        }
         Some("unflushed-updates") => {
             let path = args.get(2).expect("path arg");
             let count: usize = args
