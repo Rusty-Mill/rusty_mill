@@ -2271,6 +2271,7 @@ enum BucketKey {
     Str(String),
     F64Bits(u64),
     StrList(Vec<String>),
+    Null,
 }
 
 impl BucketKey {
@@ -2282,6 +2283,7 @@ impl BucketKey {
             ScanValue::Str(v) => Self::Str(v.clone()),
             ScanValue::F64(v) => Self::F64Bits(v.to_bits()),
             ScanValue::StrList(v) => Self::StrList(v.clone()),
+            ScanValue::Null => Self::Null,
         }
     }
 }
@@ -2407,6 +2409,12 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
     fn is_str_list(pair: &(FieldRef, ScanValue)) -> bool {
         matches!(pair.1, ScanValue::StrList(_))
     }
+    // `NUL-FR-002` (ADR-0117): below 31 a `Null` pair is stripped as a
+    // `StrList` pair is below 11 — the same rule, one more variant.
+    let unknown_below = |pair: &(FieldRef, ScanValue)| {
+        (negotiated < 11 && is_str_list(pair))
+            || (negotiated < 31 && matches!(pair.1, ScanValue::Null))
+    };
     match resp {
         // `WCB-FR-001` (ADR-0103): below 30 the clamp mark is dropped and
         // the rows go as `Rows` — through this function again, so a
@@ -2414,14 +2422,19 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
         Response::RowsClamped { rows, .. } if negotiated < 30 => {
             downgrade_for_version(Response::Rows { rows }, negotiated)
         }
-        Response::Record { id, fields } if negotiated < 11 => Response::Record {
+        Response::Record { id, fields } if negotiated < 31 => Response::Record {
             id,
-            fields: fields.into_iter().filter(|p| !is_str_list(p)).collect(),
+            fields: fields.into_iter().filter(|p| !unknown_below(p)).collect(),
         },
-        Response::Rows { rows } if negotiated < 11 => Response::Rows {
+        Response::Rows { rows } if negotiated < 31 => Response::Rows {
             rows: rows
                 .into_iter()
-                .map(|(id, fields)| (id, fields.into_iter().filter(|p| !is_str_list(p)).collect()))
+                .map(|(id, fields)| {
+                    (
+                        id,
+                        fields.into_iter().filter(|p| !unknown_below(p)).collect(),
+                    )
+                })
                 .collect(),
         },
         Response::Schema(mut schema) if negotiated < 11 => {
@@ -5697,6 +5710,65 @@ mod tests {
                 index: 0,
                 code: ErrorCode::Unsupported,
                 message: error_message(ErrorCode::Unsupported).to_string(),
+            }
+        );
+    }
+
+    /// `NUL-FR-002` (ADR-0117): a `Null` pair is dropped from `Record`
+    /// and `Rows` (and `RowsClamped` through `Rows`) below 31, kept at
+    /// 31 and above — one rule with the `StrList` strip, so a
+    /// connection below 11 loses both kinds of pair.
+    #[test]
+    fn downgrade_strips_null_pairs_below_31() {
+        let id = uuid::Uuid::from_u128(1);
+        let fields = || {
+            vec![
+                (0u16, ScanValue::Str("Ada".into())),
+                (3u16, ScanValue::StrList(vec!["Countess".into()])),
+                (11u16, ScanValue::Null),
+            ]
+        };
+        let record = Response::Record {
+            id,
+            fields: fields(),
+        };
+        let rows = Response::Rows {
+            rows: vec![(id, fields())],
+        };
+        let clamped = Response::RowsClamped {
+            rows: vec![(id, fields())],
+            cap: 1,
+        };
+        let without_null = || vec![fields()[0].clone(), fields()[1].clone()];
+        let only_str = || vec![fields()[0].clone()];
+
+        assert_eq!(downgrade_for_version(record.clone(), 31), record);
+        assert_eq!(downgrade_for_version(rows.clone(), 31), rows);
+        assert_eq!(downgrade_for_version(clamped.clone(), 31), clamped);
+        assert_eq!(
+            downgrade_for_version(record.clone(), 30),
+            Response::Record {
+                id,
+                fields: without_null()
+            }
+        );
+        assert_eq!(
+            downgrade_for_version(clamped.clone(), 29),
+            Response::Rows {
+                rows: vec![(id, without_null())]
+            }
+        );
+        assert_eq!(
+            downgrade_for_version(rows.clone(), 10),
+            Response::Rows {
+                rows: vec![(id, only_str())]
+            }
+        );
+        assert_eq!(
+            downgrade_for_version(record, 1),
+            Response::Record {
+                id,
+                fields: only_str()
             }
         );
     }

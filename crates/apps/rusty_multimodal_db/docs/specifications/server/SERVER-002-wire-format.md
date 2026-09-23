@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.19.2 (protocol version 30, unchanged — `SERVER-001` v0.90.0,
+- Version: 0.20.0 (protocol version 31 — `SERVER-001` v0.96.0,
+  `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
   `BTL-FR-001`, `ADR-0104`: `Busy` under TLS too; 0.19.0 was `SERVER-001` v0.84.0,
   `WCB-FR-005`, `ADR-0103`: `RowsClamped` (24), `ErrorCode::Busy` (15);
@@ -108,7 +109,7 @@ fixture and are asserted by the reference client's tests):
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 30
+## 5. Types at protocol version 31
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -139,6 +140,7 @@ unmarked is version 1.
 | 3 | `Str` | `String` |
 | 4 | `F64` (since 9) | `f64` — only ever `AggregateFn::Avg`'s result; never a stored field's kind |
 | 5 | `StrList` (since 11) | `Vec<String>` — a stored list-of-strings field, read-only over the wire |
+| 6 | `Null` (since 31) | none — the absence of a value; a unit variant, the index alone. No shipped column is nullable yet: a server never sends it and answers `Malformed` to a request carrying it where a value is read (§7 item 28) |
 
 ### 5.4 `Selection` (since 8), `JoinRelation` (since 12)
 
@@ -659,6 +661,18 @@ Each item names the `SERVER-001` requirement that owns it.
    before it is closed (§6.3; under TLS after the handshake, since
    `SERVER-001` v0.85.0), the only frame a server ever sends before
    negotiation. (`FR-096`, `FR-097`)
+28. **`Null`** (31) — `ScanValue::Null` (§5.3, index 6) is the absence
+   of a value. On a connection negotiated at 31 or above a server may
+   send it inside a `Record` or `Rows` field pair for a nullable field;
+   below 31 the pair is dropped from the answer, as a `StrList` pair is
+   below 11 (rule 3). No shipped table has a nullable field yet, so no
+   server sends it today; a request carrying `Null` where a value is
+   read — an `Insert`/`Replace`/`ReplaceIf`/`WriteBatch` field, a
+   predicate, a `Transaction` op, an `UpdateField`, a guard — is
+   `Malformed`, since no field is nullable. `Schema` is unchanged:
+   nullability is a property of a field, not a `ValueKind`, and will
+   arrive as a field capability when the first nullable column does.
+   (`FR-109`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -716,6 +730,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 28 | v0.74.0 | `PageDesc` (36), `FilteredPageDesc` (37) |
 | 29 | v0.76.0 | no new variant — a contradictory filter is `Err { Malformed }` at ≥ 29 (§7 item 26) |
 | 30 | v0.84.0 | `RowsClamped` (24), `ErrorCode::Busy` (15) — `Rows` below 30 for a clamped `Query` (§7 item 27); `Busy` written only before negotiation, never as an answer |
+| 31 | v0.96.0 | `ScanValue::Null` (6) — a unit variant; a `Null` field pair is dropped from `Record`/`Rows` below 31 (§7 item 28); no shipped field is nullable yet |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -766,6 +781,12 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.20.0 (`SERVER-001` v0.96.0, `ADR-0117`, `NUL-FR-001`/`002`): protocol
+  version 31 — `ScanValue::Null` (6), the absence of a value; stripped
+  from `Record`/`Rows` below 31; `Malformed` wherever a request carries
+  it and a value is read, while no field is nullable. §5.3, §7 item 28.
+  Fixture: `Response/Record(Null)`, `Response/Rows(Null)` at 31. Python
+  client: `Null`, read as `None`, declares 31.
 - 0.19.2 (`SERVER-001` v0.90.0, `ADR-0111`, `RVM-FR-002`): no wire
   change — `RowsClamped` is sent only when the clamped answer holds
   exactly `cap` rows (more may have matched); a shorter answer is

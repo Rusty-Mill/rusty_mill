@@ -53,8 +53,12 @@ class TlsOptions:
 
 
 def _to_scan_value(kind: p.ValueKind, value: Any):
-    if isinstance(value, (p.U32, p.I64, p.Bool, p.Str, p.F64, p.StrList)):
+    if isinstance(value, (p.U32, p.I64, p.Bool, p.Str, p.F64, p.StrList, p.Null)):
         return value
+    if value is None:
+        # NUL-FR-001 (protocol 31): sent as Null; the server answers
+        # Malformed while no field is nullable.
+        return p.Null()
     if kind is p.ValueKind.U32:
         return p.U32(int(value))
     if kind is p.ValueKind.I64:

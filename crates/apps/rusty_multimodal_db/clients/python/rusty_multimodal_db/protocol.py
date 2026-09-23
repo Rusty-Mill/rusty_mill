@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 30
+PROTOCOL_VERSION = 31
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -128,11 +128,23 @@ class StrList:
         object.__setattr__(self, "value", tuple(self.value))
 
 
-ScanValue = [U32, I64, Bool, Str, F64, StrList]
+@dataclass(frozen=True)
+class Null:
+    """NUL-FR-001, ADR-0117 (protocol 31): the absence of a value. No
+    shipped column is nullable yet, so a server never sends it and
+    answers Malformed to a request carrying it where a value is read."""
+
+    _index: ClassVar[int] = 6
+    _spec: ClassVar[list] = []
+
+
+ScanValue = [U32, I64, Bool, Str, F64, StrList, Null]
 
 
 def scan_value_py(v) -> Any:
-    """The plain Python value inside a ScanValue (list for StrList)."""
+    """The plain Python value inside a ScanValue (list for StrList, None for Null)."""
+    if isinstance(v, Null):
+        return None
     return list(v.value) if isinstance(v, StrList) else v.value
 
 
