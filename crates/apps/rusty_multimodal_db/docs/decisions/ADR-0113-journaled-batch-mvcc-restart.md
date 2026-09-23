@@ -90,6 +90,8 @@ history.
 - Named, not hidden: `memory_server` still refuses the journal-plus-MVCC
   combination (`SERVER_MVCC_ISOLATION` with `SERVER_TXN_JOURNAL_PATH`);
   this ADR fixes the library path only and does not lift that refusal.
+  *Lifted by `ADR-0114`: `open_with_mvcc_journaled` and every replayed
+  batch folded, atomic `WriteBatch` outcomes included.*
 
 ## Acceptance and implementation
 

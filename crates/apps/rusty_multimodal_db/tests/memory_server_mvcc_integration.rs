@@ -21,7 +21,8 @@ use rusty_multimodal_db::server::memory::{
     FIELD_STATUS, FIELD_TAGS, FIELD_UPDATED_AT,
 };
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION, SESSION_MVCC_ISOLATION,
+    ErrorCode, Request, Response, ScanValue, WriteOp, WriteResult, PROTOCOL_VERSION,
+    SESSION_MVCC_ISOLATION,
 };
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -62,6 +63,16 @@ impl Drop for ChildGuard {
 }
 
 fn spawn_memory_server(data_dir: &Path, mvcc: bool, addr: SocketAddr) -> ChildGuard {
+    spawn_memory_server_with(data_dir, mvcc, None, addr)
+}
+
+/// `JMC-FR-003` (ADR-0114): the same, with `SERVER_TXN_JOURNAL_PATH` too.
+fn spawn_memory_server_with(
+    data_dir: &Path,
+    mvcc: bool,
+    journal: Option<&Path>,
+    addr: SocketAddr,
+) -> ChildGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_memory_server"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("SERVER_") {
@@ -75,6 +86,9 @@ fn spawn_memory_server(data_dir: &Path, mvcc: bool, addr: SocketAddr) -> ChildGu
         .stderr(Stdio::null());
     if mvcc {
         command.env("SERVER_MVCC_ISOLATION", "1");
+    }
+    if let Some(journal) = journal {
+        command.env("SERVER_TXN_JOURNAL_PATH", journal);
     }
     let child = command.spawn().unwrap();
     wait_for_listener(addr);
@@ -275,6 +289,7 @@ fn real_binary_serves_a_working_mvcc_session_and_survives_a_concurrent_ordinary_
 fn real_binary_reopening_with_mvcc_preserves_a_committed_write_across_restart() {
     let dir = unique_dir("memory_server_mvcc_restart");
     let id = Uuid::from_u128(1);
+    let pending = Uuid::from_u128(2);
 
     {
         let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
@@ -305,6 +320,22 @@ fn real_binary_reopening_with_mvcc_preserves_a_committed_write_across_restart() 
             Response::Staged { index: 0 }
         );
         assert_eq!(roundtrip(&mut c, Request::Commit), Response::Ok);
+        // An ordinary insert after the index activated: the insert
+        // itself flushes the history (round ten), so a restart keeps it
+        // whether or not the reopen reads the pending log. Pinned here
+        // as the contrast to `real_binary_composes_the_journal_with_
+        // mvcc_across_a_restart`, whose journaled insert flushes nothing
+        // and needs that read (`JMC-FR-003`, ADR-0114).
+        assert_eq!(
+            roundtrip(
+                &mut seed,
+                Request::Insert {
+                    id: pending,
+                    fields: full_fields_with_content("pending in the insert log"),
+                }
+            ),
+            Response::Ok
+        );
     }
 
     {
@@ -335,6 +366,91 @@ fn real_binary_reopening_with_mvcc_preserves_a_committed_write_across_restart() 
             }
             other => panic!("expected Response::Record, got {other:?}"),
         }
+        assert_eq!(
+            content_of(&mut fresh, pending),
+            "pending in the insert log",
+            "a fresh snapshot after reopen sees the insert that was pending in the log"
+        );
+        assert_eq!(roundtrip(&mut fresh, Request::Rollback), Response::Ok);
+    }
+}
+
+/// `JMC-FR-003` (ADR-0114): `SERVER_TXN_JOURNAL_PATH` and
+/// `SERVER_MVCC_ISOLATION` together, through the real binary — refused
+/// at startup until this ADR. The first process commits an MVCC session's
+/// `UpdateField` (a journaled `Transaction` batch: in the journal, not
+/// yet in `.mvcc`) and an atomic `WriteBatch` insert; the second process,
+/// started against the same directory with both variables still set,
+/// must start at all, and a fresh MVCC snapshot on it must see both —
+/// the journal replayed into the index, not only into the store.
+#[test]
+fn real_binary_composes_the_journal_with_mvcc_across_a_restart() {
+    let dir = unique_dir("memory_server_journal_mvcc_restart");
+    let journal = dir.join("memories.journal");
+    let (updated, inserted) = (Uuid::from_u128(1), Uuid::from_u128(2));
+
+    {
+        let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
+        let _server = spawn_memory_server_with(&dir, true, Some(&journal), addr);
+        let mut seed = connect_negotiated(addr);
+        assert_eq!(
+            roundtrip(
+                &mut seed,
+                Request::Insert {
+                    id: updated,
+                    fields: full_fields_with_content("original"),
+                }
+            ),
+            Response::Ok
+        );
+        // Activate the index (its baseline flush) before the journaled
+        // batches, so the restart has a history file to reconstruct from.
+        let mut c = connect_negotiated(addr);
+        assert_eq!(begin_mvcc(&mut c), Response::Ok);
+        assert_eq!(
+            roundtrip(
+                &mut c,
+                Request::UpdateField {
+                    id: updated,
+                    field: FIELD_ACCESS_COUNT,
+                    value: ScanValue::I64(9),
+                }
+            ),
+            Response::Staged { index: 0 }
+        );
+        assert_eq!(roundtrip(&mut c, Request::Commit), Response::Ok);
+        match roundtrip(
+            &mut seed,
+            Request::WriteBatch {
+                ops: vec![WriteOp::Insert {
+                    id: inserted,
+                    fields: full_fields_with_content("batched in"),
+                }],
+                atomic: true,
+            },
+        ) {
+            Response::BatchResults { results } => assert_eq!(results, vec![WriteResult::Inserted]),
+            other => panic!("expected BatchResults, got {other:?}"),
+        }
+    }
+
+    {
+        let addr: SocketAddr = ([127, 0, 0, 1], free_port()).into();
+        let _server = spawn_memory_server_with(&dir, true, Some(&journal), addr);
+        let mut fresh = connect_negotiated(addr);
+        assert_eq!(begin_mvcc(&mut fresh), Response::Ok);
+        match roundtrip(&mut fresh, Request::GetById { id: updated }) {
+            Response::Record { fields, .. } => assert!(
+                fields.contains(&(FIELD_ACCESS_COUNT, ScanValue::I64(9))),
+                "a fresh snapshot after the restart sees the journaled transaction: {fields:?}"
+            ),
+            other => panic!("expected Response::Record, got {other:?}"),
+        }
+        assert_eq!(
+            content_of(&mut fresh, inserted),
+            "batched in",
+            "a fresh snapshot after the restart sees the journaled insert"
+        );
         assert_eq!(roundtrip(&mut fresh, Request::Rollback), Response::Ok);
     }
 }

@@ -103,6 +103,15 @@
 //! (~90 vs ~180 µs) — `RESULTS.md`. Off by default; an error without a
 //! journal.
 //!
+//! # Journal and MVCC together (ADR-0114)
+//!
+//! `SERVER_TXN_JOURNAL_PATH` and `SERVER_MVCC_ISOLATION` may both be
+//! set (until ADR-0114 the pair was refused at startup). A reopened
+//! `memory` table then reads its pending insert log before the reopen
+//! clears it, replays the journal, and folds both into the reconstructed
+//! version index before serving, so a fresh snapshot after a restart
+//! sees every batch the journal acknowledged.
+//!
 //! # MVCC history bounded — `SERVER_MVCC_RECLAIM_EVERY` (ADR-0105)
 //!
 //! With `SERVER_MVCC_ISOLATION` set, every committed write appends a
@@ -376,66 +385,45 @@ fn main() {
         Some(DEFAULT_MVCC_RECLAIM_EVERY),
     )
     .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
-    // These two do not compose safely today: `with_journal`'s own
-    // `open_or_create_*_production_stack` call (inside `open_stores`,
-    // below) already folds and clears the insert log for its own
-    // primary-state purposes, before either `with_journal` or any MVCC
-    // constructor ever sees it — the exact gap `open_with_mvcc`'s own
-    // doc comment names, but with no way to recover from it here, since
-    // by the time `with_journal` or `.with_mvcc()` would run the log is
-    // already gone. Refusing to start (an explicit, named limitation,
-    // not a silent gap) matches this binary's own "unopenable path is a
-    // startup error" convention for every other misconfiguration.
-    if mvcc_enabled && journaled {
-        panic!(
-            "SERVER_MVCC_ISOLATION and SERVER_TXN_JOURNAL_PATH cannot both be set: real MVCC \
-             and the crash-atomic journal are not yet composable for a reopened table (see \
-             MemoryConnectionStore::with_mvcc's and ::open_with_mvcc's own doc comments, and \
-             ADR-0072's \"Negative / tradeoffs\") — pick one for this table"
-        );
-    }
-    // Detected *before* `open_stores` runs `open_or_create_*_production_stack`
-    // on each path — afterward every file exists regardless, so this is
-    // the only point a caller can still tell "fresh" from "reopen" the
-    // same way `open_or_create_memory_production_stack`'s own
-    // `path.exists()` check does internally. Scratch mode is always
-    // "fresh": its directory is a brand-new per-process temp path that
-    // cannot already hold any of these three files.
-    let (memories_existed, entities_existed, relations_existed) = match &data {
-        DataLocation::Durable(dir) => (
-            dir.join("memories.mmap").exists(),
-            dir.join("entities.mmap").exists(),
-            dir.join("relations.mmap").exists(),
-        ),
-        DataLocation::Scratch(_) => (false, false, false),
-    };
-    // Known, accepted tradeoff of this round: when `open_with_mvcc` is
-    // used below (reopening a table with MVCC on), the corresponding
-    // stack `open_stores` already built here (`store`/`entity_store`/
-    // `relation_store`) is left unused for that table — `open_with_mvcc`
-    // opens the file a second time itself, since it must read the insert
-    // log *before* the normal open path clears it, and this binary's own
-    // `open_stores` has no way to be told "skip this one, something else
-    // will open it." The first, unused mapping is simply dropped at
-    // `main`'s own end; it is never read or written, so this is wasted
-    // I/O and a doubled peak file-handle count for that table's startup,
-    // not a correctness risk — a deeper `open_stores` refactor to avoid
-    // it is future work, not attempted in this round.
-    let (store, entity_store, relation_store, memories_path, entities_path, relations_path) =
-        open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
+    // `JMC-FR-003` (ADR-0114): `SERVER_TXN_JOURNAL_PATH` and
+    // `SERVER_MVCC_ISOLATION` compose — a reopened `memory` table takes
+    // `open_with_mvcc_journaled` below, which reads the pending insert
+    // log before the reopen clears it, replays the journal, and folds
+    // both into the reconstructed index. Until ADR-0114 the pair was
+    // refused at startup.
+    // `JMC-FR-003` (ADR-0114): a table an MVCC constructor will reopen
+    // is not opened here first — `open_with_mvcc`/`open_with_mvcc_journaled`
+    // must read the insert log before any open of the file folds and
+    // clears it. Through ADR-0113 this binary opened every table once
+    // through `open_stores` and then a second time in the MVCC reopen;
+    // the first, unused mapping had already cleared the log, so a
+    // journaled batch pending in it never reached the index (an
+    // ordinary write survived only because it flushes the history
+    // itself). `open_stores` now leaves such a table to its adapter.
+    let OpenedStores {
+        store,
+        entity_store,
+        relation_store,
+        memories_path,
+        entities_path,
+        relations_path,
+    } = open_stores(&data, mvcc_enabled).unwrap_or_else(|e| panic!("{e}"));
     let relation_connection_store: Arc<dyn ConnectionStore> = Arc::new({
-        let adapter = if mvcc_enabled && relations_existed {
-            RelationConnectionStore::open_with_mvcc(&relations_path).unwrap_or_else(|e| {
-                panic!("SERVER_MVCC_ISOLATION: reopening {relations_path:?} for relation: {e}")
-            })
-        } else {
-            let adapter = RelationConnectionStore::new(GenericProductionStore::new(relation_store));
-            if mvcc_enabled {
-                adapter.with_mvcc(&relations_path).unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: activating for relation: {e}")
-                })
-            } else {
-                adapter
+        let adapter = match relation_store {
+            TableOpen::ReopenWithMvcc => RelationConnectionStore::open_with_mvcc(&relations_path)
+                .unwrap_or_else(|e| {
+                    panic!("SERVER_MVCC_ISOLATION: reopening {relations_path:?} for relation: {e}")
+                }),
+            TableOpen::Opened(relation_store) => {
+                let adapter =
+                    RelationConnectionStore::new(GenericProductionStore::new(relation_store));
+                if mvcc_enabled {
+                    adapter.with_mvcc(&relations_path).unwrap_or_else(|e| {
+                        panic!("SERVER_MVCC_ISOLATION: activating for relation: {e}")
+                    })
+                } else {
+                    adapter
+                }
             }
         };
         // `BAK-FR-002` (ADR-0065): only a durable table has a directory
@@ -453,18 +441,20 @@ fn main() {
             .with_journaled_updates(journal_updates)
     });
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
-        let adapter = if mvcc_enabled && entities_existed {
-            EntityConnectionStore::open_with_mvcc(&entities_path).unwrap_or_else(|e| {
-                panic!("SERVER_MVCC_ISOLATION: reopening {entities_path:?} for entity: {e}")
-            })
-        } else {
-            let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
-            if mvcc_enabled {
-                adapter
-                    .with_mvcc(&entities_path)
-                    .unwrap_or_else(|e| panic!("SERVER_MVCC_ISOLATION: activating for entity: {e}"))
-            } else {
-                adapter
+        let adapter = match entity_store {
+            TableOpen::ReopenWithMvcc => EntityConnectionStore::open_with_mvcc(&entities_path)
+                .unwrap_or_else(|e| {
+                    panic!("SERVER_MVCC_ISOLATION: reopening {entities_path:?} for entity: {e}")
+                }),
+            TableOpen::Opened(entity_store) => {
+                let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
+                if mvcc_enabled {
+                    adapter.with_mvcc(&entities_path).unwrap_or_else(|e| {
+                        panic!("SERVER_MVCC_ISOLATION: activating for entity: {e}")
+                    })
+                } else {
+                    adapter
+                }
             }
         };
         let adapter = if durable {
@@ -482,29 +472,44 @@ fn main() {
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
     // write, replayed on the next start. Set it the same way every start:
-    // opening without it after a crash forgoes the replay. Mutually
-    // exclusive with `SERVER_MVCC_ISOLATION` (checked above), so this
-    // branch and the MVCC one below never both apply to `memory`.
+    // opening without it after a crash forgoes the replay. With
+    // `SERVER_MVCC_ISOLATION` too, a reopened table takes the journaled
+    // MVCC reopen (`JMC-FR-003`, ADR-0114).
+    let journal_path = std::env::var_os("SERVER_TXN_JOURNAL_PATH").map(PathBuf::from);
     let connection_store = Arc::new({
-        let adapter = if mvcc_enabled && memories_existed {
-            MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
-                panic!("SERVER_MVCC_ISOLATION: reopening {memories_path:?} for memory: {e}")
-            })
-        } else {
-            let adapter = match std::env::var("SERVER_TXN_JOURNAL_PATH") {
-                Ok(journal_path) => MemoryConnectionStore::with_journal(
-                    GenericProductionStore::new(store),
-                    Path::new(&journal_path),
-                )
-                .unwrap_or_else(|e| panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")),
-                Err(_) => MemoryConnectionStore::new(GenericProductionStore::new(store)),
-            };
-            if mvcc_enabled {
-                adapter
-                    .with_mvcc(&memories_path)
-                    .unwrap_or_else(|e| panic!("SERVER_MVCC_ISOLATION: activating for memory: {e}"))
-            } else {
-                adapter
+        let adapter = match store {
+            TableOpen::ReopenWithMvcc => match &journal_path {
+                Some(journal_path) => {
+                    MemoryConnectionStore::open_with_mvcc_journaled(&memories_path, journal_path)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "SERVER_MVCC_ISOLATION with SERVER_TXN_JOURNAL_PATH: reopening \
+                                 {memories_path:?} for memory: {e}"
+                            )
+                        })
+                }
+                None => MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
+                    panic!("SERVER_MVCC_ISOLATION: reopening {memories_path:?} for memory: {e}")
+                }),
+            },
+            TableOpen::Opened(store) => {
+                let adapter = match &journal_path {
+                    Some(journal_path) => MemoryConnectionStore::with_journal(
+                        GenericProductionStore::new(store),
+                        journal_path,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")
+                    }),
+                    None => MemoryConnectionStore::new(GenericProductionStore::new(store)),
+                };
+                if mvcc_enabled {
+                    adapter.with_mvcc(&memories_path).unwrap_or_else(|e| {
+                        panic!("SERVER_MVCC_ISOLATION: activating for memory: {e}")
+                    })
+                } else {
+                    adapter
+                }
             }
         };
         let adapter = if durable {
@@ -711,19 +716,25 @@ impl DataLocation {
 /// `SERVER_DATA_DIR`'s decision table (`DDR-FR-002`): the directory is
 /// created if missing; durable tables open-or-create, scratch tables
 /// are seeded. Every failure names the directory.
-fn open_stores(
-    data: &DataLocation,
-) -> Result<
-    (
-        MemoryProductionStack,
-        EntityProductionStack,
-        RelationProductionStack,
-        PathBuf,
-        PathBuf,
-        PathBuf,
-    ),
-    String,
-> {
+/// How a table's store reaches its adapter (`JMC-FR-003`, ADR-0114):
+/// opened here, or left to the adapter's own MVCC reopen, which reads the
+/// insert log before any open of the file clears it.
+enum TableOpen<S> {
+    Opened(S),
+    ReopenWithMvcc,
+}
+
+/// The three tables as `open_stores` leaves them, with their file paths.
+struct OpenedStores {
+    store: TableOpen<MemoryProductionStack>,
+    entity_store: TableOpen<EntityProductionStack>,
+    relation_store: TableOpen<RelationProductionStack>,
+    memories_path: PathBuf,
+    entities_path: PathBuf,
+    relations_path: PathBuf,
+}
+
+fn open_stores(data: &DataLocation, mvcc_enabled: bool) -> Result<OpenedStores, String> {
     let (dir, durable) = match data {
         DataLocation::Durable(dir) => (dir, true),
         DataLocation::Scratch(dir) => (dir, false),
@@ -734,20 +745,42 @@ fn open_stores(
     let entities = dir.join("entities.mmap");
     let relations = dir.join("relations.mmap");
     if durable {
-        let store = open_or_create_memory_production_stack(&memories)
-            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", memories.display()))?;
-        let entity_store = open_or_create_entity_production_stack(&entities)
-            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?;
-        let relation_store = open_or_create_relation_production_stack(&relations)
-            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", relations.display()))?;
-        return Ok((
+        // Existence is checked before any open: afterward every file
+        // exists regardless. Scratch mode is always fresh — its directory
+        // is a brand-new per-process temp path.
+        let store = if mvcc_enabled && memories.exists() {
+            TableOpen::ReopenWithMvcc
+        } else {
+            TableOpen::Opened(
+                open_or_create_memory_production_stack(&memories)
+                    .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", memories.display()))?,
+            )
+        };
+        let entity_store = if mvcc_enabled && entities.exists() {
+            TableOpen::ReopenWithMvcc
+        } else {
+            TableOpen::Opened(
+                open_or_create_entity_production_stack(&entities)
+                    .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?,
+            )
+        };
+        let relation_store = if mvcc_enabled && relations.exists() {
+            TableOpen::ReopenWithMvcc
+        } else {
+            TableOpen::Opened(
+                open_or_create_relation_production_stack(&relations).map_err(|e| {
+                    format!("SERVER_DATA_DIR: opening {}: {e}", relations.display())
+                })?,
+            )
+        };
+        return Ok(OpenedStores {
             store,
             entity_store,
             relation_store,
-            memories,
-            entities,
-            relations,
-        ));
+            memories_path: memories,
+            entities_path: entities,
+            relations_path: relations,
+        });
     }
     let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &memories)
         .map_err(|e| format!("creating the sample MemoryProductionStack: {e}"))?;
@@ -755,14 +788,14 @@ fn open_stores(
         .map_err(|e| format!("creating the sample EntityProductionStack: {e}"))?;
     let relation_store = create_relation_production_stack(sample_relations(), &relations)
         .map_err(|e| format!("creating the sample RelationProductionStack: {e}"))?;
-    Ok((
-        store,
-        entity_store,
-        relation_store,
-        memories,
-        entities,
-        relations,
-    ))
+    Ok(OpenedStores {
+        store: TableOpen::Opened(store),
+        entity_store: TableOpen::Opened(entity_store),
+        relation_store: TableOpen::Opened(relation_store),
+        memories_path: memories,
+        entities_path: entities,
+        relations_path: relations,
+    })
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see

@@ -762,7 +762,9 @@ own assumptions, both confirmed by direct code reading:
 - Still open after #241, deliberately: reconstruction from a pending
   *journal* remainder (the open-hook proposal's own open question — the
   insert-log twin is closed); MVCC and the crash-atomic journal on the
-  same table; and independent Codex review of the entire line — its
+  same table (*both closed by `ADR-0113`/`ADR-0114`, which also ended
+  the doubled open: its first mapping cleared the log `open_with_mvcc`
+  reads*); and independent Codex review of the entire line — its
   Windows sandbox runner never connected its pipe at any point
   (investigated 2026-09-19: the runner launches as the sandbox user and
   logs on successfully, then times out connecting; the one coincident
