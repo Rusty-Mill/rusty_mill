@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-WIRE-CLAMP-BUSY` fork, a retry-after hint in `Busy` — declined on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "Decline": the server has no honest estimate of when a slot frees, so the frame would carry nothing the client did not already know; recorded in the design doc's open questions. `ADR-0092`–`ADR-0105` (PRs #292–#307) merged.
+- `CI-STANDALONE-RETIRED` (`ADR-0106`) — implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23), the owner's "2": the crate's standalone `.github/workflows/ci.yml` deleted — it never ran inside the monorepo, every job has run from the root workflow since `ADR-0098`/`ADR-0100`, and the mirror repository it was kept for is archived. Its PR waits on the owner. `ADR-0092`–`ADR-0105` and two declined forks (PRs #292–#308) merged.
 
 ## Blocked
 
