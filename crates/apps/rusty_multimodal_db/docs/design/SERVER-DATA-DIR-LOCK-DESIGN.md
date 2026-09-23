@@ -104,7 +104,7 @@ into the library; **(e)** decline and revert.
 `src/server/data_lock.rs` (new); `src/server/mod.rs` (`pub mod
 data_lock`); `src/durability/mod.rs` (`sync_parent_dir`); the six
 install points; `src/bin/memory_server.rs`; `Cargo.toml`
-(`rust-version`, the `[[test]]`); `.github/workflows/ci.yml` (the pin);
+(`rust-version`, the `[[test]]`); the crate's standalone `.github/workflows/ci.yml` (the pin; retired by `ADR-0106`, the pin now in the root workflow's `multimodal-db-msrv` job);
 `tests/memory_server_data_dir_lock.rs` (new).
 
 ## Data/state and invariants
