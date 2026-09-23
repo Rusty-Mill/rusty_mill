@@ -2457,17 +2457,6 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
     }
 }
 
-/// One in-flight connection slot claimed by `ServeOptions::try_admit`
-/// (`LIM-FR-002`); released on drop, so every return path of the
-/// connection's thread gives it back.
-struct InFlightGuard<'a>(&'a AtomicUsize);
-
-impl Drop for InFlightGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 /// `LIM-FR-003` (ADR-0093): whether `req` asks for more rows than `cap`
 /// allows — a `Query` with no `limit` or one above `cap`, or a page
 /// whose `limit` is above it. Pure over the request; every other
@@ -2511,6 +2500,16 @@ pub fn clamp_missing_limit(req: Request, cap: usize) -> (Request, bool) {
         ),
         other => (other, false),
     }
+}
+
+/// `RVL-FR-007` (ADR-0112): a Prometheus label value — backslash, double
+/// quote, and newline escaped as the exposition format requires, so a
+/// table name a library caller chose cannot break the scrape.
+fn escape_label_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// `WCB-FR-001` (ADR-0103) as amended by `RVM-FR-002` (ADR-0111): the
@@ -2572,7 +2571,11 @@ fn handle_backup(store: &dyn ConnectionStore, options: &ServeOptions, name: &str
     let tmp = root.join(format!(".backup-tmp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let result = match store.backup(&tmp) {
+        // `RVL-FR-003` (ADR-0112): the rename's directory entry is made
+        // durable before `BackedUp` is answered, as every other rename
+        // install in this crate (`ADR-0092`).
         Ok(report) => std::fs::rename(&tmp, &target)
+            .and_then(|()| crate::durability::sync_parent_dir(&target))
             .map(|()| Response::BackedUp {
                 files: report.files,
                 bytes: report.bytes,
@@ -2839,14 +2842,19 @@ impl ServeOptions {
         self.max_connections
     }
 
-    /// `LIM-FR-003` (ADR-0093): the most rows one read may ask for — a
-    /// `Query` must carry a `limit` at or under it, and a page's `limit`
-    /// must be at or under it; past it the request is refused
-    /// `TooLarge` before any read (`Malformed` below protocol 25).
-    /// Opt-in; unset, a `Query` may omit its `limit` and materialize
-    /// every matching row, as before.
+    /// `LIM-FR-003` (ADR-0093) as amended by `CLP-FR-001` (ADR-0102): the
+    /// most rows one read may ask for — a `Query` with a `limit` above it
+    /// and a page whose `limit` is above it are refused `TooLarge` before
+    /// any read (`Malformed` below protocol 25); a `Query` with no `limit`
+    /// is clamped to it and answered `RowsClamped` when cut. Opt-in;
+    /// unset, a `Query` may omit its `limit` and materialize every
+    /// matching row. `RVL-FR-006` (ADR-0112): `0` means unset, as
+    /// `memory_server`'s `SERVER_MAX_QUERY_ROWS=0` does — a cap of zero
+    /// would answer every limitless `Query` with no rows. The guard runs
+    /// before dispatch's own validation, so a page that is both over the
+    /// cap and malformed is `TooLarge`, not `UnknownField`.
     pub fn with_max_query_rows(mut self, max: usize) -> Self {
-        self.max_query_rows = Some(max);
+        self.max_query_rows = (max > 0).then_some(max);
         self
     }
 
@@ -2857,7 +2865,7 @@ impl ServeOptions {
 
     /// `LIM-FR-002`: claim one in-flight slot at accept — `true` and the
     /// count is up by one (released by the connection thread's
-    /// [`InFlightGuard`]); `false` and nothing changed, the cap is
+    /// [`InFlightGuardOwned`]); `false` and nothing changed, the cap is
     /// already reached and the caller closes the socket. Counted even
     /// with no cap, so the guard is always symmetric.
     fn try_admit(&self) -> bool {
@@ -2992,9 +3000,12 @@ impl ServeOptions {
         let samples: Vec<String> = tables
             .iter()
             .filter_map(|(name, table)| {
-                table
-                    .mvcc_history_entries()
-                    .map(|n| format!("dogserver_mvcc_history_entries{{table=\"{name}\"}} {n}\n"))
+                table.mvcc_history_entries().map(|n| {
+                    format!(
+                        "dogserver_mvcc_history_entries{{table=\"{}\"}} {n}\n",
+                        escape_label_value(name)
+                    )
+                })
             })
             .collect();
         if samples.is_empty() {
@@ -4856,11 +4867,31 @@ pub fn serve_tables(
             continue;
         }
         let tables = Arc::clone(&tables);
-        let options = Arc::clone(&options);
-        thread::spawn(move || {
-            let _slot = InFlightGuard(&options.in_flight);
-            handle_connection(stream, &tables, primary, options.as_ref())
+        let thread_options = Arc::clone(&options);
+        // `RVL-FR-008` (ADR-0112): a spawn failure (the process at its
+        // thread limit) releases the slot and drops the socket instead of
+        // panicking the accept loop; the guard is built here so the slot
+        // is released whether or not the thread ever runs.
+        let slot = InFlightGuardOwned(Arc::clone(&options));
+        let spawned = thread::Builder::new().spawn(move || {
+            let _slot = slot;
+            handle_connection(stream, &tables, primary, thread_options.as_ref())
         });
+        if spawned.is_err() {
+            options.metrics().record_connection_refused();
+        }
+    }
+}
+
+/// `RVL-FR-008` (ADR-0112): the in-flight slot as an owned guard, so it
+/// can be built on the accept thread and moved into the connection
+/// thread — released on drop wherever that happens, including when the
+/// spawn itself fails and the closure is dropped unrun.
+struct InFlightGuardOwned(Arc<ServeOptions>);
+
+impl Drop for InFlightGuardOwned {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -4896,9 +4927,19 @@ fn refuse_busy(stream: TcpStream, options: &Arc<ServeOptions>) {
         options.busy_refusals.fetch_sub(1, Ordering::AcqRel);
         return; // closed silently: the refusal pool is full too
     }
+    /// The refusal slot as an owned guard (`RVL-FR-008`).
+    struct RefusalGuardOwned(Arc<ServeOptions>);
+    impl Drop for RefusalGuardOwned {
+        fn drop(&mut self) {
+            self.0.busy_refusals.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
     let options = Arc::clone(options);
-    thread::spawn(move || {
-        let _slot = InFlightGuard(&options.busy_refusals);
+    // `RVL-FR-008` (ADR-0112): a failed spawn drops the socket (a silent
+    // close, as past the pool) and the guard releases the refusal slot.
+    let slot = RefusalGuardOwned(Arc::clone(&options));
+    let _ = thread::Builder::new().spawn(move || {
+        let _slot = slot;
         let _ = stream.set_read_timeout(Some(BUSY_REFUSAL_TIMEOUT));
         let _ = stream.set_write_timeout(Some(BUSY_REFUSAL_TIMEOUT));
         let Ok(raw) = stream.try_clone() else {

@@ -137,7 +137,8 @@ fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), D
     })?;
     upgrade_if_version_1(log, tag)?;
     let mut file = OpenOptions::new().append(true).create(true).open(log)?;
-    let mut image = if file.metadata()?.len() == 0 {
+    let created = file.metadata()?.len() == 0;
+    let mut image = if created {
         encode_tagged_image(&MAGIC, LOG_VERSION, 0, tag, &[])
     } else {
         Vec::new()
@@ -147,6 +148,11 @@ fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), D
     image.extend_from_slice(payload);
     file.write_all(&image)?;
     file.sync_data()?;
+    if created {
+        // `RVL-FR-003` (ADR-0112): a log created by this append needs its
+        // directory entry durable too, as every other creation does.
+        sync_parent_dir(log)?;
+    }
     Ok(())
 }
 

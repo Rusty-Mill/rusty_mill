@@ -236,7 +236,7 @@ impl RelationConnectionStore {
             .skip(reconstructed.insert_log_entries_reflected);
         for entry in entries {
             let txn_id = reconstructed.state.counter().next();
-            reconstructed.state.with_index(|index| match entry {
+            reconstructed.state.with_index_quiet(|index| match entry {
                 LogEntry::Item(record) => {
                     let id = record.id;
                     index.record_write(
@@ -267,13 +267,22 @@ impl RelationConnectionStore {
             for (batch_index, batch) in batches.iter().enumerate() {
                 match batch {
                     JournaledBatch::Transaction(ops) => {
-                        Self::apply_batch(inner, ops).map_err(|(index, code)| {
-                            JournalError::Replay {
-                                batch: batch_index,
-                                index,
-                                code,
+                        // `RVL-FR-004` (ADR-0112): a record deleted after the
+                        // batch was journaled (its tombstone folded from the
+                        // insert log before this replay) makes the op moot,
+                        // not the journal corrupt — skip it, replay the rest.
+                        for (index, op) in ops.iter().enumerate() {
+                            match Self::apply_batch(inner, std::slice::from_ref(op)) {
+                                Ok(()) | Err((_, ErrorCode::RecordNotFound)) => {}
+                                Err((_, code)) => {
+                                    return Err(JournalError::Replay {
+                                        batch: batch_index,
+                                        index,
+                                        code,
+                                    })
+                                }
                             }
-                        })?;
+                        }
                     }
                     JournaledBatch::Write(ops) => {
                         Self::replay_write_batch(inner, &schema, ops).map_err(
@@ -1386,7 +1395,7 @@ impl ConnectionStore for RelationConnectionStore {
                 for id in AllIds::<Relation>::all_ids(inner) {
                     if let Some(record) = GetById::<Relation>::get(inner, id) {
                         let fields = Self::fields_of(record);
-                        mvcc.state.with_index(|index| {
+                        mvcc.state.with_index_quiet(|index| {
                             index.record_write(
                                 (id, mvcc::EXISTENCE_FIELD),
                                 mvcc::BASELINE_TXN,
@@ -1496,6 +1505,29 @@ mod tests {
         let stack =
             create_relation_production_stack(sample(), &dir.join("relations.mmap")).unwrap();
         RelationConnectionStore::new(GenericProductionStore::new(stack))
+    }
+
+    /// `MUR-FR-001`/`002` (ADR-0108) on `Relation`, `RVL-FR-010` (ADR-0112):
+    /// the in-place `UpdateField` records into the MVCC index — a held
+    /// snapshot still reads the old value, the current reads the new.
+    #[test]
+    fn an_in_place_update_is_recorded_in_the_mvcc_index() {
+        let (adapter, _path) = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let held = adapter.mvcc_begin();
+        let old = adapter.mvcc_get(id, held).unwrap().unwrap();
+        let before = adapter.mvcc_history_entries().unwrap();
+        assert_eq!(
+            adapter.update_field(id, FIELD_UPDATED_AT, ScanValue::I64(77)),
+            Ok(true)
+        );
+        assert_eq!(adapter.mvcc_history_entries(), Some(before + 1));
+        assert_eq!(adapter.mvcc_get(id, held).unwrap().unwrap(), old);
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_UPDATED_AT as usize].1,
+            ScanValue::I64(77)
+        );
+        adapter.mvcc_release(held);
     }
 
     fn sample_adapter_with_mvcc() -> (RelationConnectionStore, std::path::PathBuf) {

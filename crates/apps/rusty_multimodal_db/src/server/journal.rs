@@ -251,6 +251,9 @@ impl BatchJournal {
             file.write_all(JOURNAL_MAGIC)?;
             file.write_all(&JOURNAL_FORMAT_VERSION.to_le_bytes())?;
             file.sync_all()?;
+            // `RVL-FR-003` (ADR-0112): the new file's directory entry too,
+            // so the journal itself survives a power loss (`ADR-0092`).
+            crate::durability::sync_parent_dir(path)?;
             return Ok((
                 Self {
                     file,

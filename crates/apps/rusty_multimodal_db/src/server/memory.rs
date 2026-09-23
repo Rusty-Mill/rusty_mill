@@ -313,7 +313,7 @@ impl MemoryConnectionStore {
             .skip(reconstructed.insert_log_entries_reflected);
         for entry in entries {
             let txn_id = reconstructed.state.counter().next();
-            reconstructed.state.with_index(|index| match entry {
+            reconstructed.state.with_index_quiet(|index| match entry {
                 LogEntry::Item(record) => {
                     let id = record.id;
                     index.record_write(
@@ -344,13 +344,22 @@ impl MemoryConnectionStore {
             for (batch_index, batch) in batches.iter().enumerate() {
                 match batch {
                     JournaledBatch::Transaction(ops) => {
-                        Self::apply_batch(inner, ops).map_err(|(index, code)| {
-                            JournalError::Replay {
-                                batch: batch_index,
-                                index,
-                                code,
+                        // `RVL-FR-004` (ADR-0112): a record deleted after the
+                        // batch was journaled (its tombstone folded from the
+                        // insert log before this replay) makes the op moot,
+                        // not the journal corrupt — skip it, replay the rest.
+                        for (index, op) in ops.iter().enumerate() {
+                            match Self::apply_batch(inner, std::slice::from_ref(op)) {
+                                Ok(()) | Err((_, ErrorCode::RecordNotFound)) => {}
+                                Err((_, code)) => {
+                                    return Err(JournalError::Replay {
+                                        batch: batch_index,
+                                        index,
+                                        code,
+                                    })
+                                }
                             }
-                        })?;
+                        }
                     }
                     JournaledBatch::Write(ops) => {
                         Self::replay_write_batch(inner, &schema, ops).map_err(
@@ -1691,7 +1700,7 @@ impl ConnectionStore for MemoryConnectionStore {
                 for id in AllIds::<Memory>::all_ids(inner) {
                     if let Some(record) = GetById::<Memory>::get(inner, id) {
                         let fields = Self::fields_of(record);
-                        mvcc.state.with_index(|index| {
+                        mvcc.state.with_index_quiet(|index| {
                             index.record_write(
                                 (id, mvcc::EXISTENCE_FIELD),
                                 mvcc::BASELINE_TXN,
@@ -2218,7 +2227,7 @@ mod tests {
         let with_snapshot_open = history_len();
         assert!(
             with_snapshot_open < before,
-            "nothing reclaimed with a snapshot open at {held}: {before} -> {with_snapshot_open}"
+            "with a snapshot open at {held} only the entries below it are reclaimed: {before} -> {with_snapshot_open}"
         );
         assert_eq!(
             adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
@@ -2502,6 +2511,45 @@ mod tests {
             .with_index(|index| index.history_len()) as u64;
         assert!(expected > 0, "activation seeds a baseline");
         assert_eq!(adapter.mvcc_history_entries(), Some(expected));
+    }
+
+    /// `RVL-FR-004` (ADR-0112): a journaled update whose record is deleted
+    /// before the journal is checkpointed is moot at replay, not corrupt —
+    /// the reopen through `with_journal` succeeds and the record stays
+    /// deleted.
+    #[test]
+    fn replay_skips_a_journaled_update_to_a_record_deleted_afterwards() {
+        let dir = fresh_temp_dir("server_memory_replay_deleted").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let id = Uuid::from_u128(1);
+        {
+            let stack = create_memory_production_stack(
+                vec![memory(1, "general", false), memory(2, "general", false)],
+                &[],
+                &path,
+            )
+            .unwrap();
+            let adapter =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap()
+                    .with_journaled_updates(true);
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(9)),
+                Ok(true)
+            );
+            assert_eq!(
+                adapter.journal.as_ref().unwrap().entries_since_checkpoint(),
+                1
+            );
+            assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::Deleted));
+        }
+        let stack = crate::generic::memory::open_memory_production_stack_portable(&path).unwrap();
+        let reopened =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        assert_eq!(reopened.get(id), None, "deleted stays deleted");
+        assert!(reopened.get(Uuid::from_u128(2)).is_some());
     }
 
     #[test]

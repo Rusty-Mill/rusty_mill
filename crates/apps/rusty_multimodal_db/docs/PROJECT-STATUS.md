@@ -484,7 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
-- `SERVER-REVIEW-MEDIUMS` (`ADR-0111`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the review's Mediums 4–8 fixed — the clamp counter after dispatch, `RowsClamped` only for an answer cut at the cap, `last_clamp` reset per query, the metrics listener's exposure check, the refusal drain's deadline; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0110` and the review report (PRs #292–#312) merged; Mediums 9–14 are next.
+- `SERVER-REVIEW-REMAINDER` (`ADR-0112`) — implemented and verified on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): the review's Mediums 9–14 and Lows 15–23 fixed, one requirement each; no wire change. Its PR waits on the owner. With it every finding of `docs/reports/2026-09-23-hardening-line-review.md` that lives in this crate or its CI is closed. `ADR-0092`–`ADR-0111` (PRs #292–#313) merged.
 
 ## Blocked
 

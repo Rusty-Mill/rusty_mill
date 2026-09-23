@@ -107,6 +107,17 @@ class Client:
             if tls.client_cert:
                 ctx.load_cert_chain(tls.client_cert, tls.client_key)
             sock = ctx.wrap_socket(raw, server_hostname=tls.server_name)
+        try:
+            return cls._handshake(sock, protocol_version, token)
+        except BaseException:
+            # RVL-FR-009 (ADR-0112): a failed connect (Busy included) closes
+            # the socket at once, so a server refusal slot is not held
+            # for as long as the exception object lives.
+            sock.close()
+            raise
+
+    @classmethod
+    def _handshake(cls, sock, protocol_version: int, token: Optional[str]) -> "Client":
         # Hello is the optional first frame; a server answers min(client, server).
         reply = _exchange(sock, p.Hello(protocol_version))
         if isinstance(reply, p.Err):

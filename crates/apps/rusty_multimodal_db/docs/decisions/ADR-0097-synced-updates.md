@@ -34,7 +34,9 @@ this one (`access_count`). The review rated it High.
 
 Implement: `with_synced_updates(true)` — after a successful in-place
 update, `msync` the table's slot files (the stack's `Flush`, under the
-write lock) before answering; an `msync` failure withholds the
+write lock — *its own second acquisition, not the update's, the
+2026-09-23 review noted; durability before the acknowledgement holds
+either way*) before answering; an `msync` failure withholds the
 acknowledgement as `Storage`. Journaled arms are untouched. Opt-in and
 unset by default; `memory_server` reads `SERVER_SYNC_UPDATES=1`. The
 cost is measured, not assumed: `update_field` on `Memory`, release build, this container, 2,000 updates each: 0.1 → 105.4 µs per update at 1K rows, 0.2 → 99.7 µs at 100K rows (unsynced → synced); the `msync` costs what the insert log's per-entry `sync_data` costs, and does not scale with the table.

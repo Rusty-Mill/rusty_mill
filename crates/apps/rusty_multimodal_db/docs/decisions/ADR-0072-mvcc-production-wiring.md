@@ -299,6 +299,7 @@ own assumptions, both confirmed by direct code reading:
   reinterpret it). Registered into a small per-table in-memory
   open-snapshot set, exactly as `ADR-0071` already decided (never
   persisted, lost harmlessly on restart, used only by `Compact`'s GC
+  (*since `ADR-0105`, by the automatic reclaim on every write path too*)
   step). Deregistered at `Commit`, `Rollback`, or disconnect.
 - **Reads while such a session is open** use the identical logic
   `MVCC-SPIKE-DESIGN.md`'s `read()` already proved (primary value if its

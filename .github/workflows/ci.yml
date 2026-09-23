@@ -592,6 +592,10 @@ jobs:
         run: cargo clippy -p rusty_multimodal_db --features server --all-targets -- -D warnings
       - name: cargo clippy -p rusty_multimodal_db --features research
         run: cargo clippy -p rusty_multimodal_db --features research --all-targets -- -D warnings
+      # `server,research` is the crate's own documented test command and is not the
+      # union `--all-features` builds (ADR-0098 listed five sets; ADR-0112 adds the fifth).
+      - name: cargo clippy -p rusty_multimodal_db --features server,research
+        run: cargo clippy -p rusty_multimodal_db --features server,research --all-targets -- -D warnings
       # `ECO-FR-003` (ADR-0043): the client-only feature set tests with no server compiled.
       - name: cargo test -p rusty_multimodal_db --features client
         run: cargo test -p rusty_multimodal_db --features client

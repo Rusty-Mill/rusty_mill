@@ -50,7 +50,8 @@ pid-in-a-file scheme (stale after `SIGKILL`).
 
 - Positive: the single-process assumption is enforced where a
   deployment breaks it; a rename install survives power loss at the
-  directory level, not just the file's.
+  directory level, not just the file's (on Unix; `sync_parent_dir` is a
+  no-op elsewhere — noted by the 2026-09-23 review).
 - Negative / tradeoffs: the MSRV moves 1.88 → 1.89 (the owner's
   toolchain call, named here rather than folded in). Advisory only —
   a process that never opens the lock file is not stopped; every
