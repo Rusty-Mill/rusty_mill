@@ -821,6 +821,18 @@ impl ConnectionStore for EntityConnectionStore {
                 if !written {
                     return Ok(false);
                 }
+                // `RVW-FR-001` (ADR-0110): no journal covers an in-place
+                // update, so its MVCC record must reach `.mvcc` now —
+                // exactly as the non-journaled batch arm flushes — or a
+                // restart would reconstruct an index without it.
+                let journal_count = self
+                    .journal
+                    .as_ref()
+                    .map(CommitGroup::entries_since_checkpoint)
+                    .unwrap_or(0);
+                if !self.mvcc_flush_now(journal_count) {
+                    return Err(ErrorCode::Storage);
+                }
                 self.sync_update_ack()?;
                 Ok(true)
             }
@@ -1332,9 +1344,8 @@ impl ConnectionStore for EntityConnectionStore {
                 .unwrap_or(0);
             let _ = self.mvcc_flush_now(journal_count);
         }
-        let snapshot_txn = mvcc.state.with_index(|index| index.last_committed());
-        mvcc.state.open_snapshots().register(snapshot_txn);
-        snapshot_txn
+        // `RVW-FR-002` (ADR-0110): read and register under one lock.
+        mvcc.state.open_snapshot()
     }
 
     fn mvcc_release(&self, snapshot_txn: u64) {

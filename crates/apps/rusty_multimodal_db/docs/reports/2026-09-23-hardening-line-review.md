@@ -16,7 +16,7 @@
   None of the three is on the consumer's current single-connection,
   non-MVCC path.
 
-## High — fix now
+## High — fix now (*all three fixed by `ADR-0110`, the round after this report*)
 
 1. **An in-place `UpdateField` is recorded in the MVCC index but never
    flushed to `.mvcc`, so a restart forgets it** (`memory.rs`

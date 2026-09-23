@@ -55,8 +55,13 @@
 //! anything is a versioned server, and `Malformed` still means what it
 //! did). The cost is one extra connect when a server genuinely dies
 //! under the first frame — the second attempt then fails the same way
-//! and that error is the one returned. [`ConnectOptions::require_hello`]
-//! turns the fallback off for a caller that would rather see the EOF.
+//! and that error is the one returned. *Since v0.89.0 (`RVW-FR-003`,
+//! ADR-0110) the fallback is off by default*: a close under the `Hello`
+//! is also what a server at its connection cap does once its refusal
+//! pool is full (`ADR-0104`), and re-dialing it at version 1 would run
+//! a whole session without the wire this client was built for.
+//! [`ConnectOptions::allow_pre_hello_fallback`] turns it back on;
+//! [`ConnectOptions::require_hello`] names the default.
 //!
 //! # Authentication (`ServeOptions`), `SERVER-001-FR-021`
 //!
@@ -372,13 +377,29 @@ impl ClientTlsConfig {
 /// address: an `Authenticate` token (`FR-021`) and a [`ClientTlsConfig`]
 /// (`FR-022`), each optional and independent. `ConnectOptions::new()`
 /// (or `default()`) is exactly [`SchemaDrivenClient::connect`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ConnectOptions {
     token: Option<String>,
     tls: Option<ClientTlsConfig>,
-    /// `FR-026`: when set, a pre-hello server is an error, not a silent
-    /// reconnect. Default off — the fallback is on.
+    /// `FR-026` as amended by `RVW-FR-003` (ADR-0110): when set, a
+    /// server that closes under the `Hello` is an error. **Default on
+    /// since v0.89.0**: a close without a reply is what a server at its
+    /// connection cap does once its refusal pool is full (`ADR-0104`),
+    /// and re-dialing it at version 1 would silently run a whole session
+    /// without the wire the client was built for. Pre-hello servers
+    /// (protocol 1, `SERVER-001` v0.9.1) no longer exist to fall back
+    /// to; [`Self::allow_pre_hello_fallback`] restores the old behaviour.
     require_hello: bool,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            token: None,
+            tls: None,
+            require_hello: true,
+        }
+    }
 }
 
 impl ConnectOptions {
@@ -399,13 +420,25 @@ impl ConnectOptions {
         self
     }
 
-    /// Disable the pre-hello fallback (`FR-026`; see this module's own
-    /// "Protocol version" section): a server that closes the connection
-    /// under the `Hello` is then reported as
-    /// `ClientError::Frame(FrameError::Io(..))`, as it was before v0.16.0,
-    /// instead of being reconnected to without a `Hello`.
+    /// Require a `Hello` reply — the default since v0.89.0 (`RVW-FR-003`,
+    /// ADR-0110): a server that closes the connection under the `Hello`
+    /// is reported as `ClientError::Frame(FrameError::Io(..))`, never
+    /// reconnected to without one. Kept for callers that set it
+    /// explicitly before it became the default.
     pub fn require_hello(mut self) -> Self {
         self.require_hello = true;
+        self
+    }
+
+    /// `FR-026`'s pre-hello fallback, opt-in since v0.89.0 (`RVW-FR-003`,
+    /// ADR-0110): a server that closes the connection under the `Hello`
+    /// with no reply is reconnected to once without a `Hello` and spoken
+    /// to at protocol version 1. Only for a `SERVER-001` v0.9.1 server,
+    /// which no shipped binary is; against a current server this turns a
+    /// refused connect (`ADR-0104`, a silent close past the refusal
+    /// pool) into a version-1 session with no error.
+    pub fn allow_pre_hello_fallback(mut self) -> Self {
+        self.require_hello = false;
         self
     }
 }
