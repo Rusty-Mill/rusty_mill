@@ -138,6 +138,8 @@
     `--every` are untested; "the old directory is untouched" checks
     existence only; the allow-insecure metrics-bind test does not
     assert the warning names the variable; `free_port()` is a port race
+    (*the four left by `ADR-0122` — `waiting_writers`, `.failed-`,
+    `--every`, the port race — paid by `ADR-0123`*)
     under parallel runs.
 
 ## What the reviewers found sound

@@ -10,10 +10,9 @@
 #![cfg(unix)]
 
 use rusty_multimodal_db::server::data_lock::LOCK_FILE_NAME;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 fn unique_dir(label: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,24 +21,62 @@ fn unique_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{label}_{}_{n}", std::process::id()))
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// `RGT-FR-004` (ADR-0123): a server spawned on port 0, its bound address
+/// read from the listening banner — no port is picked ahead of the bind,
+/// so two tests can never race for one. `before_banner` is every stderr
+/// line the server wrote before it; the pipe stays open for its lifetime.
+struct Server {
+    child: Child,
+    addr: SocketAddr,
+    // The same helper in every binary test; each reads the fields it needs.
+    #[allow(dead_code)]
+    before_banner: String,
+    /// The listening banner itself, the server's own account of its settings.
+    #[allow(dead_code)]
+    banner: String,
+    _stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
 }
 
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
+impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
-fn memory_server_command(data_dir: &Path, addr: SocketAddr) -> Command {
+fn spawn_listening(mut command: Command) -> Server {
+    use std::io::BufRead;
+    let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut lines = std::io::BufReader::new(stderr).lines();
+    let mut before_banner = String::new();
+    let (addr, banner) = loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("stderr closed before the listening banner: {before_banner}"))
+            .unwrap();
+        if let Some(rest) = line.strip_prefix("memory_server listening on ") {
+            let addr = rest
+                .split(' ')
+                .next()
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap();
+            break (addr, line);
+        }
+        before_banner.push_str(&line);
+        before_banner.push('\n');
+    };
+    Server {
+        child,
+        addr,
+        before_banner,
+        banner,
+        _stderr: lines,
+    }
+}
+
+fn memory_server_command(data_dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_memory_server"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("SERVER_") {
@@ -47,24 +84,11 @@ fn memory_server_command(data_dir: &Path, addr: SocketAddr) -> Command {
         }
     }
     command
-        .arg(addr.to_string())
+        .arg("127.0.0.1:0")
         .env("SERVER_DATA_DIR", data_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     command
-}
-
-fn wait_for_listener(addr: SocketAddr) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("memory_server never started listening on {addr}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// `DDL-FR-002`: the first server claims the directory and the lock
@@ -75,22 +99,13 @@ fn wait_for_listener(addr: SocketAddr) {
 #[test]
 fn a_second_memory_server_on_the_same_data_dir_refuses_to_start_until_the_first_exits() {
     let data_dir = unique_dir("memory_server_data_dir_lock");
-    let first_addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-    let first = ChildGuard(
-        memory_server_command(&data_dir, first_addr)
-            .spawn()
-            .unwrap(),
-    );
-    wait_for_listener(first_addr);
+    let first = spawn_listening(memory_server_command(&data_dir));
     assert!(
         data_dir.join(LOCK_FILE_NAME).is_file(),
         "the running server left no lock file in {data_dir:?}"
     );
 
-    let second_addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-    let second = memory_server_command(&data_dir, second_addr)
-        .output()
-        .unwrap();
+    let second = memory_server_command(&data_dir).output().unwrap();
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(
         !second.status.success(),
@@ -104,19 +119,10 @@ fn a_second_memory_server_on_the_same_data_dir_refuses_to_start_until_the_first_
         !stderr.contains("listening on"),
         "the refused server printed a listening banner before refusing: {stderr}"
     );
-    assert!(
-        TcpStream::connect(second_addr).is_err(),
-        "the refused server is listening on {second_addr}"
-    );
 
     drop(first);
-    let third_addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-    let third = ChildGuard(
-        memory_server_command(&data_dir, third_addr)
-            .spawn()
-            .unwrap(),
-    );
-    wait_for_listener(third_addr);
+    let third = spawn_listening(memory_server_command(&data_dir));
+    assert!(TcpStream::connect(third.addr).is_ok());
     drop(third);
     let _ = std::fs::remove_dir_all(&data_dir);
 }

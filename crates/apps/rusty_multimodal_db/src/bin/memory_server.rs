@@ -543,6 +543,13 @@ fn main() {
     });
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
+    // `RGT-FR-004` (ADR-0123): the banner names the address the kernel
+    // bound, so `:0` is a usable request — a test or a supervisor reads
+    // the port from the banner instead of guessing one first.
+    let addr = listener
+        .local_addr()
+        .map(|bound| bound.to_string())
+        .unwrap_or(addr);
 
     // `SERVER_AUDIT_LOG` (ADR-0029): `stderr`, or a file path appended to;
     // unset → no audit. An unopenable path is a startup error.
@@ -668,7 +675,11 @@ fn main() {
             }
             let listener = TcpListener::bind(&addr)
                 .expect("binding SERVER_METRICS_HTTP_ADDR for the HTTP metrics listener");
-            eprintln!("memory_server metrics HTTP listening on {addr} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
+            let bound = listener
+                .local_addr()
+                .map(|bound| bound.to_string())
+                .unwrap_or_else(|_| addr.clone());
+            eprintln!("memory_server metrics HTTP listening on {bound} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
             options.with_metrics_http(listener)
         }
         _ => options,

@@ -10,7 +10,9 @@ use rusty_multimodal_db::generic::entity::open_entity_production_stack_portable;
 use rusty_multimodal_db::generic::memory::open_memory_production_stack_portable;
 use rusty_multimodal_db::generic::query::AllIds;
 use rusty_multimodal_db::generic::relation::open_relation_production_stack_portable;
-use rusty_multimodal_db::server::client::{ClientError, ConnectOptions, SchemaDrivenClient};
+use rusty_multimodal_db::server::client::{
+    ClientError, ClientTlsConfig, ConnectOptions, SchemaDrivenClient, TrustPolicy,
+};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -118,12 +120,25 @@ pub struct Target {
 
 impl Target {
     /// Plaintext, token only — loopback or a trusted network; for
-    /// anything else set `options.tls` as `SchemaDrivenClient::connect_with`
-    /// documents.
+    /// anything else use [`Self::with_tls`].
     pub fn new(addr: impl Into<String>, token: &str) -> Self {
         Self {
             addr: addr.into(),
             options: ConnectOptions::new().token(token),
+        }
+    }
+
+    /// `RGT-FR-001` (ADR-0123): TLS to `server_name` under the operating
+    /// system's trust anchors (`TrustPolicy::System`, which honours
+    /// `SSL_CERT_FILE`/`SSL_CERT_DIR` first on Linux — the way to trust a
+    /// private CA without shipping a parser here). The token travels
+    /// inside the handshake, so it is safe off the server's host.
+    pub fn with_tls(addr: impl Into<String>, token: &str, server_name: &str) -> Self {
+        Self {
+            addr: addr.into(),
+            options: ConnectOptions::new()
+                .token(token)
+                .tls(ClientTlsConfig::new(server_name, TrustPolicy::System)),
         }
     }
 }
@@ -339,5 +354,32 @@ fn staging(path: &Path, source: io::Error) -> RefreshError {
     RefreshError::Staging {
         path: path.to_path_buf(),
         source,
+    }
+}
+
+/// `RGT-FR-003` (ADR-0123): the CLI's `--every` loop as a library call —
+/// refresh, prune to `keep`, hand the outcome to `report`, sleep `every`,
+/// again; stops when `report` returns `false`. A failed refresh is
+/// reported and the loop goes on: a standby that missed one interval
+/// is still a standby.
+pub fn refresh_loop(
+    target: &Target,
+    root: &Path,
+    domain: Domain,
+    keep: usize,
+    every: std::time::Duration,
+    mut report: impl FnMut(&Result<RefreshReport, RefreshError>, &io::Result<Vec<PathBuf>>) -> bool,
+) {
+    loop {
+        let outcome = refresh(target, root, domain);
+        let pruned = if outcome.is_ok() {
+            prune(root, keep)
+        } else {
+            Ok(Vec::new())
+        };
+        if !report(&outcome, &pruned) {
+            return;
+        }
+        std::thread::sleep(every);
     }
 }

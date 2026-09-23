@@ -6,10 +6,9 @@
 //! version before did (every other subprocess test in this crate is
 //! that case).
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 fn unique_dir(label: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,20 +17,58 @@ fn unique_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{label}_{}_{n}", std::process::id()))
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// `RGT-FR-004` (ADR-0123): a server spawned on port 0, its bound address
+/// read from the listening banner — no port is picked ahead of the bind,
+/// so two tests can never race for one. `before_banner` is every stderr
+/// line the server wrote before it; the pipe stays open for its lifetime.
+struct Server {
+    child: Child,
+    addr: SocketAddr,
+    // The same helper in every binary test; each reads the fields it needs.
+    #[allow(dead_code)]
+    before_banner: String,
+    /// The listening banner itself, the server's own account of its settings.
+    #[allow(dead_code)]
+    banner: String,
+    _stderr: std::io::Lines<std::io::BufReader<std::process::ChildStderr>>,
 }
 
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
+impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_listening(mut command: Command) -> Server {
+    use std::io::BufRead;
+    let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut lines = std::io::BufReader::new(stderr).lines();
+    let mut before_banner = String::new();
+    let (addr, banner) = loop {
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("stderr closed before the listening banner: {before_banner}"))
+            .unwrap();
+        if let Some(rest) = line.strip_prefix("memory_server listening on ") {
+            let addr = rest
+                .split(' ')
+                .next()
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap();
+            break (addr, line);
+        }
+        before_banner.push_str(&line);
+        before_banner.push('\n');
+    };
+    Server {
+        child,
+        addr,
+        before_banner,
+        banner,
+        _stderr: lines,
     }
 }
 
@@ -53,19 +90,6 @@ fn memory_server(bind: &str, env: &[(&str, &str)]) -> Command {
     command
 }
 
-fn wait_for_listener(addr: SocketAddr) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!("memory_server never started listening on {addr}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn refusal(bind: &str, env: &[(&str, &str)]) -> String {
     let output = memory_server(bind, env).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -82,8 +106,7 @@ fn refusal(bind: &str, env: &[(&str, &str)]) -> String {
 
 #[test]
 fn an_exposed_bind_with_nothing_configured_refuses_and_names_the_missing_auth() {
-    let bind = format!("0.0.0.0:{}", free_port());
-    let stderr = refusal(&bind, &[]);
+    let stderr = refusal("0.0.0.0:0", &[]);
     assert!(
         stderr.contains("SERVER_AUTH_READ_WRITE_TOKEN"),
         "the refusal did not name the token variable: {stderr}"
@@ -96,7 +119,7 @@ fn an_exposed_bind_with_nothing_configured_refuses_and_names_the_missing_auth() 
 
 #[test]
 fn an_exposed_bind_with_a_token_but_no_tls_refuses_and_names_tls() {
-    let bind = format!("0.0.0.0:{}", free_port());
+    let bind = "0.0.0.0:0".to_string();
     let stderr = refusal(&bind, &[("SERVER_AUTH_READ_WRITE_TOKEN", "secret")]);
     assert!(
         stderr.contains("SERVER_TLS_CERT_CHAIN_PATH"),
@@ -110,75 +133,56 @@ fn an_exposed_bind_with_a_token_but_no_tls_refuses_and_names_tls() {
 /// turns it into a warning.
 #[test]
 fn an_exposed_metrics_bind_refuses_even_when_the_wire_bind_is_loopback() {
-    let bind = format!("127.0.0.1:{}", free_port());
-    let metrics = format!("0.0.0.0:{}", free_port());
-    let stderr = refusal(&bind, &[("SERVER_METRICS_HTTP_ADDR", &metrics)]);
+    let stderr = refusal("127.0.0.1:0", &[("SERVER_METRICS_HTTP_ADDR", "0.0.0.0:0")]);
     assert!(
         stderr.contains("SERVER_METRICS_HTTP_ADDR"),
         "the refusal did not name the metrics listener: {stderr}"
     );
-    let port = free_port();
-    let bind = format!("127.0.0.1:{port}");
-    let metrics = format!("0.0.0.0:{}", free_port());
-    let mut child = ChildGuard(
-        memory_server(
-            &bind,
-            &[
-                ("SERVER_METRICS_HTTP_ADDR", &metrics),
-                ("SERVER_ALLOW_INSECURE", "1"),
-            ],
-        )
-        .spawn()
-        .unwrap(),
-    );
-    wait_for_listener(format!("127.0.0.1:{port}").parse().unwrap());
+    let server = spawn_listening(memory_server(
+        "127.0.0.1:0",
+        &[
+            ("SERVER_METRICS_HTTP_ADDR", "0.0.0.0:0"),
+            ("SERVER_ALLOW_INSECURE", "1"),
+        ],
+    ));
     // `RGL-FR-004` (ADR-0122): the override's warning names the metrics
     // listener it applies to, not only the wire one.
-    let stderr = stderr_until_listening(&mut child.0);
     assert!(
-        stderr.contains("WARNING: metrics listening on")
-            && stderr.contains("SERVER_ALLOW_INSECURE=1 is set"),
-        "the override did not warn about the metrics listener: {stderr}"
+        server
+            .before_banner
+            .contains("WARNING: metrics listening on")
+            && server
+                .before_banner
+                .contains("SERVER_ALLOW_INSECURE=1 is set"),
+        "the override did not warn about the metrics listener: {}",
+        server.before_banner
     );
-    drop(child);
+    assert!(TcpStream::connect(server.addr).is_ok());
+    drop(server);
 }
 
 #[test]
 fn allow_insecure_turns_the_refusal_into_a_warning_and_the_server_serves() {
-    let port = free_port();
-    let bind = format!("0.0.0.0:{port}");
-    let mut child = ChildGuard(
-        memory_server(&bind, &[("SERVER_ALLOW_INSECURE", "1")])
-            .spawn()
-            .unwrap(),
-    );
-    wait_for_listener(format!("127.0.0.1:{port}").parse().unwrap());
-    let stderr = stderr_until_listening(&mut child.0);
+    let server = spawn_listening(memory_server(
+        "0.0.0.0:0",
+        &[("SERVER_ALLOW_INSECURE", "1")],
+    ));
     assert!(
-        stderr.contains("WARNING: listening on")
-            && stderr.contains("SERVER_ALLOW_INSECURE=1 is set"),
-        "the override did not print its warning before the listening banner: {stderr}"
+        server.before_banner.contains("WARNING: listening on")
+            && server
+                .before_banner
+                .contains("SERVER_ALLOW_INSECURE=1 is set"),
+        "the override did not print its warning before the listening banner: {}",
+        server.before_banner
     );
     assert!(
-        !stderr.contains("refusing to listen on"),
-        "the override still refused: {stderr}"
+        !server.before_banner.contains("refusing to listen on"),
+        "the override still refused: {}",
+        server.before_banner
     );
-    drop(child);
-}
-
-/// Reads the child's stderr line by line until the listening banner, so the
-/// assertion sees exactly what an operator sees before the server serves.
-fn stderr_until_listening(child: &mut Child) -> String {
-    use std::io::BufRead;
-    let stderr = child.stderr.take().expect("stderr is piped");
-    let mut collected = String::new();
-    for line in std::io::BufReader::new(stderr).lines() {
-        let line = line.unwrap();
-        collected.push_str(&line);
-        collected.push('\n');
-        if line.starts_with("memory_server listening on") {
-            return collected;
-        }
-    }
-    panic!("stderr closed before the listening banner: {collected}");
+    assert!(
+        TcpStream::connect(("127.0.0.1", server.addr.port())).is_ok(),
+        "the server serves on the port the banner named"
+    );
+    drop(server);
 }

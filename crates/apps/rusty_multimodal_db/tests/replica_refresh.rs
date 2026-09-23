@@ -8,14 +8,15 @@
 mod replica_refresh;
 
 use replica_refresh::{
-    is_plain_file_name, prune, refresh, snapshots, Domain, RefreshError, Target,
+    is_plain_file_name, prune, refresh, refresh_loop, snapshots, Domain, RefreshError, Target,
 };
 use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::server::client::{ClientTlsConfig, ConnectOptions, TrustPolicy};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
-use rusty_multimodal_db::server::{serve, ServeOptions};
+use rusty_multimodal_db::server::{serve, ServeOptions, TlsConfig};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,6 +50,10 @@ fn memory(n: u128, content: &str) -> Memory {
 }
 
 fn start_server() -> SocketAddr {
+    start_server_with(ServeOptions::default().with_replication_token("repl-secret".to_string()))
+}
+
+fn start_server_with(options: ServeOptions) -> SocketAddr {
     let source = unique_dir("replica_refresh_source");
     std::fs::create_dir_all(&source).unwrap();
     let path = source.join("memories.mmap");
@@ -60,7 +65,6 @@ fn start_server() -> SocketAddr {
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let options = ServeOptions::default().with_replication_token("repl-secret".to_string());
     thread::spawn(move || serve(listener, store, options));
     addr
 }
@@ -154,4 +158,103 @@ fn only_plain_file_names_are_accepted_from_a_snapshot() {
     ] {
         assert!(!is_plain_file_name(bad), "{bad:?}");
     }
+}
+
+/// `RGT-FR-001` (ADR-0123): a refresh over TLS — the token inside the
+/// handshake — installs the same verified directory. The server presents
+/// a throwaway self-signed leaf; the library target here trusts it
+/// without verification, the CLI's `Target::with_tls` builds the same
+/// options with the system trust anchors instead.
+#[test]
+fn a_refresh_over_tls_installs_a_verified_directory() {
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let tls = TlsConfig::new(vec![cert.der().to_vec()], key_pair.serialize_der()).unwrap();
+    let addr = start_server_with(
+        ServeOptions::default()
+            .with_replication_token("repl-secret".to_string())
+            .with_tls(tls),
+    );
+    let root = unique_dir("replica_refresh_tls");
+    let target = Target {
+        addr: addr.to_string(),
+        options: ConnectOptions::new()
+            .token("repl-secret")
+            .tls(ClientTlsConfig::new(
+                "localhost",
+                TrustPolicy::DangerNoVerification,
+            )),
+    };
+    let report = refresh(&target, &root, Domain::Memory).unwrap();
+    assert_eq!(report.records, 2);
+    let with_system_trust = Target::with_tls(addr.to_string(), "repl-secret", "localhost");
+    match refresh(&with_system_trust, &root, Domain::Memory) {
+        Err(RefreshError::Connect(_)) => {}
+        other => panic!("a self-signed leaf is not in the system trust store: {other:?}"),
+    }
+    assert_eq!(
+        snapshots(&root).unwrap().len(),
+        1,
+        "the refused refresh wrote nothing"
+    );
+}
+
+/// `RGT-FR-002` (ADR-0123): a snapshot that fails its verification reopen
+/// is kept under `.failed-`, never under a name `snapshots` lists — here
+/// by asking for the wrong domain, so the fetched memory files have no
+/// `entities.mmap` to reopen.
+#[test]
+fn a_failed_verification_is_kept_aside_and_never_listed() {
+    let addr = start_server();
+    let root = unique_dir("replica_refresh_failed");
+    let target = Target::new(addr.to_string(), "repl-secret");
+    match refresh(&target, &root, Domain::Entity) {
+        Err(RefreshError::Verification { path, .. }) => {
+            assert!(
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".failed-"),
+                "{path:?}"
+            );
+            assert!(path.is_dir(), "kept for inspection: {path:?}");
+        }
+        other => panic!("expected a verification failure, got {other:?}"),
+    }
+    assert!(snapshots(&root).unwrap().is_empty());
+    assert_eq!(
+        prune(&root, 1).unwrap(),
+        Vec::<PathBuf>::new(),
+        "prune leaves .failed- alone"
+    );
+}
+
+/// `RGT-FR-003` (ADR-0123): the `--every` loop refreshes, prunes and
+/// reports each round until told to stop.
+#[test]
+fn the_refresh_loop_refreshes_prunes_and_stops_when_told() {
+    let addr = start_server();
+    let root = unique_dir("replica_refresh_loop");
+    let target = Target::new(addr.to_string(), "repl-secret");
+    let mut rounds = 0;
+    let mut removed_total = 0;
+    refresh_loop(
+        &target,
+        &root,
+        Domain::Memory,
+        1,
+        std::time::Duration::from_millis(1),
+        |outcome, pruned| {
+            assert!(outcome.is_ok(), "{outcome:?}");
+            removed_total += pruned.as_ref().unwrap().len();
+            rounds += 1;
+            rounds < 3
+        },
+    );
+    assert_eq!(rounds, 3);
+    assert_eq!(
+        removed_total, 2,
+        "each round after the first pruned the previous snapshot"
+    );
+    assert_eq!(snapshots(&root).unwrap().len(), 1);
 }
