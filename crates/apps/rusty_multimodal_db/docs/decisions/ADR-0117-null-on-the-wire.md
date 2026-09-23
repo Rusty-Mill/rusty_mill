@@ -28,7 +28,9 @@ column costs a field flag, not a protocol bump and a client round.
   alone on the wire. `PROTOCOL_VERSION` 31. A server never emits it
   today and answers `Malformed` wherever a request carries it and a
   value is read — a write, a predicate, a transaction op, a guard —
-  through `value_matches_kind`, which no kind matches. Equality
+  through `value_matches_kind`, which no kind matches (a read-only or
+  unknown field answers its own code first, as for any wrong-kind
+  value — `ADR-0122` note). Equality
   (`Eq`/`Ne`) compares it as any value; ordering never holds.
 - `NUL-FR-002` — `downgrade_for_version` strips a `Null` pair from
   `Record` and `Rows` (and `RowsClamped` through `Rows`) on a connection

@@ -7,7 +7,9 @@
 #[path = "../examples/support/replica_refresh_lib.rs"]
 mod replica_refresh;
 
-use replica_refresh::{prune, refresh, snapshots, Domain, RefreshError, Target};
+use replica_refresh::{
+    is_plain_file_name, prune, refresh, snapshots, Domain, RefreshError, Target,
+};
 use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
 };
@@ -89,8 +91,18 @@ fn a_refresh_makes_a_verified_directory_the_domain_reopens_and_pruning_keeps_the
         "no staging directory is left behind"
     );
 
+    // `RGM-FR-006` (ADR-0121): an operator's own directory that happens
+    // to be three numbers is neither listed nor pruned.
+    std::fs::create_dir(root.join("2026-09-23")).unwrap();
+    std::fs::create_dir(root.join("1700000000-1-1")).unwrap();
     let second = refresh(&target, &root, Domain::Memory).unwrap();
     assert_ne!(second.directory, first.directory);
+    assert!(second
+        .directory
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("refresh-"));
     assert_eq!(
         snapshots(&root).unwrap(),
         vec![first.directory.clone(), second.directory.clone()],
@@ -104,6 +116,7 @@ fn a_refresh_makes_a_verified_directory_the_domain_reopens_and_pruning_keeps_the
     assert_eq!(prune(&root, 1).unwrap(), vec![first.directory.clone()]);
     assert!(!first.directory.exists());
     assert!(second.directory.exists());
+    assert!(root.join("2026-09-23").exists() && root.join("1700000000-1-1").exists());
 }
 
 #[test]
@@ -119,4 +132,26 @@ fn a_wrong_token_writes_nothing() {
         !root.exists() || std::fs::read_dir(&root).unwrap().next().is_none(),
         "nothing was written under {root:?}"
     );
+}
+
+/// `RGM-FR-008` (ADR-0121): only a single normal path component may be
+/// joined under the staging directory; anything a hostile or spoofed
+/// server could use to escape it is refused before any write.
+#[test]
+fn only_plain_file_names_are_accepted_from_a_snapshot() {
+    for ok in ["memories.mmap", "memories.mmap.records", "a b.c"] {
+        assert!(is_plain_file_name(ok), "{ok}");
+    }
+    for bad in [
+        "",
+        ".",
+        "..",
+        "../memories.mmap",
+        "/etc/passwd",
+        "dir/memories.mmap",
+        "dir\\memories.mmap",
+        "memories.mmap/",
+    ] {
+        assert!(!is_plain_file_name(bad), "{bad:?}");
+    }
 }

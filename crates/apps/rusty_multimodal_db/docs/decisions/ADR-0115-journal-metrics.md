@@ -54,8 +54,9 @@ named "journal size" and "queue depth" as the two metrics still absent.
   the write queue are visible; an alert on `waiting_writers` catches a
   stalled `fsync` before clients time out.
 - Negative / tradeoffs: a render takes each journaled table's group
-  lock briefly, the same lock every commit takes; `len_bytes` on the
-  journal and the group are no longer test-only.
+  lock briefly, the same lock every commit takes; `BatchJournal::len_bytes`
+  is no longer test-only (`CommitGroup::len_bytes` stays a test hook;
+  `stats` is the path).
 - Named, not hidden: `waiting_writers` counts writers parked for their
   turn after their append, not writers blocked on the group's mutex
   before it — the latter has no counter and would need one on the

@@ -114,7 +114,8 @@ not a guess.
   text, gated as a read at the version gate. The audit log
   (`ADR-0029`) and access log (`ADR-0031`) still separately record
   admission/auth/request events to a file. Still absent: request
-  latency histograms, queue depth, journal size, cache/index stats.
+  cache/index stats (latency histograms came with `ADR-0088`, queue
+  depth and journal size with `ADR-0115`, below).
   **Now built**: an opt-in HTTP `/metrics` listener
   (`SERVER-METRICS-HTTP`, `ADR-0069`, `SERVER-001` v0.57.0/FR-069) —
   `SERVER_METRICS_HTTP_ADDR` binds a second, independent

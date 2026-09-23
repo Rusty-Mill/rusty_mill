@@ -24,6 +24,7 @@ WORK="$(mktemp -d /tmp/rmdb-power-loss.XXXXXX)"
 LOOP=""
 LOG_LOOP=""
 DM_NAME="rmdb-log-writes-$$"
+WRITER_PID=""
 MOUNT="$WORK/mnt"
 
 refuse() { echo "power_loss_trial: $*" >&2; exit 2; }
@@ -37,6 +38,7 @@ modprobe dm-log-writes 2>/dev/null || refuse "the dm-log-writes module is not av
 
 cleanup() {
   set +e
+  [ -n "$WRITER_PID" ] && kill -9 "$WRITER_PID" 2>/dev/null
   mountpoint -q "$MOUNT" && umount "$MOUNT"
   [ -n "$DM_NAME" ] && dmsetup info "$DM_NAME" >/dev/null 2>&1 && dmsetup remove "$DM_NAME"
   [ -n "$LOOP" ] && losetup -d "$LOOP"
@@ -65,33 +67,46 @@ mount "$DEV" "$MOUNT"
 dmsetup message "$DM_NAME" 0 mark mkfs
 
 STORE="$MOUNT/trial.mmap"
+MARKS=""
+# Waits for the writer's line; a writer that died first is a failed trial,
+# not a hang.
+wait_line() {
+  until grep -q "^$1\$" "$WORK/writer.out" 2>/dev/null; do
+    kill -0 "$WRITER_PID" 2>/dev/null || refuse "crash_writer exited before printing $1: $(tail -3 "$WORK/writer.out")"
+    sleep 0.02
+  done
+}
 echo "running crash_writer $MODE against $STORE"
 case "$MODE" in
   flushed)
     "$WRITER" flushed-updates "$STORE" "$COUNT" > "$WORK/writer.out" &
     WRITER_PID=$!
-    until grep -q '^FLUSHED$' "$WORK/writer.out"; do sleep 0.05; done
+    wait_line FLUSHED
     dmsetup message "$DM_NAME" 0 mark flushed
+    MARKS="flushed"
     ;;
   unflushed)
     "$WRITER" unflushed-updates "$STORE" "$COUNT" > "$WORK/writer.out" &
     WRITER_PID=$!
-    until grep -q '^ALL_DONE$' "$WORK/writer.out"; do sleep 0.05; done
+    wait_line ALL_DONE
     dmsetup message "$DM_NAME" 0 mark all_done
+    MARKS="all_done"
     ;;
   torn-write)
-    # The harness normally seeds the store; here `unflushed-updates 0`
-    # creates a valid, flushed store to append against.
-    "$WRITER" unflushed-updates "$STORE" 0 > /dev/null &
-    SEED_PID=$!; sleep 1; kill "$SEED_PID" 2>/dev/null || true
-    "$WRITER" torn-write "$STORE" 0 1 42 > "$WORK/writer.out" &
+    # Seed three durable records (create + Flush), then append a fourth
+    # slot and cut after its id and its value, before its commit marker:
+    # the reopen must keep the three and exclude the torn one.
+    "$WRITER" flushed-updates "$STORE" 3 > "$WORK/writer.out" & WRITER_PID=$!
+    wait_line FLUSHED; kill -9 "$WRITER_PID" 2>/dev/null || true; wait "$WRITER_PID" 2>/dev/null || true
+    "$WRITER" torn-write "$STORE" 3 4 42 > "$WORK/writer.out" &
     WRITER_PID=$!
-    until grep -q '^ID_WRITTEN$' "$WORK/writer.out"; do sleep 0.02; done
+    wait_line ID_WRITTEN
     dmsetup message "$DM_NAME" 0 mark id_written
-    until grep -q '^VALUE_WRITTEN$' "$WORK/writer.out"; do sleep 0.02; done
+    wait_line VALUE_WRITTEN
     dmsetup message "$DM_NAME" 0 mark value_written
-    until grep -q '^MARKER_WRITTEN$' "$WORK/writer.out"; do sleep 0.02; done
+    wait_line MARKER_WRITTEN
     dmsetup message "$DM_NAME" 0 mark marker_written
+    MARKS="id_written value_written marker_written"
     ;;
   *) refuse "unknown mode $MODE (flushed|torn-write|unflushed)";;
 esac
@@ -102,10 +117,18 @@ umount "$MOUNT"
 dmsetup remove "$DM_NAME"; DM_NAME=""
 
 echo "replaying to each mark and reopening"
+# `RGF-FR-002` (ADR-0120): replay-log has no mode that lists marks, so
+# the marks are the ones this script set above (MARKS), and the data
+# device is zeroed before every replay — replay-log writes the log's
+# bios over whatever the device holds, and blocks written after a mark
+# (the journal tail sync/umount left) would otherwise survive into the
+# "earlier" state.
 STATUS=0
-for MARK in $(replay-log --log "$LOG_LOOP" --list 2>/dev/null | awk '/mark/ {print $NF}' | grep -v '^mkfs$'); do
+for MARK in $MARKS; do
+  dd if=/dev/zero of="$LOOP" bs=4M status=none || true
   replay-log --log "$LOG_LOOP" --replay "$LOOP" --end-mark "$MARK" >/dev/null
-  mount -o ro "$LOOP" "$MOUNT"
+  # Mounted read-write: ext4 must replay its own journal, as after a cut.
+  mount "$LOOP" "$MOUNT"
   if "$WRITER" reopen-check "$STORE" > "$WORK/check-$MARK.out" 2>&1; then
     echo "mark $MARK: $(tail -1 "$WORK/check-$MARK.out")"
   else

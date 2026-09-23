@@ -61,7 +61,12 @@ mkdir -p "$MOUNT" "$SNAP_MOUNT"
 mount "$LOOP" "$MOUNT"
 STORE="$MOUNT/trial.mmap"
 
-wait_line() { until grep -q "^$1\$" "$WORK/writer.out" 2>/dev/null; do sleep 0.02; done; }
+wait_line() {
+  until grep -q "^$1\$" "$WORK/writer.out" 2>/dev/null; do
+    kill -0 "$WRITER_PID" 2>/dev/null || refuse "crash_writer exited before printing $1: $(tail -3 "$WORK/writer.out")"
+    sleep 0.02
+  done
+}
 snapshot() {
   # The crash instant: kill, then copy the device before writeback runs.
   kill -9 "$WRITER_PID" 2>/dev/null || true
@@ -81,8 +86,8 @@ case "$MODE" in
     # Seed three durable records (create + Flush), then append a fourth
     # slot and cut after its value, before its commit marker: the reopen
     # must keep the three and exclude the torn one.
-    "$WRITER" flushed-updates "$STORE" 3 > "$WORK/writer.out" & SEED=$!
-    wait_line FLUSHED; kill -9 "$SEED" 2>/dev/null || true; wait "$SEED" 2>/dev/null || true
+    "$WRITER" flushed-updates "$STORE" 3 > "$WORK/writer.out" & WRITER_PID=$!
+    wait_line FLUSHED; kill -9 "$WRITER_PID" 2>/dev/null || true; wait "$WRITER_PID" 2>/dev/null || true
     "$WRITER" torn-write "$STORE" 3 4 42 > "$WORK/writer.out" & WRITER_PID=$!
     wait_line VALUE_WRITTEN; snapshot value_written; MARKS="value_written" ;;
   *) refuse "unknown mode $MODE (flushed|torn-write|unflushed)" ;;

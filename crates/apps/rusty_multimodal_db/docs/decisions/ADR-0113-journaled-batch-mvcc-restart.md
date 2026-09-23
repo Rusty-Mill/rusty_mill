@@ -50,7 +50,10 @@ history.
   inactive index needs nothing: its first `Begin` seeds the baseline
   from the live store, which already holds the replay. The fold is
   ordered after the insert-log fold because the journal's entries are
-  younger than any pending insert. Proven by journaling a batch on an
+  younger than any pending insert (*not in general — `ADR-0122` note: a
+  non-journaled write to the same key after a journaled batch is
+  re-applied by the replay and re-folded on top, so store and index
+  agree on the older value; `ADR-0025`'s replay semantics, pre-existing*). Proven by journaling a batch on an
   active index, dropping without a checkpoint, and reopening through
   the portable open, `with_journal`, and `with_mvcc`: a fresh snapshot
   reads the batch. Removing the fold fails the test.

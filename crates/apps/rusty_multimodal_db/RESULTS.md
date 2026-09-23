@@ -1909,8 +1909,12 @@ Read: for one writer on a small table the journal path costs more — the entry'
 
 ## Power loss — the crash-prefix trial (`ADR-0119`, 2026-09-23, the owner's "Power")
 
-The first durability result in this file that does not consult the page
-cache. Run here, in the session's Firecracker guest (kernel
+The first durability result in this file that checks the bytes that
+reached the block device rather than the page cache a killed process
+leaves behind. (Background writeback or a journal commit landing before
+the copy can add to what the device holds, never subtract from it, so
+the `unflushed` result is a lower bound on loss and the `flushed` one
+proves `Flush` reached the device — `ADR-0122` note.) Run here, in the session's Firecracker guest (kernel
 6.18.44-fc, root, loop devices; **no device-mapper** — `CONFIG_BLK_DEV_DM`
 absent, so `scripts/power_loss_trial.sh`'s `dm-log-writes` replay could
 not run), with `scripts/power_loss_trial_loop.sh`: ext4 on a loop device

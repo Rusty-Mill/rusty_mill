@@ -489,6 +489,10 @@ struct GroupState {
     /// unparked individually when its turn comes, so releasing a turn
     /// wakes exactly one thread rather than every waiter.
     turn_waiters: BTreeMap<u64, Thread>,
+    /// `RGM-FR-001` (ADR-0121): followers parked on the `durable`
+    /// condvar while a leader's `sync_data` runs — queued writers too,
+    /// and the ones a stalled `fsync` piles up.
+    waiting_durable: usize,
 }
 
 /// The group-commit discipline behind a journaled adapter (`SERVER-001`
@@ -560,6 +564,7 @@ impl CommitGroup {
                     syncing: false,
                     next_apply: 1,
                     turn_waiters: BTreeMap::new(),
+                    waiting_durable: 0,
                 }),
                 durable: Condvar::new(),
                 #[cfg(test)]
@@ -652,7 +657,10 @@ impl CommitGroup {
                 break Ok(());
             }
             if state.syncing {
-                state = self.durable.wait(state).map_err(|_| poisoned())?;
+                state.waiting_durable += 1;
+                let mut woken = self.durable.wait(state).map_err(|_| poisoned())?;
+                woken.waiting_durable -= 1;
+                state = woken;
                 continue;
             }
             state.syncing = true;
@@ -739,7 +747,8 @@ impl CommitGroup {
     /// on a journaled table, read under the group's own lock in one go
     /// so they describe one instant: the file's size, the entries the
     /// next checkpoint will drop, and the writers parked for their turn
-    /// (`GRP-FR-003`) — the group's queue depth. A poisoned lock reads
+    /// (`GRP-FR-003`) plus the followers parked for a leader's `fsync`
+    /// (`RGM-FR-001`) — the group's queue depth. A poisoned lock reads
     /// as zeros: a scrape must never fail on a journal that has.
     pub fn stats(&self) -> JournalStats {
         self.state
@@ -747,7 +756,7 @@ impl CommitGroup {
             .map(|s| JournalStats {
                 bytes: s.journal.len_bytes(),
                 entries_since_checkpoint: s.since_checkpoint,
-                waiting_writers: s.turn_waiters.len() as u64,
+                waiting_writers: (s.turn_waiters.len() + s.waiting_durable) as u64,
             })
             .unwrap_or_default()
     }

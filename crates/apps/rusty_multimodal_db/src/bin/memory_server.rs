@@ -159,6 +159,14 @@
 //! refuses to start and says which is missing. `SERVER_ALLOW_INSECURE=1`
 //! turns that refusal into a warning for an operator who means it. A
 //! loopback bind needs nothing, as every version before.
+//!
+//! # Metrics scrape — `SERVER_METRICS_HTTP_ADDR` (ADR-0069, ADR-0111)
+//!
+//! Set to `host:port` to bind a second listener answering a plain
+//! `GET /metrics` with the same Prometheus text `Request::Metrics`
+//! carries; unset, no listener. It has no authentication of its own, so
+//! a non-loopback address is refused at startup (`RVM-FR-004`) unless
+//! `SERVER_ALLOW_INSECURE=1`, which turns the refusal into a warning.
 
 use rusty_multimodal_db::generic::entity::{
     create_entity_production_stack, open_or_create_entity_production_stack, Entity,
@@ -412,7 +420,10 @@ fn main() {
         let adapter = match relation_store {
             TableOpen::ReopenWithMvcc => RelationConnectionStore::open_with_mvcc(&relations_path)
                 .unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: reopening {relations_path:?} for relation: {e}")
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("relation", &relations_path, &e)
+                    )
                 }),
             TableOpen::Opened(relation_store) => {
                 let adapter =
@@ -444,7 +455,10 @@ fn main() {
         let adapter = match entity_store {
             TableOpen::ReopenWithMvcc => EntityConnectionStore::open_with_mvcc(&entities_path)
                 .unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: reopening {entities_path:?} for entity: {e}")
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("entity", &entities_path, &e)
+                    )
                 }),
             TableOpen::Opened(entity_store) => {
                 let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
@@ -483,13 +497,16 @@ fn main() {
                     MemoryConnectionStore::open_with_mvcc_journaled(&memories_path, journal_path)
                         .unwrap_or_else(|e| {
                             panic!(
-                                "SERVER_MVCC_ISOLATION with SERVER_TXN_JOURNAL_PATH: reopening \
-                                 {memories_path:?} for memory: {e}"
+                                "SERVER_MVCC_ISOLATION with SERVER_TXN_JOURNAL_PATH: {}",
+                                open_error("memory", &memories_path, &e)
                             )
                         })
                 }
                 None => MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: reopening {memories_path:?} for memory: {e}")
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("memory", &memories_path, &e)
+                    )
                 }),
             },
             TableOpen::Opened(store) => {
@@ -631,8 +648,10 @@ fn main() {
     };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
+    // `RGL-FR-005` (ADR-0122): exported but empty is unset, as for every
+    // other variable (`RVL-FR-005`).
     let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {
-        Ok(addr) => {
+        Ok(addr) if !addr.is_empty() => {
             // `RVM-FR-004` (ADR-0111): the same rule as the wire listener,
             // stricter — this one has no auth or TLS to configure.
             if let Err(exposure) = check_metrics_exposure(&addr) {
@@ -652,7 +671,7 @@ fn main() {
             eprintln!("memory_server metrics HTTP listening on {addr} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
             options.with_metrics_http(listener)
         }
-        Err(_) => options,
+        _ => options,
     };
     eprintln!(
         "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {}, MVCC reclaim every: {:?}, journaled updates: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
@@ -741,11 +760,19 @@ fn open_error(table: &str, path: &Path, error: &dyn std::fmt::Display) -> String
              serves (ADR-0056). It is refused, never mis-read and never recreated.",
         );
         if table == "memory" {
+            // `RGF-FR-003` (ADR-0120): the tool takes the two *slot file*
+            // paths and copies only this table, so the remedy names the
+            // directory `SERVER_DATA_DIR` must point at and the two
+            // sibling tables the operator carries over unchanged.
             message.push_str(
-                "\nRemedy: migrate it into a fresh directory with\n  cargo run -p \
-                 rusty_multimodal_db --example migrate_memory_v1_to_v2 -- <old_path> <new_path>\n\
-                 (ADR-0066, STORAGE-019) and point SERVER_DATA_DIR at <new_path>; or re-push \
-                 the table from the consumer, the source of truth.",
+                "\nRemedy: migrate it into a fresh directory <new_dir>:\n  cargo run -p \
+                 rusty_multimodal_db --example migrate_memory_v1_to_v2 -- \
+                 <old_dir>/memories.mmap <new_dir>/memories.mmap\n(ADR-0066, STORAGE-019; \
+                 <new_dir>/memories.mmap must not exist yet). The tool migrates the memory \
+                 table only: copy every entities.mmap* and relations.mmap* file from <old_dir> \
+                 into <new_dir> unchanged (their layouts have not changed), then set \
+                 SERVER_DATA_DIR=<new_dir>. Or re-push the table from the consumer, the source \
+                 of truth.",
             );
         } else {
             message.push_str(

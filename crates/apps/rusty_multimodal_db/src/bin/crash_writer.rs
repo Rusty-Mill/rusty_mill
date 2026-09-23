@@ -202,7 +202,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("reopen-check") => {
-            let path = args.get(2).expect("path arg");
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: crash_writer reopen-check <path>");
+                std::process::exit(1);
+            };
             run_reopen_check(path);
         }
         Some("unflushed-updates") => {

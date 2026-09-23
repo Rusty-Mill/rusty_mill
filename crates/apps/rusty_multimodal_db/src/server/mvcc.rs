@@ -456,6 +456,10 @@ impl MvccState {
             }
         }
         index.last_committed = index.last_committed.max(persisted.last_committed);
+        // `RGL-FR-001` (ADR-0122): what was folded from disk is not a live
+        // append; it must not count toward the automatic reclaim
+        // (`RVL-FR-002`).
+        index.reset_append_count();
         Ok(Reconstructed {
             state: MvccState {
                 active: AtomicBool::new(true),
@@ -563,7 +567,13 @@ impl MvccState {
     /// held across I/O (`ADR-0072`'s "in-memory decision, not a
     /// durability step").
     pub fn with_index<T>(&self, f: impl FnOnce(&mut MvccIndex) -> T) -> T {
-        let mut index = self.index.lock().unwrap();
+        // `RGL-FR-002` (ADR-0122): a poisoned index is recovered, not
+        // re-panicked — a scrape or a fold must not die for a panic in an
+        // earlier closure; the index's own invariants are per key.
+        let mut index = self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let out = f(&mut index);
         // `ART-FR-002` (ADR-0105): the automatic trigger — under the
         // same lock, right after the call that may have appended, at
@@ -583,7 +593,13 @@ impl MvccState {
     /// after — for a baseline seeding or a log replay, which are not
     /// live writes and must not fire or count toward a reclaim.
     pub fn with_index_quiet<T>(&self, f: impl FnOnce(&mut MvccIndex) -> T) -> T {
-        let mut index = self.index.lock().unwrap();
+        // `RGL-FR-002` (ADR-0122): a poisoned index is recovered, not
+        // re-panicked — a scrape or a fold must not die for a panic in an
+        // earlier closure; the index's own invariants are per key.
+        let mut index = self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let out = f(&mut index);
         index.reset_append_count();
         out

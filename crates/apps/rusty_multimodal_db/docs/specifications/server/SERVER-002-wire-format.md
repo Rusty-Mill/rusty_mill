@@ -1,6 +1,7 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.20.0 (protocol version 31 — `SERVER-001` v0.96.0,
+- Version: 0.20.1 (protocol version 31, unchanged — `SERVER-001` v0.99.0,
+  `RGM-FR-004`, `ADR-0121`: the `Null` strip below 31 covers `JoinedRows` too; 0.20.0 was `SERVER-001` v0.96.0,
   `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
   `BTL-FR-001`, `ADR-0104`: `Busy` under TLS too; 0.19.0 was `SERVER-001` v0.84.0,
@@ -103,8 +104,9 @@ are no type tags, field names, alignment, or varints.
 Two worked examples a client must reproduce exactly (both are in §9's
 fixture and are asserted by the reference client's tests):
 
-- `Request::Hello { protocol_version: 30 }`, framed:
-  `08 00 00 00` · `0a 00 00 00` (variant 10) · `1e 00 00 00` (30).
+- `Request::Hello { protocol_version: 2 }`, framed:
+  `08 00 00 00` · `0a 00 00 00` (variant 10) · `02 00 00 00` (2) — the
+  fixture's own `Request/Hello`; a current client sends 31 (`1f 00 00 00`).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
@@ -663,9 +665,9 @@ Each item names the `SERVER-001` requirement that owns it.
    negotiation. (`FR-096`, `FR-097`)
 28. **`Null`** (31) — `ScanValue::Null` (§5.3, index 6) is the absence
    of a value. On a connection negotiated at 31 or above a server may
-   send it inside a `Record` or `Rows` field pair for a nullable field;
-   below 31 the pair is dropped from the answer, as a `StrList` pair is
-   below 11 (rule 3). No shipped table has a nullable field yet, so no
+   send it inside a `Record`, `Rows` or `JoinedRows` field pair for a
+   nullable field; below 31 the pair is dropped from the answer, as a
+   `StrList` pair is below 11 (rule 3). No shipped table has a nullable field yet, so no
    server sends it today; a request carrying `Null` where a value is
    read — an `Insert`/`Replace`/`ReplaceIf`/`WriteBatch` field, a
    predicate, a `Transaction` op, an `UpdateField`, a guard — is
@@ -744,8 +746,9 @@ Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
    request it could not send is `Err { Malformed }` (sessions below 3,
    `Join`/`DescribeRelations` below 12, `Insert` below 13, `Link` below 14, `Replace` below 15, `Use`/`ListTables` below 16, `Delete` below 17, `Compact` below 18, `ReplaceIf` below 19, `Page` below 20, `CountEdges` below 21, `WriteBatch` below 22, `Backup` below 24, `FetchSnapshot` below 25, `FilteredPage` below 26, `PageDesc`/`FilteredPageDesc` below 28); an error code introduced later
    is reported as `Unsupported`; a `RowsClamped` below 30 is sent as
-   `Rows`; and — the one *content* rewrite — a
-   `StrList` field is removed from `Record`/`Rows`/`Schema` below 11,
+   `Rows`; and — the *content* rewrites — a
+   `StrList` field is removed from `Record`/`Rows`/`Schema` below 11, a
+   `Null` field pair from `Record`/`Rows`/`JoinedRows` below 31 (item 28),
    so an older client sees exactly the record shape it knew. `Busy`
    is the one exception to the rule's premise: it is written before a
    version is negotiated, so it cannot be gated on one (§6.3).
@@ -781,6 +784,10 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.20.1 (`SERVER-001` v0.99.0, `ADR-0121`, `RGM-FR-004`): no wire
+  change — the `Null` strip below 31 also covers both field lists of a
+  `JoinedRows` row; §7 item 28. A client below 31 must not send `Null`
+  (rule 4); both reference clients now refuse it locally.
 - 0.20.0 (`SERVER-001` v0.96.0, `ADR-0117`, `NUL-FR-001`/`002`): protocol
   version 31 — `ScanValue::Null` (6), the absence of a value; stripped
   from `Record`/`Rows` below 31; `Malformed` wherever a request carries
