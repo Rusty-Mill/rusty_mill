@@ -157,7 +157,16 @@ review owed.
   refusal thread per refused TLS socket under a 2 s timeout, at most
   sixteen alive, past which the silent close.*
 - **A retry-after hint** — a `Busy { after_ms }` variant would be a
-  protocol round of its own.
+  protocol round of its own. *Declined (2026-09-23, the owner's
+  "Decline"): the server has no honest number to put in it. A slot
+  frees when an active connection ends, which nothing bounds; the
+  idle timeout is a ceiling on a stalled connection, not an estimate,
+  and a client backing off for it would wait minutes on a server
+  that frees a slot in milliseconds; a configured constant is one the
+  client can hold itself. Building it would also have meant the
+  refusal thread reading the client's `Hello` before choosing the
+  frame, since a new variant cannot be gated on a version the server
+  has not yet read. Reopen only with a real estimate to carry.*
 
 ## Change history
 
