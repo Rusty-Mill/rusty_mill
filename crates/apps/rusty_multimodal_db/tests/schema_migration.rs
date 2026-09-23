@@ -196,3 +196,57 @@ fn migrate_refuses_a_store_already_tagged_at_the_current_schema() {
 
     let _ = std::fs::remove_dir_all(current_path.parent().unwrap());
 }
+
+/// `SCE-FR-001` (ADR-0116): `memory_server` pointed at a directory
+/// written at the pre-`ADR-0056` layout refuses to start — the distinct
+/// schema-tag refusal, never a mis-read and never a recreate — and its
+/// startup error names the remedy: the migration tool, or a re-push.
+#[cfg(feature = "server")]
+#[test]
+fn memory_server_refuses_an_old_layout_and_names_the_migration_tool() {
+    use std::process::{Command, Stdio};
+
+    let dir = unique_dir("schema_migration_server_refusal");
+    std::fs::create_dir_all(&dir).unwrap();
+    create_memory_v1_fixture(
+        vec![memory_v1(1, "general", false)],
+        &[],
+        &dir.join("memories.mmap"),
+    )
+    .unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_memory_server"));
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("SERVER_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .arg("127.0.0.1:0")
+        .env("SERVER_DATA_DIR", &dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "memory_server started on an old-layout directory; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("schema tag mismatch"),
+        "the refusal is the distinct schema-tag one: {stderr}"
+    );
+    assert!(
+        stderr.contains("migrate_memory_v1_to_v2") && stderr.contains("ADR-0066"),
+        "the refusal names the migration tool: {stderr}"
+    );
+    assert!(
+        !stderr.contains("listening on"),
+        "refused before listening: {stderr}"
+    );
+    assert!(
+        std::fs::metadata(dir.join("memories.mmap")).is_ok(),
+        "the old directory is untouched"
+    );
+}
