@@ -377,9 +377,28 @@ jobs:
       # for having nothing to test). `warn` still logs it -- so a crate that
       # silently loses all its tests some other way isn't swept under the
       # rug -- without failing a PR whose whole point is scaffolding.
+      # `--no-fail-fast`: nextest stops the whole shard at its first failure
+      # by default, so a full-workspace run showed exactly one failing test
+      # per shard and hid the rest behind it -- three runs, three rounds of
+      # "fix one, find the next". Running every test costs nothing extra on a
+      # shard that was going to build everything anyway, and the summary then
+      # names every failure at once.
+      #
+      # Windows, full-workspace runs specifically: cargo prepends the target
+      # `deps` dir and every build script's link-search `out` dir to `PATH`
+      # for each test binary. With `--all-features` across the whole
+      # workspace that is dozens of long `target\debug\build\...\out` entries
+      # ahead of the system's own, and `cmd.exe` reads at most 8,191
+      # characters of a variable -- so `C:\Windows\System32` falls off the
+      # end and any test that shells out through `cmd /C` to an external
+      # program (`ping`, `sort`, `git`) fails "not recognized", while the same
+      # test passes when its crate runs alone. The affected tests now hand
+      # `cmd` a `PATH` without the `target\` entries (see
+      # `rusty_tokio/tests/process_windows.rs`); a new test that shells out
+      # on Windows must do the same.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
 
       # Runs once per OS, not once per shard -- it's cheap and not worth
       # partitioning, and nextest's own partitioning above doesn't cover a
@@ -537,6 +556,84 @@ jobs:
   # `alloc`-only (no hardware/platform-specific code), so the host triple
   # is sufficient -- no `--target` cross-compile is needed the way
   # rusty_win32's check above needs one.
+  # rusty_multimodal_db's library and test targets are built by every
+  # other job with --all-features only, which is not what a deployment
+  # builds: `memory_server` is `--features server`, a client is
+  # `--features client`, and the default build has neither. Two of those
+  # broke (a `research`-gated import used by both, a module ungated behind
+  # `client`) and stayed broken across several merged PRs before a local
+  # `cargo check --features server` found them (ADR-0098). This job lints
+  # the crate's shipped feature sets, all targets, so the gap stays closed
+  # -- clippy rather than check since ADR-0100, because `--all-features`
+  # alone lets dead code hide behind `research`-gated callers (the crate's
+  # standalone workflow's own reason for per-feature clippy). The same
+  # job carries the rest of that standalone workflow, which the monorepo
+  # never ran: the client-only test run (a consumer compiles no server),
+  # the Python reference client's offline wire-vector conformance test,
+  # and `cargo doc`. The MSRV check is its own job below (other toolchain).
+  multimodal-db-feature-sets:
+    name: rusty_multimodal_db feature sets (default, client, server, research)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: multimodal-db-feature-sets
+      - name: cargo clippy -p rusty_multimodal_db (default features)
+        run: cargo clippy -p rusty_multimodal_db --all-targets -- -D warnings
+      - name: cargo clippy -p rusty_multimodal_db --features client
+        run: cargo clippy -p rusty_multimodal_db --features client --all-targets -- -D warnings
+      - name: cargo clippy -p rusty_multimodal_db --features server
+        run: cargo clippy -p rusty_multimodal_db --features server --all-targets -- -D warnings
+      - name: cargo clippy -p rusty_multimodal_db --features research
+        run: cargo clippy -p rusty_multimodal_db --features research --all-targets -- -D warnings
+      # `server,research` is the crate's own documented test command and is not the
+      # union `--all-features` builds (ADR-0098 listed five sets; ADR-0112 adds the fifth).
+      - name: cargo clippy -p rusty_multimodal_db --features server,research
+        run: cargo clippy -p rusty_multimodal_db --features server,research --all-targets -- -D warnings
+      # `ECO-FR-003` (ADR-0043): the client-only feature set tests with no server compiled.
+      - name: cargo test -p rusty_multimodal_db --features client
+        run: cargo test -p rusty_multimodal_db --features client
+      # `ECO-FR-008` (ADR-0043): every line of the crate's wire-vector fixture decodes and
+      # re-encodes byte-for-byte through the stdlib-only Python client. `python3` is part of
+      # `ubuntu-latest`; the live half runs inside `cargo test --all-features` above.
+      - name: python reference client (offline conformance vectors)
+        run: python3 -m unittest discover -s crates/apps/rusty_multimodal_db/clients/python/tests -v
+      # Warnings denied since ADR-0101: the 82 rustdoc warnings ADR-0100 found
+      # (unresolved intra-doc links, public docs linking private items) are
+      # fixed, and this step keeps them at zero.
+      - name: cargo doc -p rusty_multimodal_db --all-features --no-deps
+        run: cargo doc -p rusty_multimodal_db --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # `Cargo.toml`'s `rust-version` is only a promise if something builds at
+  # it (ADR-0100, from the crate's standalone workflow). Keep the version
+  # below equal to `rust-version` in crates/apps/rusty_multimodal_db/Cargo.toml.
+  # `--all-features` pulls DuckDB's amalgamation, so a cold run is long; the
+  # cache is keyed on the rustc version, so this job warms its own.
+  multimodal-db-msrv:
+    # The pin lives in the toolchain step below (keep it equal to `rust-version`
+    # in the crate's Cargo.toml); the check's name carries no literal so a pin
+    # bump does not rename a check a branch protection might require.
+    name: rusty_multimodal_db msrv (rust-version)
+    needs: plan
+    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: multimodal-db-msrv
+      - name: cargo check on the declared rust-version
+        run: cargo check -p rusty_multimodal_db --all-features --all-targets
+
   rusty-config-no-std-check:
     name: rusty_config no_std (--no-default-features)
     needs: plan

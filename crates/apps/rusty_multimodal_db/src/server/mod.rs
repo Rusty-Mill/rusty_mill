@@ -9,13 +9,13 @@
 //!
 //! # This is a thin translation layer, not a new storage engine
 //!
-//! [`dispatch`] and [`serve`] never touch a record's bytes directly —
+//! [`crate::server::dispatch`] and [`crate::server::serve`] never touch a record's bytes directly —
 //! every operation goes through the existing, already-validated
-//! [`ConnectionStore`] adapter around a real store type
-//! ([`dog::DogConnectionStore`] wraps [`crate::production::ProductionStore`];
+//! [`crate::server::ConnectionStore`] adapter around a real store type
+//! ([`crate::server::dog::DogConnectionStore`] wraps [`crate::production::ProductionStore`];
 //! `reminder::ReminderConnectionStore`, `entity::EntityConnectionStore`,
 //! `memory::MemoryConnectionStore`, and the `research`-gated
-//! [`order::OrderConnectionStore`]/[`employee::EmployeeConnectionStore`] wrap
+//! [`crate::server::order::OrderConnectionStore`]/[`crate::server::employee::EmployeeConnectionStore`] wrap
 //! [`crate::generic::production::GenericProductionStore`]). Concurrency
 //! across client connections adds no new lock: it collapses onto whatever
 //! `RwLock` the wrapped store already manages internally, per
@@ -49,9 +49,9 @@
 //! # Authentication/authorization (`ServeOptions`), ADR-0012
 //!
 //! `docs/design/SERVER-AUTH-DESIGN.md` closes the "no authentication, no
-//! authorization" gap ADR-0010 originally left open: [`serve`] takes an
-//! [`ServeOptions`] naming which token(s) (if any) a server instance
-//! accepts and the [`TokenClass`] (`ReadOnly`/`ReadWrite`) each grants.
+//! authorization" gap ADR-0010 originally left open: [`crate::server::serve`] takes an
+//! [`crate::server::ServeOptions`] naming which token(s) (if any) a server instance
+//! accepts and the [`crate::server::TokenClass`] (`ReadOnly`/`ReadWrite`) each grants.
 //! `Request::Authenticate` establishes a connection's class; every other
 //! request kind is rejected with `ErrorCode::Unauthenticated` until it
 //! does, and `ReadOnly` is further rejected from `Request::UpdateField`/
@@ -81,7 +81,7 @@
 //! session (`SERVER-001` FR-024, ADR-0024) that stages writes
 //! per connection and commits them as one batch, holding no lock across
 //! round trips; and an opt-in redo journal (`SERVER-001` FR-025,
-//! ADR-0025, [`journal`]) that an adapter built with `with_journal`
+//! ADR-0025, [`crate::server::journal`]) that an adapter built with `with_journal`
 //! appends and `fsync`s before a batch's first write — since `SERVER-001`
 //! FR-027 (ADR-0026) as a leader/follower group commit that runs outside
 //! the store's exclusive section and applies in journal order — and replays on the
@@ -89,7 +89,7 @@
 //!
 //! # A real, schema-driven client
 //!
-//! [`client::SchemaDrivenClient`] is the client half of ADR-0011's schema
+//! [`crate::server::client::SchemaDrivenClient`] is the client half of ADR-0011's schema
 //! discovery: a real, reusable client that never imports a domain's own
 //! `FIELD_*` constants, driving every request purely from what
 //! `Request::DescribeSchema` reports at connect time. Unconditional under
@@ -99,8 +99,8 @@
 //! # Native transport encryption (`TlsConfig`), ADR-0014
 //!
 //! `docs/design/SERVER-TLS-DESIGN.md` closes the transport-encryption half
-//! of ADR-0010's gap that ADR-0012 explicitly left open: [`serve`] takes
-//! an optional [`TlsConfig`] (`None` reproduces today's plaintext behavior
+//! of ADR-0010's gap that ADR-0012 explicitly left open: [`crate::server::serve`] takes
+//! an optional [`crate::server::TlsConfig`] (`None` reproduces today's plaintext behavior
 //! exactly, `TLS-FR-008`). When configured, every accepted connection
 //! performs a TLS server handshake — via
 //! [`rusty_tls::TlsAcceptor`](https://github.com/Rusty-Mill/rusty_mill/tree/main/crates/rusty_tls),
@@ -111,7 +111,7 @@
 //! remain completely unaware transport encryption exists, and
 //! `src/server/framing.rs` needed zero changes, since its functions were
 //! already generic over `Read`/`Write`. Explicitly not mTLS — client
-//! identity remains exactly [`ServeOptions`]'s existing shared-secret token
+//! identity remains exactly [`crate::server::ServeOptions`]'s existing shared-secret token
 //! scheme, now traveling encrypted rather than plaintext.
 //!
 //! # Protocol version (`Hello`), ADR-0022
@@ -155,6 +155,7 @@ pub mod access;
 #[cfg(feature = "server")]
 pub mod audit;
 pub mod client;
+pub mod data_lock;
 #[cfg(feature = "server")]
 pub mod dog;
 #[cfg(all(feature = "server", feature = "research"))]
@@ -164,6 +165,8 @@ pub mod employee;
 /// front-door precedent, not `order`/`employee`'s.
 #[cfg(feature = "server")]
 pub mod entity;
+#[cfg(feature = "server")]
+pub mod exposure;
 pub mod framing;
 #[cfg(feature = "server")]
 pub mod journal;
@@ -171,9 +174,9 @@ pub mod journal;
 /// the `Reminder`/`Entity` precedent: real, deployable capability.
 #[cfg(feature = "server")]
 pub mod memory;
-/// Process-wide observability counters (`ADR-0064`): [`metrics::ServerMetrics`]
-/// lives on [`ServeOptions`] and is rendered as Prometheus text by
-/// [`Request::Metrics`].
+/// Process-wide observability counters (`ADR-0064`): [`crate::server::metrics::ServerMetrics`]
+/// lives on [`crate::server::ServeOptions`] and is rendered as Prometheus text by
+/// [`crate::server::protocol::Request::Metrics`].
 #[cfg(feature = "server")]
 pub mod metrics;
 #[cfg(feature = "server")]
@@ -195,8 +198,8 @@ pub mod relation;
 pub mod reminder;
 mod sql;
 
-/// The server body — [`ConnectionStore`], [`dispatch`], [`serve`],
-/// [`ServeOptions`], [`TlsConfig`], and every evaluator — behind the
+/// The server body — [`crate::server::ConnectionStore`], [`crate::server::dispatch`], [`crate::server::serve`],
+/// [`crate::server::ServeOptions`], [`crate::server::TlsConfig`], and every evaluator — behind the
 /// `server` feature and re-exported here unchanged, so
 /// `crate::server::ServeOptions` and friends are the same paths they were
 /// before `ECO-FR-001` (ADR-0043) split the client half out. Under
@@ -209,7 +212,7 @@ pub use serve::*;
 
 use std::io;
 
-/// Everything that can go wrong building a [`TlsConfig`].
+/// Everything that can go wrong building a [`crate::server::TlsConfig`].
 #[derive(Debug)]
 pub enum TlsConfigError {
     /// Reading a certificate/key file failed (missing file, permission

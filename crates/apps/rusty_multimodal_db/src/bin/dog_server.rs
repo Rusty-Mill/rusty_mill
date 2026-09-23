@@ -31,11 +31,20 @@
 //! localhost/development network unless both auth and TLS are configured
 //! — see ADR-0010's Consequences. Usage: `dog_server [host:port]`
 //! (defaults to `127.0.0.1:7878`).
+//!
+//! # Exposure — a non-loopback bind needs auth and TLS (ADR-0094)
+//!
+//! Binding anything but a loopback address (`127.0.0.1`, `[::1]`) with
+//! no authentication configured, or with authentication but no TLS,
+//! refuses to start and says which is missing. `SERVER_ALLOW_INSECURE=1`
+//! turns that refusal into a warning for an operator who means it. A
+//! loopback bind needs nothing, as every version before.
 
 use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
+use rusty_multimodal_db::server::exposure::{allow_insecure_from_env, check_exposure};
 use rusty_multimodal_db::server::{serve, RateLimit, ServeOptions, TlsConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::TcpListener;
@@ -131,6 +140,21 @@ fn main() {
         Some(tls) => auth.with_tls(tls),
         None => auth,
     };
+    // `EXP-FR-002`/`003` (ADR-0094): a non-loopback bind without both
+    // authentication and TLS is refused at startup; `SERVER_ALLOW_INSECURE=1`
+    // turns the refusal into a warning for the operator who means it.
+    if let Err(exposure) = check_exposure(&addr, &options) {
+        if allow_insecure_from_env() {
+            eprintln!(
+                "WARNING: listening on {addr} although {exposure} (SERVER_ALLOW_INSECURE=1 is set)"
+            );
+        } else {
+            panic!(
+                "refusing to listen on {addr}: {exposure}; bind a loopback address, configure \
+                 what is missing, or set SERVER_ALLOW_INSECURE=1 to serve anyway (ADR-0094)"
+            );
+        }
+    }
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
     let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {

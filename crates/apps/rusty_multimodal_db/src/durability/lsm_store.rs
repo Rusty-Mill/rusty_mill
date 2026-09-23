@@ -9,10 +9,10 @@
 //!   the task's own framing ("immutable *sorted* file"), and holding only
 //!   what's actually changed since the last flush, not a full copy of
 //!   every record.
-//! - **WAL**: reuses [`super::WalEntry`]/[`super::append_wal_entry`], the
+//! - **WAL**: reuses [`super::WalEntry`]/`super::append_wal_entry`, the
 //!   same format every WAL-based Tier 1 variant uses — durability for
 //!   whatever's still in the memtable and hasn't been flushed yet.
-//! - **Flush** ([`Self::flush`]): serializes the current memtable to a new
+//! - **Flush** ([`LsmStore::flush`]): serializes the current memtable to a new
 //!   numbered, immutable file (`sst_N.bin`), then clears the memtable and
 //!   starts a fresh WAL — the flushed generation no longer needs WAL
 //!   coverage, since it's now durable in its own file.

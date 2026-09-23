@@ -16,9 +16,33 @@ use rusty_tokio::process::{Command, Stdio};
 use rusty_tokio::Runtime;
 use std::time::Duration;
 
+/// `PATH` with cargo's own prepended `target\...` entries removed.
+///
+/// `cargo test`/nextest prepend the target `deps` dir and every build
+/// script's link-search `out` dir to `PATH` before running a test
+/// binary. In a full-workspace `--all-features` run that is dozens of
+/// long `target\debug\build\<crate>-<hash>\out` entries ahead of the
+/// system's own, and `cmd.exe` reads at most 8,191 characters of any
+/// variable -- so `C:\Windows\System32` falls off the end, `ping`,
+/// `sort`, and everything else external become "not recognized", and
+/// the very same test passes when its crate runs alone (a 3 KB `PATH`).
+/// The Rust side (`std::process::Command`) searches the full `PATH`
+/// itself and is unaffected; only what `cmd.exe` resolves is. The
+/// child never needs anything under `target\`, so drop those entries.
+fn path_without_cargo_target_dirs() -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::env::split_paths(&path).filter(|dir| {
+        !dir.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("\\target\\")
+    }))
+    .unwrap_or(path)
+}
+
 fn cmd() -> Command {
     let mut c = Command::new("cmd.exe");
     c.arg("/C");
+    c.env("PATH", path_without_cargo_target_dirs());
     c
 }
 

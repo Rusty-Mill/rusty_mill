@@ -299,6 +299,7 @@ own assumptions, both confirmed by direct code reading:
   reinterpret it). Registered into a small per-table in-memory
   open-snapshot set, exactly as `ADR-0071` already decided (never
   persisted, lost harmlessly on restart, used only by `Compact`'s GC
+  (*since `ADR-0105`, by the automatic reclaim on every write path too*)
   step). Deregistered at `Commit`, `Rollback`, or disconnect.
 - **Reads while such a session is open** use the identical logic
   `MVCC-SPIKE-DESIGN.md`'s `read()` already proved (primary value if its
@@ -438,7 +439,9 @@ own assumptions, both confirmed by direct code reading:
   longer-lived must outlive their own reclamation). It grows roughly
   one entry per commit, not only per superseded key, reclaimed only at
   the next `Compact` — the same accepted "unbounded between explicit
-  Compact runs" cost `ADR-0071` already named. Unlike a naive per-write
+  Compact runs" cost `ADR-0071` already named. *Note (`ADR-0096`, 2026-09-21):
+  until that round no `Compact` actually called `MvccIndex::gc`; it
+  does now, at the oldest open snapshot, before the flush.* Unlike a naive per-write
   sidecar, though, it is only *flushed* at existing checkpoint/compact
   boundaries (piggybacking on locks and gates that already exist), not
   on every write — bounding the durability cost even though the
@@ -759,7 +762,9 @@ own assumptions, both confirmed by direct code reading:
 - Still open after #241, deliberately: reconstruction from a pending
   *journal* remainder (the open-hook proposal's own open question — the
   insert-log twin is closed); MVCC and the crash-atomic journal on the
-  same table; and independent Codex review of the entire line — its
+  same table (*both closed by `ADR-0113`/`ADR-0114`, which also ended
+  the doubled open: its first mapping cleared the log `open_with_mvcc`
+  reads*); and independent Codex review of the entire line — its
   Windows sandbox runner never connected its pipe at any point
   (investigated 2026-09-19: the runner launches as the sandbox user and
   logs on successfully, then times out connecting; the one coincident

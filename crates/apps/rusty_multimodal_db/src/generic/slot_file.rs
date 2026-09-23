@@ -30,6 +30,7 @@
 //! "append these," "read/write the value at this position," and "flush."
 
 use super::mmap_field::MmapFieldValue;
+use crate::durability::sync_parent_dir;
 use crate::durability::DurabilityError;
 use memmap2::MmapMut;
 use std::collections::HashMap;
@@ -308,6 +309,7 @@ where
             Self::write_slot_into(&mut mmap, position, id, value);
         }
         mmap.flush()?;
+        sync_parent_dir(path)?;
 
         Ok(Self {
             mmap,
@@ -349,6 +351,7 @@ where
         // the field type requires.
         self.mmap = MmapMut::map_anon(1)?;
         std::fs::rename(&temp, &self.path)?;
+        sync_parent_dir(&self.path)?;
         let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         // SAFETY: see `create` — the same single-process exclusive-access
         // assumption, over the file this call just put in place.

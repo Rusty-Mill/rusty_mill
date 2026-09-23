@@ -29,10 +29,22 @@
 //! lose whatever was still *dirty* in that cache and hadn't reached the
 //! disk yet, which killing a process alone cannot demonstrate without
 //! either root-level cache manipulation or an actual power interruption,
-//! neither of which this harness attempts. Trial 1's own finding (below)
+//! neither of which this harness attempts — `ADR-0119` and
+//! `docs/design/STORAGE-POWER-LOSS-DESIGN.md` do, with `scripts/
+//! power_loss_trial.sh` (`dm-log-writes`) and `scripts/power_loss_trial_loop.sh`
+//! (a crash-prefix snapshot; run, see `RESULTS.md`). Trial 1's own finding (below)
 //! is precisely about this gap between "survives a process kill" and
 //! "durable to physical storage" — read the report's caveat on it rather
 //! than treating "survived" as proof of true crash-durability.
+//!
+//! # Since `ADR-0095`: the same four trials are a CI gate
+//!
+//! `tests/crash_safety.rs` (`STORAGE-021`) runs these four trials as
+//! asserted integration tests — three repeats each, the same
+//! `crash_writer` child, the same kill points, the same public-API
+//! reopen — so `cargo test --all-features` fails on a regression this
+//! harness would only have printed. This binary stays the hand-run
+//! diagnostic with its full report and eight repeats.
 //!
 //! # The trials
 //!

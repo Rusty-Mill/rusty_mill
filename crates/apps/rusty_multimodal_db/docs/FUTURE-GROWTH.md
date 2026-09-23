@@ -7,7 +7,7 @@ This document captures directions this project could grow in beyond its current 
 Every current boundary in this project is a deliberate scope line from a specific round, not a structural limitation:
 
 * The multi-process append fix targets local filesystems only (`O_APPEND`'s atomicity guarantee excludes NFS) — a real, identifiable piece of work if that assumption ever needs to change, not a rewrite.
-* The multi-process fix covers slot creation specifically. Broader multi-writer coordination wasn't needed yet, not ruled out.
+* The multi-process fix covers slot creation specifically. Broader multi-writer coordination wasn't needed yet, not ruled out. *Since `ADR-0092`:* the deployment boundary is interlocked — `memory_server` claims its `SERVER_DATA_DIR` with an `flock` (`server::data_lock`) and a second server on the same directory refuses to start; the library itself still takes no lock, so two processes on one file remain possible by construction (the diagnosis harness relies on it) and coordinated only for slot creation.
 * The `research` feature flag means every benchmarked alternative — 4 storage backends, 8 durability variants, 4 concurrency strategies — is still in the codebase, just not compiled into a default build. Nothing was deleted at any point in this project's history.
 * The generic schema layer (`crate::generic`) was validated against a toy domain (`Order`/`Customer`) and a real one (requirements traceability). Nothing schema-specific is baked into the storage engine itself.
 * Staying off crates.io is a current decision (a `Cargo.toml`/publishing choice), not a technical constraint.
@@ -42,11 +42,11 @@ The big three:
 
 Smaller, but still real:
 
-* Dynamic/runtime schema (`ALTER TABLE`-style changes). Schema here is a compile-time Rust concept, and a record layout is unversioned: adding a field is a schema-tag bump that refuses old directories distinctly (`ADR-0056`), with an in-place upgrade named as the round for the first directory that cannot be re-pushed.
-* Null. The wire has no null; two domains carry documented per-field sentinels instead (`ADR-0056`: `0` for a timestamp, `""` for a node id — lossless for those columns). A nullable `ScanValue` at a protocol bump is the general answer, deferred until a column arrives with no lossless sentinel; the scoring floats the consumer keeps also need a float kind first.
+* Dynamic/runtime schema (`ALTER TABLE`-style changes). Schema here is a compile-time Rust concept. A record layout is versioned by its schema tag (`memory::Memory@2`): adding a field is a tag bump that refuses old directories distinctly (`ADR-0056`), and the upgrade path is `STORAGE-019`'s migration tooling (`ADR-0066`) — a copy into a fresh directory through the existing open and create paths, one tool per layout change, `examples/migrate_memory_v1_to_v2.rs` the first; since `ADR-0116` the refusal itself names that tool or a re-push. Still absent: any runtime schema change, and tolerant decoding (`bincode` writes no field markers).
+* Null. *Since `ADR-0117`, protocol 31:* the wire has `ScanValue::Null`, stripped below 31. No shipped column is nullable yet — two domains keep their documented per-field sentinels (`ADR-0056`: `0` for a timestamp, `""` for a node id, lossless for those columns) — so a server never emits it and refuses it where a value is read. Still absent: a nullable field capability and a SQL `NULL`, the first nullable column's round; the scoring floats the consumer keeps also need a stored float kind first.
 * A query optimizer for aggregation (`GROUP BY`, `AVG`, multi-table joins) — DuckDB's core identity is vectorized execution over exactly this. A bounded `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` exists (`ADR-0035`) as a full scan then a bucket, with no optimizer of any kind — except, since `ADR-0081`, a `COUNT(*)` whose filter is only bounds on a range-indexed field, which is the sorted index's own count between the bounds with no record read (and, since `ADR-0082`, `SUM`/`AVG`/`MIN`/`MAX` of that field are reductions over the walked keys, no record read either; an aggregate over any other field still decodes; since `ADR-0084` a `GROUP BY` of that field over a pure range is one group per run of equal walked keys, and every other `GROUP BY` still decodes — since `ADR-0085` through a hashed bucket, linear in the rows).
 * Client ecosystem — drivers for other languages, a CLI, general tooling. A byte-level wire specification and a stdlib-only Python client exist (`ADR-0043`); everything else on this list does not.
-* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison.
+* Decades of hardening. SQLite's reliability record is the product of 20+ years and one of the largest test suites in software. This project's crash-safety work is real and genuinely tested, but young by comparison. *Since `ADR-0095`:* the crash-safety trials the diagnosis harness once ran by hand are a CI gate (`tests/crash_safety.rs`, `STORAGE-021`) — a regression in the commit marker, the reopen reconciliation, or `Flush` fails `cargo test`; still a process-kill proof, not a power-loss one. *Since `ADR-0119`:* the power-loss proof is designed (`docs/design/STORAGE-POWER-LOSS-DESIGN.md`) and its runbook ships (`scripts/power_loss_trial.sh`, `dm-log-writes` on a root Linux host). Its crash-prefix variant (`scripts/power_loss_trial_loop.sh`, loop devices only) was run: every flushed update reached the device, no unflushed one did, a torn slot was excluded — `RESULTS.md`; the full replay is still owed.
 
 ## Operational maturity — not named in this document before
 
@@ -102,11 +102,13 @@ not a guess.
   replay against an already-identical starting snapshot); no automatic
   failover or promotion — a refreshed replica is a manually-promoted
   cold standby only; no write forwarding — a replica never proxies
-  writes to a primary; no cluster membership, gossip, or consensus; no
-  replica-refresh daemon shipped by this crate — an operator's own
-  script fetches, writes to local disk, and restarts a second
-  `memory_server` pointed at it (`Backup`'s own "restore needs no new
-  code" precedent).
+  writes to a primary; no cluster membership, gossip, or consensus. *Since `ADR-0118`:*
+  the refresh script ships — `examples/replica_refresh.rs` fetches a
+  snapshot into a fresh, verified directory once or on an interval,
+  pruning old ones; the standby's restart is still the operator's.
+  *Since `ADR-0123`:* the script connects over TLS when
+  `REPLICA_REFRESH_TLS_SERVER_NAME` is set, so a standby can sit
+  across an untrusted network.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
   (`ADR-0064`, protocol 23) renders a bounded, fixed set of
@@ -115,7 +117,8 @@ not a guess.
   text, gated as a read at the version gate. The audit log
   (`ADR-0029`) and access log (`ADR-0031`) still separately record
   admission/auth/request events to a file. Still absent: request
-  latency histograms, queue depth, journal size, cache/index stats.
+  cache/index stats (latency histograms came with `ADR-0088`, queue
+  depth and journal size with `ADR-0115`, below).
   **Now built**: an opt-in HTTP `/metrics` listener
   (`SERVER-METRICS-HTTP`, `ADR-0069`, `SERVER-001` v0.57.0/FR-069) —
   `SERVER_METRICS_HTTP_ADDR` binds a second, independent
@@ -132,7 +135,70 @@ not a guess.
   pure function of the request. **Since `ADR-0088`**: request latency —
   `dogserver_request_duration_seconds`, one histogram with sixteen
   fixed buckets (`SERVER-001` v0.73.0/FR-085), observed once per
-  dispatched request; still absent: queue depth, journal size.
+  dispatched request. **Since `ADR-0093`**:
+  `dogserver_connections_refused_total`, accepts closed at the
+  connection cap. **Since `ADR-0115`**: `dogserver_journal_bytes`,
+  `dogserver_journal_entries_since_checkpoint` and
+  `dogserver_journal_waiting_writers` (the commit group's queue depth)
+  per journaled table — the last two this list named absent.
+* **Durable acknowledgements for in-place updates.** Not named here
+  before: every write but the in-place field update was `fsync`ed
+  before its acknowledgement (insert log, journal); `UpdateField` and
+  a non-journaled `Transaction` batch reached disk at the next
+  `Flush`/checkpoint/write-back. *Since `ADR-0097`:* opt-in
+  `with_synced_updates` / `SERVER_SYNC_UPDATES=1` `msync`s the slot
+  files before acknowledging, on `Memory`/`Entity`/`Relation`, at
+  `update_field` on `Memory`, release build, this container, 2,000 updates each: 0.1 → 105.4 µs per update at 1K rows, 0.2 → 99.7 µs at 100K rows (unsynced → synced); the `msync` costs what the insert log's per-entry `sync_data` costs, and does not scale with the table. On by default in `memory_server` since `ADR-0099`
+  (`SERVER_SYNC_UPDATES=0` turns it off). *Measured and declined
+  (2026-09-22):* a ranged `msync` of the one slot — whole-mapping and
+  one-page `msync` cost the same from 100 KiB to 3.8 GiB, the kernel
+  already flushing only the dirty pages (`RESULTS.md`). Still absent:
+  `UpdateField` in the journal (group commit would amortize the sync
+  across concurrent writers only — no gain for one connection; *built
+  since, `ADR-0107`:* opt-in `SERVER_JOURNAL_UPDATES=1` on a journaled
+  server, measured at half the per-update cost under eight writers and
+  a win at 1M rows even for one), and
+  any of this for the research domains.
+* **MVCC history reclaimed.** `ADR-0072` accepted "unbounded between
+  explicit `Compact` runs" and then no `Compact` reclaimed. *Since
+  `ADR-0096`:* `Compact` on `Memory`/`Entity`/`Relation` drops every
+  chain entry below the oldest open snapshot before flushing the
+  history store. *Since `ADR-0105`:* the index reclaims itself every
+  N appended entries (`SERVER_MVCC_RECLAIM_EVERY`, default 10,000,
+  `0` leaving it to `Compact`), at the oldest open snapshot, inside
+  the lock the write already holds; *since `ADR-0109`:*
+  `dogserver_mvcc_history_entries{table}` on `Metrics` and the scrape,
+  one gauge per MVCC table. Still absent: any reclamation for the
+  research domains, which answer `Compact` with `Unsupported`.
+* **An exposed, unprotected listener refused at startup.** Not named
+  here before. *Built since this was written:* `ADR-0094` — every
+  binary refuses a non-loopback bind unless authentication and TLS are
+  both configured, `SERVER_ALLOW_INSECURE=1` the explicit override; the
+  library's `ServeOptions::default()` is still the original open server
+  for loopback and for tests. Still absent: the same rule inside
+  `serve` itself, and for the `/metrics` HTTP listener.
+* **Limits on what one peer can cost the process.** Not named here
+  before. *Built since this was written:* `ADR-0093` — an opt-in idle
+  timeout on the accepted socket, a connection cap checked at accept
+  (`dogserver_connections_refused_total`), and a row cap on `Query`
+  and the pages (`TooLarge` before any read), each on `ServeOptions`
+  and each a `memory_server` setting (`SERVER_IDLE_TIMEOUT_SECS`,
+  `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS`); `evaluate_query`
+  now stops at `limit` while filtering. *Since `ADR-0099`:* the idle
+  timeout (300 s) and the connection cap (1,024) are on by default in
+  `memory_server`, `0` turning either off; *since `ADR-0102`:* the row
+  cap too (10,000), a `Query` with no `limit` clamped to it and counted
+  in `dogserver_query_rows_clamped_total` rather than refused; *since
+  `ADR-0103` (protocol 30):* a clamped `Query` is answered
+  `RowsClamped { rows, cap }` on a connection at 30 or above
+  (`SchemaDrivenClient::last_clamp`), and a connection refused at the
+  connection cap reads one `Err { Busy }` frame before the close —
+  *since `ADR-0104`* under TLS too, after the handshake, from a pool of
+  at most sixteen short-lived refusal threads. *Declined
+  (2026-09-23):* a retry-after hint in `Busy` — the server has no
+  honest estimate of when a slot frees, and a constant is one the
+  client can hold itself. Still absent: a scan budget for
+  `Aggregate`/`Join`, graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing

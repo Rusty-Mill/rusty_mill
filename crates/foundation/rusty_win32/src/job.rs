@@ -848,6 +848,14 @@ pub unsafe fn wait_for_message(
 
 #[cfg(test)]
 mod tests {
+    /// A well-known long-running system command, by absolute path: in a
+    /// full-workspace `cargo test`/nextest run cargo prepends dozens of
+    /// `target\...` entries to `PATH`, pushing it past the 8,191
+    /// characters `cmd.exe` reads, so a bare `ping` is "not recognized"
+    /// there while the same test passes when this crate runs alone.
+    /// `%SystemRoot%` is short and always expands.
+    const PING_30S: &str = "cmd.exe /c %SystemRoot%\\System32\\ping.exe -n 30 127.0.0.1 >nul";
+
     use super::*;
     use crate::process;
 
@@ -860,10 +868,8 @@ mod tests {
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command — this test terminates it
         // via the job before it would exit on its own.
-        let spawned = unsafe {
-            process::spawn_suspended("cmd.exe /c ping -n 30 127.0.0.1 >nul", true, false, None)
-        }
-        .expect("CreateProcessW should succeed");
+        let spawned = unsafe { process::spawn_suspended(PING_30S, true, false, None) }
+            .expect("CreateProcessW should succeed");
 
         // SAFETY: `job`/`spawned.process` are both freshly created, valid
         // handles; assignment happens before `resume`, so job membership is

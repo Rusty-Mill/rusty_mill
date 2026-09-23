@@ -3,11 +3,11 @@
 //! storage API under test — this exists purely so both bench binaries
 //! build the exact same kind of dataset and target-selection logic rather
 //! than duplicating it. Also the single home for generic 2-hop graph
-//! traversal (see [`two_hop_neighbors`]) — see
+//! traversal (see [`crate::bench_support::two_hop_neighbors`]) — see
 //! `docs/decisions/ADR-0004-one-hop-neighbors-trait-method.md` for why that
 //! logic lives here, in benchmark/test-facing code, rather than as a
 //! `DogStore` trait method — and for the mixed read/write workload driver
-//! (see [`MixedWorkloadDriver`]), for the same reason: blending calls
+//! (see [`crate::bench_support::MixedWorkloadDriver`]), for the same reason: blending calls
 //! together is workload logic, not something a backend needs to know how
 //! to do.
 
@@ -51,11 +51,11 @@ pub const LITTERMATE_AVG_DEGREE: f64 = 1.5;
 pub const SAMPLE_TARGET_COUNT: usize = 200;
 
 /// Write ratios swept by the mixed read/write workload
-/// ([`MixedWorkloadDriver`]): 10%, 50%, and 90% `update_age` calls, with
+/// ([`crate::bench_support::MixedWorkloadDriver`]): 10%, 50%, and 90% `update_age` calls, with
 /// the remainder in each case split evenly between `get` and `scan_ages`.
 pub const MIXED_WRITE_RATIOS: [f64; 3] = [0.10, 0.50, 0.90];
 
-/// XORed into [`SEED`] to derive [`MixedWorkloadDriver`]'s op-selection RNG
+/// XORed into [`SEED`] to derive [`crate::bench_support::MixedWorkloadDriver`]'s op-selection RNG
 /// stream, independent of every other seeded stream in this crate (mirrors
 /// `build_dataset`'s `SEED ^ 0xA5A5_A5A5` and the generator's
 /// `LITTERMATE_SEED_XOR`).
@@ -144,7 +144,7 @@ pub enum MixedWorkloadConfigError {
     InvalidWriteRatio { write_ratio: f64 },
 }
 
-/// The write/read split [`MixedWorkloadDriver`] draws operations from:
+/// The write/read split [`crate::bench_support::MixedWorkloadDriver`] draws operations from:
 /// `write_ratio` chance of `update_age` on any given call, with the
 /// remainder split evenly between `get` and `scan_ages`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -227,7 +227,7 @@ impl MixedWorkloadDriver {
     /// Returns [`StoreError::NotFound`] only if `sample_ids` contains a
     /// UUID `store` doesn't have — never happens when `sample_ids` comes
     /// from the same generated dataset `store` was built from, which is
-    /// the only way this crate constructs a [`MixedWorkloadDriver`] (see
+    /// the only way this crate constructs a [`crate::bench_support::MixedWorkloadDriver`] (see
     /// `mixed_workload_driver_never_errors_against_its_own_dataset`).
     pub fn run_one<S: DogStore>(
         &mut self,
@@ -289,7 +289,7 @@ impl MixedWorkloadDriver {
     }
 }
 
-/// Re-exported from [`crate::test_support`], which — unlike this module —
+/// Re-exported from `crate::test_support`, which — unlike this module —
 /// isn't gated behind the `research` feature: [`crate::production::ProductionStore`]'s
 /// own infallible constructors need it unconditionally. Kept reachable at
 /// this path too so the many existing call sites written against

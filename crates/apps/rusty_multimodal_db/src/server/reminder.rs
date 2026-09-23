@@ -27,7 +27,9 @@
 //! validation path this domain needs beyond the mechanical repetition
 //! every existing adapter already has.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
+use super::journal::{
+    CheckpointFlush, CommitError, CommitGroup, JournalError, JournalStats, JournaledBatch,
+};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
@@ -209,6 +211,12 @@ impl ReminderConnectionStore {
 }
 
 impl ConnectionStore for ReminderConnectionStore {
+    /// `JSM-FR-001` (ADR-0115): the journal's live figures, when there
+    /// is one.
+    fn journal_stats(&self) -> Option<JournalStats> {
+        self.journal.as_ref().map(CommitGroup::stats)
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Reminder>(id).map(Self::fields_of)
     }

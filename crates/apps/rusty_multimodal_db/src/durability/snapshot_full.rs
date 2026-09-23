@@ -3,10 +3,10 @@
 //! Durability model: identical write-path cost to variant 3
 //! ([`super::SnapshotRebuildStore`]) — `update_age` only mutates
 //! in-memory state, zero disk I/O per write. The difference is entirely
-//! in what [`Self::checkpoint`] persists: the *whole*
+//! in what [`SnapshotFullStore::checkpoint`] persists: the *whole*
 //! [`super::CanonicalCachedState`] — canonical map, breed index, age
 //! cache, position index, and adjacency index — serialized directly, with
-//! no reconstruction step. [`Self::open`] deserializes it back exactly as
+//! no reconstruction step. [`SnapshotFullStore::open`] deserializes it back exactly as
 //! it was, with no rebuild.
 //!
 //! # The tradeoff this variant accepts (and variant 3 doesn't)

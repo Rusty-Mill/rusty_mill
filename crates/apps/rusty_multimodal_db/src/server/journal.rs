@@ -42,7 +42,7 @@
 //! always holds exactly the batches applied since the last moment every
 //! slot write was known to be on disk.
 
-use super::protocol::{ErrorCode, TransactionOp, WriteOp};
+use super::protocol::{ErrorCode, TransactionOp, WriteOp, WriteResult};
 use crate::durability::DurabilityError;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -91,6 +91,35 @@ pub(crate) enum JournalEntry<'a> {
 pub(crate) enum JournaledBatch {
     Transaction(Vec<TransactionOp>),
     Write(Vec<WriteOp>),
+}
+
+/// `JMC-FR-001` (ADR-0114): what an adapter's `with_journal` replay
+/// actually applied, in journal order, kept for the MVCC index to fold
+/// when it is attached after the replay — the journal is truncated by
+/// then, so this is the replay's only record. A `Transaction` holds the
+/// ops that applied (`RVL-FR-004` skips the moot ones); a `Write` pairs
+/// every op with its outcome, exactly as the live record does.
+pub(crate) enum ReplayedBatch {
+    Transaction(Vec<TransactionOp>),
+    Write {
+        ops: Vec<WriteOp>,
+        results: Vec<WriteResult>,
+    },
+}
+
+/// `JSM-FR-001` (ADR-0115): a journaled table's live journal figures,
+/// as `CommitGroup::stats` reads them and
+/// `ConnectionStore::journal_stats` reports them for the
+/// `dogserver_journal_*` gauges.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JournalStats {
+    /// The journal file's size in bytes, header included.
+    pub bytes: u64,
+    /// Entries appended since the last checkpoint truncated the file.
+    pub entries_since_checkpoint: u64,
+    /// Writers parked for their apply turn right now — the group's
+    /// queue depth.
+    pub waiting_writers: u64,
 }
 
 /// Everything that can go wrong opening, appending to, or replaying a
@@ -251,6 +280,9 @@ impl BatchJournal {
             file.write_all(JOURNAL_MAGIC)?;
             file.write_all(&JOURNAL_FORMAT_VERSION.to_le_bytes())?;
             file.sync_all()?;
+            // `RVL-FR-003` (ADR-0112): the new file's directory entry too,
+            // so the journal itself survives a power loss (`ADR-0092`).
+            crate::durability::sync_parent_dir(path)?;
             return Ok((
                 Self {
                     file,
@@ -381,7 +413,6 @@ impl BatchJournal {
     }
 
     /// The journal's size in bytes, header included.
-    #[cfg(test)]
     pub(crate) fn len_bytes(&self) -> u64 {
         self.len
     }
@@ -458,6 +489,10 @@ struct GroupState {
     /// unparked individually when its turn comes, so releasing a turn
     /// wakes exactly one thread rather than every waiter.
     turn_waiters: BTreeMap<u64, Thread>,
+    /// `RGM-FR-001` (ADR-0121): followers parked on the `durable`
+    /// condvar while a leader's `sync_data` runs — queued writers too,
+    /// and the ones a stalled `fsync` piles up.
+    waiting_durable: usize,
 }
 
 /// The group-commit discipline behind a journaled adapter (`SERVER-001`
@@ -529,6 +564,7 @@ impl CommitGroup {
                     syncing: false,
                     next_apply: 1,
                     turn_waiters: BTreeMap::new(),
+                    waiting_durable: 0,
                 }),
                 durable: Condvar::new(),
                 #[cfg(test)]
@@ -621,7 +657,10 @@ impl CommitGroup {
                 break Ok(());
             }
             if state.syncing {
-                state = self.durable.wait(state).map_err(|_| poisoned())?;
+                state.waiting_durable += 1;
+                let mut woken = self.durable.wait(state).map_err(|_| poisoned())?;
+                woken.waiting_durable -= 1;
+                state = woken;
                 continue;
             }
             state.syncing = true;
@@ -702,6 +741,24 @@ impl CommitGroup {
             .lock()
             .map(|s| s.journal.len_bytes())
             .unwrap_or(0)
+    }
+
+    /// `JSM-FR-001` (ADR-0115): the three gauges an operator watches
+    /// on a journaled table, read under the group's own lock in one go
+    /// so they describe one instant: the file's size, the entries the
+    /// next checkpoint will drop, and the writers parked for their turn
+    /// (`GRP-FR-003`) plus the followers parked for a leader's `fsync`
+    /// (`RGM-FR-001`) — the group's queue depth. A poisoned lock reads
+    /// as zeros: a scrape must never fail on a journal that has.
+    pub fn stats(&self) -> JournalStats {
+        self.state
+            .lock()
+            .map(|s| JournalStats {
+                bytes: s.journal.len_bytes(),
+                entries_since_checkpoint: s.since_checkpoint,
+                waiting_writers: (s.turn_waiters.len() + s.waiting_durable) as u64,
+            })
+            .unwrap_or_default()
     }
 
     /// `ADR-0072`'s `MVCC2-FR-010`: how many entries have been appended
@@ -915,6 +972,42 @@ mod tests {
             .collect();
         assert_eq!(journaled.len(), 320);
         assert_eq!(*applied.lock().unwrap(), journaled);
+    }
+
+    /// `RGT-FR-002` (ADR-0123): while a leader is held in its `sync_data`,
+    /// the followers parked for it count as waiting writers — the gauge a
+    /// stalled `fsync` is meant to move (`RGM-FR-001`).
+    #[test]
+    fn stats_count_the_followers_parked_for_a_held_leader() {
+        use std::sync::Arc;
+        let (group, _path) = open_group("journal_group_waiting_writers");
+        let group = Arc::new(group);
+        let (hook, entered, release, _syncs) = holding_hook(false);
+        group.set_sync_hook(hook);
+        assert_eq!(group.stats().waiting_writers, 0);
+        let spawn = |v: u32| {
+            let group = Arc::clone(&group);
+            std::thread::spawn(move || {
+                group.commit(&[op(v as u128, v)], |_turn| Ok::<bool, ()>(false))
+            })
+        };
+        let a = spawn(1);
+        entered.recv().unwrap();
+        let b = spawn(2);
+        let c = spawn(3);
+        wait_until("both followers to park for the held leader", || {
+            group.stats().waiting_writers == 2
+        });
+        assert_eq!(group.stats().entries_since_checkpoint, 3);
+        release.send(()).unwrap();
+        for t in [a, b, c] {
+            t.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            group.stats().waiting_writers,
+            0,
+            "nobody waits once durable"
+        );
     }
 
     /// `GRP-FR-002` (design criterion 2): while one leader is held before

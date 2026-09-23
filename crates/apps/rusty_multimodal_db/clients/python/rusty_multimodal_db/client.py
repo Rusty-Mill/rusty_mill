@@ -11,6 +11,7 @@ implemented (see ADR-0043's Non-goals). No SQL front end: build
 
 from __future__ import annotations
 
+import dataclasses
 import socket
 import ssl
 from dataclasses import dataclass
@@ -53,8 +54,12 @@ class TlsOptions:
 
 
 def _to_scan_value(kind: p.ValueKind, value: Any):
-    if isinstance(value, (p.U32, p.I64, p.Bool, p.Str, p.F64, p.StrList)):
+    if isinstance(value, (p.U32, p.I64, p.Bool, p.Str, p.F64, p.StrList, p.Null)):
         return value
+    if value is None:
+        # NUL-FR-001 (protocol 31): sent as Null; the server answers
+        # Malformed while no field is nullable.
+        return p.Null()
     if kind is p.ValueKind.U32:
         return p.U32(int(value))
     if kind is p.ValueKind.I64:
@@ -81,6 +86,11 @@ class Client:
         # once each for a cross-table join.
         self.table: Optional[str] = None
         self._table_schemas: Dict[str, p.DomainSchema] = {}
+        # WCB-FR-001 (protocol 30): the row cap the most recent ``query``
+        # was cut at — it answered exactly that many rows and more may
+        # match — or None (complete, or a server below 30 that cannot
+        # say). Reset by every ``query``.
+        self.last_clamp: Optional[int] = None
 
     # ---- connection lifecycle ----
 
@@ -102,8 +112,23 @@ class Client:
             if tls.client_cert:
                 ctx.load_cert_chain(tls.client_cert, tls.client_key)
             sock = ctx.wrap_socket(raw, server_hostname=tls.server_name)
+        try:
+            return cls._handshake(sock, protocol_version, token)
+        except BaseException:
+            # RVL-FR-009 (ADR-0112): a failed connect (Busy included) closes
+            # the socket at once, so a server refusal slot is not held
+            # for as long as the exception object lives.
+            sock.close()
+            raise
+
+    @classmethod
+    def _handshake(cls, sock, protocol_version: int, token: Optional[str]) -> "Client":
         # Hello is the optional first frame; a server answers min(client, server).
         reply = _exchange(sock, p.Hello(protocol_version))
+        if isinstance(reply, p.Err):
+            # WCB-FR-002 (protocol 30): a server at its connection cap
+            # answers the connect itself with Err { Busy } and closes.
+            raise ServerError(reply.code, reply.message)
         if not isinstance(reply, p.HelloResp):
             raise ProtocolError(f"expected Hello, got {type(reply).__name__}")
         negotiated = reply.protocol_version
@@ -153,6 +178,14 @@ class Client:
 
     def _roundtrip(self, req):
         self._gate(req)
+        # RGM-FR-005 (ADR-0121), compatibility rule 4: a value variant is
+        # never sent to a server negotiated below the version that added
+        # it — an older server closes the connection on an unknown index
+        # with no reply, which is worse than a local error.
+        if self.server_protocol_version < 31 and _carries_null(req):
+            raise UnsupportedError(
+                f"a Null value needs protocol 31, negotiated {self.server_protocol_version}"
+            )
         reply = _exchange(self._sock, req)
         if isinstance(reply, p.Err):
             raise ServerError(reply.code, reply.message)
@@ -648,6 +681,10 @@ class Client:
     ) -> List[Tuple[uuid.UUID, List[Tuple[str, Any]]]]:
         reply = self._roundtrip(p.Query(self._selection(select), tuple(self._predicates(where)), limit))
         if isinstance(reply, p.Rows):
+            self.last_clamp = None
+            return [(rid, self._named(fields)) for rid, fields in reply.rows]
+        if isinstance(reply, p.RowsClamped):
+            self.last_clamp = reply.cap
             return [(rid, self._named(fields)) for rid, fields in reply.rows]
         raise ProtocolError(type(reply).__name__)
 
@@ -756,6 +793,22 @@ def _write_result_str(r) -> str:
     if isinstance(r, p.WrFailed):
         return f"failed:{r.code.name}"
     return names[type(r)]
+
+
+def _carries_null(value) -> bool:
+    """Whether a request (or anything inside it) holds a ``Null`` value.
+
+    Walks instance fields only: a dataclass *class* (a variant family
+    entry) and the ``ClassVar`` specs are not values."""
+    if isinstance(value, p.Null):
+        return True
+    if isinstance(value, type):
+        return False
+    if isinstance(value, (tuple, list)):
+        return any(_carries_null(v) for v in value)
+    if dataclasses.is_dataclass(value):
+        return any(_carries_null(getattr(value, f.name)) for f in dataclasses.fields(value))
+    return False
 
 
 def _exchange(sock, req):

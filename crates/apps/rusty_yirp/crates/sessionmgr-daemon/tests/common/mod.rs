@@ -43,9 +43,51 @@ use std::time::{Duration, Instant};
 /// path tiny while staying collision-free.
 pub struct TempRoot(PathBuf);
 
+/// On Windows, drop cargo's prepended `target\...` entries from this
+/// process's `PATH` so `cmd.exe` in every session this test starts can
+/// still find `ping`, `git`, and the rest.
+///
+/// `cargo test`/nextest prepend the target `deps` dir and every build
+/// script's link-search `out` dir to `PATH`. In a full-workspace
+/// `--all-features` run that is dozens of long
+/// `target\debug\build\<crate>-<hash>\out` entries ahead of the
+/// system's own, and `cmd.exe` reads at most 8,191 characters of any
+/// variable -- `C:\Windows\System32` and `Git\cmd` fall off the end,
+/// `cmd /C ping` answers "not recognized", the session records
+/// `Errored`, and the very same test passes when this crate runs alone
+/// (a 3 KB `PATH`). Every process a test starts -- client, daemon,
+/// worker, the session's own `cmd` -- inherits from here, and none of
+/// them needs anything under `target\`. Under nextest each test is its
+/// own process; under a plain `cargo test` several test threads share
+/// this process, so the mutation runs exactly once (`Once`) and is
+/// idempotent (it only removes entries) -- a thread spawning a child
+/// while another trims sees either the full or the trimmed `PATH`, both
+/// of which work.
+#[cfg(windows)]
+fn trim_cargo_target_dirs_from_path() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(path) = std::env::var_os("PATH") else {
+            return;
+        };
+        let kept = std::env::split_paths(&path).filter(|dir| {
+            !dir.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("\\target\\")
+        });
+        if let Ok(joined) = std::env::join_paths(kept) {
+            std::env::set_var("PATH", joined);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn trim_cargo_target_dirs_from_path() {}
+
 impl TempRoot {
     pub fn new(label: &str) -> Self {
         use std::hash::{Hash, Hasher};
+        trim_cargo_target_dirs_from_path();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

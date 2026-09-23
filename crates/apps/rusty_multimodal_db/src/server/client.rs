@@ -55,8 +55,13 @@
 //! anything is a versioned server, and `Malformed` still means what it
 //! did). The cost is one extra connect when a server genuinely dies
 //! under the first frame — the second attempt then fails the same way
-//! and that error is the one returned. [`ConnectOptions::require_hello`]
-//! turns the fallback off for a caller that would rather see the EOF.
+//! and that error is the one returned. *Since v0.89.0 (`RVW-FR-003`,
+//! ADR-0110) the fallback is off by default*: a close under the `Hello`
+//! is also what a server at its connection cap does once its refusal
+//! pool is full (`ADR-0104`), and re-dialing it at version 1 would run
+//! a whole session without the wire this client was built for.
+//! [`ConnectOptions::allow_pre_hello_fallback`] turns it back on;
+//! [`ConnectOptions::require_hello`] names the default.
 //!
 //! # Authentication (`ServeOptions`), `SERVER-001-FR-021`
 //!
@@ -372,13 +377,29 @@ impl ClientTlsConfig {
 /// address: an `Authenticate` token (`FR-021`) and a [`ClientTlsConfig`]
 /// (`FR-022`), each optional and independent. `ConnectOptions::new()`
 /// (or `default()`) is exactly [`SchemaDrivenClient::connect`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ConnectOptions {
     token: Option<String>,
     tls: Option<ClientTlsConfig>,
-    /// `FR-026`: when set, a pre-hello server is an error, not a silent
-    /// reconnect. Default off — the fallback is on.
+    /// `FR-026` as amended by `RVW-FR-003` (ADR-0110): when set, a
+    /// server that closes under the `Hello` is an error. **Default on
+    /// since v0.89.0**: a close without a reply is what a server at its
+    /// connection cap does once its refusal pool is full (`ADR-0104`),
+    /// and re-dialing it at version 1 would silently run a whole session
+    /// without the wire the client was built for. Pre-hello servers
+    /// (protocol 1, `SERVER-001` v0.9.1) no longer exist to fall back
+    /// to; [`Self::allow_pre_hello_fallback`] restores the old behaviour.
     require_hello: bool,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            token: None,
+            tls: None,
+            require_hello: true,
+        }
+    }
 }
 
 impl ConnectOptions {
@@ -399,13 +420,25 @@ impl ConnectOptions {
         self
     }
 
-    /// Disable the pre-hello fallback (`FR-026`; see this module's own
-    /// "Protocol version" section): a server that closes the connection
-    /// under the `Hello` is then reported as
-    /// `ClientError::Frame(FrameError::Io(..))`, as it was before v0.16.0,
-    /// instead of being reconnected to without a `Hello`.
+    /// Require a `Hello` reply — the default since v0.89.0 (`RVW-FR-003`,
+    /// ADR-0110): a server that closes the connection under the `Hello`
+    /// is reported as `ClientError::Frame(FrameError::Io(..))`, never
+    /// reconnected to without one. Kept for callers that set it
+    /// explicitly before it became the default.
     pub fn require_hello(mut self) -> Self {
         self.require_hello = true;
+        self
+    }
+
+    /// `FR-026`'s pre-hello fallback, opt-in since v0.89.0 (`RVW-FR-003`,
+    /// ADR-0110): a server that closes the connection under the `Hello`
+    /// with no reply is reconnected to once without a `Hello` and spoken
+    /// to at protocol version 1. Only for a `SERVER-001` v0.9.1 server,
+    /// which no shipped binary is; against a current server this turns a
+    /// refused connect (`ADR-0104`, a silent close past the refusal
+    /// pool) into a version-1 session with no error.
+    pub fn allow_pre_hello_fallback(mut self) -> Self {
+        self.require_hello = false;
         self
     }
 }
@@ -815,6 +848,10 @@ pub struct SchemaDrivenClient {
     /// `TBL-FR-009`: other tables' schemas, fetched once each for a
     /// cross-table `JOIN` (see [`Self::schema_of`]).
     table_schemas: HashMap<String, DomainSchema>,
+    /// `WCB-FR-001` (ADR-0103): the row cap the most recent `Query`'s
+    /// answer was clamped to, when the server said it was — see
+    /// [`Self::last_clamp`].
+    last_clamp: Option<u64>,
 }
 
 impl SchemaDrivenClient {
@@ -871,6 +908,9 @@ impl SchemaDrivenClient {
             },
         ) {
             Ok(Response::Hello { protocol_version }) => protocol_version,
+            // `WCB-FR-002` (ADR-0103): a server at its connection cap
+            // answers the connect itself with `Err { Busy }` and closes.
+            Ok(Response::Err { code, message }) => return Err(ClientError::Server(code, message)),
             Ok(_) => return Err(ClientError::UnexpectedResponse("Hello")),
             // `FR-026`: the peer closed the connection under the `Hello`
             // with no reply — what a pre-hello server does. Reconnect
@@ -917,6 +957,7 @@ impl SchemaDrivenClient {
             server_protocol_version,
             current_table: None,
             table_schemas: HashMap::new(),
+            last_clamp: None,
         })
     }
 
@@ -1009,6 +1050,17 @@ impl SchemaDrivenClient {
     /// `PROTOCOL_VERSION` against a server from the same build.
     pub fn server_protocol_version(&self) -> u32 {
         self.server_protocol_version
+    }
+
+    /// `WCB-FR-001` (ADR-0103) as amended by `RVM-FR-002`/`003`
+    /// (ADR-0111): whether the most recent [`Self::query`]'s answer was
+    /// cut at the server's row cap — `Some(cap)` when it holds exactly
+    /// `cap` rows and more may have matched, `None` when it is complete,
+    /// took a path the cap never touches (a point read, `ORDER BY`, an
+    /// aggregate, a join), failed, or the server speaks a protocol below
+    /// 30 and cannot say. Reset at the start of every `query`.
+    pub fn last_clamp(&self) -> Option<u64> {
+        self.last_clamp
     }
 
     /// Open a transaction session on this connection (`FR-024`; see this
@@ -1120,6 +1172,13 @@ impl SchemaDrivenClient {
     }
 
     fn roundtrip(&mut self, req: Request) -> Result<Response, ClientError> {
+        // `RGM-FR-005` (ADR-0121), compatibility rule 4: a value variant
+        // is never sent to a server negotiated below the version that
+        // added it — an older server closes the connection on an unknown
+        // index with no reply, which is worse than a local error.
+        if self.server_protocol_version < 31 && carries_null(&req) {
+            return Err(ClientError::Unsupported("a Null value needs protocol 31"));
+        }
         Self::exchange(&mut self.stream, &req)
     }
 
@@ -1215,6 +1274,9 @@ impl SchemaDrivenClient {
     /// `OBY-FR-003`).
     pub fn query(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         let parsed = sql::parse(sql).map_err(|e| ClientError::Sql(e.to_string()))?;
+        // `RVM-FR-003` (ADR-0111): every `query` starts unclamped; only a
+        // `RowsClamped` answer on the wire path sets it.
+        self.last_clamp = None;
         if parsed.join.is_some() {
             return self.query_join(parsed).map(QueryResult::Joined);
         }
@@ -1285,24 +1347,34 @@ impl SchemaDrivenClient {
             };
         }
 
-        match self.roundtrip(Request::Query {
+        // `WCB-FR-001` (ADR-0103): `RowsClamped` is `Rows` plus the cap;
+        // the cap is kept for `last_clamp`, the rows go the same way.
+        let rows = match self.roundtrip(Request::Query {
             select,
             filter,
             limit: parsed.limit,
         })? {
-            Response::Rows { rows } => Ok(rows
-                .into_iter()
-                .map(|(id, fields)| {
-                    let named = fields
-                        .into_iter()
-                        .map(|(tag, value)| (self.field_name(tag), value))
-                        .collect();
-                    (id, named)
-                })
-                .collect()),
-            Response::Err { code, message } => Err(ClientError::Server(code, message)),
-            _ => Err(ClientError::UnexpectedResponse("Rows")),
-        }
+            Response::Rows { rows } => {
+                self.last_clamp = None;
+                rows
+            }
+            Response::RowsClamped { rows, cap } => {
+                self.last_clamp = Some(cap);
+                rows
+            }
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("Rows")),
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(id, fields)| {
+                let named = fields
+                    .into_iter()
+                    .map(|(tag, value)| (self.field_name(tag), value))
+                    .collect();
+                (id, named)
+            })
+            .collect())
     }
 
     /// `OBY-FR-003`/`004` (ADR-0061); `FPG-FR-005`/`006` (ADR-0068):
@@ -2662,5 +2734,110 @@ impl SchemaDrivenClient {
         let mut result: Vec<(RecordId, usize)> = visited.into_iter().collect();
         result.sort_by_key(|(_, depth)| *depth);
         Ok(result)
+    }
+}
+
+/// `RGM-FR-005` (ADR-0121): whether `req` carries a [`ScanValue::Null`]
+/// anywhere a value can sit — a field list, a predicate, a transaction
+/// op, a guard, a page cursor. Every value-bearing request variant is
+/// listed; a variant with no value is `false`.
+fn carries_null(req: &Request) -> bool {
+    fn null(v: &ScanValue) -> bool {
+        matches!(v, ScanValue::Null)
+    }
+    fn fields(fields: &[(FieldRef, ScanValue)]) -> bool {
+        fields.iter().any(|(_, v)| null(v))
+    }
+    fn preds(filter: &[Predicate]) -> bool {
+        filter.iter().any(|p| null(&p.value))
+    }
+    fn cursor(c: &Option<(ScanValue, RecordId)>) -> bool {
+        c.as_ref().is_some_and(|(v, _)| null(v))
+    }
+    match req {
+        Request::Insert { fields: f, .. } | Request::Replace { fields: f, .. } => fields(f),
+        Request::ReplaceIf {
+            fields: f, guard, ..
+        } => fields(f) || null(&guard.value),
+        Request::UpdateField { value, .. } | Request::FilterEq { value, .. } => null(value),
+        Request::Transaction { updates } => updates.iter().any(|op| null(&op.value)),
+        Request::WriteBatch { ops, .. } => ops.iter().any(|op| match op {
+            WriteOp::Insert { fields: f, .. } | WriteOp::Replace { fields: f, .. } => fields(f),
+            WriteOp::ReplaceIf {
+                fields: f, guard, ..
+            } => fields(f) || null(&guard.value),
+            WriteOp::Delete { .. } | WriteOp::Link { .. } => false,
+        }),
+        Request::Query { filter, .. } | Request::Aggregate { filter, .. } => preds(filter),
+        Request::Page { after, .. } => cursor(after),
+        Request::PageDesc { before, .. } => cursor(before),
+        Request::FilteredPage { after, filter, .. } => cursor(after) || preds(filter),
+        Request::FilteredPageDesc { before, filter, .. } => cursor(before) || preds(filter),
+        Request::Join(spec) => preds(&spec.left_filter) || preds(&spec.right_filter),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod carries_null_tests {
+    use super::*;
+    use crate::server::protocol::{CompareOp, TransactionOp};
+
+    /// `RGM-FR-005` (ADR-0121): the gate sees a `Null` wherever a value
+    /// can sit, and nothing else.
+    #[test]
+    fn carries_null_finds_a_null_in_every_value_position() {
+        let id = RecordId::from_u128(1);
+        let pred = |value: ScanValue| Predicate {
+            field: 1,
+            op: CompareOp::Eq,
+            value,
+        };
+        assert!(carries_null(&Request::Insert {
+            id,
+            fields: vec![(0, ScanValue::Str("a".into())), (1, ScanValue::Null)],
+        }));
+        assert!(!carries_null(&Request::Insert {
+            id,
+            fields: vec![(0, ScanValue::Str("a".into()))],
+        }));
+        assert!(carries_null(&Request::ReplaceIf {
+            id,
+            fields: vec![],
+            guard: pred(ScanValue::Null),
+        }));
+        assert!(carries_null(&Request::UpdateField {
+            id,
+            field: 1,
+            value: ScanValue::Null,
+        }));
+        assert!(carries_null(&Request::Transaction {
+            updates: vec![TransactionOp {
+                id,
+                field: 1,
+                value: ScanValue::Null,
+            }],
+        }));
+        assert!(carries_null(&Request::WriteBatch {
+            ops: vec![WriteOp::Replace {
+                id,
+                fields: vec![(2, ScanValue::Null)],
+            }],
+            atomic: true,
+        }));
+        assert!(carries_null(&Request::Query {
+            select: Selection::All,
+            filter: vec![pred(ScanValue::Null)],
+            limit: None,
+        }));
+        assert!(carries_null(&Request::Page {
+            order_by: 1,
+            after: Some((ScanValue::Null, id)),
+            limit: 1,
+        }));
+        assert!(!carries_null(&Request::GetById { id }));
+        assert!(!carries_null(&Request::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }));
     }
 }

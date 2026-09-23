@@ -97,7 +97,7 @@
 //! this crate's first git dependency) before any framed traffic, also
 //! purely opt-in — a server started with no `TlsConfig` behaves exactly
 //! as before. Since then the wire has gained a negotiated protocol version
-//! (18 today), transaction sessions, a redo journal, a client-side SQL
+//! (31 today), transaction sessions, a redo journal, a client-side SQL
 //! `SELECT`/`GROUP BY`/`JOIN` subset compiled to the same primitives, and
 //! — the `rusty_remind_me` line, ADR-0036 through ADR-0052 — runtime
 //! insertion, linking, replacement, deletion, more than one table on one

@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 29
+PROTOCOL_VERSION = 31
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -75,6 +75,9 @@ class ErrorCode(IntEnum):
     Storage = 12
     GuardFailed = 13
     TooLarge = 14
+    # WCB-FR-002, ADR-0103 (protocol 30): the server is at its connection
+    # cap; this frame is the one a refused connect reads before the close.
+    Busy = 15
 
 
 # ---- ScanValue (enum family) ----
@@ -125,11 +128,23 @@ class StrList:
         object.__setattr__(self, "value", tuple(self.value))
 
 
-ScanValue = [U32, I64, Bool, Str, F64, StrList]
+@dataclass(frozen=True)
+class Null:
+    """NUL-FR-001, ADR-0117 (protocol 31): the absence of a value. No
+    shipped column is nullable yet, so a server never sends it and
+    answers Malformed to a request carrying it where a value is read."""
+
+    _index: ClassVar[int] = 6
+    _spec: ClassVar[list] = []
+
+
+ScanValue = [U32, I64, Bool, Str, F64, StrList, Null]
 
 
 def scan_value_py(v) -> Any:
-    """The plain Python value inside a ScanValue (list for StrList)."""
+    """The plain Python value inside a ScanValue (list for StrList, None for Null)."""
+    if isinstance(v, Null):
+        return None
     return list(v.value) if isinstance(v, StrList) else v.value
 
 
@@ -939,10 +954,26 @@ class Snapshot:
         )
 
 
+@_variant(24, [("rows", ("vec", ("tuple", "uuid", FIELDS))), ("cap", "u64")])
+class RowsClamped:
+    """WCB-FR-001, ADR-0103 (protocol 30). `Rows` plus the row cap the
+    answer was clamped to: what a `Query` with no `limit` is answered
+    with under the server's row cap — the first `cap` matches in scan
+    order, not every match."""
+
+    rows: Tuple[Tuple[uuid.UUID, Tuple[Tuple[int, Any], ...]], ...]
+    cap: int
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "rows", tuple((rid, tuple(tuple(f) for f in fields)) for rid, fields in self.rows)
+        )
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
-    BatchResults, MetricsResp, BackedUp, Snapshot,
+    BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped,
 ]
 
 

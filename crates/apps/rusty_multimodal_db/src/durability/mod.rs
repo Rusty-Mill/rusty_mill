@@ -11,7 +11,7 @@
 //!
 //! # Why a new module, not a change to `src/store/canonical_cached.rs`
 //!
-//! Every durability variant here implements [`DogStore`] so it plugs into
+//! Every durability variant here implements [`crate::store::DogStore`] so it plugs into
 //! the same benchmark/test patterns the four existing backends use, but
 //! none of them are built by modifying `CanonicalCachedStore` itself —
 //! that file is closed, already-benchmarked backend code (see prior
@@ -235,6 +235,31 @@ impl From<DurabilityError> for StoreError {
 // `CanonicalCachedState`, and the WAL helpers) — gated behind `research`
 // along with them.
 
+/// `fsync` the directory holding `path`, so a rename or create just made
+/// in it is itself on disk — a file's own `sync_all` covers its bytes,
+/// never the directory entry that names it (`ADR-0092`, `DDL-FR-004`).
+/// Every write-to-temp-then-rename install in this crate calls this
+/// after its rename. A `path` with no parent (bare relative name) syncs
+/// the current directory. On targets where a directory cannot be opened
+/// as a file (Windows) this is a no-op: the rename's visibility there is
+/// the filesystem's own promise, and this crate's servers are Linux-only
+/// in CI.
+pub(crate) fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => std::path::Path::new("."),
+        };
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Append one entry to `writer`, length-prefixed (a 4-byte little-endian
 /// length followed by that many bincode-serialized bytes) so a reader
 /// doesn't need to know each entry's size in advance and can detect a
@@ -337,9 +362,9 @@ impl CanonicalCachedState {
     /// `rayon`'s data-parallel iterators would be overkill for a plain
     /// two-way split with nothing left to subdivide further.
     ///
-    /// Below [`PARALLEL_CONSTRUCTION_THRESHOLD`] records, thread-spawn
+    /// Below `PARALLEL_CONSTRUCTION_THRESHOLD` records, thread-spawn
     /// overhead exceeds the work being parallelized — see that constant's
-    /// own doc comment — so this falls back to [`Self::new_sequential`],
+    /// own doc comment — so this falls back to `Self::new_sequential`,
     /// the original single-threaded construction, instead.
     pub fn new(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
         if records.len() < PARALLEL_CONSTRUCTION_THRESHOLD {
@@ -399,7 +424,7 @@ impl CanonicalCachedState {
 
     /// The original, single-threaded construction — same two phases as
     /// [`Self::new`]'s parallel path, just run in sequence on one thread.
-    /// Used below [`PARALLEL_CONSTRUCTION_THRESHOLD`], where spawning a
+    /// Used below `PARALLEL_CONSTRUCTION_THRESHOLD`, where spawning a
     /// thread would cost more than it saves.
     fn new_sequential(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
         let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();

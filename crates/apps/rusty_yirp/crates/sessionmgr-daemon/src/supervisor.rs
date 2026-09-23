@@ -1583,6 +1583,18 @@ mod tests {
             let mut cmd = if cfg!(windows) {
                 let mut c = std::process::Command::new("cmd");
                 c.args(["/C", "ping -n 2 127.0.0.1 > NUL"]);
+                // See `tests/common/mod.rs`'s
+                // `trim_cargo_target_dirs_from_path`: in a full-workspace
+                // run cargo's prepended `target\...` entries push `PATH`
+                // past the 8,191 characters `cmd.exe` reads, and `ping`
+                // becomes "not recognized".
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let kept = std::env::split_paths(&path).filter(|dir| {
+                    !dir.to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("\\target\\")
+                });
+                c.env("PATH", std::env::join_paths(kept).unwrap_or(path));
                 c
             } else {
                 let mut c = std::process::Command::new("sh");

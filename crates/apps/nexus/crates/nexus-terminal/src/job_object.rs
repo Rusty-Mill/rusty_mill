@@ -187,7 +187,18 @@ mod imp {
             use std::process::{Command, Stdio};
 
             let mut job = JobObject::create().expect("create job");
+            // In a full-workspace run cargo's prepended `target\...`
+            // entries push `PATH` past the 8,191 characters `cmd.exe`
+            // reads, so `ping` is "not recognized"; hand `cmd` a `PATH`
+            // without them (the child needs nothing under `target\`).
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let kept = std::env::split_paths(&path).filter(|dir| {
+                !dir.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains("\\target\\")
+            });
             let mut child = Command::new("cmd")
+                .env("PATH", std::env::join_paths(kept).unwrap_or(path))
                 .args(["/C", "ping -n 60 127.0.0.1 >nul"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

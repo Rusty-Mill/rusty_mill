@@ -51,6 +51,78 @@
 //! silent recreation. Combine with `SERVER_TXN_JOURNAL_PATH` for
 //! crash-atomic batches; the two are independent settings.
 //!
+//! **One process per directory (`ADR-0092`).** Before any of the three
+//! files is opened, this binary claims `<dir>/.rusty_multimodal_db.lock`
+//! with an exclusive advisory lock (`server::data_lock::DataDirLock`)
+//! and holds it until it exits; a second `memory_server` pointed at
+//! the same directory refuses to start, naming that file. The kernel
+//! releases the lock however the process ends, so a killed server
+//! leaves nothing to clean up.
+//!
+//! # Connection limits — `SERVER_IDLE_TIMEOUT_SECS`, `SERVER_MAX_CONNECTIONS`, `SERVER_MAX_QUERY_ROWS` (ADR-0093)
+//!
+//! Since `ADR-0099`/`ADR-0102` all three default on: unset,
+//! `SERVER_IDLE_TIMEOUT_SECS` is 300, `SERVER_MAX_CONNECTIONS` is 1024,
+//! and `SERVER_MAX_QUERY_ROWS` is 10000; `0` turns any of them off.
+//! `SERVER_IDLE_TIMEOUT_SECS=<n>` closes a connection that
+//! neither sends nor accepts a byte for `n` seconds (its session, if
+//! any, rolls back and its MVCC snapshot is released, exactly as on a
+//! disconnect). `SERVER_MAX_CONNECTIONS=<n>` closes the `n+1`th
+//! concurrent connection at accept, before any byte is read, and
+//! counts it in `dogserver_connections_refused_total`.
+//! `SERVER_MAX_QUERY_ROWS=<n>` answers a `Query` with no `limit` as if it
+//! had asked for `n` rows (counted in `dogserver_query_rows_clamped_total`,
+//! ADR-0102), and refuses a `Query` or page whose `limit` is above `n`
+//! with `TooLarge` before any read. A value that is not a non-negative
+//! integer is a startup error.
+//!
+//! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
+//!
+//! An `Insert`/`Replace`/`Delete`/`Link` is `fsync`ed to the insert log
+//! before it is acknowledged, and a journaled `Transaction` batch
+//! (`SERVER_TXN_JOURNAL_PATH`) is `fsync`ed to the journal first. An
+//! `UpdateField`, and a `Transaction` batch on a table with no
+//! journal, is an in-place write to a mapped page: acknowledged at
+//! once, on disk at the next `Flush`, checkpoint, or OS write-back —
+//! it survives a process crash, not a power loss. Since `ADR-0099`
+//! those two paths `msync` the table's slot files before acknowledging
+//! by default, at roughly the cost of one `fsync` per update
+//! (`RESULTS.md`: ~100 µs); `SERVER_SYNC_UPDATES=0` turns that off and
+//! takes the write-back window back.
+//!
+//! # Updates through the journal — `SERVER_JOURNAL_UPDATES` (ADR-0107)
+//!
+//! With `SERVER_TXN_JOURNAL_PATH` set, `SERVER_JOURNAL_UPDATES=1` commits
+//! every `UpdateField` through the journal as a one-operation batch —
+//! the redo entry `fsync`ed before the slot is written, replayed on the
+//! next start — instead of `msync`ing the table's mapping. Durable past
+//! a power loss either way; the cost differs: for one writer the journal
+//! path is slower on a small table (~220 vs ~145 µs) and faster on a
+//! large one (~240 vs ~310 µs at 1M rows); under eight concurrent
+//! writers one `fsync` covers a group and the per-update cost halves
+//! (~90 vs ~180 µs) — `RESULTS.md`. Off by default; an error without a
+//! journal.
+//!
+//! # Journal and MVCC together (ADR-0114)
+//!
+//! `SERVER_TXN_JOURNAL_PATH` and `SERVER_MVCC_ISOLATION` may both be
+//! set (until ADR-0114 the pair was refused at startup). A reopened
+//! `memory` table then reads its pending insert log before the reopen
+//! clears it, replays the journal, and folds both into the reconstructed
+//! version index before serving, so a fresh snapshot after a restart
+//! sees every batch the journal acknowledged.
+//!
+//! # MVCC history bounded — `SERVER_MVCC_RECLAIM_EVERY` (ADR-0105)
+//!
+//! With `SERVER_MVCC_ISOLATION` set, every committed write appends a
+//! version entry that some open snapshot might still need. `ADR-0096`
+//! reclaimed the entries no open snapshot needs at `Compact` only; by
+//! default the server now also reclaims them on its own every 10,000
+//! appended entries (`SERVER_MVCC_RECLAIM_EVERY`; `0` leaves it to
+//! `Compact`), inside the same lock the write took, at the oldest
+//! open snapshot — so a deployment that never compacts no longer
+//! holds every version ever written.
+//!
 //! # Live backups — `SERVER_BACKUP_ROOT` (ADR-0065)
 //!
 //! Opt-in, and only meaningful with `SERVER_DATA_DIR` also set (a
@@ -79,6 +151,22 @@
 //! together. `FetchSnapshot` streams every file this table owns back
 //! over the connection, up to `MAX_SNAPSHOT_BYTES`. Unset, every
 //! `FetchSnapshot` request answers `Unauthorized`.
+//!
+//! # Exposure — a non-loopback bind needs auth and TLS (ADR-0094)
+//!
+//! Binding anything but a loopback address (`127.0.0.1`, `[::1]`) with
+//! no authentication configured, or with authentication but no TLS,
+//! refuses to start and says which is missing. `SERVER_ALLOW_INSECURE=1`
+//! turns that refusal into a warning for an operator who means it. A
+//! loopback bind needs nothing, as every version before.
+//!
+//! # Metrics scrape — `SERVER_METRICS_HTTP_ADDR` (ADR-0069, ADR-0111)
+//!
+//! Set to `host:port` to bind a second listener answering a plain
+//! `GET /metrics` with the same Prometheus text `Request::Metrics`
+//! carries; unset, no listener. It has no authentication of its own, so
+//! a non-loopback address is refused at startup (`RVM-FR-004`) unless
+//! `SERVER_ALLOW_INSECURE=1`, which turns the refusal into a warning.
 
 use rusty_multimodal_db::generic::entity::{
     create_entity_production_stack, open_or_create_entity_production_stack, Entity,
@@ -95,7 +183,11 @@ use rusty_multimodal_db::generic::relation::{
 };
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
+use rusty_multimodal_db::server::data_lock::DataDirLock;
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
+use rusty_multimodal_db::server::exposure::{
+    allow_insecure_from_env, check_exposure, check_metrics_exposure,
+};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{
@@ -182,6 +274,68 @@ fn sample_mentions() -> Vec<(Uuid, Uuid)> {
     ]
 }
 
+/// `LIM-FR-005` (ADR-0093): an opt-in positive-integer setting — `None`
+/// when unset; a startup error when set to anything else.
+/// `LIM-FR-005` (ADR-0093) as amended by `DEF-FR-001` (ADR-0099): a
+/// bounded setting with a default — unset is `default`; `0` is "off"
+/// (`None`); a positive integer is itself; anything else is a startup
+/// error.
+fn bounded_env(name: &str, default: Option<u64>) -> Option<u64> {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    // `RVL-FR-005` (ADR-0112): an exported-but-empty variable is unset.
+    if raw.trim().is_empty() {
+        return default;
+    }
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(n) => Some(n),
+        Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
+            panic!("{name}={raw:?} is larger than a 64-bit integer allows")
+        }
+        Err(_) => panic!("{name}={raw:?} is not a non-negative integer (0 turns the limit off)"),
+    }
+}
+
+/// `DEF-FR-002` (ADR-0099): an on/off setting that defaults to on —
+/// unset or `1` is on, `0` is off, anything else a startup error.
+fn switch_env(name: &str) -> bool {
+    switch_env_with_default(name, true)
+}
+
+/// `RVL-FR-005` (ADR-0112): an on/off setting with a stated default —
+/// unset or empty is the default, `1` on, `0` off, anything else a
+/// startup error.
+fn switch_env_with_default(name: &str, default: bool) -> bool {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    match raw.trim() {
+        "" => default,
+        "1" => true,
+        "0" => false,
+        _ => panic!("{name}={raw:?} is neither 0 nor 1"),
+    }
+}
+
+/// `DEF-FR-001` (ADR-0099): the idle timeout a deployment gets without
+/// asking — five minutes, long past any request's round trip and short
+/// enough that an abandoned session's MVCC snapshot is released the
+/// same hour.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+/// `DEF-FR-001` (ADR-0099): the connection cap a deployment gets without
+/// asking — a thread each, well under a Linux default thread limit.
+const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
+/// `CLP-FR-003` (ADR-0102): the row cap a deployment gets without asking
+/// — a `Query` with no `limit` is answered as if it had asked for this
+/// many rows (and counted); an explicit `limit` above it is refused.
+const DEFAULT_MAX_QUERY_ROWS: u64 = 10_000;
+/// `ART-FR-004` (ADR-0105): with MVCC on, reclaim history every this
+/// many appended entries without waiting for a `Compact` — a bound on
+/// the version index a deployment gets without asking.
+const DEFAULT_MVCC_RECLAIM_EVERY: u64 = 10_000;
+
 fn main() {
     let addr = std::env::args()
         .nth(1)
@@ -197,7 +351,26 @@ fn main() {
         ),
     };
     let durable = matches!(data, DataLocation::Durable(_));
+    // `ADR-0092` (`DDL-FR-002`): one process per data directory. Taken
+    // before any store is opened, held until `main` returns; a second
+    // server on the same directory refuses to start, naming the holder's
+    // lock file. Scratch mode is a per-process path nobody else can
+    // share, so it takes no lock.
+    let _data_dir_lock = match &data {
+        DataLocation::Durable(dir) => Some(DataDirLock::acquire(dir).unwrap_or_else(|e| {
+            panic!("SERVER_DATA_DIR {dir:?}: {e} — one memory_server per data directory")
+        })),
+        DataLocation::Scratch(_) => None,
+    };
     let journaled = std::env::var_os("SERVER_TXN_JOURNAL_PATH").is_some();
+    // `SERVER_JOURNAL_UPDATES` (`ADR-0107`, `JUF-FR-003`): with a journal,
+    // every `UpdateField` is committed through it (group commit) instead
+    // of `msync`ing the mapping; a `0`/`1` switch, off by default
+    // (`RVL-FR-005`, ADR-0112), an error without `SERVER_TXN_JOURNAL_PATH`.
+    let journal_updates = switch_env_with_default("SERVER_JOURNAL_UPDATES", false);
+    if journal_updates && !journaled {
+        panic!("SERVER_JOURNAL_UPDATES needs SERVER_TXN_JOURNAL_PATH: there is no journal to commit through");
+    }
     // `SERVER_MVCC_ISOLATION` (`ADR-0072`, `MVCC2-FR-004`/`011`): opt-in,
     // unset by default — matching `with_mvcc`/`open_with_mvcc`'s own
     // "unset by default" framing and `SERVER_BACKUP_ROOT`/
@@ -206,133 +379,177 @@ fn main() {
     // any of the three tables; unset, that bit is refused `Unsupported`
     // everywhere, exactly as it always was before this variable existed.
     let mvcc_enabled = std::env::var_os("SERVER_MVCC_ISOLATION").is_some();
-    // These two do not compose safely today: `with_journal`'s own
-    // `open_or_create_*_production_stack` call (inside `open_stores`,
-    // below) already folds and clears the insert log for its own
-    // primary-state purposes, before either `with_journal` or any MVCC
-    // constructor ever sees it — the exact gap `open_with_mvcc`'s own
-    // doc comment names, but with no way to recover from it here, since
-    // by the time `with_journal` or `.with_mvcc()` would run the log is
-    // already gone. Refusing to start (an explicit, named limitation,
-    // not a silent gap) matches this binary's own "unopenable path is a
-    // startup error" convention for every other misconfiguration.
-    if mvcc_enabled && journaled {
-        panic!(
-            "SERVER_MVCC_ISOLATION and SERVER_TXN_JOURNAL_PATH cannot both be set: real MVCC \
-             and the crash-atomic journal are not yet composable for a reopened table (see \
-             MemoryConnectionStore::with_mvcc's and ::open_with_mvcc's own doc comments, and \
-             ADR-0072's \"Negative / tradeoffs\") — pick one for this table"
-        );
-    }
-    // Detected *before* `open_stores` runs `open_or_create_*_production_stack`
-    // on each path — afterward every file exists regardless, so this is
-    // the only point a caller can still tell "fresh" from "reopen" the
-    // same way `open_or_create_memory_production_stack`'s own
-    // `path.exists()` check does internally. Scratch mode is always
-    // "fresh": its directory is a brand-new per-process temp path that
-    // cannot already hold any of these three files.
-    let (memories_existed, entities_existed, relations_existed) = match &data {
-        DataLocation::Durable(dir) => (
-            dir.join("memories.mmap").exists(),
-            dir.join("entities.mmap").exists(),
-            dir.join("relations.mmap").exists(),
-        ),
-        DataLocation::Scratch(_) => (false, false, false),
-    };
-    // Known, accepted tradeoff of this round: when `open_with_mvcc` is
-    // used below (reopening a table with MVCC on), the corresponding
-    // stack `open_stores` already built here (`store`/`entity_store`/
-    // `relation_store`) is left unused for that table — `open_with_mvcc`
-    // opens the file a second time itself, since it must read the insert
-    // log *before* the normal open path clears it, and this binary's own
-    // `open_stores` has no way to be told "skip this one, something else
-    // will open it." The first, unused mapping is simply dropped at
-    // `main`'s own end; it is never read or written, so this is wasted
-    // I/O and a doubled peak file-handle count for that table's startup,
-    // not a correctness risk — a deeper `open_stores` refactor to avoid
-    // it is future work, not attempted in this round.
-    let (store, entity_store, relation_store, memories_path, entities_path, relations_path) =
-        open_stores(&data).unwrap_or_else(|e| panic!("{e}"));
+    // `SERVER_SYNC_UPDATES` (`ADR-0097`, `SYU-FR-004`; on by default since
+    // `ADR-0099`, `DEF-FR-002`): every `UpdateField` and every
+    // non-journaled `Transaction` batch is `msync`ed before it is
+    // acknowledged; `0` turns it off and the acknowledgement precedes
+    // durability by the OS's write-back.
+    let sync_updates = switch_env("SERVER_SYNC_UPDATES");
+    // `SERVER_MVCC_RECLAIM_EVERY` (`ADR-0105`, `ART-FR-004`): with MVCC
+    // on, history no open snapshot needs is reclaimed automatically
+    // every this many appended entries; `0` leaves it to `Compact`.
+    let mvcc_reclaim_every = bounded_env(
+        "SERVER_MVCC_RECLAIM_EVERY",
+        Some(DEFAULT_MVCC_RECLAIM_EVERY),
+    )
+    .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    // `JMC-FR-003` (ADR-0114): `SERVER_TXN_JOURNAL_PATH` and
+    // `SERVER_MVCC_ISOLATION` compose — a reopened `memory` table takes
+    // `open_with_mvcc_journaled` below, which reads the pending insert
+    // log before the reopen clears it, replays the journal, and folds
+    // both into the reconstructed index. Until ADR-0114 the pair was
+    // refused at startup.
+    // `JMC-FR-003` (ADR-0114): a table an MVCC constructor will reopen
+    // is not opened here first — `open_with_mvcc`/`open_with_mvcc_journaled`
+    // must read the insert log before any open of the file folds and
+    // clears it. Through ADR-0113 this binary opened every table once
+    // through `open_stores` and then a second time in the MVCC reopen;
+    // the first, unused mapping had already cleared the log, so a
+    // journaled batch pending in it never reached the index (an
+    // ordinary write survived only because it flushes the history
+    // itself). `open_stores` now leaves such a table to its adapter.
+    let OpenedStores {
+        store,
+        entity_store,
+        relation_store,
+        memories_path,
+        entities_path,
+        relations_path,
+    } = open_stores(&data, mvcc_enabled).unwrap_or_else(|e| panic!("{e}"));
     let relation_connection_store: Arc<dyn ConnectionStore> = Arc::new({
-        let adapter = if mvcc_enabled && relations_existed {
-            RelationConnectionStore::open_with_mvcc(&relations_path).unwrap_or_else(|e| {
-                panic!("SERVER_MVCC_ISOLATION: reopening {relations_path:?} for relation: {e}")
-            })
-        } else {
-            let adapter = RelationConnectionStore::new(GenericProductionStore::new(relation_store));
-            if mvcc_enabled {
-                adapter.with_mvcc(&relations_path).unwrap_or_else(|e| {
-                    panic!("SERVER_MVCC_ISOLATION: activating for relation: {e}")
-                })
-            } else {
-                adapter
+        let adapter = match relation_store {
+            TableOpen::ReopenWithMvcc => RelationConnectionStore::open_with_mvcc(&relations_path)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("relation", &relations_path, &e)
+                    )
+                }),
+            TableOpen::Opened(relation_store) => {
+                let adapter =
+                    RelationConnectionStore::new(GenericProductionStore::new(relation_store));
+                if mvcc_enabled {
+                    adapter.with_mvcc(&relations_path).unwrap_or_else(|e| {
+                        panic!("SERVER_MVCC_ISOLATION: activating for relation: {e}")
+                    })
+                } else {
+                    adapter
+                }
             }
         };
         // `BAK-FR-002` (ADR-0065): only a durable table has a directory
         // worth naming — a scratch table is gone on restart regardless.
-        if durable {
+        let adapter = if durable {
             adapter.with_backup_source(relations_path)
         } else {
             adapter
-        }
+        };
+        // `SYU-FR-004` (ADR-0097): `msync` before every in-place
+        // update's acknowledgement, when asked.
+        adapter
+            .with_synced_updates(sync_updates)
+            .with_mvcc_reclaim_every(mvcc_reclaim_every)
+            .with_journaled_updates(journal_updates)
     });
     let entity_connection_store: Arc<dyn ConnectionStore> = Arc::new({
-        let adapter = if mvcc_enabled && entities_existed {
-            EntityConnectionStore::open_with_mvcc(&entities_path).unwrap_or_else(|e| {
-                panic!("SERVER_MVCC_ISOLATION: reopening {entities_path:?} for entity: {e}")
-            })
-        } else {
-            let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
-            if mvcc_enabled {
-                adapter
-                    .with_mvcc(&entities_path)
-                    .unwrap_or_else(|e| panic!("SERVER_MVCC_ISOLATION: activating for entity: {e}"))
-            } else {
-                adapter
+        let adapter = match entity_store {
+            TableOpen::ReopenWithMvcc => EntityConnectionStore::open_with_mvcc(&entities_path)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("entity", &entities_path, &e)
+                    )
+                }),
+            TableOpen::Opened(entity_store) => {
+                let adapter = EntityConnectionStore::new(GenericProductionStore::new(entity_store));
+                if mvcc_enabled {
+                    adapter.with_mvcc(&entities_path).unwrap_or_else(|e| {
+                        panic!("SERVER_MVCC_ISOLATION: activating for entity: {e}")
+                    })
+                } else {
+                    adapter
+                }
             }
         };
-        if durable {
+        let adapter = if durable {
             adapter.with_backup_source(entities_path)
         } else {
             adapter
-        }
+        };
+        // `SYU-FR-004` (ADR-0097): `msync` before every in-place
+        // update's acknowledgement, when asked.
+        adapter
+            .with_synced_updates(sync_updates)
+            .with_mvcc_reclaim_every(mvcc_reclaim_every)
+            .with_journaled_updates(journal_updates)
     });
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
     // write, replayed on the next start. Set it the same way every start:
-    // opening without it after a crash forgoes the replay. Mutually
-    // exclusive with `SERVER_MVCC_ISOLATION` (checked above), so this
-    // branch and the MVCC one below never both apply to `memory`.
+    // opening without it after a crash forgoes the replay. With
+    // `SERVER_MVCC_ISOLATION` too, a reopened table takes the journaled
+    // MVCC reopen (`JMC-FR-003`, ADR-0114).
+    let journal_path = std::env::var_os("SERVER_TXN_JOURNAL_PATH").map(PathBuf::from);
     let connection_store = Arc::new({
-        let adapter = if mvcc_enabled && memories_existed {
-            MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
-                panic!("SERVER_MVCC_ISOLATION: reopening {memories_path:?} for memory: {e}")
-            })
-        } else {
-            let adapter = match std::env::var("SERVER_TXN_JOURNAL_PATH") {
-                Ok(journal_path) => MemoryConnectionStore::with_journal(
-                    GenericProductionStore::new(store),
-                    Path::new(&journal_path),
-                )
-                .unwrap_or_else(|e| panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")),
-                Err(_) => MemoryConnectionStore::new(GenericProductionStore::new(store)),
-            };
-            if mvcc_enabled {
-                adapter
-                    .with_mvcc(&memories_path)
-                    .unwrap_or_else(|e| panic!("SERVER_MVCC_ISOLATION: activating for memory: {e}"))
-            } else {
-                adapter
+        let adapter = match store {
+            TableOpen::ReopenWithMvcc => match &journal_path {
+                Some(journal_path) => {
+                    MemoryConnectionStore::open_with_mvcc_journaled(&memories_path, journal_path)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "SERVER_MVCC_ISOLATION with SERVER_TXN_JOURNAL_PATH: {}",
+                                open_error("memory", &memories_path, &e)
+                            )
+                        })
+                }
+                None => MemoryConnectionStore::open_with_mvcc(&memories_path).unwrap_or_else(|e| {
+                    panic!(
+                        "SERVER_MVCC_ISOLATION: {}",
+                        open_error("memory", &memories_path, &e)
+                    )
+                }),
+            },
+            TableOpen::Opened(store) => {
+                let adapter = match &journal_path {
+                    Some(journal_path) => MemoryConnectionStore::with_journal(
+                        GenericProductionStore::new(store),
+                        journal_path,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("SERVER_TXN_JOURNAL_PATH configured but invalid: {e}")
+                    }),
+                    None => MemoryConnectionStore::new(GenericProductionStore::new(store)),
+                };
+                if mvcc_enabled {
+                    adapter.with_mvcc(&memories_path).unwrap_or_else(|e| {
+                        panic!("SERVER_MVCC_ISOLATION: activating for memory: {e}")
+                    })
+                } else {
+                    adapter
+                }
             }
         };
-        if durable {
+        let adapter = if durable {
             adapter.with_backup_source(memories_path)
         } else {
             adapter
-        }
+        };
+        // `SYU-FR-004` (ADR-0097): `msync` before every in-place
+        // update's acknowledgement, when asked.
+        adapter
+            .with_synced_updates(sync_updates)
+            .with_mvcc_reclaim_every(mvcc_reclaim_every)
+            .with_journaled_updates(journal_updates)
     });
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
+    // `RGT-FR-004` (ADR-0123): the banner names the address the kernel
+    // bound, so `:0` is a usable request — a test or a supervisor reads
+    // the port from the banner instead of guessing one first.
+    let addr = listener
+        .local_addr()
+        .map(|bound| bound.to_string())
+        .unwrap_or(addr);
 
     // `SERVER_AUDIT_LOG` (ADR-0029): `stderr`, or a file path appended to;
     // unset → no audit. An unopenable path is a startup error.
@@ -386,6 +603,21 @@ fn main() {
         Some(tls) => auth.with_tls(tls),
         None => auth,
     };
+    // `EXP-FR-002`/`003` (ADR-0094): a non-loopback bind without both
+    // authentication and TLS is refused at startup; `SERVER_ALLOW_INSECURE=1`
+    // turns the refusal into a warning for the operator who means it.
+    if let Err(exposure) = check_exposure(&addr, &options) {
+        if allow_insecure_from_env() {
+            eprintln!(
+                "WARNING: listening on {addr} although {exposure} (SERVER_ALLOW_INSECURE=1 is set)"
+            );
+        } else {
+            panic!(
+                "refusing to listen on {addr}: {exposure}; bind a loopback address, configure \
+                 what is missing, or set SERVER_ALLOW_INSECURE=1 to serve anyway (ADR-0094)"
+            );
+        }
+    }
     // `SERVER_BACKUP_ROOT` (ADR-0065, `BAK-FR-003`): opt-in — unset,
     // every `Request::Backup` answers `Unsupported` server-wide, no new
     // filesystem-write surface at all.
@@ -402,19 +634,58 @@ fn main() {
         Err(_) => options,
     };
     let replication_tokened = std::env::var_os("SERVER_AUTH_REPLICATION_TOKEN").is_some();
+    // `SERVER_IDLE_TIMEOUT_SECS` / `SERVER_MAX_CONNECTIONS` /
+    // `SERVER_MAX_QUERY_ROWS` (ADR-0093, `LIM-FR-005`): each opt-in; a
+    // value that is not a positive integer is a startup error, this
+    // binary's convention for every other misconfiguration.
+    // Defaults since `ADR-0099` (`DEF-FR-001`): 300 s idle, 1,024
+    // connections; since `ADR-0102` (`CLP-FR-003`) 10,000 rows, now that a
+    // `Query` with no `limit` is clamped under the cap rather than refused.
+    let options = match bounded_env("SERVER_IDLE_TIMEOUT_SECS", Some(DEFAULT_IDLE_TIMEOUT_SECS)) {
+        Some(secs) => options.with_idle_timeout(std::time::Duration::from_secs(secs)),
+        None => options,
+    };
+    let options = match bounded_env("SERVER_MAX_CONNECTIONS", Some(DEFAULT_MAX_CONNECTIONS)) {
+        Some(max) => options.with_max_connections(usize::try_from(max).unwrap_or(usize::MAX)),
+        None => options,
+    };
+    let options = match bounded_env("SERVER_MAX_QUERY_ROWS", Some(DEFAULT_MAX_QUERY_ROWS)) {
+        Some(max) => options.with_max_query_rows(usize::try_from(max).unwrap_or(usize::MAX)),
+        None => options,
+    };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
+    // `RGL-FR-005` (ADR-0122): exported but empty is unset, as for every
+    // other variable (`RVL-FR-005`).
     let options = match std::env::var("SERVER_METRICS_HTTP_ADDR") {
-        Ok(addr) => {
+        Ok(addr) if !addr.is_empty() => {
+            // `RVM-FR-004` (ADR-0111): the same rule as the wire listener,
+            // stricter — this one has no auth or TLS to configure.
+            if let Err(exposure) = check_metrics_exposure(&addr) {
+                if allow_insecure_from_env() {
+                    eprintln!(
+                        "WARNING: metrics listening on {addr} although {exposure} (SERVER_ALLOW_INSECURE=1 is set)"
+                    );
+                } else {
+                    panic!(
+                        "refusing to listen on {addr}: {exposure}; bind the metrics listener to a \
+                         loopback address, or set SERVER_ALLOW_INSECURE=1 to serve anyway (ADR-0111)"
+                    );
+                }
+            }
             let listener = TcpListener::bind(&addr)
                 .expect("binding SERVER_METRICS_HTTP_ADDR for the HTTP metrics listener");
-            eprintln!("memory_server metrics HTTP listening on {addr} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
+            let bound = listener
+                .local_addr()
+                .map(|bound| bound.to_string())
+                .unwrap_or_else(|_| addr.clone());
+            eprintln!("memory_server metrics HTTP listening on {bound} (SERVER_METRICS_HTTP_ADDR, ADR-0069)");
             options.with_metrics_http(listener)
         }
-        Err(_) => options,
+        _ => options,
     };
     eprintln!(
-        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "memory_server listening on {addr} (data: {}, auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {}, backup root: {}, replication token: {}, idle timeout: {:?}, max connections: {:?}, max query rows: {:?}, synced updates: {}, MVCC reclaim every: {:?}, journaled updates: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031/ADR-0048/ADR-0053/ADR-0064/ADR-0065/ADR-0067; do not expose beyond a trusted network unless auth and TLS are both configured)",
         data.describe(),
         if options.is_configured() { "configured" } else { "NOT configured" },
         match options.tls() {
@@ -428,6 +699,12 @@ fn main() {
         if access_logged { "configured" } else { "NOT configured" },
         if backup_rooted { "configured" } else { "NOT configured" },
         if replication_tokened { "configured" } else { "NOT configured" },
+        options.idle_timeout(),
+        options.max_connections(),
+        options.max_query_rows(),
+        if sync_updates { "configured" } else { "NOT configured (write-back)" },
+        mvcc_reclaim_every,
+        if journal_updates { "configured" } else { "NOT configured" },
     );
 
     // `TBL-FR-001` (ADR-0050): tables on one listener, `memory` primary
@@ -469,19 +746,67 @@ impl DataLocation {
 /// `SERVER_DATA_DIR`'s decision table (`DDR-FR-002`): the directory is
 /// created if missing; durable tables open-or-create, scratch tables
 /// are seeded. Every failure names the directory.
-fn open_stores(
-    data: &DataLocation,
-) -> Result<
-    (
-        MemoryProductionStack,
-        EntityProductionStack,
-        RelationProductionStack,
-        PathBuf,
-        PathBuf,
-        PathBuf,
-    ),
-    String,
-> {
+/// How a table's store reaches its adapter (`JMC-FR-003`, ADR-0114):
+/// opened here, or left to the adapter's own MVCC reopen, which reads the
+/// insert log before any open of the file clears it.
+enum TableOpen<S> {
+    Opened(S),
+    ReopenWithMvcc,
+}
+
+/// `SCE-FR-001` (ADR-0116): the startup error for a table that will not
+/// open, and — when the cause is a schema-tag mismatch, the distinct
+/// refusal `ADR-0056` gives a directory written at an older layout —
+/// the remedy: the migration tool `ADR-0066` ships for `Memory`, or a
+/// re-push from the consumer, the source of truth, for every table.
+fn open_error(table: &str, path: &Path, error: &dyn std::fmt::Display) -> String {
+    let text = error.to_string();
+    let mut message = format!(
+        "SERVER_DATA_DIR: opening {} ({table}): {text}",
+        path.display()
+    );
+    if text.contains("schema tag mismatch") {
+        message.push_str(
+            "\nThis directory was written at an older layout of this table than this binary \
+             serves (ADR-0056). It is refused, never mis-read and never recreated.",
+        );
+        if table == "memory" {
+            // `RGF-FR-003` (ADR-0120): the tool takes the two *slot file*
+            // paths and copies only this table, so the remedy names the
+            // directory `SERVER_DATA_DIR` must point at and the two
+            // sibling tables the operator carries over unchanged.
+            message.push_str(
+                "\nRemedy: migrate it into a fresh directory <new_dir>:\n  cargo run -p \
+                 rusty_multimodal_db --example migrate_memory_v1_to_v2 -- \
+                 <old_dir>/memories.mmap <new_dir>/memories.mmap\n(ADR-0066, STORAGE-019; \
+                 <new_dir>/memories.mmap must not exist yet). The tool migrates the memory \
+                 table only: copy every entities.mmap* and relations.mmap* file from <old_dir> \
+                 into <new_dir> unchanged (their layouts have not changed), then set \
+                 SERVER_DATA_DIR=<new_dir>. Or re-push the table from the consumer, the source \
+                 of truth.",
+            );
+        } else {
+            message.push_str(
+                "\nRemedy: re-push the table from the consumer, the source of truth (no \
+                 migration tool ships for this table yet — ADR-0066's three-step pattern \
+                 applies when one is needed).",
+            );
+        }
+    }
+    message
+}
+
+/// The three tables as `open_stores` leaves them, with their file paths.
+struct OpenedStores {
+    store: TableOpen<MemoryProductionStack>,
+    entity_store: TableOpen<EntityProductionStack>,
+    relation_store: TableOpen<RelationProductionStack>,
+    memories_path: PathBuf,
+    entities_path: PathBuf,
+    relations_path: PathBuf,
+}
+
+fn open_stores(data: &DataLocation, mvcc_enabled: bool) -> Result<OpenedStores, String> {
     let (dir, durable) = match data {
         DataLocation::Durable(dir) => (dir, true),
         DataLocation::Scratch(dir) => (dir, false),
@@ -492,20 +817,41 @@ fn open_stores(
     let entities = dir.join("entities.mmap");
     let relations = dir.join("relations.mmap");
     if durable {
-        let store = open_or_create_memory_production_stack(&memories)
-            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", memories.display()))?;
-        let entity_store = open_or_create_entity_production_stack(&entities)
-            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", entities.display()))?;
-        let relation_store = open_or_create_relation_production_stack(&relations)
-            .map_err(|e| format!("SERVER_DATA_DIR: opening {}: {e}", relations.display()))?;
-        return Ok((
+        // Existence is checked before any open: afterward every file
+        // exists regardless. Scratch mode is always fresh — its directory
+        // is a brand-new per-process temp path.
+        let store = if mvcc_enabled && memories.exists() {
+            TableOpen::ReopenWithMvcc
+        } else {
+            TableOpen::Opened(
+                open_or_create_memory_production_stack(&memories)
+                    .map_err(|e| open_error("memory", &memories, &e))?,
+            )
+        };
+        let entity_store = if mvcc_enabled && entities.exists() {
+            TableOpen::ReopenWithMvcc
+        } else {
+            TableOpen::Opened(
+                open_or_create_entity_production_stack(&entities)
+                    .map_err(|e| open_error("entity", &entities, &e))?,
+            )
+        };
+        let relation_store = if mvcc_enabled && relations.exists() {
+            TableOpen::ReopenWithMvcc
+        } else {
+            TableOpen::Opened(
+                open_or_create_relation_production_stack(&relations)
+                    .map_err(|e| open_error("relation", &relations, &e))?,
+            )
+        };
+        return Ok(OpenedStores {
             store,
             entity_store,
             relation_store,
-            memories,
-            entities,
-            relations,
-        ));
+            memories_path: memories,
+            entities_path: entities,
+            relations_path: relations,
+        });
     }
     let store = create_memory_production_stack(sample_memories(), &sample_mentions(), &memories)
         .map_err(|e| format!("creating the sample MemoryProductionStack: {e}"))?;
@@ -513,14 +859,14 @@ fn open_stores(
         .map_err(|e| format!("creating the sample EntityProductionStack: {e}"))?;
     let relation_store = create_relation_production_stack(sample_relations(), &relations)
         .map_err(|e| format!("creating the sample RelationProductionStack: {e}"))?;
-    Ok((
-        store,
-        entity_store,
-        relation_store,
-        memories,
-        entities,
-        relations,
-    ))
+    Ok(OpenedStores {
+        store: TableOpen::Opened(store),
+        entity_store: TableOpen::Opened(entity_store),
+        relation_store: TableOpen::Opened(relation_store),
+        memories_path: memories,
+        entities_path: entities,
+        relations_path: relations,
+    })
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see

@@ -264,6 +264,59 @@ fn a_plain_connection_to_a_tls_configured_server_never_gets_a_valid_response() {
     );
 }
 
+/// `BTL-FR-001` (ADR-0104): a TLS listener at its connection cap tells a
+/// refused connection so — the refusal thread completes the handshake
+/// and writes one `Err { Busy }` frame before closing — and the first
+/// connection is unaffected; once it ends, the next connect is admitted.
+#[test]
+fn a_tls_connection_past_the_cap_reads_busy_after_the_handshake() {
+    let (cert, key) = self_signed_leaf();
+    let addr = start_server(
+        ServeOptions::new(None, None).with_max_connections(1),
+        Some(TlsConfig::new(vec![cert], key).unwrap()),
+    );
+
+    let mut first = connect_tls(addr);
+    match roundtrip(
+        &mut first,
+        Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    ) {
+        Response::Hello { .. } => {}
+        other => panic!("expected Hello, got {other:?}"),
+    }
+
+    let mut refused = connect_tls(addr);
+    let _ = write_message(
+        &mut refused,
+        &Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    );
+    match read_message::<_, Response>(&mut refused) {
+        Ok(Response::Err { code, .. }) => assert_eq!(code, ErrorCode::Busy),
+        other => panic!("expected Busy over TLS, got {other:?}"),
+    }
+    assert!(
+        read_message::<_, Response>(&mut refused).is_err(),
+        "the refused connection is closed after its one frame"
+    );
+
+    drop(first);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let mut third = connect_tls(addr);
+    match roundtrip(
+        &mut third,
+        Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    ) {
+        Response::Hello { .. } => {}
+        other => panic!("expected Hello once the slot is free, got {other:?}"),
+    }
+}
+
 /// `TLS-FR-008`: a server started with no `TlsConfig` behaves identically
 /// to every other integration test in this suite — plaintext, no
 /// handshake required. Already exercised broadly by every other

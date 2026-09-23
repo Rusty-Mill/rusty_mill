@@ -10,8 +10,31 @@ use rusty_http::head::{ResponseHead, DEFAULT_MAX_HEAD_LEN};
 use rusty_http::sync::SyncTransport;
 use rusty_http::{HeaderMap, Method, StatusCode, Version};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
+
+/// `RGM-FR-003` (ADR-0121): the most scrape connections served at once;
+/// past it an accept is closed unanswered, so a flood of idle
+/// connections cannot exhaust the process's threads.
+pub const MAX_METRICS_HTTP_CONNECTIONS: usize = 16;
+
+/// `RGM-FR-003`: how long one scrape may take to send its request head
+/// or receive its answer before the connection is dropped.
+pub const METRICS_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// One served scrape's slot, released when the handler returns — or when
+/// the spawn failed and the closure holding it was dropped.
+struct SlotGuard;
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// `MHTTP-FR-001`/`004` (ADR-0069): accept on an already-bound listener,
 /// serving each connection on its own OS thread against the identical
@@ -23,8 +46,20 @@ pub(super) fn serve_metrics_http(listener: TcpListener, options: Arc<ServeOption
             Ok(s) => s,
             Err(_) => continue, // one bad accept doesn't take down the server
         };
+        if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_METRICS_HTTP_CONNECTIONS {
+            IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            drop(stream); // `RGM-FR-003`: past the cap, closed unanswered
+            continue;
+        }
+        let slot = SlotGuard;
         let options = Arc::clone(&options);
-        thread::spawn(move || handle_metrics_http_connection(stream, options.as_ref()));
+        // `RVL-FR-008`'s discipline (ADR-0112), applied here by
+        // `RGM-FR-003`: a failed spawn drops the socket and the slot
+        // instead of panicking the accept loop.
+        let _ = thread::Builder::new().spawn(move || {
+            let _slot = slot;
+            handle_metrics_http_connection(stream, options.as_ref())
+        });
     }
 }
 
@@ -34,13 +69,15 @@ pub(super) fn serve_metrics_http(listener: TcpListener, options: Arc<ServeOption
 /// an empty `404`. No path increments any wire-protocol metric.
 fn handle_metrics_http_connection(stream: TcpStream, options: &ServeOptions) {
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(METRICS_HTTP_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(METRICS_HTTP_TIMEOUT));
     let mut transport = SyncTransport::new(stream);
     let head = match transport.read_request_head(DEFAULT_MAX_HEAD_LEN) {
         Ok(head) => head,
         Err(_) => return,
     };
     let (status, reason, body) = match (head.method, head.target.as_str()) {
-        (Method::Get, "/metrics") => (StatusCode::OK, "OK", options.metrics().render()),
+        (Method::Get, "/metrics") => (StatusCode::OK, "OK", options.render_metrics()),
         _ => (StatusCode::NOT_FOUND, "Not Found", String::new()),
     };
     let mut headers = HeaderMap::new();

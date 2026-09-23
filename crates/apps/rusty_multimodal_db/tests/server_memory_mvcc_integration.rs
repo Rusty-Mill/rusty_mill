@@ -174,6 +174,40 @@ fn content_of(stream: &mut TcpStream, id: Uuid) -> String {
     }
 }
 
+/// `MHE-FR-002` (ADR-0109): `Metrics` carries one
+/// `dogserver_mvcc_history_entries` gauge sample per table with MVCC
+/// state — `0` before the first `BeginWith`, the seeded baseline after
+/// — on the wire, read live from the table.
+#[test]
+fn metrics_carry_the_mvcc_history_size_per_table() {
+    let addr = start_server();
+    let mut observer = connect_negotiated(addr);
+    match roundtrip(&mut observer, Request::Metrics) {
+        Response::Metrics { text } => assert!(
+            text.contains("dogserver_mvcc_history_entries{table=\"memory\"} 0\n"),
+            "before activation: {text}"
+        ),
+        other => panic!("expected Metrics, got {other:?}"),
+    }
+    let mut session = connect_negotiated(addr);
+    assert!(matches!(begin_mvcc(&mut session), Response::Ok));
+    match roundtrip(&mut observer, Request::Metrics) {
+        Response::Metrics { text } => {
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("dogserver_mvcc_history_entries{table=\"memory\"} "))
+                .unwrap_or_else(|| panic!("no sample: {text}"));
+            let n: u64 = line.rsplit(' ').next().unwrap().parse().unwrap();
+            assert!(n > 0, "activation seeded a baseline: {line}");
+            assert!(
+                text.contains("# TYPE dogserver_mvcc_history_entries gauge\n"),
+                "text: {text}"
+            );
+        }
+        other => panic!("expected Metrics, got {other:?}"),
+    }
+}
+
 /// `MVCC2-FR-004`: the bit is unknown (`Malformed`) below protocol 27.
 #[test]
 fn the_mvcc_bit_is_unknown_below_protocol_27() {

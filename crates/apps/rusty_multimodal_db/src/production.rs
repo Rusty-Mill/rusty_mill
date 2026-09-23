@@ -74,8 +74,8 @@
 //! permission on the OS temp dir) is a genuinely exceptional environment
 //! problem, not a normal operational outcome any caller could sensibly
 //! recover from by inspecting a `Result`. Callers who need real fallibility
-//! (a caller-supplied, persistent path) should use [`Self::create`]/
-//! [`Self::open`] directly, which return `Result` throughout.
+//! (a caller-supplied, persistent path) should use [`ProductionStore::create`]/
+//! [`ProductionStore::open`] directly, which return `Result` throughout.
 //!
 //! # File portability: two files, one path (STORAGE-014)
 //!

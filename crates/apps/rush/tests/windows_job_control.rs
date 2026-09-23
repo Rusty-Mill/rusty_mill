@@ -17,8 +17,25 @@
 use std::process::Command;
 
 /// Runs `rush -c src`, returning `(stdout, exit status)`.
+/// The workspace's Windows CI runs every crate's tests with cargo's
+/// build-script `out` and `target` directories prepended to `PATH`, which
+/// past ~8 KB drops `System32` off cmd's view (see the root `ci.yml`'s
+/// nextest step). `ping` below is resolved through `PATH`, so the shell
+/// under test gets one without those entries — the same trim
+/// `rusty_tokio`'s and `sessionmgr-daemon`'s tests apply.
+fn path_without_cargo_target_dirs() -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let kept = std::env::split_paths(&path).filter(|dir| {
+        !dir.to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("\\target\\")
+    });
+    std::env::join_paths(kept).unwrap_or(path)
+}
+
 fn rush(src: &str) -> (String, i32) {
     let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .env("PATH", path_without_cargo_target_dirs())
         .arg("-c")
         .arg(src)
         .output()
@@ -36,6 +53,7 @@ fn rush(src: &str) -> (String, i32) {
 /// earlier command failed and printed a message to stderr.
 fn rush_full(src: &str) -> (String, String, i32) {
     let output = Command::new(env!("CARGO_BIN_EXE_rush"))
+        .env("PATH", path_without_cargo_target_dirs())
         .arg("-c")
         .arg(src)
         .output()

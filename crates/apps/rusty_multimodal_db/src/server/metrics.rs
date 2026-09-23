@@ -1,13 +1,13 @@
 //! Process-wide server metrics (`SERVER-001` FR, ADR-0064,
 //! `docs/design/SERVER-METRICS-DESIGN.md`): a small, fixed set of atomic
-//! counters, readable over the existing wire as [`Request::Metrics`]
+//! counters, readable over the existing wire as [`crate::server::protocol::Request::Metrics`]
 //! (`super::protocol::Request::Metrics`), rendered as Prometheus text
 //! exposition format — no new dependency, no second listener. See the
 //! design document's own "Non-goals" for what this deliberately does not
 //! provide (per-`RequestKind` cardinality, latency histograms, a
 //! standalone HTTP endpoint).
 //!
-//! [`ServerMetrics`] lives on [`super::ServeOptions`] (one instance per
+//! [`crate::server::metrics::ServerMetrics`] lives on [`crate::server::ServeOptions`] (one instance per
 //! `serve`/`serve_tables` call, shared via the same `Arc<ServeOptions>`
 //! every connection thread already holds) rather than as a separate
 //! parameter — `ServeOptions` already carries live, shared, mutable
@@ -45,6 +45,12 @@ pub struct ServerMetrics {
     requests_ok_total: AtomicU64,
     requests_err_total: AtomicU64,
     connections_total: AtomicU64,
+    /// `LIM-FR-002` (ADR-0093): accepts closed at once because the
+    /// connection cap was reached.
+    connections_refused_total: AtomicU64,
+    /// `CLP-FR-002` (ADR-0102): `Query` requests that named no `limit`
+    /// and were answered as if they had asked for the row cap.
+    query_rows_clamped_total: AtomicU64,
     connections_active: AtomicI64,
     /// `QPM-FR-002`: one counter per [`PlanKind`], indexed by
     /// [`PlanKind::index`].
@@ -127,6 +133,8 @@ impl Default for ServerMetrics {
             requests_ok_total: AtomicU64::new(0),
             requests_err_total: AtomicU64::new(0),
             connections_total: AtomicU64::new(0),
+            connections_refused_total: AtomicU64::new(0),
+            query_rows_clamped_total: AtomicU64::new(0),
             connections_active: AtomicI64::new(0),
             plans: Default::default(),
             latency_buckets: Default::default(),
@@ -147,6 +155,23 @@ impl ServerMetrics {
     pub(crate) fn record_connection_opened(&self) {
         self.connections_total.fetch_add(1, Ordering::Relaxed);
         self.connections_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `LIM-FR-002` (ADR-0093): one accept closed at once because
+    /// `ServeOptions::max_connections` was already reached — never
+    /// counted in `connections_total`, never opened.
+    pub(crate) fn record_connection_refused(&self) {
+        self.connections_refused_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `CLP-FR-002` (ADR-0102) as amended by `RVM-FR-001` (ADR-0111): one
+    /// `Query` with no `limit` whose answer was cut at
+    /// `ServeOptions::max_query_rows` — counted where the answer is
+    /// marked, never for a request that was refused.
+    pub(crate) fn record_query_clamped(&self) {
+        self.query_rows_clamped_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// The matching close — always called exactly once per
@@ -261,6 +286,12 @@ impl ServerMetrics {
              # HELP dogserver_connections_active Connections currently open.\n\
              # TYPE dogserver_connections_active gauge\n\
              dogserver_connections_active {}\n\
+             # HELP dogserver_connections_refused_total Accepts closed at once because the connection cap was reached.\n\
+             # TYPE dogserver_connections_refused_total counter\n\
+             dogserver_connections_refused_total {}\n\
+             # HELP dogserver_query_rows_clamped_total Queries with no limit whose answer was cut at the row cap.\n\
+             # TYPE dogserver_query_rows_clamped_total counter\n\
+             dogserver_query_rows_clamped_total {}\n\
              # HELP dogserver_query_plans_total Planned reads answered without an error, by the path taken.\n\
              # TYPE dogserver_query_plans_total counter\n\
              {}\
@@ -275,6 +306,8 @@ impl ServerMetrics {
             self.requests_err_total.load(Ordering::Relaxed),
             self.connections_total.load(Ordering::Relaxed),
             self.connections_active.load(Ordering::Relaxed),
+            self.connections_refused_total.load(Ordering::Relaxed),
+            self.query_rows_clamped_total.load(Ordering::Relaxed),
             plans,
             self.render_latency(),
             uptime,
@@ -308,7 +341,33 @@ mod tests {
         assert!(text.contains("dogserver_requests_err_total 0\n"));
         assert!(text.contains("dogserver_connections_total 0\n"));
         assert!(text.contains("dogserver_connections_active 0\n"));
+        assert!(text.contains("dogserver_connections_refused_total 0\n"));
+        assert!(text.contains("dogserver_query_rows_clamped_total 0\n"));
         assert!(text.contains("dogserver_uptime_seconds "));
+    }
+
+    /// `LIM-FR-002` (ADR-0093): a refused accept moves only its own
+    /// counter — never `connections_total` or the active gauge.
+    #[test]
+    fn a_refused_connection_counts_only_as_refused() {
+        let m = ServerMetrics::new();
+        m.record_connection_refused();
+        let text = m.render();
+        assert!(text.contains("dogserver_connections_refused_total 1\n"));
+        assert!(text.contains("dogserver_connections_total 0\n"));
+        assert!(text.contains("dogserver_connections_active 0\n"));
+    }
+
+    /// `CLP-FR-002` (ADR-0102): a clamped query moves only its own
+    /// counter.
+    #[test]
+    fn a_clamped_query_counts_only_as_clamped() {
+        let m = ServerMetrics::new();
+        m.record_query_clamped();
+        let text = m.render();
+        assert!(text.contains("dogserver_query_rows_clamped_total 1\n"));
+        assert!(text.contains("dogserver_requests_total 0\n"));
+        assert!(text.contains("dogserver_connections_refused_total 0\n"));
     }
 
     #[test]

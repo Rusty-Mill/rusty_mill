@@ -17,8 +17,11 @@
 //! See `crate::generic::memory`'s own module docs for what the
 //! consumer's table holds that this record does not, and why.
 
-use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError, JournaledBatch};
-use super::mvcc::{self, MvccState};
+use super::journal::{
+    CheckpointFlush, CommitError, CommitGroup, JournalError, JournalStats, JournaledBatch,
+    ReplayedBatch,
+};
+use super::mvcc::{self, MvccIndex, MvccState, TxnId};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
@@ -91,12 +94,32 @@ struct MvccHandle {
     mmap_path: PathBuf,
 }
 
+/// One write an atomic batch made, for the MVCC record: `None` fields is
+/// a deletion.
+type RecordedWrite = (RecordId, Option<Vec<(FieldRef, ScanValue)>>);
+
 pub struct MemoryConnectionStore {
     store: GenericProductionStore<MemoryProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
     journal: Option<CommitGroup>,
     /// `BAK-FR-002` (ADR-0065) — see `DogConnectionStore::with_backup_source`.
     backup_source: Option<PathBuf>,
+    /// `SYU-FR-001` (ADR-0097): when set, every in-place field write that
+    /// no journal covers is `msync`ed (the stack's `Flush`) before it is
+    /// acknowledged; unset, the acknowledgement precedes durability by
+    /// up to the OS's own write-back — the documented loss window.
+    sync_updates: bool,
+    /// `JUF-FR-001` (ADR-0107): `with_journaled_updates` — in-place
+    /// updates committed through the journal when there is one.
+    journal_updates: bool,
+    /// `JMR-FR-001` (ADR-0113) / `JMC-FR-001` (ADR-0114): what
+    /// `with_journal`'s replay applied, in journal order, kept until the
+    /// MVCC index is attached and folds it — the journal is truncated by
+    /// then, so this is the replay's only record.
+    replayed: Vec<ReplayedBatch>,
+    /// `ART-FR-002` (ADR-0105): the automatic reclaim threshold, kept
+    /// here so `with_mvcc` can apply it whichever order the builders run.
+    mvcc_reclaim_every: Option<usize>,
     /// `ADR-0072`'s `MVCC2-FR-001`: `None` — the same "unset by default,
     /// opt in with the real path" shape `backup_source` already
     /// establishes — until [`Self::with_mvcc`] is called; `mvcc_supported`
@@ -112,6 +135,10 @@ impl MemoryConnectionStore {
             store,
             journal: None,
             backup_source: None,
+            sync_updates: false,
+            journal_updates: false,
+            replayed: Vec::new(),
+            mvcc_reclaim_every: None,
             mvcc: None,
         }
     }
@@ -120,6 +147,74 @@ impl MemoryConnectionStore {
     pub fn with_backup_source(mut self, path: PathBuf) -> Self {
         self.backup_source = Some(path);
         self
+    }
+
+    /// `SYU-FR-001` (ADR-0097): acknowledge an in-place field update —
+    /// `UpdateField`, and a `Transaction` batch on a table with no
+    /// journal — only after `msync` has forced the slot to disk. Opt-in;
+    /// unset, the update sits in the page cache until `Flush`, a
+    /// checkpoint, or the OS's write-back, as every version before.
+    /// Journaled batches are unaffected: the redo entry is already
+    /// `fsync`ed before the first slot write.
+    pub fn with_synced_updates(mut self, enabled: bool) -> Self {
+        self.sync_updates = enabled;
+        self
+    }
+
+    /// `ART-FR-002` (ADR-0105): reclaim MVCC history automatically once
+    /// `every` entries have been appended since the last reclaim
+    /// (`None` — never: `Compact` only, the `ADR-0096` behaviour).
+    /// Applies to the MVCC state this adapter holds now or activates
+    /// later; a no-op on a table that never goes MVCC-active.
+    pub fn with_mvcc_reclaim_every(mut self, every: Option<usize>) -> Self {
+        self.mvcc_reclaim_every = every;
+        if let Some(mvcc) = &self.mvcc {
+            mvcc.state.set_reclaim_every(every);
+        }
+        self
+    }
+
+    /// `SYU-FR-002`: the `msync` `with_synced_updates` asks for, taken
+    /// under the store's write lock; a failure withholds the
+    /// acknowledgement as `Storage`.
+    fn sync_update_ack(&self) -> Result<(), ErrorCode> {
+        if !self.sync_updates {
+            return Ok(());
+        }
+        self.store.flush().map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `JUF-FR-001` (ADR-0107): opt in to committing every in-place
+    /// field update through the journal as a one-operation batch — the
+    /// redo entry `fsync`ed (group-committed with any concurrent batch)
+    /// before the slot is written, no `msync` of the mapping, replayed
+    /// at the next open like any journaled batch. Durable past a power
+    /// loss like `with_synced_updates`, at a different cost: more for a
+    /// single writer (the entry and the slot), less per update under
+    /// concurrent writers (one `fsync` covers a group) — `RESULTS.md`.
+    /// A no-op on an adapter with no journal.
+    pub fn with_journaled_updates(mut self, enabled: bool) -> Self {
+        self.journal_updates = enabled;
+        self
+    }
+
+    /// `JUF-FR-001` (ADR-0107): the journaled commit of one in-place
+    /// update — `Ok(false)` for a missing record, `update_field`'s own
+    /// contract; `Journal` when the entry could not be made durable,
+    /// nothing applied.
+    fn journaled_update(&self, op: TransactionOp) -> Result<bool, ErrorCode> {
+        match self.apply_transaction(std::slice::from_ref(&op), &[]) {
+            Ok(()) => Ok(true),
+            Err((_, ErrorCode::RecordNotFound)) => Ok(false),
+            Err((_, code)) => Err(code),
+        }
+    }
+
+    /// `JUF-FR-001`: whether `update_field` goes through the journal —
+    /// only when there is one and the operator asked; otherwise the
+    /// in-place write (and `msync`, if asked) as before.
+    fn journals_updates(&self) -> bool {
+        self.journal.is_some() && self.journal_updates
     }
 
     /// `ADR-0072`'s `MVCC2-FR-001`/`003`: enable real MVCC for this table,
@@ -160,15 +255,124 @@ impl MemoryConnectionStore {
     ///
     /// Returns [`DurabilityError`] if `<mmap_path>.mvcc` exists but can't
     /// be read/decoded, or if the insert log can't be read.
-    pub fn with_mvcc(mut self, mmap_path: &Path) -> Result<Self, DurabilityError> {
-        let reconstructed = MvccState::open(mmap_path)?;
+    pub fn with_mvcc(self, mmap_path: &Path) -> Result<Self, DurabilityError> {
         let log = insert_log::log_path(mmap_path);
         let entries = insert_log::read_entries(&log, Memory::SCHEMA_TAG)?;
-        Self::fold_pending_log_entries(&reconstructed, entries);
+        self.attach_mvcc(mmap_path, entries)
+    }
+
+    /// `JMC-FR-002` (ADR-0114): the journaled reopen — [`Self::open_with_mvcc`]'s
+    /// read of the pending insert log before the reopen clears it,
+    /// [`Self::with_journal`]'s replay, then the index attached with both
+    /// folded in: the pending entries first (the older), the replayed
+    /// batches after, in journal order, and the history flushed. The one
+    /// constructor that composes the crash-atomic journal with real MVCC
+    /// for an existing table; `memory_server` takes it when
+    /// `SERVER_TXN_JOURNAL_PATH` and `SERVER_MVCC_ISOLATION` are both set.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError`] from the journal's own open or replay, or wrapping
+    /// the [`DurabilityError`] of the pending-log read, the reopen, or the
+    /// history's reconstruction and flush.
+    pub fn open_with_mvcc_journaled(
+        path: &Path,
+        journal_path: &Path,
+    ) -> Result<Self, JournalError> {
+        let log = insert_log::log_path(path);
+        let pending_entries = insert_log::read_entries(&log, Memory::SCHEMA_TAG)?;
+        Self::persist_pending_history(path, pending_entries)?;
+        let stack = open_memory_production_stack_portable(path)?;
+        // `RGM-FR-009`: replay without truncating, fold and flush, then
+        // truncate — the journal outlives the index's record of it.
+        let adapter =
+            Self::with_journal_inner(GenericProductionStore::new(stack), journal_path, false)?
+                .attach_mvcc(path, Vec::new())?;
+        if let Some(journal) = &adapter.journal {
+            journal.truncate()?;
+        }
+        Ok(adapter)
+    }
+
+    /// `RGM-FR-009` (ADR-0121): before the reopen clears the insert log,
+    /// fold its pending entries into the reconstructed index and flush
+    /// the history, so the entries have a durable home *before* their
+    /// only other one is destroyed. Nothing for an inactive index
+    /// (`RGF-FR-001`) or an empty log.
+    fn persist_pending_history(
+        mmap_path: &Path,
+        pending: Vec<LogEntry<Memory, RecordId>>,
+    ) -> Result<(), DurabilityError> {
+        let total = pending.len();
+        let reconstructed = MvccState::open(mmap_path)?;
+        if !reconstructed.state.is_active() || total == 0 {
+            return Ok(());
+        }
+        if Self::fold_pending_log_entries(&reconstructed, pending) == 0 {
+            return Ok(());
+        }
+        reconstructed.state.flush(mmap_path, total, 0)
+    }
+
+    /// The shared tail of [`Self::with_mvcc`], [`Self::open_with_mvcc`] and
+    /// [`Self::open_with_mvcc_journaled`]: reconstruct the index, fold
+    /// `pending` (skipping what the last flush already reflects), fold
+    /// what `with_journal` replayed (`JMR-FR-001`, ADR-0113: one fresh
+    /// txn per batch, in journal order, no reclaim trigger), and flush the
+    /// history when anything was folded, so the next open depends on
+    /// neither a log the reopen cleared nor a journal the replay
+    /// truncated. An inactive index folds no replay: its first `Begin`
+    /// seeds the baseline from the live store, which holds it already.
+    fn attach_mvcc(
+        mut self,
+        mmap_path: &Path,
+        pending: Vec<LogEntry<Memory, RecordId>>,
+    ) -> Result<Self, DurabilityError> {
+        let reconstructed = MvccState::open(mmap_path)?;
+        // `RGF-FR-001` (ADR-0120): an inactive index folds nothing — its
+        // first `Begin` seeds the baseline from the live store, which
+        // already holds the log; a fold here would sit *above* that
+        // baseline and a fresh snapshot would read the older value.
+        let folded_pending = if reconstructed.state.is_active() {
+            Self::fold_pending_log_entries(&reconstructed, pending)
+        } else {
+            0
+        };
+        reconstructed
+            .state
+            .set_reclaim_every(self.mvcc_reclaim_every);
+        let replayed = std::mem::take(&mut self.replayed);
+        let active = reconstructed.state.is_active();
+        let fold_replayed = active && !replayed.is_empty();
         self.mvcc = Some(MvccHandle {
             state: reconstructed.state,
             mmap_path: mmap_path.to_path_buf(),
         });
+        if fold_replayed {
+            for batch in &replayed {
+                match batch {
+                    ReplayedBatch::Transaction(ops) => self.mvcc_record_transaction_quiet(ops),
+                    ReplayedBatch::Write { ops, results } => {
+                        self.mvcc_record_write_ops_quiet(ops, results)
+                    }
+                }
+            }
+        }
+        // `RGM-FR-009`: an active index is flushed at every open — the
+        // reopen just reset the insert log, so the recorded "entries
+        // reflected" must be reset with it, fold or no fold.
+        if active || folded_pending > 0 || fold_replayed {
+            let journal_count = self
+                .journal
+                .as_ref()
+                .map(CommitGroup::entries_since_checkpoint)
+                .unwrap_or(0);
+            if !self.mvcc_flush_now(journal_count) {
+                return Err(DurabilityError::Io(std::io::Error::other(
+                    "flushing the MVCC history after folding the pending log and the replayed journal at open",
+                )));
+            }
+        }
         Ok(self)
     }
 
@@ -190,25 +394,12 @@ impl MemoryConnectionStore {
     /// be read/decoded, if the insert log can't be read, or if the
     /// underlying reopen (`open_memory_production_stack_portable`) fails.
     pub fn open_with_mvcc(path: &Path) -> Result<Self, DurabilityError> {
-        // Read the pending log first — before anything below has a
-        // chance to clear it.
+        // Read the pending log first — before the reopen below clears it.
         let log = insert_log::log_path(path);
         let pending_entries = insert_log::read_entries(&log, Memory::SCHEMA_TAG)?;
-
+        Self::persist_pending_history(path, pending_entries)?;
         let stack = open_memory_production_stack_portable(path)?;
-        let store = GenericProductionStore::new(stack);
-
-        let reconstructed = MvccState::open(path)?;
-        Self::fold_pending_log_entries(&reconstructed, pending_entries);
-        Ok(Self {
-            store,
-            journal: None,
-            backup_source: None,
-            mvcc: Some(MvccHandle {
-                state: reconstructed.state,
-                mmap_path: path.to_path_buf(),
-            }),
-        })
+        Self::new(GenericProductionStore::new(stack)).attach_mvcc(path, Vec::new())
     }
 
     /// Shared by [`Self::with_mvcc`] and [`Self::open_with_mvcc`]: fold
@@ -219,13 +410,15 @@ impl MemoryConnectionStore {
     fn fold_pending_log_entries(
         reconstructed: &mvcc::Reconstructed,
         entries: Vec<LogEntry<Memory, RecordId>>,
-    ) {
+    ) -> usize {
         let entries = entries
             .into_iter()
             .skip(reconstructed.insert_log_entries_reflected);
+        let mut folded = 0;
         for entry in entries {
+            folded += 1;
             let txn_id = reconstructed.state.counter().next();
-            reconstructed.state.with_index(|index| match entry {
+            reconstructed.state.with_index_quiet(|index| match entry {
                 LogEntry::Item(record) => {
                     let id = record.id;
                     index.record_write(
@@ -242,6 +435,7 @@ impl MemoryConnectionStore {
                 }
             });
         }
+        folded
     }
 
     /// The crash-atomic variant — see `DogConnectionStore::with_journal`
@@ -250,38 +444,78 @@ impl MemoryConnectionStore {
         store: GenericProductionStore<MemoryProductionStack>,
         journal_path: &Path,
     ) -> Result<Self, JournalError> {
+        Self::with_journal_inner(store, journal_path, true)
+    }
+
+    /// `RGM-FR-009` (ADR-0121): [`Self::with_journal`] with the truncate
+    /// held back — for [`Self::open_with_mvcc_journaled`], which folds
+    /// the replay into the version index and flushes it *before* the
+    /// journal is dropped, so a crash between the two replays again
+    /// instead of losing the batches from the index.
+    fn with_journal_inner(
+        store: GenericProductionStore<MemoryProductionStack>,
+        journal_path: &Path,
+        truncate: bool,
+    ) -> Result<Self, JournalError> {
         let (journal, batches) = CommitGroup::open(journal_path)?;
+        let mut replayed = Vec::new();
         store.with_exclusive(|inner| -> Result<(), JournalError> {
             let schema = Self::schema();
             for (batch_index, batch) in batches.iter().enumerate() {
                 match batch {
                     JournaledBatch::Transaction(ops) => {
-                        Self::apply_batch(inner, ops).map_err(|(index, code)| {
-                            JournalError::Replay {
-                                batch: batch_index,
-                                index,
-                                code,
+                        // `RVL-FR-004` (ADR-0112): a record deleted after the
+                        // batch was journaled (its tombstone folded from the
+                        // insert log before this replay) makes the op moot,
+                        // not the journal corrupt — skip it, replay the rest.
+                        let mut applied = Vec::with_capacity(ops.len());
+                        for (index, op) in ops.iter().enumerate() {
+                            match Self::apply_batch(inner, std::slice::from_ref(op)) {
+                                Ok(()) => applied.push(op.clone()),
+                                Err((_, ErrorCode::RecordNotFound)) => {}
+                                Err((_, code)) => {
+                                    return Err(JournalError::Replay {
+                                        batch: batch_index,
+                                        index,
+                                        code,
+                                    })
+                                }
                             }
-                        })?;
+                        }
+                        if !applied.is_empty() {
+                            replayed.push(ReplayedBatch::Transaction(applied));
+                        }
                     }
                     JournaledBatch::Write(ops) => {
-                        Self::replay_write_batch(inner, &schema, ops).map_err(
+                        let results = Self::replay_write_batch(inner, &schema, ops).map_err(
                             |(index, code)| JournalError::Replay {
                                 batch: batch_index,
                                 index,
                                 code,
                             },
                         )?;
+                        replayed.push(ReplayedBatch::Write {
+                            ops: ops.clone(),
+                            results,
+                        });
                     }
                 }
             }
             inner.checkpoint_flush()?;
-            journal.truncate()
+            if truncate {
+                journal.truncate()
+            } else {
+                Ok(())
+            }
         })?;
         Ok(Self {
             store,
             journal: Some(journal),
             backup_source: None,
+            sync_updates: false,
+            journal_updates: false,
+            replayed,
+            mvcc_reclaim_every: None,
             mvcc: None,
         })
     }
@@ -301,12 +535,13 @@ impl MemoryConnectionStore {
         inner: &mut MemoryProductionStack,
         schema: &DomainSchema,
         ops: &[WriteOp],
-    ) -> Result<(), (usize, ErrorCode)> {
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        let mut results = Vec::with_capacity(ops.len());
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
-            Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?;
+            results.push(Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?);
         }
-        Ok(())
+        Ok(results)
     }
 
     /// This domain's `DomainSchema`, without an instance — needed at
@@ -601,11 +836,28 @@ impl MemoryConnectionStore {
             return;
         }
         let txn_id = mvcc.state.counter().next();
-        mvcc.state.with_index(|index| {
-            for op in updates {
-                index.record_write((op.id, op.field), txn_id, Some(op.value.clone()));
-            }
-        });
+        mvcc.state
+            .with_index(|index| Self::record_transaction_into(index, txn_id, updates));
+    }
+
+    /// `JMC-FR-001` (ADR-0114): [`Self::mvcc_record_transaction`] for a
+    /// batch `with_journal` replayed, at open — the same record, with
+    /// the reclaim trigger held off and the append count reset after
+    /// (`RVL-FR-002`).
+    fn mvcc_record_transaction_quiet(&self, updates: &[TransactionOp]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() || updates.is_empty() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state
+            .with_index_quiet(|index| Self::record_transaction_into(index, txn_id, updates));
+    }
+
+    fn record_transaction_into(index: &mut MvccIndex, txn_id: TxnId, updates: &[TransactionOp]) {
+        for op in updates {
+            index.record_write((op.id, op.field), txn_id, Some(op.value.clone()));
+        }
     }
 
     /// `ADR-0072`'s `MVCC2-FR-002`/`008`: record an atomic `WriteBatch`'s
@@ -622,22 +874,37 @@ impl MemoryConnectionStore {
         if !mvcc.state.is_active() {
             return;
         }
-        let writes: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> = ops
-            .iter()
-            .zip(results)
-            .filter_map(|(op, result)| match (op, result) {
-                (WriteOp::Insert { id, fields }, WriteResult::Inserted)
-                | (WriteOp::Replace { id, fields }, WriteResult::Replaced)
-                | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
-                    Some((*id, fields.clone()))
-                }
-                (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, Vec::new())),
-                _ => None,
-            })
-            .collect();
+        let writes = Self::recorded_writes(ops, results);
         if writes.is_empty() {
             return;
         }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state
+            .with_index(|index| Self::record_writes_into(index, txn_id, &writes));
+    }
+
+    /// `JMC-FR-001` (ADR-0114): [`Self::mvcc_record_write_ops`] for a
+    /// batch `with_journal` replayed, at open — the same record, with
+    /// the reclaim trigger held off and the append count reset after
+    /// (`RVL-FR-002`).
+    fn mvcc_record_write_ops_quiet(&self, ops: &[WriteOp], results: &[WriteResult]) {
+        let Some(mvcc) = &self.mvcc else { return };
+        if !mvcc.state.is_active() {
+            return;
+        }
+        let writes = Self::recorded_writes(ops, results);
+        if writes.is_empty() {
+            return;
+        }
+        let txn_id = mvcc.state.counter().next();
+        mvcc.state
+            .with_index_quiet(|index| Self::record_writes_into(index, txn_id, &writes));
+    }
+
+    /// The writes an atomic batch actually made, by outcome: `None`
+    /// fields for a record the batch deleted (every entry of that id,
+    /// so a `Replace` before its own `Delete` records the deletion too).
+    fn recorded_writes(ops: &[WriteOp], results: &[WriteResult]) -> Vec<RecordedWrite> {
         let deletes: std::collections::HashSet<RecordId> = ops
             .iter()
             .zip(results)
@@ -646,23 +913,35 @@ impl MemoryConnectionStore {
                 _ => None,
             })
             .collect();
-        let txn_id = mvcc.state.counter().next();
-        mvcc.state.with_index(|index| {
-            for (id, fields) in writes {
-                if deletes.contains(&id) {
-                    index.record_write((id, mvcc::EXISTENCE_FIELD), txn_id, None);
-                    continue;
+        ops.iter()
+            .zip(results)
+            .filter_map(|(op, result)| match (op, result) {
+                (WriteOp::Insert { id, fields }, WriteResult::Inserted)
+                | (WriteOp::Replace { id, fields }, WriteResult::Replaced)
+                | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
+                    Some((*id, (!deletes.contains(id)).then(|| fields.clone())))
                 }
-                index.record_write(
-                    (id, mvcc::EXISTENCE_FIELD),
-                    txn_id,
-                    Some(ScanValue::Bool(true)),
-                );
-                for (tag, value) in fields {
-                    index.record_write((id, tag), txn_id, Some(value));
-                }
+                (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, None)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn record_writes_into(index: &mut MvccIndex, txn_id: TxnId, writes: &[RecordedWrite]) {
+        for (id, fields) in writes {
+            let Some(fields) = fields else {
+                index.record_write((*id, mvcc::EXISTENCE_FIELD), txn_id, None);
+                continue;
+            };
+            index.record_write(
+                (*id, mvcc::EXISTENCE_FIELD),
+                txn_id,
+                Some(ScanValue::Bool(true)),
+            );
+            for (tag, value) in fields {
+                index.record_write((*id, *tag), txn_id, Some(value.clone()));
             }
-        });
+        }
     }
 
     /// `ADR-0072`'s `MVCC2-FR-010`: flush the current MVCC index to
@@ -805,6 +1084,12 @@ impl MemoryConnectionStore {
 }
 
 impl ConnectionStore for MemoryConnectionStore {
+    /// `JSM-FR-001` (ADR-0115): the journal's live figures, when there
+    /// is one.
+    fn journal_stats(&self) -> Option<JournalStats> {
+        self.journal.as_ref().map(CommitGroup::stats)
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Memory>(id).map(Self::fields_of)
     }
@@ -1056,10 +1341,44 @@ impl ConnectionStore for MemoryConnectionStore {
                 if !valid_access_count(count) {
                     return Err(ErrorCode::Malformed);
                 }
-                match self.store.update::<Memory, AccessCountField>(id, count) {
-                    Ok(()) => Ok(true),
-                    Err(_not_found) => Ok(false),
+                if self.journals_updates() {
+                    return self.journaled_update(TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(count),
+                    });
                 }
+                // `MUR-FR-001` (ADR-0108): the in-place write and its MVCC
+                // record in one exclusive section, as a batch's are.
+                let written = self.store.with_exclusive(|inner| {
+                    let written =
+                        UpdateField::<Memory, AccessCountField>::update(inner, id, count).is_ok();
+                    if written {
+                        self.mvcc_record_transaction(&[TransactionOp {
+                            id,
+                            field: FIELD_ACCESS_COUNT,
+                            value: ScanValue::I64(count),
+                        }]);
+                    }
+                    written
+                });
+                if !written {
+                    return Ok(false);
+                }
+                // `RVW-FR-001` (ADR-0110): no journal covers an in-place
+                // update, so its MVCC record must reach `.mvcc` now —
+                // exactly as the non-journaled batch arm flushes — or a
+                // restart would reconstruct an index without it.
+                let journal_count = self
+                    .journal
+                    .as_ref()
+                    .map(CommitGroup::entries_since_checkpoint)
+                    .unwrap_or(0);
+                if !self.mvcc_flush_now(journal_count) {
+                    return Err(ErrorCode::Storage);
+                }
+                self.sync_update_ack()?;
+                Ok(true)
             }
             (FIELD_ACCESS_COUNT, _) => Err(ErrorCode::Malformed),
             (field, _) if READ_ONLY_FIELDS.contains(&field) => Err(ErrorCode::Unsupported),
@@ -1204,10 +1523,26 @@ impl ConnectionStore for MemoryConnectionStore {
                 .as_ref()
                 .map(CommitGroup::entries_since_checkpoint)
                 .unwrap_or(0);
+            // `HRC-FR-002` (ADR-0096): reclaim history no open snapshot
+            // needs, then flush — the flushed store is the reclaimed one.
+            if let Some(mvcc) = &self.mvcc {
+                mvcc.state.reclaim();
+            }
             if !self.mvcc_flush_now(journal_entries) {
                 return Err(ErrorCode::Storage);
             }
-            crate::generic::query::Compact::compact(inner).map_err(|_| ErrorCode::Storage)
+            let report =
+                crate::generic::query::Compact::compact(inner).map_err(|_| ErrorCode::Storage)?;
+            // `RGM-FR-010` (ADR-0121): the clear emptied the insert log, so
+            // the history's "entries reflected" must say so — left at the
+            // pre-clear count, the next reopen skipped that many *new*
+            // entries, and a journaled insert among them (a `Duplicate`
+            // on replay, the store having folded the log first) never
+            // reached the index.
+            if !self.mvcc_flush_now(journal_entries) {
+                return Err(ErrorCode::Storage);
+            }
+            Ok(report)
         })
     }
 
@@ -1443,6 +1778,11 @@ impl ConnectionStore for MemoryConnectionStore {
                 Self::validate_batch(updates, |id| GetById::<Memory>::get(inner, id).is_some())?;
                 Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
                 Self::apply_batch(inner, updates)?;
+                // `SYU-FR-003` (ADR-0097): no journal covers this batch,
+                // so force the slots to disk before acknowledging.
+                if self.sync_updates && inner.checkpoint_flush().is_err() {
+                    return Err((0, ErrorCode::Storage));
+                }
                 self.mvcc_record_transaction(updates);
                 // `ADR-0072`'s `MVCC2-FR-010`: no journal means no
                 // checkpoint boundary, so a committed transaction flushes
@@ -1506,6 +1846,11 @@ impl ConnectionStore for MemoryConnectionStore {
                 Self::check_read_set(read_set, |id| GetById::<Memory>::get(inner, id))?;
                 conflict_check()?;
                 Self::apply_batch(inner, updates)?;
+                // `SYU-FR-003` (ADR-0097): no journal covers this batch,
+                // so force the slots to disk before acknowledging.
+                if self.sync_updates && inner.checkpoint_flush().is_err() {
+                    return Err((0, ErrorCode::Storage));
+                }
                 self.mvcc_record_transaction(updates);
                 // See `apply_transaction`: no journal means no checkpoint
                 // boundary, so this commit flushes MVCC history now.
@@ -1551,7 +1896,7 @@ impl ConnectionStore for MemoryConnectionStore {
                 for id in AllIds::<Memory>::all_ids(inner) {
                     if let Some(record) = GetById::<Memory>::get(inner, id) {
                         let fields = Self::fields_of(record);
-                        mvcc.state.with_index(|index| {
+                        mvcc.state.with_index_quiet(|index| {
                             index.record_write(
                                 (id, mvcc::EXISTENCE_FIELD),
                                 mvcc::BASELINE_TXN,
@@ -1583,15 +1928,22 @@ impl ConnectionStore for MemoryConnectionStore {
                 .unwrap_or(0);
             let _ = self.mvcc_flush_now(journal_count);
         }
-        let snapshot_txn = mvcc.state.with_index(|index| index.last_committed());
-        mvcc.state.open_snapshots().register(snapshot_txn);
-        snapshot_txn
+        // `RVW-FR-002` (ADR-0110): read and register under one lock.
+        mvcc.state.open_snapshot()
     }
 
     fn mvcc_release(&self, snapshot_txn: u64) {
         if let Some(mvcc) = &self.mvcc {
             mvcc.state.open_snapshots().deregister(snapshot_txn);
         }
+    }
+
+    /// `MHE-FR-001` (ADR-0109): the version-index entries this table
+    /// holds — `None` before `with_mvcc`/`open_with_mvcc`.
+    fn mvcc_history_entries(&self) -> Option<u64> {
+        self.mvcc
+            .as_ref()
+            .map(|mvcc| mvcc.state.with_index(|index| index.history_len()) as u64)
     }
 
     /// `ADR-0072`'s `MVCC2-FR-006`: `id`'s value as of `snapshot_txn` —
@@ -2030,6 +2382,372 @@ mod tests {
     /// full, correct history from before that `Compact` — a snapshot
     /// taken before a write still sees the pre-write value, and a fresh
     /// snapshot after reopen sees the write.
+    /// `HRC-FR-002`/`003` (ADR-0096): `Compact` reclaims every history
+    /// entry below the oldest open snapshot and nothing that snapshot
+    /// still needs; with no snapshot open, one entry per chain remains
+    /// and the current value still reads.
+    #[test]
+    fn compact_reclaims_history_below_the_oldest_open_snapshot() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let history_len = || {
+            adapter
+                .mvcc
+                .as_ref()
+                .unwrap()
+                .state
+                .with_index(|index| index.history_len())
+        };
+        let write = |value: i64| {
+            let snapshot = adapter.mvcc_begin();
+            adapter
+                .apply_transaction_mvcc(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(value),
+                    }],
+                    &[],
+                    snapshot,
+                )
+                .unwrap();
+            adapter.mvcc_release(snapshot);
+        };
+        write(1);
+        let held = adapter.mvcc_begin();
+        write(2);
+        write(3);
+        let before = history_len();
+
+        adapter.compact().unwrap();
+        let with_snapshot_open = history_len();
+        assert!(
+            with_snapshot_open < before,
+            "with a snapshot open at {held} only the entries below it are reclaimed: {before} -> {with_snapshot_open}"
+        );
+        assert_eq!(
+            adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(1),
+            "the open snapshot still reads the value it was opened on"
+        );
+
+        adapter.mvcc_release(held);
+        adapter.compact().unwrap();
+        let after = history_len();
+        assert!(
+            after < with_snapshot_open,
+            "releasing the snapshot must let Compact reclaim more: {with_snapshot_open} -> {after}"
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(3),
+            "the current value is never reclaimed"
+        );
+    }
+
+    /// `ART-FR-002`/`005` (ADR-0105): through the adapter, a threshold
+    /// reclaims without any `Compact` — the held snapshot still reads
+    /// its value, the current value reads, and a reopen reconstructs
+    /// a consistent index.
+    #[test]
+    fn a_reclaim_threshold_bounds_history_without_a_compact() {
+        let adapter = sample_adapter_with_mvcc().with_mvcc_reclaim_every(Some(2));
+        let id = Uuid::from_u128(1);
+        let state = || &adapter.mvcc.as_ref().unwrap().state;
+        let history_len = || state().with_index(|index| index.history_len());
+        let write = |value: i64| {
+            let snapshot = adapter.mvcc_begin();
+            adapter
+                .apply_transaction_mvcc(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(value),
+                    }],
+                    &[],
+                    snapshot,
+                )
+                .unwrap();
+            adapter.mvcc_release(snapshot);
+        };
+        assert_eq!(state().reclaim_every(), Some(2));
+        write(1);
+        let held = adapter.mvcc_begin();
+        let before = history_len();
+        for value in 2..=9 {
+            write(value);
+        }
+        let reclaims_while_held = state().auto_reclaims();
+        assert!(
+            reclaims_while_held >= 1,
+            "eight appends past a threshold of two must have reclaimed"
+        );
+        // Every entry after the held snapshot is one it may still need,
+        // so history grows while it is open — the trigger fires and
+        // keeps them, exactly as `Compact` would.
+        let while_held = history_len();
+        assert!(while_held > before, "{before} -> {while_held}");
+        assert_eq!(
+            adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(1),
+            "the open snapshot still reads the value it was opened on"
+        );
+        adapter.mvcc_release(held);
+        write(10);
+        write(11);
+        assert!(
+            state().auto_reclaims() > reclaims_while_held,
+            "the next threshold after the release reclaims again"
+        );
+        // The reclaim runs inside the committing session, whose own
+        // snapshot (the previous commit) is still registered — so the
+        // written chain keeps that one entry beside the current.
+        assert!(
+            history_len() <= before + 1,
+            "nothing held: the history is back to a bounded size, {while_held} -> {}",
+            history_len()
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(11),
+            "the current value is never reclaimed"
+        );
+    }
+
+    /// `SYU-FR-001`–`003` (ADR-0097): with synced updates on, every
+    /// answer is the same as without — `UpdateField` and a non-journaled
+    /// `Transaction` batch acknowledge and read back — and a reopen from
+    /// the files alone sees the values without any explicit `Flush`.
+    /// What `msync` adds (durability past a power loss) is not
+    /// observable in-process; the test pins the contract's shape.
+    #[test]
+    fn synced_updates_answer_exactly_as_unsynced_and_a_reopen_sees_them() {
+        let dir = fresh_temp_dir("server_memory_synced_updates").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+                .with_synced_updates(true);
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+                Ok(true)
+            );
+            assert_eq!(
+                adapter.update_field(Uuid::from_u128(404), FIELD_ACCESS_COUNT, ScanValue::I64(1)),
+                Ok(false)
+            );
+            assert_eq!(
+                adapter.apply_transaction(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(8),
+                    }],
+                    &[],
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+                ScanValue::I64(8)
+            );
+        }
+        let stack = crate::generic::memory::open_memory_production_stack_portable(&path).unwrap();
+        let reopened = MemoryConnectionStore::new(GenericProductionStore::new(stack));
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(8)
+        );
+    }
+
+    /// `JUF-FR-001`/`002` (ADR-0107): with a journal and the setting,
+    /// `UpdateField` is a journaled one-operation batch — the entry is
+    /// in the journal before the acknowledgement, the answers are the
+    /// same as the in-place path's (`Ok(true)`, `Ok(false)` for a
+    /// missing record, `Malformed` for a bad value), and a reopen
+    /// through the journal sees the value. Without the setting the
+    /// journaled adapter still writes in place, nothing journaled.
+    #[test]
+    fn journaled_synced_updates_go_through_the_journal_and_survive_a_reopen() {
+        let dir = fresh_temp_dir("server_memory_journaled_updates").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let unsynced =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap();
+            assert!(!unsynced.journals_updates());
+            let unsynced = unsynced.with_synced_updates(true);
+            assert!(
+                !unsynced.journals_updates(),
+                "synced alone is msync, not the journal"
+            );
+            assert_eq!(
+                unsynced.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(5)),
+                Ok(true)
+            );
+            assert_eq!(
+                unsynced
+                    .journal
+                    .as_ref()
+                    .unwrap()
+                    .entries_since_checkpoint(),
+                0,
+                "unsynced: in place, nothing journaled"
+            );
+            let adapter = unsynced.with_journaled_updates(true);
+            assert!(adapter.journals_updates());
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+                Ok(true)
+            );
+            assert_eq!(
+                adapter.journal.as_ref().unwrap().entries_since_checkpoint(),
+                1,
+                "synced: one journal entry per update"
+            );
+            assert_eq!(
+                adapter.update_field(Uuid::from_u128(404), FIELD_ACCESS_COUNT, ScanValue::I64(1)),
+                Ok(false)
+            );
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(-1)),
+                Err(ErrorCode::Malformed)
+            );
+            assert_eq!(
+                adapter.journal.as_ref().unwrap().entries_since_checkpoint(),
+                1,
+                "a refused update journals nothing"
+            );
+            assert_eq!(
+                adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+                ScanValue::I64(7)
+            );
+        }
+        let stack = crate::generic::memory::open_memory_production_stack_portable(&path).unwrap();
+        let reopened =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(7)
+        );
+    }
+
+    /// `MUR-FR-001`/`002` (ADR-0108): an in-place `UpdateField` on an
+    /// MVCC-active table records its write in the version index like a
+    /// batch does — a snapshot opened before it still reads the old
+    /// value, the current value reads the new one, and the history
+    /// grew by the one entry. Before this, the in-place path wrote the
+    /// slot and told the index nothing.
+    #[test]
+    fn an_in_place_update_is_recorded_in_the_mvcc_index() {
+        let adapter = sample_adapter_with_mvcc();
+        let id = Uuid::from_u128(1);
+        let state = || &adapter.mvcc.as_ref().unwrap().state;
+        let held = adapter.mvcc_begin();
+        let before = state().with_index(|index| index.history_len());
+        let old = adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize]
+            .1
+            .clone();
+        assert_eq!(
+            adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(41)),
+            Ok(true)
+        );
+        assert_eq!(
+            state().with_index(|index| index.history_len()),
+            before + 1,
+            "one entry for the one in-place write"
+        );
+        assert_eq!(
+            adapter.mvcc_get(id, held).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            old,
+            "the snapshot opened before the update still reads the old value"
+        );
+        assert_eq!(
+            adapter.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(41)
+        );
+        adapter.mvcc_release(held);
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(404), FIELD_ACCESS_COUNT, ScanValue::I64(1)),
+            Ok(false)
+        );
+        assert_eq!(
+            state().with_index(|index| index.history_len()),
+            before + 1,
+            "a missing record records nothing"
+        );
+    }
+
+    /// `MHE-FR-001` (ADR-0109): the history-size accessor behind the
+    /// metric — `None` without MVCC state, the index's entry count with.
+    #[test]
+    fn mvcc_history_entries_is_none_without_mvcc_and_the_count_with() {
+        assert_eq!(sample_adapter().mvcc_history_entries(), None);
+        let adapter = sample_adapter_with_mvcc();
+        assert_eq!(
+            adapter.mvcc_history_entries(),
+            Some(0),
+            "state, not yet activated"
+        );
+        let _snapshot = adapter.mvcc_begin();
+        let expected = adapter
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .state
+            .with_index(|index| index.history_len()) as u64;
+        assert!(expected > 0, "activation seeds a baseline");
+        assert_eq!(adapter.mvcc_history_entries(), Some(expected));
+    }
+
+    /// `RVL-FR-004` (ADR-0112): a journaled update whose record is deleted
+    /// before the journal is checkpointed is moot at replay, not corrupt —
+    /// the reopen through `with_journal` succeeds and the record stays
+    /// deleted.
+    #[test]
+    fn replay_skips_a_journaled_update_to_a_record_deleted_afterwards() {
+        let dir = fresh_temp_dir("server_memory_replay_deleted").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let id = Uuid::from_u128(1);
+        {
+            let stack = create_memory_production_stack(
+                vec![memory(1, "general", false), memory(2, "general", false)],
+                &[],
+                &path,
+            )
+            .unwrap();
+            let adapter =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap()
+                    .with_journaled_updates(true);
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(9)),
+                Ok(true)
+            );
+            assert_eq!(
+                adapter.journal.as_ref().unwrap().entries_since_checkpoint(),
+                1
+            );
+            assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::Deleted));
+        }
+        let stack = crate::generic::memory::open_memory_production_stack_portable(&path).unwrap();
+        let reopened =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        assert_eq!(reopened.get(id), None, "deleted stays deleted");
+        assert!(reopened.get(Uuid::from_u128(2)).is_some());
+    }
+
     #[test]
     fn compact_flushes_mvcc_history_and_a_reopen_reconstructs_it() {
         let dir = fresh_temp_dir("server_memory_mvcc_compact").unwrap();
@@ -2086,6 +2804,44 @@ mod tests {
     /// write). `with_mvcc` alone cannot handle this: by the time it would
     /// run after the normal portable-open path, `GenericMmapStore::open`
     /// has already cleared the insert log this test relies on.
+    /// `RVW-FR-001` (ADR-0110): an in-place `UpdateField` on an
+    /// MVCC-active table survives a restart in the version index — no
+    /// `Compact`, no session, no journal: the update's record is flushed
+    /// to `.mvcc` before the acknowledgement, so `open_with_mvcc` rebuilds
+    /// an index whose newest entry is the update, and a fresh snapshot
+    /// reads the new value through `mvcc_get` as `get` does.
+    #[test]
+    fn an_in_place_update_survives_a_restart_in_the_mvcc_index() {
+        let dir = fresh_temp_dir("server_memory_in_place_restart").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+                .with_mvcc(&path)
+                .unwrap();
+            let activated = adapter.mvcc_begin();
+            adapter.mvcc_release(activated);
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(41)),
+                Ok(true)
+            );
+        }
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        let fresh = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, fresh).unwrap().unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(41),
+            "the index rebuilt from .mvcc holds the in-place update"
+        );
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(41)
+        );
+    }
+
     #[test]
     fn open_with_mvcc_reconstructs_a_pending_unflushed_insert_log_entry() {
         let dir = fresh_temp_dir("server_memory_mvcc_open_hook").unwrap();
@@ -2380,6 +3136,263 @@ mod tests {
             reopened.mvcc_get(id, after).unwrap().unwrap()[10],
             (FIELD_ACCESS_COUNT, ScanValue::I64(11)),
             "a fresh snapshot after reopen sees the commit apply_transaction_mvcc flushed"
+        );
+    }
+
+    /// `JMR-FR-001` (ADR-0113): a journaled batch commits to the index
+    /// in memory but only the journal reaches disk before the
+    /// acknowledgement, so before this ADR a restart that replayed the
+    /// journal into the store left the MVCC index without the batch —
+    /// a fresh snapshot after reopen read the pre-commit value while a
+    /// plain `GetById` read the committed one. The reopen now folds
+    /// what `with_journal` replayed into the reconstructed index.
+    #[test]
+    fn a_journaled_batch_reaches_the_mvcc_index_after_a_restart() {
+        let dir = fresh_temp_dir("server_memory_journaled_batch_mvcc_restart").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let id = Uuid::from_u128(1);
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap()
+                    .with_mvcc(&path)
+                    .unwrap();
+            // Activate the index and flush its baseline, as the first
+            // `Begin` of a served table does.
+            let baseline = adapter.mvcc_begin();
+            adapter.mvcc_release(baseline);
+            assert_eq!(
+                adapter.apply_transaction(
+                    &[TransactionOp {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(5),
+                    }],
+                    &[],
+                ),
+                Ok(())
+            );
+            // No checkpoint: the batch is in the journal and nowhere else.
+            drop(adapter);
+        }
+
+        let stack = open_memory_production_stack_portable(&path).unwrap();
+        let reopened =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap()
+                .with_mvcc(&path)
+                .unwrap();
+        assert_eq!(
+            reopened.get(id).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(5),
+            "the journal replay reached the store"
+        );
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, after).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(5)),
+            "a fresh snapshot after reopen sees the journaled batch"
+        );
+    }
+
+    /// `JMC-FR-001`/`002` (ADR-0114): the journaled reopen. Every kind of
+    /// journaled batch — an atomic `WriteBatch` (insert, replace, delete)
+    /// and a `Transaction` — committed on an active index with no
+    /// checkpoint in between reaches a fresh snapshot after the reopen,
+    /// in journal order: the transaction's value on the replaced record
+    /// wins over the replace's, the deleted record is gone, the inserted
+    /// one is there. Removing the replay fold fails this test.
+    #[test]
+    fn open_with_mvcc_journaled_folds_every_replayed_batch_in_journal_order() {
+        let dir = fresh_temp_dir("server_memory_journaled_mvcc_reopen").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let (replaced, deleted, inserted) =
+            (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(10));
+        let mut edited = full_fields(1);
+        edited[0] = (
+            FIELD_CONTENT,
+            ScanValue::Str("replaced by the batch".into()),
+        );
+        {
+            let stack = create_memory_production_stack(
+                vec![memory(1, "general", false), memory(2, "general", false)],
+                &[],
+                &path,
+            )
+            .unwrap();
+            let adapter =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap()
+                    .with_mvcc(&path)
+                    .unwrap();
+            let baseline = adapter.mvcc_begin();
+            adapter.mvcc_release(baseline);
+            let ops = vec![
+                WriteOp::Insert {
+                    id: inserted,
+                    fields: full_fields(10),
+                },
+                WriteOp::Replace {
+                    id: replaced,
+                    fields: edited.clone(),
+                },
+                WriteOp::Delete { id: deleted },
+            ];
+            assert_eq!(
+                adapter.write_batch(&ops, true).unwrap(),
+                vec![
+                    WriteResult::Inserted,
+                    WriteResult::Replaced,
+                    WriteResult::Deleted
+                ]
+            );
+            assert_eq!(
+                adapter.apply_transaction(
+                    &[TransactionOp {
+                        id: replaced,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(5),
+                    }],
+                    &[],
+                ),
+                Ok(())
+            );
+            // No checkpoint: both batches are in the journal and nowhere
+            // else the index reads.
+            drop(adapter);
+        }
+
+        let reopened = MemoryConnectionStore::open_with_mvcc_journaled(&path, &journal).unwrap();
+        assert!(reopened.mvcc_supported());
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(inserted, after).unwrap(),
+            Some(full_fields(10)),
+            "the journaled insert reached the index"
+        );
+        assert_eq!(
+            reopened.mvcc_get(deleted, after).unwrap(),
+            None,
+            "the journaled delete reached the index"
+        );
+        let mut expected = edited;
+        expected[10] = (FIELD_ACCESS_COUNT, ScanValue::I64(5));
+        assert_eq!(
+            reopened.mvcc_get(replaced, after).unwrap(),
+            Some(expected),
+            "the replace and then the transaction, in journal order"
+        );
+        assert_eq!(
+            reopened.get(replaced).unwrap()[FIELD_ACCESS_COUNT as usize].1,
+            ScanValue::I64(5),
+            "the store agrees with the index"
+        );
+    }
+
+    /// `RGF-FR-001` (ADR-0120, the growth-line review's High 1): enabling
+    /// MVCC on a table that was never MVCC-active. An ordinary insert
+    /// leaves a pending insert-log entry; an in-place update then changes
+    /// the record without touching the log (and, the index inactive,
+    /// flushes nothing). The reopen must fold nothing into the inactive
+    /// index: the first `Begin` seeds the baseline from the live store,
+    /// and a fresh snapshot reads the updated value. Before the gate the
+    /// pending entry was folded at txn 1, above the later baseline at
+    /// txn 0, and the snapshot read the stale insert.
+    #[test]
+    fn enabling_mvcc_on_a_never_active_table_reads_the_live_store_not_the_pending_log() {
+        let dir = fresh_temp_dir("server_memory_mvcc_first_activation").unwrap();
+        let path = dir.join("memories.mmap");
+        let id = Uuid::from_u128(7);
+        {
+            let stack = create_memory_production_stack(vec![], &[], &path).unwrap();
+            let adapter = MemoryConnectionStore::new(GenericProductionStore::new(stack))
+                .with_mvcc(&path)
+                .unwrap();
+            assert_eq!(
+                adapter.insert_record(id, full_fields(7)),
+                Ok(InsertOutcome::Inserted)
+            );
+            assert_eq!(
+                adapter.update_field(id, FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+                Ok(true)
+            );
+            // Never activated: no `.mvcc`, the insert pending in the log.
+            drop(adapter);
+        }
+        let reopened = MemoryConnectionStore::open_with_mvcc(&path).unwrap();
+        let snapshot = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(id, snapshot).unwrap().unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(7)),
+            "the first snapshot after activation sees the live store's value"
+        );
+        assert_eq!(
+            reopened.get(id).unwrap()[10],
+            (FIELD_ACCESS_COUNT, ScanValue::I64(7))
+        );
+    }
+
+    /// `RGM-FR-010` (ADR-0121, the review's Medium 11): an ordinary
+    /// insert flushes the history with the insert log at one entry;
+    /// `Compact` clears the log; a journaled `WriteBatch` insert then
+    /// appends one entry. Before this round `.mvcc` still said one entry
+    /// was reflected, so the reopen's pending fold skipped the new one,
+    /// and the replay could not rescue it either: the reopen had folded
+    /// the log into the store first, so the replayed insert was a
+    /// `Duplicate` that records nothing. `Compact` now flushes again
+    /// after the clear, with the count at zero; this test fails without
+    /// that second flush.
+    #[test]
+    fn a_journaled_write_batch_after_a_compact_reaches_the_index_after_a_restart() {
+        let dir = fresh_temp_dir("server_memory_journaled_write_after_compact").unwrap();
+        let path = dir.join("memories.mmap");
+        let journal = dir.join("memories.journal");
+        let (early, late) = (Uuid::from_u128(20), Uuid::from_u128(30));
+        {
+            let stack =
+                create_memory_production_stack(vec![memory(1, "general", false)], &[], &path)
+                    .unwrap();
+            let adapter =
+                MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                    .unwrap()
+                    .with_mvcc(&path)
+                    .unwrap();
+            let baseline = adapter.mvcc_begin();
+            adapter.mvcc_release(baseline);
+            assert_eq!(
+                adapter.insert_record(early, full_fields(20)),
+                Ok(InsertOutcome::Inserted)
+            );
+            adapter.compact().unwrap();
+            assert_eq!(
+                adapter
+                    .write_batch(
+                        &[WriteOp::Insert {
+                            id: late,
+                            fields: full_fields(30),
+                        }],
+                        true,
+                    )
+                    .unwrap(),
+                vec![WriteResult::Inserted]
+            );
+            drop(adapter);
+        }
+        let reopened = MemoryConnectionStore::open_with_mvcc_journaled(&path, &journal).unwrap();
+        let after = reopened.mvcc_begin();
+        assert_eq!(
+            reopened.mvcc_get(late, after).unwrap(),
+            Some(full_fields(30)),
+            "the journaled insert after the compact reached the index through the replay"
+        );
+        assert_eq!(
+            reopened.mvcc_get(early, after).unwrap(),
+            Some(full_fields(20))
         );
     }
 

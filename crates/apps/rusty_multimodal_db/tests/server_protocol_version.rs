@@ -461,7 +461,11 @@ fn join_and_describe_relations_are_malformed_below_version_12() {
     }
 
     // Client side, rule 4: a version-1 server never receives a `Join`.
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(old.relations().is_empty());
     assert!(matches!(
@@ -628,18 +632,25 @@ fn start_pre_hello_dog_server(drop_every_first_frame: bool) -> SocketAddr {
     addr
 }
 
-/// `SERVER-001` FR-026 (the reconnect-without-hello fallback, default-on):
-/// against a pre-hello server `connect` succeeds on a silent second
-/// connection, reports version 1, serves reads, and refuses the
-/// version-gated session API; `require_hello()` restores the pre-v0.16.0
-/// error; a server that dies under *any* first frame is still an error —
-/// the fallback fires once and returns the second attempt's failure, it
-/// does not retry forever or invent a server.
+/// `SERVER-001` FR-026 as amended by `RVW-FR-003` (ADR-0110): the
+/// reconnect-without-hello fallback is opt-in. By default a pre-hello
+/// server's silent close is the error it is (a server at its connection
+/// cap closes the same way); with `allow_pre_hello_fallback()` `connect`
+/// succeeds on a silent second connection, reports version 1, serves
+/// reads, and refuses the version-gated session API; a server that dies
+/// under *any* first frame is still an error — the fallback fires once
+/// and returns the second attempt's failure.
 #[test]
-fn a_pre_hello_server_is_reconnected_to_without_a_hello_unless_hello_is_required() {
+fn a_pre_hello_server_is_an_error_unless_the_fallback_is_allowed() {
     let addr = start_pre_hello_dog_server(false);
 
-    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    match SchemaDrivenClient::connect(addr).map(|_| ()) {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!("expected the pre-hello EOF by default, got {other:?}"),
+    }
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().allow_pre_hello_fallback())
+            .unwrap();
     assert_eq!(client.server_protocol_version(), 1);
     let fields = client.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
@@ -668,7 +679,9 @@ fn a_pre_hello_server_is_reconnected_to_without_a_hello_unless_hello_is_required
     }
 
     let dying = start_pre_hello_dog_server(true);
-    match SchemaDrivenClient::connect(dying).map(|_| ()) {
+    match SchemaDrivenClient::connect_with(dying, ConnectOptions::new().allow_pre_hello_fallback())
+        .map(|_| ())
+    {
         Err(ClientError::Frame(_)) => {}
         other => panic!(
             "expected a server that dies under any first frame to be an error, got {other:?}"
@@ -764,7 +777,11 @@ fn insert_is_malformed_below_version_13() {
         }
     ));
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.insert(
@@ -847,7 +864,11 @@ fn link_is_malformed_below_version_14() {
         other => panic!("expected RelationKinds, got {other:?}"),
     }
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.link(
@@ -933,7 +954,11 @@ fn replace_is_malformed_below_version_15() {
     );
     assert_eq!(roundtrip(&mut reader, &mut writer, &replace), Response::Ok);
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.replace(RecordId::from_u128(1), &[("age", ScanValue::U32(1))]),
@@ -1023,7 +1048,11 @@ fn replace_if_is_malformed_below_version_19() {
         Response::Ok
     );
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.replace_if(
@@ -1128,7 +1157,11 @@ fn page_is_malformed_below_version_20() {
         }
     }
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.page("age", None, 10),
@@ -1210,7 +1243,11 @@ fn count_edges_is_malformed_below_version_21() {
         }
     ));
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.count_edges("littermate_of"),
@@ -1284,7 +1321,11 @@ fn write_batch_is_malformed_below_version_22() {
         other => panic!("expected BatchResults, got {other:?}"),
     }
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.write_batch(&[], false),
@@ -1382,7 +1423,11 @@ fn use_and_list_tables_are_malformed_below_version_16() {
         }
     ));
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.list_tables(),
@@ -1460,7 +1505,11 @@ fn delete_is_malformed_below_version_17() {
         Response::NotFound
     );
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.delete(RecordId::from_u128(1)),
@@ -1520,7 +1569,11 @@ fn compact_is_malformed_below_version_18() {
         Response::Compacted { .. }
     ));
 
-    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    let mut old = SchemaDrivenClient::connect_with(
+        start_pre_hello_dog_server(false),
+        ConnectOptions::new().allow_pre_hello_fallback(),
+    )
+    .unwrap();
     assert_eq!(old.server_protocol_version(), 1);
     assert!(matches!(
         old.compact(),

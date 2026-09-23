@@ -79,11 +79,13 @@
 //! | 22 | `SERVER-001` v0.50.0 | + [`Request::WriteBatch`] (31) and [`Response::BatchResults`] (20) — `WBT-FR-001`, ADR-0060: a batch of the five runtime writes (`Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link`, as [`WriteOp`]) for the connection's table, applied in order under one write-lock acquisition, answered one [`WriteResult`] per op. `atomic: false` pipelined (each op stands on its own); `atomic: true` precondition- and isolation-atomic — nothing applies unless every op validates, else all apply, an abort reported by [`Response::TransactionFailed`] (reused). Not crash-atomic across the batch (a storage batch marker is the named follow-on). A write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, server-gated `Malformed` below 22 or over `MAX_BATCH_OPS` ops. No new `ErrorCode`. ADR-0060 |
 //! | 23 | `SERVER-001` v0.53.0 | + [`Request::Metrics`] (32) and [`Response::Metrics`] (21) — `MET-FR-001`, ADR-0064: a bounded, fixed set of process-wide atomic counters (requests total/ok/error, connections accepted/active, uptime), rendered as Prometheus text exposition format — no new dependency, no second listener. Gated as a **read**, but not restricted to `ReadWrite` — the first request answerable by any authenticated class, since observing process health is not a data write. `Malformed` below 23 (rule 3); never overlaid by a session, never read-set-tracked (process-wide data, not table data). No new `ErrorCode`. ADR-0064 |
 //! | 24 | `SERVER-001` v0.54.0 | + [`Request::Backup`] (33) and [`Response::BackedUp`] (22) — `BAK-FR-001`, ADR-0065: a live, lock-consistent snapshot copy of the connection's table files into an opt-in, server-configured `SERVER_BACKUP_ROOT`-relative directory named by `name` (a single path component — `/`, `\`, and `..` refused before any I/O, `BAK-FR-004`), under the table's write lock (`Compact`'s own precedent). Answered [`Response::BackedUp`] with the files/bytes copied; `Unsupported` when `SERVER_BACKUP_ROOT` is unconfigured or the adapter has no known data directory (`Dog`'s bespoke store when built without one, `Order`/`Employee`); `Storage` for an existing non-empty target or an I/O failure mid-copy (the partial target removed, never left half-written). An operator's write: `Unauthorized` for `ReadOnly`, `SessionOpen` inside a session, `Malformed` below 24. No new `ErrorCode`. ADR-0065 |
-//! | 25 | `SERVER-001` v0.55.0 | + [`Request::FetchSnapshot`] (34), [`Response::Snapshot`] (23), and [`ErrorCode::TooLarge`] (14) — `RPL-FR-001`, ADR-0067: a full, lock-consistent snapshot of the connection's table's files, streamed back over the wire — every companion file's name and bytes, the same file set [`Request::Backup`] already enumerates, reused unchanged. Gated behind a new [`TokenClass::Replication`], never satisfied by `ReadOnly`/`ReadWrite` — the whole point: a shape [`Request::Backup`]'s own design once considered and declined ("a new bulk-exfiltration primitive") is safe now because nothing short of a separately-provisioned credential can ever reach it. `TooLarge` refuses a table whose on-disk size exceeds [`MAX_SNAPSHOT_BYTES`] before any byte is read. `Malformed` below 25 (rule 3). ADR-0067 |
+//! | 25 | `SERVER-001` v0.55.0 | + [`Request::FetchSnapshot`] (34), [`Response::Snapshot`] (23), and [`ErrorCode::TooLarge`] (14) — `RPL-FR-001`, ADR-0067: a full, lock-consistent snapshot of the connection's table's files, streamed back over the wire — every companion file's name and bytes, the same file set [`Request::Backup`] already enumerates, reused unchanged. Gated behind a new [`crate::server::TokenClass::Replication`], never satisfied by `ReadOnly`/`ReadWrite` — the whole point: a shape [`Request::Backup`]'s own design once considered and declined ("a new bulk-exfiltration primitive") is safe now because nothing short of a separately-provisioned credential can ever reach it. `TooLarge` refuses a table whose on-disk size exceeds [`MAX_SNAPSHOT_BYTES`] before any byte is read. `Malformed` below 25 (rule 3). ADR-0067 |
 //! | 26 | `SERVER-001` v0.56.0 | + [`Request::FilteredPage`] (35) — `FPG-FR-001`, ADR-0068: [`Request::Page`]'s three fields (`order_by`, `after`, `limit`) plus `filter: Vec<Predicate>`, answered [`Response::Rows`] (reused, no new response variant) — an ordered keyset page over only the rows every filter predicate matches. Evaluated by one shared default correct for every domain, no adapter override this round: `ConnectionStore::scan_all`, filtered via the identical [`ErrorCode`]-and-`predicate_matches` logic [`Request::Query`]'s own filter already uses, then [`Request::Page`]'s own key selection over the filtered subset. `Memory`/`Relation`'s `Ordered` index gives no speed advantage to a filtered request this round — only the unfiltered `Page` fast path keeps it, untouched by this addition. Validated exactly as `Page`/`Query` already are — no new validation function. Gated as a **read**, `Page`'s own precedent; `Malformed` below 26 (rule 3). No new `ErrorCode`. ADR-0068 |
 //! | 27 | `SERVER-001` v0.57.0 | No new variant: `BeginWith` learns a fourth flag bit, [`SESSION_MVCC_ISOLATION`] (`MVCC2-FR-004`, `ADR-0072`) — real multi-version concurrency control for `Memory`/`Entity`/`Relation` (`MVCC2-FR-012`): `Begin` opens a snapshot at the table's current `last_committed_txn`; `GetById` while such a session is open answers with the version visible as of that snapshot, including against a conflicting *ordinary* (non-session) write from another connection, not only another session's commit (`MVCC2-FR-006`/`008`); `Commit`'s write-write conflict check reuses [`ErrorCode::Conflict`] and `Response::TransactionFailed { index: 0, .. }` — `SESSION_SNAPSHOT_ISOLATION`'s own precedent, no new `ErrorCode`. Unknown below 27 (rule 3), sent only after negotiating ≥ 27 (rule 4); composes independently with the three existing bits. `Dog`/`Order`/`Employee` unaffected — the bit is `Unsupported` there, the same domain-scoping precedent `Insert`/`Replace`/`Delete`/`Compact` already established. ADR-0072 |
 //! | 28 | `SERVER-001` v0.74.0 | + [`Request::PageDesc`] (36), [`Request::FilteredPageDesc`] (37) — `PGD-FR-001`, ADR-0089: [`Request::Page`]/[`Request::FilteredPage`] walked the other way — sorted *descending* by `(order_by, id)`, strictly *before* the `before` cursor, at most `limit` rows, answered [`Response::Rows`] (reused). The consumer's "latest N" shape (`ORDER BY updated_at DESC LIMIT 50`). `Memory`/`Relation`/`Reminder` answer `PageDesc` on their ordered field from the sorted index walked backward; every other shape from the scan. Validated exactly as `Page`/`FilteredPage`. Gated as a **read**; `Malformed` below 28 (rule 3). No new `ErrorCode`. ADR-0089 |
 //! | 29 | `SERVER-001` v0.76.0 | No new variant: a filter no record can satisfy — two bounds on one field whose intersection is empty (`a > 5 AND a < 3`, `a = 3 AND a > 3`, `a = 1 AND a = 2`, `a = 1 AND a != 1`) — is refused with `Err { Malformed }` before any read, on a connection negotiated at 29 or above (`QCX-FR-002`, `ADR-0091`); below 29 it keeps the empty answer every earlier version gave (rule 3's nearest older shape, applied to a semantics change as version 27 did). Pure over the request ([`contradicted`]); `Query`, `Aggregate`, `FilteredPage`/`FilteredPageDesc`, and both sides of `Join`. ADR-0091 |
+//! | 30 | `SERVER-001` v0.84.0 | + [`Response::RowsClamped`] (24) and [`ErrorCode::Busy`] (15) — `WCB-FR-001`/`002`, ADR-0103: the two wire-level forks `ADR-0093`/`ADR-0102` held open. `RowsClamped { rows, cap }` is [`Response::Rows`] plus the cap it was clamped to — what a `Query` with no `limit` under `ServeOptions::max_query_rows` (`CLP-FR-001`) is answered with, so the client can see its answer is short; `Rows` below 30 (rule 3, `serve::downgrade_for_version`). `Err { Busy }` is the one frame a server ever writes *before* negotiation: on a plaintext listener a connection refused at accept under `max_connections` (`LIM-FR-002`) is answered `Err { Busy, .. }` then closed instead of closed silently, so a client can tell a full server from a dead one; a client below 30 cannot decode index 15 and fails the connect as it failed on the EOF before; since ADR-0104 every refusal, plaintext or TLS, runs on one of at most [`super::serve::MAX_BUSY_REFUSALS`] short-lived refusal threads (`BTL-FR-001`/`002`) — the handshake first under TLS, then the frame, then a wait for the peer's close so the frame is never lost to a reset (`BTL-FR-004`) — past which the socket is closed silently. ADR-0103, ADR-0104 |
+//! | 31 | `SERVER-001` v0.96.0 | + [`ScanValue::Null`] (6) — `NUL-FR-001`, ADR-0117: the absence of a value, a unit variant. No shipped column is nullable yet, so a server never emits it and answers `Malformed` to any request carrying it where a value is read (a write, a predicate, a transaction op, a guard). Stripped from `Record`/`Rows` below 31 by `downgrade_for_version` (rule 3, `StrList`'s precedent). No new `Request`/`ErrorCode`. ADR-0117 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -118,7 +120,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -227,6 +229,16 @@ pub enum ScanValue {
     /// connection negotiated below 11 (rule 3, the protocol's first
     /// content-rewriting downgrade).
     StrList(Vec<String>),
+    /// Protocol 31, `NUL-FR-001` (ADR-0117): the absence of a value.
+    /// No shipped column carries it yet — `Memory`'s `deleted_at` and
+    /// `node_id` keep their lossless sentinels (`ADR-0056`) — so today a
+    /// server never emits it and refuses it everywhere a value is read:
+    /// a write, a predicate, a transaction op or a guard carrying `Null`
+    /// is `Malformed`, because no field is nullable. The variant exists
+    /// so the first column with no lossless sentinel needs no protocol
+    /// bump, only a field marked nullable. Stripped from `Record`/`Rows`
+    /// by `downgrade_for_version` below 31 (rule 3, as `StrList` below 11).
+    Null,
 }
 
 /// Whether `predicate` holds over one record's wire shape — a `Query`
@@ -674,9 +686,25 @@ pub enum ErrorCode {
     GuardFailed,
     /// Protocol 25 (`RPL-FR-007`, ADR-0067). [`Request::FetchSnapshot`]'s
     /// table exceeds [`MAX_SNAPSHOT_BYTES`] — refused before any file is
-    /// read, nothing sent. Only ever answers a `FetchSnapshot`, which a
-    /// connection below 25 cannot send, so it needs no downgrade.
+    /// read, nothing sent. Only ever answered a `FetchSnapshot`, which a
+    /// connection below 25 cannot send, so it needed no downgrade —
+    /// until `LIM-FR-003` (ADR-0093): under an opt-in
+    /// `ServeOptions::max_query_rows`, a `Query` with no `limit` or a
+    /// `limit` above the cap, or a `Page`/`FilteredPage`/`PageDesc`/
+    /// `FilteredPageDesc` whose `limit` is above it, is refused with this
+    /// code before any read at 25 or above, `Malformed` below (rule 3).
     TooLarge,
+    /// Protocol 30 (`WCB-FR-002`, ADR-0103). The server is at its
+    /// connection cap (`ServeOptions::max_connections`, `LIM-FR-002`):
+    /// this connection was refused at accept and is closed right after
+    /// this frame. The one frame ever written before negotiation, from
+    /// a bounded pool of refusal threads (`BTL-FR-001`/`002`, ADR-0104)
+    /// that complete the TLS handshake first when there is one and wait
+    /// for the peer's close after. A client that speaks 30 reads it as
+    /// "full, retry later"; a client below 30 cannot decode index 15
+    /// and fails the connect exactly as it failed on the silent close
+    /// before. Never answers a request, so it needs no downgrade arm.
+    Busy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1112,7 +1140,7 @@ pub enum Request {
     /// `UnknownField`/`Malformed` for each `filter` predicate (`Query`'s
     /// own rules) — no new validation function. Evaluated by one shared
     /// default, correct for every domain, no adapter override this
-    /// round: [`ConnectionStore::scan_all`], filtered via the identical
+    /// round: [`crate::server::ConnectionStore::scan_all`], filtered via the identical
     /// `predicate_matches` logic [`Request::Query`]'s own filter already
     /// uses, then `Page`'s own key selection over the filtered subset —
     /// bounded by one full scan per request, the same worst-case ceiling
@@ -1300,6 +1328,20 @@ pub enum Response {
     Snapshot {
         files: Vec<(String, Vec<u8>)>,
     },
+    /// Protocol 30 (`WCB-FR-001`, ADR-0103). [`Response::Rows`] plus
+    /// the row cap it was clamped to: what a [`Request::Query`] with no
+    /// `limit` is answered with under `ServeOptions::max_query_rows`
+    /// (`CLP-FR-001`, ADR-0102) *when the answer was cut at the cap* —
+    /// it holds exactly `cap` rows, the first in scan order, and more
+    /// may have matched (`RVM-FR-002`, ADR-0111; an answer shorter than
+    /// the cap is complete and goes as `Rows`). `rows` is exactly what
+    /// `Rows` would have carried. Sent only on a
+    /// connection negotiated at 30 or above; `Rows` below (rule 3,
+    /// `serve::downgrade_for_version`).
+    RowsClamped {
+        rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
+        cap: u64,
+    },
 }
 
 #[cfg(test)]
@@ -1346,6 +1388,8 @@ mod tests {
             "FilteredPage" => 26,
             "BeginWith(mvcc isolation)" | "BeginWith(all four bits)" => 27,
             "PageDesc" | "FilteredPageDesc" => 28,
+            "RowsClamped" | "Err(Busy)" => 30,
+            "Record(Null)" | "Rows(Null)" => 31,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -2151,6 +2195,37 @@ mod tests {
                 b"Ada",
             ]),
         );
+        // Protocol 31 (`NUL-FR-001`, ADR-0117): `ScanValue::Null` at 6, a
+        // unit variant — the index alone — pinned in the two ungated
+        // response shapes that can carry a field value.
+        assert_golden_eq(
+            "Record(Null)",
+            &Response::Record {
+                id,
+                fields: vec![(11, ScanValue::Null)],
+            },
+            &bytes(&[
+                &[0x00, 0x00, 0x00, 0x00], // Record
+                &ID1,
+                &LEN1,                     // fields: one (tag, value) pair
+                &[0x0b, 0x00],             // field tag
+                &[0x06, 0x00, 0x00, 0x00], // ScanValue::Null
+            ]),
+        );
+        assert_golden_eq(
+            "Rows(Null)",
+            &Response::Rows {
+                rows: vec![(id, vec![(11, ScanValue::Null)])],
+            },
+            &bytes(&[
+                &[0x0c, 0x00, 0x00, 0x00], // Rows
+                &LEN1,                     // rows: one (id, fields) pair
+                &ID1,
+                &LEN1,                     // fields: one (tag, value) pair
+                &[0x0b, 0x00],             // field tag
+                &[0x06, 0x00, 0x00, 0x00], // ScanValue::Null
+            ]),
+        );
         assert_golden_eq(
             "Schema(StrList)",
             &Response::Schema(DomainSchema {
@@ -2296,6 +2371,24 @@ mod tests {
                 &[0xde, 0xad, 0xbe, 0xef],
             ]),
         );
+        // Protocol 30 (`WCB-FR-001`, ADR-0103): `RowsClamped` at 24 —
+        // `Rows`'s exact payload followed by the cap as a `u64`.
+        assert_golden_eq(
+            "RowsClamped",
+            &Response::RowsClamped {
+                rows: vec![(id, vec![(1, ScanValue::U32(3))])],
+                cap: 1,
+            },
+            &bytes(&[
+                &[0x18, 0x00, 0x00, 0x00], // RowsClamped
+                &LEN1,                     // rows: one (id, fields) pair
+                &ID1,
+                &LEN1, // fields: one (tag, value) pair
+                &[0x01, 0x00],
+                &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00], // ScanValue::U32(3)
+                &LEN1,                                             // cap: 1
+            ]),
+        );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
         assert_golden_eq(
             "Compacted",
@@ -2346,6 +2439,8 @@ mod tests {
             (ErrorCode::GuardFailed, 0x0d),
             // Protocol 25 (`RPL-FR-007`, ADR-0067): `TooLarge` at 14.
             (ErrorCode::TooLarge, 0x0e),
+            // Protocol 30 (`WCB-FR-002`, ADR-0103): `Busy` at 15.
+            (ErrorCode::Busy, 0x0f),
         ] {
             assert_golden_eq(
                 &format!("Err({code:?})"),
@@ -2364,7 +2459,9 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 27 is the one that added
+    /// module docs' table — version 31 added `ScanValue::Null`, 30 `Response::RowsClamped` and
+    /// `ErrorCode::Busy` (29 refused contradictory filters, 28
+    /// `Request::PageDesc`/`FilteredPageDesc`, 27 added
     /// `SESSION_MVCC_ISOLATION` (26 `Request::FilteredPage`, 25 `Request::FetchSnapshot`/`Response::Snapshot`
     /// and `ErrorCode::TooLarge`, 24 `Request::Backup`/`Response::BackedUp`, 23 `Request::Metrics`/
     /// `Response::Metrics`, 22 `Request::WriteBatch`/`Response::BatchResults`
@@ -2418,7 +2515,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 29);
+        assert_eq!(PROTOCOL_VERSION, 31);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

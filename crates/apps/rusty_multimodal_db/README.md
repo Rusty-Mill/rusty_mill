@@ -87,7 +87,7 @@ justified each pick.
 
 `server::serve` puts a thin, real TCP listener in front of
 `ProductionStore`/`GenericProductionStore` — a versioned
-`Request`/`Response` wire protocol (currently version 18) over
+`Request`/`Response` wire protocol (currently version 30) over
 length-prefixed `bincode` framing, thread-per-connection, reusing whichever
 `RwLock` the wrapped store already manages (no new lock at this layer).
 Off by default, distinct from `research` (this is new, additive
@@ -156,12 +156,21 @@ and `Employee` (both relation kinds on one self-referential record).
 **Security.** Authentication/authorization (`ADR-0012`), native TLS via
 `rusty_tls` (`ADR-0014`), mutual TLS with class-from-certificate, rate
 limiting and lockout, and audit and access logs are all implemented and
-all opt-in through one `ServeOptions` value (`ADR-0032`);
+all opt-in through one `ServeOptions` value (`ADR-0032`), as are the
+idle timeout and connection cap (`ADR-0093`), and row cap (`ADR-0102`);
 `ServeOptions::default()` reproduces the original unauthenticated,
 plaintext behavior exactly. **Do not expose a server built from this
 module beyond a trusted, localhost/development network unless both
 authentication and TLS are configured together** — either alone leaves
-the other half of the gap open. See `src/server`'s own module docs and
+the other half of the gap open. Since `ADR-0094` the four shipped
+binaries enforce this: a bind to anything but a loopback address refuses
+to start until both are configured, unless `SERVER_ALLOW_INSECURE=1` is
+set explicitly. **Durability.** Inserts, replaces, deletes, links, and
+journaled transaction batches are `fsync`ed before they are
+acknowledged; an in-place field update is `msync`ed first too by
+`memory_server`'s default (`ADR-0097`, on since `ADR-0099`;
+`SERVER_SYNC_UPDATES=0` takes the write-back window back, ~100 µs per
+update cheaper). See `src/server`'s own module docs and
 `docs/decisions/ADR-0010-server-query-layer-proposal.md` before using it.
 
 ```sh

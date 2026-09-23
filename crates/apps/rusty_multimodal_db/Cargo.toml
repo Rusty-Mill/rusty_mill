@@ -2,10 +2,13 @@
 name = "rusty_multimodal_db"
 version = "0.1.0"
 edition = "2021"
-# The oldest compiler that builds the lockfile with every feature: `time` 0.3.55
-# declares 1.88.0, the ceiling of every dependency. Checked by CI's `msrv` job, so
-# a dependency bump that raises it fails there rather than on whoever builds next.
-rust-version = "1.88"
+# The oldest compiler that builds this crate: `std::fs::File::try_lock` (the data-
+# directory lock, `ADR-0092`) is stable since 1.89.0, one minor above the 1.88.0
+# ceiling every dependency declares (`time` 0.3.55). Checked by the monorepo's
+# `multimodal-db-msrv` job in the root workflow (the crate's own workflow was
+# retired by `ADR-0106`), so a dependency bump that raises it fails there rather
+# than on whoever builds next. Keep the job's toolchain pin equal to this.
+rust-version = "1.89"
 description = "Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends"
 repository = "https://github.com/baileyrd/rusty_multimodal_db"
 license = "MIT"
@@ -202,6 +205,53 @@ required-features = ["server"]
 name = "server_metrics_http_integration"
 required-features = ["server"]
 
+[[test]]
+name = "memory_server_data_dir_lock"
+required-features = ["server"]
+
+# Five server-only test targets that were never registered (ADR-0098):
+# each imports `rusty_multimodal_db::server::{memory,entity,relation,...}`,
+# so without `required-features` they fail to compile under any feature
+# set that lacks `server` -- invisible to CI's `--all-features` run.
+[[test]]
+name = "memory_server_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_memory_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_entity_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_relation_mvcc_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_replication_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_limits_integration"
+required-features = ["server"]
+
+[[test]]
+name = "memory_server_exposure"
+required-features = ["server"]
+
+[[test]]
+name = "memory_server_defaults"
+required-features = ["server"]
+
+# The crash-safety diagnosis harness's four trials as a CI gate
+# (ADR-0095): spawns `crash_writer`, so it needs the `research` feature
+# that binary is gated behind.
+[[test]]
+name = "crash_safety"
+required-features = ["research"]
+
 # `ADR-0065`: a live snapshot copy into a `SERVER_BACKUP_ROOT`-relative
 # directory, reopened via `open_memory_production_stack_portable` to
 # prove the copy is real — `server` alone.
@@ -244,6 +294,25 @@ name = "restore_backup"
 # Backup fixtures are cfg(server) tests within this same target.
 [[test]]
 name = "restore_backup"
+
+# `ADR-0118`: the replica-refresh CLI — `FetchSnapshot` into a fresh,
+# verified directory, once or on an interval. Needs the client half
+# (`SchemaDrivenClient`); the shared main-less module lives under
+# examples/support/ like the restore and migration tools' own.
+[[example]]
+name = "replica_refresh"
+required-features = ["client"]
+
+# Its integration test serves a real table, so it needs `server`; the
+# file is `#![cfg(feature = "server")]` as well.
+[[test]]
+name = "replica_refresh"
+required-features = ["server"]
+
+# `ADR-0115`: the journal gauges over a real served pair of tables.
+[[test]]
+name = "server_journal_metrics_integration"
+required-features = ["server"]
 
 # `crash_writer`/`crash_safety_harness` (the crash-safety diagnosis
 # harness) build `Order`/`Customer` datasets via `generic::order_customer`
