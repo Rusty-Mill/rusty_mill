@@ -716,6 +716,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
+      # This workflow strips debug info (CARGO_PROFILE_DEV_DEBUG: 0 above),
+      # but `stack-dumps`' watchdog_stack_dump_test asserts that dumped
+      # frames resolve to file:line, which needs line tables.
+      # `line-tables-only` is what this product's own CI always ran with.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:
