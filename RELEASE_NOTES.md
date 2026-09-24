@@ -13,6 +13,43 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Import rusty_remind_me into crates/apps/rusty_remind_me; first product released from the monorepo
+**2026-09-24** · ADR [`0004`](docs/adr/0004-release-products-from-the-monorepo.md)
+
+Ninth merge, same `git subtree` process as ADR-0001's waves (full history,
+442 commits). `rusty_remind_me` is the first merged product that ships
+releases and a Claude Code plugin, so its distribution moved with it.
+Product-level detail is in the crate's own `RELEASE_NOTES.md` (v0.2.1) and
+`docs/adr/0020`.
+
+- **Added:** six workspace members under `crates/apps/rusty_remind_me/crates/`
+  (`layer = "apps"`), with their intra-family path dependencies hoisted into
+  `[workspace.dependencies]`.
+- **Added:** `.github/workflows/remind-me-release.yml` (tags
+  `rusty-remind-me-vX.Y.Z`, `make_latest: false`) and
+  `.github/workflows/remind-me-checks.yml` (schema drift against
+  `baileyrd/remind_me` on a daily schedule, plugin/crate version lockstep).
+- **Added:** `.claude-plugin/marketplace.json` at the repository root
+  (marketplace `rusty-mill`), listing the `rusty-remind-me` plugin by
+  relative path.
+- **Added:** `ci.yml` jobs `remind-me`, `remind-me-features` (8 legs),
+  `remind-me-combined-features`, `remind-me-hub` (Postgres service) and
+  `remind-me-windows`, gated on a new `remind_me` plan output.
+- **Changed:** `select-packages` gained an all-OS `exclude` input. The
+  generic clippy/test jobs exclude the six crates, whose `--all-features`
+  build would compile whisper.cpp, usearch and the AWS SDK and link
+  libunwind's ptrace API, on Windows too.
+- **Changed:** `Cargo.lock` gained 87 new packages and a second version of
+  14 existing ones (mostly optional-feature trees: the AWS SDK's
+  hyper 0.14/rustls 0.21, rten/tokenizers, whisper-rs, usearch). No existing
+  entry was removed or changed version.
+- **Known limitation:** the subtree merge commit has no `git-subtree-*`
+  trailers (git subtree's `-m` replaces its generated message) and is
+  unsigned; amending it was blocked in the session that made it. The
+  trailers are a lookup shortcut for `git subtree split`, which can still
+  reconstruct the split from history, so nothing depends on them.
+
+
 ## ADR-0003 Phase 4: apps/tools layer (125 crates, 21 families) — migration complete
 **2026-09-15** · spec [`PHASE-4-SPEC.md`](PHASE-4-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
 

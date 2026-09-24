@@ -57,6 +57,23 @@ survives — they predate `RELEASE_NOTES.md`'s earliest recorded entries, so
 their arrival is placed here, alongside the broader crate build-out,
 without a specific date.
 
+A ninth merge brought in `baileyrd/rusty_remind_me`, a persistent-memory
+MCP server and Claude Code plugin (six crates: `remind_me_core`,
+`remind_me_mcp`, `remind_me_api`, `remind_me_remote`, `remind_me_hub`, and
+the `rusty-remind-me` binary), under `crates/apps/rusty_remind_me/`, by the
+same `git subtree` process. It is the first merged product that *ships*
+releases, so it brought its distribution with it:
+`.github/workflows/remind-me-release.yml` publishes
+`rusty-remind-me-vX.Y.Z` releases from here, and this repository's root
+`.claude-plugin/marketplace.json` lists its plugin
+(`claude plugin marketplace add Rusty-Mill/rusty_mill`) — see ADR-0004.
+Its `[workspace.package]` collided with this root's (version, license), so
+its crates carry literal fields like `rusty_db`'s; `rusqlite` moved
+`0.31` → `0.39` (`links = "sqlite3"` again) and `rmcp` `3.0.1` → `3.1.4`.
+Its `--all-features` build (whisper.cpp, usearch, the AWS SDK, libunwind)
+is excluded from the generic clippy/test jobs in favour of dedicated
+`remind-me*` jobs running the feature matrix it was verified with.
+
 ## Crates
 
 | Crate | Path | Purpose |
@@ -277,6 +294,12 @@ without a specific date.
 | [`nexus-context`](crates/apps/nexus/crates/nexus-context) | `crates/apps/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`nexus-protocol`](crates/apps/nexus/crates/nexus-protocol) | `crates/apps/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`rusty_multimodal_db`](crates/apps/rusty_multimodal_db) | `crates/apps/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
+| [`remind_me_core`](crates/apps/rusty_remind_me/crates/remind_me_core) | `crates/apps/rusty_remind_me/crates/remind_me_core` | rusty_remind_me: memory store, hybrid FTS5/vector search, ACT-R vitality, knowledge graph, wiki, sync client |
+| [`remind_me_mcp`](crates/apps/rusty_remind_me/crates/remind_me_mcp) | `crates/apps/rusty_remind_me/crates/remind_me_mcp` | rusty_remind_me: stdio MCP server exposing the `remind_me_*` tools |
+| [`remind_me_api`](crates/apps/rusty_remind_me/crates/remind_me_api) | `crates/apps/rusty_remind_me/crates/remind_me_api` | rusty_remind_me: REST API and web dashboard |
+| [`remind_me_remote`](crates/apps/rusty_remind_me/crates/remind_me_remote) | `crates/apps/rusty_remind_me/crates/remind_me_remote` | rusty_remind_me: remote MCP connector over Streamable HTTP (`rmcp`), secret-path/bearer or OAuth 2.1 |
+| [`remind_me_hub`](crates/apps/rusty_remind_me/crates/remind_me_hub) | `crates/apps/rusty_remind_me/crates/remind_me_hub` | rusty_remind_me: multi-node sync hub (`rusty-remind-me-hub`), SQLite or Postgres storage |
+| [`rusty-remind-me`](crates/apps/rusty_remind_me/crates/remind_me_cli) | `crates/apps/rusty_remind_me/crates/remind_me_cli` | rusty_remind_me: the `rusty-remind-me` CLI/server binary; also a Claude Code plugin (root `.claude-plugin/marketplace.json`) |
 | [`rusty_sha1`](crates/foundation/rusty_sha1) | `crates/foundation/rusty_sha1` | Zero-dependency SHA-1 (FIPS 180-1) implementation, shared by `rusty_git`'s object hashing and `rusty_term`'s WebSocket handshake |
 | [`rusty_base64`](crates/foundation/rusty_base64) | `crates/foundation/rusty_base64` | Hand-rolled, dependency-free Base64 (RFC 4648) codec (standard and URL-safe alphabets, encode/decode), extracted from `rusty_oauth` and now shared by `rusty_acp`/`rusty-mcp`/`rusty_a2a` |
 | [`rusty_rand`](crates/foundation/rusty_rand) | `crates/foundation/rusty_rand` | OS-backed cryptographically secure random bytes (`/dev/urandom`/`BCryptGenRandom`), the CSPRNG shared by `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc` |

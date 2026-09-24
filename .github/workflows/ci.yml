@@ -50,6 +50,13 @@ env:
   # the probe returns Ok and individual credential operations return
   # KeyringDisabled instead, exactly the CI-without-a-real-keyring case.
   NEXUS_NO_KEYRING: '1'
+  # rusty_remind_me's six crates. Excluded from the generic clippy/test jobs,
+  # whose `--all-features` would switch on every optional feature of
+  # remind_me_core at once -- including `stack-dumps` (libunwind/liblzma,
+  # Linux-only) and `audio`/`ann` (whisper.cpp and usearch built from C/C++
+  # source), on Windows too. The remind-me-* jobs below run the exact
+  # per-feature matrix that product was verified with before the merge.
+  REMIND_ME_PACKAGES: remind_me_core remind_me_mcp remind_me_api rusty-remind-me remind_me_remote remind_me_hub
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -107,6 +114,7 @@ jobs:
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
+      remind_me: ${{ steps.plan.outputs.remind_me }}
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
@@ -129,6 +137,7 @@ jobs:
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
             echo "term_web=true" >> "$GITHUB_OUTPUT"
             echo "key_desktop=true" >> "$GITHUB_OUTPUT"
+            echo "remind_me=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -146,6 +155,7 @@ jobs:
             echo "dashboard=true" >> "$GITHUB_OUTPUT"
             echo "term_web=true" >> "$GITHUB_OUTPUT"
             echo "key_desktop=true" >> "$GITHUB_OUTPUT"
+            echo "remind_me=true" >> "$GITHUB_OUTPUT"
             echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -160,6 +170,7 @@ jobs:
               echo "dashboard=true" >> "$GITHUB_OUTPUT"
               echo "term_web=true" >> "$GITHUB_OUTPUT"
               echo "key_desktop=true" >> "$GITHUB_OUTPUT"
+              echo "remind_me=true" >> "$GITHUB_OUTPUT"
               echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -213,6 +224,19 @@ jobs:
             lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock)"
             echo "Lockfile-narrowed crates: ${lockfile_packages:-<none>}"
             packages="$(printf '%s\n' $packages $lockfile_packages | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+          fi
+
+          # rusty_remind_me's crates are excluded from the generic clippy/test
+          # jobs and run by the remind-me-* jobs below instead. Those run when
+          # one of its crates is affected (including via a lockfile move) or
+          # anything under its directory changed -- scripts/, .claude-plugin/
+          # and hooks/ belong to no crate, so the affected-crates filter alone
+          # would miss them.
+          if echo "$changed" | grep -q '^crates/apps/rusty_remind_me/' \
+            || printf ' %s ' "$packages" | grep -Eq ' (rusty-remind-me|remind_me_[a-z]+) '; then
+            echo "remind_me=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "remind_me=false" >> "$GITHUB_OUTPUT"
           fi
 
           if [ -z "$packages" ]; then
@@ -279,6 +303,7 @@ jobs:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
           windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       - name: Clippy
         if: steps.scope.outputs.args != ''
@@ -306,6 +331,7 @@ jobs:
           full: ${{ needs.plan.outputs.full }}
           packages: ${{ needs.plan.outputs.packages }}
           windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
+          exclude: ${{ env.REMIND_ME_PACKAGES }}
 
       # mill-term's own tests locate sibling binaries (rush/rgit/rsed/rawk)
       # by walking target/{debug,release} at runtime rather than through a
@@ -647,3 +673,167 @@ jobs:
           shared-key: rusty-config-no-std
       - name: cargo check -p rusty_config --no-default-features
         run: cargo check -p rusty_config --no-default-features --all-targets
+
+  # ---------------------------------------------------------------------------
+  # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
+  # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
+  # dead now that it is not at a repository root -- the full rationale for
+  # each leg is in its comments there). Its toolchain-independent checks
+  # (schema drift against baileyrd/remind_me, plugin.json version) live in
+  # remind-me-checks.yml, which also needs a daily schedule this file lacks.
+  # `fmt` is covered by the workspace-wide job above.
+  # ---------------------------------------------------------------------------
+
+  remind-me:
+    name: rusty_remind_me build / test / clippy (default features)
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me
+      - name: cargo build
+        run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
+      - name: cargo test
+        run: cargo test --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
+      - name: cargo clippy
+        run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
+
+  # One runner per optional remind_me_core feature. Which features run tests
+  # and which are clippy-only is deliberate (models that can't be fetched in
+  # CI, runner disk) -- see the original workflow's comment before changing it.
+  remind-me-features:
+    name: rusty_remind_me feature ${{ matrix.feature }}
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { feature: pdf, test: true, clippy: true }
+          - { feature: cloud-backup, test: true, clippy: true }
+          - { feature: ann, test: true, clippy: false }
+          - { feature: ocr, test: false, clippy: true }
+          - { feature: audio, test: false, clippy: true }
+          - { feature: rerank, test: true, clippy: false }
+          - { feature: local-embed, test: false, clippy: true }
+          # rstack-self links libunwind's ptrace API; liblzma-dev is required
+          # too (remind_me_core's build.rs asks for -llzma -- its docs/adr/0014).
+          - { feature: stack-dumps, test: true, clippy: true, apt: libunwind-dev liblzma-dev }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me-feature-${{ matrix.feature }}
+      - name: Install system packages this feature needs
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: cargo test --features ${{ matrix.feature }}
+        if: matrix.test
+        run: cargo test --locked -p remind_me_core --features ${{ matrix.feature }}
+      - name: cargo clippy --features ${{ matrix.feature }}
+        if: matrix.clippy
+        run: cargo clippy --locked -p remind_me_core --features ${{ matrix.feature }} --all-targets -- -D warnings
+
+  # ocr/rerank/local-embed share one rten/tokenizers runtime; this is the only
+  # leg that exercises them initialising together in one process.
+  remind-me-combined-features:
+    name: rusty_remind_me build / test / clippy (combined features)
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me-combined
+      - name: cargo build --features ann,ocr,rerank,local-embed,pdf
+        run: cargo build --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
+      - name: cargo test --features ann,ocr,rerank,local-embed,pdf
+        run: cargo test --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf
+      - name: cargo clippy --features ann,ocr,rerank,local-embed,pdf
+        run: cargo clippy --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets -- -D warnings
+
+  remind-me-hub:
+    name: rusty_remind_me hub (sqlite + postgres)
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hubtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me-hub
+      - name: cargo clippy -p remind_me_hub
+        run: cargo clippy --locked -p remind_me_hub --all-targets -- -D warnings
+      - name: cargo test -p remind_me_hub (sqlite only)
+        run: cargo test --locked -p remind_me_hub
+      - name: cargo test -p remind_me_hub (with postgres)
+        env:
+          REMIND_ME_HUB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/hubtest
+          # A skipped Postgres test reports as passed; make losing the
+          # service container a hard failure instead.
+          REMIND_ME_HUB_REQUIRE_POSTGRES: "1"
+        run: cargo test --locked -p remind_me_hub -- --test-threads=1
+      - name: cargo test -p remind_me_hub --no-default-features
+        run: cargo test --locked -p remind_me_hub --no-default-features
+
+  # remind_me_core's cfg(windows) FFI (sidecar job objects, `\\?\` stripping)
+  # compiles on no Linux leg above.
+  remind-me-windows:
+    name: rusty_remind_me build / test / clippy (windows)
+    needs: plan
+    if: needs.plan.outputs.remind_me == 'true'
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me-windows
+      - name: cargo build
+        run: cargo build --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
+      - name: cargo test
+        run: cargo test --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub
+      - name: cargo clippy
+        run: cargo clippy --locked -p remind_me_core -p remind_me_mcp -p remind_me_api -p rusty-remind-me -p remind_me_remote -p remind_me_hub --all-targets -- -D warnings
