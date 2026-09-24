@@ -20,6 +20,13 @@ inputs:
     description: 'space-separated package names to leave out on Windows runners'
     required: false
     default: ''
+  exclude:
+    description: >
+      space-separated package names to leave out on every runner -- for
+      crates whose --all-features build is covered by dedicated jobs of
+      their own instead (see ci.yml's rusty_remind_me jobs)
+    required: false
+    default: ''
 outputs:
   args:
     description: 'cargo package-selection flags to pass to build/test/clippy; empty means nothing to do'
@@ -40,10 +47,19 @@ runs:
           done
           return 1
         }
+        is_excluded() {
+          for x in ${{ inputs.exclude }}; do
+            [ "$x" = "$1" ] && return 0
+          done
+          return 1
+        }
 
         pkgs=""
         if [ "${{ inputs.full }}" = "true" ]; then
           args="--workspace"
+          for x in ${{ inputs.exclude }}; do
+            args="$args --exclude $x"
+          done
           if [ "${{ runner.os }}" = "Windows" ]; then
             for x in ${{ inputs.windows-exclude }}; do
               args="$args --exclude $x"
@@ -52,6 +68,9 @@ runs:
         else
           args=""
           for p in ${{ inputs.packages }}; do
+            if is_excluded "$p"; then
+              continue
+            fi
             if [ "${{ runner.os }}" = "Windows" ] && is_windows_excluded "$p"; then
               continue
             fi

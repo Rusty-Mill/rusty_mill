@@ -221,6 +221,12 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_provider | rp-providers |  | 2 |
 | apps | rusty_provider | rp-router |  | 3 |
 | apps | rusty_provider | rp-server |  | 0 |
+| apps | rusty_remind_me | remind_me_api |  | 1 |
+| apps | rusty_remind_me | remind_me_core |  | 4 |
+| apps | rusty_remind_me | remind_me_hub |  | 1 |
+| apps | rusty_remind_me | remind_me_mcp |  | 2 |
+| apps | rusty_remind_me | remind_me_remote |  | 1 |
+| apps | rusty_remind_me | rusty-remind-me |  | 0 |
 | apps | rusty_skillopt | skillopt-cli |  | 0 |
 | apps | rusty_skillopt | skillopt-core |  | 3 |
 | apps | rusty_skillopt | skillopt-envs |  | 1 |

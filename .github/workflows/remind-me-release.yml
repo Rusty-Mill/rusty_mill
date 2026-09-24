@@ -1,0 +1,199 @@
+name: rusty_remind_me release
+
+# Ported from rusty_remind_me's own pre-merge release workflow
+# (crates/apps/rusty_remind_me/.github/workflows/release.yml, dead now that it
+# is not at a repository root -- its comments carry the full rationale for the
+# runner/target choices below). What changed in the port, and why, is ADR-0004
+# in docs/adr/:
+#
+# - Tags are `rusty-remind-me-vX.Y.Z`, not `vX.Y.Z`: this repository holds
+#   many products, and a bare `vX.Y.Z` would claim to version all of them.
+# - The version comes from the six crates' own `[package].version` (kept in
+#   lockstep by scripts/get_workspace_version.sh), not `[workspace.package]`,
+#   which in this repository belongs to other crates.
+# - The trigger is a push to `main` touching one of those manifests.
+#
+# Still one workflow rather than "tag on bump" + "build on tag": a tag pushed
+# with the default GITHUB_TOKEN triggers no other workflow, so a two-workflow
+# split would silently never build anything. softprops/action-gh-release
+# creates the tag itself, in the same run that detected the bump.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/apps/rusty_remind_me/crates/*/Cargo.toml"
+  workflow_dispatch:
+
+concurrency:
+  group: remind-me-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  PRODUCT_DIR: crates/apps/rusty_remind_me
+  TAG_PREFIX: rusty-remind-me-v
+
+jobs:
+  detect-version:
+    name: detect version bump
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_new: ${{ steps.version.outputs.is_new }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Every tag, not just this branch's history -- the existing-tag
+          # check below needs every release ever published.
+          fetch-depth: 0
+
+      - id: version
+        name: Read the crates' version and check for an existing release tag
+        run: |
+          set -euo pipefail
+          version="$("$PRODUCT_DIR/scripts/get_workspace_version.sh")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG_PREFIX}${version}" >/dev/null; then
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+            echo "${TAG_PREFIX}${version} is already tagged -- nothing to release."
+          else
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+            echo "${TAG_PREFIX}${version} is new -- will build and publish a release."
+          fi
+
+  # One native build per platform, no cross-compilation (see the original
+  # workflow). `macos-14` starts deprecating 2026-07-06 and is unsupported
+  # from 2026-11-02 -- if these legs queue forever, move both to the current
+  # macOS runner label.
+  build:
+    name: build (${{ matrix.target }})
+    needs: detect-version
+    if: needs.detect-version.outputs.is_new == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me-release-${{ matrix.target }}
+
+      # Default features only, matching what README tells a from-source user
+      # to build. `-p` keeps this to the two shipped binaries -- a bare build
+      # here would compile the whole monorepo.
+      - name: Build rusty-remind-me and rusty-remind-me-hub (release)
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rusty-remind-me -p remind_me_hub
+
+      - name: Package the archive (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.detect-version.outputs.version }}"
+          stage="rusty-remind-me-v${version}-${{ matrix.target }}"
+          mkdir "$stage"
+          cp "target/${{ matrix.target }}/release/rusty-remind-me" "$stage/"
+          cp "target/${{ matrix.target }}/release/rusty-remind-me-hub" "$stage/"
+          cp "$PRODUCT_DIR/README.md" "$stage/"
+          tar czf "${stage}.tar.gz" "$stage"
+          echo "ASSET_PATH=${stage}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package the archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "${{ needs.detect-version.outputs.version }}"
+          $stage = "rusty-remind-me-v$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me-hub.exe" "$stage/"
+          Copy-Item "$env:PRODUCT_DIR/README.md" "$stage/"
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          echo "ASSET_PATH=$stage.zip" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-${{ matrix.target }}
+          path: ${{ env.ASSET_PATH }}
+          if-no-files-found: error
+
+  # The Claude Code plugin surface, zipped so it can be grabbed from the
+  # Release page without cloning. Needs no Rust toolchain.
+  package-plugin:
+    name: package Claude Code plugin
+    needs: detect-version
+    if: needs.detect-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # remind-me-checks.yml should already have blocked a drifted PR, but a
+      # release must never ship a plugin archive claiming the wrong version.
+      - name: Verify plugin.json version matches this release
+        run: "$PRODUCT_DIR/scripts/check_plugin_version.sh"
+
+      - name: Build the plugin archive
+        run: |
+          set -euo pipefail
+          version="${{ needs.detect-version.outputs.version }}"
+          stage="rusty-remind-me-plugin-v${version}"
+          mkdir "$stage"
+          (cd "$PRODUCT_DIR" && cp -R .claude-plugin commands hooks .mcp.json README.md "$GITHUB_WORKSPACE/$stage/")
+          zip -rq "${stage}.zip" "$stage"
+          echo "ASSET_PATH=${stage}.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-asset-plugin
+          path: ${{ env.ASSET_PATH }}
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    needs: [detect-version, build, package-plugin]
+    if: needs.detect-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-asset-*
+          merge-multiple: true
+
+      # Two differences from the standalone repo, both because this
+      # repository ships more than one product: `make_latest: false`, so
+      # "Latest" on the Releases page doesn't flip to whichever product
+      # shipped last; and a body pointing at the product's own
+      # RELEASE_NOTES.md instead of `generate_release_notes`, which would
+      # list every monorepo PR merged since the previous release of *any*
+      # product.
+      - name: Create the release and attach all archives
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_PREFIX }}${{ needs.detect-version.outputs.version }}
+          name: rusty_remind_me v${{ needs.detect-version.outputs.version }}
+          body: >-
+            rusty_remind_me v${{ needs.detect-version.outputs.version }}.
+            What changed is in
+            [RELEASE_NOTES.md](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/crates/apps/rusty_remind_me/RELEASE_NOTES.md).
+          make_latest: false
+          files: dist/*
