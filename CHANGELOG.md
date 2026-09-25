@@ -8,6 +8,14 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- **`rusty_multimodal_db_engine`: every insert read the whole insert log.**
+  `insert_log::on_disk_version` read the file to get four header bytes, so
+  each insert or replace cost time in proportion to the log and filling a
+  store was quadratic until the next fold. It now reads the header only.
+  Found by `rusty_remind_me`'s hub pull-latency benchmark, where 20 000
+  inserts spent 22 s of 30 s in `read`, and now take 5 s.
+
 ### Added
 - **`rusty_multimodal_db_engine`** (`crates/libs/storage/`): the generic
   record store extracted from `rusty_multimodal_db` (its ADR-0124) so

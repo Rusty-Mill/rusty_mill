@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db_engine: inserts no longer read the whole insert log
+**2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
+
+- **Fixed:** `insert_log::on_disk_version` read the whole insert log on every append to get four header bytes. Every insert and replace therefore got slower as the log grew, until the next `open` or `compact()` folded it. It now reads the header only. A new unit test pins the header-only behaviour, and the engine's and `rusty_multimodal_db`'s suites pass unchanged.
+- In `rusty_remind_me`'s hub benchmark (`remind_me_hub/examples/pull_latency.rs`), loading 20 000 memories took 25.1 s before the fix and 5.2 s after. SQLite takes 5.7 s for the same load.
+
+---
+
 ## rusty_multimodal_db's generic store extracted to a libs crate
 **2026-09-25** · PR [#328](https://github.com/Rusty-Mill/rusty_mill/pull/328) · ADR `rusty_multimodal_db` [`0124`](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0124-engine-extracted-to-libs.md)
 

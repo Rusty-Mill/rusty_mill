@@ -2,6 +2,48 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-09-25 — The embedded-engine hub no longer starves pulls under push load
+
+### Fixed
+- **A pull could wait seconds behind queued pushes on the embedded-engine backend.** Every push holds the store's write lock through its `fsync`. `std`'s `RwLock` also lets a waiting writer go ahead of waiting readers. With four pushers, a pull's median wait was 10 s. Writers now queue on a mutex before asking for the lock, so a pull waits for at most one push. Pulls also copy their rows under the lock and build the JSON after releasing it.
+- **Writes got slower as the store grew.** This was an engine bug: every insert read the whole insert log. It was fixed in `rusty_multimodal_db_engine`.
+
+### Added
+- **`examples/pull_latency.rs`**, the measurement ADR-0021 requires before the default switches. It preloads a hub, runs pushers against pullers, and prints push throughput and pull latency percentiles for SQLite and the engine. Run it with:
+
+  ```sh
+  cargo run --release -p remind_me_hub --features multimodal-store --example pull_latency
+  ```
+
+### Provenance
+
+| 20k memories preloaded, 4 pushers, 2 pullers | SQLite | Engine before | Engine after |
+|---|---|---|---|
+| Pushes per second | 2534 | 259 | 1102 |
+| Pull latency, p50 / p99 | 27 / 232 ms | 10 s / 10 s | 3.2 / 7.1 ms |
+
+With one pusher, the engine manages 1893 pushes/s against SQLite's 828. The full table is in ADR-0021's phase 3 notes. All hub tests pass on every feature combination, including against Postgres.
+
+## 2026-09-25 — rusty-remind-me-hub-copy: move a SQLite or Postgres hub onto the embedded engine
+
+### Added
+- **`rusty-remind-me-hub-copy`** (feature `multimodal-store`). Phase 3 of ADR-0021. It copies a SQLite hub (`--from-sqlite PATH`) or a Postgres hub (`--from-postgres`, which reads `DATABASE_URL`) into a new embedded-engine data directory.
+- **Every `hub_seq` and `origin_node` is kept exactly**, so nodes carry on from their cursors. The next `hub_seq` starts above the highest the source ever issued. That can be above every remaining row. For Postgres it is the sequence's last value, and for SQLite the mark it keeps in `hub_meta`.
+- **Rows the engine cannot store are listed, and nothing is written**: ids over 64 bytes or holding NUL, and rows that do not parse. `--check` lists them without writing; `--drop-invalid` copies everything else.
+- **After writing, the tool reads every row back and compares it with the source.**
+- **The source is only ever read.** SQLite is opened read-only. Postgres is read in one repeatable-read, read-only transaction. A legacy Python-hub database (`TIMESTAMPTZ` columns) is read as it stands, not migrated.
+- **New feature `postgres-import`** for the Postgres reader. It is kept apart from `postgres-store` so it can outlive that store.
+
+### Provenance
+
+New tests:
+- `tests/hub_copy_test.rs`. A copied SQLite hub answers every read of the shared differential script exactly as the source does, before and after a reopen. It covers refused and dropped ids, a source left byte-for-byte unchanged, a non-empty target, and the binary end to end.
+- In `hub_postgres_test.rs`, two cases:
+  - a Postgres hub with `hub_seq` gaps copies exactly, and the next write gets the same `hub_seq` on both;
+  - a legacy database copies to exactly what the Postgres store's own in-place migration makes of it.
+- In `hub_copy_test.rs`, a SQLite hub that compacted away its newest row: the copy's next write gets the same `hub_seq` as the source's. It failed (2 against 3) before the SQLite reader read `hub_meta`.
+- A mutation check: when the copy ignores the sequence's high-water mark, the gap test fails.
+
 ## 2026-09-25 — The SQLite hub no longer reissues a `hub_seq` after tombstone compaction
 
 ### Fixed

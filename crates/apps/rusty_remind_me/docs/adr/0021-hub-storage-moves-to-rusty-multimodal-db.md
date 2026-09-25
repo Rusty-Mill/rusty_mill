@@ -193,6 +193,71 @@ change was needed. Building it settled details the decisions above left open:
 Not yet measured: pull latency under push load, which this ADR requires before
 the default switches (phase 3).
 
+## Phase 3 notes: the copy tool (2026-09-25)
+
+`rusty-remind-me-hub-copy` (`remind_me_hub/src/bin/copy.rs`, the `import`
+module) reads a SQLite or Postgres hub and writes a new engine data directory
+in one pass (`MultimodalHubStore::create_from_snapshot`).
+
+- **Rows are read as JSON and parsed like a push.** Each reader turns a row
+  into a column-keyed object: SQLite by column, Postgres by `to_jsonb(row)`.
+  `record::parse` then validates it and fills defaults, so a legacy schema
+  with missing columns reads correctly and is never migrated.
+  - Stored empty strings in `category`, `source`, `client`, `status` and
+    `memory_type` are kept as they are. A push would replace them with
+    defaults.
+  - A row that does not parse is reported, not dropped.
+- **Where `hub_seq` starts.** A memory with no `hub_seq` gets one in
+  `(updated_at, id)` order, as the stores' own `migrate` backfills them. The
+  counter starts above the source's high-water mark, which can be above
+  every remaining row: for Postgres, the sequence's `last_value`; for
+  SQLite, the `hub_meta` mark it has kept since it stopped reissuing a
+  compacted `hub_seq`. Tests for both show the next write gets the same
+  `hub_seq` on the copy as on the source, including after the source
+  compacted away its newest row.
+- **The Postgres reader is behind `postgres-import`, not `postgres-store`,**
+  so it outlives the Postgres store (decision 6).
+- **The copy refuses rather than drops.** Ids the engine cannot hold, and two
+  rows mapping to one engine id, stop the copy with nothing written, unless
+  `--drop-invalid` says to go ahead without those rows.
+
+### Pull latency under push load (measured 2026-09-25)
+
+`remind_me_hub/examples/pull_latency.rs` preloads a hub on disk with 20 000
+memories. Pushers then apply one memory at a time while two pullers page
+`since_seq` pulls of 500 from random cursors. It ran on this project's
+shared CI-class container.
+
+| 20k preloaded, 10 s | SQLite | Engine, as first built | Engine, fixed |
+|---|---|---|---|
+| Preload, one writer | 5.7 s | 25.1 s | 5.2 s |
+| 4 pushers: pushes/s | 2534 | 259 | 1102 |
+| 4 pushers: pull p50 / p99 | 27 / 232 ms | 10 s / 10 s | 3.2 / 7.1 ms |
+| 1 pusher: pushes/s | 828 | 308 | 1893 |
+| 1 pusher: pull p50 / p99 | 6.5 / 38 ms | 4.2 / 12 ms | 3.6 / 8.9 ms |
+
+The engine as first built failed the Consequences' "pushes block pulls"
+concern badly. Three fixes brought it well past SQLite on pulls:
+
+- **Pulls starved behind queued pushes.** `std`'s `RwLock` lets a waiting
+  writer go ahead of waiting readers, so under several pushers a pull
+  waited for every queued push. Writers now queue on a mutex first, so at
+  most one writer waits on the lock.
+- **Every insert read the whole insert log** (an engine bug: four header
+  bytes read as the whole file). It was fixed in the engine, which made
+  writes linear again.
+- **Pulls held the read lock while building JSON.** They now copy their
+  rows under the lock and serialise after releasing it.
+
+Contended pushes remain below SQLite's. Each engine write syncs twice,
+the log and then the slot file, and SQLite syncs once. A personal hub's push
+load is a few records a minute, and a node's first full sync of 20 000
+memories takes about 20 s. The real fix is batching a push under one sync,
+which needs an engine batch-insert API. That is a follow-up, not a gate.
+
+Still to do in phase 3: switch the default, then remove the old stores a
+release later.
+
 ## Related
 
 - The same mapping found that the Postgres hub assigned `hub_seq` at statement
