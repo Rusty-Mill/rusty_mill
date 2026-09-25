@@ -416,14 +416,14 @@
 //! fails now.
 
 use super::insert_log;
-use super::insert_log::LogEntry;
+use super::insert_log::{LogEntry, LogSync};
 use super::mmap_field::MmapFieldValue;
 use super::query::{
     AllIds, Compact, Delete, FilterEq, GetById, Insert, Replace, ScanField, UpdateField,
 };
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
-use super::store::Flush;
+use super::store::{Flush, GroupCommit};
 use super::traits::{IndexedField, ScannableField, SchemaTag};
 use super::{CompactionReport, DeleteError, InsertError, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
@@ -468,6 +468,11 @@ where
     /// per-field `MmapScanned` layer. This store keeps the policy: which
     /// slots to reuse, which records to append, and the index above.
     file: SlotFile<R::Id, R::ScanValue>,
+    /// When a write's insert-log entry is synced: [`LogSync::Now`] unless
+    /// a [`GroupCommit`] is open.
+    log_sync: LogSync,
+    /// Whether the insert log holds deferred entries not yet synced.
+    unsynced: bool,
     _marker: PhantomData<(IndexMarker, ScanMarker)>,
 }
 
@@ -592,6 +597,8 @@ where
             index: indexes.index,
             position_index,
             file,
+            log_sync: LogSync::Now,
+            unsynced: false,
             _marker: PhantomData,
         })
     }
@@ -718,6 +725,8 @@ where
             index: indexes.index,
             position_index,
             file,
+            log_sync: LogSync::Now,
+            unsynced: false,
             _marker: PhantomData,
         })
     }
@@ -765,6 +774,24 @@ where
         records
     }
 
+    /// Whether a [`GroupCommit`] is open: writes are not synced until its
+    /// `commit`.
+    pub fn is_sync_deferred(&self) -> bool {
+        self.log_sync == LogSync::Deferred
+    }
+
+    /// Append `record` to the insert log, synced as the open
+    /// [`GroupCommit`] (if any) says.
+    fn log_record(&mut self, record: &R) -> Result<(), DurabilityError> {
+        insert_log::append_record(
+            &insert_log::log_path(self.file.path()),
+            record,
+            self.log_sync,
+        )?;
+        self.unsynced |= self.log_sync == LogSync::Deferred;
+        Ok(())
+    }
+
     /// Add one record at runtime (`INS-FR-002`, ADR-0046): refuse a
     /// duplicate id with nothing written; append the record to the
     /// insert log at `<path>.inserts` and `sync_data` it; append one
@@ -791,7 +818,7 @@ where
         if self.records.contains_key(&id) {
             return Err(InsertError::Duplicate(id));
         }
-        insert_log::append(&insert_log::log_path(self.file.path()), &record)?;
+        self.log_record(&record)?;
         let positions = self
             .file
             .append_committed_slots([(id, record.scannable_value())])?;
@@ -839,7 +866,7 @@ where
             .position_index
             .get(&id)
             .ok_or(ReplaceError::NotFound(id))?;
-        insert_log::append(&insert_log::log_path(self.file.path()), &record)?;
+        self.log_record(&record)?;
         self.file.write_value(position, record.scannable_value());
         let new_value = record.indexed_value().clone();
         if old_value != new_value {
@@ -878,7 +905,13 @@ where
             .position_index
             .get(&id)
             .ok_or(DeleteError::NotFound(id))?;
-        insert_log::append_tombstone(&insert_log::log_path(self.file.path()), R::SCHEMA_TAG, &id)?;
+        insert_log::append_tombstone_as(
+            &insert_log::log_path(self.file.path()),
+            R::SCHEMA_TAG,
+            &id,
+            self.log_sync,
+        )?;
+        self.unsynced |= self.log_sync == LogSync::Deferred;
         self.file.clear_marker(position);
         if let Some(bucket) = self.index.get_mut(&indexed) {
             bucket.retain(|other| *other != id);
@@ -936,6 +969,8 @@ where
                 .map(|record| (record.id(), record.scannable_value())),
         )?;
         insert_log::clear(&log)?;
+        // Every deferred entry is in the blob now, which the rewrite synced.
+        self.unsynced = false;
         self.position_index = records
             .iter()
             .enumerate()
@@ -1191,6 +1226,29 @@ where
     /// mirrors `MmapAgeStore::flush` exactly.
     fn flush(&self) -> Result<(), DurabilityError> {
         self.file.flush()
+    }
+}
+
+/// The insert log is the only file a write syncs: slot appends and
+/// in-place slot writes go through the mapping unsynced (see [`Flush`]).
+/// Deferring the log's sync therefore defers every sync a write makes.
+impl<R, IndexMarker, ScanMarker> GroupCommit for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker> + ScannableField<ScanMarker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+{
+    fn defer_sync(&mut self) {
+        self.log_sync = LogSync::Deferred;
+    }
+
+    fn commit(&mut self) -> Result<(), DurabilityError> {
+        self.log_sync = LogSync::Now;
+        if self.unsynced {
+            insert_log::sync(&insert_log::log_path(self.file.path()))?;
+            self.unsynced = false;
+        }
+        Ok(())
     }
 }
 

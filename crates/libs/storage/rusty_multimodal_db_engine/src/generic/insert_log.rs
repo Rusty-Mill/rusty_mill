@@ -42,6 +42,15 @@
 //! The header and the first entry are written in one `write_all` so a
 //! crash can never leave a header-only or half-header file that a later
 //! `append` would misread.
+//!
+//! # Deferred sync
+//!
+//! An append normally returns only after `sync_data`. A caller applying a
+//! batch can append with [`LogSync::Deferred`] instead and call [`sync`]
+//! once at the end, so N writes cost one sync rather than N. Until that
+//! sync returns, none of the batch is acknowledged: a crash may keep any
+//! prefix of it (a torn tail is dropped as above), which is the state a
+//! crash mid-way through N synced appends could leave too.
 
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::SchemaTag;
@@ -77,6 +86,16 @@ pub enum LogEntry<T, K> {
 }
 const LOG_SUFFIX: &str = ".inserts";
 
+/// When an appended entry has to be on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogSync {
+    /// Before the append returns (`sync_data`): the default.
+    #[default]
+    Now,
+    /// At the caller's next [`sync`] of the log (see the module docs).
+    Deferred,
+}
+
 /// Where a `GenericMmapStore` whose mmap file lives at `path` keeps its
 /// insert log — `<path>.inserts`, the `<path>.records` derivation with
 /// a different suffix.
@@ -99,7 +118,25 @@ pub fn append<R>(log: &Path, record: &R) -> Result<(), DurabilityError>
 where
     R: Serialize + SchemaTag,
 {
-    append_item(log, R::SCHEMA_TAG, record)
+    append_record(log, record, LogSync::Now)
+}
+
+/// [`append`], synced as `when` says.
+///
+/// # Errors
+///
+/// As [`append`].
+pub fn append_record<R>(log: &Path, record: &R, when: LogSync) -> Result<(), DurabilityError>
+where
+    R: Serialize + SchemaTag,
+{
+    append_entry(
+        log,
+        R::SCHEMA_TAG,
+        KIND_ITEM,
+        &crate::codec::encode(record)?,
+        when,
+    )
 }
 
 /// [`append`] over any serializable item under an explicit `tag` —
@@ -111,7 +148,13 @@ pub fn append_item<T>(log: &Path, tag: &str, item: &T) -> Result<(), DurabilityE
 where
     T: Serialize + ?Sized,
 {
-    append_entry(log, tag, KIND_ITEM, &crate::codec::encode(item)?)
+    append_entry(
+        log,
+        tag,
+        KIND_ITEM,
+        &crate::codec::encode(item)?,
+        LogSync::Now,
+    )
 }
 
 /// `DEL-FR-003` (ADR-0051): append a tombstone for `key` — the id of a
@@ -121,14 +164,56 @@ pub fn append_tombstone<K>(log: &Path, tag: &str, key: &K) -> Result<(), Durabil
 where
     K: Serialize + ?Sized,
 {
-    append_entry(log, tag, KIND_TOMBSTONE, &crate::codec::encode(key)?)
+    append_tombstone_as(log, tag, key, LogSync::Now)
+}
+
+/// [`append_tombstone`], synced as `when` says.
+///
+/// # Errors
+///
+/// As [`append_tombstone`].
+pub fn append_tombstone_as<K>(
+    log: &Path,
+    tag: &str,
+    key: &K,
+    when: LogSync,
+) -> Result<(), DurabilityError>
+where
+    K: Serialize + ?Sized,
+{
+    append_entry(log, tag, KIND_TOMBSTONE, &crate::codec::encode(key)?, when)
+}
+
+/// Sync every entry appended to the log at `log` with
+/// [`LogSync::Deferred`]. A missing log has nothing to sync.
+///
+/// # Errors
+///
+/// Returns [`DurabilityError::Io`] if the file exists and can't be opened
+/// or synced.
+pub fn sync(log: &Path) -> Result<(), DurabilityError> {
+    // Opened for writing: on Windows `sync_data` (`FlushFileBuffers`)
+    // needs a handle with write access.
+    let file = match OpenOptions::new().append(true).open(log) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    file.sync_data()?;
+    Ok(())
 }
 
 /// One `kind` + `u32` length + payload entry, after the header on a new
 /// file. A version-1 log found here (written before `DEL-FR-003`, never
 /// reopened since) is rewritten as version 2 first — its entries are all
 /// items — so a file is never a mix of the two layouts.
-fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), DurabilityError> {
+fn append_entry(
+    log: &Path,
+    tag: &str,
+    kind: u8,
+    payload: &[u8],
+    when: LogSync,
+) -> Result<(), DurabilityError> {
     let len = u32::try_from(payload.len()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -147,10 +232,14 @@ fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), D
     image.extend_from_slice(&len.to_le_bytes());
     image.extend_from_slice(payload);
     file.write_all(&image)?;
-    file.sync_data()?;
+    if when == LogSync::Now {
+        file.sync_data()?;
+    }
     if created {
         // `RVL-FR-003` (ADR-0112): a log created by this append needs its
-        // directory entry durable too, as every other creation does.
+        // directory entry durable too, as every other creation does. Done
+        // even for a deferred append: it happens once per log, and a later
+        // `sync` then needs only the file's data.
         sync_parent_dir(log)?;
     }
     Ok(())
@@ -578,6 +667,26 @@ mod tests {
             }
             other => panic!("expected a tag mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deferred_appends_read_back_and_sync_is_a_no_op_without_a_log() {
+        let dir = fresh_temp_dir("insert_log_deferred").unwrap();
+        let log = log_path(&dir.join("store.mmap"));
+        sync(&log).unwrap();
+        assert!(!log.exists(), "sync must not create a log");
+        append_record(&log, &item(1), LogSync::Deferred).unwrap();
+        append_tombstone_as(&log, Item::SCHEMA_TAG, &1u32, LogSync::Deferred).unwrap();
+        append_record(&log, &item(2), LogSync::Deferred).unwrap();
+        sync(&log).unwrap();
+        assert_eq!(
+            read_entries::<Item, u32>(&log, Item::SCHEMA_TAG).unwrap(),
+            vec![
+                LogEntry::Item(item(1)),
+                LogEntry::Tombstone(1),
+                LogEntry::Item(item(2)),
+            ]
+        );
     }
 
     /// `DEL-FR-003`: a version-1 log (no kind bytes) still reads, every

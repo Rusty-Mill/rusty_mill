@@ -8,6 +8,15 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- **`rusty_multimodal_db_engine`: group commit.**
+  - `GroupCommit::defer_sync` stops each write syncing its insert-log entry.
+  - `commit` syncs the entries in one call.
+  - Implemented by `GenericMmapStore`, and forwarded by `Indexed`, `Scanned`, `NameIndex` and `Ordered`.
+  - Not implemented by the relation layers, since their edge logs would need their syncs ordered against the record log's.
+  - New in `insert_log`: `LogSync`, `append_record`, `append_tombstone_as` and `sync`; and `GenericMmapStore::is_sync_deferred`.
+  - `rusty_remind_me`'s hub applies each push through it.
+
 ### Fixed
 - **`rusty_multimodal_db_engine`: every insert read the whole insert log.**
   `insert_log::on_disk_version` read the file to get four header bytes, so
