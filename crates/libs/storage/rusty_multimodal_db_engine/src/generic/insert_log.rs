@@ -71,7 +71,7 @@ const KIND_TOMBSTONE: u8 = 1;
 /// One entry of a version-2 log (`DEL-FR-003`): an item, or a tombstone
 /// for the key an earlier entry (or the blob) holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LogEntry<T, K> {
+pub enum LogEntry<T, K> {
     Item(T),
     Tombstone(K),
 }
@@ -80,7 +80,7 @@ const LOG_SUFFIX: &str = ".inserts";
 /// Where a `GenericMmapStore` whose mmap file lives at `path` keeps its
 /// insert log — `<path>.inserts`, the `<path>.records` derivation with
 /// a different suffix.
-pub(crate) fn log_path(path: &Path) -> PathBuf {
+pub fn log_path(path: &Path) -> PathBuf {
     let mut log = path.as_os_str().to_owned();
     log.push(LOG_SUFFIX);
     PathBuf::from(log)
@@ -95,7 +95,7 @@ pub(crate) fn log_path(path: &Path) -> PathBuf {
 /// Returns [`DurabilityError::Serde`] if `record` can't be serialized,
 /// [`DurabilityError::Io`] if the file can't be opened, written, or
 /// synced, or if the encoded record exceeds a `u32` length prefix.
-pub(crate) fn append<R>(log: &Path, record: &R) -> Result<(), DurabilityError>
+pub fn append<R>(log: &Path, record: &R) -> Result<(), DurabilityError>
 where
     R: Serialize + SchemaTag,
 {
@@ -107,7 +107,7 @@ where
 /// carry no `SchemaTag` of their own, tagged with the *record type's*
 /// tag exactly as the edge blob is. The record-facing [`append`] is this
 /// with `R::SCHEMA_TAG`.
-pub(crate) fn append_item<T>(log: &Path, tag: &str, item: &T) -> Result<(), DurabilityError>
+pub fn append_item<T>(log: &Path, tag: &str, item: &T) -> Result<(), DurabilityError>
 where
     T: Serialize + ?Sized,
 {
@@ -117,7 +117,7 @@ where
 /// `DEL-FR-003` (ADR-0051): append a tombstone for `key` — the id of a
 /// record, or the id every edge of which is to go — under `tag`'s log.
 /// Synced before returning, exactly as [`append_item`].
-pub(crate) fn append_tombstone<K>(log: &Path, tag: &str, key: &K) -> Result<(), DurabilityError>
+pub fn append_tombstone<K>(log: &Path, tag: &str, key: &K) -> Result<(), DurabilityError>
 where
     K: Serialize + ?Sized,
 {
@@ -254,7 +254,7 @@ fn raw_entries(bytes: &[u8], version: u32) -> Vec<(u8, &[u8])> {
 /// record type, or holds a complete entry that doesn't decode; or
 /// [`DurabilityError::Io`] if it can't be read for any other reason.
 #[cfg(test)]
-pub(crate) fn read<R>(log: &Path) -> Result<Vec<R>, DurabilityError>
+pub fn read<R>(log: &Path) -> Result<Vec<R>, DurabilityError>
 where
     R: DeserializeOwned + SchemaTag,
 {
@@ -264,7 +264,7 @@ where
 /// [`read`] over any deserializable item under an explicit `tag` — the
 /// edge log's reader (`LNK-FR-003`).
 #[cfg(test)]
-pub(crate) fn read_items<T>(log: &Path, tag: &str) -> Result<Vec<T>, DurabilityError>
+pub fn read_items<T>(log: &Path, tag: &str) -> Result<Vec<T>, DurabilityError>
 where
     T: DeserializeOwned,
 {
@@ -291,10 +291,7 @@ where
 /// [`DurabilityError::RecordBlobUnreadable`] naming the log. (The
 /// fingerprint the header claims is always zero for a log and is
 /// ignored — every entry is framed and decoded on its own.)
-pub(crate) fn read_entries<T, K>(
-    log: &Path,
-    tag: &str,
-) -> Result<Vec<LogEntry<T, K>>, DurabilityError>
+pub fn read_entries<T, K>(log: &Path, tag: &str) -> Result<Vec<LogEntry<T, K>>, DurabilityError>
 where
     T: DeserializeOwned,
     K: DeserializeOwned,
@@ -357,7 +354,7 @@ fn read_raw(log: &Path, tag: &str) -> Result<Vec<(usize, u8, Vec<u8>)>, Durabili
 ///
 /// Returns [`DurabilityError::Io`] if the file exists and can't be
 /// removed.
-pub(crate) fn clear(log: &Path) -> Result<(), DurabilityError> {
+pub fn clear(log: &Path) -> Result<(), DurabilityError> {
     match std::fs::remove_file(log) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),

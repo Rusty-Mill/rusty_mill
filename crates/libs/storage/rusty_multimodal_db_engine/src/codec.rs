@@ -5,7 +5,7 @@
 //!
 //! # Configuration
 //!
-//! [`options`] spells out, explicitly, every option `bincode`'s free
+//! `options` spells out, explicitly, every option `bincode`'s free
 //! functions (`bincode::serialize`/`deserialize`) apply implicitly —
 //! **fixint** integers, **little-endian** byte order, **no size limit** —
 //! with one deliberate difference: **trailing bytes are rejected**
@@ -76,14 +76,14 @@ fn options() -> impl Options {
 }
 
 /// Encode `value` to a fresh `Vec<u8>` under the crate's configuration.
-pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, bincode::Error> {
+pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, bincode::Error> {
     options().serialize(value)
 }
 
 /// Encode `value` straight into `writer` under the crate's configuration
 /// — used where the bytes are hashed rather than kept (the blob
 /// fingerprints), so the `Vec` [`encode`] would allocate is never built.
-pub(crate) fn encode_into<W: Write, T: Serialize + ?Sized>(
+pub fn encode_into<W: Write, T: Serialize + ?Sized>(
     writer: W,
     value: &T,
 ) -> Result<(), bincode::Error> {
@@ -93,7 +93,7 @@ pub(crate) fn encode_into<W: Write, T: Serialize + ?Sized>(
 /// Decode a `T` from exactly `bytes` under the crate's configuration —
 /// fails if `bytes` is short, malformed, or has anything left over after
 /// the value (`BINENC-FR-002`).
-pub(crate) fn decode<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, bincode::Error> {
+pub fn decode<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, bincode::Error> {
     options().deserialize(bytes)
 }
 

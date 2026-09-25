@@ -93,261 +93,32 @@
 //! `RESULTS.md`'s `## Generic schema library` section for the full
 //! numbers. This is the accepted cost of the correctness guarantee, not
 //! an unexamined regression.
+//!
+//! # Where the machinery lives
+//!
+//! Everything generic here (the traits, the store layers, `GenericMmapStore`,
+//! `GenericProductionStore`, the error types, and the `Order` fixture) moved
+//! to `rusty_multimodal_db_engine` (ADR-0124) so another product can embed it.
+//! It is re-exported below under the same paths, so `crate::generic::store`,
+//! `crate::generic::GenericMmapStore` and the rest resolve as before. What
+//! stays in this module is this crate's own domains.
 
-pub(crate) mod edge_blob;
+pub use rusty_multimodal_db_engine::generic::*;
+
 /// `Entity` — this library's second front-door domain (`ENT-FR-001`,
 /// ADR-0037), and its first with a `SymmetricRelation`. See this
 /// module's own doc comment for the full account.
 pub mod entity;
-pub(crate) mod insert_log;
+
 /// `Memory` — this library's third front-door domain (`MEM-FR-001`,
 /// ADR-0048): the consumer's own `memories` table, bounded to the eleven
 /// fields a memory is. See the module's own doc comment.
 pub mod memory;
-pub mod mmap_field;
-pub mod mmap_scanned;
-pub mod mmap_store;
-/// `Order`/`Customer` — this library's reference implementation, proving
-/// the design against a second, structurally different domain than `Dog`.
-/// Not part of the recommended path to build *your own* domain (see
-/// [`super`]'s top-level doc comment for what is); kept as evidence,
-/// gated behind the `research` feature.
-#[cfg(feature = "research")]
-pub mod order_customer;
-pub mod production;
-pub mod query;
-pub(crate) mod record_blob;
+
 /// `Reminder` — this library's first front-door domain, not `research`-
 /// gated (`RMD-FR-001`, ADR-0036): unlike `order_customer`, this is not
 /// reference material validating the design, but real, deployable
 /// capability. See this module's own doc comment for the full account.
 pub mod relation;
+
 pub mod reminder;
-pub(crate) mod slot_file;
-pub mod store;
-pub mod traits;
-
-pub use mmap_scanned::MmapScanned;
-pub use mmap_store::GenericMmapStore;
-#[cfg(feature = "research")]
-pub use order_customer::{
-    build_order_generic_store, create_order_production_stack, open_order_production_stack,
-    open_order_production_stack_portable, Order, OrderGenericStore, OrderProductionStack,
-};
-pub use production::GenericProductionStore;
-
-use crate::durability::DurabilityError;
-use std::fmt;
-
-/// Error returned by [`crate::generic::query::UpdateField::update`] when `id` has no
-/// record — the generic analogue of `StoreError::NotFound`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotFound<Id>(pub Id);
-
-impl<Id: fmt::Debug> fmt::Display for NotFound<Id> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "no record with id {:?}", self.0)
-    }
-}
-
-impl<Id: fmt::Debug> std::error::Error for NotFound<Id> {}
-
-/// Error returned by [`crate::generic::query::Insert::insert`] (`INS-FR-001`, ADR-0046):
-/// either `id` already has a record — nothing was written, at any layer
-/// — or the innermost durable store could not make the new record
-/// durable (its insert log or slot append failed).
-#[derive(Debug)]
-pub enum InsertError<Id> {
-    /// `id` already has a record. Nothing was written.
-    Duplicate(Id),
-    /// The record could not be made durable; see the inner error.
-    Durability(DurabilityError),
-}
-
-impl<Id: fmt::Debug> fmt::Display for InsertError<Id> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            InsertError::Duplicate(id) => write!(f, "a record with id {id:?} already exists"),
-            InsertError::Durability(e) => write!(f, "insert could not be made durable: {e}"),
-        }
-    }
-}
-
-impl<Id: fmt::Debug> std::error::Error for InsertError<Id> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            InsertError::Duplicate(_) => None,
-            InsertError::Durability(e) => Some(e),
-        }
-    }
-}
-
-impl<Id> From<DurabilityError> for InsertError<Id> {
-    fn from(e: DurabilityError) -> Self {
-        InsertError::Durability(e)
-    }
-}
-
-/// Error returned by [`crate::generic::query::Replace::replace`] (`REP-FR-001`, ADR-0049):
-/// either `id` has no record — nothing was written, at any layer — or
-/// the innermost durable store could not make the new version durable
-/// (its insert log append failed).
-#[derive(Debug)]
-pub enum ReplaceError<Id> {
-    /// `id` has no record. Nothing was written.
-    NotFound(Id),
-    /// The new version could not be made durable; see the inner error.
-    Durability(DurabilityError),
-}
-
-impl<Id: fmt::Debug> fmt::Display for ReplaceError<Id> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReplaceError::NotFound(id) => write!(f, "no record with id {id:?} to replace"),
-            ReplaceError::Durability(e) => write!(f, "replace could not be made durable: {e}"),
-        }
-    }
-}
-
-impl<Id: fmt::Debug> std::error::Error for ReplaceError<Id> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ReplaceError::NotFound(_) => None,
-            ReplaceError::Durability(e) => Some(e),
-        }
-    }
-}
-
-/// What a guarded replacement did (`GRD-FR-001`, ADR-0054): the record
-/// is now the new version, or the guard did not hold against the stored
-/// record and nothing was written. A missing id is
-/// [`ReplaceError::NotFound`], as for an unguarded replace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardedReplace {
-    /// The guard held; the record is the new version.
-    Replaced,
-    /// The guard did not hold; nothing was written.
-    Refused,
-}
-
-impl<Id> From<DurabilityError> for ReplaceError<Id> {
-    fn from(e: DurabilityError) -> Self {
-        ReplaceError::Durability(e)
-    }
-}
-
-/// Error returned by [`crate::generic::query::Delete::delete`] and
-/// [`crate::generic::query::Detach::detach`] (`DEL-FR-001`, ADR-0051): either the id (or,
-/// for `detach`, the label) is unknown — nothing was written, at any
-/// layer — or the innermost durable store could not make the tombstone
-/// durable.
-#[derive(Debug)]
-pub enum DeleteError<Id> {
-    /// `id` has no record (or, for `detach`, the label does not exist).
-    /// Nothing was written.
-    NotFound(Id),
-    /// The tombstone could not be made durable; see the inner error.
-    Durability(DurabilityError),
-}
-
-impl<Id: fmt::Debug> fmt::Display for DeleteError<Id> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DeleteError::NotFound(id) => write!(f, "no record with id {id:?} to delete"),
-            DeleteError::Durability(e) => write!(f, "delete could not be made durable: {e}"),
-        }
-    }
-}
-
-impl<Id: fmt::Debug> std::error::Error for DeleteError<Id> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DeleteError::NotFound(_) => None,
-            DeleteError::Durability(e) => Some(e),
-        }
-    }
-}
-
-impl<Id> From<DurabilityError> for DeleteError<Id> {
-    fn from(e: DurabilityError) -> Self {
-        DeleteError::Durability(e)
-    }
-}
-
-/// What one [`crate::generic::query::Compact::compact`] reclaimed (`CMP-FR-001`,
-/// ADR-0052), summed across every layer of a stack.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CompactionReport {
-    /// Live records the rewritten blob and slot file hold.
-    pub records: usize,
-    /// Slots the old slot file held that the new one does not — the
-    /// retired slots of deleted records, plus any a crash never
-    /// committed.
-    pub slots_reclaimed: usize,
-    /// Entries the insert log held (items and tombstones), now folded.
-    pub log_entries_folded: usize,
-    /// Edge logs (one per relation label) that held entries, now folded.
-    pub edge_logs_folded: usize,
-}
-
-impl CompactionReport {
-    /// Add a layer's numbers to a stack's total.
-    pub fn absorb(&mut self, other: CompactionReport) {
-        self.records += other.records;
-        self.slots_reclaimed += other.slots_reclaimed;
-        self.log_entries_folded += other.log_entries_folded;
-        self.edge_logs_folded += other.edge_logs_folded;
-    }
-}
-
-/// What [`crate::generic::query::Link::link`] / [`crate::generic::query::MultiLink::link`] did
-/// (`LNK-FR-001`, ADR-0047): the edge is new, or it was already present
-/// and nothing was written — the consumer's insert-or-ignore, a normal
-/// outcome rather than an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkOutcome {
-    Linked,
-    AlreadyLinked,
-}
-
-/// Error returned by [`crate::generic::query::Link::link`] / [`crate::generic::query::MultiLink::link`]
-/// (`LNK-FR-001`, ADR-0047). Every variant but `Durability` is refused
-/// before anything is written, at every layer.
-#[derive(Debug)]
-pub enum LinkError<Id> {
-    /// One endpoint has no record — the first missing one, `a` before `b`.
-    UnknownRecord(Id),
-    /// Both endpoints are the same record.
-    SelfLoop(Id),
-    /// The relation label is not a valid one — see
-    /// [`crate::generic::store::valid_relation_label`].
-    InvalidLabel(String),
-    /// The edge could not be made durable; see the inner error.
-    Durability(DurabilityError),
-}
-
-impl<Id: fmt::Debug> fmt::Display for LinkError<Id> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LinkError::UnknownRecord(id) => write!(f, "no record with id {id:?}"),
-            LinkError::SelfLoop(id) => write!(f, "a record cannot be linked to itself ({id:?})"),
-            LinkError::InvalidLabel(label) => write!(f, "invalid relation label {label:?}"),
-            LinkError::Durability(e) => write!(f, "link could not be made durable: {e}"),
-        }
-    }
-}
-
-impl<Id: fmt::Debug> std::error::Error for LinkError<Id> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            LinkError::Durability(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl<Id> From<DurabilityError> for LinkError<Id> {
-    fn from(e: DurabilityError) -> Self {
-        LinkError::Durability(e)
-    }
-}

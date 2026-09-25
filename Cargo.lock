@@ -14091,10 +14091,22 @@ dependencies = [
  "redb",
  "rusqlite",
  "rusty_http",
+ "rusty_multimodal_db_engine",
  "rusty_tls",
  "serde",
  "sha2 0.10.9",
  "subtle",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "rusty_multimodal_db_engine"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "memmap2",
+ "serde",
  "thiserror 1.0.69",
  "uuid",
 ]

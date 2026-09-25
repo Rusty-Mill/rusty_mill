@@ -507,7 +507,7 @@ mod tests {
     use super::super::slot_file::HEADER_LEN;
     use super::super::store::BaseStore;
     use super::*;
-    use crate::bench_support::fresh_temp_dir;
+    use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
     type Core = GenericMmapStore<Order, Status, Amount>;

@@ -93,19 +93,19 @@ const BLOB_VERSION: u32 = 2;
 
 /// Byte offset of the little-endian `u64` schema tag hash: immediately
 /// after the shared header's fingerprint.
-pub(crate) const TAG_OFFSET: usize = HEADER_LEN;
+pub const TAG_OFFSET: usize = HEADER_LEN;
 
 /// The shared 20-byte header plus the 8-byte schema tag: 28 bytes. Where
 /// the body of every version-2 generic blob (`GENBLOB\0` and `GENEDGE\0`)
 /// begins, and exactly what [`GenericRecordBlob::is_current_at`] reads.
-pub(crate) const TAGGED_HEADER_LEN: usize = TAG_OFFSET + 8;
+pub const TAGGED_HEADER_LEN: usize = TAG_OFFSET + 8;
 
 /// The 8 bytes a [`SchemaTag::SCHEMA_TAG`] becomes in a header: FNV-1a 64
 /// over the tag's UTF-8 bytes alone — no length prefix, no terminator —
 /// by the same [`Fnv1a64`] the body fingerprint uses, so the same string
 /// hashes the same on every platform and in every build (`SCHTAG-FR-009`).
 /// The empty string is the FNV offset basis.
-pub(crate) fn tag_hash(tag: &str) -> u64 {
+pub fn tag_hash(tag: &str) -> u64 {
     let mut hash = Fnv1a64::new();
     hash.update(tag.as_bytes());
     hash.finish()
@@ -115,7 +115,7 @@ pub(crate) fn tag_hash(tag: &str) -> u64 {
 /// [`HEADER_LEN`]-byte header (via [`encode_image`], unchanged), then the
 /// [`tag_hash`] of `tag` as a little-endian `u64`, then `body`. The
 /// inverse of [`parse_tagged_header`] for the header half.
-pub(crate) fn encode_tagged_image(
+pub fn encode_tagged_image(
     magic: &[u8; 8],
     version: u32,
     fingerprint: u64,
@@ -141,7 +141,7 @@ pub(crate) fn encode_tagged_image(
 /// never a tag mismatch. `bytes` may be the whole file or just its first
 /// [`TAGGED_HEADER_LEN`] bytes. Errors are the `cause` half of a
 /// [`DurabilityError::RecordBlobUnreadable`].
-pub(crate) fn parse_tagged_header(
+pub fn parse_tagged_header(
     bytes: &[u8],
     magic: &[u8; 8],
     expected_version: u32,
@@ -170,7 +170,7 @@ pub(crate) fn parse_tagged_header(
 /// store encodes and fingerprints the caller's `Vec<R>` *before* moving
 /// it into its own maps, so no clone of the set is made just to persist
 /// it.
-pub(crate) struct GenericRecordBlob<'a, R> {
+pub struct GenericRecordBlob<'a, R> {
     records: &'a [R],
 }
 
@@ -178,7 +178,7 @@ impl<'a, R> GenericRecordBlob<'a, R>
 where
     R: Serialize + SchemaTag,
 {
-    pub(crate) fn new(records: &'a [R]) -> Self {
+    pub fn new(records: &'a [R]) -> Self {
         Self { records }
     }
 
@@ -190,7 +190,7 @@ where
     /// # Errors
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
-    pub(crate) fn fingerprint(&self) -> Result<u64, DurabilityError> {
+    pub fn fingerprint(&self) -> Result<u64, DurabilityError> {
         let mut hash = Fnv1a64::new();
         crate::codec::encode_into(&mut hash, self.records)?;
         Ok(hash.finish())
@@ -203,7 +203,7 @@ where
     /// # Errors
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
-    pub(crate) fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
+    pub fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
         let body = crate::codec::encode(self.records)?;
         let mut hash = Fnv1a64::new();
         hash.update(&body);
@@ -226,7 +226,7 @@ where
     /// (`STORAGE-015-FR-003`). A serialization failure also counts as
     /// "not current": `open` then attempts the rewrite, which surfaces the
     /// same failure as a proper error instead of swallowing it here.
-    pub(crate) fn is_current_at(&self, path: &Path) -> bool {
+    pub fn is_current_at(&self, path: &Path) -> bool {
         let mut header = [0u8; TAGGED_HEADER_LEN];
         let read_header = File::open(path).and_then(|mut file| file.read_exact(&mut header));
         read_header.is_ok()
@@ -250,7 +250,7 @@ where
 /// # Errors
 ///
 /// Returns [`DurabilityError::RecordBlobUnreadable`] as described above.
-pub(crate) fn read<R>(path: &Path) -> Result<Vec<R>, DurabilityError>
+pub fn read<R>(path: &Path) -> Result<Vec<R>, DurabilityError>
 where
     R: DeserializeOwned + SchemaTag,
 {
@@ -277,7 +277,7 @@ where
 /// Where a `GenericMmapStore` whose mmap file lives at `path` keeps its
 /// companion blob — the same `<path>.records` derivation as the
 /// `ProductionStore` companion (`STORAGE-015-FR-001`).
-pub(crate) fn blob_path(path: &Path) -> std::path::PathBuf {
+pub fn blob_path(path: &Path) -> std::path::PathBuf {
     companion_path(path)
 }
 
@@ -398,10 +398,7 @@ mod tests {
     fn a_dog_blob_at_the_companion_path_is_a_magic_error() {
         let dir = fresh_temp_dir("generic_blob_dog_magic").unwrap();
         let path = blob_path(&dir.join("store.mmap"));
-        let dog = crate::durability::record_blob::RecordBlob {
-            records: crate::durability::test_support::sample_records(),
-            edges: crate::durability::test_support::sample_edges(),
-        };
+        let dog = crate::test_support::foreign_dog_blob();
         dog.write(&path).unwrap();
         match read::<Item>(&path) {
             Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {

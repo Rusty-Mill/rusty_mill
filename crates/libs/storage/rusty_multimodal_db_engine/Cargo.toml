@@ -1,0 +1,34 @@
+[package]
+name = "rusty_multimodal_db_engine"
+version = "0.1.0"
+edition = "2021"
+# Matches rusty_multimodal_db, which this engine was extracted from and whose
+# msrv job still builds it transitively.
+rust-version = "1.89"
+description = "The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs"
+license = "MIT"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+# Every pin below is the one rusty_multimodal_db already used for this code,
+# kept literal rather than taken from [workspace.dependencies] on purpose: the
+# record blobs and insert log are bincode-encoded on-disk formats, and a
+# dependency drifting under them would change bytes a store already wrote.
+[dependencies]
+# Ids (`Uuid` is one of the three slot-file id types) and serde support for them.
+uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+# `DurabilityError` and the store-layer error types.
+thiserror = "1"
+# Record, blob and insert-log (de)serialization; `derive` for the blob headers.
+serde = { version = "1", features = ["derive"] }
+# The on-disk encoding of record blobs, edge blobs and the insert log.
+bincode = "1"
+# The memory-mapped slot files.
+memmap2 = "0.9"
+
+[features]
+# The `Order`/`Customer` fixture domain the engine's own tests exercise it
+# with, and which rusty_multimodal_db's research benches and order server use.
+research = []

@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn create_then_read_and_write_as_production_stack() {
-        let dir = crate::bench_support::fresh_temp_dir("order_production_basic").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("order_production_basic").unwrap();
         let path = dir.join("amount.mmap");
         let mut stack = create_order_production_stack(sample(), &path).unwrap();
 
@@ -500,7 +500,7 @@ mod tests {
     /// back from the caller-supplied records because nothing persists it.
     #[test]
     fn both_durable_fields_survive_flush_and_reopen_through_the_stack() {
-        let dir = crate::bench_support::fresh_temp_dir("order_production_two_fields").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("order_production_two_fields").unwrap();
         let path = dir.join("amount.mmap");
 
         {
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn flush_then_reopen_production_stack_sees_the_written_value() {
-        let dir = crate::bench_support::fresh_temp_dir("order_production_roundtrip").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("order_production_roundtrip").unwrap();
         let path = dir.join("amount.mmap");
 
         {
@@ -561,7 +561,7 @@ mod tests {
     /// `Amount` value as last flushed — with no `orders` argument.
     #[test]
     fn open_portable_rebuilds_the_full_stack_from_the_two_files_alone() {
-        let dir = crate::bench_support::fresh_temp_dir("order_production_portable").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("order_production_portable").unwrap();
         let path = dir.join("amount.mmap");
 
         {
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn insert_through_the_production_stack_survives_open_portable_with_both_durable_fields() {
         use super::super::query::Insert;
-        let dir = crate::bench_support::fresh_temp_dir("order_production_insert").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("order_production_insert").unwrap();
         let path = dir.join("amount.mmap");
         let new = Order {
             id: Uuid::from_u128(4),

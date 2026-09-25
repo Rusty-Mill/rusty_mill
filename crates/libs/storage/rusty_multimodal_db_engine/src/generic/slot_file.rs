@@ -47,15 +47,15 @@ use std::path::{Path, PathBuf};
 /// identifies "a slot-file-shaped file," not which domain or which field
 /// it belongs to; nothing in this format encodes that (the companion
 /// record blob's schema tag does, for the stack as a whole).
-pub(crate) const MAGIC: [u8; 8] = *b"GMMAPST\0";
+pub const MAGIC: [u8; 8] = *b"GMMAPST\0";
 
 /// Bumped whenever the on-disk *slot* layout changes in a way that would
 /// make an old file misread under a new build — last bumped for the
 /// trailing per-slot `COMMITTED` marker byte.
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// `MAGIC` followed by `SCHEMA_VERSION` as a little-endian `u32`.
-pub(crate) const HEADER_LEN: usize = MAGIC.len() + 4;
+pub const HEADER_LEN: usize = MAGIC.len() + 4;
 
 /// The value a slot's trailing marker byte holds once the slot's id and
 /// value are both fully in place. Any other byte value — including `0`,
@@ -63,12 +63,12 @@ pub(crate) const HEADER_LEN: usize = MAGIC.len() + 4;
 /// anything writes to them — means "not committed," so a slot that was
 /// never reached at all and a slot whose marker write was interrupted by
 /// a crash both read the same safe way: absent, not corrupted.
-pub(crate) const COMMITTED: u8 = 1;
+pub const COMMITTED: u8 = 1;
 
 /// One memory-mapped `GMMAPST\0` slot file: a column of
 /// `(Id, V, COMMITTED)` slots behind the fixed header. Owns the mapping
 /// and the path; knows nothing about records.
-pub(crate) struct SlotFile<Id, V> {
+pub struct SlotFile<Id, V> {
     mmap: MmapMut,
     path: PathBuf,
     _marker: PhantomData<(Id, V)>,
@@ -81,20 +81,20 @@ where
 {
     /// Bytes per persisted slot: the id prefix, the value, and the
     /// trailing `COMMITTED` marker byte.
-    pub(crate) fn slot_width() -> usize {
+    pub fn slot_width() -> usize {
         Id::BYTE_WIDTH + V::BYTE_WIDTH + 1
     }
 
     /// Byte offset of slot `position`'s first byte — every slot sits after
     /// the fixed `HEADER_LEN`-byte header, not at file offset 0 directly.
-    pub(crate) fn slot_offset(position: usize) -> usize {
+    pub fn slot_offset(position: usize) -> usize {
         HEADER_LEN + position * Self::slot_width()
     }
 
     /// The value stored in slot `position`. The caller guarantees
     /// `position` is a slot this file holds (it came from
     /// [`Self::committed_pairs`] or [`Self::append_committed_slots`]).
-    pub(crate) fn read_value(&self, position: usize) -> V {
+    pub fn read_value(&self, position: usize) -> V {
         let start = Self::slot_offset(position) + Id::BYTE_WIDTH;
         V::read_le(&self.mmap[start..start + V::BYTE_WIDTH])
     }
@@ -106,7 +106,7 @@ where
     /// in `GenericMmapStore`'s docs (the in-place update path was
     /// checked separately from slot creation and reproduced empirically
     /// by `src/bin/crash_safety_harness.rs`).
-    pub(crate) fn write_value(&mut self, position: usize, value: V) {
+    pub fn write_value(&mut self, position: usize, value: V) {
         let start = Self::slot_offset(position) + Id::BYTE_WIDTH;
         value.write_le(&mut self.mmap[start..start + V::BYTE_WIDTH]);
     }
@@ -116,14 +116,14 @@ where
     /// has established every slot is live (see [`Self::is_gapless`]);
     /// otherwise a stale or uncommitted slot's value would leak into the
     /// result.
-    pub(crate) fn slot_bytes(&self) -> &[u8] {
+    pub fn slot_bytes(&self) -> &[u8] {
         &self.mmap[HEADER_LEN..]
     }
 
     /// Number of whole slots the file currently has room for, header
     /// excluded — committed or not. A trailing partial slot is not
     /// counted; see [`Self::trailing_partial_bytes`].
-    pub(crate) fn slot_count(&self) -> usize {
+    pub fn slot_count(&self) -> usize {
         (self.mmap.len() - HEADER_LEN) / Self::slot_width()
     }
 
@@ -136,7 +136,7 @@ where
     /// follows); `MmapScanned` refuses the file (`MFMD-FR-009`'s slot-width
     /// check). Both policies are the owners' to choose, which is why this
     /// only reports.
-    pub(crate) fn trailing_partial_bytes(&self) -> usize {
+    pub fn trailing_partial_bytes(&self) -> usize {
         (self.mmap.len() - HEADER_LEN) % Self::slot_width()
     }
 
@@ -147,12 +147,12 @@ where
     /// (pigeonhole): an uncommitted or stale slot is never in the owner's
     /// position index, so if one existed the live count would be short by
     /// exactly that slot.
-    pub(crate) fn is_gapless(&self, live_count: usize) -> bool {
+    pub fn is_gapless(&self, live_count: usize) -> bool {
         live_count * Self::slot_width() == self.mmap.len() - HEADER_LEN
     }
 
     /// The path this file was created at or opened from.
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
@@ -161,7 +161,7 @@ where
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] if the `msync` fails.
-    pub(crate) fn flush(&self) -> Result<(), DurabilityError> {
+    pub fn flush(&self) -> Result<(), DurabilityError> {
         self.mmap.flush()?;
         Ok(())
     }
@@ -193,7 +193,7 @@ where
     /// log tombstone's; a marker that survives a crash describes a slot
     /// whose id the folded record set no longer holds, which `open`
     /// already ignores as stale.
-    pub(crate) fn clear_marker(&mut self, position: usize) {
+    pub fn clear_marker(&mut self, position: usize) {
         let marker_offset = Self::slot_offset(position) + Id::BYTE_WIDTH + V::BYTE_WIDTH;
         self.mmap[marker_offset] = 0;
     }
@@ -283,7 +283,7 @@ where
     ///
     /// Returns [`DurabilityError::Io`] if the parent can't be created, the
     /// file can't be created/sized, the mapping fails, or the flush fails.
-    pub(crate) fn create<I>(path: &Path, slots: I) -> Result<Self, DurabilityError>
+    pub fn create<I>(path: &Path, slots: I) -> Result<Self, DurabilityError>
     where
         I: ExactSizeIterator<Item = (Id, V)>,
     {
@@ -338,7 +338,7 @@ where
     /// is mapped in its place. A crash before the rename leaves the old
     /// file intact plus a stray `.compact` the next `create`/`rewrite`
     /// truncates; a crash after it leaves the new file whole.
-    pub(crate) fn rewrite<I>(&mut self, slots: I) -> Result<(), DurabilityError>
+    pub fn rewrite<I>(&mut self, slots: I) -> Result<(), DurabilityError>
     where
         I: ExactSizeIterator<Item = (Id, V)>,
     {
@@ -359,7 +359,7 @@ where
         Ok(())
     }
 
-    pub(crate) fn open(path: &Path) -> Result<Self, DurabilityError> {
+    pub fn open(path: &Path) -> Result<Self, DurabilityError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         // SAFETY: see `create` — same single-process exclusive-access
         // assumption.
@@ -380,7 +380,7 @@ where
     /// exactly as if it had never been persisted, rather than handing a
     /// torn id/value pair to a caller. A trailing partial slot is likewise
     /// never read (it isn't a slot at all — [`Self::slot_count`]).
-    pub(crate) fn committed_pairs(&self) -> HashMap<Id, (usize, V)> {
+    pub fn committed_pairs(&self) -> HashMap<Id, (usize, V)> {
         let id_width = Id::BYTE_WIDTH;
         let value_width = V::BYTE_WIDTH;
         let slot_count = self.slot_count();
@@ -417,10 +417,7 @@ where
     /// committed but *not* reported — the next `open` finds them by id
     /// through [`Self::committed_pairs`], which is the same recovery a
     /// crash mid-append gets.
-    pub(crate) fn append_committed_slots<I>(
-        &mut self,
-        slots: I,
-    ) -> Result<Vec<usize>, DurabilityError>
+    pub fn append_committed_slots<I>(&mut self, slots: I) -> Result<Vec<usize>, DurabilityError>
     where
         I: IntoIterator<Item = (Id, V)>,
     {

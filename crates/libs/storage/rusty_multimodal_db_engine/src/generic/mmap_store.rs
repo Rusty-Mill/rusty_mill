@@ -1203,7 +1203,62 @@ where
 mod tests {
     use super::*;
     use crate::generic::order_customer::{Amount, Order, OrderStatus, Status};
-    use crate::generic_spike::employee_impl::{Department, DepartmentField, Employee, SalaryCents};
+    use employee_fixture::{Department, DepartmentField, Employee, SalaryCents};
+
+    /// A second record type with the same slot shape as `Order` (a `Uuid`
+    /// id, an `i64` scannable field) but a different schema tag: what the
+    /// tag checks below must tell apart. The minimal slice of
+    /// `rusty_multimodal_db`'s research `Employee` fixture these tests
+    /// used before the engine was extracted (ADR-0124), with the same tag.
+    mod employee_fixture {
+        use crate::generic::traits::{IndexedField, Record, ScannableField, SchemaTag};
+        use serde::{Deserialize, Serialize};
+        use uuid::Uuid;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum Department {
+            Engineering,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub struct Employee {
+            pub id: Uuid,
+            pub name: String,
+            pub department: Department,
+            pub salary_cents: i64,
+            pub manager_id: Option<Uuid>,
+        }
+
+        impl Record for Employee {
+            type Id = Uuid;
+            fn id(&self) -> Uuid {
+                self.id
+            }
+        }
+
+        impl SchemaTag for Employee {
+            const SCHEMA_TAG: &'static str = "employee::Employee";
+        }
+
+        pub struct DepartmentField;
+        impl IndexedField<DepartmentField> for Employee {
+            type IndexValue = Department;
+            fn indexed_value(&self) -> &Department {
+                &self.department
+            }
+        }
+
+        pub struct SalaryCents;
+        impl ScannableField<SalaryCents> for Employee {
+            type ScanValue = i64;
+            fn scannable_value(&self) -> i64 {
+                self.salary_cents
+            }
+            fn set_scannable_value(&mut self, value: i64) {
+                self.salary_cents = value;
+            }
+        }
+    }
 
     fn sample() -> Vec<Order> {
         vec![
@@ -1228,7 +1283,7 @@ mod tests {
 
     #[test]
     fn create_then_read_and_write() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_basic").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_basic").unwrap();
         let path = dir.join("amount.mmap");
         let mut store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
 
@@ -1257,7 +1312,7 @@ mod tests {
 
     #[test]
     fn flush_then_reopen_sees_the_written_value() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_roundtrip").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_roundtrip").unwrap();
         let path = dir.join("amount.mmap");
 
         {
@@ -1286,7 +1341,7 @@ mod tests {
 
     #[test]
     fn filter_eq_works_on_the_index_field() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_index").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_index").unwrap();
         let path = dir.join("amount.mmap");
         let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
 
@@ -1301,7 +1356,7 @@ mod tests {
     /// header check must not get in the way of the ordinary case.
     #[test]
     fn opening_a_file_at_the_current_schema_version_succeeds() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_baseline").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_header_baseline").unwrap();
         let path = dir.join("amount.mmap");
         {
             let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
@@ -1326,7 +1381,7 @@ mod tests {
     /// mechanism, not any particular history of the constant.
     #[test]
     fn opening_a_file_with_a_mismatched_schema_version_fails_distinctly() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_version").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_header_version").unwrap();
         let path = dir.join("amount.mmap");
         {
             let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
@@ -1368,7 +1423,7 @@ mod tests {
     /// instead, that confusion is exactly what this test exists to catch.
     #[test]
     fn opening_a_file_with_the_wrong_magic_number_fails_distinctly_from_a_version_mismatch() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_magic").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_header_magic").unwrap();
         let path = dir.join("amount.mmap");
         {
             let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
@@ -1402,7 +1457,7 @@ mod tests {
     /// clean, typed error, not an out-of-bounds panic on the header slice.
     #[test]
     fn a_file_shorter_than_the_header_fails_as_invalid_magic_not_a_panic() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_short").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_header_short").unwrap();
         let path = dir.join("garbage.mmap");
         std::fs::write(&path, [0u8; 4]).unwrap(); // shorter than HEADER_LEN
 
@@ -1427,7 +1482,7 @@ mod tests {
     /// not a coincidence of matching bytes.
     #[test]
     fn a_slot_with_an_unset_commit_marker_is_treated_as_never_persisted() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_torn_slot").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_torn_slot").unwrap();
         let path = dir.join("amount.mmap");
         {
             let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
@@ -1480,7 +1535,7 @@ mod tests {
 
     #[test]
     fn create_writes_the_companion_blob_and_open_portable_round_trips_every_field() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable").unwrap();
         let path = dir.join("amount.mmap");
         {
             let mut store =
@@ -1523,7 +1578,7 @@ mod tests {
 
     #[test]
     fn copying_both_files_to_a_fresh_directory_reopens_portably() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_copy").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_copy").unwrap();
         let path = dir.join("amount.mmap");
         {
             let mut store =
@@ -1557,7 +1612,7 @@ mod tests {
 
     #[test]
     fn a_missing_companion_is_unreadable_naming_its_path_and_plain_open_heals_it() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_missing").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_missing").unwrap();
         let path = dir.join("amount.mmap");
         GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
         let companion = blob_path(&path);
@@ -1591,7 +1646,7 @@ mod tests {
 
     #[test]
     fn open_rewrites_the_companion_only_when_the_record_set_changed() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_stale").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_stale").unwrap();
         let path = dir.join("amount.mmap");
         GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
         let companion = blob_path(&path);
@@ -1626,16 +1681,13 @@ mod tests {
 
     #[test]
     fn a_production_store_blob_at_the_companion_path_is_a_magic_error() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_dog_blob").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_dog_blob").unwrap();
         let path = dir.join("amount.mmap");
         GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
         let companion = blob_path(&path);
-        crate::durability::record_blob::RecordBlob {
-            records: crate::durability::test_support::sample_records(),
-            edges: crate::durability::test_support::sample_edges(),
-        }
-        .write(&companion)
-        .unwrap();
+        crate::test_support::foreign_dog_blob()
+            .write(&companion)
+            .unwrap();
 
         match GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path) {
             Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
@@ -1652,7 +1704,7 @@ mod tests {
 
     #[test]
     fn a_stray_temp_file_is_not_a_companion_and_the_mmap_file_alone_is_not_portable() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_mmap_only").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_mmap_only").unwrap();
         let path = dir.join("amount.mmap");
         GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
         let companion = blob_path(&path);
@@ -1691,7 +1743,7 @@ mod tests {
 
     #[test]
     fn an_employee_blob_read_as_orders_is_a_tag_error_and_plain_open_heals_it() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_other_tag").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_other_tag").unwrap();
         let path = dir.join("store.mmap");
         // Both stores are `Uuid`-keyed with an `i64` scannable field, so
         // the mmap file itself is interchangeable; only the companion's
@@ -1744,7 +1796,7 @@ mod tests {
 
     #[test]
     fn a_version_1_companion_is_a_version_error_and_plain_open_heals_it() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_v1_blob").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_mmap_portable_v1_blob").unwrap();
         let path = dir.join("amount.mmap");
         GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
         let companion = blob_path(&path);
@@ -1795,7 +1847,7 @@ mod tests {
     /// is appended, the blob rewritten, the log removed.
     #[test]
     fn a_logged_record_with_no_slot_is_healed_by_open() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_no_slot").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_insert_log_no_slot").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         drop(OrderCore::create(sample(), &path).unwrap());
@@ -1815,7 +1867,7 @@ mod tests {
     /// — replayed without duplicates, by id.
     #[test]
     fn a_log_entry_the_blob_already_holds_is_skipped() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_dup").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_insert_log_dup").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         drop(OrderCore::create(sample(), &path).unwrap());
@@ -1836,7 +1888,7 @@ mod tests {
     /// path belongs to a store that no longer exists.
     #[test]
     fn create_removes_a_stale_insert_log() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_stale").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_insert_log_stale").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         insert_log::append(&log, &order(9)).unwrap();
@@ -1851,7 +1903,7 @@ mod tests {
     /// mmap file is touched.
     #[test]
     fn a_foreign_insert_log_is_refused_by_name_from_open_and_read_portable() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_insert_log_foreign").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_insert_log_foreign").unwrap();
         let path = dir.join("orders.mmap");
         drop(OrderCore::create(sample(), &path).unwrap());
         let employee = Employee {
@@ -1884,7 +1936,7 @@ mod tests {
     /// nothing; an unknown id is refused with nothing written.
     #[test]
     fn replace_moves_the_index_rewrites_the_slot_and_survives_reopen() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_replace").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_replace").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         {
@@ -1947,7 +1999,7 @@ mod tests {
     /// idempotent; log order decides between two versions of one id.
     #[test]
     fn a_logged_replacement_wins_over_the_blob_in_the_fold() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_replace_fold").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_replace_fold").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         drop(OrderCore::create(sample(), &path).unwrap());
@@ -1982,7 +2034,7 @@ mod tests {
     /// inserted again afterwards — the later log entry winning.
     #[test]
     fn delete_retires_the_slot_survives_reopen_and_allows_reinsert() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_delete").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_delete").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         let two = uuid::Uuid::from_u128(2);
@@ -2038,7 +2090,7 @@ mod tests {
     /// for an id nothing holds is a no-op.
     #[test]
     fn the_fold_applies_tombstones_in_log_order() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_delete_fold").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_delete_fold").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         drop(OrderCore::create(sample(), &path).unwrap());
@@ -2067,7 +2119,7 @@ mod tests {
     /// data without writing, and a second compaction reclaims nothing.
     #[test]
     fn compact_reclaims_retired_slots_folds_the_log_and_changes_no_read() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_compact").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_compact").unwrap();
         let path = dir.join("orders.mmap");
         let log = insert_log::log_path(&path);
         let mut store = OrderCore::create(sample(), &path).unwrap();

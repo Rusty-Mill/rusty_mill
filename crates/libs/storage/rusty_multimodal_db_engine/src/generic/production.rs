@@ -70,9 +70,9 @@ const LOCK_POISONED: &str =
 /// minimal shape, unconditionally available:
 ///
 /// ```
-/// use rusty_multimodal_db::generic::mmap_store::GenericMmapStore;
-/// use rusty_multimodal_db::generic::production::GenericProductionStore;
-/// use rusty_multimodal_db::generic::traits::{IndexedField, Record, ScannableField, SchemaTag};
+/// use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
+/// use rusty_multimodal_db_engine::generic::production::GenericProductionStore;
+/// use rusty_multimodal_db_engine::generic::traits::{IndexedField, Record, ScannableField, SchemaTag};
 /// use serde::{Deserialize, Serialize};
 /// use uuid::Uuid;
 ///
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn get_filter_scan_update_parent_children_all_work_through_the_lock() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_production_basic").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_production_basic").unwrap();
         let path = dir.join("amount.mmap");
         let stack = create_order_production_stack(sample(), &path).unwrap();
         let store = GenericProductionStore::new(stack);
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn flush_then_reopen_sees_the_written_value() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_production_roundtrip").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_production_roundtrip").unwrap();
         let path = dir.join("amount.mmap");
 
         {
@@ -857,7 +857,7 @@ mod tests {
     /// never called.
     #[test]
     fn replace_if_replaces_only_when_the_guard_holds_against_the_stored_record() {
-        let dir = crate::bench_support::fresh_temp_dir("generic_production_replace_if").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("generic_production_replace_if").unwrap();
         let path = dir.join("amount.mmap");
         let stack = create_order_production_stack(sample(), &path).unwrap();
         let store = GenericProductionStore::new(stack);

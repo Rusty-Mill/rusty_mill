@@ -1656,7 +1656,8 @@ pub struct NameIndex<S, R: super::query::NameIndexed> {
 /// single space and trims the ends, then lowercases. `pub(crate)` so
 /// `entity_id` can reuse it; not `pub` — the rule is an implementation
 /// detail of the index, not a public API.
-pub(crate) fn normalize(key: &str) -> String {
+#[doc(hidden)]
+pub fn normalize(key: &str) -> String {
     key.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
