@@ -18,6 +18,9 @@ Removed / Fixed / Security, newest first.
   - `rusty_remind_me`'s hub applies each push through it.
 
 ### Fixed
+- **`rusty_multimodal_db_engine`: a long write pause each time the row count doubled.**
+  - `GenericMmapStore` kept its records inline in a `HashMap`, so a regrow copied every record under the caller's lock: 170–370 ms at 115 000 of `rusty_remind_me`'s ~800-byte hub memories.
+  - Records are now boxed, so a regrow moves a key and a pointer each. The pause is now under 10 ms at that size, and 37 ms at 229 000.
 - **`rusty_multimodal_db_engine`: every insert read the whole insert log.**
   `insert_log::on_disk_version` read the file to get four header bytes, so
   each insert or replace cost time in proportion to the log and filling a

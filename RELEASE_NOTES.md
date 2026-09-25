@@ -27,7 +27,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   - a commit with nothing written;
   - a compaction inside a batch.
 - In the `rusty_remind_me` hub benchmark, 100-record pushes went from 1327 to 17 040 records/s with 4 pushers.
-- **Known limitation, not new:** the core's `HashMap`s regrow in one step, pausing a write once per doubling of the row count. The pause was about 0.2–0.4 s at 115 000 rows.
+- **Fixed:** `GenericMmapStore` now holds its records boxed (`HashMap<Id, Box<R>>`).
+  - The map regrows in one step, and with records inline a regrow copied every record: a 170–370 ms write pause at 115 000 hub memories of ~800 bytes each.
+  - Boxed, the pause is under 10 ms at 115 000 rows and 37 ms at 229 000.
+  - The field is private, so the API is unchanged.
 
 ---
 

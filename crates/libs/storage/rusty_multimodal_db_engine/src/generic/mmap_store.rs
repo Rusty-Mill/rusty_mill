@@ -455,7 +455,12 @@ where
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
-    records: HashMap<R::Id, R>,
+    /// Boxed, so the map's own entries stay small: a `HashMap` regrows in
+    /// one step, moving every entry under whatever lock the caller holds,
+    /// and with records inline that was every record's bytes (a 0.2–0.4 s
+    /// write pause at 115 000 `rusty_remind_me` hub memories of ~800 bytes
+    /// each). Boxed, a regrow moves a key and a pointer per record.
+    records: HashMap<R::Id, Box<R>>,
     index: HashMap<R::IndexValue, Vec<R::Id>>,
     /// `id` -> that id's *current* slot position in `file` — built by
     /// matching persisted ids against `records`, not by array index. See
@@ -489,7 +494,7 @@ struct Indexes<R, IndexMarker>
 where
     R: IndexedField<IndexMarker>,
 {
-    records: HashMap<R::Id, R>,
+    records: HashMap<R::Id, Box<R>>,
     index: HashMap<R::IndexValue, Vec<R::Id>>,
 }
 
@@ -528,7 +533,10 @@ where
                 .or_default()
                 .push(record.id());
         }
-        let records_map = records.iter().cloned().map(|r| (r.id(), r)).collect();
+        let records_map = records
+            .iter()
+            .map(|r| (r.id(), Box::new(r.clone())))
+            .collect();
         Indexes {
             records: records_map,
             index,
@@ -830,7 +838,7 @@ where
             .or_default()
             .push(id);
         self.position_index.insert(id, position);
-        self.records.insert(id, record);
+        self.records.insert(id, Box::new(record));
         Ok(())
     }
 
@@ -878,7 +886,7 @@ where
             }
             self.index.entry(new_value).or_default().push(id);
         }
-        self.records.insert(id, record);
+        self.records.insert(id, Box::new(record));
         Ok(())
     }
 
@@ -954,7 +962,7 @@ where
         let records: Vec<R> = ordered
             .iter()
             .map(|(position, id)| {
-                let mut record = self.records[id].clone();
+                let mut record = R::clone(&self.records[id]);
                 record.set_scannable_value(self.file.read_value(*position));
                 record
             })
@@ -1037,7 +1045,7 @@ where
     /// whatever `records` held at construction time — see this module's
     /// doc comment on why `set_scannable_value` exists.
     fn get(&self, id: R::Id) -> Option<R> {
-        let mut record = self.records.get(&id)?.clone();
+        let mut record = R::clone(self.records.get(&id)?);
         let position = *self.position_index.get(&id)?;
         record.set_scannable_value(self.file.read_value(position));
         Some(record)
