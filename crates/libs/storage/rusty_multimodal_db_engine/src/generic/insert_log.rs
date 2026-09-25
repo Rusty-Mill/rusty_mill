@@ -49,8 +49,8 @@ use crate::durability::sync_parent_dir;
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: [u8; 8] = *b"GENINSL\0";
@@ -158,15 +158,27 @@ fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), D
 
 /// The version a log file on disk declares, or `None` when there is no
 /// file (or too little of one to carry a header).
+///
+/// Reads the header only. Every append calls this, and it once read the
+/// whole log to get at four bytes, so each insert cost time in proportion
+/// to the log and filling a store was quadratic until the next fold
+/// (found by `rusty_remind_me`'s hub pull-latency benchmark: 20 000 inserts
+/// spent 22 s of 30 s in `read`).
 fn on_disk_version(log: &Path) -> Result<Option<u32>, DurabilityError> {
-    let bytes = match std::fs::read(log) {
-        Ok(bytes) => bytes,
+    let mut file = match File::open(log) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    Ok(bytes
-        .get(VERSION_OFFSET..VERSION_OFFSET + 4)
-        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]])))
+    let mut header = [0u8; VERSION_OFFSET + 4];
+    match file.read_exact(&mut header) {
+        Ok(()) => {
+            let [.., a, b, c, d] = header;
+            Ok(Some(u32::from_le_bytes([a, b, c, d])))
+        }
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Rewrite a version-1 log as version 2 in place (every entry an item),
@@ -393,6 +405,23 @@ mod tests {
             id,
             label: format!("item {id}"),
         }
+    }
+
+    #[test]
+    fn the_on_disk_version_comes_from_the_header_alone() {
+        let dir = fresh_temp_dir("insert_log_version").unwrap();
+        let log = log_path(&dir.join("store.mmap"));
+        assert_eq!(on_disk_version(&log).unwrap(), None, "no file");
+        std::fs::write(&log, [0u8; VERSION_OFFSET + 3]).unwrap();
+        assert_eq!(
+            on_disk_version(&log).unwrap(),
+            None,
+            "too short for a header"
+        );
+        std::fs::remove_file(&log).unwrap();
+        append(&log, &item(1)).unwrap();
+        append(&log, &item(2)).unwrap();
+        assert_eq!(on_disk_version(&log).unwrap(), Some(LOG_VERSION));
     }
 
     #[test]
