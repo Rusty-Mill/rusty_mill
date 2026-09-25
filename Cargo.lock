@@ -12206,8 +12206,10 @@ dependencies = [
  "chrono",
  "postgres",
  "rusqlite",
+ "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
