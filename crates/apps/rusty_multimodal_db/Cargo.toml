@@ -373,6 +373,10 @@ required-features = ["server"]
 # is new as of the durability work (STORAGE-008/009): WAL entries and snapshots need Uuid to
 # (de)serialize.
 uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+# The generic store, extracted from this crate so another product can embed it
+# (ADR-0124); re-exported as `generic`, `durability::DurabilityError` and
+# `codec`, so this crate's paths are unchanged.
+rusty_multimodal_db_engine = { workspace = true }
 # Error type for the one fallible DogStore operation (update_age on an unknown UUID), and for
 # DurabilityError (src/durability/mod.rs).
 thiserror = "1"
@@ -511,7 +515,7 @@ perfcnt = { version = "0.8", optional = true }
 # consumer depending on this crate doesn't compile any of it in. See
 # `lib.rs`'s own top-level doc comment for the full front-door/research
 # split.
-research = []
+research = ["rusty_multimodal_db_engine/research"]
 # The network server/query layer (`src/server/`) — off by default, distinct
 # from `research`: this is new, real, additive capability (ADR-0010,
 # Accepted), not a benchmarked-alternative or historical-spike module.

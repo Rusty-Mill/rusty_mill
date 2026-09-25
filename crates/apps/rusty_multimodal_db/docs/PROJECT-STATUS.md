@@ -484,6 +484,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## In progress
 
+- The generic store extracted to `crates/libs/storage/rusty_multimodal_db_engine` (`ADR-0124`, 2026-09-25), phase 1 of `rusty_remind_me`'s ADR-0021: `generic/*` (except the four domains), `codec`, `DurabilityError` and the shared blob header moved with `git mv`, re-exported under their old paths. `DurabilityError::Store` holds a boxed error. No wire or on-disk change. 875 tests here plus 123 in the engine: the same 998 as before the split.
 - TLS in the refresh CLI and the review's test debts (`ADR-0123`) — implemented on `claude/pr-276-multimodal-db-growth-4lkjx8` (2026-09-23): `Target::with_tls` and `REPLICA_REFRESH_TLS_SERVER_NAME`; `refresh_loop`; the `waiting_writers > 0`, `.failed-` and loop tests; the listening banner prints the bound address and the four binary tests spawn on port 0 through `spawn_listening`. Not built: a nullable field capability (no producer column). Not run here: the `dm-log-writes` replay (no device-mapper in the guest). `SERVER-001` v0.101.0 / `FR-114`; no wire change. Its PR waits on the owner. `ADR-0092`–`ADR-0122` (PRs #292–#319) merged.
 
 ## Blocked

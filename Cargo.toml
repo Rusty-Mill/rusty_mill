@@ -52,6 +52,13 @@ members = [
     "crates/apps/rusty_homelab_mcp",
     "crates/apps/rusty_fedora_agent",
     "crates/apps/rusty_multimodal_db",
+    "crates/libs/storage/rusty_multimodal_db_engine",
+    "crates/apps/rusty_remind_me/crates/remind_me_core",
+    "crates/apps/rusty_remind_me/crates/remind_me_mcp",
+    "crates/apps/rusty_remind_me/crates/remind_me_api",
+    "crates/apps/rusty_remind_me/crates/remind_me_cli",
+    "crates/apps/rusty_remind_me/crates/remind_me_remote",
+    "crates/apps/rusty_remind_me/crates/remind_me_hub",
     "crates/apps/rusty_hister/crates/rusty-hister-core",
     "crates/apps/rusty_hister/crates/rusty-hister-model",
     "crates/apps/rusty_hister/crates/rusty-hister-extractor",
@@ -328,6 +335,7 @@ rusty_retry = { path = "crates/foundation/rusty_retry" }
 rusty_rsa = { path = "crates/foundation/rusty_rsa" }
 rusty_sha1 = { path = "crates/foundation/rusty_sha1", version = "0.1.0" }
 rusty_simd = { path = "crates/foundation/rusty_simd" }
+rusty_multimodal_db_engine = { path = "crates/libs/storage/rusty_multimodal_db_engine" }
 rusty_sqlite = { path = "crates/libs/storage/rusty_sqlite" }
 rusty_sync = { path = "crates/foundation/rusty_sync" }
 rusty_term = { path = "crates/libs/ui/rusty_term", version = "0.1.1" }
@@ -725,6 +733,22 @@ windows-sys = { version = "0.59", features = [
 # sessionmgr-pty made.
 nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
 nexus-hashline = { path = "crates/apps/nexus/crates/nexus-hashline" }
+
+# Hoisted from rusty_remind_me's own former `[workspace.dependencies]` (a
+# six-crate Cargo workspace before this merge). Only its intra-family path
+# entries move here, so its members' `remind_me_core.workspace = true` lines
+# keep working unchanged. Its `[workspace.package]` collided with this root's
+# on version (0.2.0), license ("MIT") and rust-version (1.94), so -- like
+# rusty_db -- its crates carry literal `[package]` fields instead. Its
+# external dependencies are literal in the member manifests too: `thiserror`
+# ("2.0") and `dirs` ("5.0") are the same splits nexus keeps literal, and
+# `rusqlite` moved 0.31 -> 0.39 (its `links = "sqlite3"` allows one version
+# per graph) with the `functions` feature this root's entry lacks.
+remind_me_core = { path = "crates/apps/rusty_remind_me/crates/remind_me_core" }
+remind_me_mcp = { path = "crates/apps/rusty_remind_me/crates/remind_me_mcp" }
+remind_me_api = { path = "crates/apps/rusty_remind_me/crates/remind_me_api" }
+remind_me_remote = { path = "crates/apps/rusty_remind_me/crates/remind_me_remote" }
+remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }
