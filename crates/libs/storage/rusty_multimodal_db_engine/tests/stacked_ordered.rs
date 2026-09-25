@@ -170,9 +170,13 @@ where
     }
 }
 
+/// A brute-force sort key: the ordered field, then the id's bytes, then
+/// the `Uuid` the index breaks exact ties on.
+type SortKey = (i64, Vec<u8>, Uuid);
+
 /// The expected order for each index, by brute force over `rows`.
 fn expected(rows: &[Row]) -> [Vec<String>; 3] {
-    let by = |mut v: Vec<&Row>, key: &dyn Fn(&Row) -> (i64, Vec<u8>, Uuid)| {
+    let by = |mut v: Vec<&Row>, key: &dyn Fn(&Row) -> SortKey| {
         v.sort_by_key(|r| key(r));
         v.into_iter().map(|r| r.id.clone()).collect::<Vec<_>>()
     };
