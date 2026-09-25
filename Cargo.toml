@@ -52,6 +52,7 @@ members = [
     "crates/apps/rusty_homelab_mcp",
     "crates/apps/rusty_fedora_agent",
     "crates/apps/rusty_multimodal_db",
+    "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
     "crates/apps/rusty_remind_me/crates/remind_me_api",
@@ -334,6 +335,7 @@ rusty_retry = { path = "crates/foundation/rusty_retry" }
 rusty_rsa = { path = "crates/foundation/rusty_rsa" }
 rusty_sha1 = { path = "crates/foundation/rusty_sha1", version = "0.1.0" }
 rusty_simd = { path = "crates/foundation/rusty_simd" }
+rusty_multimodal_db_engine = { path = "crates/libs/storage/rusty_multimodal_db_engine" }
 rusty_sqlite = { path = "crates/libs/storage/rusty_sqlite" }
 rusty_sync = { path = "crates/foundation/rusty_sync" }
 rusty_term = { path = "crates/libs/ui/rusty_term", version = "0.1.1" }

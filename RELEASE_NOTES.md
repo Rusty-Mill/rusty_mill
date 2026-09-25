@@ -13,6 +13,23 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db's generic store extracted to a libs crate
+**2026-09-25** · PR [#328](https://github.com/Rusty-Mill/rusty_mill/pull/328) · ADR `rusty_multimodal_db` [`0124`](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0124-engine-extracted-to-libs.md)
+
+Phase 1 of `rusty_remind_me`'s ADR-0021: its hub will embed this store, and
+the layer check forbids one apps crate depending on another's.
+
+- **Added:** `crates/libs/storage/rusty_multimodal_db_engine` (`layer = "libs"`):
+  the generic store (traits, store layers, `GenericMmapStore`,
+  `GenericProductionStore`), `DurabilityError`, the shared blob header and
+  `codec`, moved with `git mv` so their history is kept.
+- **Changed:** `rusty_multimodal_db` depends on it and re-exports it under the
+  paths it had, so its public API is unchanged. `DurabilityError::Store` now
+  holds a boxed error; the crate's `From` impls keep the Dog `StoreError`
+  round trip. There are no on-disk format or wire changes.
+
+---
+
 ## Import rusty_remind_me into crates/apps/rusty_remind_me; first product released from the monorepo
 **2026-09-24** · ADR [`0004`](docs/adr/0004-release-products-from-the-monorepo.md)
 

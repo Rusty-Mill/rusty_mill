@@ -9,6 +9,10 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_multimodal_db_engine`** (`crates/libs/storage/`): the generic
+  record store extracted from `rusty_multimodal_db` (its ADR-0124) so
+  `rusty_remind_me`'s hub can embed it without a cross-family apps
+  dependency. `rusty_multimodal_db` re-exports it under its old paths.
 - **`rusty_remind_me` imported** into `crates/apps/rusty_remind_me` via
   `git subtree` (six crates, full history), the first merged product that
   ships releases. Added `.github/workflows/remind-me-release.yml`

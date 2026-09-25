@@ -128,6 +128,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rusty_err`](crates/foundation/rusty_err) | `crates/foundation/rusty_err` | `no_std` + `alloc` sovereign error trait, context extension, and proc-macro error derive library, built on `rusty_std` |
 | [`rusty_err_derive`](crates/foundation/rusty_err/derive) | `crates/foundation/rusty_err/derive` | `rusty_err`'s `#[derive(Error)]` proc-macro |
 | [`rusty_request`](crates/libs/net/rusty_request) | `crates/libs/net/rusty_request` | Async HTTP client (a Rust take on Python's `requests`), built on `rusty_tokio`/`rusty_tls`/`rusty_http` |
+| [`rusty_multimodal_db_engine`](crates/libs/storage/rusty_multimodal_db_engine) | `crates/libs/storage/rusty_multimodal_db_engine` | The embedded, mmap-backed generic record store extracted from `rusty_multimodal_db`: composable store layers, durable slot files and record blobs |
 | [`rusty_sqlite`](crates/libs/storage/rusty_sqlite) | `crates/libs/storage/rusty_sqlite` | A thin, ergonomic wrapper over `rusqlite`: bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management |
 | [`rusty_time`](crates/foundation/rusty_time) | `crates/foundation/rusty_time` | `no_std` + `alloc` sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate, built on `rusty_std` |
 | [`rusty_uuid`](crates/foundation/rusty_uuid) | `crates/foundation/rusty_uuid` | Minimal, dependency-free UUID v4 generation |

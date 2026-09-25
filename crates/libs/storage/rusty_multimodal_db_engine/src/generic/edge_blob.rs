@@ -82,7 +82,7 @@ const EDGES_SUFFIX: &str = ".edges";
 /// `create`/`open` receive it and in caller order. Held by reference: the
 /// layer encodes and fingerprints the caller's slice before building its
 /// adjacency map, so no copy of the list is made just to persist it.
-pub(crate) struct EdgeBlob<'a, Id> {
+pub struct EdgeBlob<'a, Id> {
     edges: &'a [(Id, Id)],
     /// The schema tag of the record type the relation is over
     /// (`R::SCHEMA_TAG`), written into the header and checked by
@@ -94,7 +94,7 @@ impl<'a, Id> EdgeBlob<'a, Id>
 where
     Id: Serialize,
 {
-    pub(crate) fn new(edges: &'a [(Id, Id)], tag: &'static str) -> Self {
+    pub fn new(edges: &'a [(Id, Id)], tag: &'static str) -> Self {
         Self { edges, tag }
     }
 
@@ -105,7 +105,7 @@ where
     /// # Errors
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
-    pub(crate) fn fingerprint(&self) -> Result<u64, DurabilityError> {
+    pub fn fingerprint(&self) -> Result<u64, DurabilityError> {
         let mut hash = Fnv1a64::new();
         crate::codec::encode_into(&mut hash, self.edges)?;
         Ok(hash.finish())
@@ -118,7 +118,7 @@ where
     /// # Errors
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
-    pub(crate) fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
+    pub fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
         let body = crate::codec::encode(self.edges)?;
         let mut hash = Fnv1a64::new();
         hash.update(&body);
@@ -140,7 +140,7 @@ where
     /// failure also counts as "not current": `open` then attempts the
     /// rewrite, which surfaces the same failure as a proper error instead
     /// of swallowing it here.
-    pub(crate) fn is_current_at(&self, path: &Path) -> bool {
+    pub fn is_current_at(&self, path: &Path) -> bool {
         let mut header = [0u8; TAGGED_HEADER_LEN];
         let read_header = File::open(path).and_then(|mut file| file.read_exact(&mut header));
         read_header.is_ok()
@@ -162,7 +162,7 @@ where
 /// # Errors
 ///
 /// Returns [`DurabilityError::RecordBlobUnreadable`] as described above.
-pub(crate) fn read<Id>(path: &Path, tag: &'static str) -> Result<Vec<(Id, Id)>, DurabilityError>
+pub fn read<Id>(path: &Path, tag: &'static str) -> Result<Vec<(Id, Id)>, DurabilityError>
 where
     Id: DeserializeOwned,
 {
@@ -197,7 +197,7 @@ where
 /// `<path>.<label>.edges` names (`store::labeled_edges_path`), so the
 /// helper is gated to keep the default and `client` builds warning-free.
 #[cfg(any(test, feature = "research"))]
-pub(crate) fn edges_path(path: &Path) -> PathBuf {
+pub fn edges_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(EDGES_SUFFIX);
     PathBuf::from(name)
@@ -364,10 +364,7 @@ mod tests {
     fn a_dog_blob_at_the_edges_path_is_a_magic_error() {
         let dir = fresh_temp_dir("edge_blob_dog_magic").unwrap();
         let path = edges_path(&dir.join("store.mmap"));
-        let dog = crate::durability::record_blob::RecordBlob {
-            records: crate::durability::test_support::sample_records(),
-            edges: crate::durability::test_support::sample_edges(),
-        };
+        let dog = crate::test_support::foreign_dog_blob();
         dog.write(&path).unwrap();
         match read::<Uuid>(&path, TAG) {
             Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
