@@ -21,6 +21,9 @@
 //! is checked **before** the file's text is read or parsed, so a re-import
 //! short-circuits without doing the work.
 
+use crate::db::entities::Entities;
+use crate::db::imports::ImportLedger;
+use crate::db::memories::{Memories, NewMemory};
 use crate::entity::{upsert_entity, upsert_entity_relation};
 use crate::import_paths::{
     suffix_of, validate_import_dir, validate_import_file, AUDIO_SUFFIXES, DOCUMENT_SUFFIXES,
@@ -31,7 +34,7 @@ use crate::models::{
     ImportStats, IMPORT_MAX_LENGTH_MAX, IMPORT_MAX_LENGTH_MIN,
 };
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 
 /// `source` assigned to memories from a chat export.
@@ -671,16 +674,8 @@ pub fn restore_graph_records(
         stats.entities_restored += 1;
     }
 
-    let exists = |table: &str, column: &str, id: &str| -> Result<bool> {
-        let found: Option<i64> = conn
-            .query_row(
-                &format!("SELECT 1 FROM {} WHERE {} = ?", table, column),
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
-    };
+    let memories = Memories::new(conn);
+    let entities = Entities::new(conn);
 
     for record in records {
         match record.get("record_type").and_then(|v| v.as_str()) {
@@ -691,7 +686,7 @@ pub fn restore_graph_records(
                 ) else {
                     continue;
                 };
-                if !exists("memories", "id", memory_id)? || !exists("entities", "id", entity_id)? {
+                if !memories.exists(memory_id)? || !entities.exists(entity_id)? {
                     stats.links_skipped_dangling += 1;
                     continue;
                 }
@@ -707,7 +702,7 @@ pub fn restore_graph_records(
                 ) else {
                     continue;
                 };
-                if !exists("entities", "id", subject)? || !exists("entities", "id", object)? {
+                if !entities.exists(subject)? || !entities.exists(object)? {
                     stats.relations_skipped_dangling += 1;
                     continue;
                 }
@@ -1012,7 +1007,6 @@ pub fn import_content(
 
     let now = Utc::now().to_rfc3339();
     let import_id = format!("imp_{}", uuid::Uuid::new_v4().simple());
-    let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
 
     // Raw-transcript retention (#212). A no-op unless REMIND_ME_ARCHIVE_DIR is
     // set. A failure here is swallowed on purpose: the memories below are the
@@ -1062,14 +1056,11 @@ pub fn import_content(
         // a correction. Deduplicated case-insensitively so `#Project` from the
         // note and `project` from the caller do not both land.
         let chunk_extras = extras.get(chunk_index);
-        let chunk_tags_json = match chunk_extras {
-            Some(e) if !e.extra_tags.is_empty() => {
-                let merged = crate::obsidian_import::dedupe_ci(
-                    tags.iter().cloned().chain(e.extra_tags.iter().cloned()),
-                );
-                serde_json::to_string(&merged).unwrap_or_else(|_| tags_json.clone())
-            }
-            _ => tags_json.clone(),
+        let chunk_tags = match chunk_extras {
+            Some(e) if !e.extra_tags.is_empty() => crate::obsidian_import::dedupe_ci(
+                tags.iter().cloned().chain(e.extra_tags.iter().cloned()),
+            ),
+            _ => tags.to_vec(),
         };
 
         let memory_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
@@ -1077,26 +1068,17 @@ pub fn import_content(
         // `doc_id`/`chunk_index` group every chunk of this file in source
         // order, which is what lets neighbour expansion find a hit's siblings
         // without re-parsing anything.
-        conn.execute(
-            "INSERT OR IGNORE INTO memories
-                (id, content, category, tags, source, metadata, created_at, updated_at,
-                 doc_id, chunk_index, node_id, client)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                memory_id,
-                content,
-                category,
-                chunk_tags_json,
-                source,
-                metadata.to_string(),
-                now,
-                now,
-                import_id,
-                chunk_index as i64,
-                node_id,
-                client,
-            ],
-        )?;
+        Memories::new(conn).insert_or_ignore(&NewMemory {
+            category: category.to_string(),
+            tags: chunk_tags,
+            source: source.to_string(),
+            metadata,
+            doc_id: Some(import_id.clone()),
+            chunk_index: Some(chunk_index as i64),
+            node_id: Some(node_id.clone()),
+            client: client.clone(),
+            ..NewMemory::new(memory_id.clone(), content.clone(), &now)
+        })?;
         created += 1;
 
         // Point this memory back at the bytes it came from, so a caller can
@@ -1135,16 +1117,12 @@ pub fn import_content(
     stats.memories_created = created;
     stats.raw_entries = raw_entries;
 
-    conn.execute(
-        "INSERT INTO chat_imports (import_id, filename, hash, imported_at, stats)
-         VALUES (?, ?, ?, ?, ?)",
-        params![
-            import_id,
-            filename,
-            hash,
-            now,
-            serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string())
-        ],
+    ImportLedger::new(conn).record_chat(
+        &import_id,
+        filename,
+        hash,
+        &now,
+        &serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string()),
     )?;
 
     Ok(ImportOutcome::Imported {
@@ -1156,12 +1134,7 @@ pub fn import_content(
 }
 
 fn existing_import(conn: &Connection, hash: &str) -> Result<Option<String>> {
-    conn.query_row(
-        "SELECT import_id FROM chat_imports WHERE hash = ?",
-        params![hash],
-        |r| r.get(0),
-    )
-    .optional()
+    ImportLedger::new(conn).chat_import_with_hash(hash)
 }
 
 /// Reject a kind/suffix pair the importer cannot honour.

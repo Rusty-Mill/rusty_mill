@@ -2,6 +2,141 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-09-26 — The last store reads move into db:: (ADR-0023, phase 1, step 8a)
+
+### Changed
+- **No SQL against the node's store is left outside `db::`.** Expansion's reads and association writes (`db::related`), the peer server's pull feeds and counts (`db::sync_feed`), the digest, vitality report, code-reference scan, export, sync status and reconcile reads moved into repositories. `db::database_path` replaces six copies of `PRAGMA database_list`.
+- The only remaining SQL outside `db::` reads the foreign SQLite files the dbs and mempalace importers take in. Behaviour is unchanged.
+- ADR-0023: step 8b (a store handle replacing `&Connection`) moves to phase 4, where the engine-backed `NodeStore` gives it a second implementation. Phase 1 is complete.
+
+### Tests
+- New repository test: a co-retrieval pair is read from either side and its weight is capped.
+- The core, API, MCP, CLI and remote suites pass unchanged.
+
+## 2026-09-26 — No more SQLite triggers; schema v31 (ADR-0023, phase 1, step 7)
+
+### Breaking
+- **Schema version 31.**
+  - The fifteen triggers that maintained the full-text indexes, the tag index and the sync outbox are gone, and opening an older database drops them.
+  - `db::derived` does their work in the same savepoint as each write, so a failed write leaves the indexes as they were.
+  - A write made with raw SQL outside `db::` is no longer indexed or queued; `db::derived::rebuild_indexes` rebuilds the indexes from the rows.
+- **Synced records are no longer queued at all.** Before, the triggers queued them and the apply marked them sent. `sync_outbox` no longer holds sent echo rows, and `Outbox::high_water`/`suppress_echo` are removed.
+- `Entities::link` and `Entities::insert_relation_or_ignore` take an `Origin`.
+- `schema_triggers.sql` is removed. The v30 triggers are kept as a test fixture (`tests/fixtures/schema_v30_triggers.sql`).
+
+### Unchanged
+- Outbox payloads keep the triggers' shape exactly: SQLite's `json_object` over the same columns, with tags and metadata as JSON text and `sensitive` as 0 or 1. Peers and the hub need no change.
+- Access tracking still queues nothing, and a local edit queues exactly one row.
+
+### Tests
+- New `db::derived` tests:
+  - the index and tags follow a memory through insert, update and delete;
+  - only local edits that move `updated_at` are queued, and nothing is queued with sync off;
+  - a failed write leaves the index as it was;
+  - the payload keeps the trigger shape, all 28 keys.
+- Updated tests:
+  - the stale-trigger test now installs the v30 outbox triggers and checks that reopening drops them, so an edit is queued once;
+  - the v19 migration test checks that its triggers are gone;
+  - the echo test checks that an applied record queues nothing while local edits stay queued.
+- Fixtures that plant rows with raw SQL rebuild the indexes. The core, API, MCP, CLI and remote suites pass.
+
+## 2026-09-26 — Vectors are keyed by memory id; schema v30 (ADR-0023, phase 1, step 4)
+
+### Breaking
+- **Schema version 30.** `vec_chunks` is now `(memory_id, chunk_ix, embedding)`, keyed by memory id rather than `memories.rowid`, and `vec_embeddings` is gone.
+  - Opening a v29 database moves every chunk across, inside one savepoint, after the usual pre-migration backup. Chunks whose memory no longer exists are dropped.
+  - Nothing needs re-embedding.
+- **A database from a newer build is refused.** Before, an older build would have reshaped it back to its own schema; now it names the version and asks for an upgrade. An older build of this crate opening a v30 database fails when it tries to rebuild `vec_chunks`, which leaves the database as it was.
+- **The optional ANN index must be rebuilt** (`--features ann`). Its manifest now keys vectors by memory id. An older manifest reads as unusable, so search uses the exact full scan until the index is rebuilt.
+- `sync::ApplyOutcome::Applied` no longer carries a rowid.
+
+### Changed
+- Every vector statement lives in `db::vectors::Vectors`: storing, deleting, the semantic scan, the reindex list, consolidation's candidates and `embedding_meta`.
+
+### Tests
+- New migration tests build the v29 vector layout by hand, then check that opening it keeps every chunk under its memory id, drops the orphan, runs once, and that a newer stamp is refused and left untouched.
+- The vector, ANN (with and without `--features ann`), consolidation and schema tests now seed the v30 table. The core, API, MCP and CLI suites pass.
+
+## 2026-09-26 — The sync outbox goes behind db::outbox (ADR-0023, phase 1, step 6)
+
+### Changed
+- **`db::outbox::Outbox` now holds every statement against `sync_outbox` and `sync_sends`:** push batches, pending counts, pruning, the clear and backfill when sync is toggled, and echo suppression. Echo suppression works as before; it becomes a flag on the write once the triggers move (step 7). Behaviour is unchanged.
+
+### Tests
+- New repository tests: echo suppression touches only the key's rows above the mark; pending counts rows with no send to the remote; pruning drops old and sent rows and their send markers.
+- The core, API, MCP and CLI suites pass unchanged.
+
+## 2026-09-26 — Curation queue reads go behind db::curation (ADR-0023, phase 1, step 5c)
+
+### Changed
+- **`db::curation::Curation` now holds every statement `capture.rs`, `normalize.rs`, `maintenance.rs` and `contradictions.rs` ran:** the decomposition and normalization backlogs, capture lookups, the maintenance counts, and contradiction pairs. Behaviour is unchanged.
+
+### Tests
+- New repository tests: a capture leaves the backlog once a fact names it, and an import once it is normalized, with the batch count and the maintenance count agreeing each time; contradiction pairs page by keyset and respect the fan-out ceiling.
+- The core, API, MCP and CLI suites pass unchanged.
+
+## 2026-09-26 — Import bookkeeping goes behind db:: (ADR-0023, phase 1, step 5b)
+
+### Changed
+- **`db::archives::Archives`** now holds every statement against `import_archives` and `import_archive_spans`, and creates them at open. `archive::ensure_schema` is gone.
+- **`db::imports::ImportLedger`** now holds every statement against `chat_imports`, `dbs_imports` and `mempalace_imports` from the importers and `undo_import`, including the undo's per-kind memory queries.
+- Reading the foreign SQLite files the dbs and mempalace importers take in stays with them. Behaviour is unchanged.
+
+### Tests
+- New repository tests: a chat import is forgotten only once nothing of it is left; a dbs rerun replaces the tracked memory; a recorded drawer is not re-recorded; removing an archive takes its spans and leaves a shared blob counted.
+- The core, API, MCP and CLI suites pass unchanged.
+
+## 2026-09-26 — Promotion's storage goes behind db::promotions (ADR-0023, phase 1, step 5a)
+
+### Changed
+- **Every statement `promotion.rs` ran now lives in `db::promotions::Promotions`.** That covers the candidate queries and counts for all three rungs, source checks, duplicate detection, provenance, and the persona and demoted listings. The `promotions` table is created by `db::promotions::ensure_table`; `promotion::ensure_schema` is gone. Behaviour is unchanged.
+
+### Tests
+- New repository tests: surviving sources count only live, unsuperseded sources; a superseded source is unusable.
+- The core suite passes unchanged.
+
+## 2026-09-26 — The wiki index goes behind db::wiki (ADR-0023, phase 1, step 3)
+
+### Changed
+- **Every statement against `wiki_pages`, `wiki_links`, `wiki_meta` and `wiki_fts` now lives in `db::wiki::WikiIndex`.** `wiki.rs` and `wiki_fs.rs` keep the rules: files are the source of truth, reserved slugs, reconcile, the load budget and the compile watermark. The compile brief's reads of new memories moved to `db::memories`.
+- `delete_wiki_page` now also clears the deleted page's outgoing links, as the file-backed delete already did.
+
+### Tests
+- New repository tests: an unbacked write keeps the cached mtime and a new one starts at 0; removing a page takes its links and reports a missing page; `wiki_meta` round-trips and overwrites.
+- The core, API, MCP and CLI suites pass unchanged.
+
+## 2026-09-26 — The knowledge graph's storage goes behind db::entities (ADR-0023, phase 1, step 2)
+
+### Changed
+- **Every statement against `entities`, `entity_relations` and `memory_entities` from `entity.rs` and `sync/graph.rs` now lives in `db::entities::Entities`.** That covers lookups, upserts, mention links, relations, the traversal's edge query, id renormalisation and sync apply. Nothing outside `db::` writes to the graph tables or to `memories` now. Behaviour is unchanged.
+
+### Tests
+- New repository tests: a synced entity overwrite keeps `created_at`; repointing drops a link the target already has; a traversal step from no entities is empty.
+- The core, API, MCP and CLI suites pass unchanged.
+
+## 2026-09-26 — Memory writes go through one repository (ADR-0023, phase 1, step 1)
+
+### Changed
+- **Every write to `memories` now lives in `db::`.** `db::memories::Memories` holds the inserts, the sync upsert and the field updates that capture, skeletons, promotion, normalization, consolidation, the importers, the watcher, the webhook, access tracking and sync apply used to write inline. A new row is a `NewMemory`, whose defaults are the schema's. This is the groundwork for moving the FTS, tag and outbox triggers into Rust (step 7).
+- A normalized memory's tags, copied from its source, are re-serialized rather than copied as text. They read the same.
+
+### Tests
+- New repository tests: `NewMemory::new` matches the schema default of every column; `insert` refuses a taken id and `insert_or_ignore` reports it; a synced overwrite keeps `created_at`, `doc_id` and `chunk_index`; tags that are not an array read as none; access inputs skip unknown ids.
+- The core, API, MCP and CLI suites pass unchanged.
+
+## 2026-09-26 — The Python remind_me is retired (ADR-0023, phase 0)
+
+### Changed
+- **The schema files are hand-owned.** `schema_{tables,indexes,triggers}.sql` were dumps of the Python remind_me's schema, and CI failed when they drifted from it. With Python retired, they are edited by hand, and a change to them is a schema change (`db/migrations.rs`). `SCHEMA_VERSION` stays 29 and is now this crate's own number.
+- **ARCHITECTURE.md Tenet 3 is replaced.** "Data Parity with `remind-me`" (an identical v29 SQLite file the Python server could open) becomes "Wire compatibility, not file sharing": the node keeps the MCP tool signatures and the sync protocol, and no longer promises a file the Python server can read. §5 now says where the schema lives and lists the objects this crate adds.
+- **Docs:** the README's substitution section becomes "Coming from the Python `remind_me`", a one-way move. `docs/CUTOVER.md` and `gap-analysis.md` are marked historical. ADR-0007's regeneration half is superseded.
+
+### Removed
+- The `schema-drift` CI job, its weekly schedule, and `scripts/check_schema_drift.sh`, `scripts/check_schema_regen_drift.sh` and `scripts/regenerate_schema.py`. The plugin-version check stays.
+
+### Fixed
+- **`configure_mcp.py` and `configure_mcp.ps1` pointed clients at an empty database.** Their default path was not the one the server uses; both now default to `~/.remind-me/memory.db`.
+
 ## 2026-09-26 — The hub's Postgres and SQLite stores are removed
 
 ### Breaking

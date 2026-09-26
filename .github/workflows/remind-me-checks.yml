@@ -1,14 +1,19 @@
 name: rusty_remind_me checks
 
-# rusty_remind_me's cheap, toolchain-independent checks, ported from its
+# rusty_remind_me's cheap, toolchain-independent check, ported from its
 # pre-merge ci.yml (crates/apps/rusty_remind_me/.github/workflows/ci.yml):
+# .claude-plugin/plugin.json against the crates' version, and the six crates
+# against each other.
 #
-# - schema drift: SCHEMA_VERSION and the generated schema_*.sql against the
-#   upstream reference, baileyrd/remind_me. That compares against *another*
-#   repository, so it can go red with nothing here changing -- which is why
-#   this is its own workflow with a daily schedule, rather than jobs in
-#   ci.yml (where a scheduled run would trigger the full workspace sweep).
-# - plugin version: .claude-plugin/plugin.json against the crates' version,
+# This used to run a daily schema-drift check against the Python reference,
+# baileyrd/remind_me. That reference is retired (rusty_remind_me ADR-0023), so
+# the node's schema is its own and there is nothing outside this repository
+# to drift from.
+#
+# The Rust build/test/clippy legs for this product are in ci.yml
+# (`remind-me*` jobs), gated on its affected-crates plan like everything else.
+
+on: .claude-plugin/plugin.json against the crates' version,
 #   and the six crates against each other.
 #
 # The Rust build/test/clippy legs for this product are in ci.yml
@@ -24,8 +29,6 @@ on:
     paths:
       - "crates/apps/rusty_remind_me/**"
       - ".github/workflows/remind-me-checks.yml"
-  schedule:
-    - cron: "17 6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -33,18 +36,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  schema-drift:
-    name: rusty_remind_me schema version vs. remind_me
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # remind_me is public, so no token; the scripts clone it themselves so
-      # the same command works locally.
-      - name: Compare SCHEMA_VERSION against the reference
-        run: crates/apps/rusty_remind_me/scripts/check_schema_drift.sh
-      - name: Regenerate schema_*.sql and diff against committed files
-        run: crates/apps/rusty_remind_me/scripts/check_schema_regen_drift.sh
-
   plugin-version:
     name: rusty_remind_me plugin.json version vs. crate versions
     runs-on: ubuntu-latest

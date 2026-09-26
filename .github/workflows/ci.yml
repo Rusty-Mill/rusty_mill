@@ -678,9 +678,8 @@ jobs:
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
   # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
   # dead now that it is not at a repository root -- the full rationale for
-  # each leg is in its comments there). Its toolchain-independent checks
-  # (schema drift against baileyrd/remind_me, plugin.json version) live in
-  # remind-me-checks.yml, which also needs a daily schedule this file lacks.
+  # each leg is in its comments there). Its toolchain-independent check
+  # (plugin.json version) lives in remind-me-checks.yml.
   # `fmt` is covered by the workspace-wide job above.
   # ---------------------------------------------------------------------------
 

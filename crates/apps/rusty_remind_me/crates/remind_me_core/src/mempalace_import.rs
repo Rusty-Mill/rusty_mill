@@ -37,9 +37,11 @@
 //! stays imported, matching the reference exactly (it has no content-hash
 //! column to compare against).
 
+use crate::db::imports::ImportLedger;
+use crate::db::memories::{Memories, NewMemory};
 use crate::models::{MempalaceImportInput, MEMPALACE_IMPORT_LIMIT_MAX, MEMPALACE_IMPORT_LIMIT_MIN};
 use chrono::Utc;
-use rusqlite::{params, params_from_iter, Connection, OpenFlags, Result};
+use rusqlite::{params, Connection, OpenFlags, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -341,17 +343,11 @@ pub fn pull_mempalace(
     }
 
     let already: std::collections::HashSet<String> = {
-        let placeholders = std::iter::repeat_n("?", page.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT drawer_id FROM mempalace_imports WHERE drawer_id IN ({})",
-            placeholders
-        );
         let ids: Vec<&str> = page.iter().map(|d| d.drawer_id.as_str()).collect();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(ids.iter()), |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<_>>()?
+        ImportLedger::new(conn)
+            .imported_drawers(&ids)?
+            .into_iter()
+            .collect()
     };
 
     let to_import: Vec<&Drawer> = page
@@ -443,26 +439,15 @@ pub fn pull_mempalace(
             "room": room_val,
         });
 
-        tx.execute(
-            "INSERT OR IGNORE INTO memories
-                (id, content, category, tags, source, metadata, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                memory_id,
-                content,
-                mem_category,
-                serde_json::to_string(&mem_tags).unwrap_or_else(|_| "[]".to_string()),
-                mem_source,
-                metadata.to_string(),
-                created_at,
-                now,
-            ],
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO mempalace_imports (drawer_id, memory_id, imported_at)
-             VALUES (?, ?, ?)",
-            params![drawer.drawer_id, memory_id, now],
-        )?;
+        Memories::new(&tx).insert_or_ignore(&NewMemory {
+            category: mem_category,
+            tags: mem_tags,
+            source: mem_source,
+            metadata,
+            created_at,
+            ..NewMemory::new(memory_id.clone(), content, &now)
+        })?;
+        ImportLedger::new(&tx).record_mempalace(&drawer.drawer_id, &memory_id, &now)?;
     }
 
     tx.commit()?;
