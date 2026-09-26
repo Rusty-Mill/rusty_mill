@@ -62,7 +62,9 @@ tag prefix.**
   Checks that compare against another repository and so need a daily
   schedule (`rusty_remind_me`'s schema drift against `baileyrd/remind_me`)
   go in a separate workflow, because a scheduled run of `ci.yml` is a full
-  workspace sweep.
+  workspace sweep. (That check was retired with the Python reference on
+  2026-09-26; see `rusty_remind_me`'s ADR-0023. The separate workflow
+  remains for its plugin-version check.)
 
 ## Alternatives considered
 
