@@ -1,0 +1,7 @@
+# Build context for images built from the monorepo root (today:
+# rusty_remind_me's hub, crates/apps/rusty_remind_me/crates/remind_me_hub/
+# Containerfile). Images built from their own crate directory use that
+# directory's own ignore file instead.
+.git
+target
+**/target

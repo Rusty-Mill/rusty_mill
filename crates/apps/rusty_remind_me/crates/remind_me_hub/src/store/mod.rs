@@ -7,7 +7,8 @@
 //! existing Postgres deployment is not a successor, and a hub that *requires*
 //! Postgres is a heavy ask of the single-operator self-host case the SQLite
 //! node already serves happily. `docs/adr/0021` adds a third, `multimodal`
-//! (behind the `multimodal-store` feature), which is to replace both.
+//! (the `multimodal-store` feature, on by default), which is the default for
+//! a new hub and is to replace both.
 //!
 //! # What the trait deliberately does not expose
 //!
@@ -166,6 +167,21 @@ pub trait HubStore: Send + Sync {
     /// an insert-or-ignore that hit an existing row, which is *not* a failure
     /// and is reported separately from one.
     fn apply_record(&self, record: &Record, origin: Option<&str>) -> StoreResult<bool>;
+
+    /// Apply a push's records, each isolated from the others exactly as
+    /// [`Self::apply_record`] isolates it: one result per record, in order.
+    ///
+    /// A backend may share durability work across the batch (the engine
+    /// store syncs once per chunk, not once per record); it must not let
+    /// one record's failure change another's outcome, except that a failed
+    /// sync fails every record it covered. The default applies them one by
+    /// one.
+    fn apply_records(&self, records: &[Record], origin: Option<&str>) -> Vec<StoreResult<bool>> {
+        records
+            .iter()
+            .map(|record| self.apply_record(record, origin))
+            .collect()
+    }
 
     fn stats(&self) -> StoreResult<Stats>;
 

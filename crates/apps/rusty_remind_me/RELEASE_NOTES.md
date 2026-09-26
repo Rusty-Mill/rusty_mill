@@ -2,6 +2,60 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-09-25 — The engine hub applies a push under one sync per chunk
+
+### Changed
+- **`/sync/push` on the embedded engine is about 13 times faster for batched pushes.**
+  - The store applies a push in chunks of 64 records, each under one `fsync` per table rather than one per record (the engine's new `GroupCommit`).
+  - In `examples/pull_latency.rs` with 4 pushers sending 100 records each, it went from 1327 to 17 040 records/s. SQLite managed 2780.
+  - Pull p99 stayed at 11 ms.
+  - A node's first full sync of 20 000 memories now spends about a second in the store, not 20.
+- `HubStore` gains `apply_records`, which the push route calls once per request. The SQL stores keep the default, record by record, so their behaviour is unchanged.
+- Each record is still isolated. A refused id or an LWW loss affects only its own outcome.
+
+### Fixed
+- **After a failed `fsync`, the engine store now refuses every write, and `/health` fails, until the hub restarts.** A failed sync leaves the chunk it covered applied in memory but possibly not on disk. Acknowledging later writes on top of that could lose them in a crash. The whole chunk is reported `failed`, so senders retry it.
+
+- **A write pause at each power of two of rows, cut from up to a second to tens of milliseconds.**
+  - The engine's record map regrows in one step under the write lock. With each ~800-byte memory held inline, that copied every row, and the lock hold reached 170–370 ms at 115 000 memories. Pulls behind it waited up to 1 s once under benchmark load.
+  - The engine now boxes its records. The hold is under 10 ms at 115 000 memories and 37 ms at 229 000.
+  - The pause was not new: the benchmark had never grown a hub that large before.
+
+`examples/pull_latency.rs` gains a `BATCH` argument.
+
+## 2026-09-25 — The embedded engine becomes the hub's default store; hub images build again
+
+### Changed
+- **A new hub runs on the embedded engine** (ADR-0021, phase 3).
+  - `setup.sh install` sets up one container with a data directory and no database server. Pass `--postgres` or `--sqlite` for the other stores.
+  - `remind_me_hub` builds the engine and the copy tool by default.
+  - `deploy/docker-compose.engine.yml` and `hub-engine.env.example` are new.
+  - The single-container quadlet is renamed `remind-me-hub-standalone.container`, since it now serves either the engine or SQLite.
+- **Existing hubs are not switched.**
+  - `setup.sh` keeps the store an existing `~/remind-me-hub/hub.env` names, and refuses a flag that contradicts it.
+  - `docker-compose.yml`, Fly and Railway stay on Postgres.
+  - To move a hub onto the engine, copy it with `rusty-remind-me-hub-copy`. The crate README has the steps.
+- The Postgres and SQLite stores are still built in, and are removed in a later release.
+
+### Fixed
+- **The hub image had not built since the monorepo import.** The Containerfile, `setup.sh`, the Compose files, Fly and Railway all built from `crates/apps/rusty_remind_me`, which has no workspace `Cargo.toml` or `Cargo.lock`. They now build from the monorepo root, with a root `.dockerignore` and BuildKit cache mounts.
+- **A Compose named volume came up root-owned**, so the hub (uid 10001) could not create its store. This affected the SQLite Compose file too. The image now creates `/data` owned by the hub user.
+- **Missing binary:** the image and the release archives now ship `rusty-remind-me-hub-copy`.
+
+### Provenance
+
+The image was built with Docker 29 from the monorepo root and run end to end:
+- the engine on a fresh named volume: push, `--health-check`, restart, count;
+- a SQLite hub, then the copy tool inside the image, then the engine on the same volume (`hub_seq` 1 and 2 kept).
+
+`setup.sh --dry-run` was run against stubbed Podman and systemd:
+- a fresh install gets the engine;
+- `--postgres` gets the Postgres units;
+- an existing Postgres `hub.env` stays on Postgres without flags;
+- a contradicting flag, both flags, a `hub.env` naming no store, and `restore` on an engine hub are each refused with a message.
+
+`docker compose config` resolves all three Compose files' build context to the monorepo root.
+
 ## 2026-09-25 — The embedded-engine hub no longer starves pulls under push load
 
 ### Fixed

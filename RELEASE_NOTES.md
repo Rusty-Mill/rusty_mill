@@ -13,6 +13,27 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db_engine: group commit
+**2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
+
+- **Added:** `GroupCommit`.
+  - `defer_sync()` makes each write return once its insert-log entry is written, before it is synced.
+  - `commit()` syncs every such entry and goes back to syncing each write.
+  - Reads see deferred writes at once. They are durable only once `commit` returns `Ok`.
+  - Implemented by `GenericMmapStore`, and forwarded by the layers with no files of their own: `Indexed`, `Scanned`, `NameIndex` and `Ordered`.
+- `insert_log` gains `LogSync`, `append_record`, `append_tombstone_as` and `sync`, and `GenericMmapStore` gains `is_sync_deferred`. Existing appends still sync each entry.
+- New integration test `tests/group_commit.rs` covers:
+  - a batch of inserts, replaces and deletes seen at once and folded on reopen;
+  - a commit with nothing written;
+  - a compaction inside a batch.
+- In the `rusty_remind_me` hub benchmark, 100-record pushes went from 1327 to 17 040 records/s with 4 pushers.
+- **Fixed:** `GenericMmapStore` now holds its records boxed (`HashMap<Id, Box<R>>`).
+  - The map regrows in one step, and with records inline a regrow copied every record: a 170–370 ms write pause at 115 000 hub memories of ~800 bytes each.
+  - Boxed, the pause is under 10 ms at 115 000 rows and 37 ms at 229 000.
+  - The field is private, so the API is unchanged.
+
+---
+
 ## rusty_multimodal_db_engine: inserts no longer read the whole insert log
 **2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
 

@@ -1,6 +1,12 @@
+pub mod feedback;
+pub mod history;
 pub mod migrations;
 pub mod queries;
+pub mod reminders;
+pub mod saved_searches;
 pub mod schema;
+pub mod stats;
+pub mod sync_state;
 
 use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, Result};

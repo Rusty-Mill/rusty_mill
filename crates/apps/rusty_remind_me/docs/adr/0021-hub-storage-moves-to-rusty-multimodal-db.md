@@ -249,14 +249,102 @@ concern badly. Three fixes brought it well past SQLite on pulls:
 - **Pulls held the read lock while building JSON.** They now copy their
   rows under the lock and serialise after releasing it.
 
-Contended pushes remain below SQLite's. Each engine write syncs twice,
-the log and then the slot file, and SQLite syncs once. A personal hub's push
-load is a few records a minute, and a node's first full sync of 20 000
-memories takes about 20 s. The real fix is batching a push under one sync,
-which needs an engine batch-insert API. That is a follow-up, not a gate.
+Contended pushes remained below SQLite's, because each engine write
+synced its insert log (the slot file is never synced per write) and SQLite
+amortises its commits better under contention. A node's first full sync of
+20 000 memories spent about 20 s in the store.
 
-Still to do in phase 3: switch the default, then remove the old stores a
-release later.
+### Group commit
+
+The engine now has a batch API, `GroupCommit`:
+- `defer_sync()` stops each write syncing its insert-log entry;
+- `commit()` syncs them all at once.
+
+The hub gets a matching `HubStore::apply_records`, which `/sync/push` calls
+once per request:
+- The SQL stores keep the default, which applies records one by one.
+- The engine store applies a push in chunks of 64 records. Each chunk takes
+  one hold of the write lock and one sync per table touched, and pulls get
+  in between chunks.
+- Each record is still isolated. A refused id or an LWW loss affects only
+  that record's outcome.
+- A failed sync fails every record in its chunk. It also stops the store
+  taking writes until a restart, and `/health` fails, since the chunk is
+  applied in memory but may not be on disk.
+
+Same benchmark, 20k preloaded, 10 s, with pushers sending batches of 100
+records (a node's outbox sends up to 200):
+
+| 20k preloaded, 10 s | SQLite | Engine, record by record | Engine, group commit |
+|---|---|---|---|
+| 4 pushers: pushes/s | 2780 | 1327 | 17 040 |
+| 4 pushers: pull p50 / p99 | 46 / 399 ms | 3.0 / 7.1 ms | 4.2 / 11 ms |
+| 1 pusher: pushes/s | 1920 | 2148 | 17 800 |
+| 1 pusher: pull p50 / p99 | 30 / 61 ms | 3.3 / 7.6 ms | 3.9 / 10 ms |
+
+The record-by-record column is the same run with single-record pushes;
+SQLite's single-record figures (2485/s with 4 pushers, 912/s with one) are
+close to those above.
+
+Group-commit runs reach 115 000 memories within the 10 s. At that size,
+one pull in each run waited about 0.2 to 1 s. Timing the lock hold placed the
+wait in a single insert at row 114 729, just past 7/8 of 2^17: the engine
+core's `HashMap`s regrowing. The sync took under 1 ms.
+The pause happened once each time the row count doubled, batched or not.
+It was all under the write lock: the record map held each ~800-byte
+memory inline, so a regrow copied every row into a new table of twice the
+size. The core now boxes its records, so a regrow moves a key and a pointer
+per row:
+
+| Worst lock hold at a regrow | Records inline | Records boxed |
+|---|---|---|
+| 115 000 rows | 170–370 ms | under 10 ms |
+| 229 000 rows | not measured | 37 ms |
+
+In the same 20 s run, the worst pull was 42 ms, and p99 stayed at 10 ms.
+A regrow is still linear in the row count (an estimated 0.15 s
+at a million rows). A map that grows incrementally would remove the pause
+entirely, but it would add a dependency to the engine for sizes a personal
+hub does not reach.
+
+### The default switch
+
+The engine is now the default store for a new hub:
+
+- `remind_me_hub`'s default features gain `postgres-import`, which brings in
+  the engine and the copy tool. `postgres-store` stays in the defaults.
+- `setup.sh install` installs the engine unless given `--postgres` or
+  `--sqlite`.
+- `deploy/docker-compose.engine.yml` is the documented default for Compose.
+- The image and the release archives ship `rusty-remind-me-hub-copy`.
+
+Existing deployments are left alone on purpose:
+
+- `setup.sh` takes the backend from an existing `hub.env`, and refuses a flag
+  that contradicts it. Re-running `install` on a Postgres hub would otherwise
+  swap its units for the single-container one and strand its database.
+- The existing `docker-compose.yml` stays on Postgres, since a changed default
+  there would bring up an empty hub on the next `docker compose up`.
+- Fly and Railway stay on managed Postgres.
+
+Building the default found that every container path had been broken since
+the monorepo import. The Containerfile, `setup.sh` and every template built
+from `crates/apps/rusty_remind_me`, which holds no workspace manifest. Two
+fixes:
+
+- They now build from the monorepo root, with BuildKit cache mounts in place
+  of the standalone repo's stub-manifest trick.
+- The image now creates `/data` owned by the hub user. Otherwise a Compose
+  named volume came up root-owned and the hub could not create its store. The
+  existing SQLite Compose file had the same latent problem.
+
+The image was built and run end to end:
+- the engine on a fresh named volume;
+- the health check;
+- a restart;
+- the copy tool moving a SQLite hub onto the engine.
+
+Still to do in phase 3: remove the old stores a release later.
 
 ## Related
 
