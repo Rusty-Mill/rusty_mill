@@ -49,11 +49,8 @@ pub fn tables_sqlite_version() -> &'static str {
 pub fn tokenize(text: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = text.char_indices().peekable();
-    loop {
-        // Skip separators up to the first character that starts a token.
-        let Some((start, first)) = chars.find(|(_, c)| starts_token(*c)) else {
-            break;
-        };
+    // Skip separators up to the first character that starts a token.
+    while let Some((start, first)) = chars.find(|(_, c)| starts_token(*c)) {
         let mut folded = String::new();
         push_folded(&mut folded, first);
         let mut end = start + first.len_utf8();
