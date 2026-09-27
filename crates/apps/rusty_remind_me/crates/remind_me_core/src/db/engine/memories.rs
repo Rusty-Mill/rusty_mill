@@ -14,12 +14,15 @@ use super::core::{Change, CoreTables};
 use super::EngineTables;
 use super::{core_mut, core_ref, engine_error, engine_id, ensure_same_id, micros, outbox};
 use crate::db::derived::Origin;
+use crate::db::feedback::Importance;
+use crate::db::history::Tracked;
 use crate::db::memories::{
-    tags_json, AccessInputs, CreatedMemory, ListFilter, MemoryEdit, NewMemory, SyncView, Triple,
+    tags_json, AccessInputs, CreatedMemory, KeywordFilter, ListFilter, MemoryEdit, NewMemory,
+    PageFilter, SyncView, Triple,
 };
 use crate::db::Result;
 use crate::models::{Memory, UnclassifiedMemory};
-use rusty_multimodal_db_engine::fulltext::FullTextIndex;
+use rusty_multimodal_db_engine::fulltext::{FullTextIndex, Query};
 use rusty_multimodal_db_engine::generic::query::{AllIds, FilterEq, GetById};
 use rusty_multimodal_db_engine::generic::traits::{
     IndexedField, Record, ScannableField, SchemaTag,
@@ -624,6 +627,57 @@ pub(crate) fn apply_edit(tables: &mut EngineTables, id: &str, edit: &MemoryEdit)
     })
 }
 
+/// Write `values` into memory `id`'s tracked columns as stored text,
+/// stamping `updated_at`: a revert. A `None` `sensitive` writes not
+/// sensitive.
+pub(crate) fn restore_tracked(
+    tables: &mut EngineTables,
+    id: &str,
+    values: &Tracked,
+    updated_at: &str,
+) -> Result<()> {
+    update(tables, id, Origin::Local, |row| {
+        row.content.clone_from(&values.content);
+        row.category.clone_from(&values.category);
+        row.tags.clone_from(&values.tags);
+        row.metadata.clone_from(&values.metadata);
+        row.sensitive = values.sensitive.unwrap_or(false);
+        row.updated_at = updated_at.to_string();
+        Ok(())
+    })
+}
+
+/// Set or clear memory `id`'s reminder, stamping `updated_at`.
+pub(crate) fn set_remind_at(
+    tables: &mut EngineTables,
+    id: &str,
+    remind_at: Option<&str>,
+    updated_at: &str,
+) -> Result<()> {
+    update(tables, id, Origin::Local, |row| {
+        row.remind_at = remind_at.map(str::to_string);
+        row.updated_at = updated_at.to_string();
+        Ok(())
+    })
+}
+
+/// Rewrite memory `id`'s importance after a global judgement, without
+/// stamping `updated_at`: a local score, not an edit.
+pub(crate) fn set_importance(
+    tables: &mut EngineTables,
+    id: &str,
+    base_weight: f64,
+    vitality: f64,
+    status: &str,
+) -> Result<()> {
+    update(tables, id, Origin::Local, |row| {
+        row.base_weight = base_weight;
+        row.vitality = vitality;
+        row.status = status.to_string();
+        Ok(())
+    })
+}
+
 /// Delete live memory `id`: tombstone it at `tombstone_at`, or remove it.
 /// Whether it was live.
 pub(crate) fn delete_live(
@@ -814,6 +868,28 @@ fn distinct(ids: &[String]) -> impl Iterator<Item = &str> {
         .filter(move |id| seen.insert(*id))
 }
 
+/// Memory `id`'s tracked columns as stored, deleted or not.
+pub(crate) fn tracked(tables: &EngineTables, id: &str) -> Result<Option<Tracked>> {
+    Ok(row(core_ref(tables)?, id).map(|row| Tracked {
+        content: row.content,
+        category: row.category,
+        tags: row.tags,
+        metadata: row.metadata,
+        sensitive: Some(row.sensitive),
+    }))
+}
+
+/// Memory `id`'s importance columns, unless it is missing or deleted.
+pub(crate) fn importance(tables: &EngineTables, id: &str) -> Result<Option<Importance>> {
+    Ok(row(core_ref(tables)?, id)
+        .filter(|row| row.deleted_at.is_none())
+        .map(|row| Importance {
+            access_count: row.access_count,
+            base_weight: row.base_weight,
+            vitality: row.vitality,
+        }))
+}
+
 /// Memory `id`, unless it is missing or deleted.
 pub(crate) fn get_live(tables: &EngineTables, id: &str) -> Result<Option<Memory>> {
     Ok(row(core_ref(tables)?, id)
@@ -870,6 +946,102 @@ pub(crate) fn of_type_page(
             id: row.id,
             category: row.category,
         })
+        .collect();
+    Ok((total, page))
+}
+
+/// Every live, unsuperseded row matching any of `phrases`, with its BM25
+/// score, best first, ties by id: `memories_fts MATCH … ORDER BY bm25()`.
+fn ranked(core: &CoreTables, phrases: &[String]) -> Vec<(MemoryRow, f64)> {
+    let query = Query::any_of(phrases.iter().map(String::as_str));
+    let mut hits: Vec<(MemoryRow, f64)> = core
+        .search
+        .search(&query)
+        .into_iter()
+        .filter_map(|hit| Some((row(core, &hit.key)?, hit.score)))
+        .filter(|(row, _)| row.is_live())
+        .collect();
+    hits.sort_by(|(a, x), (b, y)| x.total_cmp(y).then_with(|| a.id.cmp(&b.id)));
+    hits
+}
+
+/// What `Memories::keyword_hits` selects. Effective vitality is computed as
+/// of one instant for the whole search, where SQLite reads the clock per
+/// row.
+pub(crate) fn keyword_hits(
+    tables: &EngineTables,
+    phrases: &[String],
+    filter: &KeywordFilter,
+    limit: usize,
+) -> Result<Vec<(Memory, f64)>> {
+    let now = chrono::Utc::now();
+    Ok(ranked(core_ref(tables)?, phrases)
+        .into_iter()
+        .filter(|(row, _)| filter.include_sensitive || !row.sensitive)
+        .filter(|(row, _)| filter.category.as_ref().is_none_or(|c| &row.category == c))
+        .map(|(row, score)| (row.to_memory(), score))
+        .filter(|(memory, _)| {
+            filter
+                .min_effective_vitality
+                .is_none_or(|floor| crate::vitality::effective_vitality(memory, now) >= floor)
+        })
+        .take(limit)
+        .collect())
+}
+
+pub(crate) fn sensitive_ids(tables: &EngineTables) -> Result<HashSet<String>> {
+    Ok(rows(core_ref(tables)?)
+        .filter(|row| row.sensitive)
+        .map(|row| row.id)
+        .collect())
+}
+
+/// What `Memories::keyword_page` selects. `linked` holds the ids of the
+/// memories linked to the filter's entity, read from SQLite.
+pub(crate) fn keyword_page(
+    tables: &EngineTables,
+    phrases: &[String],
+    filter: &PageFilter,
+    linked: &HashSet<String>,
+    limit: usize,
+    offset: usize,
+) -> Result<(usize, Vec<Memory>)> {
+    let core = core_ref(tables)?;
+    let candidates: Vec<MemoryRow> = if phrases.is_empty() {
+        let mut rows: Vec<MemoryRow> = rows(core).filter(MemoryRow::is_live).collect();
+        rows.sort_by(|a, b| (&b.created_at, &b.id).cmp(&(&a.created_at, &a.id)));
+        rows
+    } else {
+        ranked(core, phrases)
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect()
+    };
+    // `lower()` folds ASCII only, as SQLite's built-in does.
+    let names = |row: &MemoryRow, canonical: &str| {
+        let is = |v: &Option<String>| {
+            v.as_ref()
+                .is_some_and(|v| v.to_ascii_lowercase() == canonical)
+        };
+        is(&row.subject) || is(&row.object)
+    };
+    let matching: Vec<MemoryRow> = candidates
+        .into_iter()
+        .filter(|row| filter.category.as_ref().is_none_or(|c| &row.category == c))
+        .filter(|row| filter.tags.iter().all(|tag| core.tags.has(tag, &row.id)))
+        .filter(|row| {
+            filter
+                .entity
+                .as_ref()
+                .is_none_or(|scope| linked.contains(&row.id) || names(row, &scope.canonical))
+        })
+        .collect();
+    let total = matching.len();
+    let page = matching
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(MemoryRow::to_memory)
         .collect();
     Ok((total, page))
 }
