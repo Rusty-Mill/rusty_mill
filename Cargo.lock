@@ -12186,6 +12186,7 @@ dependencies = [
  "rten",
  "rten-tensor",
  "rusqlite",
+ "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
  "sha256",
