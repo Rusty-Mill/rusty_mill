@@ -770,15 +770,20 @@ description = "d"
         }
 
         if saw_new_theme {
-            // A `changed` event should have fired from the reload — drain
-            // instead of asserting a single try_recv since the debounced
-            // watcher may coalesce/fire more than once.
+            // The watcher thread publishes after releasing the engine lock, so the
+            // new theme can be visible before the event is sent: wait for it
+            // rather than draining once. The debounced watcher may also
+            // coalesce/fire more than once, so skip over any other events.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let mut saw_event = false;
-            while let Ok(Some(event)) = sub.try_recv() {
-                if let nexus_kernel::NexusEvent::Custom { type_id, .. } = &event.event {
-                    if type_id == EVENT_CHANGED {
-                        saw_event = true;
+            while !saw_event && std::time::Instant::now() < deadline {
+                match sub.try_recv() {
+                    Ok(Some(event)) => {
+                        if let nexus_kernel::NexusEvent::Custom { type_id, .. } = &event.event {
+                            saw_event = type_id == EVENT_CHANGED;
+                        }
                     }
+                    _ => std::thread::sleep(Duration::from_millis(20)),
                 }
             }
             assert!(saw_event, "hot-reload must publish com.nexus.theme.changed");
