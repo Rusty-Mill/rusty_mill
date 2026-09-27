@@ -22,6 +22,12 @@ The first consumer outside `rusty_multimodal_db` is `rusty_remind_me`'s hub
 - `durability::DurabilityError`, and the blob header helpers every
   companion blob shares.
 - `codec`: the one bincode configuration every on-disk format here uses.
+- `journal`: a redo journal for batches that must land in several stores
+  together or not at all, and the durable named sequence counters that ride
+  on it. The caller commits a batch, applies it to its stores, and
+  checkpoints once they have synced; open hands back what to apply again.
+- `dir_lock`: an OS lock on a data directory, so a second process refuses
+  to open a store another one serves.
 
 The full design, requirements and ADRs are in `rusty_multimodal_db`'s
 `docs/`, where this code was developed. `rusty_multimodal_db` re-exports all
@@ -32,6 +38,8 @@ of it under its original paths.
 - **Everything lives in RAM.** Each store keeps every record in a `HashMap`.
 - **Ids are `u32`, `i64` or `Uuid`** (`MmapFieldValue`), and ids and
   ordered-index keys must be `Copy`.
+- **One process per directory.** Records live in the owner's memory, so an
+  embedder takes `dir_lock::DirLock` on its data directory.
 - **One writer at a time.** `GenericProductionStore` holds a single
   `RwLock` and panics if a previous holder panicked. A caller that must
   survive a panic should own its lock.
