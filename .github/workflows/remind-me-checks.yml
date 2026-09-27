@@ -13,12 +13,6 @@ name: rusty_remind_me checks
 # The Rust build/test/clippy legs for this product are in ci.yml
 # (`remind-me*` jobs), gated on its affected-crates plan like everything else.
 
-on: .claude-plugin/plugin.json against the crates' version,
-#   and the six crates against each other.
-#
-# The Rust build/test/clippy legs for this product are in ci.yml
-# (`remind-me*` jobs), gated on its affected-crates plan like everything else.
-
 on:
   push:
     branches: [main]
