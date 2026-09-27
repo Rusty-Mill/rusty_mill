@@ -12,8 +12,10 @@
 //! paths they had before the move.
 
 pub mod codec;
+pub mod dir_lock;
 pub mod durability;
 pub mod generic;
+pub mod journal;
 
 #[cfg(test)]
 mod test_support;
