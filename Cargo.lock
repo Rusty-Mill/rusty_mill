@@ -14108,6 +14108,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "memmap2",
+ "rusqlite",
  "serde",
  "thiserror 1.0.69",
  "uuid",

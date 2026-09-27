@@ -14,6 +14,7 @@
 pub mod codec;
 pub mod dir_lock;
 pub mod durability;
+pub mod fulltext;
 pub mod generic;
 pub mod journal;
 
