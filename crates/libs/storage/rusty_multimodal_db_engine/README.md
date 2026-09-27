@@ -26,6 +26,12 @@ The first consumer outside `rusty_multimodal_db` is `rusty_remind_me`'s hub
   together or not at all, and the durable named sequence counters that ride
   on it. The caller commits a batch, applies it to its stores, and
   checkpoints once they have synced; open hands back what to apply again.
+- `fulltext`: an in-memory full-text index that ranks exactly as SQLite's
+  FTS5 does: FTS5's `unicode61` tokenizer ported with its tables (generated
+  from the bundled `sqlite3.c` by `scripts/gen_unicode61_tables.py`),
+  phrase matching, `bm25()` scores in FTS5's sign convention, and
+  `snippet()`. Queries are any of several phrases, the shape
+  `rusty_remind_me` builds. Held to FTS5 by `tests/fulltext_vs_fts5.rs`.
 - `dir_lock`: an OS lock on a data directory, so a second process refuses
   to open a store another one serves.
 
@@ -51,4 +57,12 @@ of it under its original paths.
 ```sh
 cargo test -p rusty_multimodal_db_engine                     # without the Order fixture
 cargo test -p rusty_multimodal_db_engine --features research # the full suite
+```
+
+`tests/fulltext_vs_fts5.rs` links SQLite (a dev-dependency only) to compare
+the full-text index with FTS5. It also checks that the tokenizer's tables
+came from the SQLite it links; when `rusqlite` moves, regenerate them:
+
+```sh
+python3 scripts/gen_unicode61_tables.py src/fulltext/unicode_tables.rs
 ```
