@@ -48,10 +48,25 @@ pub fn tables_sqlite_version() -> &'static str {
 /// Split `text` into tokens.
 pub fn tokenize(text: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
+    for_each_token(text, |folded, start, end| {
+        tokens.push(Token {
+            text: folded.to_owned(),
+            start,
+            end,
+        });
+    });
+    tokens
+}
+
+/// Call `f` with each token of `text` in order: its folded text and its
+/// byte range. One buffer serves every token, so this allocates nothing
+/// per token, unlike [`tokenize`].
+pub fn for_each_token(text: &str, mut f: impl FnMut(&str, usize, usize)) {
+    let mut folded = String::new();
     let mut chars = text.char_indices().peekable();
     // Skip separators up to the first character that starts a token.
     while let Some((start, first)) = chars.find(|(_, c)| starts_token(*c)) {
-        let mut folded = String::new();
+        folded.clear();
         push_folded(&mut folded, first);
         let mut end = start + first.len_utf8();
         while let Some(&(at, c)) = chars.peek() {
@@ -62,13 +77,8 @@ pub fn tokenize(text: &str) -> Vec<Token> {
             end = at + c.len_utf8();
             chars.next();
         }
-        tokens.push(Token {
-            text: folded,
-            start,
-            end,
-        });
+        f(&folded, start, end);
     }
-    tokens
 }
 
 /// Whether `c` can begin a token.
