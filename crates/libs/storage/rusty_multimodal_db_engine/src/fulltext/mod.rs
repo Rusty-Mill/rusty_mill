@@ -20,7 +20,7 @@
 pub mod unicode61;
 mod unicode_tables;
 
-pub use unicode61::{tokenize, Token};
+pub use unicode61::{for_each_token, tokenize, Token};
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
@@ -85,21 +85,52 @@ pub struct SnippetStyle<'a> {
     pub tokens: usize,
 }
 
+/// One indexed document.
 #[derive(Debug, Clone)]
 struct Doc {
     /// Tokens per column.
-    sizes: Vec<u32>,
-    /// Every distinct term, so removal knows which postings to visit.
-    terms: Vec<String>,
+    sizes: Box<[u32]>,
+    /// Its distinct terms, by id, ascending.
+    terms: Box<[u32]>,
+    /// Where each of `terms` starts in `occurrences`, plus the end.
+    starts: Box<[u32]>,
+    /// `(column, position)` of every token, grouped by term in `terms`
+    /// order, each group in order.
+    occurrences: Box<[(u32, u32)]>,
+}
+
+impl Doc {
+    fn size(&self) -> u32 {
+        self.sizes.iter().sum()
+    }
+
+    /// Where `term` occurs, in column then position order.
+    fn positions(&self, term: u32) -> Option<&[(u32, u32)]> {
+        let i = self.terms.binary_search(&term).ok()?;
+        Some(&self.occurrences[self.starts[i] as usize..self.starts[i + 1] as usize])
+    }
 }
 
 /// An in-memory full-text index over documents of `C` text columns, keyed
 /// by `K`.
+///
+/// Laid out for size, since a node holds one over every memory: each term
+/// is stored once and numbered, each document gets a slot number, postings
+/// are sorted slot lists, and a document's positions sit in one block.
+/// Keys and term text are never copied per posting.
 #[derive(Debug, Clone)]
 pub struct FullTextIndex<K, const C: usize> {
-    docs: HashMap<K, Doc>,
-    /// Term to document to `(column, position)`s, in order.
-    postings: HashMap<String, HashMap<K, Vec<(u32, u32)>>>,
+    /// Each document's slot.
+    slots: HashMap<K, u32>,
+    /// Slot to key and document; `None` is a free slot.
+    docs: Vec<Option<(K, Doc)>>,
+    /// Slots [`remove`](Self::remove) freed, reused before new ones.
+    free: Vec<u32>,
+    /// Each term's id. Ids are never reused, so the vocabulary only grows,
+    /// by the distinct terms ever indexed.
+    term_ids: HashMap<Box<str>, u32>,
+    /// Term id to the slots of the documents holding it, ascending.
+    postings: Vec<Vec<u32>>,
     total_tokens: u64,
 }
 
@@ -112,76 +143,130 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> Default for FullTextIndex<K, C>
 impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
     pub fn new() -> Self {
         Self {
-            docs: HashMap::new(),
-            postings: HashMap::new(),
+            slots: HashMap::new(),
+            docs: Vec::new(),
+            free: Vec::new(),
+            term_ids: HashMap::new(),
+            postings: Vec::new(),
             total_tokens: 0,
         }
     }
 
     /// Documents indexed.
     pub fn len(&self) -> usize {
-        self.docs.len()
+        self.slots.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.docs.is_empty()
+        self.slots.is_empty()
     }
 
     /// Index `columns` as the document `key`, replacing what it held.
     pub fn upsert(&mut self, key: K, columns: [&str; C]) {
         self.remove(&key);
         let mut sizes = Vec::with_capacity(C);
-        let mut positions: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+        let mut tokens: Vec<(u32, u32, u32)> = Vec::new();
         for (column, text) in columns.iter().enumerate() {
-            let tokens = tokenize(text);
-            sizes.push(tokens.len() as u32);
-            for (position, token) in tokens.into_iter().enumerate() {
-                positions
-                    .entry(token.text)
-                    .or_default()
-                    .push((column as u32, position as u32));
+            let mut position = 0u32;
+            for_each_token(text, |term, _, _| {
+                let term = self.term_id(term);
+                tokens.push((term, column as u32, position));
+                position += 1;
+            });
+            sizes.push(position);
+        }
+        tokens.sort_unstable();
+
+        let mut terms = Vec::new();
+        let mut starts = Vec::new();
+        for (i, &(term, _, _)) in tokens.iter().enumerate() {
+            if terms.last() != Some(&term) {
+                terms.push(term);
+                starts.push(i as u32);
             }
         }
-        self.total_tokens += sizes.iter().map(|s| u64::from(*s)).sum::<u64>();
-        let terms: Vec<String> = positions.keys().cloned().collect();
-        for (term, at) in positions {
-            self.postings
-                .entry(term)
-                .or_default()
-                .insert(key.clone(), at);
+        starts.push(tokens.len() as u32);
+        let doc = Doc {
+            sizes: sizes.into(),
+            terms: terms.into(),
+            starts: starts.into(),
+            occurrences: tokens.iter().map(|&(_, c, p)| (c, p)).collect(),
+        };
+
+        let slot = self.take_slot();
+        for &term in doc.terms.iter() {
+            let list = &mut self.postings[term as usize];
+            if let Err(at) = list.binary_search(&slot) {
+                list.insert(at, slot);
+            }
         }
-        self.docs.insert(key, Doc { sizes, terms });
+        self.total_tokens += u64::from(doc.size());
+        self.slots.insert(key.clone(), slot);
+        self.docs[slot as usize] = Some((key, doc));
+    }
+
+    /// The id of `term`, numbering it if it is new.
+    fn term_id(&mut self, term: &str) -> u32 {
+        if let Some(&id) = self.term_ids.get(term) {
+            return id;
+        }
+        let id = self.postings.len() as u32;
+        self.postings.push(Vec::new());
+        self.term_ids.insert(term.into(), id);
+        id
+    }
+
+    /// A free slot, or a new one.
+    fn take_slot(&mut self) -> u32 {
+        if let Some(slot) = self.free.pop() {
+            return slot;
+        }
+        self.docs.push(None);
+        (self.docs.len() - 1) as u32
     }
 
     /// Drop the document `key`. Returns whether it was there.
     pub fn remove(&mut self, key: &K) -> bool {
-        let Some(doc) = self.docs.remove(key) else {
+        let Some(slot) = self.slots.remove(key) else {
             return false;
         };
-        self.total_tokens -= doc.sizes.iter().map(|s| u64::from(*s)).sum::<u64>();
-        for term in doc.terms {
-            if let Some(by_doc) = self.postings.get_mut(&term) {
-                by_doc.remove(key);
-                if by_doc.is_empty() {
-                    self.postings.remove(&term);
-                }
+        let Some((_, doc)) = self.docs[slot as usize].take() else {
+            return false;
+        };
+        self.total_tokens -= u64::from(doc.size());
+        for &term in doc.terms.iter() {
+            let list = &mut self.postings[term as usize];
+            if let Ok(at) = list.binary_search(&slot) {
+                list.remove(at);
+            }
+            if list.is_empty() {
+                list.shrink_to_fit();
             }
         }
+        self.free.push(slot);
         true
+    }
+
+    /// The document in `slot`. Postings hold only live slots.
+    fn doc(&self, slot: u32) -> Option<&(K, Doc)> {
+        self.docs.get(slot as usize)?.as_ref()
     }
 
     /// Every document matching `query`, best first (FTS5's `ORDER BY
     /// bm25(...)`), ties broken by key.
     pub fn search(&self, query: &Query) -> Vec<Hit<K>> {
-        let matches: Vec<HashMap<&K, Vec<(u32, u32)>>> = query
+        let matches: Vec<HashMap<u32, Vec<(u32, u32)>>> = query
             .phrases
             .iter()
             .map(|phrase| self.phrase_matches(phrase))
             .collect();
-        let mut hits: BTreeMap<&K, Vec<Instance>> = BTreeMap::new();
+        let mut hits: BTreeMap<&K, (u32, Vec<Instance>)> = BTreeMap::new();
         for (phrase, by_doc) in matches.iter().enumerate() {
-            for (key, at) in by_doc {
-                let instances = hits.entry(*key).or_default();
+            for (&slot, at) in by_doc {
+                let Some((key, doc)) = self.doc(slot) else {
+                    continue;
+                };
+                let (_, instances) = hits.entry(key).or_insert_with(|| (doc.size(), Vec::new()));
                 instances.extend(at.iter().map(|&(column, offset)| Instance {
                     column: column as usize,
                     offset,
@@ -190,7 +275,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
             }
         }
 
-        let rows = self.docs.len() as f64;
+        let rows = self.slots.len() as f64;
         let average = self.total_tokens as f64 / rows;
         // `fts5Bm25GetData`: an IDF per phrase from how many documents hold
         // it anywhere, floored just above zero.
@@ -209,9 +294,8 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
 
         let mut ranked: Vec<Hit<K>> = hits
             .into_iter()
-            .map(|(key, mut instances)| {
+            .map(|(key, (size, mut instances))| {
                 instances.sort_unstable();
-                let size: u32 = self.docs[key].sizes.iter().sum();
                 let score = bm25(&idf, &instances, f64::from(size), average);
                 Hit {
                     key: key.clone(),
@@ -224,19 +308,28 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
         ranked
     }
 
-    /// Where `phrase` occurs, per document: the position of its first token.
-    fn phrase_matches(&self, phrase: &[String]) -> HashMap<&K, Vec<(u32, u32)>> {
-        let Some((first, rest)) = phrase.split_first() else {
-            return HashMap::new();
-        };
-        let Some(starts) = self.postings.get(first) else {
+    /// Where `phrase` occurs, per document slot: the position of its first
+    /// token.
+    fn phrase_matches(&self, phrase: &[String]) -> HashMap<u32, Vec<(u32, u32)>> {
+        let ids: Option<Vec<u32>> = phrase
+            .iter()
+            .map(|term| self.term_ids.get(term.as_str()).copied())
+            .collect();
+        // A term no document holds: the phrase matches nothing.
+        let Some((&first, rest)) = ids.as_deref().and_then(<[u32]>::split_first) else {
             return HashMap::new();
         };
         let mut found = HashMap::new();
-        'docs: for (key, at) in starts {
+        'docs: for &slot in &self.postings[first as usize] {
+            let Some((_, doc)) = self.doc(slot) else {
+                continue;
+            };
+            let Some(at) = doc.positions(first) else {
+                continue;
+            };
             let mut followers = Vec::with_capacity(rest.len());
-            for term in rest {
-                match self.postings.get(term).and_then(|d| d.get(key)) {
+            for &term in rest {
+                match doc.positions(term) {
                     Some(positions) => followers.push(positions),
                     None => continue 'docs,
                 }
@@ -253,7 +346,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
                 })
                 .collect();
             if !hits.is_empty() {
-                found.insert(key, hits);
+                found.insert(slot, hits);
             }
         }
         found
@@ -272,7 +365,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
         column: Option<usize>,
         style: SnippetStyle<'_>,
     ) -> String {
-        let Some(doc) = self.docs.get(&hit.key) else {
+        let Some((_, doc)) = self.slots.get(&hit.key).and_then(|&slot| self.doc(slot)) else {
             return String::new();
         };
         let phrase_size = |phrase: usize| query.phrases[phrase].len() as i64;
@@ -574,6 +667,34 @@ mod tests {
     fn an_empty_phrase_matches_nothing() {
         let index = index(&[(1, ["anything", ""])]);
         assert!(index.search(&Query::any_of(["_", "?!"])).is_empty());
+    }
+
+    #[test]
+    fn a_freed_slot_holds_the_next_document_alone() {
+        let mut index = index(&[(1, ["alpha beta", ""]), (2, ["beta gamma", ""])]);
+        assert!(index.remove(&1));
+        index.upsert(3, ["delta beta", ""]);
+        assert_eq!(index.docs.len(), 2, "slot 0 is reused");
+        assert!(index.search(&Query::any_of(["alpha"])).is_empty());
+        let keys = |q: &str| {
+            let mut keys: Vec<u32> = index
+                .search(&Query::any_of([q]))
+                .iter()
+                .map(|h| h.key)
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        assert_eq!(keys("beta"), [2, 3]);
+        assert_eq!(keys("delta beta"), [3]);
+        assert_eq!(index.total_tokens, 4);
+    }
+
+    #[test]
+    fn a_phrase_with_an_unknown_term_matches_nothing() {
+        let index = index(&[(1, ["alpha beta", ""])]);
+        assert!(index.search(&Query::any_of(["alpha zzz"])).is_empty());
+        assert!(index.search(&Query::any_of(["zzz alpha"])).is_empty());
     }
 
     #[test]
