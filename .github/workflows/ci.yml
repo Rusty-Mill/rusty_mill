@@ -735,9 +735,10 @@ jobs:
           # rstack-self links libunwind's ptrace API; liblzma-dev is required
           # too (remind_me_core's build.rs asks for -llzma -- its docs/adr/0014).
           - { feature: stack-dumps, test: true, clippy: true, apt: libunwind-dev liblzma-dev }
-          # ADR-0023 phase 4: the engine-backed store. `store: engine` runs
-          # the whole suite with the groups moved so far on the engine.
-          - { feature: engine-store, test: true, clippy: true, store: engine }
+          # ADR-0023: the engine is the default store (phase 5.4b), so every
+          # other leg runs on it. This one keeps the SQLite store covered:
+          # `store: sqlite` runs the whole suite with REMIND_ME_STORE=sqlite.
+          - { feature: engine-store, test: true, clippy: true, store: sqlite }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
