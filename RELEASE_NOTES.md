@@ -13,6 +13,21 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db_engine: column filters and store lifecycle (issue #382)
+**2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** `Query::in_columns` and `Query::in_column`, FTS5's `{c1 c2} : (query)`.
+  - The filter applies to phrases, so `all_of` under it needs each phrase in a chosen column; a column the index lacks matches nothing; nested filters intersect.
+  - Held to FTS5 by `tests/fulltext_vs_fts5.rs` (ranking and snippets), including prefix, `AND` and `NOT` inside a filter.
+- **Added:** `tests/store_lifecycle.rs` for one store directory per user.
+  - Closing loses nothing and a reopen sees every write.
+  - `DirLock` refuses a second handle in the same process, which is what makes closing an idle store safe; the store itself does not lock.
+  - An ignored probe measures open, close and idle memory: about 1.5 µs and 260 bytes per record (2.3 ms and 257 KiB at 1,000 records). Numbers are in `rusty_tick`'s `SPIKE-FINDINGS.md`.
+  - No engine API added: the pool of open stores stays app-side.
+- Known limits: the measurements are one machine, one run; column filters cover inclusion only, not FTS5's `- col :` exclusion.
+
+---
+
 ## rusty_multimodal_db_engine: task-manager gaps (issue #382)
 **2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
 
