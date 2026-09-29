@@ -67,7 +67,12 @@ impl TaskStore {
         Ok(store)
     }
 
+    /// Trashed tasks are searchable and taggable nowhere: they drop out of both
+    /// derived indexes and come back when restored.
     fn index(&mut self, task: &Task) {
+        if task.is_deleted() {
+            return;
+        }
         self.search.upsert(task.id, [&task.title, &task.notes]);
         for tag in &task.tags {
             self.tags.entry(tag.clone()).or_default().insert(task.id);
@@ -120,6 +125,15 @@ impl TaskStore {
 
     pub fn get(&self, id: Uuid) -> Option<Task> {
         self.stack.get(id)
+    }
+
+    /// Every task, trashed ones included, unspecified order.
+    pub fn all(&self) -> Vec<Task> {
+        self.stack
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| self.stack.get(id))
+            .collect()
     }
 
     /// Every task in `list`, in the store's own (unspecified) order.

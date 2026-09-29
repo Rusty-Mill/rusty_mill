@@ -117,7 +117,7 @@ impl ServicePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::{system_clock, NewTask};
+    use crate::service::{system_clock, NewList, NewTask};
 
     fn user(name: &str) -> UserKey {
         UserKey::parse(name).unwrap()
@@ -129,6 +129,13 @@ mod tests {
             NonZeroUsize::new(capacity).unwrap(),
             Box::new(system_clock),
         )
+    }
+
+    fn new_list(name: &str) -> NewList {
+        NewList {
+            name: name.into(),
+            ..NewList::default()
+        }
     }
 
     fn new_task(list_id: uuid::Uuid) -> NewTask {
@@ -175,7 +182,7 @@ mod tests {
         let mut pool = pool(root.path(), 1);
         let (list, task) = pool
             .with(&user("alice"), |s| {
-                let list = s.create_list("Inbox").unwrap();
+                let list = s.create_list(new_list("Inbox")).unwrap();
                 let task = s.create_task(new_task(list.id)).unwrap();
                 (list, task)
             })
@@ -185,7 +192,7 @@ mod tests {
         let (lists, back) = pool
             .with(&user("alice"), |s| (s.lists(), s.task(task.id).unwrap()))
             .unwrap();
-        assert_eq!(lists, [list]);
+        assert!(lists.contains(&list));
         assert_eq!(back, task);
     }
 
@@ -195,7 +202,7 @@ mod tests {
         let mut pool = pool(root.path(), 4);
         let list = pool
             .with(&user("alice"), |s| {
-                let list = s.create_list("Private").unwrap();
+                let list = s.create_list(new_list("Private")).unwrap();
                 s.create_task(new_task(list.id)).unwrap();
                 list
             })
@@ -203,7 +210,10 @@ mod tests {
         let (lists, missing) = pool
             .with(&user("bob"), |s| (s.lists(), s.list(list.id).is_err()))
             .unwrap();
-        assert!(lists.is_empty());
+        assert!(
+            lists.iter().all(|l| l.id != list.id),
+            "only bob's own Inbox"
+        );
         assert!(missing, "bob cannot read alice's list by id");
     }
 
@@ -216,7 +226,9 @@ mod tests {
             Box::new(|| Box::new(|| 1_234)),
         );
         let stamped = pool
-            .with(&user("alice"), |s| s.create_list("L").unwrap().updated_ms)
+            .with(&user("alice"), |s| {
+                s.create_list(new_list("L")).unwrap().updated_ms
+            })
             .unwrap();
         assert_eq!(stamped, 1_234);
     }

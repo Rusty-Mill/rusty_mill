@@ -13,6 +13,9 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::Duration;
 
+/// Every store starts with one permanent list.
+const INBOX: &str = "Inbox";
+
 fn key(name: &str) -> UserKey {
     UserKey::parse(name).unwrap()
 }
@@ -71,6 +74,7 @@ fn send(
         method: &method,
         target,
         authorization: header.as_deref(),
+        if_match: None,
         body: body.as_bytes(),
     };
     let response = backend.handle(&request);
@@ -111,8 +115,8 @@ fn users_see_only_their_own_lists() {
     let inbox = create_list(&mut backend, &f.alice, "Alice's inbox");
     create_list(&mut backend, &f.bob, "Bob's chores");
 
-    assert_eq!(list_names(&mut backend, &f.alice), ["Alice's inbox"]);
-    assert_eq!(list_names(&mut backend, &f.bob), ["Bob's chores"]);
+    assert_eq!(list_names(&mut backend, &f.alice), [INBOX, "Alice's inbox"]);
+    assert_eq!(list_names(&mut backend, &f.bob), [INBOX, "Bob's chores"]);
     // Bob cannot reach Alice's list by its id either.
     let (status, _) = send(
         &mut backend,
@@ -169,6 +173,7 @@ fn a_scheme_other_than_bearer_is_refused() {
         method: &Method::Get,
         target: "/api/v1/lists",
         authorization: Some(&format!("Basic {}", f.alice)),
+        if_match: None,
         body: b"",
     };
     assert_eq!(backend.handle(&request).status.as_u16(), 401);
@@ -187,7 +192,7 @@ fn health_needs_no_token_and_opens_no_store() {
 fn a_revoked_token_stops_working_without_a_restart() {
     let mut f = Fixture::new();
     let mut backend = f.backend(4);
-    assert_eq!(list_names(&mut backend, &f.alice), Vec::<String>::new());
+    assert_eq!(list_names(&mut backend, &f.alice), [INBOX]);
 
     let id = f.registry.user(&key("alice")).unwrap().tokens[0].id.clone();
     f.registry.revoke(&key("alice"), &id).unwrap();
@@ -202,7 +207,7 @@ fn a_revoked_token_stops_working_without_a_restart() {
         Some(&f.alice),
     );
     assert_eq!(status, 401);
-    assert_eq!(list_names(&mut backend, &f.bob), Vec::<String>::new());
+    assert_eq!(list_names(&mut backend, &f.bob), [INBOX]);
 }
 
 #[test]
@@ -213,7 +218,7 @@ fn a_user_evicted_from_the_pool_comes_back_with_their_data() {
     assert_eq!(backend.open_stores(), 1);
     create_list(&mut backend, &f.bob, "Other"); // closes alice's store
     assert_eq!(backend.open_stores(), 1);
-    assert_eq!(list_names(&mut backend, &f.alice), ["Kept"]);
+    assert_eq!(list_names(&mut backend, &f.alice), [INBOX, "Kept"]);
     assert_eq!(backend.open_stores(), 1);
 }
 
@@ -231,7 +236,7 @@ fn a_directory_held_by_another_process_is_a_503_for_that_user_only() {
     );
     assert_eq!(status, 503);
     assert_eq!(json(&body)["error"]["code"], "unavailable");
-    assert_eq!(list_names(&mut backend, &f.bob), Vec::<String>::new());
+    assert_eq!(list_names(&mut backend, &f.bob), [INBOX]);
 }
 
 #[test]
@@ -274,8 +279,8 @@ fn single_user_mode_keeps_its_shared_token_and_its_directory() {
         Backend::single(Path::new("unused"), "short".into(), system_clock()),
         Err(BackendError::Token(_))
     ));
-    create_list(&mut backend, token, "Inbox");
-    assert_eq!(list_names(&mut backend, token), ["Inbox"]);
+    create_list(&mut backend, token, "Inbox 2");
+    assert_eq!(list_names(&mut backend, token), [INBOX, "Inbox 2"]);
     let (status, _) = send(
         &mut backend,
         Method::Get,

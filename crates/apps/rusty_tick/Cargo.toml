@@ -25,7 +25,7 @@ rusty_base64 = { workspace = true }
 rusty_rsa = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0"
-uuid = { version = "1", features = ["v7", "serde"] }
+uuid = { version = "1", features = ["v7", "v5", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -523,6 +523,28 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build
 
+  # rusty_tick's web UI (Vite/React). Typecheck, unit + integration tests
+  # (jsdom over the in-memory adapter) and the production build. The
+  # Playwright run (`npm run e2e`) needs the compiled rusty_tick binary and a
+  # browser, so it stays a local check.
+  rusty-tick-web:
+    name: rusty_tick web (typecheck, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_tick/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_tick/web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   # rusty_key's desktop front end: a vendored Vite/Solid app inside a
   # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build
   # only -- `npm run build` bundles the web assets without needing the

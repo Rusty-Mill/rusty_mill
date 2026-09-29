@@ -4,27 +4,39 @@
 //! and returns a [`Response`], so every route is testable without a network
 //! and [`crate::server`] stays a thin adapter.
 //!
-//! Routes (JSON, bearer-token auth except `/health`):
+//! JSON, bearer-token auth except `/health`. Under `/api/v1`:
 //!
 //! | Method | Path | |
 //! |---|---|---|
-//! | GET | `/health` | liveness, no auth |
-//! | GET, POST | `/api/v1/lists` | |
-//! | GET, PATCH, DELETE | `/api/v1/lists/{id}` | delete cascades to its tasks |
-//! | GET | `/api/v1/lists/{id}/tasks?status=open\|done&sort=manual\|due` | |
-//! | POST | `/api/v1/tasks` | |
-//! | GET, PATCH, DELETE | `/api/v1/tasks/{id}` | delete cascades to subtasks |
-//! | POST | `/api/v1/tasks/{id}/complete`, `/reopen` | |
-//! | PUT | `/api/v1/tasks/{id}/order` | `{"sortOrder": n}` |
-//! | GET | `/api/v1/search?q=` | whole-word match on title and notes |
-//! | GET | `/api/v1/tags/{tag}/tasks` | |
-//! | GET | `/api/v1/smart/{today,next7,overdue}?utcOffsetMin=` | |
+//! | GET | `/snapshot` | lists, tasks (trash and completed included), tags: one boot read |
+//! | GET, POST | `/lists` | POST accepts a client-chosen `id` |
+//! | GET, PATCH, DELETE | `/lists/{id}` | delete sends its tasks to the trash; the Inbox is permanent |
+//! | GET | `/lists/{id}/tasks?status=open\|done&sort=manual\|due` | |
+//! | POST | `/tasks` | accepts a client-chosen `id` |
+//! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes; `?permanent=true` purges |
+//! | POST | `/tasks/{id}/complete`, `/reopen`, `/restore` | |
+//! | PUT | `/tasks/{id}/order` | `{"sortOrder": n}` |
+//! | DELETE | `/trash` | purge everything in the trash |
+//! | GET, POST | `/tags` | |
+//! | PATCH, DELETE | `/tags/{name}` | |
+//! | POST | `/tags/{name}/rename` | `{"label"}` renames on every task |
+//! | GET | `/tags/{name}/tasks` | |
+//! | GET | `/search?q=` | whole-word match on title and notes |
+//! | GET | `/smart/{today,next7,overdue}?utcOffsetMin=` | |
+//! | GET | `/docs/{kind}` | client-owned JSON: habits, focus records, prefs |
+//! | PUT, DELETE | `/docs/{kind}/{id}` | |
+//!
+//! Writes accept `If-Match: "<etag>"`; a stale one is refused with 412 and
+//! the current entity in `current`.
 
 use crate::auth::{Authenticator, Denied};
 use crate::dto::{
-    CreateList, CreateTask, ListDto, Lists, PatchList, PatchTask, SetOrder, TaskDto, Tasks,
+    CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, PatchList, PatchTag,
+    PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
 };
-use crate::service::{ListOrderBy, NewTask, Service, ServiceError, TaskPatch};
+use crate::service::{
+    ListOrderBy, ListPatch, NewList, NewTask, Service, ServiceError, TagPatch, TaskPatch,
+};
 use crate::task::{Priority, Status};
 use crate::users::{RegistryFile, UserKey};
 use rusty_http::{Method, StatusCode};
@@ -40,6 +52,7 @@ pub struct Request<'a> {
     /// Origin-form target: path and optional `?query`.
     pub target: &'a str,
     pub authorization: Option<&'a str>,
+    pub if_match: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -112,6 +125,7 @@ enum ApiError {
     Unauthorized,
     NotFound(String),
     Invalid(String),
+    Conflict(String),
     Internal,
     Unavailable,
 }
@@ -123,6 +137,7 @@ impl ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
@@ -134,6 +149,7 @@ impl ApiError {
             Self::Unauthorized => "unauthorized",
             Self::NotFound(_) => "not_found",
             Self::Invalid(_) => "invalid",
+            Self::Conflict(_) => "conflict",
             Self::Internal => "internal",
             Self::Unavailable => "unavailable",
         }
@@ -142,7 +158,9 @@ impl ApiError {
     /// Internal errors never leak detail to the client.
     fn message(&self) -> String {
         match self {
-            Self::BadRequest(m) | Self::NotFound(m) | Self::Invalid(m) => m.clone(),
+            Self::BadRequest(m) | Self::NotFound(m) | Self::Invalid(m) | Self::Conflict(m) => {
+                m.clone()
+            }
             Self::Unauthorized => "missing or invalid bearer token".to_string(),
             Self::Internal => "internal error".to_string(),
             Self::Unavailable => "temporarily unavailable".to_string(),
@@ -155,6 +173,7 @@ impl From<ServiceError> for ApiError {
         match error {
             ServiceError::NotFound(what) => Self::NotFound(format!("{what} not found")),
             ServiceError::Invalid(message) => Self::Invalid(message),
+            ServiceError::Conflict(message) => Self::Conflict(message),
             ServiceError::Storage(e) => {
                 eprintln!("rusty_tick: storage error: {e}");
                 Self::Internal
@@ -211,11 +230,23 @@ impl Api {
     /// Route an authenticated request within one user's data.
     pub fn serve(service: &mut Service, request: &Request<'_>) -> Response {
         let (path, query) = split_target(request.target);
-        let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
-        match route(service, request.method, &segments, &query, request.body) {
-            Ok(response) => response,
-            Err(error) => Response::error(&error),
+        let segments: Vec<String> = path
+            .trim_matches('/')
+            .split('/')
+            .map(decode_segment)
+            .collect();
+        let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+        let cx = Cx {
+            method: request.method,
+            query: &query,
+            body: request.body,
+            if_match: request.if_match,
+        };
+        match segments.as_slice() {
+            ["api", "v1", rest @ ..] => route(service, &cx, rest),
+            _ => Err(not_found()),
         }
+        .unwrap_or_else(|error| Response::error(&error))
     }
 }
 
@@ -244,6 +275,53 @@ impl Query {
     }
 }
 
+/// What a route handler needs besides the service.
+struct Cx<'a> {
+    method: &'a Method,
+    query: &'a Query,
+    body: &'a [u8],
+    if_match: Option<&'a str>,
+}
+
+impl Cx<'_> {
+    fn body<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
+        rusty_json::from_slice(self.body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
+    }
+
+    /// `Some(response)` when `If-Match` is present and does not name `current`.
+    fn stale<T: Serialize>(&self, current: &str, entity: impl FnOnce() -> T) -> Option<Response> {
+        let presented = self
+            .if_match?
+            .trim()
+            .trim_start_matches("W/")
+            .trim_matches('"');
+        if presented == current {
+            return None;
+        }
+        #[derive(Serialize)]
+        struct Stale<'a, T> {
+            error: StaleError<'a>,
+            current: T,
+        }
+        #[derive(Serialize)]
+        struct StaleError<'a> {
+            code: &'a str,
+            message: &'a str,
+        }
+        Some(Response::json(
+            StatusCode::PRECONDITION_FAILED,
+            &Stale {
+                error: StaleError {
+                    code: "precondition_failed",
+                    message: "the record changed since you read it",
+                },
+                current: entity(),
+            },
+        ))
+    }
+}
+
 fn split_target(target: &str) -> (&str, Query) {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let pairs = rusty_url::form_urlencoded::parse(query.as_bytes())
@@ -252,101 +330,31 @@ fn split_target(target: &str) -> (&str, Query) {
     (path, Query(pairs))
 }
 
-fn route(
-    service: &mut Service,
-    method: &Method,
-    segments: &[&str],
-    query: &Query,
-    body: &[u8],
-) -> Result<Response> {
-    match (method, segments) {
-        (Method::Get, ["api", "v1", "lists"]) => {
-            let lists = service.lists().into_iter().map(ListDto::from).collect();
-            Ok(Response::json(StatusCode::OK, &Lists { lists }))
+/// Percent-decode one path segment. `+` is literal in a path, unlike a query.
+fn decode_segment(segment: &str) -> String {
+    let escaped = segment.replace('+', "%2B");
+    rusty_url::form_urlencoded::parse(format!("={escaped}").as_bytes())
+        .next()
+        .map_or_else(|| segment.to_string(), |(_, value)| value.into_owned())
+}
+
+fn route(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> {
+    match path {
+        ["snapshot"] if cx.method == &Method::Get => Ok(Response::json(
+            StatusCode::OK,
+            &SnapshotDto::from(service.snapshot()),
+        )),
+        ["lists", rest @ ..] => route_lists(service, cx, rest),
+        ["tasks", rest @ ..] => route_tasks(service, cx, rest),
+        ["tags", rest @ ..] => route_tags(service, cx, rest),
+        ["docs", rest @ ..] => route_docs(service, cx, rest),
+        ["trash"] if cx.method == &Method::Delete => {
+            let purged = service.empty_trash()?;
+            Ok(Response::json(StatusCode::OK, &Purged { purged }))
         }
-        (Method::Post, ["api", "v1", "lists"]) => {
-            let input: CreateList = parse_body(body)?;
-            let list = service.create_list(&input.name)?;
-            Ok(Response::json(StatusCode::CREATED, &ListDto::from(list)))
-        }
-        (Method::Get, ["api", "v1", "lists", id]) => {
-            let list = service.list(parse_id(id)?)?;
-            Ok(Response::json(StatusCode::OK, &ListDto::from(list)))
-        }
-        (Method::Patch, ["api", "v1", "lists", id]) => {
-            let input: PatchList = parse_body(body)?;
-            let list = service.patch_list(parse_id(id)?, input.name.as_deref(), input.archived)?;
-            Ok(Response::json(StatusCode::OK, &ListDto::from(list)))
-        }
-        (Method::Delete, ["api", "v1", "lists", id]) => {
-            service.delete_list(parse_id(id)?)?;
-            Ok(Response::empty(StatusCode::NO_CONTENT))
-        }
-        (Method::Get, ["api", "v1", "lists", id, "tasks"]) => {
-            let status = match query.get("status") {
-                None => None,
-                Some("open") => Some(Status::Open),
-                Some("done") => Some(Status::Done),
-                Some(_) => return Err(ApiError::BadRequest("status must be open or done".into())),
-            };
-            let order = match query.get("sort") {
-                None | Some("manual") => ListOrderBy::Manual,
-                Some("due") => ListOrderBy::Due,
-                Some(_) => return Err(ApiError::BadRequest("sort must be manual or due".into())),
-            };
-            let tasks = service.tasks_in_list(parse_id(id)?, status, order)?;
-            Ok(Response::json(StatusCode::OK, &Tasks::new(tasks)))
-        }
-        (Method::Post, ["api", "v1", "tasks"]) => {
-            let input: CreateTask = parse_body(body)?;
-            let task = service.create_task(NewTask {
-                list_id: input.list_id,
-                parent_id: input.parent_id,
-                title: input.title,
-                notes: input.notes,
-                priority: input.priority.map(parse_priority).transpose()?,
-                due_ms: input.due_ms,
-                tags: input.tags,
-            })?;
-            Ok(Response::json(StatusCode::CREATED, &TaskDto::from(task)))
-        }
-        (Method::Get, ["api", "v1", "tasks", id]) => {
-            let task = service.task(parse_id(id)?)?;
-            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
-        }
-        (Method::Patch, ["api", "v1", "tasks", id]) => {
-            let input: PatchTask = parse_body(body)?;
-            let task = service.patch_task(
-                parse_id(id)?,
-                TaskPatch {
-                    title: input.title,
-                    notes: input.notes,
-                    priority: input.priority.map(parse_priority).transpose()?,
-                    due_ms: input.due_ms,
-                    tags: input.tags,
-                },
-            )?;
-            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
-        }
-        (Method::Delete, ["api", "v1", "tasks", id]) => {
-            service.delete_task(parse_id(id)?)?;
-            Ok(Response::empty(StatusCode::NO_CONTENT))
-        }
-        (Method::Post, ["api", "v1", "tasks", id, "complete"]) => {
-            let task = service.set_status(parse_id(id)?, Status::Done)?;
-            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
-        }
-        (Method::Post, ["api", "v1", "tasks", id, "reopen"]) => {
-            let task = service.set_status(parse_id(id)?, Status::Open)?;
-            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
-        }
-        (Method::Put, ["api", "v1", "tasks", id, "order"]) => {
-            let input: SetOrder = parse_body(body)?;
-            let task = service.reorder(parse_id(id)?, input.sort_order)?;
-            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
-        }
-        (Method::Get, ["api", "v1", "search"]) => {
-            let q = query
+        ["search"] if cx.method == &Method::Get => {
+            let q = cx
+                .query
                 .get("q")
                 .ok_or_else(|| ApiError::BadRequest("q is required".into()))?;
             Ok(Response::json(
@@ -354,12 +362,8 @@ fn route(
                 &Tasks::new(service.search(q)),
             ))
         }
-        (Method::Get, ["api", "v1", "tags", tag, "tasks"]) => Ok(Response::json(
-            StatusCode::OK,
-            &Tasks::new(service.with_tag(tag)),
-        )),
-        (Method::Get, ["api", "v1", "smart", which]) => {
-            let offset = utc_offset(query)?;
+        ["smart", which] if cx.method == &Method::Get => {
+            let offset = utc_offset(cx.query)?;
             let tasks = match *which {
                 "today" => service.today(offset),
                 "next7" => service.next_7_days(offset),
@@ -367,6 +371,246 @@ fn route(
                 _ => return Err(not_found()),
             };
             Ok(Response::json(StatusCode::OK, &Tasks::new(tasks)))
+        }
+        _ => Err(not_found()),
+    }
+}
+
+fn route_lists(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> {
+    match (cx.method, path) {
+        (Method::Get, []) => {
+            let lists = service.lists().into_iter().map(ListDto::from).collect();
+            Ok(Response::json(StatusCode::OK, &Lists { lists }))
+        }
+        (Method::Post, []) => {
+            let input: CreateList = cx.body()?;
+            let list = service.create_list(NewList {
+                id: input.id,
+                name: input.name,
+                color: input.color,
+            })?;
+            Ok(Response::json(StatusCode::CREATED, &ListDto::from(list)))
+        }
+        (Method::Get, [id]) => {
+            let list = service.list(parse_id(id)?)?;
+            Ok(Response::json(StatusCode::OK, &ListDto::from(list)))
+        }
+        (Method::Patch, [id]) => {
+            let id = parse_id(id)?;
+            let current = service.list(id)?;
+            if let Some(stale) = cx.stale(&current.version.to_string(), || {
+                ListDto::from(current.clone())
+            }) {
+                return Ok(stale);
+            }
+            let input: PatchList = cx.body()?;
+            let list = service.patch_list(
+                id,
+                ListPatch {
+                    name: input.name,
+                    color: input.color,
+                    archived: input.archived,
+                    view_mode: input.view_mode,
+                    sort_type: input.sort_type,
+                    sort_order: input.sort_order,
+                },
+            )?;
+            Ok(Response::json(StatusCode::OK, &ListDto::from(list)))
+        }
+        (Method::Delete, [id]) => {
+            service.delete_list(parse_id(id)?)?;
+            Ok(Response::empty(StatusCode::NO_CONTENT))
+        }
+        (Method::Get, [id, "tasks"]) => {
+            let status = match cx.query.get("status") {
+                None => None,
+                Some("open") => Some(Status::Open),
+                Some("done") => Some(Status::Done),
+                Some(_) => return Err(ApiError::BadRequest("status must be open or done".into())),
+            };
+            let order = match cx.query.get("sort") {
+                None | Some("manual") => ListOrderBy::Manual,
+                Some("due") => ListOrderBy::Due,
+                Some(_) => return Err(ApiError::BadRequest("sort must be manual or due".into())),
+            };
+            let tasks = service.tasks_in_list(parse_id(id)?, status, order)?;
+            Ok(Response::json(StatusCode::OK, &Tasks::new(tasks)))
+        }
+        _ => Err(not_found()),
+    }
+}
+
+fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> {
+    match (cx.method, path) {
+        (Method::Post, []) => {
+            let input: CreateTask = cx.body()?;
+            let task = service.create_task(NewTask {
+                id: input.id,
+                list_id: input.list_id,
+                parent_id: input.parent_id,
+                title: input.title,
+                notes: input.notes,
+                kind: input.kind,
+                priority: input.priority.map(parse_priority).transpose()?,
+                start_ms: input.start_ms,
+                due_ms: input.due_ms,
+                is_all_day: input.is_all_day,
+                time_zone: input.time_zone,
+                reminders: input.reminders,
+                repeat_flag: input.repeat_flag,
+                items: input.items,
+                tags: input.tags,
+                sort_order: input.sort_order,
+            })?;
+            Ok(Response::json(StatusCode::CREATED, &TaskDto::from(task)))
+        }
+        (Method::Get, [id]) => {
+            let task = service.task(parse_id(id)?)?;
+            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Patch, [id]) => {
+            let id = parse_id(id)?;
+            if let Some(stale) = stale_task(service, cx, id)? {
+                return Ok(stale);
+            }
+            let input: PatchTask = cx.body()?;
+            let task = service.patch_task(id, task_patch(input)?)?;
+            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Delete, [id]) => {
+            let id = parse_id(id)?;
+            if let Some(stale) = stale_task(service, cx, id)? {
+                return Ok(stale);
+            }
+            match cx.query.get("permanent") {
+                Some("true") => service.purge_task(id)?,
+                None | Some("false") => {
+                    service.trash_task(id)?;
+                }
+                Some(_) => {
+                    return Err(ApiError::BadRequest(
+                        "permanent must be true or false".into(),
+                    ))
+                }
+            }
+            Ok(Response::empty(StatusCode::NO_CONTENT))
+        }
+        (Method::Post, [id, "complete"]) => {
+            let task = service.set_status(parse_id(id)?, Status::Done)?;
+            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Post, [id, "reopen"]) => {
+            let task = service.set_status(parse_id(id)?, Status::Open)?;
+            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Post, [id, "restore"]) => {
+            let task = service.restore_task(parse_id(id)?)?;
+            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Put, [id, "order"]) => {
+            let input: SetOrder = cx.body()?;
+            let task = service.reorder(parse_id(id)?, input.sort_order)?;
+            Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        _ => Err(not_found()),
+    }
+}
+
+/// A 412 response when the request's `If-Match` is stale for task `id`.
+fn stale_task(service: &Service, cx: &Cx<'_>, id: Uuid) -> Result<Option<Response>> {
+    let current = service.task(id)?;
+    Ok(cx.stale(&current.version.to_string(), || {
+        TaskDto::from(current.clone())
+    }))
+}
+
+fn task_patch(input: PatchTask) -> Result<TaskPatch> {
+    Ok(TaskPatch {
+        title: input.title,
+        notes: input.notes,
+        kind: input.kind,
+        status: input.status,
+        priority: input.priority.map(parse_priority).transpose()?,
+        start_ms: input.start_ms,
+        due_ms: input.due_ms,
+        is_all_day: input.is_all_day,
+        time_zone: input.time_zone,
+        reminders: input.reminders,
+        repeat_flag: input.repeat_flag,
+        ex_dates: input.ex_dates,
+        items: input.items,
+        tags: input.tags,
+        list_id: input.list_id,
+        sort_order: input.sort_order,
+    })
+}
+
+fn route_tags(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> {
+    match (cx.method, path) {
+        (Method::Get, []) => {
+            let tags = service.tags().into_iter().map(TagDto::from).collect();
+            Ok(Response::json(StatusCode::OK, &Tags { tags }))
+        }
+        (Method::Post, []) => {
+            let input: CreateTag = cx.body()?;
+            let tag = service.create_tag(&input.label, input.color)?;
+            Ok(Response::json(StatusCode::CREATED, &TagDto::from(tag)))
+        }
+        (Method::Patch, [name]) => {
+            let current = service.tag(name)?;
+            if let Some(stale) = cx.stale(&current.version.to_string(), || {
+                TagDto::from(current.clone())
+            }) {
+                return Ok(stale);
+            }
+            let input: PatchTag = cx.body()?;
+            let tag = service.patch_tag(
+                name,
+                TagPatch {
+                    color: input.color,
+                    parent: input.parent,
+                    sort_order: input.sort_order,
+                },
+            )?;
+            Ok(Response::json(StatusCode::OK, &TagDto::from(tag)))
+        }
+        (Method::Post, [name, "rename"]) => {
+            let input: RenameTag = cx.body()?;
+            let tag = service.rename_tag(name, &input.label)?;
+            Ok(Response::json(StatusCode::OK, &TagDto::from(tag)))
+        }
+        (Method::Delete, [name]) => {
+            service.delete_tag(name)?;
+            Ok(Response::empty(StatusCode::NO_CONTENT))
+        }
+        (Method::Get, [name, "tasks"]) => Ok(Response::json(
+            StatusCode::OK,
+            &Tasks::new(service.with_tag(name)),
+        )),
+        _ => Err(not_found()),
+    }
+}
+
+fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> {
+    match (cx.method, path) {
+        (Method::Get, [kind]) => {
+            let docs = service
+                .docs(kind)?
+                .into_iter()
+                .filter_map(DocDto::from_doc)
+                .collect();
+            Ok(Response::json(StatusCode::OK, &Docs { docs }))
+        }
+        (Method::Put, [kind, id]) => {
+            let body = std::str::from_utf8(cx.body)
+                .map_err(|_| ApiError::BadRequest("body must be UTF-8 JSON".into()))?;
+            let doc = service.put_doc(kind, parse_id(id)?, body)?;
+            let dto = DocDto::from_doc(doc).ok_or(ApiError::Internal)?;
+            Ok(Response::json(StatusCode::OK, &dto))
+        }
+        (Method::Delete, [kind, id]) => {
+            service.delete_doc(kind, parse_id(id)?)?;
+            Ok(Response::empty(StatusCode::NO_CONTENT))
         }
         _ => Err(not_found()),
     }
@@ -397,14 +641,9 @@ fn utc_offset(query: &Query) -> Result<i32> {
     }
 }
 
-fn parse_body<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T> {
-    rusty_json::from_slice(body)
-        .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::constant_time_eq;
+    use super::{constant_time_eq, decode_segment};
 
     #[test]
     fn constant_time_eq_matches_ordinary_equality() {
@@ -413,5 +652,15 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abcd"));
         assert!(!constant_time_eq(b"", b"a"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn path_segments_decode_percent_escapes_but_keep_plus() {
+        assert_eq!(decode_segment("plain"), "plain");
+        assert_eq!(decode_segment("buy%20milk"), "buy milk");
+        assert_eq!(decode_segment("c%2B%2B"), "c++");
+        assert_eq!(decode_segment("c++"), "c++", "+ is literal in a path");
+        assert_eq!(decode_segment("caf%C3%A9"), "café");
+        assert_eq!(decode_segment("a%2Fb"), "a/b");
     }
 }

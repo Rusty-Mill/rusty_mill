@@ -19,9 +19,16 @@ struct Running {
 
 impl Running {
     fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    fn start_with(web_dir: Option<std::path::PathBuf>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let backend = Backend::single(dir.path(), TOKEN.into(), system_clock()).unwrap();
-        let server = Server::bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
+        let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
+        if let Some(web) = web_dir {
+            server = server.with_web_dir(web);
+        }
         let (addr, stop) = (
             server.local_addr().unwrap(),
             server.shutdown_handle().unwrap(),
@@ -223,4 +230,78 @@ fn shutdown_stops_the_accept_loop() {
     let mut server = Running::start();
     server.stop.shutdown();
     server.thread.take().unwrap().join().unwrap();
+}
+
+#[test]
+fn serves_the_web_ui_without_shadowing_the_api() {
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(
+        web.path().join("index.html"),
+        "<!doctype html><title>Tick Local</title>",
+    )
+    .unwrap();
+    std::fs::create_dir(web.path().join("assets")).unwrap();
+    std::fs::write(web.path().join("assets/app.js"), "console.log(1)").unwrap();
+    let outside = web.path().parent().unwrap().join("outside-secret.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    let server = Running::start_with(Some(web.path().to_path_buf()));
+    let get = |path: &str| {
+        exchange(
+            &server,
+            &format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+        )
+    };
+
+    let page = get("/");
+    assert_eq!(status(&page), 200);
+    assert!(body(&page).contains("Tick Local"));
+    assert!(
+        page.contains("Content-Security-Policy: default-src 'self'"),
+        "{page}"
+    );
+    assert!(page.contains("X-Frame-Options: DENY"));
+
+    let js = get("/assets/app.js");
+    assert!(
+        js.contains("text/javascript") && body(&js) == "console.log(1)",
+        "{js}"
+    );
+    assert!(
+        !js.contains("Content-Security-Policy"),
+        "the policy rides on pages, not scripts"
+    );
+
+    assert!(
+        body(&get("/some/client/route")).contains("Tick Local"),
+        "unknown paths get the app shell"
+    );
+    assert!(!body(&get("/../outside-secret.txt")).contains("secret"));
+    assert!(!body(&get("/%2e%2e/outside-secret.txt")).contains("secret"));
+
+    assert_eq!(
+        body(&get("/health")),
+        r#"{"status":"ok"}"#,
+        "the API still wins over static files"
+    );
+    assert_eq!(
+        status(&get("/api/v1/lists")),
+        401,
+        "API paths are never served from disk"
+    );
+    assert_eq!(status(&get("/api/v1/nope")), 401);
+    std::fs::remove_file(outside).unwrap();
+}
+
+#[test]
+fn without_a_web_dir_only_the_api_answers() {
+    let server = Running::start();
+    let root = exchange(
+        &server,
+        "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        status(&root),
+        401,
+        "no UI is served, and the API needs a token"
+    );
 }
