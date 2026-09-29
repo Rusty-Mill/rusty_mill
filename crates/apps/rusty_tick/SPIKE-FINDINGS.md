@@ -81,3 +81,6 @@ build for the scale numbers.
   refuses a second handle in the same process, so an idle store can be closed
   while nothing else has it open. The store does not lock by itself, so take the
   `DirLock` first. The pool stays app-side: which user to evict and when is policy.
+  `src/pool.rs` is that pool (`StorePool`: least recently used closed first,
+  `DirLock` per directory, validated user keys). Nothing calls it yet, because
+  the API has one token and no user identity.

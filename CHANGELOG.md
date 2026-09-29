@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_multimodal_db_engine`: `Query::except_columns`** (FTS5 column exclusion) and **`rusty_tick`: `StorePool`**, a bounded per-user store pool (not yet wired to the API). Issue #382.
 - **`rusty_multimodal_db_engine`: full-text column filters** (`Query::in_columns`), FTS5-differentially tested; store open/close lifecycle tests and idle-cost measurements for one-store-per-user (issue #382 gaps 3 and 6).
 - **`rusty_multimodal_db_engine`: prefix, `AND` and `NOT` full-text queries** (`Query::any_of_prefix`, `all_of`, `except`), FTS5-differentially tested; recipe tests for multi-filter, range, reorder and change-feed use; `rusty_multimodal_db` ADR-0125 (change feed stays app-side). Issue #382.
 - **`rusty_multimodal_db_engine`: group commit.**

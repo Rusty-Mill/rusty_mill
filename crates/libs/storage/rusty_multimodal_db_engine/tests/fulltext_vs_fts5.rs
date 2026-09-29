@@ -233,17 +233,25 @@ fn side(rng: &mut Lcg) -> Both {
     }
 }
 
-/// A column filter over the wiki's `title` (0) and `content` (1): one column
-/// or both, around a plain, prefix or `AND` query.
+/// A column filter over the wiki's `title` (0) and `content` (1): one column,
+/// both, or all but one, around a plain, prefix or `AND` query.
 fn column_query(rng: &mut Lcg) -> Both {
     let (inner, inner_expr) = match rng.below(3) {
         0 => prefix_query(rng),
         1 => boolean_query(rng),
         _ => plain_query(rng),
     };
-    match rng.below(3) {
+    match rng.below(5) {
         0 => (inner.in_column(0), format!("title : ({inner_expr})")),
         1 => (inner.in_column(1), format!("content : ({inner_expr})")),
+        2 => (
+            inner.except_columns([0]),
+            format!("- title : ({inner_expr})"),
+        ),
+        3 => (
+            inner.except_columns([1]),
+            format!("- content : ({inner_expr})"),
+        ),
         _ => (
             inner.in_columns([0, 1]),
             format!("{{title content}} : ({inner_expr})"),

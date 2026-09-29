@@ -7,6 +7,7 @@
 pub mod api;
 pub mod dto;
 pub mod lists;
+pub mod pool;
 pub mod server;
 pub mod service;
 pub mod store;
