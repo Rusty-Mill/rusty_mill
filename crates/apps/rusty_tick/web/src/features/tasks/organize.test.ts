@@ -8,6 +8,7 @@ import {
   groupTasks,
   ORDER_STEP,
   renumber,
+  reorderItems,
   sortOrderBetween,
   sortTasks,
   tasksForView,
@@ -207,5 +208,34 @@ describe('small helpers', () => {
     expect(checklistProgress(task())).toBeNull()
     const items = [1, 2, 3].map((i) => ({ id: `i${i}`, title: 'x', done: i < 3, sortOrder: i }))
     expect(checklistProgress(task({ items }))).toBe('2/3')
+  })
+})
+
+describe('reorderItems', () => {
+  const items = [
+    { id: 'a', sortOrder: 0 },
+    { id: 'b', sortOrder: 1024 },
+    { id: 'c', sortOrder: 2048 },
+  ]
+
+  it('drops between the neighbours it lands beside', () => {
+    expect(reorderItems(items, 'c', 'a', true)).toEqual({ kind: 'set', id: 'c', sortOrder: 512 }) // after a, before b
+    expect(reorderItems(items, 'a', 'c', true)).toEqual({ kind: 'set', id: 'a', sortOrder: 2048 + ORDER_STEP }) // after the last
+    expect(reorderItems(items, 'c', 'a', false)).toEqual({ kind: 'set', id: 'c', sortOrder: -ORDER_STEP }) // before the first
+  })
+
+  it('does nothing when the drop changes nothing', () => {
+    expect(reorderItems(items, 'a', 'a', true)).toBeNull()
+    expect(reorderItems(items, 'x', 'a', true)).toBeNull()
+    expect(reorderItems(items, 'a', 'x', true)).toBeNull()
+  })
+
+  it('renumbers everything when there is no room between neighbours', () => {
+    const tight = [
+      { id: 'a', sortOrder: 5 },
+      { id: 'b', sortOrder: 6 },
+      { id: 'c', sortOrder: 100 },
+    ]
+    expect(reorderItems(tight, 'c', 'a', true)).toEqual({ kind: 'renumber', orders: { a: 0, c: ORDER_STEP, b: 2 * ORDER_STEP } })
   })
 })

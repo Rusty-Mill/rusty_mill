@@ -2,7 +2,7 @@
  * Which tasks a view shows, and how they are sorted and grouped. Pure: `now`
  * and the entity lists are parameters.
  */
-import type { List, Priority, Tag, Task } from '@/api/types'
+import type { List, Priority, Tag, Task, ViewMode } from '@/api/types'
 import { addDays, diffDays, startOfDay } from '@/lib/date'
 
 export type ViewSpec =
@@ -22,6 +22,9 @@ export interface ViewOptions {
   sortBy: SortBy
   order: Order
   showCompleted: boolean
+  /** Show list names, tags and checklist progress on each row. */
+  showDetails: boolean
+  viewMode: ViewMode
 }
 
 export interface Entities {
@@ -46,7 +49,7 @@ export function viewKey(spec: ViewSpec): string {
 /** Smart lists group by date; lists and tags keep manual order, ungrouped. */
 export function defaultOptions(spec: ViewSpec): ViewOptions {
   const smart = spec.kind === 'all' || spec.kind === 'today' || spec.kind === 'week'
-  return { groupBy: smart ? 'date' : 'none', sortBy: smart ? 'date' : 'manual', order: 'asc', showCompleted: false }
+  return { groupBy: smart ? 'date' : 'none', sortBy: smart ? 'date' : 'manual', order: 'asc', showCompleted: false, showDetails: true, viewMode: 'list' }
 }
 
 const isLive = (t: Task): boolean => t.deletedMs === null
@@ -215,4 +218,27 @@ export function firstSortOrder(existing: Task[]): number {
 /** Checklist progress for a row: `2/3`, or `null` when there is no checklist. */
 export function checklistProgress(t: Task): string | null {
   return t.items.length === 0 ? null : `${t.items.filter((i) => i.done).length}/${t.items.length}`
+}
+
+export type Reorder =
+  | { kind: 'set'; id: string; sortOrder: number }
+  /** The gap has closed: give every item a fresh, evenly spaced order. */
+  | { kind: 'renumber'; orders: Record<string, number> }
+
+/**
+ * What to write when `movedId` is dropped `after` (or before) `targetId`, given
+ * `items` in their current order. `null` when nothing would change.
+ */
+export function reorderItems(items: { id: string; sortOrder: number }[], movedId: string, targetId: string, after: boolean): Reorder | null {
+  if (movedId === targetId) return null
+  const moved = items.find((i) => i.id === movedId)
+  const rest = items.filter((i) => i.id !== movedId)
+  const at = rest.findIndex((i) => i.id === targetId)
+  if (!moved || at < 0) return null
+  const insert = after ? at + 1 : at
+  const order = sortOrderBetween(rest[insert - 1]?.sortOrder ?? null, rest[insert]?.sortOrder ?? null)
+  if (order !== null) return order === moved.sortOrder ? null : { kind: 'set', id: movedId, sortOrder: order }
+  const next = [...rest.slice(0, insert), moved, ...rest.slice(insert)]
+  const fresh = renumber(next.length)
+  return { kind: 'renumber', orders: Object.fromEntries(next.map((item, i) => [item.id, fresh[i]!])) }
 }
