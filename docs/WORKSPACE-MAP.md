@@ -25,7 +25,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 14 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 17 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 18 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 7 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 4 |
@@ -40,7 +40,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 16 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 1 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
-| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 3 |
+| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
@@ -92,14 +92,14 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 13 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 14 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
 | libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
-| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 3 |
+| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 4 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 0 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
@@ -249,6 +249,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_tailscale | ts-wg | WireGuard data-plane adapter (boringtun; kernel-WG later) | 1 |
 | apps | rusty_tailscale | xtask | Integration harness: Headscale in a container, multi-node NAT simulation | 0 |
 | apps | rusty_text | rusty_text | Pure Rust stream editing (sed) and pattern scanning/processing (awk) engines | 0 |
+| apps | rusty_tick | rusty_tick | Self-hosted task manager on rusty_multimodal_db_engine (spike) | 0 |
 | apps | rusty_voice | rusty_voice | A sovereign voice-to-text application leveraging rusty_whisper and rusty_audio built exclusively with Rusty Mill libraries | 0 |
 | apps | rusty_yirp | sessionmgr-agents | Per-agent-CLI adapters: launch_args and tier-3 needs_input pattern matching for Claude Code, Codex, and Gemini CLI, against a vt100-rendered screen per ADR-0002. Gemini's adapter is built from its own shipped source and hooks docs rather than a live-verified session -- no credentials on this machine to run one. | 1 |
 | apps | rusty_yirp | sessionmgr-core | Pure domain logic for sessionmgr: session state machine, identifiers, and crash-recovery policy. Zero I/O. | 5 |
