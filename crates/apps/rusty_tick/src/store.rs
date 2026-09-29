@@ -19,6 +19,9 @@ use std::ops::Bound;
 use std::path::Path;
 use uuid::Uuid;
 
+/// Gap between appended tasks, leaving room to drop one in between.
+pub const SORT_STEP: i64 = 1024;
+
 type Core = GenericMmapStore<Task, ByList, SortOrder>;
 type Stack = Ordered<Ordered<Core, Task, SortOrder>, Task, DueAt>;
 
@@ -152,6 +155,13 @@ impl TaskStore {
         .into_iter()
         .filter_map(|id| self.stack.get(id))
         .collect()
+    }
+
+    /// The sort order that appends a task after every task in `list`.
+    pub fn next_sort_order(&self, list: Uuid) -> i64 {
+        self.in_manual_order(list)
+            .last()
+            .map_or(0, |t| t.sort_order.saturating_add(SORT_STEP))
     }
 
     /// Move one task to `sort_order`: rewrites one 8-byte slot, not the record.

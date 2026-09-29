@@ -31,6 +31,11 @@ build for the scale numbers.
 - **F4, derived indexes are memory-only.** Two `Ordered` indexes, the full-text
   index and the tag map are rebuilt at every open (0.88 s at 100k tasks). Fine
   for a personal instance; it bounds how many tasks a store can hold.
+- **F5, cross-list smart lists cost one range query per list.** The `(list, due)`
+  key that makes per-list ranges cheap does not serve "everything due today
+  across all lists"; `Service::today` issues one range per non-archived list and
+  merges. Fine for tens of lists. A second ordered index on due date alone would
+  make it one query, at the price of another in-memory index.
 - The scannable field must be a fixed-width value (`i64` here), and a field
   that is both scannable and ordered must use one marker for both.
 

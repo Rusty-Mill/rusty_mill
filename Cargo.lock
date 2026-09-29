@@ -14311,7 +14311,10 @@ dependencies = [
 name = "rusty_tick"
 version = "0.0.1"
 dependencies = [
+ "rusty_http",
+ "rusty_json",
  "rusty_multimodal_db_engine",
+ "rusty_url",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

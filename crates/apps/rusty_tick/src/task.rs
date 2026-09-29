@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const NO_DUE: i64 = i64::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Open,
     Done,
@@ -21,6 +22,24 @@ pub enum Priority {
     Low = 1,
     Medium = 3,
     High = 5,
+}
+
+impl Priority {
+    /// The wire value (TickTick's scale: 0, 1, 3, 5).
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// `None` for a value outside the scale.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::None),
+            1 => Some(Self::Low),
+            3 => Some(Self::Medium),
+            5 => Some(Self::High),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

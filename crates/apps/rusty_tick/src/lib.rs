@@ -4,6 +4,11 @@
 //! Rusty-Mill/rusty_mill#382 actually block a task manager. See
 //! `SPIKE-FINDINGS.md`.
 
+pub mod api;
+pub mod dto;
+pub mod lists;
+pub mod server;
+pub mod service;
 pub mod store;
 pub mod task;
 
