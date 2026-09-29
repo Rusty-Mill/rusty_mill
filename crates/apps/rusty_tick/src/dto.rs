@@ -226,6 +226,7 @@ pub struct CreateTask {
     pub items: Vec<ChecklistItem>,
     #[serde(default)]
     pub tags: Vec<String>,
+    pub sort_order: Option<i64>,
 }
 
 #[derive(Deserialize)]

@@ -81,6 +81,8 @@ pub struct NewTask {
     pub repeat_flag: String,
     pub items: Vec<ChecklistItem>,
     pub tags: Vec<String>,
+    /// Where to put it; `None` appends to the end of the list.
+    pub sort_order: Option<i64>,
 }
 
 /// `Option<Option<_>>` fields: outer `None` leaves the field alone,
@@ -268,7 +270,8 @@ impl Service {
             new.id.unwrap_or_else(Uuid::now_v7),
             new.list_id,
             &clean_title(&new.title)?,
-            self.tasks.next_sort_order(new.list_id),
+            new.sort_order
+                .unwrap_or_else(|| self.tasks.next_sort_order(new.list_id)),
             now,
         );
         task.parent_id = new.parent_id;

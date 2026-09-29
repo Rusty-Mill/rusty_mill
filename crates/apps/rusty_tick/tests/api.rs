@@ -977,3 +977,13 @@ fn the_snapshot_carries_everything_a_client_boots_from() {
     assert_eq!(v["tags"][0]["name"], "t");
     assert_eq!(v["serverTimeMs"], NOW);
 }
+
+#[test]
+fn a_task_can_be_created_at_an_explicit_position() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    h.task(&list, r#""title":"appended""#);
+    h.task(&list, r#""title":"on top","sortOrder":-5000"#);
+    let (_, v) = h.call(Method::Get, &format!("/api/v1/lists/{list}/tasks"), "");
+    assert_eq!(titles(&v), ["on top", "appended"]);
+}

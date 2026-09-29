@@ -438,6 +438,7 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 repeat_flag: input.repeat_flag,
                 items: input.items,
                 tags: input.tags,
+                sort_order: input.sort_order,
             })?;
             Ok(Response::json(StatusCode::CREATED, &TaskDto::from(task)))
         }
