@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: storage spike and HTTP API
+**2026-09-29** · Issue [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** `crates/apps/rusty_tick` (`layer = "apps"`): a `TaskStore` over `rusty_multimodal_db_engine` and probes for the gaps #382 lists. Findings are in its `SPIKE-FINDINGS.md`.
+- **Added:** a JSON HTTP API (`rusty_tick` binary): lists, tasks, subtasks, tags, manual ordering, search and Today/Next 7 Days/Overdue smart lists. Built on `rusty_http`, `rusty_json` and `rusty_url` with a sans-IO router and blocking std sockets (ADR-0001); bearer-token auth, bounded head/body/idle/connection limits, loopback-only unless `--allow-remote`.
+- **Known limitations:** no web UI, sync, multi-user, recurrence or reminders; plain HTTP only; search is whole-word (engine has no prefix query, #382). Scale numbers are one run on one machine.
+
 ## rusty_multimodal_db_engine: group commit
 **2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
 
