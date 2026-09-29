@@ -65,11 +65,6 @@ export const REMINDERS_ALL_DAY = [
 
 export const reminderOptions = (allDay: boolean) => (allDay ? REMINDERS_ALL_DAY : REMINDERS_TIMED)
 
-/** The reminder a fresh time should get, if the user's default applies to it. */
-export function reminderForNewTime(defaultReminder: string): string[] {
-  return defaultReminder ? [defaultReminder] : []
-}
-
 export type RepeatPreset = 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom'
 
 /** The `RRULE` for a preset, anchored on `due` (its weekday or day of month). */
