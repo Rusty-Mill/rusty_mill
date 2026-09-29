@@ -1,8 +1,10 @@
 //! `rusty_tick`: serve the task API.
 //!
 //! ```text
-//! RUSTY_TICK_TOKEN=<16+ chars> rusty_tick [--data-dir DIR] [--addr HOST:PORT] [--allow-remote]
+//! RUSTY_TICK_TOKEN=<16+ chars> rusty_tick [--data-dir DIR] [--addr HOST:PORT] [--web-dir DIR] [--allow-remote]
 //! ```
+//!
+//! `--web-dir` serves the built web UI (`web/dist`) at `/`.
 //!
 //! The token is read from the environment (never an argument, which shows up
 //! in process listings). The server speaks plain HTTP, so it refuses a
@@ -19,6 +21,7 @@ use std::process::ExitCode;
 struct Options {
     data_dir: PathBuf,
     addr: SocketAddr,
+    web_dir: Option<PathBuf>,
     allow_remote: bool,
 }
 
@@ -26,6 +29,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
     let mut options = Options {
         data_dir: PathBuf::from("rusty_tick_data"),
         addr: SocketAddr::from(([127, 0, 0, 1], 8787)),
+        web_dir: None,
         allow_remote: false,
     };
     while let Some(arg) = args.next() {
@@ -36,6 +40,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
             "--addr" => {
                 let text = args.next().ok_or("--addr needs a value")?;
                 options.addr = text.parse().map_err(|e| format!("--addr {text:?}: {e}"))?;
+            }
+            "--web-dir" => {
+                options.web_dir = Some(args.next().ok_or("--web-dir needs a value")?.into());
             }
             "--allow-remote" => options.allow_remote = true,
             other => return Err(format!("unknown argument {other:?}")),
@@ -57,8 +64,17 @@ fn run() -> Result<(), String> {
     let api = Api::new(token)?;
     let service = Service::open(&options.data_dir, system_clock())
         .map_err(|e| format!("opening {}: {e}", options.data_dir.display()))?;
-    let server = Server::bind(options.addr, api, service)
+    let mut server = Server::bind(options.addr, api, service)
         .map_err(|e| format!("binding {}: {e}", options.addr))?;
+    if let Some(dir) = options.web_dir {
+        if !dir.join("index.html").is_file() {
+            return Err(format!(
+                "{} has no index.html; run `npm run build` in web/",
+                dir.display()
+            ));
+        }
+        server = server.with_web_dir(dir);
+    }
     eprintln!("rusty_tick: listening on http://{}", options.addr);
     server.run().map_err(|e| format!("serving: {e}"))
 }

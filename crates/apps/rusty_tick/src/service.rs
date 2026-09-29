@@ -1,11 +1,15 @@
-//! The application rules: validation, cascading deletes, smart lists.
+//! The application rules: validation, the Inbox, trash and restore, tag
+//! entities, smart lists.
 //!
-//! No I/O beyond the two stores, and no HTTP: the router in [`crate::api`]
+//! No I/O beyond the stores, and no HTTP: the router in [`crate::api`]
 //! translates requests into calls on [`Service`].
 
-use crate::lists::{ListStore, TaskList};
+use crate::docs::{Doc, DocStore, KINDS, MAX_DOC_BYTES};
+use crate::lists::{ListStore, TaskList, ViewMode, INBOX_ID};
 use crate::store::{TaskStore, TickError, SORT_STEP};
-use crate::task::{Priority, Status, Task, NO_DUE};
+use crate::tags::{tag_name, Tag, TagStore};
+use crate::task::{ChecklistItem, Priority, Status, Task, TaskKind, NO_DUE};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub const MAX_TITLE_CHARS: usize = 500;
@@ -13,6 +17,10 @@ pub const MAX_NOTES_CHARS: usize = 100_000;
 pub const MAX_LIST_NAME_CHARS: usize = 200;
 pub const MAX_TAGS: usize = 20;
 pub const MAX_TAG_CHARS: usize = 64;
+pub const MAX_ITEMS: usize = 200;
+pub const MAX_REMINDERS: usize = 10;
+pub const MAX_EX_DATES: usize = 1000;
+const MAX_SHORT_TEXT: usize = 200;
 const DAY_MS: i64 = 86_400_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,8 +29,20 @@ pub enum ServiceError {
     NotFound(&'static str),
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error(transparent)]
-    Storage(#[from] TickError),
+    Storage(TickError),
+}
+
+impl From<TickError> for ServiceError {
+    fn from(error: TickError) -> Self {
+        match error {
+            TickError::Duplicate(id) => Self::Conflict(format!("{id} already exists")),
+            TickError::NotFound(_) => Self::NotFound("record"),
+            other => Self::Storage(other),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ServiceError>;
@@ -42,15 +62,27 @@ pub fn system_clock() -> Clock {
     })
 }
 
+/// A task to create. `id` lets a client that generates its own ids (for
+/// optimistic updates and an offline queue) make the create idempotent.
 #[derive(Debug, Clone, Default)]
 pub struct NewTask {
+    pub id: Option<Uuid>,
     pub list_id: Uuid,
     pub parent_id: Option<Uuid>,
     pub title: String,
     pub notes: String,
+    pub kind: Option<TaskKind>,
     pub priority: Option<Priority>,
+    pub start_ms: Option<i64>,
     pub due_ms: Option<i64>,
+    pub is_all_day: bool,
+    pub time_zone: String,
+    pub reminders: Vec<String>,
+    pub repeat_flag: String,
+    pub items: Vec<ChecklistItem>,
     pub tags: Vec<String>,
+    /// Where to put it; `None` appends to the end of the list.
+    pub sort_order: Option<i64>,
 }
 
 /// `Option<Option<_>>` fields: outer `None` leaves the field alone,
@@ -59,9 +91,44 @@ pub struct NewTask {
 pub struct TaskPatch {
     pub title: Option<String>,
     pub notes: Option<String>,
+    pub kind: Option<TaskKind>,
+    pub status: Option<Status>,
     pub priority: Option<Priority>,
+    pub start_ms: Option<Option<i64>>,
     pub due_ms: Option<Option<i64>>,
+    pub is_all_day: Option<bool>,
+    pub time_zone: Option<String>,
+    pub reminders: Option<Vec<String>>,
+    pub repeat_flag: Option<String>,
+    pub ex_dates: Option<Vec<i64>>,
+    pub items: Option<Vec<ChecklistItem>>,
     pub tags: Option<Vec<String>>,
+    pub list_id: Option<Uuid>,
+    pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NewList {
+    pub id: Option<Uuid>,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ListPatch {
+    pub name: Option<String>,
+    pub color: Option<Option<String>>,
+    pub archived: Option<bool>,
+    pub view_mode: Option<ViewMode>,
+    pub sort_type: Option<String>,
+    pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TagPatch {
+    pub color: Option<Option<String>>,
+    pub parent: Option<Option<String>>,
+    pub sort_order: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,41 +137,63 @@ pub enum ListOrderBy {
     Due,
 }
 
+/// Everything a client needs to boot, in one read.
+pub struct Snapshot {
+    pub inbox_id: Uuid,
+    pub server_time_ms: i64,
+    pub lists: Vec<TaskList>,
+    pub tasks: Vec<Task>,
+    pub tags: Vec<Tag>,
+}
+
 pub struct Service {
     tasks: TaskStore,
     lists: ListStore,
+    tags: TagStore,
+    docs: DocStore,
     clock: Clock,
 }
 
 impl Service {
     pub fn open(dir: &std::path::Path, clock: Clock) -> Result<Self> {
-        Ok(Self {
+        let mut service = Self {
             tasks: TaskStore::open(dir)?,
             lists: ListStore::open(dir)?,
+            tags: TagStore::open(dir)?,
+            docs: DocStore::open(dir)?,
             clock,
-        })
+        };
+        service.ensure_inbox()?;
+        Ok(service)
     }
 
     fn now(&self) -> i64 {
         (self.clock)()
     }
 
+    fn ensure_inbox(&mut self) -> Result<()> {
+        if self.lists.get(INBOX_ID).is_none() {
+            let inbox = TaskList::new(INBOX_ID, "Inbox".into(), i64::MIN / 2, self.now());
+            self.lists.insert(inbox)?;
+        }
+        Ok(())
+    }
+
     // ---- lists -------------------------------------------------------
 
-    pub fn create_list(&mut self, name: &str) -> Result<TaskList> {
-        let name = clean_name(name)?;
+    pub fn create_list(&mut self, new: NewList) -> Result<TaskList> {
         let sort_order = self
             .lists
             .all()
             .last()
             .map_or(0, |l| l.sort_order.saturating_add(SORT_STEP));
-        let list = TaskList {
-            id: Uuid::now_v7(),
-            name,
-            archived: false,
+        let mut list = TaskList::new(
+            new.id.unwrap_or_else(Uuid::now_v7),
+            clean_name(&new.name)?,
             sort_order,
-            updated_ms: self.now(),
-        };
+            self.now(),
+        );
+        list.color = clean_color(new.color)?;
         self.lists.insert(list.clone())?;
         Ok(list)
     }
@@ -117,29 +206,47 @@ impl Service {
         self.lists.get(id).ok_or(ServiceError::NotFound("list"))
     }
 
-    pub fn patch_list(
-        &mut self,
-        id: Uuid,
-        name: Option<&str>,
-        archived: Option<bool>,
-    ) -> Result<TaskList> {
+    pub fn patch_list(&mut self, id: Uuid, patch: ListPatch) -> Result<TaskList> {
         let mut list = self.list(id)?;
-        if let Some(name) = name {
-            list.name = clean_name(name)?;
+        if id == INBOX_ID && patch.archived == Some(true) {
+            return invalid("the Inbox cannot be archived");
         }
-        if let Some(archived) = archived {
+        if let Some(name) = patch.name {
+            list.name = clean_name(&name)?;
+        }
+        if let Some(color) = patch.color {
+            list.color = clean_color(color)?;
+        }
+        if let Some(archived) = patch.archived {
             list.archived = archived;
         }
+        if let Some(view_mode) = patch.view_mode {
+            list.view_mode = view_mode;
+        }
+        if let Some(sort_type) = patch.sort_type {
+            list.sort_type = clean_short(sort_type, "sortType")?;
+        }
+        if let Some(sort_order) = patch.sort_order {
+            list.sort_order = sort_order;
+        }
         list.updated_ms = self.now();
+        list.version = list.version.wrapping_add(1);
         self.lists.replace(list.clone())?;
         Ok(list)
     }
 
-    /// Delete a list and every task in it.
+    /// Delete a list; its tasks go to the trash.
     pub fn delete_list(&mut self, id: Uuid) -> Result<()> {
+        if id == INBOX_ID {
+            return invalid("the Inbox cannot be deleted");
+        }
         self.list(id)?;
-        for task in self.tasks.in_list(id) {
-            self.tasks.delete(task.id)?;
+        let now = self.now();
+        for mut task in self.tasks.in_list(id) {
+            if !task.is_deleted() {
+                task.deleted_ms = Some(now);
+                self.save_task(task)?;
+            }
         }
         self.lists.delete(id)?;
         Ok(())
@@ -148,7 +255,7 @@ impl Service {
     // ---- tasks -------------------------------------------------------
 
     pub fn create_task(&mut self, new: NewTask) -> Result<Task> {
-        self.list(new.list_id)?;
+        self.live_list(new.list_id)?;
         if let Some(parent) = new.parent_id {
             let parent = self.task(parent)?;
             if parent.list_id != new.list_id {
@@ -158,24 +265,32 @@ impl Service {
                 return invalid("subtasks nest one level deep");
             }
         }
-        clean_due(new.due_ms)?;
-        let task = Task {
-            id: Uuid::now_v7(),
-            list_id: new.list_id,
-            parent_id: new.parent_id,
-            title: clean_title(&new.title)?,
-            notes: clean_notes(new.notes)?,
-            status: Status::Open,
-            priority: new.priority.unwrap_or(Priority::None),
-            due_ms: new.due_ms,
-            sort_order: self.tasks.next_sort_order(new.list_id),
-            tags: clean_tags(new.tags)?,
-            updated_ms: self.now(),
-        };
+        let now = self.now();
+        let mut task = Task::new(
+            new.id.unwrap_or_else(Uuid::now_v7),
+            new.list_id,
+            &clean_title(&new.title)?,
+            new.sort_order
+                .unwrap_or_else(|| self.tasks.next_sort_order(new.list_id)),
+            now,
+        );
+        task.parent_id = new.parent_id;
+        task.notes = clean_notes(new.notes)?;
+        task.kind = new.kind.unwrap_or(TaskKind::Text);
+        task.priority = new.priority.unwrap_or(Priority::None);
+        task.start_ms = clean_due(new.start_ms)?;
+        task.due_ms = clean_due(new.due_ms)?;
+        task.is_all_day = new.is_all_day;
+        task.time_zone = clean_short(new.time_zone, "timeZone")?;
+        task.reminders = clean_reminders(new.reminders)?;
+        task.repeat_flag = clean_short(new.repeat_flag, "repeatFlag")?;
+        task.items = clean_items(new.items)?;
+        task.tags = self.clean_tags(new.tags)?;
         self.tasks.insert(task.clone())?;
         Ok(task)
     }
 
+    /// A task, including one in the trash.
     pub fn task(&self, id: Uuid) -> Result<Task> {
         self.tasks.get(id).ok_or(ServiceError::NotFound("task"))
     }
@@ -188,42 +303,152 @@ impl Service {
         if let Some(notes) = patch.notes {
             task.notes = clean_notes(notes)?;
         }
+        if let Some(kind) = patch.kind {
+            task.kind = kind;
+        }
+        if let Some(status) = patch.status {
+            apply_status(&mut task, status, self.now());
+        }
         if let Some(priority) = patch.priority {
             task.priority = priority;
         }
+        if let Some(start) = patch.start_ms {
+            task.start_ms = clean_due(start)?;
+        }
         if let Some(due) = patch.due_ms {
-            clean_due(due)?;
-            task.due_ms = due;
+            task.due_ms = clean_due(due)?;
+        }
+        if let Some(all_day) = patch.is_all_day {
+            task.is_all_day = all_day;
+        }
+        if let Some(zone) = patch.time_zone {
+            task.time_zone = clean_short(zone, "timeZone")?;
+        }
+        if let Some(reminders) = patch.reminders {
+            task.reminders = clean_reminders(reminders)?;
+        }
+        if let Some(rule) = patch.repeat_flag {
+            task.repeat_flag = clean_short(rule, "repeatFlag")?;
+        }
+        if let Some(ex) = patch.ex_dates {
+            if ex.len() > MAX_EX_DATES {
+                return invalid(format!("more than {MAX_EX_DATES} exDates"));
+            }
+            task.ex_dates = ex;
+        }
+        if let Some(items) = patch.items {
+            task.items = clean_items(items)?;
         }
         if let Some(tags) = patch.tags {
-            task.tags = clean_tags(tags)?;
+            task.tags = self.clean_tags(tags)?;
         }
+        if let Some(order) = patch.sort_order {
+            task.sort_order = order;
+        }
+        let moved_to = patch.list_id.filter(|l| *l != task.list_id);
+        if let Some(list) = moved_to {
+            self.live_list(list)?;
+            if task.parent_id.is_some() {
+                return invalid("a subtask moves with its parent");
+            }
+            self.move_with_children(&task, list)?;
+            task.list_id = list;
+        }
+        self.save_task(task)
+    }
+
+    /// Move `parent`'s subtasks to `list`; the parent itself is saved by the caller.
+    fn move_with_children(&mut self, parent: &Task, list: Uuid) -> Result<()> {
+        for mut child in self.children(parent) {
+            child.list_id = list;
+            self.save_task(child)?;
+        }
+        Ok(())
+    }
+
+    fn children(&self, parent: &Task) -> Vec<Task> {
+        self.tasks
+            .in_list(parent.list_id)
+            .into_iter()
+            .filter(|t| t.parent_id == Some(parent.id))
+            .collect()
+    }
+
+    fn save_task(&mut self, mut task: Task) -> Result<Task> {
         task.updated_ms = self.now();
+        task.version = task.version.wrapping_add(1);
         self.tasks.replace(task.clone())?;
         Ok(task)
     }
 
     pub fn set_status(&mut self, id: Uuid, status: Status) -> Result<Task> {
-        let mut task = self.task(id)?;
-        task.status = status;
-        task.updated_ms = self.now();
-        self.tasks.replace(task.clone())?;
-        Ok(task)
+        self.patch_task(
+            id,
+            TaskPatch {
+                status: Some(status),
+                ..TaskPatch::default()
+            },
+        )
     }
 
-    /// Delete a task and its subtasks.
-    pub fn delete_task(&mut self, id: Uuid) -> Result<()> {
+    /// Move a task and its subtasks to the trash.
+    pub fn trash_task(&mut self, id: Uuid) -> Result<Task> {
+        let mut task = self.task(id)?;
+        let now = self.now();
+        for mut child in self.children(&task) {
+            child.deleted_ms.get_or_insert(now);
+            self.save_task(child)?;
+        }
+        task.deleted_ms.get_or_insert(now);
+        self.save_task(task)
+    }
+
+    /// Bring a task and the subtasks trashed with it back. A task whose list
+    /// is gone (or itself trashed) is restored into the Inbox.
+    pub fn restore_task(&mut self, id: Uuid) -> Result<Task> {
+        let mut task = self.task(id)?;
+        let trashed_at = task.deleted_ms;
+        if self.live_list(task.list_id).is_err() {
+            let target = INBOX_ID;
+            for mut child in self.children(&task) {
+                child.list_id = target;
+                self.save_task(child)?;
+            }
+            task.list_id = target;
+        }
+        for mut child in self.children(&task) {
+            if child.deleted_ms == trashed_at {
+                child.deleted_ms = None;
+                self.save_task(child)?;
+            }
+        }
+        task.deleted_ms = None;
+        self.save_task(task)
+    }
+
+    /// Delete a task and its subtasks for good.
+    pub fn purge_task(&mut self, id: Uuid) -> Result<()> {
         let task = self.task(id)?;
-        for child in self
-            .tasks
-            .in_list(task.list_id)
-            .into_iter()
-            .filter(|t| t.parent_id == Some(id))
-        {
+        for child in self.children(&task) {
             self.tasks.delete(child.id)?;
         }
         self.tasks.delete(id)?;
         Ok(())
+    }
+
+    /// Permanently delete everything in the trash; returns how many tasks went.
+    pub fn empty_trash(&mut self) -> Result<usize> {
+        let trashed: Vec<Uuid> = self
+            .tasks
+            .all()
+            .into_iter()
+            .filter(Task::is_deleted)
+            .map(|t| t.id)
+            .collect();
+        for id in &trashed {
+            self.tasks.delete(*id)?;
+        }
+        Ok(trashed.len())
     }
 
     /// Set a task's manual position. Rewrites one durable slot.
@@ -248,10 +473,21 @@ impl Service {
                 all
             }
         };
+        tasks.retain(|t| !t.is_deleted());
         if let Some(status) = status {
             tasks.retain(|t| t.status == status);
         }
         Ok(tasks)
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            inbox_id: INBOX_ID,
+            server_time_ms: self.now(),
+            lists: self.lists.all(),
+            tasks: self.tasks.all(),
+            tags: self.tags.all(),
+        }
     }
 
     // ---- search and smart lists --------------------------------------
@@ -272,13 +508,13 @@ impl Service {
 
     pub fn with_tag(&self, tag: &str) -> Vec<Task> {
         self.tasks
-            .with_tag(tag)
+            .with_tag(&tag_name(tag))
             .into_iter()
             .filter_map(|id| self.tasks.get(id))
             .collect()
     }
 
-    /// Open tasks due in `[from, to)` across every non-archived list,
+    /// Open, live tasks due in `[from, to)` across every non-archived list,
     /// soonest first. One range query per list.
     fn due_window(&self, from: i64, to: i64) -> Vec<Task> {
         let mut tasks: Vec<Task> = self
@@ -287,7 +523,7 @@ impl Service {
             .into_iter()
             .filter(|l| !l.archived)
             .flat_map(|l| self.tasks.due_between(l.id, from, to))
-            .filter(|t| t.status == Status::Open)
+            .filter(|t| t.status == Status::Open && !t.is_deleted())
             .collect();
         tasks.sort_by_key(|t| (t.due_ms, t.id));
         tasks
@@ -310,6 +546,223 @@ impl Service {
         let (start, _) = day_bounds(self.now(), utc_offset_min);
         self.due_window(start, start + 7 * DAY_MS)
     }
+
+    // ---- tags --------------------------------------------------------
+
+    pub fn tags(&self) -> Vec<Tag> {
+        self.tags.all()
+    }
+
+    pub fn tag(&self, name: &str) -> Result<Tag> {
+        self.tags
+            .get(&tag_name(name))
+            .ok_or(ServiceError::NotFound("tag"))
+    }
+
+    pub fn create_tag(&mut self, label: &str, color: Option<String>) -> Result<Tag> {
+        let label = clean_tag_label(label)?;
+        if self.tags.get(&tag_name(&label)).is_some() {
+            return Err(ServiceError::Conflict(format!(
+                "tag {label:?} already exists"
+            )));
+        }
+        let mut tag = Tag::new(&label, self.next_tag_order());
+        tag.color = clean_color(color)?;
+        self.tags.insert(tag.clone())?;
+        Ok(tag)
+    }
+
+    pub fn patch_tag(&mut self, name: &str, patch: TagPatch) -> Result<Tag> {
+        let mut tag = self.tag(name)?;
+        if let Some(color) = patch.color {
+            tag.color = clean_color(color)?;
+        }
+        if let Some(parent) = patch.parent {
+            tag.parent = match parent {
+                None => None,
+                Some(p) => {
+                    let p = tag_name(&p);
+                    if p == tag.name || self.tags.get(&p).is_none() {
+                        return invalid("parent must be another existing tag");
+                    }
+                    Some(p)
+                }
+            };
+        }
+        if let Some(order) = patch.sort_order {
+            tag.sort_order = order;
+        }
+        tag.version = tag.version.wrapping_add(1);
+        self.tags.replace(tag.clone())?;
+        Ok(tag)
+    }
+
+    /// Rename a tag everywhere: the entity, its children's `parent`, and every
+    /// task that carries it.
+    pub fn rename_tag(&mut self, name: &str, new_label: &str) -> Result<Tag> {
+        let old = self.tag(name)?;
+        let label = clean_tag_label(new_label)?;
+        let new_name = tag_name(&label);
+        if new_name != old.name && self.tags.get(&new_name).is_some() {
+            return Err(ServiceError::Conflict(format!(
+                "tag {label:?} already exists"
+            )));
+        }
+        let mut renamed = old.clone();
+        renamed.label = label;
+        renamed.name = new_name.clone();
+        renamed.version = renamed.version.wrapping_add(1);
+        if new_name != old.name {
+            self.tags.delete(&old.name)?;
+            self.tags.insert(renamed.clone())?;
+            for mut child in self
+                .tags
+                .all()
+                .into_iter()
+                .filter(|t| t.parent.as_deref() == Some(&old.name))
+            {
+                child.parent = Some(new_name.clone());
+                self.tags.replace(child)?;
+            }
+            self.retag(&old.name, Some(&new_name))?;
+        } else {
+            self.tags.replace(renamed.clone())?;
+        }
+        Ok(renamed)
+    }
+
+    /// Delete a tag and take it off every task.
+    pub fn delete_tag(&mut self, name: &str) -> Result<()> {
+        let tag = self.tag(name)?;
+        self.tags.delete(&tag.name)?;
+        for mut child in self
+            .tags
+            .all()
+            .into_iter()
+            .filter(|t| t.parent.as_deref() == Some(&tag.name))
+        {
+            child.parent = None;
+            self.tags.replace(child)?;
+        }
+        self.retag(&tag.name, None)
+    }
+
+    /// Replace tag `from` with `to` (or drop it) on every task, trashed ones too.
+    fn retag(&mut self, from: &str, to: Option<&str>) -> Result<()> {
+        for mut task in self
+            .tasks
+            .all()
+            .into_iter()
+            .filter(|t| t.tags.iter().any(|g| g == from))
+        {
+            let mut seen = HashSet::new();
+            task.tags = task
+                .tags
+                .iter()
+                .filter_map(|g| {
+                    if g == from {
+                        to.map(str::to_string)
+                    } else {
+                        Some(g.clone())
+                    }
+                })
+                .filter(|g| seen.insert(g.clone()))
+                .collect();
+            self.save_task(task)?;
+        }
+        Ok(())
+    }
+
+    fn next_tag_order(&self) -> i64 {
+        self.tags
+            .all()
+            .last()
+            .map_or(0, |t| t.sort_order.saturating_add(SORT_STEP))
+    }
+
+    /// Normalise `input` to tag names (trimmed, lowercased, de-duplicated,
+    /// bounded) and create any that do not exist yet.
+    fn clean_tags(&mut self, input: Vec<String>) -> Result<Vec<String>> {
+        let mut names: Vec<String> = Vec::new();
+        let mut labels: Vec<String> = Vec::new();
+        for raw in input {
+            let label = raw.trim().to_string();
+            let name = tag_name(&label);
+            if name.is_empty() || names.contains(&name) {
+                continue;
+            }
+            if label.chars().count() > MAX_TAG_CHARS {
+                return invalid(format!("a tag is longer than {MAX_TAG_CHARS} characters"));
+            }
+            names.push(name);
+            labels.push(label);
+        }
+        if names.len() > MAX_TAGS {
+            return invalid(format!("more than {MAX_TAGS} tags"));
+        }
+        for (name, label) in names.iter().zip(&labels) {
+            if self.tags.get(name).is_none() {
+                let order = self.next_tag_order();
+                self.tags.insert(Tag::new(label, order))?;
+            }
+        }
+        Ok(names)
+    }
+
+    // ---- client documents --------------------------------------------
+
+    pub fn docs(&self, kind: &str) -> Result<Vec<Doc>> {
+        check_kind(kind)?;
+        Ok(self.docs.of_kind(kind))
+    }
+
+    /// Insert or replace a document; `body` must be JSON.
+    pub fn put_doc(&mut self, kind: &str, id: Uuid, body: &str) -> Result<Doc> {
+        check_kind(kind)?;
+        if body.len() > MAX_DOC_BYTES {
+            return invalid(format!("document is larger than {MAX_DOC_BYTES} bytes"));
+        }
+        if rusty_json::from_str::<rusty_json::Value>(body).is_err() {
+            return invalid("document must be JSON");
+        }
+        if let Some(existing) = self.docs.get(id) {
+            if existing.kind != kind {
+                return Err(ServiceError::Conflict("id belongs to another kind".into()));
+            }
+        }
+        let doc = Doc {
+            id,
+            kind: kind.to_string(),
+            body: body.to_string(),
+            updated_ms: self.now(),
+        };
+        self.docs.put(doc.clone())?;
+        Ok(doc)
+    }
+
+    pub fn delete_doc(&mut self, kind: &str, id: Uuid) -> Result<()> {
+        check_kind(kind)?;
+        match self.docs.get(id) {
+            Some(doc) if doc.kind == kind => Ok(self.docs.delete(id)?),
+            _ => Err(ServiceError::NotFound("document")),
+        }
+    }
+
+    // ---- shared helpers ----------------------------------------------
+
+    /// A list that exists (trashed tasks do not keep lists alive).
+    fn live_list(&self, id: Uuid) -> Result<TaskList> {
+        self.list(id)
+    }
+}
+
+/// Completing a task stamps `completed_ms`; reopening clears it.
+fn apply_status(task: &mut Task, status: Status, now: i64) {
+    if task.status == status {
+        return;
+    }
+    task.status = status;
+    task.completed_ms = (status == Status::Done).then_some(now);
 }
 
 /// `[start, end)` of the local day containing `now_ms`, in UTC milliseconds.
@@ -320,12 +773,20 @@ fn day_bounds(now_ms: i64, utc_offset_min: i32) -> (i64, i64) {
     (start, start + DAY_MS)
 }
 
-/// `i64::MAX` is the store's "no due date" key, so it cannot be a real date.
-fn clean_due(due: Option<i64>) -> Result<()> {
-    if due == Some(NO_DUE) {
-        return invalid("dueMs is out of range");
+fn check_kind(kind: &str) -> Result<()> {
+    if KINDS.contains(&kind) {
+        Ok(())
+    } else {
+        invalid(format!("unknown document kind {kind:?}"))
     }
-    Ok(())
+}
+
+/// `i64::MAX` is the store's "no due date" key, so it cannot be a real date.
+fn clean_due(due: Option<i64>) -> Result<Option<i64>> {
+    if due == Some(NO_DUE) {
+        return invalid("date is out of range");
+    }
+    Ok(due)
 }
 
 fn clean_name(name: &str) -> Result<String> {
@@ -339,6 +800,39 @@ fn clean_name(name: &str) -> Result<String> {
         ));
     }
     Ok(name.to_string())
+}
+
+fn clean_tag_label(label: &str) -> Result<String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return invalid("tag must not be empty");
+    }
+    if label.chars().count() > MAX_TAG_CHARS {
+        return invalid(format!("tag is longer than {MAX_TAG_CHARS} characters"));
+    }
+    Ok(label.to_string())
+}
+
+/// `#rrggbb` or nothing.
+fn clean_color(color: Option<String>) -> Result<Option<String>> {
+    match color {
+        None => Ok(None),
+        Some(c) if is_hex_color(&c) => Ok(Some(c.to_lowercase())),
+        Some(_) => invalid("color must look like #rrggbb"),
+    }
+}
+
+fn is_hex_color(text: &str) -> bool {
+    text.len() == 7 && text.starts_with('#') && text[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn clean_short(text: String, field: &str) -> Result<String> {
+    if text.chars().count() > MAX_SHORT_TEXT {
+        return invalid(format!(
+            "{field} is longer than {MAX_SHORT_TEXT} characters"
+        ));
+    }
+    Ok(text)
 }
 
 fn clean_title(title: &str) -> Result<String> {
@@ -361,23 +855,27 @@ fn clean_notes(notes: String) -> Result<String> {
     Ok(notes)
 }
 
-/// Trim, drop empties, de-duplicate (first occurrence wins), and bound.
-fn clean_tags(tags: Vec<String>) -> Result<Vec<String>> {
-    let mut clean: Vec<String> = Vec::new();
-    for tag in tags {
-        let tag = tag.trim().to_string();
-        if tag.is_empty() || clean.contains(&tag) {
-            continue;
-        }
-        if tag.chars().count() > MAX_TAG_CHARS {
-            return invalid(format!("a tag is longer than {MAX_TAG_CHARS} characters"));
-        }
-        clean.push(tag);
+fn clean_reminders(reminders: Vec<String>) -> Result<Vec<String>> {
+    if reminders.len() > MAX_REMINDERS {
+        return invalid(format!("more than {MAX_REMINDERS} reminders"));
     }
-    if clean.len() > MAX_TAGS {
-        return invalid(format!("more than {MAX_TAGS} tags"));
+    reminders
+        .into_iter()
+        .map(|r| clean_short(r, "reminder"))
+        .collect()
+}
+
+fn clean_items(items: Vec<ChecklistItem>) -> Result<Vec<ChecklistItem>> {
+    if items.len() > MAX_ITEMS {
+        return invalid(format!("more than {MAX_ITEMS} checklist items"));
     }
-    Ok(clean)
+    items
+        .into_iter()
+        .map(|mut item| {
+            item.title = clean_title(&item.title)?;
+            Ok(item)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -395,10 +893,28 @@ mod tests {
     }
 
     #[test]
-    fn tags_are_trimmed_deduplicated_and_bounded() {
-        let tags = clean_tags(vec![" a ".into(), "a".into(), "".into(), "b".into()]).unwrap();
-        assert_eq!(tags, vec!["a", "b"]);
-        assert!(clean_tags((0..21).map(|i| i.to_string()).collect()).is_err());
-        assert!(clean_tags(vec!["x".repeat(65)]).is_err());
+    fn colors_must_be_hex() {
+        assert_eq!(
+            clean_color(Some("#ED70A5".into())).unwrap(),
+            Some("#ed70a5".into())
+        );
+        assert!(clean_color(Some("red".into())).is_err());
+        assert!(clean_color(Some("#12345".into())).is_err());
+        assert_eq!(clean_color(None).unwrap(), None);
+    }
+
+    #[test]
+    fn completing_stamps_and_reopening_clears() {
+        let mut task = Task::new(Uuid::now_v7(), INBOX_ID, "t", 0, 0);
+        apply_status(&mut task, Status::Done, 42);
+        assert_eq!(task.completed_ms, Some(42));
+        apply_status(&mut task, Status::Done, 99);
+        assert_eq!(
+            task.completed_ms,
+            Some(42),
+            "completing twice keeps the first stamp"
+        );
+        apply_status(&mut task, Status::Open, 100);
+        assert_eq!(task.completed_ms, None);
     }
 }
