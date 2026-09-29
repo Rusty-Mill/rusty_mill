@@ -782,6 +782,15 @@ where
         records
     }
 
+    /// Whether [`Self::compact`] would reclaim anything: the insert log
+    /// holds entries not yet folded, or the slot file holds slots of
+    /// deleted records. Cheap, unlike `compact`, which always rewrites the
+    /// blob and the slot file; a caller compacting on a timer checks this
+    /// first.
+    pub fn needs_compaction(&self) -> bool {
+        !self.is_gapless() || insert_log::log_path(self.file.path()).exists()
+    }
+
     /// Whether a [`GroupCommit`] is open: writes are not synced until its
     /// `commit`.
     pub fn is_sync_deferred(&self) -> bool {
@@ -2000,6 +2009,29 @@ mod tests {
     /// swaps the record, and — through the log — survives a portable
     /// reopen, after which the log is gone and a second reopen writes
     /// nothing; an unknown id is refused with nothing written.
+    /// `needs_compaction` is false for a freshly created store, true after
+    /// a write (the log holds it) or a delete (the log and a retired
+    /// slot), and false again once `compact` has folded both.
+    #[test]
+    fn needs_compaction_tracks_the_log_and_retired_slots() {
+        let dir = crate::test_support::fresh_temp_dir("mmap_needs_compaction").unwrap();
+        let path = dir.join("orders.mmap");
+        let mut store = OrderCore::create(sample(), &path).unwrap();
+        assert!(!store.needs_compaction(), "nothing written since create");
+
+        let mut replaced = order(2);
+        replaced.amount_cents = 1;
+        store.replace(replaced).unwrap();
+        assert!(store.needs_compaction(), "a replace is logged");
+        store.compact().unwrap();
+        assert!(!store.needs_compaction(), "compact folded the log");
+
+        store.delete(uuid::Uuid::from_u128(1)).unwrap();
+        assert!(store.needs_compaction(), "a delete is logged");
+        store.compact().unwrap();
+        assert!(!store.needs_compaction(), "and its slot reclaimed");
+    }
+
     #[test]
     fn replace_moves_the_index_rewrites_the_slot_and_survives_reopen() {
         let dir = crate::test_support::fresh_temp_dir("mmap_replace").unwrap();
