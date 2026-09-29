@@ -2,8 +2,8 @@
 
 use rusty_http::Method;
 use rusty_json::Value;
-use rusty_tick::api::{Api, Request};
-use rusty_tick::service::Service;
+use rusty_tick::api::Request;
+use rusty_tick::backend::Backend;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -15,8 +15,7 @@ const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
 struct Harness {
-    api: Api,
-    service: Service,
+    backend: Backend,
     clock: Arc<AtomicI64>,
 }
 
@@ -24,10 +23,9 @@ impl Harness {
     fn open(dir: &Path) -> Self {
         let clock = Arc::new(AtomicI64::new(NOW));
         let c = Arc::clone(&clock);
-        let service = Service::open(dir, Box::new(move || c.load(Ordering::SeqCst))).unwrap();
+        let clock_fn = Box::new(move || c.load(Ordering::SeqCst));
         Self {
-            api: Api::new(TOKEN.into()).unwrap(),
-            service,
+            backend: Backend::single(dir, TOKEN.into(), clock_fn).unwrap(),
             clock,
         }
     }
@@ -58,7 +56,7 @@ impl Harness {
             if_match,
             body: body.as_bytes(),
         };
-        let response = self.api.handle(&mut self.service, &request);
+        let response = self.backend.handle(&request);
         let value = if response.body.is_empty() {
             Value::Null
         } else {
@@ -130,7 +128,7 @@ fn health_is_open_but_everything_else_needs_the_token() {
     );
     assert_eq!(h.send(Method::Get, "/api/v1/lists", "", Some(TOKEN)).0, 200);
     assert!(
-        Api::new("short".into()).is_err(),
+        Backend::single(Path::new("unused"), "short".into(), Box::new(|| 0)).is_err(),
         "a guessable token is refused"
     );
 }

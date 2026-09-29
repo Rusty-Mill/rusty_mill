@@ -5,7 +5,7 @@ A self-hosted, TickTick-style task manager built on
 A clean-room design: it is written from the product's public behaviour and
 documented API, not from its code.
 
-Status: storage plus a JSON HTTP API. No web UI, sync or multi-user yet.
+Status: storage plus a JSON HTTP API, for one user or several. No web UI or sync yet.
 Engine findings are in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) (issue
 [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)); the HTTP stack
 choice is in [ADR-0001](docs/decisions/ADR-0001-http-stack.md); the
@@ -23,6 +23,22 @@ curl -H "Authorization: Bearer $RUSTY_TICK_TOKEN" -d '{"name":"Inbox"}' localhos
 
 The server speaks plain HTTP and refuses a non-loopback `--addr` unless
 `--allow-remote` is given (put TLS in front of it).
+
+### Several users
+
+If `<data-dir>/users.json` exists, the server runs for several users
+([ADR-0002](docs/decisions/ADR-0002-per-user-tokens.md)): each token is
+`<user key>.<secret>`, each user's data lives in `<data-dir>/users/<key>/`, at
+most 32 users are open at once, and `RUSTY_TICK_TOKEN` must not be set. The
+file is re-read as it changes, so a revoked token stops working without a
+restart. Every refusal is the same bare `401`.
+
+Nothing yet creates the file: the `rusty_tick user ...` commands are the next
+step of the ADR, so for now `users.json` is written by hand or from
+`rusty_tick::users::Registry`.
+
+Either way the server locks the data directory it opens, so a second
+`rusty_tick` on the same directory refuses to start.
 
 ## API
 

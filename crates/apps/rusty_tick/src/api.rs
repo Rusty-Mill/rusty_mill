@@ -29,6 +29,7 @@
 //! Writes accept `If-Match: "<etag>"`; a stale one is refused with 412 and
 //! the current entity in `current`.
 
+use crate::auth::{Authenticator, Denied};
 use crate::dto::{
     CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, PatchList, PatchTag,
     PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
@@ -37,12 +38,12 @@ use crate::service::{
     ListOrderBy, ListPatch, NewList, NewTask, Service, ServiceError, TagPatch, TaskPatch,
 };
 use crate::task::{Priority, Status};
+use crate::users::{RegistryFile, UserKey};
 use rusty_http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Shortest accepted bearer token: a guessable token defeats the check.
-pub const MIN_TOKEN_LEN: usize = 16;
+pub use crate::auth::MIN_TOKEN_LEN;
 const MAX_UTC_OFFSET_MIN: i32 = 14 * 60;
 
 /// A parsed request, as the router sees it.
@@ -84,6 +85,16 @@ impl Response {
         Self::error(&ApiError::Internal)
     }
 
+    /// 401, whatever the reason: a refusal says nothing about why.
+    pub fn unauthorized() -> Self {
+        Self::error(&ApiError::Unauthorized)
+    }
+
+    /// 503: the caller's data is busy elsewhere; try again.
+    pub fn unavailable() -> Self {
+        Self::error(&ApiError::Unavailable)
+    }
+
     fn error(error: &ApiError) -> Self {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -116,6 +127,7 @@ enum ApiError {
     Invalid(String),
     Conflict(String),
     Internal,
+    Unavailable,
 }
 
 impl ApiError {
@@ -127,6 +139,7 @@ impl ApiError {
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -138,6 +151,7 @@ impl ApiError {
             Self::Invalid(_) => "invalid",
             Self::Conflict(_) => "conflict",
             Self::Internal => "internal",
+            Self::Unavailable => "unavailable",
         }
     }
 
@@ -149,6 +163,7 @@ impl ApiError {
             }
             Self::Unauthorized => "missing or invalid bearer token".to_string(),
             Self::Internal => "internal error".to_string(),
+            Self::Unavailable => "temporarily unavailable".to_string(),
         }
     }
 }
@@ -169,30 +184,51 @@ impl From<ServiceError> for ApiError {
 
 type Result<T> = std::result::Result<T, ApiError>;
 
-/// The router plus the credential it checks.
+/// The router plus the way it tells who is asking.
+///
+/// Serving a request is three steps, run by [`crate::backend::Backend`]:
+/// answer what needs no user ([`Api::public`]), find the user
+/// ([`Api::authenticate`]), then route within that user's data
+/// ([`Api::serve`]).
 pub struct Api {
-    token: String,
+    auth: Authenticator,
 }
 
 impl Api {
-    /// `Err` if `token` is shorter than [`MIN_TOKEN_LEN`].
+    /// One shared token, one user. `Err` if `token` is shorter than
+    /// [`MIN_TOKEN_LEN`].
     pub fn new(token: String) -> std::result::Result<Self, String> {
-        if token.len() < MIN_TOKEN_LEN {
-            return Err(format!(
-                "the API token must be at least {MIN_TOKEN_LEN} characters"
-            ));
-        }
-        Ok(Self { token })
+        Ok(Self {
+            auth: Authenticator::single(token)?,
+        })
     }
 
-    pub fn handle(&self, service: &mut Service, request: &Request<'_>) -> Response {
-        match self.dispatch(service, request) {
-            Ok(response) => response,
-            Err(error) => Response::error(&error),
+    /// Tokens per user, checked against `users`.
+    pub fn multi_user(users: RegistryFile) -> Self {
+        Self {
+            auth: Authenticator::multi(users),
         }
     }
 
-    fn dispatch(&self, service: &mut Service, request: &Request<'_>) -> Result<Response> {
+    /// The answer to a request that needs no user (`GET /health`), or `None`.
+    pub fn public(request: &Request<'_>) -> Option<Response> {
+        let (path, _) = split_target(request.target);
+        let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+        (request.method == &Method::Get && segments == ["health"])
+            .then(|| Response::json(StatusCode::OK, &Health { status: "ok" }))
+    }
+
+    /// The user behind the request's credential.
+    ///
+    /// # Errors
+    ///
+    /// [`Denied`] when there is none; [`Response::unauthorized`] is its answer.
+    pub fn authenticate(&mut self, request: &Request<'_>) -> std::result::Result<UserKey, Denied> {
+        self.auth.authenticate(request.authorization)
+    }
+
+    /// Route an authenticated request within one user's data.
+    pub fn serve(service: &mut Service, request: &Request<'_>) -> Response {
         let (path, query) = split_target(request.target);
         let segments: Vec<String> = path
             .trim_matches('/')
@@ -200,10 +236,6 @@ impl Api {
             .map(decode_segment)
             .collect();
         let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
-        if request.method == &Method::Get && segments == ["health"] {
-            return Ok(Response::json(StatusCode::OK, &Health { status: "ok" }));
-        }
-        self.authorize(request.authorization)?;
         let cx = Cx {
             method: request.method,
             query: &query,
@@ -214,17 +246,7 @@ impl Api {
             ["api", "v1", rest @ ..] => route(service, &cx, rest),
             _ => Err(not_found()),
         }
-    }
-
-    fn authorize(&self, header: Option<&str>) -> Result<()> {
-        let presented = header
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .ok_or(ApiError::Unauthorized)?;
-        if constant_time_eq(presented.as_bytes(), self.token.as_bytes()) {
-            Ok(())
-        } else {
-            Err(ApiError::Unauthorized)
-        }
+        .unwrap_or_else(|error| Response::error(&error))
     }
 }
 

@@ -21,7 +21,6 @@
 //! exist.
 
 use crate::api::constant_time_eq;
-use crate::pool::UserKey;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -50,6 +49,35 @@ const DUMMY_DIGEST: Digest32 = [0; 32];
 
 /// A SHA-256 digest.
 pub type Digest32 = [u8; 32];
+
+/// The longest user key, in bytes.
+pub const MAX_USER_KEY_BYTES: usize = 64;
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid user key {0:?}: 1 to {MAX_USER_KEY_BYTES} of A-Z a-z 0-9 _ -")]
+pub struct InvalidKey(String);
+
+/// A user's name, which is also their directory's. Only a plain, short, ASCII
+/// key passes, so nothing (`..`, a separator, a NUL) can leave the pool's
+/// root. Case is kept, so on a case-insensitive filesystem `Alice` and
+/// `alice` name one directory; the lock then refuses the second, and callers
+/// should normalize keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserKey(String);
+
+impl UserKey {
+    pub fn parse(key: &str) -> Result<Self, InvalidKey> {
+        let plain = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+        if key.is_empty() || key.len() > MAX_USER_KEY_BYTES || !key.chars().all(plain) {
+            return Err(InvalidKey(key.to_string()));
+        }
+        Ok(Self(key.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// The digest of a token's secret: the one place SHA-256 is named, so the
 /// implementation can change without touching anything else (ADR-0002). It
@@ -516,6 +544,17 @@ mod tests {
         registry.add_user(&key("alice")).unwrap();
         let token = registry.add_token(&key("alice"), "phone", 1).unwrap();
         (registry, token)
+    }
+
+    #[test]
+    fn user_keys_are_plain_short_ascii() {
+        for good in ["alice", "Bob_2", "a-b", &"x".repeat(MAX_USER_KEY_BYTES)] {
+            assert!(UserKey::parse(good).is_ok(), "{good}");
+        }
+        for bad in ["", "..", "../x", "a/b", "a\\b", "a.b", "a b", "é", "a\0"] {
+            assert!(UserKey::parse(bad).is_err(), "{bad:?}");
+        }
+        assert!(UserKey::parse(&"x".repeat(MAX_USER_KEY_BYTES + 1)).is_err());
     }
 
     #[test]

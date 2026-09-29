@@ -3,6 +3,8 @@
 //! `SPIKE-FINDINGS.md` records which engine gaps mattered.
 
 pub mod api;
+pub mod auth;
+pub mod backend;
 pub mod docs;
 pub mod dto;
 pub mod lists;
