@@ -14308,6 +14308,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_tick"
+version = "0.0.1"
+dependencies = [
+ "rusty_multimodal_db_engine",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "rusty_time"
 version = "0.1.0"
 dependencies = [

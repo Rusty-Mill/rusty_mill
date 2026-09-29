@@ -1,0 +1,20 @@
+[package]
+name = "rusty_tick"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+description = "Self-hosted task manager on rusty_multimodal_db_engine (spike)"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_multimodal_db_engine = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2.0"
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

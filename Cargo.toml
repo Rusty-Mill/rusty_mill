@@ -52,6 +52,7 @@ members = [
     "crates/apps/rusty_homelab_mcp",
     "crates/apps/rusty_fedora_agent",
     "crates/apps/rusty_multimodal_db",
+    "crates/apps/rusty_tick",
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",

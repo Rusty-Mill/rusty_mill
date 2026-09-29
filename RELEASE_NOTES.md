@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: storage spike on the multimodal engine
+**2026-09-29** · Issue [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** `crates/apps/rusty_tick` (`layer = "apps"`): a `TaskStore` over `rusty_multimodal_db_engine` and probes for the gaps #382 lists. Findings are in its `SPIKE-FINDINGS.md`.
+- **Known limitations:** storage only; no API, UI, sync or multi-user yet. Scale numbers are one run on one machine.
+
 ## rusty_multimodal_db_engine: group commit
 **2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
 
