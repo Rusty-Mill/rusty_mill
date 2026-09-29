@@ -1,6 +1,7 @@
 # ADR-0002: Per-user tokens and one store directory per user
 
-Status: Proposed (2026-09-29), awaiting the owner. No code yet.
+Status: Accepted by the owner (2026-09-29), including the three open questions,
+which are answered below. No code yet.
 Date: 2026-09-29
 
 Related: ADR-0001 (HTTP stack), `SPIKE-FINDINGS.md` (gap 6),
@@ -64,7 +65,10 @@ Facts from the code that shape it:
    an evicted user's store happens under it too, so it stalls everyone for
    about 2 ms per 1,000 records of that user (15 ms at 10,000). That is
    accepted now; per-user locks are the next step if it is not, and the pool
-   API does not have to change for it.
+   API does not have to change for it. **The pool holds at most 32 open
+   users**, a constant (`DEFAULT_MAX_OPEN_USERS`), not a flag: at 260 bytes
+   per record that bounds memory at about 8 MiB per 1,000 records each, and
+   a flag can be added the day someone hits it.
 8. **Provisioning is a CLI, not an HTTP route.** `rusty_tick user add <key>
    [--label L]` prints the full token once and stores its digest; `user
    list`, `user revoke <key> <token id>`, `user disable <key>` and `user
@@ -86,11 +90,12 @@ Failures are logged with the user key and never the secret.
 
 ## Consequences
 
-- **Adds an external dependency:** SHA-256. The monorepo has `rusty_sha1`
-  and no SHA-256, and `sha2` is already in the workspace (used by
-  `rusty_remind_me` and `rusty_multimodal_db`), so this adds no new package to
-  the lockfile. Owner's call: use `sha2` (recommended, with this ADR as the
-  rationale) or write a first-party SHA-256 first.
+- **Adds an external dependency:** SHA-256 from `sha2`, as the owner chose.
+  The monorepo has `rusty_sha1` and no SHA-256, and `sha2` is already in the
+  workspace (used by `rusty_remind_me` and `rusty_multimodal_db`), so this adds
+  no new package to the lockfile. This ADR is the rationale for the
+  dependency policy check. A first-party SHA-256 would replace it later
+  behind the same one-function seam (`digest(secret) -> [u8; 32]`).
 - Adds `rusty_rand`, `rusty_base64` and `rusty_json` (already used) as
   first-party dependencies.
 - A leaked `users.json` exposes digests of 256-bit secrets, which cannot be
@@ -118,12 +123,9 @@ behaviour.
    proving neither sees the other's lists, a revoked token failing, and
    eviction under a capacity of one.
 
-## Open questions
+## Open questions, answered
 
-1. `sha2` or a first-party SHA-256?
-2. Is `users.json` in the data directory the right home, or should the
-   registry be an engine store like the rest of the data? A file is simpler
-   to edit and back up; a store gets the engine's durability for free but
-   needs the server stopped to edit by hand. I recommend the file.
-3. Is a per-user pool capacity worth a flag (`--max-open-users`), or is a
-   fixed default (say 32) enough until someone hits it?
+1. **SHA-256:** `sha2`, behind a one-function seam.
+2. **Registry:** the `users.json` file in the data directory, not an engine
+   store.
+3. **Pool size:** a fixed default of 32 open users, no flag.
