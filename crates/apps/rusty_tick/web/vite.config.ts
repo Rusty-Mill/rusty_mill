@@ -16,7 +16,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
-    exclude: ['**/node_modules/**', 'src/**/*.integration.test.ts'], // these need the real binary: `npm run test:integration`
+    exclude: ['**/node_modules/**', 'e2e/**', 'src/**/*.integration.test.ts'], // these need the real binary: `npm run test:integration`
     css: false,
   },
 })

@@ -1,0 +1,54 @@
+# Tick Local — web UI for `rusty_tick`
+
+React 18 + TypeScript + Vite + Tailwind + Zustand + React Router (hash routes).
+Talks to the `rusty_tick` server (data lives in `rusty_multimodal_db`), or runs
+alone against an in-browser demo backend.
+
+![Task list with detail pane](docs/screenshots/list-detail.png)
+
+## Run it
+
+```sh
+npm ci
+npm run dev                # http://localhost:5173, proxies /api to $TICK_BACKEND (default 127.0.0.1:8787)
+npm test                   # 540+ unit/component/integration tests (jsdom, in-memory backend)
+npm run test:integration   # same API contract against the real rusty_tick binary (cargo build -p rusty_tick first)
+npm run e2e                # Playwright smoke flows against the real binary serving dist/ (npm run build first)
+npm run build              # typecheck + production bundle into dist/
+```
+
+Server mode: start `RUSTY_TICK_TOKEN=<16+ chars> rusty_tick --data-dir ./data --web-dir web/dist`,
+open the URL, choose *Connect to server*, and enter the token (kept in
+sessionStorage unless you tick "remember"). Demo mode: choose *Try the demo*, or open `/?adapter=memory`.
+
+## How it fits together
+
+- `src/api/` — one `ApiClient` interface, two adapters: `MemoryAdapter` (same rules as the Rust service) and
+  `HttpAdapter` (`/api/v1`). A single contract suite (`contract.ts`) runs against both.
+- `src/store/` — Zustand store: server "base" state plus a persisted queue of pending operations replayed over it.
+  Writes are optimistic, retried with backoff when offline, and retried once on `412` (etag).
+- `src/features/` — tasks (list, kanban, detail pane, date popover), lists/tags, search, calendar, focus, habits, summary, settings.
+- `src/components/` — Popover, Menu, Dialog, Confirm, Tooltip, toasts: keyboard-operable and labelled.
+
+| | |
+|---|---|
+| ![Calendar](docs/screenshots/calendar.png) | ![Focus](docs/screenshots/focus.png) |
+| ![Habits](docs/screenshots/habits.png) | ![Summary](docs/screenshots/summary.png) |
+
+## Where this differs from the prompt (deliberately)
+
+The prompt's selections (database, HTTP stack) are fixed by the backend, so the UI follows our API, not TickTick's:
+
+- Ids are client-generated UUIDs and times are epoch milliseconds (not 24-hex ids / ISO strings); task status is `open | done`.
+- No TickTick batch API and no WebSocket "needSync": the UI polls and refreshes on window focus.
+- Focus records, habits, check-ins and the summary template are stored as generic `docs` in the backend, so they sync like everything else.
+
+## Stubs and known gaps
+
+- Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
+- Settings: Account, Date & Time, Appearance and Shortcuts are real; the other nine tabs are placeholders. Notifications are stored, never fired.
+- Comments button in the detail pane is disabled; Timeline view is a stub.
+- Search modal has no footer; the sort menu adds a "Custom" option for manual order.
+- Calendar: repeating tasks show only their next occurrence; agenda has no drag and no overdue group; "+N more" lists all of the day's tasks.
+- Habits: a check-in means "done" (goal amount is text); reminders are stored, not fired.
+- No reference screenshots were available, so there is no pixel comparison; layout, spacing and copy follow the prompt's description.
