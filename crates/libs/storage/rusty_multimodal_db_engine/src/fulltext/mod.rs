@@ -38,8 +38,8 @@ const K1: f64 = 1.2;
 const B: f64 = 0.75;
 
 /// A query. Built from [`Query::any_of`] (FTS5's `"p1" OR "p2"`), refined
-/// with [`Query::any_of_prefix`], [`Query::all_of`] (`AND`) and
-/// [`Query::except`] (`NOT`).
+/// with [`Query::any_of_prefix`], [`Query::all_of`] (`AND`),
+/// [`Query::except`] (`NOT`) and [`Query::in_columns`] (a column filter).
 ///
 /// Every phrase that can match, in the order the query was built, is a
 /// *leaf*; [`Instance::phrase`] numbers leaves. A phrase on the `NOT` side
@@ -60,6 +60,11 @@ enum Expr {
     All(Vec<Query>),
     /// Documents matching `keep` and not `drop`.
     Except { keep: Box<Query>, drop: Box<Query> },
+    /// `query`, with every phrase confined to `columns`.
+    InColumns {
+        query: Box<Query>,
+        columns: Vec<usize>,
+    },
 }
 
 impl Query {
@@ -108,13 +113,32 @@ impl Query {
         }
     }
 
+    /// Confine every phrase of `self` to `columns` (zero-based): FTS5's
+    /// `{c1 c2} : (self)`. The filter applies to phrases, not to documents,
+    /// so `all_of` under it needs each phrase in one of those columns. A
+    /// column the index does not have matches nothing. Filters nest by
+    /// intersection.
+    pub fn in_columns(self, columns: impl IntoIterator<Item = usize>) -> Self {
+        Self {
+            expr: Expr::InColumns {
+                query: Box::new(self),
+                columns: columns.into_iter().collect(),
+            },
+        }
+    }
+
+    /// [`Self::in_columns`] for a single column.
+    pub fn in_column(self, column: usize) -> Self {
+        self.in_columns([column])
+    }
+
     /// The phrases of a plain [`Self::any_of`] or [`Self::any_of_prefix`]
     /// query, already split into tokens. Empty for an `AND` or `NOT` query;
     /// [`Self::leaves`] is the general form.
     pub fn phrases(&self) -> &[Vec<String>] {
         match &self.expr {
             Expr::Any { phrases, .. } => phrases,
-            Expr::All(_) | Expr::Except { .. } => &[],
+            Expr::All(_) | Expr::Except { .. } | Expr::InColumns { .. } => &[],
         }
     }
 
@@ -130,6 +154,7 @@ impl Query {
             Expr::Any { phrases, .. } => out.extend(phrases.iter().map(Vec::as_slice)),
             Expr::All(queries) => queries.iter().for_each(|q| q.collect_leaves(out)),
             Expr::Except { keep, .. } => keep.collect_leaves(out),
+            Expr::InColumns { query, .. } => query.collect_leaves(out),
         }
     }
 }
@@ -139,6 +164,14 @@ struct Matched {
     docs: HashSet<u32>,
     /// One entry per leaf, in [`Query::leaves`] order.
     leaves: Vec<HashMap<u32, Vec<(u32, u32)>>>,
+}
+
+/// Keep only the matches in `columns`, and only the documents left with one.
+fn confine(by_doc: &mut HashMap<u32, Vec<(u32, u32)>>, columns: &[usize]) {
+    by_doc.retain(|_, at| {
+        at.retain(|&(column, _)| columns.contains(&(column as usize)));
+        !at.is_empty()
+    });
 }
 
 /// Where one phrase of the query matched: FTS5's `xInst`.
@@ -342,7 +375,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
     /// Every document matching `query`, best first (FTS5's `ORDER BY
     /// bm25(...)`), ties broken by key.
     pub fn search(&self, query: &Query) -> Vec<Hit<K>> {
-        let Matched { docs, leaves } = self.evaluate(query);
+        let Matched { docs, leaves } = self.evaluate(query, None);
         let mut hits: BTreeMap<&K, (u32, Vec<Instance>)> = BTreeMap::new();
         for (phrase, by_doc) in leaves.iter().enumerate() {
             for (&slot, at) in by_doc {
@@ -397,17 +430,21 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
     /// The documents `query` matches and where each of its leaf phrases
     /// occurs. A leaf's positions cover every document holding it, not only
     /// those the whole query keeps: BM25's IDF counts the former.
-    fn evaluate(&self, query: &Query) -> Matched {
+    fn evaluate(&self, query: &Query, columns: Option<&[usize]>) -> Matched {
         match &query.expr {
             Expr::Any { phrases, prefix } => {
                 let leaves: Vec<_> = phrases
                     .iter()
                     .map(|phrase| {
-                        if *prefix {
+                        let mut by_doc = if *prefix {
                             self.prefix_matches(phrase)
                         } else {
                             self.phrase_matches(phrase)
+                        };
+                        if let Some(columns) = columns {
+                            confine(&mut by_doc, columns);
                         }
+                        by_doc
                     })
                     .collect();
                 let docs = leaves
@@ -417,7 +454,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
                 Matched { docs, leaves }
             }
             Expr::All(queries) => {
-                let mut parts = queries.iter().map(|q| self.evaluate(q));
+                let mut parts = queries.iter().map(|q| self.evaluate(q, columns));
                 let Some(first) = parts.next() else {
                     return Matched {
                         docs: HashSet::new(),
@@ -431,10 +468,25 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
                 })
             }
             Expr::Except { keep, drop } => {
-                let mut kept = self.evaluate(keep);
-                let dropped = self.evaluate(drop);
+                let mut kept = self.evaluate(keep, columns);
+                let dropped = self.evaluate(drop, columns);
                 kept.docs.retain(|slot| !dropped.docs.contains(slot));
                 kept
+            }
+            Expr::InColumns {
+                query,
+                columns: wanted,
+            } => {
+                // Nested filters intersect: a phrase must be in both.
+                let narrowed: Vec<usize> = match columns {
+                    Some(outer) => wanted
+                        .iter()
+                        .copied()
+                        .filter(|c| outer.contains(c))
+                        .collect(),
+                    None => wanted.clone(),
+                };
+                self.evaluate(query, Some(&narrowed))
             }
         }
     }
@@ -906,6 +958,37 @@ mod tests {
         assert_eq!(hits.iter().map(|h| h.key).collect::<Vec<_>>(), [1]);
         assert!(hits[0].instances.iter().all(|i| i.phrase == 0));
         assert_eq!(query.leaves().len(), 1);
+    }
+
+    #[test]
+    fn a_column_filter_confines_phrases_to_its_columns() {
+        let index = index(&[
+            (1, ["red", "apple"]),
+            (2, ["apple", "red"]),
+            (3, ["red apple", "green"]),
+        ]);
+        let red = || Query::any_of(["red"]);
+        assert_eq!(keys(&index, &red().in_column(0)), [1, 3]);
+        assert_eq!(keys(&index, &red().in_column(1)), [2]);
+        assert_eq!(keys(&index, &red().in_columns([0, 1])), [1, 2, 3]);
+        // A column the index lacks matches nothing.
+        assert!(index.search(&red().in_column(2)).is_empty());
+        // The filter is on phrases: both must sit in the chosen column.
+        let both = Query::all_of([red(), Query::any_of(["apple"])]);
+        assert_eq!(keys(&index, &both.clone().in_column(0)), [3]);
+        assert_eq!(keys(&index, &both), [1, 2, 3]);
+        // Instances outside the filter are not reported.
+        let hits = index.search(&red().in_column(1));
+        assert!(hits[0].instances.iter().all(|i| i.column == 1));
+    }
+
+    #[test]
+    fn nested_column_filters_intersect() {
+        let index = index(&[(1, ["red", "red"]), (2, ["green", "red"])]);
+        let query = Query::any_of(["red"]).in_columns([0, 1]).in_column(1);
+        assert_eq!(keys(&index, &query), [1, 2]);
+        let narrow = Query::any_of(["red"]).in_column(0).in_column(1);
+        assert!(index.search(&narrow).is_empty());
     }
 
     #[test]
