@@ -6,6 +6,7 @@ pub mod api;
 pub mod docs;
 pub mod dto;
 pub mod lists;
+pub mod pool;
 pub mod server;
 pub mod service;
 pub mod static_files;

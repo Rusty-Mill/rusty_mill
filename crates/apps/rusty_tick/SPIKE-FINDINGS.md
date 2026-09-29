@@ -56,3 +56,31 @@ build for the scale numbers.
    belongs in the engine or the app; the existing `Journal` sequence counters
    are the starting point.
 5. Probe multi-user store eviction (gap 6) before a server milestone.
+
+## Follow-up (2026-09-29): gaps 3 and 6
+
+- **Gap 3, prefix, AND, NOT and column filters** now exist on the engine's
+  `fulltext::Query` (`any_of_prefix`, `all_of`, `except`, `in_columns`) and are
+  differentially tested against FTS5. `rusty_tick` can replace its whole-word
+  search with `any_of_prefix` for type-ahead.
+- **Gap 6, one store directory per user**, measured in `rusty_multimodal_db_engine`
+  (`tests/store_lifecycle.rs`, release build, one machine, one run, records of a
+  few dozen bytes with one equality index and one ordered index):
+
+  | Records per store | Open | Close | Idle resident |
+  |---|---|---|---|
+  | 0 | 0.2 ms | 5 µs | 4 KiB |
+  | 100 | 0.9 ms | 15 µs | 27 KiB |
+  | 1,000 | 2.3 ms | 0.1 ms | 257 KiB |
+  | 10,000 | 15.6 ms | 1.7 ms | 2.6 MiB |
+
+  Open and memory are linear in the records (about 1.5 µs and 260 bytes each), so
+  an LRU of open stores is cheap to build in the app: 1,000 idle users of 1,000
+  tasks is about 250 MiB. Closing is dropping the store and its `DirLock`; every
+  write was durable when it returned, so eviction loses nothing. The lock also
+  refuses a second handle in the same process, so an idle store can be closed
+  while nothing else has it open. The store does not lock by itself, so take the
+  `DirLock` first. The pool stays app-side: which user to evict and when is policy.
+  `src/pool.rs` is that pool (`StorePool`: least recently used closed first,
+  `DirLock` per directory, validated user keys). Nothing calls it yet, because
+  the API has one token and no user identity.

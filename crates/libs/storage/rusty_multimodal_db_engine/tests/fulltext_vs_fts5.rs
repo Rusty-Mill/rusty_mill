@@ -233,6 +233,32 @@ fn side(rng: &mut Lcg) -> Both {
     }
 }
 
+/// A column filter over the wiki's `title` (0) and `content` (1): one column,
+/// both, or all but one, around a plain, prefix or `AND` query.
+fn column_query(rng: &mut Lcg) -> Both {
+    let (inner, inner_expr) = match rng.below(3) {
+        0 => prefix_query(rng),
+        1 => boolean_query(rng),
+        _ => plain_query(rng),
+    };
+    match rng.below(5) {
+        0 => (inner.in_column(0), format!("title : ({inner_expr})")),
+        1 => (inner.in_column(1), format!("content : ({inner_expr})")),
+        2 => (
+            inner.except_columns([0]),
+            format!("- title : ({inner_expr})"),
+        ),
+        3 => (
+            inner.except_columns([1]),
+            format!("- content : ({inner_expr})"),
+        ),
+        _ => (
+            inner.in_columns([0, 1]),
+            format!("{{title content}} : ({inner_expr})"),
+        ),
+    }
+}
+
 /// What [`compare_rankings`] holds this index to.
 #[derive(Clone, Copy)]
 enum Compare {
@@ -409,6 +435,18 @@ fn and_and_not_queries_rank_as_fts5_ranks_them() {
 }
 
 #[test]
+fn column_filters_rank_as_fts5_ranks_them() {
+    compare_rankings(
+        ["title", "content"],
+        0x5eed_0007,
+        300,
+        400,
+        column_query,
+        Compare::Ranked,
+    );
+}
+
+#[test]
 fn nested_and_not_queries_match_the_documents_fts5_matches() {
     compare_rankings(
         ["content", "category", "tags"],
@@ -442,10 +480,11 @@ fn snippets_are_the_ones_fts5_writes() {
 
     let mut compared = 0;
     for _ in 0..200 {
-        let (query, expr) = match rng.below(3) {
+        let (query, expr) = match rng.below(4) {
             0 => plain_query(&mut rng),
             1 => prefix_query(&mut rng),
-            _ => boolean_query(&mut rng),
+            2 => boolean_query(&mut rng),
+            _ => column_query(&mut rng),
         };
         let hits = index.search(&query);
         // The wiki's own call, then the other shapes snippet() takes.
