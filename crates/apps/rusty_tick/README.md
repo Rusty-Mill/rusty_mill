@@ -33,9 +33,15 @@ most 32 users are open at once, and `RUSTY_TICK_TOKEN` must not be set. The
 file is re-read as it changes, so a revoked token stops working without a
 restart. Every refusal is the same bare `401`.
 
-Nothing yet creates the file: the `rusty_tick user ...` commands are the next
-step of the ADR, so for now `users.json` is written by hand or from
-`rusty_tick::users::Registry`.
+```
+rusty_tick user add alice phone --data-dir DIR   # prints alice's token, once
+rusty_tick user list | revoke KEY TOKEN_ID | disable KEY | enable KEY
+```
+
+`add` creates `users.json` in a fresh directory (and adds a token to an
+existing user). It refuses a directory that already holds a single-user
+store, which a `users.json` would hide. A running server picks the change up
+within a second.
 
 Either way the server locks the data directory it opens, so a second
 `rusty_tick` on the same directory refuses to start.

@@ -6,6 +6,10 @@
 //!
 //! `--web-dir` serves the built web UI (`web/dist`) at `/`.
 //!
+//! `rusty_tick user add KEY [LABEL] | list | revoke KEY TOKEN_ID | disable KEY |
+//! enable KEY [--data-dir DIR]` manages the users of a multi-user directory
+//! and exits; `add` prints the new token once.
+//!
 //! The token is read from the environment (never an argument, which shows up
 //! in process listings). The server speaks plain HTTP, so it refuses a
 //! non-loopback address unless `--allow-remote` says it sits behind
@@ -16,6 +20,7 @@
 //! under `DIR/users/`, and `RUSTY_TICK_TOKEN` must not be set, so nobody
 //! believes a shared token is being enforced.
 
+use rusty_tick::admin;
 use rusty_tick::backend::Backend;
 use rusty_tick::pool::DEFAULT_MAX_OPEN_USERS;
 use rusty_tick::server::Server;
@@ -29,6 +34,8 @@ struct Options {
     addr: SocketAddr,
     web_dir: Option<PathBuf>,
     allow_remote: bool,
+    /// Words that are not flags: a subcommand and its arguments.
+    command: Vec<String>,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
@@ -37,6 +44,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
         addr: SocketAddr::from(([127, 0, 0, 1], 8787)),
         web_dir: None,
         allow_remote: false,
+        command: Vec::new(),
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -51,6 +59,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
                 options.web_dir = Some(args.next().ok_or("--web-dir needs a value")?.into());
             }
             "--allow-remote" => options.allow_remote = true,
+            other if !other.starts_with('-') => options.command.push(other.to_string()),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -78,6 +87,22 @@ fn open_backend(data_dir: &std::path::Path) -> Result<Backend, String> {
 
 fn run() -> Result<(), String> {
     let options = parse_args(std::env::args().skip(1))?;
+    match options.command.split_first() {
+        None => {}
+        Some((word, rest)) if word == "user" => {
+            let out = admin::run(&options.data_dir, rest, system_clock()())?;
+            print!(
+                "{out}{}",
+                if out.is_empty() || out.ends_with('\n') {
+                    ""
+                } else {
+                    "\n"
+                }
+            );
+            return Ok(());
+        }
+        Some((word, _)) => return Err(format!("unknown command {word:?}")),
+    }
     if !options.addr.ip().is_loopback() && !options.allow_remote {
         return Err(format!(
             "{} is not a loopback address; pass --allow-remote to serve plain HTTP there",

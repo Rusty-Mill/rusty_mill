@@ -2,6 +2,7 @@
 //! rules, a JSON HTTP API and a static file server for the web UI in `web/`.
 //! `SPIKE-FINDINGS.md` records which engine gaps mattered.
 
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod backend;
