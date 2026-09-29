@@ -22,7 +22,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   - `authenticate` returns `None`, and does the same work, for a malformed token, an unknown or disabled user, a revoked token and a wrong secret.
   - `users.json` is versioned and refused if it has an unknown field, a bad key, a duplicate user or token id, or a digest that is not 64 hex characters. `save` writes a temporary file, syncs and renames it, `0600` on Unix.
   - `RegistryFile` re-reads the file when its modification time or length changes (at most once a second by default), and keeps the last good registry if a later edit does not parse, reporting why through `last_error`.
-- **Added dependencies:** `rusty_rand` and `rusty_base64` (first-party) and `sha2` (the workspace's pinned version, behind `users::digest`). No new package in the lockfile.
+- **Added dependencies:** `rusty_rand`, `rusty_base64` and `rusty_rsa` (for its SHA-256), all first-party. No external dependency and no new package in the lockfile.
 - Known limitations: no rate limiting (ADR-0002 leaves it to the TLS front end); the CLI that edits the file is step 4.
 
 ---

@@ -23,7 +23,6 @@
 use crate::api::constant_time_eq;
 use crate::pool::UserKey;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -52,14 +51,11 @@ const DUMMY_DIGEST: Digest32 = [0; 32];
 /// A SHA-256 digest.
 pub type Digest32 = [u8; 32];
 
-/// The digest of a token's secret: the one place SHA-256 is named, so a
-/// first-party implementation can replace `sha2` later without touching
-/// anything else (ADR-0002).
+/// The digest of a token's secret: the one place SHA-256 is named, so the
+/// implementation can change without touching anything else (ADR-0002). It
+/// is `rusty_rsa`'s, the monorepo's own.
 pub fn digest(secret: &str) -> Digest32 {
-    let out = Sha256::digest(secret.as_bytes());
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&out);
-    digest
+    rusty_rsa::sha256(secret.as_bytes())
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -1,7 +1,8 @@
 # ADR-0002: Per-user tokens and one store directory per user
 
 Status: Accepted by the owner (2026-09-29), including the three open questions,
-which are answered below. No code yet.
+which are answered below. *Amended 2026-09-29:* SHA-256 is the monorepo's own
+`rusty_rsa::sha256`, not `sha2` (see "Consequences").
 Date: 2026-09-29
 
 Related: ADR-0001 (HTTP stack), `SPIKE-FINDINGS.md` (gap 6),
@@ -90,17 +91,14 @@ Failures are logged with the user key and never the secret.
 
 ## Consequences
 
-- **Adds an external dependency:** SHA-256 from `sha2`, as the owner chose.
-  The monorepo has `rusty_sha1` and no SHA-256, and `sha2` is already a
-  pinned workspace dependency (`[workspace.dependencies]`, used by the `nexus`
-  crates), so `rusty_tick` takes it with `{ workspace = true }` and adds no
-  new package to the lockfile. (An earlier draft of this ADR named
-  `rusty_remind_me` and `rusty_multimodal_db` as users; they use the `sha256`
-  crate and `sha2` 0.10, so they are not the precedent.) This ADR is the rationale for the
-  dependency policy check. A first-party SHA-256 would replace it later
-  behind the same one-function seam (`digest(secret) -> [u8; 32]`).
-- Adds `rusty_rand`, `rusty_base64` and `rusty_json` (already used) as
-  first-party dependencies.
+- **No external dependency for SHA-256.** It is `rusty_rsa::sha256`, a
+  hand-rolled, dependency-free FIPS 180-4 implementation already in the
+  monorepo (`crates/foundation/rusty_rsa`). This ADR first said the monorepo
+  had no SHA-256 and chose `sha2` on that basis; that was wrong, and the owner
+  switched once it was found. The choice stays behind the one-function seam
+  (`digest(secret) -> [u8; 32]`).
+- Adds `rusty_rand`, `rusty_base64` and `rusty_rsa` as first-party
+  dependencies (`rusty_json` is already used).
 - A leaked `users.json` exposes digests of 256-bit secrets, which cannot be
   brute-forced; a leaked token exposes one user until it is revoked.
 - Single-user mode should also take the `DirLock` at startup, a one-line fix
@@ -128,7 +126,8 @@ behaviour.
 
 ## Open questions, answered
 
-1. **SHA-256:** `sha2`, behind a one-function seam.
+1. **SHA-256:** `rusty_rsa::sha256` (first chosen as `sha2`; amended, see
+   "Consequences"), behind a one-function seam.
 2. **Registry:** the `users.json` file in the data directory, not an engine
    store.
 3. **Pool size:** a fixed default of 32 open users, no flag.
