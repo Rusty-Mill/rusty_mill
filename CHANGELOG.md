@@ -20,6 +20,9 @@ Removed / Fixed / Security, newest first.
   - New in `insert_log`: `LogSync`, `append_record`, `append_tombstone_as` and `sync`; and `GenericMmapStore::is_sync_deferred`.
   - `rusty_remind_me`'s hub applies each push through it.
 
+### Changed
+- **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
+
 ### Fixed
 - **`rusty_multimodal_db_engine`: a long write pause each time the row count doubled.**
   - `GenericMmapStore` kept its records inline in a `HashMap`, so a regrow copied every record under the caller's lock: 170–370 ms at 115 000 of `rusty_remind_me`'s ~800-byte hub memories.

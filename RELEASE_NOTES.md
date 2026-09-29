@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: `ServicePool` (ADR-0002 step 1)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Changed:** `pool::StorePool` is now `pool::ServicePool`, and pools a user's whole `Service` (tasks and lists) instead of only a `TaskStore`. `StorePool` could not serve the API, since a user's data is both.
+  - `ServicePool::new(root, capacity, clock)` takes a factory for the clock each opened service reads.
+  - `DEFAULT_MAX_OPEN_USERS` is 32, a constant (ADR-0002).
+- No behaviour change: nothing calls the pool yet. The binary and API are untouched.
+- Known limitation: single-user startup still takes no `DirLock` (ADR-0002 proposes fixing it with the authenticator step).
+
+---
+
 ## rusty_multimodal_db_engine and rusty_tick: growth follow-ups (issue #382)
 **2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
 
