@@ -124,37 +124,6 @@ export function computeStreak(habit: Pick<HabitBody, 'frequency'>, checked: Read
   return { current: run, best, unit }
 }
 
-// ---- completion rate ----------------------------------------------------------
-
-/**
- * Share (0..1) of what was asked that got done between `fromMs` and `toMs`,
- * ignoring days before the habit existed. Daily and weekday habits count due
- * days; N-per-week habits count `times` per week touched by the range.
- */
-export function completionRate(habit: HabitBody, checked: ReadonlySet<string>, fromMs: number, toMs: number, weekStart: WeekStart): number {
-  const from = Math.max(startOfDay(fromMs), startOfDay(habit.createdMs))
-  const to = startOfDay(toMs)
-  if (from > to) return 0
-  const f = habit.frequency
-  if (f.kind === 'perWeek') {
-    let done = 0
-    let asked = 0
-    for (let w = startOfWeek(from, weekStart); w <= to; w = addDays(w, 7)) {
-      asked += f.times
-      done += Math.min(f.times, weekCount(checked, w))
-    }
-    return asked === 0 ? 0 : done / asked
-  }
-  let due = 0
-  let done = 0
-  for (let d = from; d <= to; d = addDays(d, 1)) {
-    if (!isDue(habit, d)) continue
-    due++
-    if (checked.has(dayKey(d))) done++
-  }
-  return due === 0 ? 0 : done / due
-}
-
 // ---- goal text ------------------------------------------------------------------
 
 const GOAL = /^(\d{1,4}) (.+) per day$/

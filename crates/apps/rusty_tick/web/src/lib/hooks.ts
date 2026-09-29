@@ -10,16 +10,6 @@ export function useNow(intervalMs = 30_000): number {
   return now
 }
 
-/** `value`, but only after it has stopped changing for `ms`. */
-export function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms)
-    return () => clearTimeout(t)
-  }, [value, ms])
-  return v
-}
-
 /** A media query, live. */
 export function useMedia(query: string): boolean {
   const [match, setMatch] = useState(() => typeof matchMedia === 'function' && matchMedia(query).matches)

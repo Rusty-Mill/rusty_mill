@@ -33,10 +33,6 @@ export function addMonths(ms: number, n: number): number {
   return d.getTime()
 }
 
-export function isSameDay(a: number, b: number): boolean {
-  return startOfDay(a) === startOfDay(b)
-}
-
 /** Whole calendar days from `a`'s day to `b`'s day. */
 export function diffDays(a: number, b: number): number {
   return Math.round((startOfDay(b) - startOfDay(a)) / DAY)

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { dayKey } from '@/lib/date'
 import { isUuid } from '@/lib/id'
 import {
-  asHabitBody, checkinId, completionRate, computeStreak, formatGoal, frequencyLabel, isDue, parseGoal, weekDays, weekdayOrder,
+  asHabitBody, checkinId, computeStreak, formatGoal, frequencyLabel, isDue, parseGoal, weekDays, weekdayOrder,
   type HabitBody,
 } from './logic'
 
@@ -109,30 +109,6 @@ describe('computeStreak', () => {
   })
   it('ignores check-ins in the future', () => {
     expect(computeStreak(daily, keys([9, 30]), today, 1).current).toBe(0)
-  })
-})
-
-describe('completionRate', () => {
-  it('is done due days over due days', () => {
-    expect(completionRate(daily, keys([9, 28], [9, 29]), at(9, 27), at(9, 29), 1)).toBeCloseTo(2 / 3)
-  })
-  it('only counts due days of a weekday habit', () => {
-    const h = habit({ kind: 'weekdays', days: [1, 3] })
-    // Sep 28 (Mon) done, Sep 30 (Wed) missed; Tue not due.
-    expect(completionRate(h, keys([9, 28]), at(9, 28), at(9, 30), 1)).toBe(0.5)
-  })
-  it('ignores days before the habit was created', () => {
-    const h = habit({ kind: 'daily' }, at(9, 28))
-    expect(completionRate(h, keys([9, 28], [9, 29]), at(9, 20), at(9, 29), 1)).toBe(1)
-  })
-  it('caps per-week habits at the target', () => {
-    const h = habit({ kind: 'perWeek', times: 2 })
-    expect(completionRate(h, keys([9, 28], [9, 29], [9, 30]), at(9, 28), at(10, 4), 1)).toBe(1)
-    expect(completionRate(h, keys([9, 28]), at(9, 28), at(10, 4), 1)).toBe(0.5)
-  })
-  it('is zero for empty ranges', () => {
-    expect(completionRate(daily, new Set(), at(9, 29), at(9, 20), 1)).toBe(0)
-    expect(completionRate(habit({ kind: 'weekdays', days: [3] }), new Set(), at(9, 29), at(9, 29), 1)).toBe(0)
   })
 })
 
