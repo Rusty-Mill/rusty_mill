@@ -11,8 +11,7 @@
 //! the token parsed, so the server can log it; the secret is never kept.
 
 use crate::api::constant_time_eq;
-use crate::pool::UserKey;
-use crate::users::{RegistryFile, Token};
+use crate::users::{RegistryFile, Token, UserKey};
 
 /// Shortest accepted single-user token: a guessable token defeats the check.
 pub const MIN_TOKEN_LEN: usize = 16;

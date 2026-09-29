@@ -24,10 +24,9 @@ use crate::auth::{Authenticator, Denied};
 use crate::dto::{
     CreateList, CreateTask, ListDto, Lists, PatchList, PatchTask, SetOrder, TaskDto, Tasks,
 };
-use crate::pool::UserKey;
 use crate::service::{ListOrderBy, NewTask, Service, ServiceError, TaskPatch};
 use crate::task::{Priority, Status};
-use crate::users::RegistryFile;
+use crate::users::{RegistryFile, UserKey};
 use rusty_http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -168,10 +167,9 @@ type Result<T> = std::result::Result<T, ApiError>;
 
 /// The router plus the way it tells who is asking.
 ///
-/// Serving a request is three steps, which the server runs against a pool of
-/// per-user services ([`crate::backend::Backend`]) and [`Api::handle`] runs
-/// against one service: answer what needs no user ([`Api::public`]), find the
-/// user ([`Api::authenticate`]), then route within that user's data
+/// Serving a request is three steps, run by [`crate::backend::Backend`]:
+/// answer what needs no user ([`Api::public`]), find the user
+/// ([`Api::authenticate`]), then route within that user's data
 /// ([`Api::serve`]).
 pub struct Api {
     auth: Authenticator,
@@ -217,18 +215,6 @@ impl Api {
         match route(service, request.method, &segments, &query, request.body) {
             Ok(response) => response,
             Err(error) => Response::error(&error),
-        }
-    }
-
-    /// All three steps against one service, whoever the user is: the
-    /// single-user server, and tests.
-    pub fn handle(&mut self, service: &mut Service, request: &Request<'_>) -> Response {
-        if let Some(response) = Self::public(request) {
-            return response;
-        }
-        match self.authenticate(request) {
-            Ok(_) => Self::serve(service, request),
-            Err(_) => Response::unauthorized(),
         }
     }
 }

@@ -13,6 +13,7 @@
 //! user identity, and ADR-0002 adds it.
 
 use crate::service::{Clock, Service, ServiceError};
+use crate::users::UserKey;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -28,39 +29,12 @@ pub const DEFAULT_MAX_OPEN_USERS: NonZeroUsize = match NonZeroUsize::new(32) {
 /// Makes the clock each opened service reads the time from.
 pub type ClockFactory = Box<dyn Fn() -> Clock + Send>;
 
-/// The longest user key, in bytes.
-pub const MAX_USER_KEY_BYTES: usize = 64;
-
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
-    #[error("invalid user key {0:?}: 1 to {MAX_USER_KEY_BYTES} of A-Z a-z 0-9 _ -")]
-    InvalidUser(String),
     #[error(transparent)]
     Lock(#[from] DirLockError),
     #[error(transparent)]
     Service(#[from] ServiceError),
-}
-
-/// A user's name as a directory name. Only a plain, short, ASCII key passes,
-/// so nothing (`..`, a separator, a NUL) can leave the pool's root. Case is
-/// kept, so on a case-insensitive filesystem `Alice` and `alice` name one
-/// directory; the lock then refuses the second, and callers should
-/// normalize keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserKey(String);
-
-impl UserKey {
-    pub fn parse(key: &str) -> Result<Self, PoolError> {
-        let plain = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
-        if key.is_empty() || key.len() > MAX_USER_KEY_BYTES || !key.chars().all(plain) {
-            return Err(PoolError::InvalidUser(key.to_string()));
-        }
-        Ok(Self(key.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 /// An open service and the lock on its directory. Fields drop in order, so the
@@ -168,17 +142,6 @@ mod tests {
     #[test]
     fn the_default_bound_is_thirty_two() {
         assert_eq!(DEFAULT_MAX_OPEN_USERS.get(), 32);
-    }
-
-    #[test]
-    fn user_keys_are_plain_short_ascii() {
-        for good in ["alice", "Bob_2", "a-b", &"x".repeat(MAX_USER_KEY_BYTES)] {
-            assert!(UserKey::parse(good).is_ok(), "{good}");
-        }
-        for bad in ["", "..", "../x", "a/b", "a\\b", "a.b", "a b", "é", "a\0"] {
-            assert!(UserKey::parse(bad).is_err(), "{bad:?}");
-        }
-        assert!(UserKey::parse(&"x".repeat(MAX_USER_KEY_BYTES + 1)).is_err());
     }
 
     #[test]

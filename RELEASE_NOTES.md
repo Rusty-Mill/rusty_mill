@@ -23,7 +23,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   - `503` if another process holds a user's directory. `/health` needs no token and opens no store.
   - `RUSTY_TICK_TOKEN` must not be set in this mode.
 - **Added:** `rusty_tick::backend::Backend` (authentication, then the caller's data; no sockets) and `rusty_tick::auth::Authenticator`.
-- **Changed:** `Server::bind` takes a `Backend` instead of an `Api` and a `Service`. `Api` is now `public`, `authenticate` and `serve` steps; `Api::handle` still runs all three against one service.
+- **Changed:** `Server::bind` takes a `Backend` instead of an `Api` and a `Service`. `Api` is now three steps (`public`, `authenticate`, `serve`) that `Backend` runs, and `Api::handle` is gone. `UserKey` moved from `pool` to `users`, with its own error instead of `PoolError::InvalidUser`, so `users` no longer reaches into `pool`.
 - **Fixed:** single-user startup took no lock on the data directory, so two servers on one directory overwrote each other. Both modes now hold a `DirLock` and a second server refuses to start.
 - Single-user mode is otherwise unchanged: `RUSTY_TICK_TOKEN`, the data directory itself.
 - Known limitations: nothing creates `users.json` yet (the `rusty_tick user ...` commands are step 4); no rate limiting (left to the TLS front end); opening an evicted user's store happens under the server's one lock.
