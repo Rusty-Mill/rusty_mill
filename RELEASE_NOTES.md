@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: the `user` commands (ADR-0002 step 4)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** `rusty_tick user add KEY [LABEL] | list | revoke KEY TOKEN_ID | disable KEY | enable KEY [--data-dir DIR]`, which edit `users.json` and exit. A running multi-user server sees the change within a second.
+  - `add` creates `users.json` in a fresh directory, or gives an existing user another token. It prints the token alone on stdout, once, so `TOKEN=$(rusty_tick user add alice phone)` works.
+  - Failures go to stderr with a non-zero exit and print nothing on stdout.
+  - `add` refuses a directory that holds a single-user store (`tasks.mmap`), which a new `users.json` would stop serving. Moving that data into a user is still manual.
+- **Added:** `rusty_tick::admin::run`, the command layer, over `users::Registry`. No new dependencies.
+- Known limitations: two `user` commands run at the same moment can lose one write (each reads the file, edits, and renames it); a running server is not told, it re-reads the file.
+
+---
+
 ## rusty_tick: several users on one server (ADR-0002 step 3)
 **2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
 

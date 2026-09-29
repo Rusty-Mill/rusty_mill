@@ -111,7 +111,7 @@ Failures are logged with the user key and never the secret.
 ## Plan
 
 Each step is a PR that leaves the tree green; steps 1 and 2 change no
-behaviour. *Status: 1 and 2 are merged (#387); 3 is built as described below.*
+behaviour. *Status: 1 to 3 are merged (#387, #389); 4 is built as described below.*
 
 1. `ServicePool` in place of `StorePool` (with the tests it has, run
    against `Service`).
@@ -124,7 +124,10 @@ behaviour. *Status: 1 and 2 are merged (#387); 3 is built as described below.*
    behind its one lock. Both modes take a `DirLock`, which also fixes
    single-user startup. The two-user end-to-end test planned for step 5
    landed here (`tests/multiuser.rs`), since it is how this step is proved.
-4. The `user` subcommands.
+4. The `user` subcommands. *Built:* `admin::run` over `Registry`, dispatched
+   from the binary (`user add KEY [LABEL]`, `list`, `revoke KEY TOKEN_ID`,
+   `disable KEY`, `enable KEY`). `add` prints the token alone on stdout so it
+   can be captured, and refuses a directory holding a single-user store.
 5. README and this ADR's remaining loose ends.
 
 ## Open questions, answered
