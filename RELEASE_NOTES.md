@@ -13,6 +13,31 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: user registry and token check (ADR-0002 step 2)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** `rusty_tick::users`, not yet wired to the API.
+  - `Token::parse` reads `<user key>.<secret>`; a secret is 32 `rusty_rand` bytes as unpadded URL-safe base64.
+  - `Registry` holds users and the SHA-256 digests of their tokens, never the secrets: `add_user`, `add_token` (returns the full token once), `revoke`, `set_disabled`, and `authenticate`.
+  - `authenticate` returns `None`, and does the same work, for a malformed token, an unknown or disabled user, a revoked token and a wrong secret.
+  - `users.json` is versioned and refused if it has an unknown field, a bad key, a duplicate user or token id, or a digest that is not 64 hex characters. `save` writes a temporary file, syncs and renames it, `0600` on Unix.
+  - `RegistryFile` re-reads the file when its modification time or length changes (at most once a second by default), and keeps the last good registry if a later edit does not parse, reporting why through `last_error`.
+- **Added dependencies:** `rusty_rand`, `rusty_base64` and `rusty_rsa` (for its SHA-256), all first-party. No external dependency and no new package in the lockfile.
+- Known limitations: no rate limiting (ADR-0002 leaves it to the TLS front end); the CLI that edits the file is step 4.
+
+---
+
+## rusty_tick: `ServicePool` (ADR-0002 step 1)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Changed:** `pool::StorePool` is now `pool::ServicePool`, and pools a user's whole `Service` (tasks and lists) instead of only a `TaskStore`. `StorePool` could not serve the API, since a user's data is both.
+  - `ServicePool::new(root, capacity, clock)` takes a factory for the clock each opened service reads.
+  - `DEFAULT_MAX_OPEN_USERS` is 32, a constant (ADR-0002).
+- No behaviour change: nothing calls the pool yet. The binary and API are untouched.
+- Known limitation: single-user startup still takes no `DirLock` (ADR-0002 proposes fixing it with the authenticator step).
+
+---
+
 ## rusty_multimodal_db_engine and rusty_tick: growth follow-ups (issue #382)
 **2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
 

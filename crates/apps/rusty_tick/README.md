@@ -8,7 +8,9 @@ documented API, not from its code.
 Status: storage plus a JSON HTTP API. No web UI, sync or multi-user yet.
 Engine findings are in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) (issue
 [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)); the HTTP stack
-choice is in [ADR-0001](docs/decisions/ADR-0001-http-stack.md).
+choice is in [ADR-0001](docs/decisions/ADR-0001-http-stack.md); the
+proposed per-user token design is in
+[ADR-0002](docs/decisions/ADR-0002-per-user-tokens.md).
 
 ## Run
 
