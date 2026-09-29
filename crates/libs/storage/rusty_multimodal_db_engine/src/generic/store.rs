@@ -2314,8 +2314,16 @@ where
 /// scannable and ordered must use one marker for both (`Relation`'s
 /// `UpdatedAtField`); two markers for one field would leave the index
 /// stale after an `update`. Compaction never moves an
-/// id, so the index survives it as is. Answers [`PageBy`]: a page costs
-/// the page, not the table. Every other trait is forwarded.
+/// id, so the index survives it as is. Answers [`PageBy`] and [`RangeBy`]:
+/// a page costs the page, not the table. Every other trait is forwarded.
+///
+/// **Stacked orders.** A layer answers `PageBy`/`RangeBy` for its own
+/// marker only, so with several orders only the outermost is queried
+/// through the stack and each inner one through [`Ordered::inner`]
+/// (`tests/stacked_ordered.rs`, `tests/task_manager_recipes.rs`). Forwarding
+/// the inner markers from the outer layer is not possible: that impl
+/// overlaps the layer's own (E0119), as `MultiNeighbors`' docs explain for
+/// relations. Writes through the outermost layer keep every index exact.
 pub struct Ordered<S, R, Marker>
 where
     R: OrderedField<Marker>,

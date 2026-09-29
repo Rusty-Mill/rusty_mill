@@ -13,6 +13,23 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db_engine: task-manager gaps (issue #382)
+**2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** additive `fulltext::Query` forms, leaving `Query::any_of` and its results unchanged.
+  - `Query::any_of_prefix` matches the last token of each phrase as a prefix (`"quick br"` finds `quick brown`).
+  - `Query::all_of` is `AND`; `Query::except` is `NOT`; `Query::leaves` numbers the phrases `Instance::phrase` refers to.
+  - Held to FTS5 by `tests/fulltext_vs_fts5.rs`: prefix, `AND` and `(a OR b) NOT c` match FTS5 document for document, order for order and score for score.
+- **Added:** `tests/task_manager_recipes.rs` and `tests/change_feed_recipe.rs`, which pin the supported recipes for several filters (index the list, filter the rest), `(list, due)` range keys, single-record drag-and-drop reorder, and a `seq`-stamped change feed with tombstones.
+- **Added:** `rusty_multimodal_db` ADR-0125 (proposed): the change feed stays app-side.
+- **Changed:** `Ordered`'s docs state that only the outermost layer answers `PageBy`/`RangeBy` and that inner orders go through `inner()`. Forwarding them is a trait-coherence error (E0119), so this is a documented limit, not a fix.
+- Known limits:
+  - Prefix matching scans the vocabulary (fine for tasks and notes).
+  - FTS5 drops some phrase instances when scoring `(a AND b) NOT c`, so that nesting is pinned for matching documents only, not scores.
+  - Per-column filters are not added.
+
+---
+
 ## rusty_multimodal_db_engine: group commit
 **2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
 

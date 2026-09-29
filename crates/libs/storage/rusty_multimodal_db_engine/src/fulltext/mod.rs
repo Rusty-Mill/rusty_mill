@@ -7,6 +7,13 @@
 //! fixed number of text columns, tokenized by [`unicode61`] with its
 //! defaults, and queries that are any of several phrases (`"a b" OR "c"`).
 //! A phrase matches where its tokens appear consecutively in one column.
+//! Three additive query forms sit on top of that (the task-manager gaps of
+//! issue #382): a prefix on a phrase's last token (`"ab cd"*`, for
+//! type-ahead), `AND` of queries and `NOT`. Each is FTS5's own operator with
+//! FTS5's own ranking, and is pinned by the same differential tests. One
+//! nesting is the exception: for `(a AND b) NOT c` FTS5 matches the same
+//! documents but drops some phrase instances when it scores them, so only
+//! the matches are pinned there (`tests/fulltext_vs_fts5.rs`).
 //!
 //! The index is derived data: it lives in memory and is rebuilt from the
 //! records when a store opens, like the engine's ordered indexes, so it has
@@ -22,7 +29,7 @@ mod unicode_tables;
 
 pub use unicode61::{for_each_token, tokenize, Token};
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 
 /// BM25's `k1`, as FTS5 fixes it.
@@ -30,10 +37,29 @@ const K1: f64 = 1.2;
 /// BM25's `b`, as FTS5 fixes it.
 const B: f64 = 0.75;
 
-/// A query: any of these phrases, each already split into tokens.
+/// A query. Built from [`Query::any_of`] (FTS5's `"p1" OR "p2"`), refined
+/// with [`Query::any_of_prefix`], [`Query::all_of`] (`AND`) and
+/// [`Query::except`] (`NOT`).
+///
+/// Every phrase that can match, in the order the query was built, is a
+/// *leaf*; [`Instance::phrase`] numbers leaves. A phrase on the `NOT` side
+/// is not a leaf: it removes documents and never appears in a hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
-    phrases: Vec<Vec<String>>,
+    expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Expr {
+    /// Any of `phrases`; with `prefix`, the last token of each is a prefix.
+    Any {
+        phrases: Vec<Vec<String>>,
+        prefix: bool,
+    },
+    /// Documents matching every query.
+    All(Vec<Query>),
+    /// Documents matching `keep` and not `drop`.
+    Except { keep: Box<Query>, drop: Box<Query> },
 }
 
 impl Query {
@@ -41,17 +67,78 @@ impl Query {
     /// does with `"p1" OR "p2" OR ...`. A phrase with no tokens in it
     /// matches nothing, as in FTS5.
     pub fn any_of<'a>(phrases: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::any(phrases, false)
+    }
+
+    /// [`Self::any_of`] where the last token of each phrase matches any term
+    /// it is a prefix of: FTS5's `"p1"* OR "p2"*`, so `"quick br"` finds
+    /// `quick brown`. Finding the terms scans the vocabulary, which is fine
+    /// for a task or note corpus and is a cost to weigh for a very large
+    /// one.
+    pub fn any_of_prefix<'a>(phrases: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::any(phrases, true)
+    }
+
+    fn any<'a>(phrases: impl IntoIterator<Item = &'a str>, prefix: bool) -> Self {
+        let phrases = phrases
+            .into_iter()
+            .map(|phrase| tokenize(phrase).into_iter().map(|t| t.text).collect())
+            .collect();
         Self {
-            phrases: phrases
-                .into_iter()
-                .map(|phrase| tokenize(phrase).into_iter().map(|t| t.text).collect())
-                .collect(),
+            expr: Expr::Any { phrases, prefix },
         }
     }
 
-    pub fn phrases(&self) -> &[Vec<String>] {
-        &self.phrases
+    /// Match documents that match every one of `queries`: FTS5's
+    /// `(q1) AND (q2) AND ...`. No queries match nothing.
+    pub fn all_of(queries: impl IntoIterator<Item = Query>) -> Self {
+        Self {
+            expr: Expr::All(queries.into_iter().collect()),
+        }
     }
+
+    /// Match documents that match `self` and do not match `drop`: FTS5's
+    /// `(self) NOT (drop)`.
+    pub fn except(self, drop: Query) -> Self {
+        Self {
+            expr: Expr::Except {
+                keep: Box::new(self),
+                drop: Box::new(drop),
+            },
+        }
+    }
+
+    /// The phrases of a plain [`Self::any_of`] or [`Self::any_of_prefix`]
+    /// query, already split into tokens. Empty for an `AND` or `NOT` query;
+    /// [`Self::leaves`] is the general form.
+    pub fn phrases(&self) -> &[Vec<String>] {
+        match &self.expr {
+            Expr::Any { phrases, .. } => phrases,
+            Expr::All(_) | Expr::Except { .. } => &[],
+        }
+    }
+
+    /// Every phrase that can appear in a hit, in [`Instance::phrase`] order.
+    pub fn leaves(&self) -> Vec<&[String]> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+
+    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a [String]>) {
+        match &self.expr {
+            Expr::Any { phrases, .. } => out.extend(phrases.iter().map(Vec::as_slice)),
+            Expr::All(queries) => queries.iter().for_each(|q| q.collect_leaves(out)),
+            Expr::Except { keep, .. } => keep.collect_leaves(out),
+        }
+    }
+}
+
+/// What a query matched: the documents, and where each leaf phrase sits.
+struct Matched {
+    docs: HashSet<u32>,
+    /// One entry per leaf, in [`Query::leaves`] order.
+    leaves: Vec<HashMap<u32, Vec<(u32, u32)>>>,
 }
 
 /// Where one phrase of the query matched: FTS5's `xInst`.
@@ -255,14 +342,13 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
     /// Every document matching `query`, best first (FTS5's `ORDER BY
     /// bm25(...)`), ties broken by key.
     pub fn search(&self, query: &Query) -> Vec<Hit<K>> {
-        let matches: Vec<HashMap<u32, Vec<(u32, u32)>>> = query
-            .phrases
-            .iter()
-            .map(|phrase| self.phrase_matches(phrase))
-            .collect();
+        let Matched { docs, leaves } = self.evaluate(query);
         let mut hits: BTreeMap<&K, (u32, Vec<Instance>)> = BTreeMap::new();
-        for (phrase, by_doc) in matches.iter().enumerate() {
+        for (phrase, by_doc) in leaves.iter().enumerate() {
             for (&slot, at) in by_doc {
+                if !docs.contains(&slot) {
+                    continue;
+                }
                 let Some((key, doc)) = self.doc(slot) else {
                     continue;
                 };
@@ -279,7 +365,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
         let average = self.total_tokens as f64 / rows;
         // `fts5Bm25GetData`: an IDF per phrase from how many documents hold
         // it anywhere, floored just above zero.
-        let idf: Vec<f64> = matches
+        let idf: Vec<f64> = leaves
             .iter()
             .map(|by_doc| {
                 let with = by_doc.len() as f64;
@@ -306,6 +392,75 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
             .collect();
         ranked.sort_by(|a, b| a.score.total_cmp(&b.score).then_with(|| a.key.cmp(&b.key)));
         ranked
+    }
+
+    /// The documents `query` matches and where each of its leaf phrases
+    /// occurs. A leaf's positions cover every document holding it, not only
+    /// those the whole query keeps: BM25's IDF counts the former.
+    fn evaluate(&self, query: &Query) -> Matched {
+        match &query.expr {
+            Expr::Any { phrases, prefix } => {
+                let leaves: Vec<_> = phrases
+                    .iter()
+                    .map(|phrase| {
+                        if *prefix {
+                            self.prefix_matches(phrase)
+                        } else {
+                            self.phrase_matches(phrase)
+                        }
+                    })
+                    .collect();
+                let docs = leaves
+                    .iter()
+                    .flat_map(|by_doc| by_doc.keys().copied())
+                    .collect();
+                Matched { docs, leaves }
+            }
+            Expr::All(queries) => {
+                let mut parts = queries.iter().map(|q| self.evaluate(q));
+                let Some(first) = parts.next() else {
+                    return Matched {
+                        docs: HashSet::new(),
+                        leaves: Vec::new(),
+                    };
+                };
+                parts.fold(first, |mut all, part| {
+                    all.docs.retain(|slot| part.docs.contains(slot));
+                    all.leaves.extend(part.leaves);
+                    all
+                })
+            }
+            Expr::Except { keep, drop } => {
+                let mut kept = self.evaluate(keep);
+                let dropped = self.evaluate(drop);
+                kept.docs.retain(|slot| !dropped.docs.contains(slot));
+                kept
+            }
+        }
+    }
+
+    /// [`Self::phrase_matches`] with the last token taken as a prefix: the
+    /// union over every term it is a prefix of.
+    fn prefix_matches(&self, phrase: &[String]) -> HashMap<u32, Vec<(u32, u32)>> {
+        let mut found: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+        let Some((last, head)) = phrase.split_last() else {
+            return found;
+        };
+        let terms = self
+            .term_ids
+            .keys()
+            .filter(|term| term.starts_with(last.as_str()));
+        for term in terms {
+            let mut concrete = head.to_vec();
+            concrete.push(term.to_string());
+            for (slot, mut at) in self.phrase_matches(&concrete) {
+                found.entry(slot).or_default().append(&mut at);
+            }
+        }
+        for at in found.values_mut() {
+            at.sort_unstable();
+        }
+        found
     }
 
     /// Where `phrase` occurs, per document slot: the position of its first
@@ -368,7 +523,8 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
         let Some((_, doc)) = self.slots.get(&hit.key).and_then(|&slot| self.doc(slot)) else {
             return String::new();
         };
-        let phrase_size = |phrase: usize| query.phrases[phrase].len() as i64;
+        let leaves = query.leaves();
+        let phrase_size = |phrase: usize| leaves[phrase].len() as i64;
         let n_token = style.tokens as i64;
         let mut best_col = column.unwrap_or(0);
         let mut best_start = 0i64;
@@ -695,6 +851,61 @@ mod tests {
         let index = index(&[(1, ["alpha beta", ""])]);
         assert!(index.search(&Query::any_of(["alpha zzz"])).is_empty());
         assert!(index.search(&Query::any_of(["zzz alpha"])).is_empty());
+    }
+
+    fn keys(index: &FullTextIndex<u32, 2>, query: &Query) -> Vec<u32> {
+        let mut keys: Vec<u32> = index.search(query).iter().map(|h| h.key).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn a_prefix_matches_the_start_of_the_last_token_only() {
+        let index = index(&[
+            (1, ["quick brown fox", ""]),
+            (2, ["quickly bronze", ""]),
+            (3, ["brown quick", ""]),
+        ]);
+        // Type-ahead: the last token is unfinished, the ones before are whole.
+        assert_eq!(keys(&index, &Query::any_of_prefix(["quick br"])), [1]);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["quick"])), [1, 2, 3]);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["quic br"])), []);
+        // Without the prefix form the same text is whole tokens.
+        assert_eq!(keys(&index, &Query::any_of(["quick"])), [1, 3]);
+    }
+
+    #[test]
+    fn a_prefix_with_no_tokens_matches_nothing() {
+        let index = index(&[(1, ["anything", ""])]);
+        assert!(index.search(&Query::any_of_prefix(["_", ""])).is_empty());
+    }
+
+    #[test]
+    fn all_of_needs_every_query_and_none_needs_nothing_to_match() {
+        let index = index(&[
+            (1, ["red apple", "fruit"]),
+            (2, ["red car", "vehicle"]),
+            (3, ["green apple", "fruit"]),
+        ]);
+        let both = Query::all_of([Query::any_of(["red"]), Query::any_of(["apple", "car"])]);
+        assert_eq!(keys(&index, &both), [1, 2]);
+        let narrow = Query::all_of([Query::any_of(["red"]), Query::any_of(["apple"])]);
+        assert_eq!(keys(&index, &narrow), [1]);
+        assert!(index.search(&Query::all_of([])).is_empty());
+    }
+
+    #[test]
+    fn except_removes_documents_and_leaves_no_instances_of_its_phrase() {
+        let index = index(&[
+            (1, ["red apple", ""]),
+            (2, ["red car", ""]),
+            (3, ["red apple car", ""]),
+        ]);
+        let query = Query::any_of(["red"]).except(Query::any_of(["car"]));
+        let hits = index.search(&query);
+        assert_eq!(hits.iter().map(|h| h.key).collect::<Vec<_>>(), [1]);
+        assert!(hits[0].instances.iter().all(|i| i.phrase == 0));
+        assert_eq!(query.leaves().len(), 1);
     }
 
     #[test]
