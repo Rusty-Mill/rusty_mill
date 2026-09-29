@@ -4,7 +4,7 @@
 //! layers add sorted `(list, sort_order)` and `(list, due)` indexes. Full text
 //! and tags are derived in memory at open, as `rusty_remind_me` does.
 
-use crate::task::{ByList, DueAt, SortOrder, Task, NO_DUE};
+use crate::task::{ByList, DueAt, SortOrder, Task};
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::fulltext::{FullTextIndex, Query};
 use rusty_multimodal_db_engine::generic::query::{
@@ -132,7 +132,6 @@ impl TaskStore {
 
     /// Tasks of `list` due within `[from, to)`, soonest first (a smart list).
     pub fn due_between(&self, list: Uuid, from: i64, to: i64) -> Vec<Task> {
-        debug_assert!(to <= NO_DUE);
         RangeBy::<Task, DueAt>::range_by(
             &self.stack,
             Bound::Included(((list, from), Uuid::nil())),
