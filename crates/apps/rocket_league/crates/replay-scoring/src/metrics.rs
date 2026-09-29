@@ -11,7 +11,8 @@ use replay_analyzer::field::{BACK_WALL_Y, SUPERSONIC_SPEED};
 use replay_analyzer::model::{Event, Vec3};
 
 use crate::config::{Metric, ScoreConfig};
-use crate::features::{CarView, FrameView, Third};
+use crate::episodes::recoveries;
+use crate::features::{sub, CarView, FrameView, Third};
 use crate::roles::{ManRole, Roles};
 
 fn speed(v: Vec3) -> f32 {
@@ -353,14 +354,6 @@ fn goalside_team(frames: &[FrameView], pri: i32, team: i32) -> Option<f32> {
     ratio(num, den)
 }
 
-fn sub(a: Vec3, b: Vec3) -> Vec3 {
-    Vec3 {
-        x: a.x - b.x,
-        y: a.y - b.y,
-        z: a.z - b.z,
-    }
-}
-
 /// Index of the grid frame nearest `t` (frames are time-sorted ascending).
 fn frame_at_time(frames: &[FrameView], t: f32) -> Option<usize> {
     if frames.is_empty() {
@@ -547,39 +540,10 @@ fn transition_readiness(
     ratio(num, den)
 }
 
-/// Mean time (s) from the end of an airborne phase until the target is back
-/// wheels-down, upright, and facing the ball — each recovery capped at
-/// `recovery_cap_s` (also charged when a recovery never completes in time).
+/// Mean recovery time (s): a reducer over the target's recovery episodes.
 fn recovery_speed(frames: &[FrameView], pri: i32, cfg: &ScoreConfig) -> Option<f32> {
-    let (mut sum, mut n) = (0.0f32, 0usize);
-    let mut air_end: Option<f32> = None;
-    for f in frames {
-        let Some(c) = f.car(pri) else {
-            air_end = None; // track gap (dead) — abandon any pending recovery
-            continue;
-        };
-        if c.airborne {
-            air_end = Some(f.t);
-            continue;
-        }
-        let Some(end) = air_end else { continue };
-        let dur = f.t - end;
-        let recovered = c.upright
-            && f.ball
-                .and_then(|b| c.forward_align(sub(b.p, c.p)))
-                .map(|a| a >= cfg.facing_cos_min)
-                .unwrap_or(false);
-        if recovered {
-            sum += dur.min(cfg.recovery_cap_s);
-            n += 1;
-            air_end = None;
-        } else if dur > cfg.recovery_cap_s {
-            sum += cfg.recovery_cap_s;
-            n += 1;
-            air_end = None;
-        }
-    }
-    (n > 0).then(|| sum / n as f32)
+    let eps = recoveries(frames, pri, cfg);
+    (!eps.is_empty()).then(|| eps.iter().map(|e| e.dur()).sum::<f32>() / eps.len() as f32)
 }
 
 /// Fraction of present frames the target is airborne (off the ground). The

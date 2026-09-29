@@ -178,6 +178,9 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   .trend i { flex: 1; min-width: 6px; max-width: 26px; border-radius: 3px 3px 0 0; background: var(--faint); }
   .trend i.w { background: var(--good); } .trend i.l { background: var(--bad); }
 
+  .mrow { cursor: pointer; }
+  .mrow:hover td { background: var(--card-2); }
+
   /* ---- iframes (viewer / report) ---- */
   .vtoolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
   .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--card-2); color: var(--fg);
@@ -251,6 +254,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <nav class="tabs" id="tabs">
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="improve">Improve</button>
+      <button data-tab="moments">Moments</button>
       <button data-tab="stats">Stats</button>
       <button data-tab="viewer">3D Viewer</button>
       <button data-tab="scoring">Scoring</button>
@@ -261,6 +265,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     </nav>
     <div class="tab active" id="tab-overview"></div>
     <div class="tab" id="tab-improve"></div>
+    <div class="tab" id="tab-moments"></div>
     <div class="tab" id="tab-stats"></div>
     <div class="tab" id="tab-viewer"></div>
     <div class="tab" id="tab-scoring"></div>
@@ -357,6 +362,7 @@ function render() {
 
   renderOverview(d);
   renderImprove(d);
+  renderMoments(d);
   renderStats(d);
   renderSkills(d);
   renderImpact(d);
@@ -555,6 +561,32 @@ function renderImprove(d) {
     `player — templated from the same rubric definitions the scores come from, not generated. A ` +
     `prioritized way into the Scoring and Pacifist tabs, not a replacement for them.</p>` +
     (cards || `<div class="card"><div class="reco muted">No players scored.</div></div>`);
+}
+
+// ---- Moments tab: the episodes behind the scores; a row jumps the 3D viewer to it ----
+const mmss = t => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+function seekViewer(t, tries = 50) {
+  selectTab("viewer");
+  const w = $("viewerFrame").contentWindow;
+  if (w.seek) w.seek(t); else if (tries) setTimeout(() => seekViewer(t, tries - 1), 100);
+}
+function renderMoments(d) {
+  const who = Object.fromEntries((d.scores || []).map(r => [r.target_pri, r]));
+  const draw = pri => {
+    const rows = (d.episodes || []).filter(e => who[e.pri] && (pri === "" || String(e.pri) === pri))
+      .map(e => `<tr class="mrow" data-t="${e.t0}"><td class="num">${mmss(e.t0)}</td>
+        <td>${nameCell(who[e.pri].target_team, who[e.pri].target_player)}</td><td>Recovery</td>
+        <td class="num">${fmt(e.dur, 2)} s</td><td>${e.done ? "✓ recovered" : "✗ not within the cap"}</td></tr>`).join("");
+    $("momentsBody").innerHTML = cardTable("Click a moment to jump to it in the 3D viewer.",
+      `<th class="num">Time</th><th>Player</th><th>Moment</th><th class="num">Duration</th><th>Result</th>`,
+      rows, "No moments.", 5);
+    document.querySelectorAll("#momentsBody .mrow").forEach(tr => tr.onclick = () => seekViewer(+tr.dataset.t));
+  };
+  $("tab-moments").innerHTML = `<div class="hist-bar"><select id="momentsWho"><option value="">All players</option>` +
+    Object.values(who).map(r => `<option value="${r.target_pri}">${esc(r.target_player)}</option>`).join("") +
+    `</select></div><div id="momentsBody"></div>`;
+  $("momentsWho").onchange = e => draw(e.target.value);
+  draw("");
 }
 
 function renderStats(d) {

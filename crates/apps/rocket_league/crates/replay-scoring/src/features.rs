@@ -90,7 +90,7 @@ impl FrameView {
     }
 }
 
-fn sub(a: Vec3, b: Vec3) -> Vec3 {
+pub(crate) fn sub(a: Vec3, b: Vec3) -> Vec3 {
     Vec3 {
         x: a.x - b.x,
         y: a.y - b.y,

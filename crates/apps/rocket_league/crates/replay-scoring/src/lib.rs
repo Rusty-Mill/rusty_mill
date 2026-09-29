@@ -15,6 +15,7 @@ pub mod config;
 pub mod contract;
 pub mod coverage;
 pub mod engine;
+pub mod episodes;
 pub mod features;
 pub mod heatmap;
 pub mod lobby;
@@ -31,6 +32,7 @@ use replay_analyzer::model::CanonicalMatch;
 
 pub use config::{ScoreConfig, SCORE_CONFIG_VERSION};
 pub use contract::{cross_check, BallchasingReplay, CrossCheckReport};
+pub use episodes::{extract, Episode};
 pub use relative::{attach_relative, BucketNorm, RankNorms, RelativeReport};
 pub use report::{Confidence, MetricBreakdown, Report};
 

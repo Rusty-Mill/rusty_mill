@@ -72,7 +72,7 @@ It builds frames + roles **once** (`score()` rebuilds them per player today — 
 see PR-D). `Report` is untouched, so **no golden file changes**.
 
 **Delivery**
-- `app/src/pipeline.rs`: `Analysis.episodes` (est. ~450 rows ≈ 35 KB **[I]**, measure).
+- `app/src/pipeline.rs`: `Analysis.episodes` (measured on `419a`: 100 recoveries ≈ 8 KB).
 - `viewer/src/render.rs`: `window.seek = seek;` (its script is a module, so `seek` isn't
   reachable today). Same-origin `srcdoc` iframe ⇒ `contentWindow.seek(t)` works.
 - `app/src/ui.rs`: one **Moments** tab — player filter, kind chips, table (time, player,

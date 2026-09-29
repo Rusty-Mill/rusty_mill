@@ -25,7 +25,9 @@ use replay_pacifist::severity::{Severity, Verdict};
 use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
-use replay_scoring::{attach_relative, score_all, RankNorms, Report, ScoreConfig};
+use replay_scoring::{
+    attach_relative, extract, score_all, Episode, RankNorms, Report, ScoreConfig,
+};
 
 use replay_skills::profile::{profiles, PlayerSkillProfile};
 use replay_skills::{detect_all, SkillConfig, SkillReport};
@@ -58,6 +60,9 @@ pub struct Analysis {
     // ---- structured per-engine results ----
     /// Decision-discipline scoring, one report per player (`replay-scoring`).
     pub scores: Vec<Report>,
+    /// The moments behind the aggregate scores (recoveries so far) — the rows of the
+    /// Moments tab, each a click-through to the 3D viewer.
+    pub episodes: Vec<Episode>,
     /// Mechanical skill proficiency per player (`replay-skills`).
     pub skill_profiles: Vec<PlayerSkillProfile>,
     /// Per-player value impact (ΔV) — the independent validator (`replay-value`).
@@ -203,6 +208,7 @@ pub fn analyze(
     // 2. Decision-discipline scoring (per player) + the lobby report HTML.
     let score_cfg = ScoreConfig::default();
     let mut scores = score_all(&canonical, &score_cfg);
+    let episodes = extract(&canonical, &score_cfg);
     // Additive rank-relative layer: grade each player against their bracket. No
     // norms ⇒ untouched (every report stays purely absolute).
     if let Some(norms) = norms {
@@ -356,6 +362,7 @@ pub fn analyze(
         standard_map,
         coordinate_warnings,
         scores,
+        episodes,
         skill_profiles,
         impact,
         bc_stats,

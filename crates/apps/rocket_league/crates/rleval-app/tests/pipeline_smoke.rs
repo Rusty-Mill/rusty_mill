@@ -38,6 +38,7 @@ fn analyzes_a_sample_into_every_view() {
     assert!(!a.skill_profiles.is_empty(), "skills produced profiles");
     assert!(!a.impact.players.is_empty(), "value produced impact rows");
     assert!(!a.pacifist.players.is_empty(), "pacifist produced rows");
+    assert!(!a.episodes.is_empty(), "scoring produced recovery episodes");
     assert!(
         a.pacifist.players.iter().all(|p| p.dimensions.len() == 8),
         "every player carries the full rubric"

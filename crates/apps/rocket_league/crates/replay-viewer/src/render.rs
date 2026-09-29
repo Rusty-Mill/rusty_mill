@@ -1499,6 +1499,7 @@ const tl = document.getElementById('timeline'), playBtn = document.getElementByI
 tl.max = dur; tl.step = 0.01; playBtn.innerHTML = ICON_PAUSE;
 function setPlaying(p) { playing = p; playBtn.innerHTML = p ? ICON_PAUSE : ICON_PLAY; }
 function seek(t) { T = Math.min(Math.max(t, 0), dur); tl.value = T; }
+window.seek = seek; // module scope otherwise — the host page's Moments tab calls it
 playBtn.onclick = () => setPlaying(!playing);
 tl.oninput = () => { T = parseFloat(tl.value); setPlaying(false); };
 document.getElementById('speed').onchange = e => { speed = parseFloat(e.target.value); };
