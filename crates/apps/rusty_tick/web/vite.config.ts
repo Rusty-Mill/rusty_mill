@@ -1,7 +1,6 @@
-/// <reference types="vitest/config" />
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 
 // The dev server proxies the API to a locally running `rusty_tick`, so the UI
 // and the API share an origin exactly as they do when the binary serves `dist/`.
@@ -17,6 +16,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
+    exclude: ['**/node_modules/**', 'src/**/*.integration.test.ts'], // these need the real binary: `npm run test:integration`
     css: false,
   },
 })

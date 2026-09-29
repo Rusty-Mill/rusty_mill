@@ -64,6 +64,29 @@ export class MemoryAdapter implements ApiClient {
     this.save()
   }
 
+  /** A store holding a copy of `snapshot`, for replaying pending operations over server truth. */
+  static fromSnapshot(snapshot: Snapshot, options: Pick<MemoryOptions, 'now'> = {}): MemoryAdapter {
+    const adapter = new MemoryAdapter(options)
+    adapter.state = { lists: clone(snapshot.lists), tasks: clone(snapshot.tasks), tags: clone(snapshot.tags), docs: [] }
+    adapter.ensureInbox()
+    return adapter
+  }
+
+  /**
+   * The current state without a promise. Every mutating method changes state
+   * before its first `await` (there are none), so after calling one the result
+   * is already visible here.
+   */
+  peek(): Snapshot {
+    return clone({
+      inboxId: INBOX_ID,
+      serverTimeMs: this.now(),
+      lists: [...this.state.lists].sort((a, b) => a.sortOrder - b.sortOrder || cmp(a.id, b.id)),
+      tasks: this.state.tasks,
+      tags: [...this.state.tags].sort((a, b) => a.sortOrder - b.sortOrder || cmp(a.name, b.name)),
+    })
+  }
+
   // ---- lifecycle -----------------------------------------------------
 
   private fresh(seed?: MemoryOptions['seed']): State {
@@ -108,13 +131,7 @@ export class MemoryAdapter implements ApiClient {
   // ---- snapshot ------------------------------------------------------
 
   async snapshot(): Promise<Snapshot> {
-    return clone({
-      inboxId: INBOX_ID,
-      serverTimeMs: this.now(),
-      lists: [...this.state.lists].sort((a, b) => a.sortOrder - b.sortOrder || cmp(a.id, b.id)),
-      tasks: this.state.tasks,
-      tags: [...this.state.tags].sort((a, b) => a.sortOrder - b.sortOrder || cmp(a.name, b.name)),
-    })
+    return this.peek()
   }
 
   // ---- lists ---------------------------------------------------------
