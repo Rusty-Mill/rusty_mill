@@ -12,6 +12,7 @@ pub mod server;
 pub mod service;
 pub mod store;
 pub mod task;
+pub mod users;
 
 pub use store::{TaskStore, TickError};
 pub use task::{Priority, Status, Task};

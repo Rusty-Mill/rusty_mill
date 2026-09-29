@@ -17,6 +17,12 @@ rusty_multimodal_db_engine = { workspace = true }
 rusty_http = { workspace = true }
 rusty_json = { workspace = true }
 rusty_url = { workspace = true }
+# Per-user tokens (ADR-0002): random secrets, their encoding, and a digest of
+# each so only digests are stored. `sha2` is the workspace's pinned SHA-256
+# (the monorepo has no first-party one); it is used behind `users::digest`.
+rusty_rand = { workspace = true }
+rusty_base64 = { workspace = true }
+sha2 = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0"
 uuid = { version = "1", features = ["v7", "serde"] }

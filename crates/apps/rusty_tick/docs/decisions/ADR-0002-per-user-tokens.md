@@ -91,9 +91,12 @@ Failures are logged with the user key and never the secret.
 ## Consequences
 
 - **Adds an external dependency:** SHA-256 from `sha2`, as the owner chose.
-  The monorepo has `rusty_sha1` and no SHA-256, and `sha2` is already in the
-  workspace (used by `rusty_remind_me` and `rusty_multimodal_db`), so this adds
-  no new package to the lockfile. This ADR is the rationale for the
+  The monorepo has `rusty_sha1` and no SHA-256, and `sha2` is already a
+  pinned workspace dependency (`[workspace.dependencies]`, used by the `nexus`
+  crates), so `rusty_tick` takes it with `{ workspace = true }` and adds no
+  new package to the lockfile. (An earlier draft of this ADR named
+  `rusty_remind_me` and `rusty_multimodal_db` as users; they use the `sha256`
+  crate and `sha2` 0.10, so they are not the precedent.) This ADR is the rationale for the
   dependency policy check. A first-party SHA-256 would replace it later
   behind the same one-function seam (`digest(secret) -> [u8; 32]`).
 - Adds `rusty_rand`, `rusty_base64` and `rusty_json` (already used) as
