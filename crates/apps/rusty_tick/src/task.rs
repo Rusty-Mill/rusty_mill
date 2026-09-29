@@ -42,6 +42,26 @@ impl Priority {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    Text,
+    Checklist,
+    Note,
+}
+
+/// One line of a task's checklist. Also its wire shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChecklistItem {
+    pub id: Uuid,
+    pub title: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub sort_order: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
@@ -49,12 +69,65 @@ pub struct Task {
     pub parent_id: Option<Uuid>,
     pub title: String,
     pub notes: String,
+    pub kind: TaskKind,
     pub status: Status,
     pub priority: Priority,
+    pub start_ms: Option<i64>,
     pub due_ms: Option<i64>,
-    pub sort_order: i64,
+    pub is_all_day: bool,
+    /// IANA zone the dates were entered in (`""` when floating).
+    pub time_zone: String,
+    /// Reminder triggers, e.g. `TRIGGER:PT0S` (at the due time).
+    pub reminders: Vec<String>,
+    /// An RFC 5545 `RRULE`, or empty for a one-off task.
+    pub repeat_flag: String,
+    /// Occurrences (Unix ms) skipped from the repeat rule.
+    pub ex_dates: Vec<i64>,
+    pub items: Vec<ChecklistItem>,
     pub tags: Vec<String>,
+    pub sort_order: i64,
+    pub created_ms: i64,
     pub updated_ms: i64,
+    pub completed_ms: Option<i64>,
+    /// Set while the task is in the trash.
+    pub deleted_ms: Option<i64>,
+    /// Bumped on every write; the API's ETag.
+    pub version: u32,
+}
+
+impl Task {
+    /// An open, undated task with every optional field empty.
+    pub fn new(id: Uuid, list_id: Uuid, title: &str, sort_order: i64, now_ms: i64) -> Self {
+        Self {
+            id,
+            list_id,
+            parent_id: None,
+            title: title.to_string(),
+            notes: String::new(),
+            kind: TaskKind::Text,
+            status: Status::Open,
+            priority: Priority::None,
+            start_ms: None,
+            due_ms: None,
+            is_all_day: false,
+            time_zone: String::new(),
+            reminders: Vec::new(),
+            repeat_flag: String::new(),
+            ex_dates: Vec::new(),
+            items: Vec::new(),
+            tags: Vec::new(),
+            sort_order,
+            created_ms: now_ms,
+            updated_ms: now_ms,
+            completed_ms: None,
+            deleted_ms: None,
+            version: 1,
+        }
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_ms.is_some()
+    }
 }
 
 impl Record for Task {
@@ -65,7 +138,7 @@ impl Record for Task {
 }
 
 impl SchemaTag for Task {
-    const SCHEMA_TAG: &'static str = "rusty_tick::Task@1";
+    const SCHEMA_TAG: &'static str = "rusty_tick::Task@2";
 }
 
 /// Index marker: tasks by list.

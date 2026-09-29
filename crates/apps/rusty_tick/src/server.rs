@@ -10,12 +10,14 @@
 
 use crate::api::{Api, Request};
 use crate::service::Service;
+use crate::static_files;
 use rusty_http::body::{request_framing, Framing};
 use rusty_http::head::ResponseHead;
 use rusty_http::sync::SyncTransport;
-use rusty_http::{HeaderMap, StatusCode, TransportError, TransportResult, Version};
+use rusty_http::{HeaderMap, Method, StatusCode, TransportError, TransportResult, Version};
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +31,8 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 struct App {
     api: Api,
     service: Mutex<Service>,
+    /// Built web UI to serve at `/`, if any.
+    web_dir: Option<PathBuf>,
 }
 
 pub struct Server {
@@ -60,10 +64,21 @@ impl Server {
             app: Arc::new(App {
                 api,
                 service: Mutex::new(service),
+                web_dir: None,
             }),
             stop: Arc::new(AtomicBool::new(false)),
             max_connections: DEFAULT_MAX_CONNECTIONS,
         })
+    }
+
+    /// Serve the built web UI in `dir` for every path outside `/api` and `/health`.
+    #[must_use]
+    pub fn with_web_dir(mut self, dir: PathBuf) -> Self {
+        // No other handle exists before `run`, so this never clones.
+        if let Some(app) = Arc::get_mut(&mut self.app) {
+            app.web_dir = Some(dir);
+        }
+        self
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -136,22 +151,43 @@ fn serve_connection(stream: TcpStream, app: &App) -> TransportResult<()> {
                 return write_response(&mut transport, StatusCode::BAD_REQUEST, b"", false);
             }
         };
+        let keep_alive = wants_keep_alive(&head.headers, head.version);
+        if let Some(asset) = static_asset(app, &head.method, &head.target) {
+            write_asset(&mut transport, &asset, keep_alive)?;
+            if !keep_alive {
+                return Ok(());
+            }
+            continue;
+        }
         let request = Request {
             method: &head.method,
             target: &head.target,
             authorization: head.headers.get("authorization"),
+            if_match: head.headers.get("if-match"),
             body: &body,
         };
         let response = match app.service.lock() {
             Ok(mut service) => app.api.handle(&mut service, &request),
             Err(_) => internal_error(),
         };
-        let keep_alive = wants_keep_alive(&head.headers, head.version);
         write_response(&mut transport, response.status, &response.body, keep_alive)?;
         if !keep_alive {
             return Ok(());
         }
     }
+}
+
+/// The web UI file for a `GET` outside the API, when a UI directory is set.
+fn static_asset(app: &App, method: &Method, target: &str) -> Option<static_files::Asset> {
+    let root = app.web_dir.as_ref()?;
+    if method != &Method::Get {
+        return None;
+    }
+    let path = target.split('?').next().unwrap_or("");
+    if path == "/health" || path == "/api" || path.starts_with("/api/") {
+        return None;
+    }
+    static_files::load(root, path)
 }
 
 /// A poisoned lock means a handler panicked mid-write; refuse rather than
@@ -200,3 +236,38 @@ fn write_response(
     }
     Ok(())
 }
+
+/// Send a static asset. Pages get a strict CSP; nothing is cached so a
+/// rebuilt UI shows up on reload.
+fn write_asset(
+    transport: &mut SyncTransport<TcpStream>,
+    asset: &static_files::Asset,
+    keep_alive: bool,
+) -> TransportResult<()> {
+    let mut headers = HeaderMap::new();
+    let _ = headers.insert("Content-Length", &asset.body.len().to_string());
+    let _ = headers.insert("Content-Type", asset.content_type);
+    let _ = headers.insert("Cache-Control", "no-cache");
+    let _ = headers.insert("X-Content-Type-Options", "nosniff");
+    if asset.content_type.starts_with("text/html") {
+        let _ = headers.insert("Content-Security-Policy", CSP);
+        let _ = headers.insert("X-Frame-Options", "DENY");
+        let _ = headers.insert("Referrer-Policy", "no-referrer");
+    }
+    if !keep_alive {
+        let _ = headers.insert("Connection", "close");
+    }
+    transport.write_response_head(&ResponseHead {
+        status: StatusCode::OK,
+        reason: "OK".to_string(),
+        version: Version::Http11,
+        headers,
+    })?;
+    transport.write_body(&asset.body)
+}
+
+/// Scripts and styles only from this origin; the UI talks only to this
+/// origin's API. Inline styles are allowed because the UI sets colours from
+/// data (list and tag colours) through the `style` attribute.
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";

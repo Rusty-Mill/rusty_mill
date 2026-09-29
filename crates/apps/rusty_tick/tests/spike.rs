@@ -1,23 +1,13 @@
 //! Probes for the gaps in Rusty-Mill/rusty_mill#382. Each test names the gap.
 
-use rusty_tick::{Priority, Status, Task, TaskStore};
+use rusty_tick::{Status, Task, TaskStore};
 use std::time::Instant;
 use uuid::Uuid;
 
 fn task(list: Uuid, title: &str, due: Option<i64>, order: i64) -> Task {
-    Task {
-        id: Uuid::now_v7(),
-        list_id: list,
-        parent_id: None,
-        title: title.into(),
-        notes: String::new(),
-        status: Status::Open,
-        priority: Priority::None,
-        due_ms: due,
-        sort_order: order,
-        tags: vec![],
-        updated_ms: 0,
-    }
+    let mut t = Task::new(Uuid::now_v7(), list, title, order, 0);
+    t.due_ms = due;
+    t
 }
 
 #[test]
