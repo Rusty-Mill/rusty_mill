@@ -24,6 +24,10 @@ const load = (): Persisted => {
 }
 
 export interface UiState extends Persisted {
+  /** The sidebar as a drawer over the content, on narrow screens. Never remembered. */
+  drawerOpen: boolean
+  toggleDrawer(): void
+  closeDrawer(): void
   /** Bumped to ask the quick-add box to take focus (the `N` shortcut). */
   quickAddFocus: number
   searchOpen: boolean
@@ -50,6 +54,9 @@ export const useUi = create<UiState>()((set, get) => {
   }
   return {
     ...load(),
+    drawerOpen: false,
+    toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
+    closeDrawer: () => set({ drawerOpen: false }),
     quickAddFocus: 0,
     searchOpen: false,
     collapsedGroups: {},

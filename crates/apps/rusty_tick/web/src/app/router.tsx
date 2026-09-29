@@ -1,19 +1,17 @@
-import { createHashRouter, Navigate } from 'react-router-dom'
+import { createHashRouter, Navigate, type RouteObject } from 'react-router-dom'
 import { CalendarPage } from '@/features/calendar/CalendarPage'
 import { FocusPage } from '@/features/focus/FocusPage'
 import { HabitsPage } from '@/features/habits/HabitsPage'
 import { SummaryPage } from '@/features/summary/SummaryPage'
-import { CompletedPage } from '@/features/tasks/CompletedPage'
+import { CompletedPage, TrashPage } from '@/features/tasks/HistoryPage'
 import { TasksPage } from '@/features/tasks/TasksPage'
-import { TrashPage } from '@/features/tasks/TrashPage'
 import { HOME } from './paths'
 import { Shell, WithSidebar } from './Shell'
 
 const home = <Navigate to={HOME} replace />
 
 /** Unknown hashes go to All, as in the reference app. */
-export const createRouter = () =>
-  createHashRouter([
+export const routes: RouteObject[] = [
     {
       element: <Shell />,
       children: [
@@ -23,8 +21,8 @@ export const createRouter = () =>
             { path: 'q/:smart/tasks/:taskId?', element: <TasksPage /> },
             { path: 'p/:listId/tasks/:taskId?', element: <TasksPage /> },
             { path: 't/:tag/tasks/:taskId?', element: <TasksPage /> },
-            { path: 'q/all/completed', element: <CompletedPage /> },
-            { path: 'q/all/trash', element: <TrashPage /> },
+            { path: 'q/all/completed/:taskId?', element: <CompletedPage /> },
+            { path: 'q/all/trash/:taskId?', element: <TrashPage /> },
             { path: 'q/all/summary', element: <SummaryPage /> },
           ],
         },
@@ -34,4 +32,7 @@ export const createRouter = () =>
         { path: '*', element: home },
       ],
     },
-  ])
+  ]
+
+/** The real router: routes live in the URL hash so they match the reference app's. */
+export const createRouter = () => createHashRouter(routes)

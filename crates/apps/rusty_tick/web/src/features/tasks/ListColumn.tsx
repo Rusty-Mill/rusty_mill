@@ -5,7 +5,9 @@ import type { ViewMode } from '@/api/types'
 import { taskPath } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { NoTasksArt } from '@/components/Illustrations'
+import { useMedia } from '@/lib/hooks'
 import { useReorderDrag } from '@/lib/useReorderDrag'
+import { NARROW } from '@/app/Shell'
 import { useUi } from '@/store/ui'
 import { usePrefs } from '../settings/prefs'
 import { KanbanBoard } from './KanbanBoard'
@@ -35,6 +37,8 @@ export function ListColumn({ spec, selectedId }: Props) {
   const collapsedGroups = useUi((s) => s.collapsedGroups)
   const toggleGroup = useUi((s) => s.toggleGroup)
   const toggleSidebar = useUi((s) => s.toggleSidebar)
+  const toggleDrawer = useUi((s) => s.toggleDrawer)
+  const narrow = useMedia(NARROW)
   const focusQuickAdd = useUi((s) => s.quickAddFocus)
   const hour12 = usePrefs((s) => s.prefs.hour12)
   void focusQuickAdd
@@ -78,7 +82,7 @@ export function ListColumn({ spec, selectedId }: Props) {
   return (
     <section aria-label={data.title} className="flex min-w-0 flex-1 flex-col">
       <header className="flex h-14 shrink-0 items-center gap-1 px-4">
-        <button type="button" aria-label="Toggle sidebar" onClick={toggleSidebar} className="flex h-8 w-8 items-center justify-center rounded-row text-grey hover:bg-hover">
+        <button type="button" aria-label="Toggle sidebar" onClick={narrow ? toggleDrawer : toggleSidebar} className="flex h-8 w-8 items-center justify-center rounded-row text-grey hover:bg-hover">
           <MenuIcon size={20} />
         </button>
         <h1 className="ml-1 min-w-0 flex-1 truncate text-title font-semibold">{data.title}</h1>
