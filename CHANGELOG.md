@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_tick`: several users on one server**, chosen by `<data-dir>/users.json`: per-user tokens, a store per user, live revocation, uniform `401`s (ADR-0002 step 3).
 - **`rusty_tick`: `users`**, the per-user token registry and check (`Token`, `Registry`, `RegistryFile`); not yet wired to the API (ADR-0002 step 2).
 - **`rusty_multimodal_db_engine`: `Query::except_columns`** (FTS5 column exclusion) and **`rusty_tick`: `StorePool`**, a bounded per-user store pool (not yet wired to the API). Issue #382.
 - **`rusty_multimodal_db_engine`: full-text column filters** (`Query::in_columns`), FTS5-differentially tested; store open/close lifecycle tests and idle-cost measurements for one-store-per-user (issue #382 gaps 3 and 6).
@@ -25,6 +26,7 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **`rusty_tick`: single-user startup took no lock on its data directory**, so two servers on one directory overwrote each other; a second now refuses to start.
 - **`rusty_multimodal_db_engine`: a long write pause each time the row count doubled.**
   - `GenericMmapStore` kept its records inline in a `HashMap`, so a regrow copied every record under the caller's lock: 170–370 ms at 115 000 of `rusty_remind_me`'s ~800-byte hub memories.
   - Records are now boxed, so a regrow moves a key and a pointer each. The pause is now under 10 ms at that size, and 37 ms at 229 000.

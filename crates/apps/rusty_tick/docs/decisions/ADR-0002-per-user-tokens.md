@@ -111,7 +111,7 @@ Failures are logged with the user key and never the secret.
 ## Plan
 
 Each step is a PR that leaves the tree green; steps 1 and 2 change no
-behaviour.
+behaviour. *Status: 1 and 2 are merged (#387); 3 is built as described below.*
 
 1. `ServicePool` in place of `StorePool` (with the tests it has, run
    against `Service`).
@@ -119,10 +119,13 @@ behaviour.
    reload. Pure and unit-tested, including the uniform-failure cases.
 3. `Api` takes an authenticator that returns a `UserKey`; the server holds
    the pool. Single-user mode is one fixed key over the root directory.
+   *Built:* `auth::Authenticator` (single or multi), `Api::{public,
+   authenticate, serve}`, and `backend::Backend`, which the server now holds
+   behind its one lock. Both modes take a `DirLock`, which also fixes
+   single-user startup. The two-user end-to-end test planned for step 5
+   landed here (`tests/multiuser.rs`), since it is how this step is proved.
 4. The `user` subcommands.
-5. README and this ADR set to Accepted; an end-to-end test with two users
-   proving neither sees the other's lists, a revoked token failing, and
-   eviction under a capacity of one.
+5. README and this ADR's remaining loose ends.
 
 ## Open questions, answered
 

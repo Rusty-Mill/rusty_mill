@@ -20,17 +20,19 @@
 //! | GET | `/api/v1/tags/{tag}/tasks` | |
 //! | GET | `/api/v1/smart/{today,next7,overdue}?utcOffsetMin=` | |
 
+use crate::auth::{Authenticator, Denied};
 use crate::dto::{
     CreateList, CreateTask, ListDto, Lists, PatchList, PatchTask, SetOrder, TaskDto, Tasks,
 };
+use crate::pool::UserKey;
 use crate::service::{ListOrderBy, NewTask, Service, ServiceError, TaskPatch};
 use crate::task::{Priority, Status};
+use crate::users::RegistryFile;
 use rusty_http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Shortest accepted bearer token: a guessable token defeats the check.
-pub const MIN_TOKEN_LEN: usize = 16;
+pub use crate::auth::MIN_TOKEN_LEN;
 const MAX_UTC_OFFSET_MIN: i32 = 14 * 60;
 
 /// A parsed request, as the router sees it.
@@ -71,6 +73,16 @@ impl Response {
         Self::error(&ApiError::Internal)
     }
 
+    /// 401, whatever the reason: a refusal says nothing about why.
+    pub fn unauthorized() -> Self {
+        Self::error(&ApiError::Unauthorized)
+    }
+
+    /// 503: the caller's data is busy elsewhere; try again.
+    pub fn unavailable() -> Self {
+        Self::error(&ApiError::Unavailable)
+    }
+
     fn error(error: &ApiError) -> Self {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -102,6 +114,7 @@ enum ApiError {
     NotFound(String),
     Invalid(String),
     Internal,
+    Unavailable,
 }
 
 impl ApiError {
@@ -112,6 +125,7 @@ impl ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -122,6 +136,7 @@ impl ApiError {
             Self::NotFound(_) => "not_found",
             Self::Invalid(_) => "invalid",
             Self::Internal => "internal",
+            Self::Unavailable => "unavailable",
         }
     }
 
@@ -131,6 +146,7 @@ impl ApiError {
             Self::BadRequest(m) | Self::NotFound(m) | Self::Invalid(m) => m.clone(),
             Self::Unauthorized => "missing or invalid bearer token".to_string(),
             Self::Internal => "internal error".to_string(),
+            Self::Unavailable => "temporarily unavailable".to_string(),
         }
     }
 }
@@ -150,47 +166,69 @@ impl From<ServiceError> for ApiError {
 
 type Result<T> = std::result::Result<T, ApiError>;
 
-/// The router plus the credential it checks.
+/// The router plus the way it tells who is asking.
+///
+/// Serving a request is three steps, which the server runs against a pool of
+/// per-user services ([`crate::backend::Backend`]) and [`Api::handle`] runs
+/// against one service: answer what needs no user ([`Api::public`]), find the
+/// user ([`Api::authenticate`]), then route within that user's data
+/// ([`Api::serve`]).
 pub struct Api {
-    token: String,
+    auth: Authenticator,
 }
 
 impl Api {
-    /// `Err` if `token` is shorter than [`MIN_TOKEN_LEN`].
+    /// One shared token, one user. `Err` if `token` is shorter than
+    /// [`MIN_TOKEN_LEN`].
     pub fn new(token: String) -> std::result::Result<Self, String> {
-        if token.len() < MIN_TOKEN_LEN {
-            return Err(format!(
-                "the API token must be at least {MIN_TOKEN_LEN} characters"
-            ));
-        }
-        Ok(Self { token })
+        Ok(Self {
+            auth: Authenticator::single(token)?,
+        })
     }
 
-    pub fn handle(&self, service: &mut Service, request: &Request<'_>) -> Response {
-        match self.dispatch(service, request) {
+    /// Tokens per user, checked against `users`.
+    pub fn multi_user(users: RegistryFile) -> Self {
+        Self {
+            auth: Authenticator::multi(users),
+        }
+    }
+
+    /// The answer to a request that needs no user (`GET /health`), or `None`.
+    pub fn public(request: &Request<'_>) -> Option<Response> {
+        let (path, _) = split_target(request.target);
+        let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+        (request.method == &Method::Get && segments == ["health"])
+            .then(|| Response::json(StatusCode::OK, &Health { status: "ok" }))
+    }
+
+    /// The user behind the request's credential.
+    ///
+    /// # Errors
+    ///
+    /// [`Denied`] when there is none; [`Response::unauthorized`] is its answer.
+    pub fn authenticate(&mut self, request: &Request<'_>) -> std::result::Result<UserKey, Denied> {
+        self.auth.authenticate(request.authorization)
+    }
+
+    /// Route an authenticated request within one user's data.
+    pub fn serve(service: &mut Service, request: &Request<'_>) -> Response {
+        let (path, query) = split_target(request.target);
+        let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+        match route(service, request.method, &segments, &query, request.body) {
             Ok(response) => response,
             Err(error) => Response::error(&error),
         }
     }
 
-    fn dispatch(&self, service: &mut Service, request: &Request<'_>) -> Result<Response> {
-        let (path, query) = split_target(request.target);
-        let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
-        if request.method == &Method::Get && segments == ["health"] {
-            return Ok(Response::json(StatusCode::OK, &Health { status: "ok" }));
+    /// All three steps against one service, whoever the user is: the
+    /// single-user server, and tests.
+    pub fn handle(&mut self, service: &mut Service, request: &Request<'_>) -> Response {
+        if let Some(response) = Self::public(request) {
+            return response;
         }
-        self.authorize(request.authorization)?;
-        route(service, request.method, &segments, &query, request.body)
-    }
-
-    fn authorize(&self, header: Option<&str>) -> Result<()> {
-        let presented = header
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .ok_or(ApiError::Unauthorized)?;
-        if constant_time_eq(presented.as_bytes(), self.token.as_bytes()) {
-            Ok(())
-        } else {
-            Err(ApiError::Unauthorized)
+        match self.authenticate(request) {
+            Ok(_) => Self::serve(service, request),
+            Err(_) => Response::unauthorized(),
         }
     }
 }

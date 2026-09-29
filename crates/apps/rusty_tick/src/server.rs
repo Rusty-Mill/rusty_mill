@@ -8,8 +8,8 @@
 //! size, idle time and connection count keep a slow or hostile client from
 //! holding resources.
 
-use crate::api::{Api, Request};
-use crate::service::Service;
+use crate::api::Request;
+use crate::backend::Backend;
 use rusty_http::body::{request_framing, Framing};
 use rusty_http::head::ResponseHead;
 use rusty_http::sync::SyncTransport;
@@ -27,8 +27,9 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_CONNECTIONS: usize = 64;
 
 struct App {
-    api: Api,
-    service: Mutex<Service>,
+    /// One lock around authentication and the users' stores, as ADR-0001
+    /// accepted for one store.
+    backend: Mutex<Backend>,
 }
 
 pub struct Server {
@@ -54,12 +55,11 @@ impl ShutdownHandle {
 }
 
 impl Server {
-    pub fn bind(addr: SocketAddr, api: Api, service: Service) -> io::Result<Self> {
+    pub fn bind(addr: SocketAddr, backend: Backend) -> io::Result<Self> {
         Ok(Self {
             listener: TcpListener::bind(addr)?,
             app: Arc::new(App {
-                api,
-                service: Mutex::new(service),
+                backend: Mutex::new(backend),
             }),
             stop: Arc::new(AtomicBool::new(false)),
             max_connections: DEFAULT_MAX_CONNECTIONS,
@@ -142,8 +142,8 @@ fn serve_connection(stream: TcpStream, app: &App) -> TransportResult<()> {
             authorization: head.headers.get("authorization"),
             body: &body,
         };
-        let response = match app.service.lock() {
-            Ok(mut service) => app.api.handle(&mut service, &request),
+        let response = match app.backend.lock() {
+            Ok(mut backend) => backend.handle(&request),
             Err(_) => internal_error(),
         };
         let keep_alive = wants_keep_alive(&head.headers, head.version);

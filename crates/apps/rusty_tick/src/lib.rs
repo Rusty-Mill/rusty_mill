@@ -5,6 +5,8 @@
 //! `SPIKE-FINDINGS.md`.
 
 pub mod api;
+pub mod auth;
+pub mod backend;
 pub mod dto;
 pub mod lists;
 pub mod pool;
