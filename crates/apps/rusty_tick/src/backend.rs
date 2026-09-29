@@ -43,9 +43,9 @@ pub enum BackendError {
 
 enum Data {
     /// The whole data directory, and its lock. Fields drop in order, so the
-    /// service closes before the lock is released.
+    /// service closes before the lock is released. Boxed: it dwarfs `Multi`.
     Single {
-        service: Service,
+        service: Box<Service>,
         _lock: DirLock,
     },
     Multi(ServicePool),
@@ -76,7 +76,7 @@ impl Backend {
         Ok(Self {
             api,
             data: Data::Single {
-                service,
+                service: Box::new(service),
                 _lock: lock,
             },
         })
