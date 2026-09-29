@@ -522,6 +522,7 @@ mod tests {
             team_scores: BTreeMap::from([(0, 0), (1, 0)]),
             players: vec![
                 PlayerMeta {
+                    platform_id: None,
                     name: "Alice".into(),
                     team: 0,
                     score: 0,
@@ -535,6 +536,7 @@ mod tests {
                     steering_sensitivity: None,
                 },
                 PlayerMeta {
+                    platform_id: None,
                     name: "Bob".into(),
                     team: 1,
                     score: 0,

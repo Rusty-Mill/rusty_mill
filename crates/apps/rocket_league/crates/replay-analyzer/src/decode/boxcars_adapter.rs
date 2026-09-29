@@ -233,6 +233,7 @@ fn extract_players(replay: &Replay) -> Vec<PlayerMeta> {
             assists: get_i("Assists"),
             saves: get_i("Saves"),
             shots: get_i("Shots"),
+            platform_id: platform_id(row),
             // Car + camera come from the network stream, joined in `build_canonical`.
             car_id: None,
             car_name: None,
@@ -241,6 +242,39 @@ fn extract_players(replay: &Replay) -> Vec<PlayerMeta> {
         });
     }
     out
+}
+
+/// The stable `"<platform>:<online id>"` for one `PlayerStats` row, or `None`
+/// for bots, unknown platforms, and a zero/absent id.
+fn platform_id(row: &[(String, HeaderProp)]) -> Option<String> {
+    let field = |k: &str| row.iter().find(|(rk, _)| rk == k).map(|(_, v)| v);
+    if matches!(field("bBot"), Some(HeaderProp::Bool(true))) {
+        return None;
+    }
+    let platform = match field("Platform")? {
+        HeaderProp::Byte { value: Some(v), .. } => platform_slug(v)?,
+        _ => return None,
+    };
+    let id = match field("OnlineID")? {
+        HeaderProp::QWord(n) if *n != 0 => n.to_string(),
+        HeaderProp::Str(s) | HeaderProp::Name(s) if !s.is_empty() && s != "0" => s.clone(),
+        _ => return None,
+    };
+    Some(format!("{platform}:{id}"))
+}
+
+/// Short lowercase name for a header `OnlinePlatform_*` value. `Dingo` is
+/// Rocket League's internal name for Xbox. Unrecognized platforms yield `None`
+/// rather than an id whose meaning we would be guessing at.
+fn platform_slug(value: &str) -> Option<&'static str> {
+    match value.strip_prefix("OnlinePlatform_")? {
+        "Steam" => Some("steam"),
+        "PS4" | "PS5" | "PS3" => Some("psn"),
+        "Dingo" | "XboxOne" | "Xbox" => Some("xbox"),
+        "Epic" => Some("epic"),
+        "NX" | "Switch" => Some("switch"),
+        _ => None,
+    }
 }
 
 /// Walk the network frames, emitting the neutral event stream.
@@ -498,4 +532,90 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
     }
 
     Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(platform: Option<&str>, id: Option<HeaderProp>, bot: bool) -> Vec<(String, HeaderProp)> {
+        let mut r = vec![("Name".to_string(), HeaderProp::Str("p".into()))];
+        if let Some(p) = platform {
+            r.push((
+                "Platform".into(),
+                HeaderProp::Byte {
+                    kind: "OnlinePlatform".into(),
+                    value: Some(p.into()),
+                },
+            ));
+        }
+        if let Some(i) = id {
+            r.push(("OnlineID".into(), i));
+        }
+        r.push(("bBot".into(), HeaderProp::Bool(bot)));
+        r
+    }
+
+    #[test]
+    fn platform_id_is_platform_colon_id() {
+        let steam = row(
+            Some("OnlinePlatform_Steam"),
+            Some(HeaderProp::QWord(7656)),
+            false,
+        );
+        assert_eq!(platform_id(&steam).as_deref(), Some("steam:7656"));
+        let xbox = row(
+            Some("OnlinePlatform_Dingo"),
+            Some(HeaderProp::QWord(25)),
+            false,
+        );
+        assert_eq!(
+            platform_id(&xbox).as_deref(),
+            Some("xbox:25"),
+            "Dingo is Xbox"
+        );
+        let epic = row(
+            Some("OnlinePlatform_Epic"),
+            Some(HeaderProp::Str("abc123".into())),
+            false,
+        );
+        assert_eq!(platform_id(&epic).as_deref(), Some("epic:abc123"));
+    }
+
+    #[test]
+    fn no_platform_id_for_bots_zero_ids_or_unknown_platforms() {
+        let steam = |id, bot| row(Some("OnlinePlatform_Steam"), Some(id), bot);
+        assert_eq!(
+            platform_id(&steam(HeaderProp::QWord(7656), true)),
+            None,
+            "bot"
+        );
+        assert_eq!(
+            platform_id(&steam(HeaderProp::QWord(0), false)),
+            None,
+            "zero id"
+        );
+        assert_eq!(
+            platform_id(&steam(HeaderProp::Str("0".into()), false)),
+            None
+        );
+        let odd = row(
+            Some("OnlinePlatform_Mystery"),
+            Some(HeaderProp::QWord(1)),
+            false,
+        );
+        assert_eq!(
+            platform_id(&odd),
+            None,
+            "unknown platform is not guessed at"
+        );
+        assert_eq!(
+            platform_id(&row(None, Some(HeaderProp::QWord(1)), false)),
+            None
+        );
+        assert_eq!(
+            platform_id(&row(Some("OnlinePlatform_Steam"), None, false)),
+            None
+        );
+    }
 }

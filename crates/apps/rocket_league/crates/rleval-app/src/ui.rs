@@ -165,6 +165,19 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   .reco-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); font-weight: 700; }
   .reco-tip { color: var(--muted); font-size: 13px; line-height: 1.5; }
 
+  /* ---- History panel: cross-match habits ---- */
+  #history { display: none; margin-top: 22px; }
+  #history.open { display: block; animation: rise .26s ease both; }
+  .hist-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .hist-bar select, .hist-bar input { background: var(--card-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 12px; font-size: 13px; }
+  .focus { border-left: 3px solid var(--accent); }
+  .focus .reco-tag { color: var(--accent); }
+  .gapneg { color: var(--bad); } .gappos { color: var(--good); }
+  .trend { display: flex; gap: 4px; align-items: flex-end; height: 54px; padding: 12px 18px; }
+  .trend i { flex: 1; min-width: 6px; max-width: 26px; border-radius: 3px 3px 0 0; background: var(--faint); }
+  .trend i.w { background: var(--good); } .trend i.l { background: var(--bad); }
+
   /* ---- iframes (viewer / report) ---- */
   .vtoolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
   .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--card-2); color: var(--fg);
@@ -184,6 +197,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <div class="logo">RL</div>
     <div class="brand">RLEval <small>unified replay analysis</small></div>
     <div class="spacer"></div>
+ <span id="who" style="display:none;font-size:13px;margin-right:14px"></span>
+    <a href="/auth/login" id="signIn" style="display:none;font-size:13px;font-weight:600;margin-right:14px">Sign in with Google</a>
+    <a href="#" id="signOut" style="display:none;font-size:13px;font-weight:600;margin-right:14px">Sign out</a>
+    <a href="#" id="histLink" style="font-size:13px;font-weight:600;margin-right:14px">History</a>
     <a href="/admin" style="font-size:13px;font-weight:600;margin-right:14px">Admin</a>
     <span class="pill-id" id="hdId"></span>
   </div>
@@ -202,8 +219,19 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <input type="file" id="file" accept=".replay" hidden>
       </div>
       <div class="samples" id="samples"><span class="lbl">Samples</span></div>
+      <div class="samples" id="teamPick" style="display:none"><span class="lbl">Share with team</span>
+        <select id="uploadTeam"><option value="">just me</option></select></div>
       <div class="status" id="status"></div>
     </div>
+  </div>
+
+  <div id="history">
+    <div class="hist-bar">
+      <input type="password" id="tokenInput" placeholder="Access token (only if the server requires one)" size="34" autocomplete="off">
+      <button class="btn" id="tokenSave">Use token</button>
+    </div>
+    <div id="teamBody"></div>
+    <div id="historyBody"></div>
   </div>
 
   <div id="summary">
@@ -213,6 +241,12 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
            stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/>
         <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
       Non-standard map — positional metrics assume standard Soccar, so scores are flagged low-confidence.
+    </div>
+    <div class="nonstd" id="coordwarn" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/>
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+      <span id="coordwarnText"></span>
     </div>
     <nav class="tabs" id="tabs">
       <button data-tab="overview" class="active">Overview</button>
@@ -270,12 +304,12 @@ async function loadSamples() {
 
 async function analyzeSample(name) {
   busy(`Analyzing sample <b>${esc(name)}</b>…`);
-  await run(fetch("/api/analyze/sample/" + encodeURIComponent(name)));
+  await run(authFetch("/api/analyze/sample/" + encodeURIComponent(name) + teamParam("?")));
 }
 async function analyzeFile(file) {
   busy(`Analyzing <b>${esc(file.name)}</b> (${(file.size/1e6).toFixed(1)} MB)…`);
   const buf = await file.arrayBuffer();
-  await run(fetch("/api/analyze?name=" + encodeURIComponent(file.name), {
+  await run(authFetch("/api/analyze?name=" + encodeURIComponent(file.name) + teamParam("&"), {
     method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: buf,
   }));
 }
@@ -317,6 +351,9 @@ function render() {
     stat("Players", (d.scores || []).length) +
     `<div class="stat"><div class="k">Score</div><div class="scoreboard">${scoreboard}</div></div>`;
   $("nonstd").style.display = d.standard_map ? "none" : "flex";
+  const cw = d.coordinate_warnings || [];
+  $("coordwarn").style.display = cw.length ? "flex" : "none";
+  $("coordwarnText").innerHTML = cw.map(esc).join("<br>");
 
   renderOverview(d);
   renderImprove(d);
@@ -766,7 +803,163 @@ drop.addEventListener("drop", e => {
   if (f) analyzeFile(f);
 });
 
+// ---- history: saved matches + cross-match habits (needs the server's --data-dir) ----
+function getToken() { try { return localStorage.getItem("rleval.token") || ""; } catch (e) { return ""; } }
+function setToken(t) { try { localStorage.setItem("rleval.token", t); } catch (e) { /* private mode: token lasts this page only */ } }
+function authFetch(url, opts = {}, quiet = false) {
+  const t = getToken();
+  const headers = Object.assign({}, opts.headers, t ? { Authorization: "Bearer " + t } : {});
+  return fetch(url, Object.assign({}, opts, { headers })).then(r => {
+    // Surface the token field. Only reveal it — reloading history here would
+    // re-enter authFetch and loop on every 401.
+    if (r.status === 401 && !quiet) $("history").classList.add("open");
+    return r;
+  });
+}
+$("histLink").onclick = (e) => {
+  e.preventDefault();
+  const open = $("history").classList.toggle("open");
+  if (open) { loadTeams(); loadHistory(); }
+};
+$("tokenInput").value = getToken();
+$("tokenSave").onclick = () => { setToken($("tokenInput").value.trim()); loadTeams(); loadHistory(); };
+
+// ---- sign-in: only shown when the server was started with --oidc-* ----
+async function loadWho() {
+  try {
+    const info = await (await fetch("/api/auth")).json();
+    if (!info.sign_in) return;
+    const me = await fetch("/api/me");
+    const show = (id, on) => { $(id).style.display = on ? "" : "none"; };
+    if (me.ok) {
+      $("who").textContent = (await me.json()).account;
+      show("who", true); show("signOut", true); show("signIn", false);
+    } else {
+      show("signIn", true); show("signOut", false); show("who", false);
+    }
+  } catch (e) { /* sign-in is optional; the app works without it */ }
+}
+$("signOut").onclick = async (e) => {
+  e.preventDefault();
+  await fetch("/auth/logout", { method: "POST" });
+  location.reload();
+};
+
+// ---- teams: shared match pool + roster view (needs --teams on the server) ----
+function teamParam(prefix) {
+  const t = $("uploadTeam").value;
+  return t ? prefix + "team=" + encodeURIComponent(t) : "";
+}
+let TEAMS = [];
+async function loadTeams(quiet = false) {
+  const box = $("teamBody");
+  try {
+    const r = await authFetch("/api/teams", {}, quiet);
+    TEAMS = r.ok ? await r.json() : [];
+  } catch (e) { TEAMS = []; }
+  const sel = $("uploadTeam"), keep = sel.value;
+  sel.innerHTML = `<option value="">just me</option>` +
+    TEAMS.map(t => `<option value="${esc(t.team)}">${esc(t.team)}</option>`).join("");
+  sel.value = TEAMS.some(t => t.team === keep) ? keep : "";
+  $("teamPick").style.display = TEAMS.length ? "" : "none";
+  if (!TEAMS.length) { box.innerHTML = ""; return; }
+  box.innerHTML =
+    `<div class="hist-bar"><span class="muted">Team</span><select id="teamSel">` +
+    TEAMS.map(t => `<option value="${esc(t.team)}">${esc(t.team)} (${esc(t.role)})</option>`).join("") +
+    `</select></div><div id="teamReport"></div><div style="height:22px"></div>`;
+  $("teamSel").onchange = () => loadTeamReport($("teamSel").value);
+  loadTeamReport($("teamSel").value);
+}
+async function loadTeamReport(team) {
+  const box = $("teamReport");
+  try {
+    const r = await authFetch("/api/teams/" + encodeURIComponent(team));
+    if (!r.ok) throw new Error(await r.text());
+    box.innerHTML = renderTeam(await r.json());
+  } catch (e) {
+    box.innerHTML = `<div class="card"><div class="reco reco-major">${esc(e.message || e)}</div></div>`;
+  }
+}
+function renderTeam(t) {
+  const rows = t.members.map(m => `<tr><td><b>${esc(m.account)}</b></td><td>${esc(m.role)}</td>
+    <td>${esc(m.in_game)}</td><td class="num">${m.matches}</td><td class="num">${m.wins}–${m.losses}</td>
+    <td>${m.focus ? esc(m.focus.dimension) : `<span class="muted">—</span>`}</td></tr>`).join("");
+  const scope = t.viewer_role === "coach" ? "Every member of the roster." : "Just you — coaches see the full roster.";
+  const roster = `<div class="card"><p class="hint" style="padding:12px 18px 0">${scope}</p><div class="tablewrap"><table>
+    <tr><th>Account</th><th>Role</th><th>In-game name</th><th class="num">Matches</th><th class="num">W–L</th>
+    <th>Work on</th></tr>${rows}</table></div></div>`;
+  const empty = `<div class="card"><div class="reco muted">No shared matches yet — pick this team under
+    “Share with team” when you analyze a replay.</div></div>`;
+  return `<h3 style="margin:0 0 10px">${esc(t.team)} — ${t.sessions} shared match${t.sessions === 1 ? "" : "es"}</h3>` +
+    (t.rollup ? renderHabits(t.rollup).replace(/^<h3[^>]*>.*?<\/h3>/, "") : empty) +
+    `<div style="height:16px"></div>` + roster;
+}
+
+async function loadHistory() {
+  const box = $("historyBody");
+  box.innerHTML = `<div class="card"><div class="reco muted">Loading…</div></div>`;
+  try {
+    const r = await authFetch("/api/history");
+    if (!r.ok) throw new Error(await r.text());
+    const h = await r.json();
+    if (!h.sessions.length) {
+      box.innerHTML = `<div class="card"><div class="reco muted">No saved matches yet — analyze a replay and it is saved here.</div></div>`;
+      return;
+    }
+    const opts = h.players.map(p => `<option value="${esc(p.key)}">${esc(p.name)} (${p.matches})</option>`).join("");
+    box.innerHTML =
+      `<div class="hist-bar"><span class="muted">${h.sessions.length} saved match${h.sessions.length === 1 ? "" : "es"} · player</span>` +
+      `<select id="habitPlayer">${opts}</select></div><div id="habitBody"></div>`;
+    $("habitPlayer").onchange = () => loadHabits($("habitPlayer").value);
+    loadHabits($("habitPlayer").value);
+  } catch (e) {
+    box.innerHTML = `<div class="card"><div class="reco reco-major">${esc(e.message || e)}</div></div>`;
+  }
+}
+
+async function loadHabits(player) {
+  const box = $("habitBody");
+  try {
+    const r = await authFetch("/api/history/habits?player=" + encodeURIComponent(player));
+    if (!r.ok) throw new Error(await r.text());
+    box.innerHTML = renderHabits(await r.json());
+  } catch (e) {
+    box.innerHTML = `<div class="card"><div class="reco reco-major">${esc(e.message || e)}</div></div>`;
+  }
+}
+
+function renderHabits(h) {
+  const gap = v => v == null ? "—" : `<span class="${v >= 0 ? "gappos" : "gapneg"}">${signed(v, 0)}</span>`;
+  const focus = h.focus
+    ? `<div class="card focus"><div class="reco"><div class="reco-h"><span class="reco-tag">${
+        h.focus.kind === "loss_habit" ? "Work on this next — shows up in your losses" : "Work on this next"}</span>
+        <b>${esc(h.focus.dimension)}</b></div><div class="reco-tip">${esc(h.focus.reason)}</div></div></div>`
+    : `<div class="card"><div class="reco muted">No scoreable Pacifist data for this player yet.</div></div>`;
+  const fault = h.recurring_fault
+    ? `<div class="reco reco-leak"><div class="reco-h"><span class="reco-tag">Recurring fault</span>
+        <b>${esc(h.recurring_fault.criterion)}</b></div><div class="reco-tip">Your most frequent Minor fault in
+        ${h.recurring_fault.matches} of ${h.matches} matches.</div></div>` : "";
+  const rows = h.dimensions.map(d => `<tr><td>${esc(d.label)}</td>
+    <td class="num">${fmt(d.overall, 0)}</td><td class="num">${fmt(d.in_wins, 0)}</td>
+    <td class="num">${fmt(d.in_losses, 0)}</td><td class="num">${gap(d.gap)}</td>
+    <td class="num">${d.opportunities}</td></tr>`).join("");
+  const bars = h.trend.map(t => `<i class="${t.won === true ? "w" : t.won === false ? "l" : ""}"
+    style="height:${Math.max(4, clampPct(t.value)) }%" title="${esc(t.label)}: ${fmt(t.value, 0)}"></i>`).join("");
+  const note = (h.wins < 2 || h.losses < 2)
+    ? `<p class="muted" style="font-size:12.5px">Win-vs-loss habits need at least 2 wins and 2 losses; ` +
+      `you have ${h.wins} and ${h.losses}. Until then the focus is your weakest dimension.</p>` : "";
+  return `<h3 style="margin:0 0 10px">${esc(h.player)} — ${h.matches} match${h.matches === 1 ? "" : "es"} ` +
+    `(${h.wins}W ${h.losses}L)</h3>` + focus + note +
+    `<div style="height:16px"></div><div class="card"><div class="tablewrap"><table>
+      <tr><th>Dimension</th><th class="num">Overall</th><th class="num">In wins</th><th class="num">In losses</th>
+      <th class="num">Win − loss</th><th class="num">Opps</th></tr>${rows}</table></div>${fault}</div>` +
+    `<div style="height:16px"></div><div class="card"><p class="hint" style="padding:12px 18px 0">Pacifist score per match, ` +
+    `oldest → newest (green = win, red = loss)</p><div class="trend">${bars}</div></div>`;
+}
+
 loadSamples();
+loadWho();
+loadTeams(true);   // reveals "Share with team" if this account is on any team
 </script>
 </body>
 </html>

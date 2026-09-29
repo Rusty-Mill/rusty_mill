@@ -29,11 +29,21 @@ build is noticeably slower per replay.
 | `--replays <dir>` | `assets/replays` | sample `.replay` files listed in the UI's picker |
 | `--corpus <dir>` | `assets/corpus` | where it looks for calibrated artifacts (`rank_norms.json`, `fitted_config.json`, `value_model.json`) |
 | `--enable-admin-run` | off | lets the `/admin` page trigger retrain/recalibrate from the browser (§3.3) |
+| `--data-dir <dir>` | off | save every analysis to per-account history and enable the **History** view (§2.1) |
+| `--store fs\|mmdb` | `fs` | session backend under `--data-dir`; `mmdb` needs a build with `--features mmdb` (§2.3) |
+| `--oidc-client-id`, `--oidc-redirect-uri`, `--oidc-users <file>` | off | Google sign-in; needs a build with `--features oidc` (§2.4) |
+| `--teams <file>` | off | team workspaces (§2.2); requires `--accounts` and `--data-dir` |
+| `--accounts <file>` | off (single-user) | require `Authorization: Bearer <token>`; one `account:token` per line, tokens ≥ 16 chars (§2.1) |
 
 ## 2. Use the app
 
 - **Drop a `.replay`** onto the page (or pick one of the bundled samples) and it
   decodes, scores, and renders in-process — nothing leaves your machine.
+- A **coordinate warning banner** appears when a replay breaks the geometry the
+  position metrics assume — blue spawning on the `+Y` side (Pacifist depth and
+  lateral scores would be mirrored) or positions far outside the arena (wrong
+  units). It is checked from the replay's own kickoffs (`analyze::coords`) and is
+  silent for a healthy replay; bounds are only checked on standard maps.
 - Tabs across the top:
   - **Overview** — one row per player: decision-discipline composite, licence
     band, skills/min, value-impact ΔV, main leak.
@@ -65,6 +75,140 @@ build is noticeably slower per replay.
   they're stale), the corpus size per rank bucket, and the value model's
   feature importances. Good first stop to check "is this running defaults or a
   corpus fit?"
+
+### 2.1 History and habits
+
+Start with `--data-dir` and each analysis is saved (the Pacifist headline, fault
+counts and per-dimension scores, plus whether the player's team won). Re-analyzing
+the same replay is a no-op — sessions are keyed by a hash of the replay bytes.
+The **History** link in the header lists your saved matches and, per player, a
+cross-match read:
+
+- **Work on this next** — the Pacifist dimension that drops most in your losses
+  versus your wins (needs ≥ 2 wins *and* ≥ 2 losses and a gap of ≥ 5 points).
+  With less data it names your weakest dimension and says so.
+- Per-dimension overall / in-wins / in-losses scores (opportunity-weighted),
+  a recurring Minor fault (top Minor in ≥ 2 matches), and a win/loss trend bar.
+
+Players are identified by the **platform id** in the replay header (`steam:…`,
+`xbox:…`, `epic:…`), so a rename does not split someone's history; the player
+list shows the most recent name. Bots, and sessions saved before ids were
+recorded, fall back to the exact display name — and those are kept as a
+separate identity from the same person's id-keyed sessions (no guessing that two
+are the same).
+
+**Accounts.** With no `--accounts` file everything is one `local` account (fine on
+loopback; the server warns if you bind elsewhere). With one, supply
+`alice:<token>` lines and each request needs `Authorization: Bearer <token>`;
+the History panel has a token field (kept in `localStorage`). Sessions are stored
+at `<data-dir>/<account>/<key>.json`. Tokens are operator-supplied and compared
+in constant time; this is a local seam meant to be replaced by a real identity
+provider, not a hardened public-internet login — put it behind TLS if exposed.
+
+### 2.2 Team workspaces
+
+For a coach and a roster: one shared pool of matches, one read of how the team
+plays. Enable with `--teams <file>` (needs `--accounts` and `--data-dir`); one
+team per line:
+
+```text
+# team: role:account[=In-Game Name], ...
+aces: coach:bailey, player:alice=Schutzein, player:bob=Nadir
+```
+
+- Roles are `coach` or `player`; every team needs at least one coach. The
+  in-game name is how a replay's player is attributed to a member (defaults to
+  the account name). It may also be a **platform id**, e.g.
+  `player:alice=steam:76561198154819830`, which keeps attribution correct when
+  they rename — prefer it once you know it (it appears as the player key in the
+  History list). Startup fails on an unknown account, a
+  duplicate account or in-game name, or a team with no coach.
+- When a member analyzes a replay, **Share with team** puts it in the team's
+  pool (`<data-dir>/_teams/<team>/`) as well as their own history. Re-sharing the
+  same replay is a no-op, whoever uploads it.
+- The History view gains a **Team** section: a **team rollup** ("work on this
+  next" for the roster as a whole; a match counts once however many members
+  played it) and a roster table. **Coaches** see every member; **players** see
+  the rollup and only their own row. A non-member gets 404, same as for a team
+  that does not exist.
+- The rollup follows the same rules as §2.1: it names a loss habit only with ≥ 2
+  wins and ≥ 2 losses in the pool, otherwise the weakest dimension.
+
+Limits: membership is a file read at startup (restart to change it), and a
+roster entry that is a display name (rather than a platform id) needs updating
+when that member renames.
+
+### 2.3 Storage backends
+
+`--data-dir` keeps sessions with one of two backends, both behind the same
+`SessionStore` port and held to the same tests:
+
+- **`fs`** (default) — one JSON file per session at
+  `<data-dir>/<account>/<key>.json`. No extra dependencies; easy to inspect.
+- **`mmdb`** — the embedded record store from the Rusty-Mill monorepo
+  (`rusty_multimodal_db_engine`): mmap-backed, an fsync'd insert log, and a
+  directory lock. Build with `cargo build --release -p rleval-app --features mmdb`
+  and serve with `--store mmdb`. Its constraints matter: every record lives in
+  RAM (fine for per-account histories), and **one process per directory** — a
+  second server on the same `--data-dir` is refused with an error rather than
+  allowed to corrupt it.
+
+Sessions are stored inside the engine as JSON in a small fixed envelope, not as
+native engine records: the engine encodes records with bincode, which is not
+self-describing, so a new field would otherwise be a breaking on-disk change.
+
+**Moving from `fs` to `mmdb`:**
+
+```sh
+cargo run --release -p rleval-app --features mmdb -- import-json --data-dir ./data
+cargo run --release -p rleval-app --features mmdb -- serve --data-dir ./data --store mmdb
+```
+
+`import-json` copies every account history and team pool, is idempotent, and
+leaves the JSON files in place (delete them once you are satisfied). The engine
+dependency is a git dependency pinned to a commit of `Rusty-Mill/rusty_mill`;
+cargo prints a few harmless "invalid character in package name" lines about
+template `Cargo.toml` files inside that repository when it resolves it.
+
+### 2.4 Google sign-in
+
+Bearer tokens (§2.1) suit scripts; people sign in with Google instead. Build with
+`--features oidc`, then:
+
+```sh
+export RLEVAL_OIDC_CLIENT_SECRET=...          # from the Google Cloud console
+rleval serve --data-dir ./data \
+  --oidc-client-id 1234-abc.apps.googleusercontent.com \
+  --oidc-redirect-uri https://rleval.example.com/auth/callback \
+  --oidc-users ./oidc-users.txt
+```
+
+`oidc-users.txt` is `email:account`, one per line. **Only verified emails on that
+list can sign in** — there is no auto-provisioning — and each maps to one
+account (which can also be listed in `--accounts` and `--teams`). Register the
+redirect URI above as an authorized redirect URI on your Google OAuth client.
+The secret is read from the environment, never a flag.
+
+- The header shows **Sign in with Google** / your account / **Sign out**. A
+  successful login sets an `HttpOnly`, `SameSite=Lax` session cookie (`Secure` when
+  the redirect URI is https). Scripts keep using `--accounts` bearer tokens; both work together.
+- Turning sign-in on closes the API to anonymous callers, even with no
+  `--accounts` file.
+- **What is verified:** the login `state` (single use, 10 minutes), PKCE, the ID
+  token's RS256 signature against Google's published keys (algorithm fixed by the
+  server), issuer, audience, expiry, the login's nonce, and `email_verified`.
+- Cookie-authenticated writes must be same-origin (an `Origin` that names another
+  host gets 403).
+- Sessions live in memory (12 hours); restarting the server signs everyone out.
+  Run it behind TLS — the endpoints refuse non-https provider URLs except on
+  loopback (for local development against a mock provider).
+- Another OpenID Connect provider works via `--oidc-auth-url`, `--oidc-token-url`,
+  `--oidc-jwks-url` and `--oidc-issuer`, provided it signs ID tokens with RS256.
+
+The protocol code is Rusty-Mill's `rusty_oauth`; the HTTPS transport is
+`rusty_http` + `rusty_tls`. This path was exercised end to end against a local
+mock provider, **not against Google itself** — try it with a test OAuth client
+before relying on it.
 
 ## 3. Calibrate
 

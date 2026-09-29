@@ -6,6 +6,7 @@
 
 pub mod bcstats;
 pub mod boost_pads;
+pub mod coords;
 pub mod events;
 pub mod features;
 pub mod identity;
@@ -89,6 +90,8 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
                     assists: s.assists,
                     saves: s.saves,
                     shots: s.shots,
+                    // The header carried no roster, so there is no online id either.
+                    platform_id: None,
                     car_id: None,
                     car_name: None,
                     camera: None,

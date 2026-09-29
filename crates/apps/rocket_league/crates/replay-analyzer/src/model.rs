@@ -60,6 +60,11 @@ pub struct PlayerMeta {
     pub assists: i32,
     pub saves: i32,
     pub shots: i32,
+    /// Stable platform identity from the header (`"steam:7656…"`, `"xbox:…"`,
+    /// `"epic:…"`), or `None` for bots and replays without an online id. Unlike
+    /// the display name it survives renames, so history and rosters key on it.
+    #[serde(default)]
+    pub platform_id: Option<String>,
     /// Car-body product id from the player's loadout (ballchasing's `car_id`),
     /// and its resolved name (`crate::cars`). `None` when the replay carries no
     /// loadout or the id is unknown to the table.

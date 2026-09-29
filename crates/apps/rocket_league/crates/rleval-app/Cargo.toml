@@ -12,6 +12,14 @@ path = "src/lib.rs"
 name = "rleval"
 path = "src/main.rs"
 
+[features]
+# Session storage on the Rusty-Mill engine (`--store mmdb`). Off by default so a
+# plain build stays free of the engine's dependencies (memmap2, bincode, uuid).
+mmdb = ["dep:rusty_multimodal_db_engine", "dep:uuid"]
+# Google sign-in (`--oidc-*`), built on Rusty-Mill's OAuth/HTTP/TLS crates. Off by
+# default: it pulls in rustls (via rusty_tls) that a token-only server never needs.
+oidc = ["dep:rusty_oauth", "dep:rusty_http", "dep:rusty_tls"]
+
 [dependencies]
 replay-analyzer = { path = ".." }
 replay-pacifist = { path = "../pacifist" }
@@ -22,3 +30,11 @@ replay-viewer = { path = "../viewer" }
 bc-clone = { path = "../bc-clone" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The embedded record store from the Rusty-Mill monorepo, pinned to a commit: its
+# on-disk formats are bincode, so a drifting dependency could change stored bytes.
+rusty_multimodal_db_engine = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "1e58e35a99639ad40ac2cf97427cbdf3d183a382", optional = true }
+uuid = { version = "1", default-features = false, features = ["std", "serde"], optional = true }
+# Sign-in stack, pinned to the same rusty_mill commit as the store above.
+rusty_oauth = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "1e58e35a99639ad40ac2cf97427cbdf3d183a382", optional = true }
+rusty_http = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "1e58e35a99639ad40ac2cf97427cbdf3d183a382", optional = true }
+rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "1e58e35a99639ad40ac2cf97427cbdf3d183a382", optional = true }

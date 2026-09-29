@@ -135,6 +135,7 @@ fn fixture() -> DecodedReplay {
             record_fps: Some(30.0),
             team_scores: BTreeMap::from([(0, 0)]),
             players: vec![PlayerMeta {
+                platform_id: None,
                 name: "Alice".into(),
                 team: 0,
                 score: 0,

@@ -13,10 +13,12 @@ use std::thread;
 /// Hard cap on a request body — comfortably above a large `.replay`.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
-/// A parsed request: method, path (with any query string), and the raw body.
+/// A parsed request: method, path (with any query string), headers, and the raw body.
 pub struct Request {
     pub method: String,
     pub path: String,
+    /// Header `(name, value)` pairs in arrival order; names keep their wire casing.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -25,12 +27,22 @@ impl Request {
     pub fn route(&self) -> &str {
         self.path.split('?').next().unwrap_or(&self.path)
     }
+
+    /// The first header named `name` (ASCII case-insensitive), if any.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// A response to write back: status, content-type, and a byte body.
 pub struct Response {
     pub status: u16,
     pub content_type: String,
+    /// Extra headers (`Location`, `Set-Cookie`, ...), written after the fixed ones.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -39,6 +51,7 @@ impl Response {
         Self {
             status: 200,
             content_type: "text/html; charset=utf-8".into(),
+            headers: Vec::new(),
             body: body.into(),
         }
     }
@@ -46,6 +59,7 @@ impl Response {
         Self {
             status: 200,
             content_type: "application/json".into(),
+            headers: Vec::new(),
             body: body.into(),
         }
     }
@@ -53,8 +67,20 @@ impl Response {
         Self {
             status,
             content_type: "text/plain; charset=utf-8".into(),
+            headers: Vec::new(),
             body: body.into().into_bytes(),
         }
+    }
+    /// A `302 Found` to `location`.
+    pub fn redirect(location: impl Into<String>) -> Self {
+        Self::text(302, "").with_header("Location", location)
+    }
+    /// This response with one more header. CR and LF are stripped from the name
+    /// and value: a line break would let a caller-controlled value inject headers.
+    pub fn with_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        let clean = |s: &str| s.replace(['\r', '\n'], "");
+        self.headers.push((clean(name), clean(&value.into())));
+        self
     }
     pub fn not_found() -> Self {
         Self::text(404, "not found")
@@ -65,6 +91,9 @@ fn status_reason(code: u16) -> &'static str {
     match code {
         200 => "OK",
         400 => "Bad Request",
+        302 => "Found",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
@@ -121,6 +150,7 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
     let path = parts.next().unwrap_or("/").to_string();
 
     let mut content_length = 0usize;
+    let mut headers = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -131,6 +161,7 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
             break; // end of headers
         }
         if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_string(), value.trim().to_string()));
             if name.trim().eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
@@ -147,12 +178,22 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
         reader.read_exact(&mut body)?;
     }
 
-    Ok(Some(Request { method, path, body }))
+    Ok(Some(Request {
+        method,
+        path,
+        headers,
+        body,
+    }))
 }
 
 fn write_response(mut stream: &TcpStream, resp: &Response) -> io::Result<()> {
+    let extra: String = resp
+        .headers
+        .iter()
+        .map(|(n, v)| format!("{n}: {v}\r\n"))
+        .collect();
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
         resp.status,
         status_reason(resp.status),
         resp.content_type,
@@ -161,4 +202,20 @@ fn write_response(mut stream: &TcpStream, resp: &Response) -> io::Result<()> {
     stream.write_all(header.as_bytes())?;
     stream.write_all(&resp.body)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_values_cannot_inject_new_headers() {
+        let r = Response::text(200, "").with_header("Location", "/a\r\nSet-Cookie: evil=1");
+        assert_eq!(
+            r.headers[0].1, "/aSet-Cookie: evil=1",
+            "line breaks are removed"
+        );
+        let r = Response::redirect("/ok");
+        assert_eq!((r.status, r.headers[0].0.as_str()), (302, "Location"));
+    }
 }

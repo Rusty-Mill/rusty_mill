@@ -18,6 +18,7 @@ const BOB: i32 = 200;
 
 fn player(name: &str, team: i32) -> PlayerMeta {
     PlayerMeta {
+        platform_id: None,
         name: name.to_string(),
         team,
         score: 0,

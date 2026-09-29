@@ -6,6 +6,17 @@
 //! binary is a thin shell over these three modules.
 
 pub mod admin;
+pub mod auth;
+pub mod authn;
+pub mod history;
+#[cfg(feature = "oidc")]
+pub mod oidc;
+#[cfg(feature = "oidc")]
+pub mod oidc_transport;
 pub mod pipeline;
 pub mod server;
+pub mod store;
+#[cfg(feature = "mmdb")]
+pub mod store_mmdb;
+pub mod teams;
 pub mod ui;

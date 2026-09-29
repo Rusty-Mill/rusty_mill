@@ -12,6 +12,7 @@ use std::path::Path;
 
 use replay_analyzer::analyze::bcstats::{ballchasing_stats, BcPlayerStats};
 use replay_analyzer::analyze::build_canonical;
+use replay_analyzer::analyze::coords::{coordinate_report, CoordinateIssue};
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_analyzer::field::is_standard_geometry;
@@ -48,6 +49,11 @@ pub struct Analysis {
     pub team_scores: Vec<(i32, i32)>,
     /// `false` for Hoops/Dropshot/etc. — the UI surfaces a low-confidence banner.
     pub standard_map: bool,
+    /// Human-readable coordinate-sanity findings (blue spawning on the wrong
+    /// side, positions outside the arena). Empty for a healthy replay; the UI
+    /// shows them as a banner because they would otherwise corrupt position
+    /// scores silently.
+    pub coordinate_warnings: Vec<String>,
 
     // ---- structured per-engine results ----
     /// Decision-discipline scoring, one report per player (`replay-scoring`).
@@ -111,6 +117,9 @@ pub struct PacifistSummary {
 #[derive(Serialize)]
 pub struct PacifistPlayer {
     pub player: String,
+    /// Stable platform identity (`steam:…`) when the replay carries one and the
+    /// display name is unambiguous within the match.
+    pub platform_id: Option<String>,
     pub team: i32,
     /// Headline 0–100 (Major-capped); `None` when nothing applied.
     pub value: Option<f32>,
@@ -185,6 +194,11 @@ pub fn analyze(
     let decoded = BoxcarsParser::new().parse(bytes)?;
     let canonical = build_canonical(&decoded, replay_id.to_string());
     let standard_map = is_standard_geometry(canonical.map.as_deref());
+    let coordinate_warnings = coordinate_report(&canonical)
+        .issues(standard_map)
+        .iter()
+        .map(CoordinateIssue::message)
+        .collect();
 
     // 2. Decision-discipline scoring (per player) + the lobby report HTML.
     let score_cfg = ScoreConfig::default();
@@ -266,8 +280,10 @@ pub fn analyze(
             .iter()
             .map(|entry| {
                 let score = analyzer.score_player_in(&pctx, entry.player);
+                let name = entry.name.clone().unwrap_or_else(|| "—".into());
                 PacifistPlayer {
-                    player: entry.name.clone().unwrap_or_else(|| "—".into()),
+                    platform_id: platform_id_for(&canonical, &name),
+                    player: name,
                     team: match entry.team {
                         replay_pacifist::Team::Blue => 0,
                         replay_pacifist::Team::Orange => 1,
@@ -338,6 +354,7 @@ pub fn analyze(
             .map(|(&k, &v)| (k, v))
             .collect(),
         standard_map,
+        coordinate_warnings,
         scores,
         skill_profiles,
         impact,
@@ -348,6 +365,17 @@ pub fn analyze(
         scoring_html,
         ballchasing_html,
     })
+}
+
+/// The platform id of the player called `name`, provided exactly one player in
+/// the match has that name (two identical display names would make the mapping a
+/// guess, and a wrong id is worse than none).
+fn platform_id_for(m: &replay_analyzer::CanonicalMatch, name: &str) -> Option<String> {
+    let mut named = m.players.iter().filter(|p| p.name == name);
+    match (named.next(), named.next()) {
+        (Some(p), None) => p.platform_id.clone(),
+        _ => None,
+    }
 }
 
 /// The most frequent Minor-severity fault criterion in `faults`, or `None` if

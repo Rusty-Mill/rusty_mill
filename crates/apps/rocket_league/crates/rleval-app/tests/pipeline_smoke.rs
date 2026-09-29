@@ -27,6 +27,11 @@ fn analyzes_a_sample_into_every_view() {
     assert!(a.duration_s > 0.0);
     assert!(a.standard_map, "EuroStadium is a standard Soccar arena");
     assert!(!a.team_scores.is_empty());
+    assert!(
+        a.coordinate_warnings.is_empty(),
+        "a healthy sample raises no coordinate warning: {:?}",
+        a.coordinate_warnings
+    );
 
     // Every engine produced rows.
     assert!(!a.scores.is_empty(), "scoring produced reports");
