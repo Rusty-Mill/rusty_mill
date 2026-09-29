@@ -124,7 +124,7 @@ impl StorePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Priority, Status, Task};
+    use crate::task::Task;
     use uuid::Uuid;
 
     fn user(name: &str) -> UserKey {
@@ -136,19 +136,7 @@ mod tests {
     }
 
     fn task(list: Uuid) -> Task {
-        Task {
-            id: Uuid::now_v7(),
-            list_id: list,
-            parent_id: None,
-            title: "t".into(),
-            notes: String::new(),
-            status: Status::Open,
-            priority: Priority::None,
-            due_ms: None,
-            sort_order: 0,
-            tags: vec![],
-            updated_ms: 0,
-        }
+        Task::new(Uuid::now_v7(), list, "t", 0, 0)
     }
 
     #[test]
