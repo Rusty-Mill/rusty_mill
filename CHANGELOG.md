@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_tick`: `users`**, the per-user token registry and check (`Token`, `Registry`, `RegistryFile`); not yet wired to the API (ADR-0002 step 2).
 - **`rusty_multimodal_db_engine`: `Query::except_columns`** (FTS5 column exclusion) and **`rusty_tick`: `StorePool`**, a bounded per-user store pool (not yet wired to the API). Issue #382.
 - **`rusty_multimodal_db_engine`: full-text column filters** (`Query::in_columns`), FTS5-differentially tested; store open/close lifecycle tests and idle-cost measurements for one-store-per-user (issue #382 gaps 3 and 6).
 - **`rusty_multimodal_db_engine`: prefix, `AND` and `NOT` full-text queries** (`Query::any_of_prefix`, `all_of`, `except`), FTS5-differentially tested; recipe tests for multi-filter, range, reorder and change-feed use; `rusty_multimodal_db` ADR-0125 (change feed stays app-side). Issue #382.
@@ -19,6 +20,9 @@ Removed / Fixed / Security, newest first.
   - Not implemented by the relation layers, since their edge logs would need their syncs ordered against the record log's.
   - New in `insert_log`: `LogSync`, `append_record`, `append_tombstone_as` and `sync`; and `GenericMmapStore::is_sync_deferred`.
   - `rusty_remind_me`'s hub applies each push through it.
+
+### Changed
+- **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
 - **`rusty_multimodal_db_engine`: a long write pause each time the row count doubled.**

@@ -14,6 +14,7 @@ pub mod store;
 pub mod table;
 pub mod tags;
 pub mod task;
+pub mod users;
 
 pub use store::{TaskStore, TickError};
 pub use task::{ChecklistItem, Priority, Status, Task, TaskKind};
