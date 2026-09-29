@@ -1,7 +1,7 @@
 # ADR-0125: The Change Feed Stays App-Side, Built From Existing Pieces
 
-- Status: **Proposed** (2026-09-29), awaiting the owner. No code change to
-  the engine; a recipe and a test.
+- Status: **Accepted by the owner** (2026-09-29). No code change to the
+  engine; a recipe and a test.
 - Date: 2026-09-29
 - Deciders: baileyrd
 - Related: issue #382 (gap 4, "Change feed for sync and multi-device"),
