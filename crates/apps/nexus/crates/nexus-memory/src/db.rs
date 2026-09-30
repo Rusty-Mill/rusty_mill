@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value TEXT NOT NULL
 );
 
+-- Pulled records that could not be applied, kept so a sync cursor never
+-- passes a record silently; written in the same transaction as the cursor
+-- and retried by every pull (design review 2.7 / N2).
+CREATE TABLE IF NOT EXISTS sync_rejected (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id   TEXT,
+    updated_at  TEXT,
+    payload     TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    rejected_at TEXT NOT NULL
+);
+
 -- Phase 5 — durable backing for the three cognitive stores
 -- (EpisodicStore / SemanticStore / ProceduralStore). Same database file
 -- as the remind_me-parity `memories` table so `.forge/memory/` stays a
@@ -260,49 +272,90 @@ impl MemoryDb {
     /// Returns an error on a write failure.
     pub fn upsert_lww(&self, m: &Memory) -> Result<bool> {
         let conn = self.pool.get()?;
-        let n = conn.execute(
-            "INSERT INTO memories (id, content, category, tags, source, metadata, \
-                created_at, updated_at, client, node_id, capture_id, source_capture_id, \
-                memory_type, status, superseded_by, subject, predicate, object, \
-                accessed_at, access_count, decay_rate, vitality, base_weight) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) \
-             ON CONFLICT(id) DO UPDATE SET \
-                content=excluded.content, category=excluded.category, tags=excluded.tags, \
-                source=excluded.source, metadata=excluded.metadata, updated_at=excluded.updated_at, \
-                client=excluded.client, node_id=excluded.node_id, capture_id=excluded.capture_id, \
-                source_capture_id=excluded.source_capture_id, memory_type=excluded.memory_type, \
-                status=excluded.status, superseded_by=excluded.superseded_by, subject=excluded.subject, \
-                predicate=excluded.predicate, object=excluded.object, accessed_at=excluded.accessed_at, \
-                access_count=excluded.access_count, decay_rate=excluded.decay_rate, \
-                vitality=excluded.vitality, base_weight=excluded.base_weight \
-             WHERE excluded.updated_at > memories.updated_at",
-            params![
-                m.id.to_string(),
-                m.content,
-                m.category,
-                serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string()),
-                m.source,
-                serde_json::to_string(&m.metadata).unwrap_or_else(|_| "{}".to_string()),
-                m.created_at.to_rfc3339(),
-                m.updated_at.to_rfc3339(),
-                m.client,
-                m.node_id,
-                m.capture_id,
-                m.source_capture_id,
-                m.memory_type.as_str(),
-                m.status.as_str(),
-                m.superseded_by.as_ref().map(MemoryId::to_string),
-                m.subject,
-                m.predicate,
-                m.object,
-                m.accessed_at.map(|t| t.to_rfc3339()),
-                m.access_count,
-                m.decay_rate,
-                m.vitality,
-                m.base_weight,
-            ],
-        )?;
-        Ok(n > 0)
+        Ok(upsert_lww_on(&conn, m)?)
+    }
+
+    /// Apply one pulled sync page atomically (design review 2.7 / N2): each
+    /// [`PulledEntry::Memory`] last-write-wins, each
+    /// [`PulledEntry::Rejected`] into the `sync_rejected` dead-letter
+    /// table, and the `cursor` key/values — all in one transaction, so the
+    /// cursor never moves past a record that is neither applied nor kept.
+    ///
+    /// # Errors
+    /// Returns an error on a write failure; nothing of the page is kept.
+    pub fn apply_pull_page(
+        &self,
+        page: &[PulledEntry],
+        cursor: &[(&str, &str)],
+    ) -> Result<PageOutcome> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let mut outcome = PageOutcome::default();
+        for entry in page {
+            match entry {
+                PulledEntry::Memory(m) => {
+                    if upsert_lww_on(&tx, m)? {
+                        outcome.applied += 1;
+                    } else {
+                        outcome.unchanged += 1;
+                    }
+                }
+                PulledEntry::Rejected(r) => {
+                    insert_rejected(&tx, r)?;
+                    outcome.rejected += 1;
+                }
+            }
+        }
+        for (key, value) in cursor {
+            tx.execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// How many pulled records are dead-lettered now.
+    ///
+    /// # Errors
+    /// Returns an error on a query failure.
+    pub fn replay_rejected_count(&self) -> Result<u64> {
+        let conn = self.pool.get()?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM sync_rejected", [], |r| r.get(0))?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Retry every dead-lettered pull record (design review 2.7 / N2): one
+    /// that now decodes is applied last-write-wins and leaves the table
+    /// (a fix such as opaque [`MemoryId`]s recovers what an older build
+    /// rejected). Returns how many were applied and how many remain.
+    ///
+    /// # Errors
+    /// Returns an error on a query or write failure; nothing is changed.
+    pub fn replay_rejected(&self) -> Result<(u64, u64)> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare("SELECT seq, payload FROM sync_rejected ORDER BY seq")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        let (mut applied, mut remaining) = (0_u64, 0_u64);
+        for (seq, payload) in rows {
+            let Ok(m) = serde_json::from_str::<Memory>(&payload) else {
+                remaining += 1;
+                continue;
+            };
+            upsert_lww_on(&tx, &m)?;
+            tx.execute("DELETE FROM sync_rejected WHERE seq = ?1", params![seq])?;
+            applied += 1;
+        }
+        tx.commit()?;
+        Ok((applied, remaining))
     }
 
     /// Read a sync cursor/state value by key (`None` if unset).
@@ -1062,6 +1115,102 @@ pub(crate) fn parse_uuid(s: &str) -> Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| MemoryDbError::Decode(format!("uuid {s:?}: {e}")))
 }
 
+/// [`MemoryDb::upsert_lww`] on a given connection or transaction.
+fn upsert_lww_on(conn: &rusqlite::Connection, m: &Memory) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+            "INSERT INTO memories (id, content, category, tags, source, metadata, \
+                created_at, updated_at, client, node_id, capture_id, source_capture_id, \
+                memory_type, status, superseded_by, subject, predicate, object, \
+                accessed_at, access_count, decay_rate, vitality, base_weight) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) \
+             ON CONFLICT(id) DO UPDATE SET \
+                content=excluded.content, category=excluded.category, tags=excluded.tags, \
+                source=excluded.source, metadata=excluded.metadata, updated_at=excluded.updated_at, \
+                client=excluded.client, node_id=excluded.node_id, capture_id=excluded.capture_id, \
+                source_capture_id=excluded.source_capture_id, memory_type=excluded.memory_type, \
+                status=excluded.status, superseded_by=excluded.superseded_by, subject=excluded.subject, \
+                predicate=excluded.predicate, object=excluded.object, accessed_at=excluded.accessed_at, \
+                access_count=excluded.access_count, decay_rate=excluded.decay_rate, \
+                vitality=excluded.vitality, base_weight=excluded.base_weight \
+             WHERE excluded.updated_at > memories.updated_at",
+            params![
+                m.id.to_string(),
+                m.content,
+                m.category,
+                serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string()),
+                m.source,
+                serde_json::to_string(&m.metadata).unwrap_or_else(|_| "{}".to_string()),
+                m.created_at.to_rfc3339(),
+                m.updated_at.to_rfc3339(),
+                m.client,
+                m.node_id,
+                m.capture_id,
+                m.source_capture_id,
+                m.memory_type.as_str(),
+                m.status.as_str(),
+                m.superseded_by.as_ref().map(MemoryId::to_string),
+                m.subject,
+                m.predicate,
+                m.object,
+                m.accessed_at.map(|t| t.to_rfc3339()),
+                m.access_count,
+                m.decay_rate,
+                m.vitality,
+                m.base_weight,
+            ],
+        )?;
+    Ok(n > 0)
+}
+
+fn insert_rejected(conn: &rusqlite::Connection, r: &RejectedRecord) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO sync_rejected (record_id, updated_at, payload, reason, rejected_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            r.id,
+            r.updated_at,
+            r.payload,
+            r.reason,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// One record of a pulled sync page, as [`MemoryDb::apply_pull_page`]
+/// takes it: decoded, or kept verbatim with why it could not be.
+#[derive(Debug, Clone)]
+pub enum PulledEntry {
+    /// A record that decoded as a [`Memory`] (boxed: it dwarfs the other).
+    Memory(Box<Memory>),
+    /// A record that did not.
+    Rejected(RejectedRecord),
+}
+
+/// A pulled record that could not be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedRecord {
+    /// Its `id`, when the payload has one.
+    pub id: Option<String>,
+    /// Its `updated_at`, when the payload has one.
+    pub updated_at: Option<String>,
+    /// The record's JSON, verbatim, for a later replay.
+    pub payload: String,
+    /// Why it was rejected.
+    pub reason: String,
+}
+
+/// What [`MemoryDb::apply_pull_page`] did with a page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageOutcome {
+    /// Records written (new, or newer than the stored row).
+    pub applied: u64,
+    /// Records that decoded but were not newer than the stored row.
+    pub unchanged: u64,
+    /// Records dead-lettered into `sync_rejected`.
+    pub rejected: u64,
+}
+
 /// A stored memory id — any origin's form, kept verbatim (see [`MemoryId`]).
 pub(crate) fn parse_memory_id(s: &str) -> Result<MemoryId> {
     MemoryId::parse(s).map_err(|e| MemoryDbError::Decode(e.to_string()))
@@ -1724,5 +1873,71 @@ mod tests {
         }
         let rows = db.list(usize::MAX).unwrap();
         assert_eq!(rows.len(), 5);
+    }
+
+    fn rejected(payload: &str) -> PulledEntry {
+        PulledEntry::Rejected(RejectedRecord {
+            id: Some("mem_x".into()),
+            updated_at: None,
+            payload: payload.into(),
+            reason: "does not decode".into(),
+        })
+    }
+
+    /// Review 2.7 (N2): rows, dead letters and the cursor commit together;
+    /// a failure before the cursor lands keeps none of the page.
+    #[test]
+    fn a_pull_page_commits_with_its_cursor_or_not_at_all() {
+        let db = MemoryDb::open_in_memory().unwrap();
+        let page = [
+            PulledEntry::Memory(Box::new(Memory::new("a good ferry fact"))),
+            rejected("{\"content\":42}"),
+        ];
+        db.pool
+            .get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE INSERT ON sync_state \
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(db.apply_pull_page(&page, &[("k", "v")]).is_err());
+        assert!(
+            db.search("ferry", 10).unwrap().is_empty(),
+            "rows rolled back"
+        );
+        assert_eq!(
+            db.replay_rejected_count().unwrap(),
+            0,
+            "dead letter rolled back"
+        );
+        assert_eq!(db.sync_state_get("k").unwrap(), None);
+
+        db.pool
+            .get()
+            .unwrap()
+            .execute_batch("DROP TRIGGER refuse;")
+            .unwrap();
+        let outcome = db.apply_pull_page(&page, &[("k", "v")]).unwrap();
+        assert_eq!(
+            (outcome.applied, outcome.unchanged, outcome.rejected),
+            (1, 0, 1)
+        );
+        assert_eq!(db.sync_state_get("k").unwrap().as_deref(), Some("v"));
+    }
+
+    /// Review 2.7 (N2): a dead letter that now decodes (an upgrade, such as
+    /// opaque memory ids) is applied by the replay and leaves the table.
+    #[test]
+    fn replay_applies_dead_letters_that_now_decode() {
+        let db = MemoryDb::open_in_memory().unwrap();
+        let mut m = Memory::new("recovered after an upgrade");
+        m.id = MemoryId::parse("mem_0123456789abcdef0123456789abcdef").unwrap();
+        let payload = serde_json::to_string(&m).unwrap();
+        db.apply_pull_page(&[rejected(&payload), rejected("not json")], &[])
+            .unwrap();
+        assert_eq!(db.replay_rejected().unwrap(), (1, 1));
+        assert!(db.get(&m.id).unwrap().is_some());
+        assert_eq!(db.replay_rejected_count().unwrap(), 1);
     }
 }

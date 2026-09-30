@@ -9,6 +9,16 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **Memory sync no longer loses records it cannot decode** (`nexus-memory`,
+  design review 2.7 / N2).
+  - The pull loop used to advance its cursor past a whole page but drop
+    undecodable records silently, and counted them as transferred.
+  - Each page's applied rows, dead-lettered records (new `sync_rejected`
+    table: payload, reason) and cursor now commit in one transaction.
+  - Every pull first retries the dead letters, so an upgrade that can
+    decode them (such as opaque memory ids) recovers them.
+  - The sync reply adds `applied`, `unchanged`, `rejected`, `replayed` and
+    `dead_letters` beside `pushed`/`pulled`.
 - **Importing a real `remind_me` database** (`nexus-memory`, design review
   2.6 / N1).
   - Memory ids are now an opaque `MemoryId`, kept verbatim: Nexus's UUIDs
