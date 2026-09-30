@@ -13,7 +13,7 @@ npm ci
 npm run dev                # http://localhost:5173, proxies /api to $TICK_BACKEND (default 127.0.0.1:8787)
 npm test                   # 540+ unit/component/integration tests (jsdom, in-memory backend)
 npm run test:integration   # same API contract against the real rusty_tick binary (cargo build -p rusty_tick first)
-npm run e2e                # Playwright smoke flows against the real binary serving dist/ (npm run build first)
+npm run e2e                # Playwright flows against the real binary (single-user and per-user tokens); needs `cargo build -p rusty_tick` and `npm run build` first; also runs in CI
 npm run build              # typecheck + production bundle into dist/
 ```
 
