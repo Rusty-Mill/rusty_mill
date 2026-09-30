@@ -48,7 +48,9 @@ impl OwnedWinHandle {
     /// else owns: the result closes it on drop, and safe conversions such
     /// as `From<OwnedWinHandle> for OwnedHandle` rely on sole ownership.
     pub unsafe fn from_raw(handle: w::HANDLE) -> Option<Self> {
-        (handle != w::INVALID_HANDLE_VALUE && !handle.is_null()).then_some(Self(handle))
+        // Lazily: an eagerly built `Self(sentinel)` would be dropped here,
+        // and its `CloseHandle` overwrite the error the caller reads next.
+        (handle != w::INVALID_HANDLE_VALUE && !handle.is_null()).then(|| Self(handle))
     }
 
     pub fn as_raw(&self) -> w::HANDLE {

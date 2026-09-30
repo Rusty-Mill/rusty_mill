@@ -55,7 +55,7 @@ impl AsyncSpawner for AsyncLinuxSpawner {
         Ok(Box::new(AsyncLinuxChild {
             inner: child,
             reactor: Arc::clone(&self.reactor),
-            reaped: Mutex::new(None),
+            reaped: Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -94,7 +94,11 @@ struct AsyncLinuxChild {
     /// `take_stdin`/`take_stdout`/`take_stderr`) — `self.inner`'s own
     /// private reap cache is deliberately never consulted, since this
     /// field is what stays authoritative instead.
-    reaped: Mutex<Option<ExitStatus>>,
+    ///
+    /// Shared with a [`WaitJob`] helper thread, which records a terminal
+    /// status here itself: the thread reaps even if its future was
+    /// dropped, and the status must not be lost with it.
+    reaped: Arc<Mutex<Option<ExitStatus>>>,
 }
 
 impl AsyncChild for AsyncLinuxChild {
@@ -206,11 +210,8 @@ impl AsyncChild for AsyncLinuxChild {
         }
         let pid = self.inner.id();
         Box::pin(async move {
-            let status = WaitJob::new(pid as libc::pid_t).await?;
-            if !matches!(status, ExitStatus::Stopped(_) | ExitStatus::Continued) {
-                *self.reaped.lock().unwrap_or_else(|p| p.into_inner()) = Some(status);
-            }
-            Ok(status)
+            // The helper thread records a terminal status in `reaped`.
+            WaitJob::new(pid as libc::pid_t, Arc::clone(&self.reaped)).await
         })
     }
 }
@@ -312,16 +313,24 @@ impl Drop for PidfdReady {
 /// already had to learn the hard way once this future's waker can be
 /// shared with unrelated futures (e.g. if a caller ever raced this
 /// against something else).
+///
+/// Cancellation: dropping this future does not stop the thread, which may
+/// still reap the child. So the thread itself records a terminal status
+/// in the child's `reaped` cache, before publishing its result; a later
+/// `kill_single`/`try_wait` then sees the child as reaped instead of
+/// acting on a pid that may be recycled.
 struct WaitJob {
     pid: libc::pid_t,
+    reaped: Arc<Mutex<Option<ExitStatus>>>,
     result: Arc<Mutex<Option<Result<ExitStatus>>>>,
     spawned: bool,
 }
 
 impl WaitJob {
-    fn new(pid: libc::pid_t) -> Self {
+    fn new(pid: libc::pid_t, reaped: Arc<Mutex<Option<ExitStatus>>>) -> Self {
         Self {
             pid,
+            reaped,
             result: Arc::new(Mutex::new(None)),
             spawned: false,
         }
@@ -339,12 +348,18 @@ impl Future for WaitJob {
         if !this.spawned {
             this.spawned = true;
             let result_slot = Arc::clone(&this.result);
+            let reaped = Arc::clone(&this.reaped);
             let waker = cx.waker().clone();
             let pid = this.pid;
             let spawned = std::thread::Builder::new()
                 .name("rustils-async-waitjob".to_owned())
                 .spawn(move || {
                     let outcome = platform_linux::sys::spawn::wait_job(pid);
+                    if let Ok(status) = &outcome {
+                        if !matches!(status, ExitStatus::Stopped(_) | ExitStatus::Continued) {
+                            *reaped.lock().unwrap_or_else(|p| p.into_inner()) = Some(*status);
+                        }
+                    }
                     *result_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
                     waker.wake();
                 });
@@ -443,5 +458,42 @@ mod wait_any_leak_tests {
         let slow_child = children.remove(1);
         let _ = slow_child.kill_single(Signal::Kill);
         let _ = block_on(slow_child.wait());
+    }
+
+    /// Review 1.6 follow-up: a `wait_job` future dropped after its first
+    /// poll leaves its helper thread blocked in `waitpid`. When the child
+    /// exits, the thread reaps it; the status must still reach the child's
+    /// cache, so `try_wait` answers from it (not `ECHILD`) and
+    /// `kill_single` sends nothing to the possibly recycled pid.
+    #[test]
+    fn an_abandoned_wait_job_still_records_the_reap() {
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let mut child = spawner
+            .spawn(
+                &Command::new("/bin/sh", "/")
+                    .arg("-c")
+                    .arg("sleep 0.2; exit 3"),
+            )
+            .expect("spawn");
+        {
+            let waker = std::task::Waker::from(Arc::new(CountingWaker(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut abandoned = child.wait_job();
+            assert!(abandoned.as_mut().poll(&mut cx).is_pending());
+        }
+        // Gone from /proc: the helper thread has reaped it, zombie and all.
+        let proc_entry = format!("/proc/{}", child.id());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::path::Path::new(&proc_entry).exists() {
+            assert!(std::time::Instant::now() < deadline, "child never reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            child.try_wait().expect("cached, not ECHILD"),
+            Some(ExitStatus::Code(3))
+        );
+        child
+            .kill_single(Signal::Kill)
+            .expect("no signal to a reaped pid");
     }
 }
