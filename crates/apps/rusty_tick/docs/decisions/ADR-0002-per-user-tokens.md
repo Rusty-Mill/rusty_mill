@@ -103,9 +103,9 @@ Failures are logged with the user key and never the secret.
   brute-forced; a leaked token exposes one user until it is revoked.
 - Single-user mode should also take the `DirLock` at startup, a one-line fix
   worth doing with this work.
-- Moving an existing single-user directory into a user is manual (stop the
-  server, move the store files into `users/<key>/`). A `user adopt` command
-  is left until someone needs it.
+- `user adopt KEY` moves an existing single-user store into `users/<key>/`
+  (server stopped, checked by the directory lock). Commands that edit
+  `users.json` hold `users.lock`, so two at once cannot lose a write.
 - Clients change only in what they send as the token.
 
 ## Plan
