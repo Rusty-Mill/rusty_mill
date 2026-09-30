@@ -86,7 +86,8 @@ platform-linux = { workspace = true, optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
-# stream to TLS with rustls before driving `establish_enhanced`. Off by
+# stream to TLS (verified per the caller's `rusty_tls::TrustPolicy`) before
+# driving `establish_enhanced`. Off by
 # default; enabling it pulls in rustls and its transitive dependencies.
 tls = ["dep:rustls", "dep:rusty_tls", "dep:getrandom"]
 # Enables `platform_net::PlatformTcpStream`, a std::io::Read+Write adapter
