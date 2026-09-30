@@ -1,10 +1,11 @@
-import { useState } from 'react'
-import { getToken, identity } from '@/app/env'
+import { useRef, useState } from 'react'
+import { forgetUserData, getToken, identity } from '@/app/env'
 import { useActions, useServices } from '@/app/services'
 import { downloadFile } from '@/features/summary/download'
 import { dayKey } from '@/lib/date'
 import { Confirm } from '@/components/Confirm'
-import { resetDemoData, signOut } from '../session'
+import { restoreBackup, wipeData } from '../backup'
+import { page, resetDemoData, signOut } from '../session'
 import { APP_NAME, APP_VERSION } from './AboutTab'
 import { PaneTitle, Row } from './controls'
 
@@ -22,7 +23,7 @@ const soon = 'text-primary/50'
 
 export function AccountTab() {
   const { mode, api } = useServices()
-  const { notify } = useActions()
+  const { notify, refresh } = useActions()
   const who = mode === 'server' ? identity(getToken()) || 'Tick Local' : 'Demo'
   const backup = (): void => {
     api
@@ -31,6 +32,28 @@ export function AccountTab() {
       .catch(() => notify('error', 'Could not create a backup'))
   }
   const [confirming, setConfirming] = useState(false)
+  const [wiping, setWiping] = useState(false)
+  const file = useRef<HTMLInputElement>(null)
+  const importFile = (f: File | undefined): void => {
+    if (!f) return
+    void f
+      .text()
+      .then((text) => restoreBackup(api, text))
+      .then((n) => {
+        notify('info', `Imported ${n.tasks} tasks, ${n.lists} lists and ${n.tags} tags`)
+        void refresh()
+      })
+      .catch((e: unknown) => notify('error', e instanceof Error ? e.message : 'Could not import that backup'))
+  }
+  const wipe = (): void => {
+    setWiping(false)
+    wipeData(api)
+      .then(() => {
+        forgetUserData()
+        page.reload()
+      })
+      .catch(() => notify('error', 'Could not delete your data'))
+  }
   return (
     <>
       <PaneTitle>Account</PaneTitle>
@@ -70,12 +93,17 @@ export function AccountTab() {
             <button type="button" onClick={backup} className="text-primary hover:underline">
               Generate Backup
             </button>
-            <span className={soon} title="Not available">Import Backups</span>
+            <button type="button" onClick={() => file.current?.click()} className="text-primary hover:underline">
+              Import Backups
+            </button>
+            <input ref={file} type="file" accept="application/json,.json" hidden aria-label="Backup file" onChange={(e) => { importFile(e.target.files?.[0]); e.target.value = '' }} />
           </span>
         </div>
         <div className={line}>
           <span>Manage Account</span>
-          <span className="text-danger/50" title="Not available">Delete Account</span>
+          <button type="button" onClick={() => setWiping(true)} className="text-danger hover:underline">
+            Delete All Data
+          </button>
         </div>
       </div>
       {mode === 'server' ? (
@@ -111,6 +139,15 @@ export function AccountTab() {
           />
         </>
       )}
+      <Confirm
+        open={wiping}
+        danger
+        title="Delete all data?"
+        message="This permanently deletes every task, list, tag, habit and comment in this account. Your sign-in stays. It cannot be undone."
+        confirmLabel="Delete"
+        onCancel={() => setWiping(false)}
+        onConfirm={wipe}
+      />
       <Row label="Application">
         <span className="text-base text-grey">
           {APP_NAME} {APP_VERSION}

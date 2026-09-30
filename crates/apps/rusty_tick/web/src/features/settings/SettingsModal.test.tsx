@@ -14,10 +14,13 @@ import { SettingsModal } from './SettingsModal'
 
 const Where = () => <output data-testid="where">{useLocation().search}</output>
 
+let services = createServices('demo')
+
 function setup(entry = '/?modalType=settings&tabs=account', mode: Mode = 'demo') {
   const user = userEvent.setup()
+  services = createServices(mode)
   render(
-    <ServicesProvider services={createServices(mode)}>
+    <ServicesProvider services={services}>
       <MemoryRouter initialEntries={[entry]}>
         <SettingsModal />
         <Where />
@@ -194,6 +197,22 @@ describe('SettingsModal', () => {
       const snap = JSON.parse(await new Promise<string>((ok) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.readAsText(blobs[0]!) })) as { lists: unknown[]; tasks: unknown[] }
       expect(snap.lists.length).toBeGreaterThan(0)
       expect(snap.tasks.length).toBeGreaterThan(0)
+    })
+
+    it('Delete All Data asks first, then empties the account and reloads', async () => {
+      const reload = vi.spyOn(page, 'reload').mockImplementation(() => undefined)
+      const user = setup()
+      await user.click(screen.getByRole('button', { name: 'Delete All Data' }))
+      expect(reload).not.toHaveBeenCalled()
+      await user.click(within(screen.getByRole('dialog', { name: 'Delete all data?' })).getByRole('button', { name: 'Delete' }))
+      await waitFor(() => expect(reload).toHaveBeenCalled())
+    })
+
+    it('Import Backups refuses a file that is not a backup', async () => {
+      const user = setup()
+      Object.defineProperty(File.prototype, 'text', { configurable: true, value: () => Promise.resolve('nope') }) // jsdom's File has no text()
+      await user.upload(screen.getByLabelText('Backup file'), new File(['nope'], 'x.json', { type: 'application/json' }))
+      await waitFor(() => expect(services.store.getState().toasts.map((t) => t.message)).toContain('That file is not a Tick Local backup'))
     })
 
     it('server mode: shows the masked token and signs out', async () => {
