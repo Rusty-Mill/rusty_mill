@@ -17,7 +17,8 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -216,7 +217,9 @@ pub fn serve(
     port: u16,
     chat_template: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
-    let (jobs_tx, jobs_rx) = channel::<Job>();
+    // Bounded (design review 3.7, N01): a full queue answers 503 rather
+    // than growing without limit while the model is busy.
+    let (jobs_tx, jobs_rx) = sync_channel::<Job>(queue_cap());
     let (ready_tx, ready_rx) = channel::<Result<(), String>>();
 
     let (mp, bk, ct) = (
@@ -235,6 +238,7 @@ pub fn serve(
         .map_err(|_| "worker thread died during startup")??;
 
     let model_id: Arc<str> = Arc::from(model_label(model_path));
+    let max_connections = connection_cap();
     let listener = TcpListener::bind((host, port))?;
     eprintln!("rusty_llama: serving '{model_id}' on http://{host}:{port} (backend: {backend})");
 
@@ -246,9 +250,16 @@ pub fn serve(
                 continue;
             }
         };
+        // Bounded connections (design review 3.7, N01): each used to get an
+        // OS thread with no ceiling.
+        let Some(slot) = ConnectionSlot::acquire(&ACTIVE_CONNECTIONS, max_connections) else {
+            refuse_busy(stream);
+            continue;
+        };
         let tx = jobs_tx.clone();
         let id = model_id.clone();
         thread::spawn(move || {
+            let _slot = slot;
             if let Err(e) = handle_connection(stream, &tx, &id) {
                 // A dropped client mid-stream is normal; just note it.
                 eprintln!("rusty_llama: connection closed: {e}");
@@ -256,6 +267,71 @@ pub fn serve(
         });
     }
     Ok(())
+}
+
+/// Connections being served now (design review 3.7, N01).
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// A held connection slot, released on drop.
+struct ConnectionSlot(&'static AtomicUsize);
+
+impl ConnectionSlot {
+    /// A slot if fewer than `max` are held.
+    fn acquire(active: &'static AtomicUsize, max: usize) -> Option<Self> {
+        active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| ConnectionSlot(active))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Answer an over-cap connection `503` on the accept thread, briefly: a
+/// short write deadline so a client that does not read cannot stall it.
+fn refuse_busy(mut stream: TcpStream) {
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+    let _ = write_json(
+        &mut stream,
+        503,
+        &error_json("server busy: too many connections"),
+    );
+}
+
+/// Queue a job for the worker: `Err` with the status and message to answer
+/// when the bounded queue is full (`503`) or the worker is gone (`500`).
+fn submit(jobs: &SyncSender<Job>, job: Job) -> Result<(), (u16, &'static str)> {
+    match jobs.try_send(job) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err((503, "server busy: generation queue full")),
+        Err(TrySendError::Disconnected(_)) => Err((500, "generation worker is gone")),
+    }
+}
+
+/// Jobs that may wait for the worker. Override with `RUSTY_LLAMA_QUEUE`
+/// (clamped to >= 1).
+fn queue_cap() -> usize {
+    std::env::var("RUSTY_LLAMA_QUEUE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64)
+        .max(1)
+}
+
+/// Connections served at once; more are answered `503`. Override with
+/// `RUSTY_LLAMA_MAX_CONNECTIONS` (clamped to >= 1).
+fn connection_cap() -> usize {
+    std::env::var("RUSTY_LLAMA_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(128)
+        .max(1)
 }
 
 /// Max concurrent sequences the scheduler batches. Override with
@@ -588,7 +664,7 @@ fn body_within_limit(content_length: usize) -> bool {
     content_length <= MAX_BODY_BYTES
 }
 
-fn handle_connection(stream: TcpStream, jobs: &Sender<Job>, model_id: &str) -> io::Result<()> {
+fn handle_connection(stream: TcpStream, jobs: &SyncSender<Job>, model_id: &str) -> io::Result<()> {
     // Bound how long one (stalled or slowloris) client can pin this worker thread:
     // without read/write timeouts a client that opens a socket and never finishes
     // its request would block the thread forever.
@@ -661,7 +737,7 @@ fn handle_connection(stream: TcpStream, jobs: &Sender<Job>, model_id: &str) -> i
 fn handle_chat(
     stream: &mut TcpStream,
     body: &[u8],
-    jobs: &Sender<Job>,
+    jobs: &SyncSender<Job>,
     model_id: &str,
 ) -> io::Result<()> {
     let req: ChatRequest = match serde_json::from_slice(body) {
@@ -685,8 +761,8 @@ fn handle_chat(
         grammar: req_grammar(req.grammar, req.response_format),
         reply,
     };
-    if jobs.send(job).is_err() {
-        return write_json(stream, 500, &error_json("generation worker is gone"));
+    if let Err((status, message)) = submit(jobs, job) {
+        return write_json(stream, status, &error_json(message));
     }
     if req.stream {
         stream_chat(stream, &rx, &model)
@@ -698,7 +774,7 @@ fn handle_chat(
 fn handle_completion(
     stream: &mut TcpStream,
     body: &[u8],
-    jobs: &Sender<Job>,
+    jobs: &SyncSender<Job>,
     model_id: &str,
 ) -> io::Result<()> {
     let req: CompletionRequest = match serde_json::from_slice(body) {
@@ -714,8 +790,8 @@ fn handle_completion(
         grammar: req_grammar(req.grammar, req.response_format),
         reply,
     };
-    if jobs.send(job).is_err() {
-        return write_json(stream, 500, &error_json("generation worker is gone"));
+    if let Err((status, message)) = submit(jobs, job) {
+        return write_json(stream, status, &error_json(message));
     }
     if req.stream {
         stream_completion(stream, &rx, &model)
@@ -1147,7 +1223,7 @@ mod tests {
         // rejected with 400 immediately.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local_addr");
-        let (jobs_tx, _jobs_rx) = channel::<Job>();
+        let (jobs_tx, _jobs_rx) = sync_channel::<Job>(1);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
             handle_connection(stream, &jobs_tx, "test-model")
@@ -1176,5 +1252,34 @@ mod tests {
             resp.contains("400"),
             "expected a 400 for an oversized request line, got: {resp}"
         );
+    }
+
+    /// Design review 3.7 (N01): the job queue was unbounded. A full bounded
+    /// queue answers 503 at once; a gone worker 500.
+    #[test]
+    fn a_full_job_queue_is_refused_not_grown() {
+        let job = || Job {
+            kind: JobKind::Completion("x".into()),
+            sampler: resolve_sampler(&SamplingParams::default()),
+            max_tokens: 1,
+            grammar: None,
+            reply: channel::<Event>().0,
+        };
+        let (tx, rx) = sync_channel::<Job>(1);
+        assert!(submit(&tx, job()).is_ok());
+        assert_eq!(submit(&tx, job()).map_err(|e| e.0), Err(503));
+        drop(rx);
+        assert_eq!(submit(&tx, job()).map_err(|e| e.0), Err(500));
+    }
+
+    /// Design review 3.7 (N01): connections were one thread each with no cap.
+    #[test]
+    fn connection_slots_admit_at_most_the_cap() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        let a = ConnectionSlot::acquire(&ACTIVE, 2).unwrap();
+        let _b = ConnectionSlot::acquire(&ACTIVE, 2).unwrap();
+        assert!(ConnectionSlot::acquire(&ACTIVE, 2).is_none());
+        drop(a);
+        assert!(ConnectionSlot::acquire(&ACTIVE, 2).is_some());
     }
 }
