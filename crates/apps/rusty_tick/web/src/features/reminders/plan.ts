@@ -4,7 +4,7 @@
  */
 import type { Task } from '@/api/types'
 import { addDays, atTime, dayKey, startOfDay } from '@/lib/date'
-import { checkinId, isDue, type Checkin, type Habit } from '@/features/habits/logic'
+import { checkinId, isDue, parseGoal, type Checkin, type Habit } from '@/features/habits/logic'
 
 export interface Due {
   key: string // what and when: the same reminder is never shown twice
@@ -48,7 +48,7 @@ export function upcomingHabits(habits: Habit[], checkins: Record<string, Checkin
     if (!m) continue
     for (let day = startOfDay(now); day <= now + horizonMs; day = addDays(day, 1)) {
       const atMs = atTime(day, Number(m[1]), Number(m[2]))
-      if (atMs <= now || atMs > now + horizonMs || !isDue(h, day) || checkinId(h.id, dayKey(day)) in checkins) continue
+      if (atMs <= now || atMs > now + horizonMs || !isDue(h, day) || (checkins[checkinId(h.id, dayKey(day))]?.count ?? 0) >= parseGoal(h.goal).count) continue
       out.push({ key: `habit|${h.id}|${atMs}`, title: h.name, body: 'Habit reminder', atMs })
     }
   }

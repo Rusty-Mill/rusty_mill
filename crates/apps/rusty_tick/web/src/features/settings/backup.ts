@@ -1,5 +1,5 @@
 import type { ApiClient } from '@/api/client'
-import type { DocKind, Snapshot, Task } from '@/api/types'
+import type { Doc, DocKind, Snapshot, Task } from '@/api/types'
 
 const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment']
 
@@ -7,9 +7,26 @@ export interface Restored {
   lists: number
   tags: number
   tasks: number
+  docs: number
 }
 
-const isSnapshot = (v: unknown): v is Snapshot => {
+/** What a backup file holds: the snapshot, plus the client documents (habits, check-ins, comments, ...) the snapshot does not carry. */
+export interface Backup extends Snapshot {
+  docs?: Partial<Record<DocKind, Doc[]>>
+}
+
+/** Everything the account holds that can be restored elsewhere. */
+export async function makeBackup(api: ApiClient): Promise<Backup> {
+  const [snap, ...lists] = await Promise.all([api.snapshot(), ...DOC_KINDS.map((k) => api.listDocs(k))])
+  return { ...snap, docs: Object.fromEntries(DOC_KINDS.map((k, i) => [k, lists[i]])) }
+}
+
+const isDoc = (v: unknown): v is Doc => {
+  const d = v as Partial<Doc> | null
+  return !!d && typeof d.id === 'string' && d.body !== undefined
+}
+
+const isSnapshot = (v: unknown): v is Backup => {
   const s = v as Partial<Snapshot> | null
   return !!s && typeof s.inboxId === 'string' && Array.isArray(s.lists) && Array.isArray(s.tasks) && Array.isArray(s.tags)
 }
@@ -34,7 +51,7 @@ export async function restoreBackup(api: ApiClient, text: string): Promise<Resto
   const listIds = new Set(have.lists.map((l) => l.id))
   const taskIds = new Set(have.tasks.map((t) => t.id))
   const tagNames = new Set(have.tags.map((t) => t.name))
-  const out: Restored = { lists: 0, tags: 0, tasks: 0 }
+  const out: Restored = { lists: 0, tags: 0, tasks: 0, docs: 0 }
 
   for (const l of parsed.lists) {
     if (l.id === parsed.inboxId || listIds.has(l.id)) continue
@@ -52,9 +69,28 @@ export async function restoreBackup(api: ApiClient, text: string): Promise<Resto
     const listId = t.listId === parsed.inboxId ? have.inboxId : t.listId
     await api.createTask({ id: t.id, listId, parentId: t.parentId, title: t.title, notes: t.notes, kind: t.kind, priority: t.priority, startMs: t.startMs, dueMs: t.dueMs, isAllDay: t.isAllDay, timeZone: t.timeZone, reminders: t.reminders, repeatFlag: t.repeatFlag, items: t.items, tags: t.tags })
     if (t.status !== 'open') await api.updateTask(t.id, { status: t.status })
+    taskIds.add(t.id)
     out.tasks++
   }
+  out.docs = await restoreDocs(api, parsed.docs, taskIds)
   return out
+}
+
+/** Put back documents the account lacks. A comment whose task is not here (it was in the trash, say) would only be swept, so it is left out. */
+async function restoreDocs(api: ApiClient, docs: Backup['docs'], taskIds: ReadonlySet<string>): Promise<number> {
+  let n = 0
+  for (const kind of DOC_KINDS) {
+    const incoming = docs?.[kind]
+    if (!Array.isArray(incoming)) continue
+    const have = new Set((await api.listDocs(kind)).map((d) => d.id))
+    for (const d of incoming.filter(isDoc)) {
+      const owner = (d.body as { taskId?: string } | null)?.taskId
+      if (have.has(d.id) || (kind === 'comment' && !taskIds.has(owner ?? ''))) continue
+      await api.putDoc(kind, d.id, d.body)
+      n++
+    }
+  }
+  return n
 }
 
 /** Delete every task, list, tag and document. The account and its token stay; the Inbox is emptied, not removed. */
