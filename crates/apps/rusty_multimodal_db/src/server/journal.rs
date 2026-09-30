@@ -63,7 +63,7 @@ pub const JOURNAL_MAGIC: &[u8; 8] = b"TXNJRNL\0";
 /// build is refused, not silently upgraded; the journal is expected to
 /// be small and frequently checkpointed, unlike a long-lived blob.
 /// Version 3 (ADR-0135) adds the strict-accepted marker (kind `3`); a
-/// version-2 journal still opens (see [`JournaledBatch::StrictWrite`]),
+/// version-2 journal still opens (see `JournaledBatch::StrictWrite`),
 /// and the truncate that follows every replay rewrites its header.
 pub const JOURNAL_FORMAT_VERSION: u32 = 3;
 /// The previous format, still read: no strict-accepted markers.
