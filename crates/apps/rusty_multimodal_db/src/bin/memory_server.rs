@@ -80,6 +80,12 @@
 //! a table of more than `n` records; an indexed or walked plan is never
 //! refused.
 //!
+//! # Graceful drain — SIGTERM / SIGINT, `SERVER_DRAIN_TIMEOUT_SECS` (ADR-0127)
+//!
+//! On Linux the first SIGTERM or SIGINT stops accepting, lets every
+//! connection finish the request it is in and then closes it, and exits 0
+//! once they have — or after `SERVER_DRAIN_TIMEOUT_SECS` (default 30).
+//!
 //! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
 //!
 //! An `Insert`/`Replace`/`Delete`/`Link` is `fsync`ed to the insert log
@@ -339,6 +345,44 @@ const DEFAULT_MAX_QUERY_ROWS: u64 = 10_000;
 /// many appended entries without waiting for a `Compact` — a bound on
 /// the version index a deployment gets without asking.
 const DEFAULT_MVCC_RECLAIM_EVERY: u64 = 10_000;
+
+/// `DRN-FR-005` (ADR-0127): SIGTERM and SIGINT ask the server to drain. The
+/// handler only stores to an atomic (async-signal-safe); a watcher thread
+/// turns the flag into `Shutdown::request`. Linux only; elsewhere the server
+/// runs until it is killed, as before.
+#[cfg(target_os = "linux")]
+mod signals {
+    use rusty_libc::signal::{signal, SIGINT, SIGTERM};
+    use rusty_multimodal_db::server::Shutdown;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    static SIGNALLED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_signal(_: i32) {
+        SIGNALLED.store(true, Ordering::SeqCst);
+    }
+
+    /// Route SIGTERM and SIGINT to `shutdown`. `false` if either handler
+    /// could not be installed, in which case the server is left as it was.
+    pub fn drain_on_signal(shutdown: Shutdown) -> bool {
+        let handler = on_signal as extern "C" fn(i32) as usize;
+        // SAFETY: `on_signal` is an `extern "C" fn(i32)` that lives for the
+        // whole process and performs one atomic store, which is
+        // async-signal-safe.
+        let installed =
+            unsafe { signal(SIGTERM, handler).is_ok() && signal(SIGINT, handler).is_ok() };
+        if installed {
+            std::thread::spawn(move || {
+                while !SIGNALLED.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                shutdown.request();
+            });
+        }
+        installed
+    }
+}
 
 fn main() {
     let addr = std::env::args()
@@ -663,6 +707,23 @@ fn main() {
     let options = match bounded_env("SERVER_MAX_SCAN_ROWS", None) {
         Some(max) => options.with_max_scan_rows(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
+    };
+    // `DRN-FR-005` (ADR-0127): on Linux, SIGTERM/SIGINT drain the server —
+    // the listener closes, each connection finishes its current request, and
+    // the process exits when they have (or after `SERVER_DRAIN_TIMEOUT_SECS`,
+    // default 30). If the handlers cannot be installed the server runs as it
+    // always did.
+    #[cfg(target_os = "linux")]
+    let options = {
+        let shutdown = rusty_multimodal_db::server::Shutdown::new();
+        if signals::drain_on_signal(shutdown.clone()) {
+            let secs = bounded_env("SERVER_DRAIN_TIMEOUT_SECS", Some(30)).unwrap_or(30);
+            options
+                .with_shutdown(shutdown)
+                .with_drain_timeout(std::time::Duration::from_secs(secs))
+        } else {
+            options
+        }
     };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.

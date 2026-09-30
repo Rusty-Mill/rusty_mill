@@ -505,6 +505,9 @@ criterion-perf-events = { version = "0.4", optional = true }
 # criterion-perf-events' own event-type/builder types (HardwareEventType, PerfCounterBuilderLinux),
 # used directly in benches/cache_events.rs to select the CacheMisses/CacheReferences events.
 perfcnt = { version = "0.8", optional = true }
+# `memory_server`'s SIGTERM/SIGINT handlers for graceful drain (ADR-0127): a first-party raw
+# `rt_sigaction`, enabled by `server`; other platforms serve until killed, as before.
+rusty_libc = { workspace = true, optional = true }
 
 [features]
 # The "internal/research" bucket: the benchmarked-alternative storage
@@ -534,7 +537,7 @@ research = ["rusty_multimodal_db_engine/research"]
 # depends on this and compiles no `serve`, no domain adapter, no journal
 # (`ECO-FR-001`, ADR-0043). `server` implies it.
 client = ["dep:rusty_tls"]
-server = ["client", "dep:rusty_http"]
+server = ["client", "dep:rusty_http", "dep:rusty_libc"]
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
 # The external-database comparison benchmark (benches/external_db.rs, ADR-0015) — SQLite/DuckDB
 # (embedded) and Postgres (a real client against a locally-run server this benchmark does not

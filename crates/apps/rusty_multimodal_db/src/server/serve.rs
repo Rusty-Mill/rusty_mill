@@ -27,7 +27,7 @@ use std::net::{IpAddr, TcpListener, TcpStream};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -2809,6 +2809,12 @@ pub struct ServeOptions {
     /// `SCB-FR-001` (ADR-0126): the most records one full-scan
     /// `Aggregate`/`Join` may read; `None` is unbounded.
     max_scan_rows: Option<usize>,
+    /// `DRN-FR-001` (ADR-0127): the handle that asks `serve_tables` to
+    /// stop; `None` serves until the listener errors, as before.
+    shutdown: Option<Shutdown>,
+    /// `DRN-FR-003` (ADR-0127): how long a stopping server waits for its
+    /// connections to end before returning anyway.
+    drain_timeout: Duration,
     /// `BTL-FR-002` (ADR-0104): refusal threads alive right now — a
     /// refused connection's `Busy` frame is written from a thread that
     /// lives at most a few `BUSY_REFUSAL_TIMEOUT`s; at most
@@ -2876,6 +2882,8 @@ impl std::fmt::Debug for ServeOptions {
             .field("max_connections", &self.max_connections)
             .field("max_query_rows", &self.max_query_rows)
             .field("max_scan_rows", &self.max_scan_rows)
+            .field("shutdown", &self.shutdown.is_some())
+            .field("drain_timeout", &self.drain_timeout)
             .finish()
     }
 }
@@ -2907,6 +2915,8 @@ impl ServeOptions {
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
             max_scan_rows: None,
+            shutdown: None,
+            drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             busy_refusals: AtomicUsize::new(0),
         }
     }
@@ -2973,6 +2983,23 @@ impl ServeOptions {
     /// The configured scan budget, or `None`.
     pub fn max_scan_rows(&self) -> Option<usize> {
         self.max_scan_rows
+    }
+
+    /// `DRN-FR-001` (ADR-0127): let `shutdown.request()` stop the server
+    /// gracefully — accepting stops, every connection finishes the request
+    /// it is in and then closes, and `serve_tables` returns once they have
+    /// (or after [`Self::with_drain_timeout`]). Opt-in: unset, `serve_tables`
+    /// blocks in a plain `accept` loop exactly as before.
+    pub fn with_shutdown(mut self, shutdown: Shutdown) -> Self {
+        self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// `DRN-FR-003` (ADR-0127): the longest a stopping server waits for its
+    /// connections to end (default [`DEFAULT_DRAIN_TIMEOUT`]).
+    pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
     }
 
     /// `LIM-FR-002`: claim one in-flight slot at accept — `true` and the
@@ -3071,6 +3098,8 @@ impl ServeOptions {
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
             max_scan_rows: None,
+            shutdown: None,
+            drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             busy_refusals: AtomicUsize::new(0),
         }
     }
@@ -4942,8 +4971,8 @@ fn handle_connection(
 /// behavior exactly (`TLS-FR-008`); configured, it requires every
 /// connection to complete a TLS handshake before any request is served.
 /// Runs until `listener` itself errors (e.g. the socket is closed) or
-/// forever otherwise — a real deployment's shutdown/drain story is an
-/// explicit non-goal of the accepted design, not solved here.
+/// forever otherwise; since `ADR-0127` a [`Shutdown`] given to
+/// [`ServeOptions::with_shutdown`] stops it gracefully.
 ///
 /// `options` consolidates every cross-cutting server concern —
 /// tokens, certificate classes, the audit/access-log sinks, the
@@ -4958,6 +4987,99 @@ pub fn serve<S: ConnectionStore + 'static>(
 ) {
     let name = store.table_name().to_string();
     serve_tables(listener, vec![(name, store)], 0, options);
+}
+
+/// `DRN-FR-003` (ADR-0127): how long a stopping server waits for its
+/// connections to end before it returns anyway.
+pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the accept loop looks at the shutdown flag when no connection
+/// is waiting (only with a [`Shutdown`] configured).
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
+
+/// `DRN-FR-001` (ADR-0127): a cloneable handle that stops a server
+/// gracefully. Give one to [`ServeOptions::with_shutdown`], keep a clone,
+/// and call [`Self::request`] from anywhere (a signal watcher, a test).
+///
+/// A request stops the accept loop and shuts the *read* side of every open
+/// connection: a request already being answered completes and its response
+/// is written, and the next read is an end of stream, which ends the
+/// connection through the path a client disconnect takes (session rolled
+/// back, MVCC snapshot released, gauges decremented). Nothing is cut
+/// mid-write.
+#[derive(Clone, Default)]
+pub struct Shutdown(Arc<ShutdownState>);
+
+#[derive(Default)]
+struct ShutdownState {
+    requested: AtomicBool,
+    next: AtomicU64,
+    open: Mutex<HashMap<u64, TcpStream>>,
+}
+
+impl Shutdown {
+    /// A handle nothing has asked to stop yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the server to stop. Idempotent; safe from any thread.
+    pub fn request(&self) {
+        self.0.requested.store(true, Ordering::SeqCst);
+        let open = self.0.open.lock().unwrap_or_else(|p| p.into_inner());
+        for stream in open.values() {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+    }
+
+    /// Whether [`Self::request`] has been called.
+    pub fn is_requested(&self) -> bool {
+        self.0.requested.load(Ordering::SeqCst)
+    }
+
+    /// Track `stream` until the returned guard drops, so `request` can wake
+    /// a connection blocked on a read. A connection registered after the
+    /// request is woken at once: the flag is read after the insert.
+    fn register(&self, stream: &TcpStream) -> Option<ShutdownGuard> {
+        let clone = stream.try_clone().ok()?;
+        let id = self.0.next.fetch_add(1, Ordering::Relaxed);
+        self.0
+            .open
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, clone);
+        if self.is_requested() {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+        Some(ShutdownGuard {
+            state: Arc::clone(&self.0),
+            id,
+        })
+    }
+}
+
+impl std::fmt::Debug for Shutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shutdown")
+            .field("requested", &self.is_requested())
+            .finish()
+    }
+}
+
+/// Removes a connection from the shutdown registry when its thread ends.
+struct ShutdownGuard {
+    state: Arc<ShutdownState>,
+    id: u64,
+}
+
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        self.state
+            .open
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
 }
 
 /// `TBL-FR-001` (ADR-0045, implemented by ADR-0050): [`serve`] for more
@@ -5002,11 +5124,41 @@ pub fn serve_tables(
         let options = Arc::clone(&options);
         thread::spawn(move || super::metrics_http::serve_metrics_http(listener, options));
     }
-    for incoming in listener.incoming() {
+    // `DRN-FR-002` (ADR-0127): with a `Shutdown` configured the listener is
+    // polled so the flag is seen while idle; without one, the blocking
+    // `incoming()` loop below is the original path, untouched.
+    let shutdown = options.shutdown.clone();
+    if shutdown.is_some() && listener.set_nonblocking(true).is_err() {
+        return; // cannot poll, so cannot honor a shutdown: do not serve
+    }
+    let mut incoming = listener.incoming();
+    loop {
+        let next = match &shutdown {
+            None => incoming.next(),
+            Some(shutdown) => loop {
+                if shutdown.is_requested() {
+                    break None;
+                }
+                match incoming.next() {
+                    Some(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(ACCEPT_POLL)
+                    }
+                    other => break other,
+                }
+            },
+        };
+        let Some(incoming) = next else {
+            break;
+        };
         let stream = match incoming {
             Ok(s) => s,
             Err(_) => continue, // one bad accept doesn't take down the server
         };
+        // An accepted socket may inherit the listener's non-blocking mode
+        // on some platforms; the connection code expects a blocking one.
+        if shutdown.is_some() && stream.set_nonblocking(false).is_err() {
+            continue;
+        }
         // `LIM-FR-002` (ADR-0093): the cap is checked here, at accept,
         // before a thread exists for the connection; a refused socket
         // is dropped (closed) with nothing written and counted. The
@@ -5026,10 +5178,23 @@ pub fn serve_tables(
         let slot = InFlightGuardOwned(Arc::clone(&options));
         let spawned = thread::Builder::new().spawn(move || {
             let _slot = slot;
+            let _registered = thread_options
+                .shutdown
+                .as_ref()
+                .and_then(|shutdown| shutdown.register(&stream));
             handle_connection(stream, &tables, primary, thread_options.as_ref())
         });
         if spawned.is_err() {
             options.metrics().record_connection_refused();
+        }
+    }
+    // `DRN-FR-003` (ADR-0127): stopped accepting; wait for the connections
+    // (their read sides are shut, so each ends after the request it is in).
+    if shutdown.is_some() {
+        drop(listener);
+        let deadline = Instant::now() + options.drain_timeout;
+        while options.in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            thread::sleep(ACCEPT_POLL / 2);
         }
     }
 }
