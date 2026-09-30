@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db: chunked snapshots proposed (ADR-0135)
+**2026-09-30** · [ADR-0135](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0135-chunked-snapshots.md)
+
+- **Docs:** a proposal to lift the 8 MiB snapshot cap: stage a consistent copy under the write lock, then stream it in chunks (protocol 36), with per-file SHA-256. No code.
+- **Measured:** a locked local copy stalls writers about 6 s per GiB on the test host, which is why the lock covers the copy and never the transfer.
+
+---
+
 ## rusty_multimodal_db: a grouped change-log sync, spiked on Memory
 **2026-09-30** · [ADR-0134](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0134-grouped-change-log-sync.md)
 
