@@ -43,6 +43,7 @@ describe('HabitsPage', () => {
     const { user } = await setup()
     expect(screen.getByText('Develop a habit')).toBeInTheDocument()
     expect(screen.getByText('Every little bit counts')).toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Last seven days' })).getAllByRole('listitem')).toHaveLength(7)
     await user.click(screen.getByRole('button', { name: 'Add habit' }))
     expect(screen.getByRole('dialog', { name: 'Create Habit' })).toBeInTheDocument()
   })

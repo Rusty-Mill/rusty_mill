@@ -12,6 +12,32 @@ import { useHabits } from './store'
 
 const LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
 
+/** The seven days ending today, each with an empty hatched circle: what a habit's check-in row will look like. */
+function DayStrip({ today }: { today: number }) {
+  const days = Array.from({ length: 7 }, (_, i) => addDays(today, i - 6))
+  return (
+    <ol aria-label="Last seven days" className="mx-6 mt-2 grid grid-cols-7">
+      {days.map((d) => {
+        const isToday = d === today
+        return (
+          <li key={d} className="flex flex-col items-center gap-1 text-s">
+            <span className="text-grey">{new Date(d).toLocaleDateString('en-US', { weekday: 'short' })}</span>
+            <span className={isToday ? 'font-semibold text-primary' : 'font-semibold text-grey'}>{new Date(d).getDate()}</span>
+            <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden>
+              <defs>
+                <pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                  <line x1="0" y1="0" x2="0" y2="4" stroke="rgb(var(--line))" strokeWidth="2" />
+                </pattern>
+              </defs>
+              <circle cx="12" cy="12" r="10" fill="url(#hatch)" stroke="rgb(var(--line))" />
+            </svg>
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
 export function HabitsPage() {
   const { api } = useServices()
   const { notify } = useActions()
@@ -82,6 +108,7 @@ export function HabitsPage() {
         </div>
       </header>
 
+      {visible.length === 0 && <DayStrip today={today} />}
       {visible.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 pb-16 text-center">
           <HabitArt />
