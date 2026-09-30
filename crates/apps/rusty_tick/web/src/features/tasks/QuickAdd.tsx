@@ -5,7 +5,7 @@ import { useActions } from '@/app/services'
 import { parseQuickAdd, type Token } from '@/lib/nlp/parse'
 import { usePrefs } from '../settings/prefs'
 import { useUi } from '@/store/ui'
-import { buildQuickAdd, defaultListId } from './quickAdd'
+import { buildQuickAdd, defaultListId } from './quickAddParse'
 import type { ViewSpec } from './organize'
 
 interface Props {
