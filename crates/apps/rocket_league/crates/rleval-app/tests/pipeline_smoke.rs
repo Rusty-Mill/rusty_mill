@@ -13,13 +13,14 @@ fn sample(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+use replay_scoring::XgModel;
 use rleval_app::pipeline;
 
 #[test]
 fn analyzes_a_sample_into_every_view() {
     let bytes = sample("42f2.replay");
     // No norms ⇒ purely absolute scoring (the rank-relative layer is optional).
-    let a = pipeline::analyze(&bytes, "42f2", None, None).expect("pipeline should succeed");
+    let a = pipeline::analyze(&bytes, "42f2", None, None, &XgModel::default()).expect("pipeline should succeed");
 
     // Match summary is populated.
     assert_eq!(a.replay_id, "42f2");
@@ -72,6 +73,6 @@ fn analyzes_a_sample_into_every_view() {
 
 #[test]
 fn rejects_garbage_bytes() {
-    let err = pipeline::analyze(b"not a replay", "junk", None, None);
+    let err = pipeline::analyze(b"not a replay", "junk", None, None, &XgModel::default());
     assert!(err.is_err(), "a non-replay should not parse");
 }

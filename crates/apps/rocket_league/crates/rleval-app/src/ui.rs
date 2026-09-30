@@ -611,10 +611,24 @@ function physicality(d, who) {
   return cardTable("Physicality — demolitions from the replay's own events. “Opponents down” is how long the victims were out of the match; “goals after” counts your team scoring within 8 s of one of your demos.",
     `<th>Player</th><th class="num">Dealt</th><th class="num">Taken</th><th class="num">Opponents down</th><th class="num">Goals after</th>`, rows, "", 5);
 }
+// Per player: shots, goals and expected goals. One match is far too small to call finishing luck or skill.
+function finishing(d, who) {
+  const shots = (d.episodes || []).filter(e => e.kind === "shot");
+  if (!shots.length) return "";
+  const rows = Object.values(who).map(r => {
+    const mine = shots.filter(e => e.pri === r.target_pri);
+    const goals = mine.filter(e => e.outcome === "goal").length, xg = mine.reduce((s, e) => s + e.xg, 0);
+    return `<tr><td>${nameCell(r.target_team, r.target_player)}</td><td class="num">${mine.length}</td><td class="num">${goals}</td>
+      <td class="num">${fmt(xg, 2)}</td><td class="num ${goals >= xg ? "pos" : "neg"}">${signed(goals - xg, 2)}</td></tr>`;
+  }).join("");
+  return cardTable(`Finishing — expected goals (xG) from shot distance, speed, aim and defenders, model <code>${esc(d.xg_version)}</code>` +
+    `${d.xg_version.includes("prior") ? " (a hand-set prior, not yet fitted on the corpus)" : ""}. Goals − xG over a single match is mostly noise; read it across many matches.`,
+    `<th>Player</th><th class="num">Shots</th><th class="num">Goals</th><th class="num">xG</th><th class="num">Goals − xG</th>`, rows, "", 5);
+}
 const momentCols = (e, who) => e.kind === "demo"
   ? ["Demo of " + esc(who[e.victim]?.target_player ?? "?"), e.down > 0 ? `${e.goal ? "✓ goal within 8 s · " : ""}out ${fmt(e.down, 1)} s` : "not seen leaving the field"]
   : e.kind === "shot"
-  ? ["Shot · " + fmt(e.speed * 0.036, 0) + " km/h", `<span class="${e.outcome === "goal" ? "pos" : "muted"}">${OUT[e.outcome][0]}</span>`]
+  ? ["Shot · " + fmt(e.speed * 0.036, 0) + " km/h", `<span class="${e.outcome === "goal" ? "pos" : "muted"}">${OUT[e.outcome][0]}</span> · xG ${fmt(e.xg, 2)}`]
   : e.kind === "loss"
   ? ["Possession lost", `${e.danger >= 0.5 ? "✗ deep in own half" : e.danger > 0 ? "own half" : "midfield or beyond"} · opponent ${fmt(e.opp_dist / 100, 0)} m away`]
   : e.kind === "challenge"
@@ -631,7 +645,7 @@ function renderMoments(d) {
     $("momentsBody").innerHTML = cardTable("Click a moment to jump to it in the 3D viewer.",
       `<th class="num">Time</th><th>Player</th><th>Moment</th><th class="num">Duration</th><th>Result</th>`,
       rows, "No moments.", 5);
-    $("momentsBody").insertAdjacentHTML("afterbegin", physicality(d, who) + shotMap(evs.filter(e => e.kind === "shot")));
+    $("momentsBody").insertAdjacentHTML("afterbegin", physicality(d, who) + finishing(d, who) + shotMap(evs.filter(e => e.kind === "shot")));
     document.querySelectorAll("#momentsBody .mrow").forEach(tr => tr.onclick = () => seekViewer(+tr.dataset.t));
   };
   $("tab-moments").innerHTML = `<div class="hist-bar"><select id="momentsWho"><option value="">All players</option>` +

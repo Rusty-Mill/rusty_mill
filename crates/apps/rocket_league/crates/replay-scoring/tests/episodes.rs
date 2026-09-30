@@ -180,3 +180,28 @@ fn demo_episodes_match_the_authoritative_demo_events() {
     assert!(demos.iter().all(|d| (2.8..3.3).contains(&d.2)), "{demos:?}");
     assert!(demos.iter().all(|d| d.0 != d.1));
 }
+
+#[test]
+fn shots_carry_a_probability_and_the_model_artifact_round_trips() {
+    let m = canonical("419a");
+    let eps = extract(&m, &ScoreConfig::default());
+    let xgs: Vec<f32> = eps
+        .iter()
+        .filter_map(|e| match e {
+            Episode::Shot { xg, .. } => Some(*xg),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(xgs.len(), 19);
+    assert!(xgs.iter().all(|p| (0.0..1.0).contains(p)), "{xgs:?}");
+    let total: f32 = xgs.iter().sum();
+    assert!(
+        (2.0..12.0).contains(&total),
+        "a sanity band for 19 shots and 5 goals, not a calibration: expected goals {total}"
+    );
+
+    let model = replay_scoring::XgModel::default();
+    let back: replay_scoring::XgModel =
+        serde_json::from_str(&serde_json::to_string(&model).unwrap()).unwrap();
+    assert_eq!(back, model);
+}

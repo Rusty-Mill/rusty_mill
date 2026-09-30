@@ -649,8 +649,9 @@ fn analyze_response(
         return Response::text(400, "empty request body — no replay bytes");
     }
     let norms = pipeline::load_rank_norms(&state.corpus);
+    let xg = pipeline::load_xg(&state.corpus);
     let result = catch_unwind(AssertUnwindSafe(|| {
-        pipeline::analyze(bytes, replay_id, norms.as_ref(), override_bracket)
+        pipeline::analyze(bytes, replay_id, norms.as_ref(), override_bracket, &xg)
     }));
     match result {
         Ok(Ok(mut analysis)) => {
@@ -749,7 +750,8 @@ fn analyze_oneshot(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     // Use the default corpus norms if present, so the static bundle also carries
     // the rank-relative layer; absent ⇒ purely absolute.
     let norms = pipeline::load_rank_norms(Path::new("assets/corpus"));
-    let analysis = pipeline::analyze(&bytes, &id, norms.as_ref(), None)?;
+    let xg = pipeline::load_xg(Path::new("assets/corpus"));
+    let analysis = pipeline::analyze(&bytes, &id, norms.as_ref(), None, &xg)?;
 
     let out = out.unwrap_or_else(|| format!("{id}.html"));
     std::fs::write(&out, bundle_html(&analysis))?;

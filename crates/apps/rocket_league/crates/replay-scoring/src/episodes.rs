@@ -11,6 +11,7 @@ use serde::Serialize;
 use crate::config::ScoreConfig;
 use crate::features::{build_frames, dist, frame_at_time, sub, CarView, FrameView};
 use crate::roles::{self, ManRole, Roles};
+use crate::xg::XgModel;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -53,6 +54,12 @@ pub enum Episode {
         tta: Option<f32>,
         on_target: bool,
         outcome: Outcome,
+        /// Ball position at the strike in the shooter's frame (+y toward the goal, +x right).
+        at: [f32; 2],
+        /// Opponents (keeper included) between the ball and the goal line, within a goal-width lane.
+        def: u8,
+        /// Chance of scoring, from the [`XgModel`] the episodes were extracted with.
+        xg: f32,
     },
     /// `pri` demolished `victim`. `down` is how long the victim was out (until their
     /// car reappears, at most `DEMO_DOWN_CAP_S`); `goal` is whether the demolisher's
@@ -301,6 +308,8 @@ const STRIKE_LAG_S: f32 = 1.5;
 const SAVE_WITHIN_S: f32 = 5.0;
 /// A goal follows its shot by at most this long.
 const GOAL_WITHIN_S: f32 = 10.0;
+/// Half-width (uu) of the lane in front of the ball in which an opponent counts as a defender.
+const DEF_LANE: f32 = 900.0;
 /// Trajectories that take longer than this to reach the goal plane are not projected.
 const MAX_TTA_S: f32 = 5.0;
 
@@ -344,7 +353,7 @@ fn goal_plane_crossing(mut p: Vec3, mut v: Vec3, goal_y: f32) -> Option<(f32, f3
 /// Every shot (scoreboard `Shot` counter), in time order. A goal is credited to the
 /// scorer's latest earlier shot, a save to the latest unresolved opposing shot before
 /// it; anything else is `Off`.
-pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
+pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView], xg: &XgModel) -> Vec<Episode> {
     let mut out = Vec::new();
     let mut shooters = Vec::new(); // (player name, team) per shot, aligned with `out`
     for e in &m.events {
@@ -383,6 +392,15 @@ pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
         let on_target = cross.is_some_and(|(x, z, _)| {
             x.abs() <= GOAL_HALF_W - BALL_RADIUS && z <= GOAL_H - BALL_RADIUS
         });
+        let at = [ball.p.x * sign as f32, ball.p.y * sign as f32];
+        let def = frames[i]
+            .cars
+            .iter()
+            .filter(|c| c.team != *team)
+            .filter(|c| {
+                c.p.y * sign as f32 > at[1] && (c.p.x * sign as f32 - at[0]).abs() < DEF_LANE
+            })
+            .count() as u8;
         out.push(Episode::Shot {
             pri: *pri,
             t: strike,
@@ -398,7 +416,15 @@ pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
             tta: cross.map(|(_, _, t)| t),
             on_target,
             outcome: Outcome::Off,
+            at,
+            def,
+            xg: 0.0,
         });
+        let last = out.len() - 1;
+        let p = xg.predict(&out[last]);
+        if let Episode::Shot { xg: x, .. } = &mut out[last] {
+            *x = p;
+        }
         shooters.push((player.clone(), *team));
     }
     // Resolve outcomes in time order so each goal/save claims one shot.
@@ -494,8 +520,13 @@ pub(crate) fn demos(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
         .collect()
 }
 
-/// Every player's episodes, in time order.
+/// Every player's episodes, in time order (shots scored by the prior xG model).
 pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
+    extract_with(m, cfg, &XgModel::default())
+}
+
+/// [`extract`] with a fitted xG model.
+pub fn extract_with(m: &CanonicalMatch, cfg: &ScoreConfig, xg: &XgModel) -> Vec<Episode> {
     let frames = build_frames(m, cfg);
     let roles = roles::assign(&frames, &crate::teams(m), cfg);
     let mut out: Vec<Episode> = Vec::new();
@@ -505,7 +536,7 @@ pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
         out.extend(challenges(&frames, &roles, t.pri, team, cfg));
         out.extend(losses(&frames, &m.events, t.pri, team));
     }
-    out.extend(shots(m, &frames));
+    out.extend(shots(m, &frames, xg));
     out.extend(demos(m, &frames));
     out.sort_by(|a, b| a.t().total_cmp(&b.t()).then(a.pri().cmp(&b.pri())));
     out

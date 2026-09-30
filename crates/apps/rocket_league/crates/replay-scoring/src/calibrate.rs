@@ -239,7 +239,7 @@ pub fn fit_weights(
 
 /// Solve `A x = b` for a small dense system (Gaussian elimination, partial
 /// pivot). `None` if singular.
-fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+pub(crate) fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
     for col in 0..n {
         let mut piv = col;

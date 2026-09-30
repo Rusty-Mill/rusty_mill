@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 
 use rleval_app::history::{habits, summarize, SessionRecord};
+use replay_scoring::XgModel;
 use rleval_app::pipeline;
 use rleval_app::store::{session_key, AccountId, FsSessionStore, SaveOutcome, SessionStore};
 
 fn analyzed_record() -> SessionRecord {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/42f2.replay");
     let bytes = std::fs::read(&path).expect("sample replay");
-    let analysis = pipeline::analyze(&bytes, "42f2", None, None).expect("analyze");
+    let analysis = pipeline::analyze(&bytes, "42f2", None, None, &XgModel::default()).expect("analyze");
 
     let record = SessionRecord::from_analysis(session_key(&bytes), 1, &analysis);
     assert_eq!(record.players.len(), analysis.pacifist.players.len());

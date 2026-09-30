@@ -26,7 +26,7 @@ use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
 use replay_scoring::{
-    attach_relative, extract, score_all, Episode, RankNorms, Report, ScoreConfig,
+    attach_relative, extract_with, score_all, Episode, RankNorms, Report, ScoreConfig, XgModel,
 };
 
 use replay_skills::profile::{profiles, PlayerSkillProfile};
@@ -63,6 +63,8 @@ pub struct Analysis {
     /// The moments behind the aggregate scores (recoveries so far) — the rows of the
     /// Moments tab, each a click-through to the 3D viewer.
     pub episodes: Vec<Episode>,
+    /// Which xG model scored the shots (`xg-prior-v1` until a corpus fit is present).
+    pub xg_version: String,
     /// Mechanical skill proficiency per player (`replay-skills`).
     pub skill_profiles: Vec<PlayerSkillProfile>,
     /// Per-player value impact (ΔV) — the independent validator (`replay-value`).
@@ -190,10 +192,25 @@ pub fn load_rank_norms(corpus_dir: &Path) -> Option<RankNorms> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// The fitted xG model (`xg_model.json`) from a corpus dir, or the built-in prior when it
+/// is absent. A file that exists but does not parse is reported, then the prior is used.
+pub fn load_xg(corpus_dir: &Path) -> XgModel {
+    let path = corpus_dir.join("xg_model.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return XgModel::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        eprintln!("warning: {} is not a valid xG model ({e}); using the prior", path.display());
+        XgModel::default()
+    })
+}
+
 /// Run the whole pipeline on raw `.replay` bytes, returning the unified bundle.
 ///
 /// `replay_id` labels the match (normally the upload's file stem). Every engine
 /// runs at its default config — the same defaults the standalone CLIs use.
+///
+/// `xg` scores the shots (use [`load_xg`], or `XgModel::default()`).
 ///
 /// `norms` (optional) enables the **rank-relative** layer: when present, each
 /// score is additionally graded against its rank bracket — the lobby's level by
@@ -204,6 +221,7 @@ pub fn analyze(
     replay_id: &str,
     norms: Option<&RankNorms>,
     override_bracket: Option<&str>,
+    xg: &XgModel,
 ) -> Result<Analysis, Box<dyn Error>> {
     // 1. Decode + reconstruct the neutral canonical model — the shared contract.
     let decoded = BoxcarsParser::new().parse(bytes)?;
@@ -218,7 +236,7 @@ pub fn analyze(
     // 2. Decision-discipline scoring (per player) + the lobby report HTML.
     let score_cfg = ScoreConfig::default();
     let mut scores = score_all(&canonical, &score_cfg);
-    let episodes = extract(&canonical, &score_cfg);
+    let episodes = extract_with(&canonical, &score_cfg, xg);
     // Additive rank-relative layer: grade each player against their bracket. No
     // norms ⇒ untouched (every report stays purely absolute).
     if let Some(norms) = norms {
@@ -373,6 +391,7 @@ pub fn analyze(
         coordinate_warnings,
         scores,
         episodes,
+        xg_version: xg.version.clone(),
         skill_profiles,
         impact,
         bc_stats,

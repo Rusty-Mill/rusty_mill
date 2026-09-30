@@ -27,7 +27,7 @@ build is noticeably slower per replay.
 | `--host` | `127.0.0.1` | bind address |
 | `--port` | `8080` | port |
 | `--replays <dir>` | `assets/replays` | sample `.replay` files listed in the UI's picker |
-| `--corpus <dir>` | `assets/corpus` | where it looks for calibrated artifacts (`rank_norms.json`, `fitted_config.json`, `value_model.json`) |
+| `--corpus <dir>` | `assets/corpus` | where it looks for calibrated artifacts (`rank_norms.json`, `fitted_config.json`, `value_model.json`, `xg_model.json`) |
 | `--enable-admin-run` | off | lets the `/admin` page trigger retrain/recalibrate from the browser (§3.3) |
 | `--data-dir <dir>` | off | save every analysis to per-account history and enable the **History** view (§2.1) |
 | `--store fs\|mmdb` | `fs` | session backend under `--data-dir`; `mmdb` needs a build with `--features mmdb` (§2.3) |
@@ -258,6 +258,18 @@ python assets/corpus/expand_manifest.py --per-tier 250       # search ballchasin
 python assets/corpus/refresh_corpus_replays.py                 # download the newly-listed files
 python assets/corpus/refresh_manifest_playlist.py               # backfill playlist/team_size from headers
 ```
+
+### 3.2a Fit expected goals
+
+```bash
+cargo run --release -p replay-scoring --bin xg-fit
+```
+
+Turns every shot in the corpus into a labelled example (goal = 1), holds out every
+fifth match, prints the held-out Brier score (base rate vs the built-in prior vs the
+fit) and a reliability table, then writes `xg_model.json` next to the manifest. Until
+that file exists the app scores shots with a hand-set prior (`xg-prior-v1`) and the
+Moments tab says so. Needs the corpus replays on disk (see `assets/corpus/README.md`).
 
 ### 3.2 Calibrate each engine
 

@@ -18,6 +18,10 @@ name = "reconcile"
 path = "src/bin/reconcile.rs"
 
 [[bin]]
+name = "xg-fit"
+path = "src/bin/xg_fit.rs"
+
+[[bin]]
 name = "contract"
 path = "src/bin/contract.rs"
 
