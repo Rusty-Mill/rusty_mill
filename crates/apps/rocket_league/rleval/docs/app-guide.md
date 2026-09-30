@@ -97,8 +97,19 @@ leaves that state. `GET /api/jobs/<id>/result` returns the analysis JSON once do
 (`409` while running, `422` with the reason if it failed). At most 4 jobs are unfinished
 at once (`429` beyond), the last 64 are remembered, and a job is visible only to the
 account that submitted it. The UI still uses the synchronous route — an analysis takes
-about half a second. Not built: signed-URL uploads and server-sent events (both need
-object storage or a streaming server), and billing or entitlements.
+about half a second.
+
+`GET /api/jobs/<id>/events` streams the same status as Server-Sent Events (`event: state`,
+one per change, a keep-alive comment every 15 s) and closes when the job ends.
+
+**Signed uploads.** `POST /api/uploads?size=<bytes>&sha256=<hex>[&name=&rank=&session=&team=]`
+(authenticated) returns `{"url": "/api/uploads/<token>", "expires_in": 600}`. The client
+then `PUT`s the replay to that URL with no credentials: the token is the credential. The
+server checks the signature (HMAC-SHA-256 under a per-process key, so URLs die with the
+process), the expiry, that the URL was not used before, and that the body has exactly the
+declared size and SHA-256 — only then is a job queued (`202`). Refusals: `403` bad
+signature, `410` expired, `409` already used, `400` wrong size, `422` wrong hash. Not built:
+billing or entitlements, and rewiring the separate Python `service/`.
 
 ### 2.1 History and habits
 

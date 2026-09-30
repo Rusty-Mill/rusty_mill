@@ -54,6 +54,29 @@ impl Server {
         )
     }
 
+    /// `(status, body)` of a `method` request carrying `body`.
+    fn send(&self, method: &str, path: &str, body: &[u8]) -> (u16, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", self.1)).unwrap();
+        write!(
+            s,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        s.write_all(body).unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        (
+            head.split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0),
+            body.to_string(),
+        )
+    }
+
     /// `(status, body)` of a POST of `body`.
     fn post(&self, path: &str, body: &[u8]) -> (u16, String) {
         let mut s = TcpStream::connect(("127.0.0.1", self.1)).unwrap();
@@ -221,4 +244,131 @@ fn a_bad_upload_fails_the_job_with_a_reason_and_an_empty_one_is_refused() {
     assert_eq!(status, 422);
     assert!(body.contains("could not"), "{body}");
     assert_eq!(srv.post("/api/jobs", b"").0, 400);
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    rleval_app::sha256::hex(&rleval_app::sha256::sha256(bytes))
+}
+
+/// Ask for a signed upload URL declaring `bytes`' real size and hash.
+fn upload_url(srv: &Server, bytes: &[u8], sha: &str) -> String {
+    let (status, body) = srv.post(
+        &format!("/api/uploads?size={}&sha256={sha}&name=419a", bytes.len()),
+        b"",
+    );
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str::<serde_json::Value>(&body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_signed_upload_is_verified_then_becomes_a_job_and_works_once() {
+    let srv = Server::start();
+    let bytes = std::fs::read(format!(
+        "{}/../assets/replays/419a.replay",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let url = upload_url(&srv, &bytes, &sha256_hex(&bytes));
+    let (status, body) = srv.send("PUT", &url, &bytes);
+    assert_eq!(status, 202, "{body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["job"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (state, _) = wait_done(&srv, &id);
+    assert_eq!(state, "done");
+    assert_eq!(srv.send("PUT", &url, &bytes).0, 409, "a URL works once");
+}
+
+#[test]
+fn a_signed_upload_rejects_wrong_bytes_a_forged_url_and_a_bad_declaration() {
+    let srv = Server::start();
+    let bytes = std::fs::read(format!(
+        "{}/../assets/replays/419a.replay",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    // Declared hash of other bytes: the upload is refused before any analysis.
+    let url = upload_url(&srv, &bytes, &sha256_hex(b"something else"));
+    assert_eq!(srv.send("PUT", &url, &bytes).0, 422);
+    // Declared size does not match what arrives.
+    let url = upload_url(&srv, &bytes, &sha256_hex(&bytes));
+    assert_eq!(srv.send("PUT", &url, &bytes[..bytes.len() - 1]).0, 400);
+    // A URL with the signature changed, and one that was never issued.
+    let url = upload_url(&srv, &bytes, &sha256_hex(&bytes));
+    let mut forged = url.clone();
+    forged.pop();
+    forged.push(if url.ends_with('0') { '1' } else { '0' });
+    assert_eq!(srv.send("PUT", &forged, &bytes).0, 403);
+    assert_eq!(srv.send("PUT", "/api/uploads/00.00", &bytes).0, 403);
+    // Malformed declarations are refused up front.
+    assert_eq!(srv.post("/api/uploads?size=10&sha256=xyz", b"").0, 400);
+    assert_eq!(
+        srv.post("/api/uploads?size=0&sha256=".to_string().as_str(), b"")
+            .0,
+        400
+    );
+    assert_eq!(
+        srv.post(
+            &format!("/api/uploads?size=999999999&sha256={}", "0".repeat(64)),
+            b""
+        )
+        .0,
+        413
+    );
+}
+
+/// Long-poll a job to its end: `(final state, states seen)`.
+fn wait_done(srv: &Server, id: &str) -> (String, Vec<String>) {
+    let (mut state, mut seen) = ("queued".to_string(), vec![]);
+    while state != "done" && state != "failed" {
+        let (status, body) = srv.get(&format!("/api/jobs/{id}?since={state}&wait=20"));
+        assert_eq!(status, 200, "{body}");
+        state = serde_json::from_str::<serde_json::Value>(&body).unwrap()["state"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        seen.push(state.clone());
+    }
+    (state, seen)
+}
+
+#[test]
+fn job_events_stream_every_state_until_the_job_ends() {
+    let srv = Server::start();
+    let bytes = std::fs::read(format!(
+        "{}/../assets/replays/419a.replay",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let (_, body) = srv.post("/api/jobs?name=419a", &bytes);
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["job"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut s = TcpStream::connect(("127.0.0.1", srv.1)).unwrap();
+    write!(
+        s,
+        "GET /api/jobs/{id}/events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap(); // the server closes the stream when the job ends
+    assert!(
+        raw.contains("text/event-stream") && !raw.to_lowercase().contains("content-length"),
+        "{raw}"
+    );
+    let states: Vec<&str> = raw
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .collect();
+    assert!(
+        states.last().is_some_and(|l| l.contains("\"done\"")),
+        "{states:?}"
+    );
+    assert!(states.iter().all(|l| l.contains(&id)));
+    assert_eq!(srv.get("/api/jobs/nope/events").0, 404);
 }

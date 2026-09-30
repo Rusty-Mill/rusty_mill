@@ -32,6 +32,7 @@ use rleval_app::store::{
     copy_all, session_key, AccountId, FsSessionStore, SaveOutcome, SessionStore,
 };
 use rleval_app::teams::{team_report, Team, Teams};
+use rleval_app::uploads::{Signer, Upload, TTL_S};
 use rleval_app::{admin, pipeline, ui};
 
 const USAGE: &str = "\
@@ -168,6 +169,7 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         teams,
         panels: PanelCache::default(),
         jobs: Jobs::default(),
+        signer: Signer::new().ok(),
     });
 
     eprintln!(
@@ -373,6 +375,8 @@ struct AppState {
     panels: PanelCache,
     /// Analyses submitted through `POST /api/jobs`.
     jobs: Jobs,
+    /// Signs upload URLs; `None` when the OS gave no randomness (uploads are then disabled).
+    signer: Option<Signer>,
 }
 
 const TEAM_POOL_DIR: &str = "_teams";
@@ -415,6 +419,21 @@ fn route(req: &Request, state: &Arc<AppState>) -> Response {
                 Err(resp) => resp,
             }
         }),
+        ("POST", "/api/uploads") => {
+            with_account(req, state, |account| issue_upload(req, state, account))
+        }
+        // No account header: the signed URL itself is the credential.
+        ("PUT", path) if path.starts_with("/api/uploads/") => {
+            redeem_upload(req, state, path.trim_start_matches("/api/uploads/"))
+        }
+        ("GET", path) if path.starts_with("/api/jobs/") && path.ends_with("/events") => {
+            with_account(req, state, |account| {
+                let id = path
+                    .trim_start_matches("/api/jobs/")
+                    .trim_end_matches("/events");
+                job_events(state, account, id)
+            })
+        }
         ("GET", path) if path.starts_with("/api/jobs/") => with_account(req, state, |account| {
             job_response(req, state, account, path.trim_start_matches("/api/jobs/"))
         }),
@@ -743,32 +762,176 @@ fn submit_job(
     account: &AccountId,
     team: Option<Team>,
 ) -> Response {
-    if req.body.is_empty() {
+    let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
+    queue_job(
+        req.body.clone(),
+        name,
+        AnalyzeOpts::from_request(req),
+        state,
+        account.clone(),
+        team,
+    )
+}
+
+fn queue_job(
+    bytes: Vec<u8>,
+    name: String,
+    opts: AnalyzeOpts,
+    state: &Arc<AppState>,
+    account: AccountId,
+    team: Option<Team>,
+) -> Response {
+    if bytes.is_empty() {
         return Response::text(400, "empty request body — no replay bytes");
     }
-    let Some(id) = state.jobs.submit(account) else {
+    let Some(id) = state.jobs.submit(&account) else {
         return Response::text(
             429,
             "too many analyses in progress — retry when one finishes",
         );
     };
-    let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
-    let (bytes, opts, account) = (
-        req.body.clone(),
-        AnalyzeOpts::from_request(req),
-        account.clone(),
-    );
     let (state, job) = (Arc::clone(state), id.clone());
     thread::spawn(move || {
         state.jobs.start(&job);
         let outcome = analyze_json(&bytes, &stem(&name), &opts, &state, &account, team.as_ref());
         state.jobs.finish(&job, outcome);
     });
-    let body = serde_json::json!({ "job": id, "state": JobState::Queued });
-    let mut resp = json_response(&body);
+    let mut resp = json_response(&serde_json::json!({ "job": id, "state": JobState::Queued }));
     resp.status = 202;
     resp
 }
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `POST /api/uploads?size=&sha256=[&name=&rank=&session=&team=]`: a signed URL to `PUT` the
+/// replay to, without credentials, valid once for [`TTL_S`] seconds.
+fn issue_upload(req: &Request, state: &AppState, account: &AccountId) -> Response {
+    let Some(signer) = &state.signer else {
+        return Response::text(501, "signed uploads are unavailable (no OS randomness)");
+    };
+    let size = query_param(&req.path, "size").and_then(|s| s.parse::<usize>().ok());
+    let sha = query_param(&req.path, "sha256").map(|s| s.to_ascii_lowercase());
+    let (Some(size), Some(sha256)) = (size, sha) else {
+        return Response::text(400, "needs ?size=<bytes>&sha256=<hex>");
+    };
+    if size == 0 {
+        return Response::text(400, "size must be at least 1 byte");
+    }
+    if size > server::MAX_BODY {
+        return Response::text(413, format!("size must be at most {} bytes", server::MAX_BODY));
+    }
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Response::text(400, "sha256 must be 64 hex digits");
+    }
+    let team = match upload_team(req, state, account) {
+        Ok(t) => t.map(|t| t.id.to_string()),
+        Err(resp) => return resp,
+    };
+    let opts = AnalyzeOpts::from_request(req);
+    let nonce = u64::from_le_bytes(sha256_nonce(&sha256, account.as_str()));
+    let upload = Upload {
+        account: account.as_str().into(),
+        size,
+        sha256,
+        name: query_param(&req.path, "name").unwrap_or_else(|| "upload".into()),
+        rank: opts.rank,
+        session: opts.session,
+        inline: opts.inline,
+        team,
+        expires: unix_now() + TTL_S,
+        nonce,
+    };
+    json_response(&serde_json::json!({
+        "url": format!("/api/uploads/{}", signer.sign(&upload)),
+        "expires_in": TTL_S,
+    }))
+}
+
+/// A nonce unique per issue: the digest of the declared hash, the account, the time and a counter.
+fn sha256_nonce(sha: &str, account: &str) -> [u8; 8] {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let d = rleval_app::sha256::sha256(format!("{sha}|{account}|{nanos}|{n}").as_bytes());
+    [d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]]
+}
+
+/// `PUT /api/uploads/<token>`: verify the bytes against the signed declaration, then queue the job.
+fn redeem_upload(req: &Request, state: &Arc<AppState>, token: &str) -> Response {
+    let Some(signer) = &state.signer else {
+        return Response::text(501, "signed uploads are unavailable (no OS randomness)");
+    };
+    let up = match signer.redeem(token, &req.body, unix_now()) {
+        Ok(up) => up,
+        Err(e) => {
+            use rleval_app::uploads::Refusal::*;
+            let status = match e {
+                Invalid => 403,
+                Expired => 410,
+                Used => 409,
+                SizeMismatch => 400,
+                HashMismatch => 422,
+            };
+            return Response::text(status, e.to_string());
+        }
+    };
+    let Ok(account) = AccountId::new(&up.account) else {
+        return Response::text(403, "invalid upload URL");
+    };
+    let team = up
+        .team
+        .as_deref()
+        .and_then(|id| state.teams.get(id))
+        .filter(|t| t.member(&account).is_some())
+        .cloned();
+    let opts = AnalyzeOpts {
+        rank: up.rank,
+        inline: up.inline,
+        session: up.session,
+    };
+    queue_job(req.body.clone(), up.name, opts, state, account, team)
+}
+
+/// `GET /api/jobs/<id>/events`: Server-Sent Events, one `state` event per change until the job ends.
+fn job_events(state: &Arc<AppState>, account: &AccountId, id: &str) -> Response {
+    let Some(first) = state.jobs.status(account, id) else {
+        return Response::text(404, "no such job");
+    };
+    let (state, account, id) = (Arc::clone(state), account.clone(), id.to_string());
+    Response::events(Box::new(move |w| {
+        let mut current = first;
+        loop {
+            let data = serde_json::to_string(&current).map_err(std::io::Error::other)?;
+            write!(w, "event: state\ndata: {data}\n\n")?;
+            w.flush()?;
+            if current.state.finished() {
+                return Ok(());
+            }
+            match state.jobs.wait(
+                &account,
+                &id,
+                current.state,
+                Duration::from_secs(EVENT_KEEPALIVE_S),
+            ) {
+                Some(next) if next.state != current.state => current = next,
+                Some(_) => {
+                    write!(w, ": keep-alive\n\n")?;
+                    w.flush()?;
+                }
+                None => return Ok(()),
+            }
+        }
+    }))
+}
+
+/// Idle time between SSE keep-alive comments (s).
+const EVENT_KEEPALIVE_S: u64 = 15;
 
 /// `GET /api/jobs/<id>[/result]`. `?since=<state>&wait=<secs>` long-polls until the job leaves that state.
 fn job_response(req: &Request, state: &AppState, account: &AccountId, rest: &str) -> Response {

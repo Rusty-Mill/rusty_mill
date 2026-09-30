@@ -19,8 +19,10 @@ pub mod panels;
 pub mod pipeline;
 pub mod progress;
 pub mod server;
+pub mod sha256;
 pub mod store;
 #[cfg(feature = "mmdb")]
 pub mod store_mmdb;
 pub mod teams;
 pub mod ui;
+pub mod uploads;
