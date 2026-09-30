@@ -14424,11 +14424,6 @@ version = "0.1.0"
 [[package]]
 name = "rusty_wiremock"
 version = "0.1.0"
-dependencies = [
- "rusty_http",
- "rusty_json",
- "rusty_std",
-]
 
 [[package]]
 name = "rustyline"

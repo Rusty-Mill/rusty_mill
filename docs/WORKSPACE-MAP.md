@@ -25,7 +25,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 14 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 18 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 17 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 8 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
@@ -37,7 +37,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_serde | rusty_serde_erased | A minimal, isolated unsafe primitive for erasing a serializer/deserializer's associated Ok type across an object-safe (dyn-compatible) boundary - internal to rusty_serde, not a public API. | 1 |
 | foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 2 |
 | foundation | rusty_simd | rusty_simd | A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference | 5 |
-| foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 16 |
+| foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 15 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 1 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
@@ -92,7 +92,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 14 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 13 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
@@ -128,7 +128,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |
-| libs | rusty_wiremock | rusty_wiremock | A #![no_std] + alloc sovereign HTTP mock server and request matcher for Rusty Mill test suites | 4 |
+| libs | rusty_wiremock | rusty_wiremock | A blocking std::net HTTP mock server that answers canned responses, for Rusty Mill test suites | 4 |
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
