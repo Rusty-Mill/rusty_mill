@@ -427,6 +427,7 @@ fn sync_parent_dir(path: &Path) -> io::Result<()> {
 /// Windows cannot open a directory to sync it; the rename is the
 /// durability point there.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
 fn sync_parent_dir(_path: &Path) -> io::Result<()> {
     Ok(())
 }
