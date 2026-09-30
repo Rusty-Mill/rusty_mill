@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { dayKey } from './date'
-import { advanceDates, describeRule, formatRule, nextOccurrence, parseRule } from './recurrence'
+import { advanceDates, describeRule, formatRule, nextOccurrence, parseRule, laterOccurrences } from './recurrence'
 
 const at = (y: number, m: number, d: number, h = 9) => new Date(y, m - 1, d, h).getTime()
 const next = (rule: string, from: number) => {
@@ -97,5 +97,22 @@ describe('advanceDates', () => {
   it('has nothing to advance without a due date or rule', () => {
     expect(advanceDates({ repeatFlag: 'RRULE:FREQ=DAILY', dueMs: null, startMs: null })).toBeNull()
     expect(advanceDates({ repeatFlag: '', dueMs: at(2026, 9, 29), startMs: null })).toBeNull()
+  })
+})
+
+describe('laterOccurrences', () => {
+  const day = (d: number, h = 9) => new Date(2026, 8, d, h).getTime()
+  it('lists the occurrences after the task itself, before the end', () => {
+    const got = laterOccurrences({ repeatFlag: 'RRULE:FREQ=DAILY;INTERVAL=2', dueMs: day(1), startMs: null }, day(8))
+    expect(got.map((o) => o.dueMs)).toEqual([day(3), day(5), day(7)])
+  })
+  it('moves a start date with the due date and honours excluded days and UNTIL', () => {
+    const got = laterOccurrences({ repeatFlag: 'RRULE:FREQ=DAILY;UNTIL=20260905', dueMs: day(1), startMs: day(1, 8) }, day(30), [day(3)])
+    expect(got.map((o) => [o.dueMs, o.startMs])).toEqual([[day(2), day(2, 8)], [day(4), day(4, 8)], [day(5), day(5, 8)]])
+  })
+  it('gives nothing for a one-off task, an undated task, or a rule it cannot read', () => {
+    expect(laterOccurrences({ repeatFlag: '', dueMs: day(1), startMs: null }, day(30))).toEqual([])
+    expect(laterOccurrences({ repeatFlag: 'RRULE:FREQ=DAILY', dueMs: null, startMs: null }, day(30))).toEqual([])
+    expect(laterOccurrences({ repeatFlag: 'RRULE:FREQ=HOURLY', dueMs: day(1), startMs: null }, day(30))).toEqual([])
   })
 })

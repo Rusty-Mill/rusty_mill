@@ -21,7 +21,7 @@ export function EventBar({ event, color, hour12, cutStart, cutEnd, onOpen, onDra
   return (
     <button
       type="button"
-      draggable
+      draggable={!event.projected}
       data-task-id={event.task.id}
       onClick={(e) => {
         e.stopPropagation()
@@ -30,7 +30,7 @@ export function EventBar({ event, color, hour12, cutStart, cutEnd, onOpen, onDra
       onDragStart={onDragStart}
       onDragEnd={() => undefined}
       style={{ backgroundColor: wash(color, event.done ? 8 : 18), borderLeftColor: cutStart ? 'transparent' : color, ...style }}
-      className={`pointer-events-auto flex h-5 w-full min-w-0 items-center gap-1 border-l-[3px] px-1.5 text-left text-s outline-none focus-visible:ring-2 focus-visible:ring-primary ${cutStart ? 'rounded-l-none' : 'rounded-l-[4px]'} ${cutEnd ? 'rounded-r-none' : 'rounded-r-[4px]'} ${event.done ? 'text-grey line-through' : 'text-text'}`}
+      className={`pointer-events-auto flex h-5 w-full min-w-0 items-center gap-1 border-l-[3px] px-1.5 text-left text-s outline-none focus-visible:ring-2 focus-visible:ring-primary ${cutStart ? 'rounded-l-none' : 'rounded-l-[4px]'} ${cutEnd ? 'rounded-r-none' : 'rounded-r-[4px]'} ${event.done ? 'text-grey line-through' : 'text-text'} ${event.projected ? 'opacity-70' : ''}`}
     >
       {time && <span className="shrink-0 text-grey">{time}</span>}
       <span className="min-w-0 flex-1 truncate">{event.task.title}</span>

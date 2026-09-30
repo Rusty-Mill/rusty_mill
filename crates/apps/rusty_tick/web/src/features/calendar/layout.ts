@@ -7,6 +7,7 @@
 import type { Task } from '@/api/types'
 import { CALENDAR_MODES, type CalendarMode } from '@/app/paths'
 import { addDays, addMonths, atTime, diffDays, formatTime, monthGrid, startOfDay, startOfWeek, MINUTE, type WeekStart } from '@/lib/date'
+import { laterOccurrences } from '@/lib/recurrence'
 
 export const DEFAULT_COLOR = '#4772fa'
 /** A timed task with no end is drawn as a block this long. */
@@ -32,6 +33,8 @@ export interface CalEvent {
   startMs: number
   endMs: number
   done: boolean
+  /** A later occurrence of a repeating task, shown but not movable: only the next one is the task's own. */
+  projected: boolean
 }
 
 /** The event a task draws as, or `null` if it has no place on a calendar. */
@@ -46,16 +49,23 @@ export function toEvent(task: Task, showDone = false): CalEvent | null {
   let endDay = startOfDay(due)
   // A timed task ending exactly at midnight belongs to the day it ended, not the next one.
   if (!task.isAllDay && due === endDay && due > start) endDay = startOfDay(due - 1)
-  if (task.isAllDay || startDay !== endDay) return { task, kind: 'span', startDay, endDay: Math.max(startDay, endDay), startMs: start, endMs: due, done }
+  if (task.isAllDay || startDay !== endDay) return { task, kind: 'span', startDay, endDay: Math.max(startDay, endDay), startMs: start, endMs: due, done, projected: false }
   const end = due > start ? due : start + DEFAULT_DURATION_MIN * MINUTE
-  return { task, kind: 'timed', startDay, endDay, startMs: start, endMs: end, done }
+  return { task, kind: 'timed', startDay, endDay, startMs: start, endMs: end, done, projected: false }
 }
 
-export function buildEvents(tasks: Iterable<Task>, showDone = false): CalEvent[] {
+/** Events for `tasks`; with `until`, repeating tasks also show their later occurrences before it. */
+export function buildEvents(tasks: Iterable<Task>, showDone = false, until?: number): CalEvent[] {
   const out: CalEvent[] = []
   for (const t of tasks) {
     const e = toEvent(t, showDone)
-    if (e) out.push(e)
+    if (!e) continue
+    out.push(e)
+    if (until === undefined || t.status !== 'open' || !t.repeatFlag) continue
+    for (const o of laterOccurrences(t, until, t.exDates)) {
+      const later = toEvent({ ...t, dueMs: o.dueMs, startMs: o.startMs })
+      if (later) out.push({ ...later, projected: true })
+    }
   }
   return out
 }
@@ -304,4 +314,9 @@ export const barTime = (e: CalEvent, hour12: boolean): string => (e.kind === 'ti
 /** Days in `range` with at least one event, each with its events. */
 export function agendaGroups(events: CalEvent[], range: Range): { day: number; events: CalEvent[] }[] {
   return range.days.map((day) => ({ day, events: eventsOnDay(events, day) })).filter((g) => g.events.length > 0)
+}
+
+/** Open tasks whose day has passed, oldest first: what the agenda lists above today. */
+export function overdueEvents(events: CalEvent[], today: number): CalEvent[] {
+  return events.filter((e) => !e.done && !e.projected && e.endDay < today).sort((a, b) => a.endDay - b.endDay || a.task.title.localeCompare(b.task.title))
 }

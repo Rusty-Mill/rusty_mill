@@ -186,4 +186,19 @@ describe('CalendarPage', () => {
     const pop = screen.getByRole('dialog')
     expect(within(pop).getAllByRole('button')).toHaveLength(5)
   })
+
+  it('shows a repeating task on each of its days in the week, and lists overdue tasks first in the agenda', async () => {
+    const { services } = await setup('/c/all/calendar/w')
+    const d0 = startOfDay(now())
+    await act(async () => {
+      await services.store.getState().createTask({ listId: services.store.getState().inboxId, title: 'Stretch', dueMs: d0, isAllDay: true, repeatFlag: 'RRULE:FREQ=DAILY' })
+      await services.store.getState().createTask({ listId: services.store.getState().inboxId, title: 'Late one', dueMs: d0 - 3 * 86_400_000, isAllDay: true })
+    })
+    expect(screen.getAllByRole('button', { name: /Stretch/ }).length).toBeGreaterThan(1)
+    const { user } = { user: userEvent.setup() }
+    await user.click(screen.getByRole('button', { name: /^View:/ }))
+    await user.click(screen.getByRole('menuitemcheckbox', { name: 'Agenda' }))
+    const overdue = await screen.findByRole('listitem', { name: 'Overdue' })
+    expect(within(overdue).getByText('Late one')).toBeInTheDocument()
+  })
 })

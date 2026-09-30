@@ -183,7 +183,7 @@ export function TimeGridView({ range, events, ctx }: Props) {
                     <button
                       key={b.event.task.id}
                       type="button"
-                      draggable
+                      draggable={!b.event.projected}
                       data-task-id={b.event.task.id}
                       aria-label={`${b.event.task.title}, ${eventWhen(b.event, ctx.hour12)}`}
                       onClick={(e) => {

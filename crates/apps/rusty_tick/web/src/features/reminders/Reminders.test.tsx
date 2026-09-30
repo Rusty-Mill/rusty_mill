@@ -4,6 +4,7 @@ import { INBOX_ID, MemoryAdapter } from '@/api/memory'
 import { ServicesProvider } from '@/app/services'
 import { usePrefs } from '@/features/settings/prefs'
 import { createDataStore } from '@/store/data'
+import { useHabits } from '@/features/habits/store'
 import { Reminders } from './Reminders'
 
 const MIN = 60_000
@@ -47,5 +48,13 @@ describe('Reminders', () => {
     await mount(true)
     await act(() => vi.advanceTimersByTimeAsync(20 * MIN))
     expect(shown).toEqual([])
+  })
+
+  it('notifies for a habit at its reminder time', async () => {
+    await mount(true)
+    useHabits.getState().add({ name: 'Read', color: '#000', goal: '1 time per day', frequency: { kind: 'daily' }, reminder: '18:07' }) // the fake clock starts at 18:00 Chicago time on 1969-12-31
+    await act(() => vi.advanceTimersByTimeAsync(5 * MIN)) // the first task's reminder
+    await act(() => vi.advanceTimersByTimeAsync(2 * MIN))
+    expect(shown).toContain('Read')
   })
 })

@@ -138,3 +138,26 @@ export function advanceDates(
   const shift = due - task.dueMs
   return { dueMs: due, startMs: task.startMs === null ? null : task.startMs + shift }
 }
+
+/**
+ * Where a repeating task's dates fall on its later occurrences, up to (not
+ * including) `endMs`, leaving out days the user excluded. The task's own dates
+ * are its first occurrence and are not repeated here.
+ */
+export function laterOccurrences(
+  task: { repeatFlag: string; dueMs: number | null; startMs: number | null },
+  endMs: number,
+  exDates: number[] = [],
+): { dueMs: number; startMs: number | null }[] {
+  if (task.dueMs === null) return []
+  const skipped = new Set(exDates.map(startOfDay))
+  const out: { dueMs: number; startMs: number | null }[] = []
+  let due: number | null = task.dueMs
+  for (let i = 0; i < 400; i++) { // the guard bounds a malformed rule
+    due = nextOccurrence(task.repeatFlag, due)
+    if (due === null || due >= endMs) break
+    if (skipped.has(startOfDay(due))) continue
+    out.push({ dueMs: due, startMs: task.startMs === null ? null : task.startMs + (due - task.dueMs) })
+  }
+  return out
+}
