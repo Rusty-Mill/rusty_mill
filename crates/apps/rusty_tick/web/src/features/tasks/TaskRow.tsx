@@ -79,7 +79,7 @@ export const TaskRow = memo(function TaskRow({ task, selected, now, hour12, show
         e.preventDefault()
         setAt({ x: e.clientX, y: e.clientY })
       }}
-      className={`group relative flex h-10 items-center rounded-row pr-2 transition-colors duration-150 ${selected ? 'bg-selected' : 'hover:bg-hover'} ${dropIndicator === 'before' ? 'before:absolute before:-top-px before:left-2 before:right-2 before:z-10 before:h-0.5 before:rounded before:bg-primary' : ''} ${dropIndicator === 'after' ? 'after:absolute after:-bottom-px after:left-2 after:right-2 after:z-10 after:h-0.5 after:rounded after:bg-primary' : ''}`}
+      className={`group relative flex h-10 items-center rounded-row border-b border-line/50 pr-2 transition-colors duration-150 ${selected ? 'bg-selected' : 'hover:bg-hover'} ${dropIndicator === 'before' ? 'before:absolute before:-top-px before:left-2 before:right-2 before:z-10 before:h-0.5 before:rounded before:bg-primary' : ''} ${dropIndicator === 'after' ? 'after:absolute after:-bottom-px after:left-2 after:right-2 after:z-10 after:h-0.5 after:rounded after:bg-primary' : ''}`}
     >
       {dragProps && (
         <span aria-hidden className="absolute -left-0.5 hidden cursor-grab text-grey group-hover:block">
