@@ -469,30 +469,32 @@ pub fn read_position(dir: &Path) -> io::Result<Position> {
     }
 }
 
-/// The first failed op of a replayed batch that means divergence. A `Link`
-/// that fails `RecordNotFound` is not one when a later op of the same batch
-/// deletes an endpoint: the batch was applied before, up to a crash ahead
-/// of the position write, and its final state holds no such edge (review
-/// 2.3, R2). Any other failure is real.
-#[cfg_attr(not(feature = "server"), allow(dead_code))]
-pub fn first_real_failure(ops: &[WriteOp], results: &[WriteResult]) -> Option<(usize, ErrorCode)> {
-    results.iter().enumerate().find_map(|(i, r)| {
-        let WriteResult::Failed(code) = r else {
-            return None;
-        };
-        let moot = match (&ops[i], code) {
-            (WriteOp::Link { left, right, .. }, ErrorCode::RecordNotFound) => ops[i + 1..]
-                .iter()
-                .any(|later| matches!(later, WriteOp::Delete { id } if id == left || id == right)),
-            _ => false,
-        };
-        (!moot).then_some((i, *code))
-    })
-}
-
 #[cfg(feature = "server")]
 mod follow_impl {
     use super::*;
+
+    /// The first failed op of a replayed batch that means divergence. A `Link`
+    /// that fails `RecordNotFound` is not one when a later op of the same batch
+    /// deletes an endpoint: the batch was applied before, up to a crash ahead
+    /// of the position write, and its final state holds no such edge (review
+    /// 2.3, R2). Any other failure is real.
+    pub fn first_real_failure(
+        ops: &[WriteOp],
+        results: &[WriteResult],
+    ) -> Option<(usize, ErrorCode)> {
+        results.iter().enumerate().find_map(|(i, r)| {
+            let WriteResult::Failed(code) = r else {
+                return None;
+            };
+            let moot = match (&ops[i], code) {
+                (WriteOp::Link { left, right, .. }, ErrorCode::RecordNotFound) => ops[i + 1..]
+                    .iter()
+                    .any(|later| matches!(later, WriteOp::Delete { id } if id == left || id == right)),
+                _ => false,
+            };
+            (!moot).then_some((i, *code))
+        })
+    }
 
     /// Why a [`follow`] stopped.
     #[derive(Debug)]
@@ -626,4 +628,4 @@ mod follow_impl {
     }
 }
 #[cfg(feature = "server")]
-pub use follow_impl::{follow, FollowError};
+pub use follow_impl::{first_real_failure, follow, FollowError};
