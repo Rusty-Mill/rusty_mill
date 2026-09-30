@@ -42,6 +42,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_multimodal_db` drain:
     - A request pipelined behind the one in flight is no longer executed after a shutdown (D4).
     - `serve`/`serve_tables` return a `DrainOutcome`, and `memory_server` marks change logs clean only after a completed drain. It exits non-zero otherwise (D5).
+  - `rusty_gui::Window` now destroys its native window on drop, and on Linux closes the X display connection it opened. Previously each window leaked its X socket, or its `HWND` on Windows.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
