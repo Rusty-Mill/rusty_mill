@@ -9,6 +9,9 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **Template substitution no longer panics on a short tag** (`nexus-templates`, design review 3.8).
+  - `{{ab` sliced five bytes past a four-byte input and panicked; the escape check now uses `starts_with`.
+  - Literal non-ASCII text used to be copied byte by byte and came out garbled (`é` became mojibake); it now survives intact.
 - **Comment sidecars are written crash-atomically** (`nexus-comments`, design
   review 2.9 / N6). `save` used `fs::write` on the only copy of a file's
   threads, so a crash or short write could leave a truncated sidecar that
