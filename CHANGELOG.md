@@ -47,6 +47,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_multimodal_db`: `Session::commit` docs now say that `Ok(())` means the batch applied, not every write. Per-op outcomes such as `Duplicate` are discarded; use `commit_results` or a strict session to see them.
   - `#[derive(RustyJson)]` is now a compile error pointing to serde derives, instead of generating a `to_json_string` that serialized no fields and a `from_json_str` that always failed.
   - **Breaking:** removed `rusty_wiremock::{MockServer, RequestMatcher, ResponseTemplate}`. They were a scaffold: `start` bound nothing and `register` did nothing. No crate used them. `canned` is unchanged, and the scaffold's unused dependencies (`rusty_http`, `rusty_json`, `rusty_std`) are gone with it.
+  - **Breaking:** `rusty_std::Error` gains `Unsupported(&'static str)` and is now `#[non_exhaustive]`. On targets with no backend (wasm32 and others), `File::open`/`create`/`read`/`write`, `TcpStream::connect`/`read`/`write` and `Command::status` return it. Before, reads returned EOF, writes reported every byte written, `connect` returned a stream with no socket behind it, and `status` reported success without spawning. The wasm32 fake `File` is gone.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.

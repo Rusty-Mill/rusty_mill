@@ -14,8 +14,6 @@ pub struct File {
     fd: i32,
     #[cfg(windows)]
     handle: rusty_win32::RawHandle,
-    #[cfg(target_arch = "wasm32")]
-    virtual_id: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -53,17 +51,10 @@ impl File {
                 .map_err(|e| map_win32("open", e))?;
             Ok(Self { handle })
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = path;
-            Ok(Self { virtual_id: 0 })
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_arch = "wasm32")))]
-        {
-            let _ = path;
-            Err(Error::NotFound(alloc::string::String::from(
-                "Unsupported OS",
-            )))
+            Err(Error::Unsupported("fs::File::open"))
         }
     }
 
@@ -86,17 +77,10 @@ impl File {
                     .map_err(|e| map_win32("create", e))?;
             Ok(Self { handle })
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = path;
-            Ok(Self { virtual_id: 0 })
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_arch = "wasm32")))]
-        {
-            let _ = path;
-            Err(Error::NotFound(alloc::string::String::from(
-                "Unsupported OS",
-            )))
+            Err(Error::Unsupported("fs::File::create"))
         }
     }
 }
@@ -115,10 +99,10 @@ impl Read for File {
             unsafe { rusty_win32::fs::read_file(self.handle, buf) }
                 .map_err(|e| map_win32("read", e))
         }
-        #[cfg(any(target_arch = "wasm32", not(any(target_os = "linux", windows))))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = buf;
-            Ok(0)
+            Err(Error::Unsupported("fs::File::read"))
         }
     }
 }
@@ -137,9 +121,10 @@ impl Write for File {
             unsafe { rusty_win32::fs::write_file(self.handle, buf) }
                 .map_err(|e| map_win32("write", e))
         }
-        #[cfg(any(target_arch = "wasm32", not(any(target_os = "linux", windows))))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
-            Ok(buf.len())
+            let _ = buf;
+            Err(Error::Unsupported("fs::File::write"))
         }
     }
 
