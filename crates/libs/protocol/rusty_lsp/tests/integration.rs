@@ -2894,3 +2894,53 @@ async fn concurrent_trivial_requests_are_never_silently_dropped() {
         assert_eq!(seen, expected, "round {round}: response id set mismatch");
     }
 }
+
+/// Design review 3.7 (N11): the concurrency cap bounded execution, not
+/// pending work -- every request got a task. Past the pending cap a
+/// request is answered `RequestFailed` at once, and cancelling a pending
+/// one frees room again.
+#[tokio::test]
+async fn requests_past_the_pending_cap_are_refused_at_once() {
+    let mut harness = Harness::start_with(|server| server.with_max_pending_requests(2));
+    harness.initialize().await;
+    let first = harness.request("test/sleep", json!({})).await;
+    let _second = harness.request("test/sleep", json!({})).await;
+    let third = harness.request("test/sleep", json!({})).await;
+    let refused = tokio::time::timeout(Duration::from_secs(2), harness.recv_response(&third))
+        .await
+        .expect("the over-cap request is answered immediately");
+    assert_eq!(refused.error.expect("error").code, codes::REQUEST_FAILED);
+
+    let RequestId::Number(numeric_id) = first.clone() else {
+        unreachable!("ids are numeric in this harness");
+    };
+    harness
+        .notify("$/cancelRequest", json!({ "id": numeric_id }))
+        .await;
+    let _ = harness.recv_response(&first).await;
+    let fourth = harness
+        .request("textDocument/hover", position_params("file:///x", 0, 0))
+        .await;
+    let answered = harness.recv_response(&fourth).await;
+    assert!(answered.error.is_none(), "room was freed by the cancel");
+}
+
+/// Design review 3.7 (N11): notifications queued without bound behind a
+/// slow handler. Past the pending cap the connection is torn down with an
+/// error instead.
+#[tokio::test]
+async fn a_notification_flood_past_the_cap_tears_the_connection_down() {
+    let mut harness = Harness::start_with(|server| server.with_max_pending_notifications(3));
+    harness.initialize().await;
+    for _ in 0..6 {
+        harness.notify("test/slow_note", json!({})).await;
+    }
+    let result = tokio::time::timeout(Duration::from_secs(10), &mut harness.serve)
+        .await
+        .expect("serve ends promptly")
+        .expect("serve task did not panic");
+    assert!(
+        result.is_err(),
+        "an overrun ends the connection with an error"
+    );
+}

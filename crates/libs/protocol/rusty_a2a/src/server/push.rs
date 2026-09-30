@@ -263,17 +263,44 @@ pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<Vec<S
     }
 }
 
+/// Whether a webhook may not be delivered to `ip`: anything not a
+/// globally routed unicast address (design review 3.6 widened this; IPv6
+/// unique-local `fc00::/7`, for one, used to pass). An IPv4 address
+/// embedded in IPv6 (mapped `::ffff:0:0/96`, NAT64 `64:ff9b::/96`) is
+/// judged as the IPv4 address it reaches.
 fn is_disallowed(ip: IpAddr) -> bool {
     match ip.to_canonical() {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
+        IpAddr::V4(v4) => is_disallowed_v4(v4),
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = seg[6].to_be_bytes();
+                let [c, d] = seg[7].to_be_bytes();
+                return is_disallowed_v4(std::net::Ipv4Addr::new(a, b, c, d));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unicast_link_local()
+                || (seg[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
+                || (seg[0] & 0xffc0) == 0xfec0 // deprecated site-local, fec0::/10
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
     }
+}
+
+fn is_disallowed_v4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local() // includes the 169.254.169.254 metadata service
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || a == 0 // "this network", 0.0.0.0/8
+        || (a == 100 && (64..128).contains(&b)) // shared address space, 100.64.0.0/10
+        || (a == 192 && b == 0 && v4.octets()[2] == 0) // IETF protocol assignments
+        || (a == 198 && (b == 18 || b == 19)) // benchmarking, 198.18.0.0/15
+        || a >= 240 // reserved, 240.0.0.0/4
 }
 
 /// Builds a one-off HTTP client whose only allowed DNS resolution for the
@@ -288,8 +315,13 @@ fn pinned_client(url: &str, addrs: &[SocketAddr]) -> std::result::Result<Client,
     let host = parsed
         .host_str()
         .ok_or_else(|| "webhook URL has no host".to_string())?;
+    // No redirects (design review 3.6): a 3xx would send the delivery to a
+    // host none of this validation ever saw -- `resolve_to_addrs` pins
+    // only the original host. A webhook that redirects is a failed
+    // delivery, retried like any other non-2xx.
     Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(host, addrs)
         .build()
         .map_err(|e| format!("failed to build a DNS-pinned HTTP client for {host:?}: {e}"))
@@ -347,5 +379,68 @@ mod tests {
             accepted.is_ok(),
             "pinned client never connected to the validated address - it must have performed its own DNS lookup instead"
         );
+    }
+
+    /// Design review 3.6: address classes a webhook must not reach. IPv6
+    /// unique-local (`fc00::/7`) and NAT64-embedded private IPv4 used to
+    /// pass the SSRF filter.
+    #[test]
+    fn non_global_addresses_are_disallowed() {
+        let blocked = [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.1.2.3",
+            "198.18.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "192.0.0.8",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "fec0::1",
+            "ff02::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+        ];
+        for ip in blocked {
+            assert!(is_disallowed(ip.parse().unwrap()), "{ip} should be blocked");
+        }
+        for ip in ["203.0.114.7", "8.8.8.8", "2606:4700::1111", "64:ff9b::808:808"] {
+            assert!(!is_disallowed(ip.parse().unwrap()), "{ip} should be allowed");
+        }
+    }
+
+    /// Design review 3.6: the pinned delivery client used reqwest's
+    /// default redirect policy, so a 3xx sent the webhook payload to a
+    /// host the SSRF check never saw. Redirects are not followed now.
+    #[tokio::test]
+    async fn the_pinned_client_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let internal = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let internal_port = internal.local_addr().unwrap().port();
+        let hook = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = hook.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = hook.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{internal_port}/admin\r\nContent-Length: 0\r\n\r\n"
+            );
+            sock.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let url = format!("http://webhook.invalid:{port}/hook");
+        let addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)];
+        let client = pinned_client(&url, &addrs).unwrap();
+        let resp = client.post(&url).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 302);
+        let followed = tokio::time::timeout(Duration::from_millis(300), internal.accept()).await;
+        assert!(followed.is_err(), "the redirect target must not be contacted");
     }
 }

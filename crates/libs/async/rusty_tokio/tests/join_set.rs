@@ -115,3 +115,33 @@ fn dropping_the_set_aborts_tasks_still_in_it() {
 
     assert_eq!(ran.load(Ordering::SeqCst), 0);
 }
+
+/// `try_join_next` hands back only tasks that have already finished, without
+/// waiting (design review 3.7: `rusty_stream`'s accept loop reaps with it).
+#[test]
+fn try_join_next_returns_only_finished_tasks() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    rt.block_on(async {
+        let mut set = JoinSet::new();
+        assert!(set.try_join_next().is_none(), "empty set");
+        let (tx, rx) = rusty_tokio::sync::oneshot::channel::<()>();
+        set.spawn(async move {
+            let _ = rx.await;
+            1
+        });
+        set.spawn(async { 2 });
+        let mut done = None;
+        for _ in 0..100 {
+            if let Some(result) = set.try_join_next() {
+                done = Some(result.unwrap());
+                break;
+            }
+            rusty_tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(done, Some(2));
+        assert!(set.try_join_next().is_none(), "the other is still waiting");
+        assert_eq!(set.len(), 1);
+        tx.send(()).unwrap();
+        assert_eq!(set.join_next().await.unwrap().unwrap(), 1);
+    });
+}

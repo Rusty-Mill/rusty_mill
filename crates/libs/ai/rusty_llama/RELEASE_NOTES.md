@@ -5,6 +5,16 @@ requests against `main` instead, reverse chronological, one entry per PR.
 
 ---
 
+## Bounded server admission (design review 3.7)
+**2026-09-30**
+
+- **Fixed:** the server's job queue was unbounded, and every connection got its own thread.
+  - The queue now holds at most `RUSTY_LLAMA_QUEUE` jobs (default 64).
+  - At most `RUSTY_LLAMA_MAX_CONNECTIONS` connections are served (default 128).
+  - Past either limit a request is answered `503` at once.
+
+---
+
 ## PR #92 — Share a KV cell budget across server slots via KvPagePool
 **2026-07-23** · [#92](https://github.com/baileyrd/rusty_llama/pull/92)
 

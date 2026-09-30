@@ -98,7 +98,7 @@ fn main() -> ExitCode {
         tmp_dir: tmp_dir.unwrap_or_else(std::env::temp_dir),
     });
     if let Some(path) = model_path {
-        spawn_model_load(state.clone(), path);
+        let _ = spawn_model_load(state.clone(), path);
     }
 
     let listener = match TcpListener::bind((host.as_str(), port)) {
@@ -120,7 +120,18 @@ fn main() -> ExitCode {
         };
         let state = state.clone();
         let public_dir = public_dir.clone();
-        std::thread::spawn(move || handle_connection(stream, public_dir, &state));
+        std::thread::spawn(move || {
+            // Bounded connections (design review 3.7, N02): each one used to
+            // get a thread with no cap and no socket deadline.
+            let Some(_slot) = CONNECTIONS.try_acquire() else {
+                let mut stream = stream;
+                let _ = Response::json(503, r#"{"error":"server busy"}"#).write_to(&mut stream);
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+            handle_connection(stream, public_dir, &state);
+        });
     }
     ExitCode::SUCCESS
 }
@@ -131,8 +142,23 @@ fn main() -> ExitCode {
 /// (rather than loading while holding it) means an in-flight `/inference`
 /// request finishes against the old model instead of racing the swap, and
 /// the new model can't be read until the swap is visible.
-fn spawn_model_load(state: Arc<ServerState>, path: String) {
+/// Concurrent connections served; more get `503` (design review 3.7, N02).
+static CONNECTIONS: server::Slots = server::Slots::new(64);
+/// A model load at a time: `POST /load` used to start a thread per call.
+static LOADS: server::Slots = server::Slots::new(1);
+/// Per-read/per-write socket deadline, so a slow or silent peer cannot
+/// hold its connection slot forever.
+const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Starts a background load unless one is already running; `false` then.
+/// The slot is taken here, on the caller's thread, and held by the load
+/// thread until it finishes -- so two callers cannot both pass.
+fn spawn_model_load(state: Arc<ServerState>, path: String) -> bool {
+    let Some(load) = LOADS.try_acquire() else {
+        return false;
+    };
     std::thread::spawn(move || {
+        let _load = load;
         match std::fs::File::open(&path).and_then(|f| model::load_model(&mut BufReader::new(f))) {
             Ok(m) => {
                 *state.model.lock().unwrap() = Some(m);
@@ -141,6 +167,7 @@ fn spawn_model_load(state: Arc<ServerState>, path: String) {
             Err(e) => eprintln!("failed to load model {path}: {e}"),
         }
     });
+    true
 }
 
 fn handle_connection(mut stream: TcpStream, public_dir: Option<PathBuf>, state: &Arc<ServerState>) {
@@ -174,8 +201,13 @@ fn handle_load(req: &Request, state: &Arc<ServerState>) -> Response {
     let Some(path) = path else {
         return Response::json(400, r#"{"error":"missing 'model' path"}"#);
     };
+    // Not ready before the load starts, so a fast load's `true` cannot be
+    // overwritten. Refused only while another load runs -- which is
+    // itself going to set `ready` when it finishes.
     state.ready.store(false, Ordering::Release);
-    spawn_model_load(state.clone(), path);
+    if !spawn_model_load(state.clone(), path) {
+        return Response::json(409, r#"{"error":"a model load is already running"}"#);
+    }
     Response::json(202, r#"{"status":"loading"}"#)
 }
 

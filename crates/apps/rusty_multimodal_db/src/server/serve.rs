@@ -13,12 +13,12 @@ use super::journal::JournalStats;
 use super::metrics::{ConnectionMetricsGuard, PlanKind, ServerMetrics};
 use super::nullable::{self, NullableField};
 use super::protocol::{
-    AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
-    JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
-    Request, Response, ScanValue, Selection, TransactionOp, WriteOp, WriteResult, MAX_BATCH_OPS,
-    MAX_SNAPSHOT_BYTES, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION,
-    SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
+    staged_op_bytes, staged_update_bytes, AggregateFn, AggregateGroup, AggregateSpec, CompareOp,
+    DomainSchema, ErrorCode, FieldRef, JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate,
+    RecordId, RelationDescriptor, Request, Response, ScanValue, Selection, TransactionOp, WriteOp,
+    WriteResult, MAX_BATCH_OPS, MAX_SNAPSHOT_BYTES, MAX_STAGED_BYTES, MAX_STAGED_OPS,
+    MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES,
+    SESSION_SNAPSHOT_ISOLATION, SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
 use std::cell::{Cell, RefCell};
@@ -4567,6 +4567,9 @@ fn handle_connection(
     // that has staged only updates (committed through `apply_transaction`
     // exactly as before).
     let mut session_writes: Option<Vec<WriteOp>> = None;
+    // Bytes the open session has staged, charged against
+    // `MAX_STAGED_BYTES` (design review 3.7); reset at every `Begin`.
+    let mut staged_bytes: usize = 0;
     // `STC-FR-003` (ADR-0133): the open session commits strictly.
     let mut strict_commit = false;
     // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
@@ -4785,6 +4788,7 @@ fn handle_connection(
                 } else {
                     session = Some(Vec::new());
                     session_writes = None;
+                    staged_bytes = 0;
                     strict_commit = false;
                     read_your_writes = None;
                     validate_on_stage = false;
@@ -4842,6 +4846,7 @@ fn handle_connection(
                     err_response(ErrorCode::Unsupported)
                 } else {
                     session = Some(Vec::new());
+                    staged_bytes = 0;
                     strict_commit = flags & SESSION_STRICT_COMMIT != 0;
                     session_writes = strict_commit.then(Vec::new);
                     read_your_writes = (flags & SESSION_READ_YOUR_WRITES != 0).then(|| {
@@ -4995,6 +5000,8 @@ fn handle_connection(
             }
             Request::UpdateField { id, field, value } if session.is_some() => {
                 let op = TransactionOp { id, field, value };
+                let cost = staged_update_bytes(&op.value);
+                let within_budget = staged_bytes + cost <= MAX_STAGED_BYTES;
                 // `STV-FR-001`: a validating session refuses a bad write
                 // now, with the code `Commit` would have given; nothing
                 // is staged.
@@ -5008,7 +5015,8 @@ fn handle_connection(
                     // `TXS-FR-003`: with record writes already staged, the
                     // update joins the one ordered `WriteOp` list.
                     (None, Some(_)) if session_writes.is_some() => match session_writes.as_mut() {
-                        Some(list) if list.len() < MAX_STAGED_OPS => {
+                        Some(list) if list.len() < MAX_STAGED_OPS && within_budget => {
+                            staged_bytes += cost;
                             list.push(WriteOp::UpdateField {
                                 id: op.id,
                                 field: op.field,
@@ -5020,7 +5028,8 @@ fn handle_connection(
                         }
                         _ => err_response(ErrorCode::SessionFull),
                     },
-                    (None, Some(staged)) if staged.len() < MAX_STAGED_OPS => {
+                    (None, Some(staged)) if staged.len() < MAX_STAGED_OPS && within_budget => {
+                        staged_bytes += cost;
                         staged.push(op);
                         Response::Staged {
                             index: (staged.len() - 1) as u32,
@@ -5056,7 +5065,9 @@ fn handle_connection(
                                 })
                                 .collect()
                         });
-                        if list.len() < MAX_STAGED_OPS {
+                        let cost = staged_op_bytes(&op);
+                        if list.len() < MAX_STAGED_OPS && staged_bytes + cost <= MAX_STAGED_BYTES {
+                            staged_bytes += cost;
                             list.push(op);
                             Response::Staged {
                                 index: (list.len() - 1) as u32,

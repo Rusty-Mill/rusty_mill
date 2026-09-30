@@ -761,6 +761,50 @@ fn cross_origin_redirect_strips_authorization_header() {
     });
 }
 
+/// Design review 3.3: a caller-set `Cookie` header used to survive a
+/// cross-origin redirect (only `Authorization` was stripped), on both the
+/// buffered and the streaming path. Same origin keeps it.
+#[test]
+fn cross_origin_redirect_strips_a_caller_cookie_on_both_send_paths() {
+    run(async {
+        for streaming in [false, true] {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log = seen.clone();
+            let target = start_test_server(move |req| {
+                log.lock()
+                    .unwrap()
+                    .push((req.target.clone(), req.header("cookie").map(str::to_string)));
+                http_response(200, "OK", &[], b"ok")
+            });
+            let target_url = target.url("/end");
+            let entry = start_test_server(move |req| match req.target.as_str() {
+                "/start" => http_response(302, "Found", &[("Location", "/same")], b""),
+                "/same" => {
+                    assert_eq!(req.header("cookie"), Some("session=secret"));
+                    http_response(302, "Found", &[("Location", target_url.as_str())], b"")
+                }
+                other => panic!("unexpected {other}"),
+            });
+            let request = Client::new()
+                .get(&entry.url("/start"))
+                .unwrap()
+                .header("Cookie", "session=secret")
+                .unwrap();
+            let status = if streaming {
+                request.send_streaming().await.unwrap().status()
+            } else {
+                request.send().await.unwrap().status()
+            };
+            assert_eq!(status.as_u16(), 200, "streaming={streaming}");
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![("/end".to_string(), None)],
+                "streaming={streaming}"
+            );
+        }
+    });
+}
+
 #[test]
 fn cookie_set_on_one_request_is_sent_on_the_next_through_the_same_client() {
     run(async {

@@ -47,7 +47,16 @@ pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Respons
     };
 
     if no_auth_configured {
-        return None;
+        // Fail closed unless the operator opted in (design review 3.1):
+        // "nothing configured" also happens at runtime, when the admin API
+        // removes the last client.
+        if state.allow_unauthenticated {
+            return None;
+        }
+        return Some(json_error(
+            401,
+            "no authentication is configured and server.allow_unauthenticated is off",
+        ));
     }
 
     let Some(token) = bearer_token(headers) else {
@@ -388,7 +397,22 @@ mod tests {
             mcp_path: "/mcp".to_string(),
             concurrency_limiter: None,
             cors_allowed_origins: None,
+            allow_unauthenticated: true,
         }
+    }
+
+    /// Design review 3.1: with no auth method configured — at startup, or
+    /// after the admin API removed the last client — callers get `401`
+    /// unless `server.allow_unauthenticated` opted in.
+    #[tokio::test]
+    async fn no_configured_auth_fails_closed_unless_explicitly_allowed() {
+        let mut state = test_state_with_jwt(vec![], None, None).await;
+        state.allow_unauthenticated = false;
+        let refused = check_auth(&state, &HeaderMap::new()).await;
+        assert_eq!(refused.map(|r| r.status().as_u16()), Some(401));
+
+        state.allow_unauthenticated = true;
+        assert!(check_auth(&state, &HeaderMap::new()).await.is_none());
     }
 
     fn bearer_headers(token: &str) -> HeaderMap {
