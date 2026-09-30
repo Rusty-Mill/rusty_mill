@@ -7,6 +7,12 @@ Newest first. Versions are milestone markers over the porting history
 
 ## Unreleased
 
+- **Security (whisper-server, design review 3.7):**
+  - Request and header lines are capped at 8 KiB, with at most 100 headers.
+  - Sockets have 30-second read and write deadlines.
+  - At most 64 connections at once; further ones get `503`.
+  - One model load at a time; a concurrent `POST /load` gets `409`.
+
 ### ⭐ Features
 
 - `--output-txt`/`-otxt`, `--output-vtt`/`-ovtt`, `--output-srt`/`-osrt`,
