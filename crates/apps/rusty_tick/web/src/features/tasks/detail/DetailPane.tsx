@@ -9,6 +9,7 @@ import { Menu } from '@/components/Menu'
 import { TaskCheck } from '@/components/TaskCheck'
 import { formatDueLong, monthName, formatTime } from '@/lib/date'
 import { newId } from '@/lib/id'
+import { Comments } from './Comments'
 import { useNow } from '@/lib/hooks'
 import { useDraft } from '@/lib/useDraft'
 import { describeRule } from '@/lib/recurrence'
@@ -84,6 +85,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
   const [fmtOpen, setFmtOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [listOpen, setListOpen] = useState(false)
+  const [commentsOpen, setCommentsOpen] = useState(false)
   const dateBtn = useRef<HTMLButtonElement>(null)
   const tagBtn = useRef<HTMLButtonElement>(null)
   const fmtBtn = useRef<HTMLButtonElement>(null)
@@ -221,6 +223,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
             </button>
           )}
         </div>
+        {commentsOpen && <Comments taskId={task.id} disabled={trashed} />}
         <TagPicker
           anchor={tagBtn.current}
           open={tagsOpen}
@@ -258,7 +261,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
             ))}
           </div>
         </Popover>
-        <button type="button" disabled title="Comments are not available yet" aria-label="Comments" className="flex h-8 w-8 items-center justify-center rounded-row text-grey opacity-40">
+        <button type="button" aria-label="Comments" aria-pressed={commentsOpen} onClick={() => setCommentsOpen((o) => !o)} className={`flex h-8 w-8 items-center justify-center rounded-row hover:bg-hover ${commentsOpen ? 'text-primary' : 'text-grey'}`}>
           <MessageSquare size={18} />
         </button>
         <button ref={moreBtn} type="button" aria-label="More" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen((o) => !o)} className="flex h-8 w-8 items-center justify-center rounded-row text-grey hover:bg-hover">
