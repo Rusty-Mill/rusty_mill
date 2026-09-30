@@ -142,6 +142,9 @@ pub struct MemoryConnectionStore {
     /// `SESSION_MVCC_ISOLATION`, matching `backup`/`fetch_snapshot`'s own
     /// precedent for `backup_source`.
     mvcc: Option<MvccHandle>,
+    /// `ADR-0134` (spike): a change log appended to from inside the ordered
+    /// section of an atomic batch and made durable after it, in a group.
+    change_log: Option<std::sync::Arc<super::changelog::ChangeLog>>,
 }
 
 impl MemoryConnectionStore {
@@ -155,6 +158,7 @@ impl MemoryConnectionStore {
             replayed: Vec::new(),
             mvcc_reclaim_every: None,
             mvcc: None,
+            change_log: None,
         }
     }
 
@@ -539,6 +543,7 @@ impl MemoryConnectionStore {
             replayed,
             mvcc_reclaim_every: None,
             mvcc: None,
+            change_log: None,
         })
     }
 
@@ -593,11 +598,35 @@ impl MemoryConnectionStore {
         )
     }
 
+    /// `ADR-0134` (spike): log this table's atomic batches through `log`,
+    /// appended in apply order from inside the exclusive section and made
+    /// durable, grouped with concurrent writers, before the batch is
+    /// acknowledged. Do not also wrap the store in `ChangeLogged`.
+    pub fn with_change_log(mut self, log: std::sync::Arc<super::changelog::ChangeLog>) -> Self {
+        self.change_log = Some(log);
+        self
+    }
+
     fn write_batch_impl(
         &self,
         ops: &[WriteOp],
         atomic: bool,
         strict: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        let ticket = std::cell::Cell::new(None);
+        let results = self.write_batch_core(ops, atomic, strict, &ticket)?;
+        if let (Some(log), Some(ticket)) = (&self.change_log, ticket.get()) {
+            log.sync_through(ticket).map_err(|code| (0, code))?;
+        }
+        Ok(results)
+    }
+
+    fn write_batch_core(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+        strict: bool,
+        ticket: &std::cell::Cell<Option<u64>>,
     ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
         if !atomic {
             return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
@@ -611,6 +640,11 @@ impl MemoryConnectionStore {
         // write (ADR-0135); a no-op without a journal.
         let apply = |inner: &mut MemoryProductionStack,
                      accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
+            // A poisoned change log is missing a write this table applied
+            // (a failed append or group sync): apply nothing more (review 2.3).
+            if let Some(log) = &self.change_log {
+                log.ensure_writable().map_err(|code| (0, code))?;
+            }
             if strict {
                 if let Some(refused) = Self::strict_refusal(inner, ops) {
                     return Err(refused);
@@ -636,6 +670,13 @@ impl MemoryConnectionStore {
             // inside the same exclusive section, immediately after every
             // op in it has actually applied.
             self.mvcc_record_write_ops(ops, &results);
+            if let Some(log) = &self.change_log {
+                let effective = super::changelogged::effective_ops(ops, &results);
+                if !effective.is_empty() {
+                    let at = log.append_deferred(&effective).map_err(|code| (0, code))?;
+                    ticket.set(Some(at));
+                }
+            }
             Ok(results)
         };
         match &self.journal {
@@ -4360,5 +4401,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `ADR-0134` (spike): with the change log appended from inside the
+    /// ordered section and synced in a group, the log's order is still the
+    /// apply order under concurrent writers — the record's final value is the
+    /// last logged update's — and nothing is lost or logged twice.
+    #[test]
+    fn a_grouped_change_log_keeps_apply_order_under_concurrent_writers() {
+        use crate::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
+        let dir = fresh_temp_dir("server_memory_change_sink").unwrap();
+        let stack = create_memory_production_stack(
+            vec![memory(1, "general", false)],
+            &[],
+            &dir.join("memories.mmap"),
+        )
+        .unwrap();
+        let log = std::sync::Arc::new(
+            ChangeLog::open(&dir.join("table.changes"), DEFAULT_RETAIN_BYTES).unwrap(),
+        );
+        let adapter = std::sync::Arc::new(
+            MemoryConnectionStore::with_journal(
+                GenericProductionStore::new(stack),
+                &dir.join("table.journal"),
+            )
+            .unwrap()
+            .with_change_log(log.clone()),
+        );
+        let (threads, per_thread) = (8u64, 100u64);
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let adapter = adapter.clone();
+                std::thread::spawn(move || {
+                    for i in 0..per_thread {
+                        let op = WriteOp::UpdateField {
+                            id: Uuid::from_u128(1),
+                            field: FIELD_ACCESS_COUNT,
+                            value: ScanValue::I64((t * 1000 + i) as i64),
+                        };
+                        adapter.write_batch(&[op], true).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let epoch = log.position().epoch;
+        let (position, entries) = log.since(epoch, 0, usize::MAX).unwrap();
+        assert_eq!(position.head, threads * per_thread, "one entry per batch");
+        let logged: Vec<i64> = entries
+            .into_iter()
+            .flatten()
+            .map(|op| match op {
+                WriteOp::UpdateField {
+                    value: ScanValue::I64(v),
+                    ..
+                } => v,
+                other => panic!("unexpected logged op {other:?}"),
+            })
+            .collect();
+        assert_eq!(logged.len() as u64, threads * per_thread);
+        let stored = adapter.get(Uuid::from_u128(1)).unwrap();
+        let (_, last) = stored
+            .iter()
+            .find(|(tag, _)| *tag == FIELD_ACCESS_COUNT)
+            .unwrap();
+        assert_eq!(
+            last,
+            &ScanValue::I64(*logged.last().unwrap()),
+            "the store ends where the log's last entry says"
+        );
+    }
+
+    /// Review 2.3 × ADR-0134: with a change log appended from inside the
+    /// ordered section, a poisoned log stops the next batch before it
+    /// applies — no write the log cannot hold.
+    #[test]
+    fn a_poisoned_grouped_change_log_refuses_before_applying() {
+        use crate::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
+        let dir = fresh_temp_dir("server_memory_change_sink_poison").unwrap();
+        let stack = create_memory_production_stack(
+            vec![memory(1, "general", false)],
+            &[],
+            &dir.join("memories.mmap"),
+        )
+        .unwrap();
+        let log = std::sync::Arc::new(
+            ChangeLog::open(&dir.join("table.changes"), DEFAULT_RETAIN_BYTES).unwrap(),
+        );
+        let adapter = MemoryConnectionStore::with_journal(
+            GenericProductionStore::new(stack),
+            &dir.join("table.journal"),
+        )
+        .unwrap()
+        .with_change_log(log.clone());
+        let bump = |v: i64| WriteOp::UpdateField {
+            id: Uuid::from_u128(1),
+            field: FIELD_ACCESS_COUNT,
+            value: ScanValue::I64(v),
+        };
+        adapter.write_batch(&[bump(5)], true).unwrap();
+        log.poison();
+        assert!(adapter.write_batch(&[bump(6)], true).is_err());
+        let stored = adapter.get(Uuid::from_u128(1)).unwrap();
+        let count = stored
+            .iter()
+            .find(|(tag, _)| *tag == FIELD_ACCESS_COUNT)
+            .unwrap();
+        assert_eq!(
+            count.1,
+            ScanValue::I64(5),
+            "the refused batch did not apply"
+        );
     }
 }

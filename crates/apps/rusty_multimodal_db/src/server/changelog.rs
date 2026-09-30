@@ -43,7 +43,7 @@ use super::protocol::{ErrorCode, WriteOp};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 /// The change log file's magic.
 pub const CHANGELOG_MAGIC: &[u8; 8] = b"RMDBCHLG";
@@ -99,6 +99,17 @@ pub struct LogPosition {
 /// writers, which is what makes the log's order the apply order.
 pub struct ChangeLog {
     inner: Mutex<Inner>,
+    /// `ADR-0134` (spike): the group-sync state behind [`Self::sync_through`].
+    synced: Mutex<SyncState>,
+    /// Wakes the callers waiting on a leader's `fsync`.
+    synced_cv: Condvar,
+}
+
+/// The group-sync state: the highest durable head and whether a caller is
+/// leading an `fsync` right now.
+struct SyncState {
+    durable: u64,
+    syncing: bool,
 }
 
 struct Inner {
@@ -119,6 +130,9 @@ struct Inner {
     /// Tests only: the next append fails, as a full disk would.
     #[cfg(test)]
     fail_next_append: bool,
+    /// Tests only: the next group `fsync` fails.
+    #[cfg(test)]
+    fail_next_sync: bool,
 }
 
 /// A header for a log that is open (the clean flag clear).
@@ -250,7 +264,14 @@ impl ChangeLog {
                 poisoned: false,
                 #[cfg(test)]
                 fail_next_append: false,
+                #[cfg(test)]
+                fail_next_sync: false,
             }),
+            synced: Mutex::new(SyncState {
+                durable: 0,
+                syncing: false,
+            }),
+            synced_cv: Condvar::new(),
         }
     }
 
@@ -280,7 +301,7 @@ impl ChangeLog {
         inner.ensure_writable()?;
         let (result, ops) = apply();
         if let Some(ops) = ops.filter(|ops| !ops.is_empty()) {
-            inner.append(&ops).map_err(|_| ErrorCode::Storage)?;
+            inner.append(&ops, true).map_err(|_| ErrorCode::Storage)?;
         }
         Ok(result)
     }
@@ -299,6 +320,73 @@ impl ChangeLog {
     /// writes those entries record are applied; their durability is not.
     pub fn poison(&self) {
         self.lock().poisoned = true;
+    }
+
+    /// `ADR-0134` (spike): append one entry **without** `fsync`, returning the
+    /// head it made — the ticket to hand [`Self::sync_through`]. Called from
+    /// inside the wrapped store's own ordered section, so the log's order is
+    /// the apply order without this lock being held across the apply.
+    pub fn append_deferred(&self, ops: &[WriteOp]) -> Result<u64, ErrorCode> {
+        let mut inner = self.lock();
+        inner.append(ops, false).map_err(|_| ErrorCode::Storage)?;
+        Ok(inner.position().head)
+    }
+
+    /// `ADR-0134` (spike): make every entry through `ticket` durable. One
+    /// caller does the `fsync` for all the entries appended so far; callers
+    /// that arrive while it runs find their entry covered and return.
+    pub fn sync_through(&self, ticket: u64) -> Result<(), ErrorCode> {
+        let mut state = self.synced.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if state.durable >= ticket {
+                return Ok(());
+            }
+            // A failed sync poisoned the log: every writer it covered fails
+            // too, rather than retrying an `fsync` whose failure may already
+            // have dropped the dirty pages (a later "success" proves nothing).
+            if self.lock().poisoned {
+                return Err(ErrorCode::Storage);
+            }
+            if state.syncing {
+                state = self
+                    .synced_cv
+                    .wait(state)
+                    .unwrap_or_else(|p| p.into_inner());
+                continue;
+            }
+            state.syncing = true;
+            drop(state);
+            // Read how far to sync as late as possible: everything appended
+            // before the `fsync` starts is covered by it.
+            let (head, handle) = {
+                #[allow(unused_mut)]
+                let mut inner = self.lock();
+                #[cfg(test)]
+                if std::mem::take(&mut inner.fail_next_sync) {
+                    drop(inner);
+                    let injected = io::Error::other("injected");
+                    let head = self.position().head;
+                    (head, Err(injected))
+                } else {
+                    (inner.position().head, inner.file.try_clone())
+                }
+                #[cfg(not(test))]
+                (inner.position().head, inner.file.try_clone())
+            };
+            let synced = handle.and_then(|f| f.sync_data());
+            state = self.synced.lock().unwrap_or_else(|p| p.into_inner());
+            state.syncing = false;
+            if synced.is_ok() {
+                state.durable = state.durable.max(head);
+            }
+            if synced.is_err() {
+                self.poison();
+            }
+            self.synced_cv.notify_all();
+            if synced.is_err() {
+                return Err(ErrorCode::Storage);
+            }
+        }
     }
 
     /// `f` under the lock, with the position — for a read that must agree
@@ -385,21 +473,21 @@ impl Inner {
         Ok(())
     }
 
-    /// Every append goes through here, so any failure — whoever appended,
-    /// synced or deferred — poisons the log (see [`ChangeLog::commit`]); a
-    /// poisoned log appends nothing more.
-    fn append(&mut self, ops: &[WriteOp]) -> Result<(), ChangeLogError> {
+    /// Every append goes through here — `commit`'s synced one and
+    /// `append_deferred`'s unsynced one alike — so any failure poisons the
+    /// log (see [`ChangeLog::commit`]); a poisoned log appends nothing more.
+    fn append(&mut self, ops: &[WriteOp], sync: bool) -> Result<(), ChangeLogError> {
         if self.poisoned {
             return Err(ChangeLogError::Format("the log is poisoned".into()));
         }
-        let appended = self.append_record(ops);
+        let appended = self.append_record(ops, sync);
         if appended.is_err() {
             self.poisoned = true;
         }
         appended
     }
 
-    fn append_record(&mut self, ops: &[WriteOp]) -> Result<(), ChangeLogError> {
+    fn append_record(&mut self, ops: &[WriteOp], sync: bool) -> Result<(), ChangeLogError> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_append) {
             return Err(ChangeLogError::Io(io::Error::other("injected")));
@@ -411,7 +499,9 @@ impl Inner {
         }
         let at = self.len;
         self.write_record(KIND_ENTRY, &payload)?;
-        self.file.sync_data()?;
+        if sync {
+            self.file.sync_data()?;
+        }
         self.offsets.push(at);
         if self.len > self.retain_bytes && self.offsets.len() > 1 {
             self.compact()?;
@@ -706,9 +796,29 @@ mod tests {
         log.poison();
         assert_eq!(log.ensure_writable(), Err(ErrorCode::Storage));
         assert!(
-            log.lock().append(&delete(1)).is_err(),
+            log.lock().append(&delete(1), true).is_err(),
             "no append after poison"
         );
+        assert!(log.close_clean().is_err());
+    }
+
+    /// Review 2.3 × ADR-0134: a failed group `fsync` poisons the log, so
+    /// the writer it covered fails, later deferred appends are refused, the
+    /// pre-apply check refuses, and the log does not close clean.
+    #[test]
+    fn a_failed_group_sync_poisons_the_log() {
+        let d = dir("poison_group_sync");
+        let log = ChangeLog::open(&d.join("t.changes"), DEFAULT_RETAIN_BYTES).unwrap();
+        let ticket = log.append_deferred(&delete(1)).unwrap();
+        log.lock().fail_next_sync = true;
+        assert_eq!(log.sync_through(ticket), Err(ErrorCode::Storage));
+        assert_eq!(
+            log.sync_through(ticket),
+            Err(ErrorCode::Storage),
+            "no retry succeeds"
+        );
+        assert_eq!(log.ensure_writable(), Err(ErrorCode::Storage));
+        assert_eq!(log.append_deferred(&delete(2)), Err(ErrorCode::Storage));
         assert!(log.close_clean().is_err());
     }
 }
