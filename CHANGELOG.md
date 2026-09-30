@@ -37,6 +37,11 @@ Removed / Fixed / Security, newest first.
   - Neither can write through a symlink out of its allowed folder.
 - **Design review Tranche 3 (#419), redirect credentials (3.3):** `rusty_request` now drops a caller-set `Cookie` and `Proxy-Authorization`, as well as `Authorization`, when a redirect leaves the origin. Buffered and streaming sends share one redirect policy.
 - **Design review Tranche 3 (#419), HTTP/1 framing (3.4):** `rusty_http` reads every `Transfer-Encoding` field as one coding list. It refuses `chunked` anywhere but once and last, and a request carrying `Transfer-Encoding` together with `Content-Length`. These are request-smuggling ambiguities that used to fall back to `Content-Length`.
+- **Design review Tranche 3 (#419), HTTP/2 hardening (3.5):** `rusty_h2` changes:
+  - Header blocks cap CONTINUATION frames by count and size, and refuse interleaved frames.
+  - Receive windows are enforced, and `release_capacity` replenishes them.
+  - Outgoing frames go through a new `send_frame` instead of the receive path.
+  - The dead duplicate `flow.rs` is removed.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
