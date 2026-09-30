@@ -6858,6 +6858,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "directories",
+ "fs4 1.1.0",
  "keyring",
  "rand 0.8.8",
  "rand_chacha 0.3.1",

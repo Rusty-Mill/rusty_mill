@@ -101,7 +101,7 @@ pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};
 pub use statement::{Statement, StatementStatus};
-pub use storage::{Database, IndexMetadata, Table, TableSource};
+pub use storage::{Database, IndexMetadata, Snapshot, Table, TableSource};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
 pub use trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};

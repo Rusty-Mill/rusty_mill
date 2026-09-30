@@ -5,8 +5,7 @@
 
 use crate::connection::Connection;
 use crate::error::Result;
-use crate::storage::Table;
-use std::collections::HashMap;
+use crate::storage::Snapshot;
 use std::ops::{Deref, DerefMut};
 
 /// The locking mode requested for a transaction. Accepted for API-shape
@@ -56,7 +55,7 @@ pub enum DropBehavior {
 /// was called or [`Transaction::set_drop_behavior`] was changed.
 pub struct Transaction<'conn> {
     conn: &'conn mut Connection,
-    snapshot: Option<HashMap<String, Table>>,
+    snapshot: Option<Snapshot>,
     drop_behavior: DropBehavior,
     finished: bool,
 }
@@ -78,11 +77,15 @@ impl<'conn> Transaction<'conn> {
     /// Notifies any [`crate::TransactionVTab`]-participating virtual
     /// tables (issue #95) — this guard's own snapshot/restore mechanism
     /// only ever covered native tables.
+    ///
+    /// The outermost commit writes the database file; nothing reaches it
+    /// while a transaction is open, so a rollback (or a crash) before
+    /// this point leaves the file at its pre-transaction state.
     pub fn commit(mut self) -> Result<()> {
         self.conn.db().notify_virtual_tables_commit()?;
         self.snapshot = None;
         self.mark_finished();
-        Ok(())
+        self.conn.flush_if_autocommit()
     }
 
     /// Rolls back to the pre-transaction snapshot, and notifies any
@@ -113,6 +116,9 @@ impl<'conn> Transaction<'conn> {
             DropBehavior::Commit => {
                 self.conn.db().notify_virtual_tables_commit()?;
                 self.snapshot = None;
+                self.mark_finished();
+                // A drop cannot report this error; `finish` can.
+                return self.conn.flush_if_autocommit();
             }
             DropBehavior::Rollback => {
                 if let Some(snapshot) = self.snapshot.take() {
