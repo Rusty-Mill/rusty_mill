@@ -1,18 +1,11 @@
-import { Bell, Bot, Clock, Crown, Info, Keyboard, LayoutGrid, ListFilter, MoreHorizontal, Palette, Plug, User, Users, type LucideIcon } from 'lucide-react'
+import { Bell, Clock, Info, Keyboard, Palette, User, type LucideIcon } from 'lucide-react'
 import type { SettingsTab } from '@/app/paths'
 
 export const TAB_META: { id: SettingsTab; label: string; icon: LucideIcon }[] = [
   { id: 'account', label: 'Account', icon: User },
-  { id: 'premium', label: 'Premium', icon: Crown },
-  { id: 'features', label: 'Features', icon: LayoutGrid },
-  { id: 'smart-list', label: 'Smart List', icon: ListFilter },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'date-time', label: 'Date & Time', icon: Clock },
   { id: 'appearance', label: 'Appearance', icon: Palette },
-  { id: 'ai', label: 'AI Features', icon: Bot },
-  { id: 'more', label: 'More', icon: MoreHorizontal },
-  { id: 'integrations', label: 'Integrations & Import', icon: Plug },
-  { id: 'collaborate', label: 'Collaborate', icon: Users },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
   { id: 'about', label: 'About', icon: Info },
 ]

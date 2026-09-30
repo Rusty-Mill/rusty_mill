@@ -1,4 +1,4 @@
-import { BarChart3, Crown, LogOut, Settings } from 'lucide-react'
+import { BarChart3, LogOut, Settings } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { settingsHref } from '@/app/paths'
@@ -13,7 +13,7 @@ interface Props {
   onClose: () => void
 }
 
-/** The avatar menu: Settings, Statistics, Premium (not applicable here), and Sign Out / Leave demo. */
+/** The avatar menu: Settings, Statistics, and Sign Out / Leave demo. */
 export function AccountMenu({ anchor, open, onClose }: Props) {
   const navigate = useNavigate()
   const { mode } = useServices()
@@ -29,7 +29,6 @@ export function AccountMenu({ anchor, open, onClose }: Props) {
         items={[
           { id: 'settings', label: 'Settings', icon: <Settings size={16} />, onSelect: () => navigate(settingsHref('account')) },
           { id: 'stats', label: 'Statistics', icon: <BarChart3 size={16} />, onSelect: () => setStats(true) },
-          { id: 'premium', label: 'Premium', icon: <Crown size={16} />, hint: 'Not applicable in Tick Local', disabled: true },
           'separator',
           mode === 'server'
             ? { id: 'signout', label: 'Sign Out', icon: <LogOut size={16} />, onSelect: signOut }
