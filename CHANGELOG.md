@@ -51,6 +51,7 @@ Removed / Fixed / Security, newest first.
     - Sockets have 30-second read and write deadlines.
     - At most 64 connections at once; the rest get `503`.
     - One model load at a time; a second `POST /load` gets `409`.
+  - `rusty_multimodal_db`: a session is also capped at 64 MiB of staged data (`MAX_STAGED_BYTES`), answered `SessionFull` like the op-count cap. The byte budget is released at commit, rollback and disconnect.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
