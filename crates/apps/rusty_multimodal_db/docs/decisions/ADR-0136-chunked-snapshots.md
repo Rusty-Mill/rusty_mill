@@ -1,4 +1,4 @@
-# ADR-0135: Chunked Snapshots — Lifting the 8 MiB Cap (Proposal)
+# ADR-0136: Chunked Snapshots — Lifting the 8 MiB Cap (Proposal)
 
 - Status: **Proposed — design only, no code. Forks for the owner at the end.**
 - Date: 2026-09-30
