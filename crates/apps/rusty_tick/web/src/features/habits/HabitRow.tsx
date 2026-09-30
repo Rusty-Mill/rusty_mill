@@ -2,7 +2,7 @@ import { Check, Flame, MoreHorizontal } from 'lucide-react'
 import { useState } from 'react'
 import { Menu } from '@/components/Menu'
 import { dayKey, monthName } from '@/lib/date'
-import { computeStreak, frequencyLabel, isDue, type Habit } from './logic'
+import { computeStreak, frequencyLabel, isDue, parseGoal, type Habit } from './logic'
 import type { WeekStart } from '@/lib/date'
 
 export const ROW_GRID = 'grid grid-cols-[minmax(150px,1fr)_repeat(7,44px)_96px_36px] items-center'
@@ -11,8 +11,8 @@ const WEEKDAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'F
 interface Props {
   habit: Habit
   days: number[]
-  /** `YYYY-MM-DD` keys this habit is checked in on. */
-  checked: ReadonlySet<string>
+  /** How many times this habit was done on each `YYYY-MM-DD` day. */
+  counts: ReadonlyMap<string, number>
   today: number
   weekStart: WeekStart
   onToggle: (day: string) => void
@@ -20,15 +20,18 @@ interface Props {
   onDelete: () => void
 }
 
-/** "Read, Tuesday Sep 29, not done" */
-export function cellLabel(name: string, ms: number, done: boolean): string {
+/** "Read, Tuesday Sep 29, not done", or "Water, Tuesday Sep 29, 2 of 8" for a goal of several. */
+export function cellLabel(name: string, ms: number, count: number, goal = 1): string {
   const d = new Date(ms)
-  return `${name}, ${WEEKDAY_FULL[d.getDay()]} ${monthName(d.getMonth())} ${d.getDate()}, ${done ? 'done' : 'not done'}`
+  const status = goal > 1 ? `${count} of ${goal}` : count >= goal ? 'done' : 'not done'
+  return `${name}, ${WEEKDAY_FULL[d.getDay()]} ${monthName(d.getMonth())} ${d.getDate()}, ${status}`
 }
 
-export function HabitRow({ habit, days, checked, today, weekStart, onToggle, onEdit, onDelete }: Props) {
+export function HabitRow({ habit, days, counts, today, weekStart, onToggle, onEdit, onDelete }: Props) {
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
+  const goal = parseGoal(habit.goal).count
+  const checked = new Set([...counts].filter(([, n]) => n >= goal).map(([day]) => day)) // only days that met the goal keep a streak
   const streak = computeStreak(habit, checked, today, weekStart)
   const unit = streak.unit === 'day' ? 'day' : 'week'
   return (
@@ -46,23 +49,26 @@ export function HabitRow({ habit, days, checked, today, weekStart, onToggle, onE
       </div>
       {days.map((d) => {
         const key = dayKey(d)
-        const done = checked.has(key)
+        const count = counts.get(key) ?? 0
+        const done = count >= goal
+        const partial = count > 0 && !done
         const future = d > today
         const due = isDue(habit, d)
         return (
           <div key={key} className="flex justify-center">
             <button
               type="button"
-              aria-label={cellLabel(habit.name, d, done)}
+              aria-label={cellLabel(habit.name, d, count, goal)}
               aria-pressed={done}
               disabled={future}
               onClick={() => onToggle(key)}
-              style={done ? { backgroundColor: habit.color, borderColor: habit.color } : undefined}
+              style={done ? { backgroundColor: habit.color, borderColor: habit.color } : partial ? { borderColor: habit.color, color: habit.color } : undefined}
               className={`flex h-7 w-7 items-center justify-center rounded-full border-[1.5px] outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface disabled:cursor-default ${
-                done ? 'text-white' : `border-dashed border-grey hover:bg-selected ${due ? 'opacity-90' : 'opacity-40'} ${future ? 'opacity-30' : ''}`
+                done ? 'text-white' : partial ? 'text-s font-semibold' : `border-dashed border-grey hover:bg-selected ${due ? 'opacity-90' : 'opacity-40'} ${future ? 'opacity-30' : ''}`
               }`}
             >
               {done && <Check size={16} strokeWidth={2.5} aria-hidden />}
+              {partial && <span aria-hidden>{count}</span>}
             </button>
           </div>
         )

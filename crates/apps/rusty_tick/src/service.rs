@@ -165,6 +165,7 @@ impl Service {
         };
         service.ensure_inbox()?;
         service.realign_subtasks()?;
+        service.sweep_orphan_comments()?;
         Ok(service)
     }
 
@@ -193,6 +194,17 @@ impl Service {
             }
         }
         Ok(())
+    }
+
+    /// Drop comments whose task is gone for good (a trashed task still counts:
+    /// it can come back). Purging cleans up after itself; this catches comments
+    /// left by versions that did not, and is a no-op otherwise.
+    fn sweep_orphan_comments(&mut self) -> Result<usize> {
+        let live: std::collections::HashSet<Uuid> =
+            self.tasks.all().into_iter().map(|t| t.id).collect();
+        Ok(self
+            .docs
+            .delete_comments_where(|owner| !owner.is_some_and(|id| live.contains(&id)))?)
     }
 
     fn now(&self) -> i64 {
@@ -922,6 +934,34 @@ mod tests {
         assert!(utc_start <= now && now < utc_end);
         let (plus2_start, _) = day_bounds(now, 120);
         assert_eq!(plus2_start, utc_end - 2 * 3_600_000);
+    }
+
+    #[test]
+    fn opening_sweeps_comments_whose_task_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = || Box::new(|| 1_000_i64) as Clock;
+        let mut service = Service::open(dir.path(), clock()).unwrap();
+        let task = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                title: "alive".into(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        let comment = |service: &mut Service, owner: &str| {
+            let body = format!(r#"{{"v":1,"taskId":"{owner}","text":"x","createdMs":1}}"#);
+            service.put_doc("comment", Uuid::now_v7(), &body).unwrap();
+        };
+        comment(&mut service, &task.id.to_string());
+        comment(&mut service, &Uuid::now_v7().to_string()); // its task was purged long ago
+        comment(&mut service, "not-a-task-id");
+        assert_eq!(service.docs("comment").unwrap().len(), 3);
+        drop(service);
+
+        let service = Service::open(dir.path(), clock()).unwrap();
+        let left = service.docs("comment").unwrap();
+        assert_eq!(left.len(), 1, "only the live task's comment survives");
+        assert!(left[0].body.contains(&task.id.to_string()));
     }
 
     #[test]

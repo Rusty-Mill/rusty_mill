@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { runApiContract } from './contract'
-import { MemoryAdapter, STORAGE_KEY } from './memory'
+import { INBOX_ID, MemoryAdapter, STORAGE_KEY } from './memory'
 
 runApiContract('MemoryAdapter', async () => new MemoryAdapter())
 
@@ -15,6 +15,19 @@ describe('MemoryAdapter persistence', () => {
     expect(snap.tasks.map((t) => t.id)).toEqual([task.id])
     expect(snap.lists.map((l) => l.name)).toEqual(['Inbox', 'Kept'])
     expect(snap.tags.map((t) => t.name)).toEqual(['t'])
+  })
+
+  it('sweeps comments whose task is gone when it loads, and keeps a trashed task\'s', async () => {
+    const first = new MemoryAdapter({ storage: localStorage })
+    const alive = await first.createTask({ listId: INBOX_ID, title: 'alive' })
+    const binned = await first.createTask({ listId: INBOX_ID, title: 'binned' })
+    await first.trashTask(binned.id)
+    for (const taskId of [alive.id, binned.id, 'purged-long-ago']) await first.putDoc('comment', crypto.randomUUID(), { v: 1, taskId, text: 'x', createdMs: 1 })
+    await first.putDoc('habit', crypto.randomUUID(), { name: 'not a comment' })
+
+    const second = new MemoryAdapter({ storage: localStorage })
+    expect((await second.listDocs<{ taskId: string }>('comment')).map((d) => d.body.taskId).sort()).toEqual([alive.id, binned.id].sort())
+    expect(await second.listDocs('habit')).toHaveLength(1)
   })
 
   it('treats an unreadable save as empty rather than crashing', async () => {
