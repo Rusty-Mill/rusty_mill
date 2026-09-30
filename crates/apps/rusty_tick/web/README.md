@@ -19,7 +19,7 @@ npm run build              # typecheck + production bundle into dist/
 
 Server mode: start `RUSTY_TICK_TOKEN=<16+ chars> rusty_tick --data-dir ./data --web-dir web/dist`,
 open the URL, choose *Connect to server*, and enter the token (kept in
-sessionStorage unless you tick "remember"). Demo mode: choose *Try the demo*, or open `/?adapter=memory`.
+sessionStorage unless you tick "remember"). With per-user tokens (`rusty_tick user add`, ADR-0002) paste the full `<user>.<secret>` token; cached data is kept per user and dropped when another user signs in or the user signs out. Demo mode: choose *Try the demo*, or open `/?adapter=memory`.
 
 ## How it fits together
 
