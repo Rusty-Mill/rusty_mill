@@ -154,6 +154,12 @@
 pub mod access;
 #[cfg(feature = "server")]
 pub mod audit;
+/// The change log behind continuous replication (`ADR-0131`, protocol 34).
+#[cfg(feature = "server")]
+pub mod changelog;
+/// A store whose writes are recorded in a change log (`ADR-0131`).
+#[cfg(feature = "server")]
+pub mod changelogged;
 pub mod client;
 pub mod data_lock;
 #[cfg(feature = "server")]

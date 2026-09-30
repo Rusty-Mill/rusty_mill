@@ -25,24 +25,24 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 14 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 18 |
-| foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
-| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 8 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 17 |
+| foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 0 |
+| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 6 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 4 |
 | foundation | rusty_rsa | rusty_rsa | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256 -- the primitives rusty_oauth and rusty_rdp each independently reimplemented for their own RSA public-key verification/encryption. Named for the primary use case; BigUint is general-purpose (rusty_oauth's own ECC/ES256 code also builds on it) and SHA-256 is a general hash, not RSA-specific -- see lib.rs. | 3 |
-| foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 10 |
+| foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. | 9 |
 | foundation | rusty_serde | rusty_serde_derive | Hand-written #[derive(Serialize, Deserialize)] proc-macro for rusty_serde, built directly on proc_macro (no syn/quote). | 1 |
 | foundation | rusty_serde | rusty_serde_erased | A minimal, isolated unsafe primitive for erasing a serializer/deserializer's associated Ok type across an object-safe (dyn-compatible) boundary - internal to rusty_serde, not a public API. | 1 |
-| foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 2 |
+| foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 1 |
 | foundation | rusty_simd | rusty_simd | A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference | 5 |
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 16 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 1 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
-| foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
+| foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 9 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
 | platform | portable-runtime | compat |  | 4 |
 | platform | portable-runtime | conformance |  | 0 |
@@ -50,10 +50,10 @@ Families are the current directories immediately below `crates/`.
 | platform | portable-runtime | proc-runner |  | 0 |
 | platform | portable-runtime | pty-shell |  | 0 |
 | platform | portable-runtime | stat-tool |  | 0 |
-| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 19 |
+| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 18 |
 | platform | rustils | platform-bsd | BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering. | 2 |
-| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 10 |
-| platform | rustils | platform-mock | In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1). | 7 |
+| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 9 |
+| platform | rustils | platform-mock | In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1). | 6 |
 | platform | rustils | platform-parity | Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate. | 4 |
 | platform | rustils | platform-windows | Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it. | 4 |
 | platform | rustils | winargv | Windows argv -&gt; command-line construction (MSVCRT + cmd-rules quoting, refuse-unrepresentable). Standalone so handback consumers don't need to depend on platform-windows. | 1 |
@@ -83,16 +83,16 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core | 1 |
 | libs | rusty_db | rusty-db-core | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db) | 4 |
 | libs | rusty_db | rusty-db-derive | #[derive(Mapped)] macro for rusty_db: maps a struct to a table | 1 |
-| libs | rusty_db | rusty-db-mysql | MySQL/MariaDB driver for rusty_db, built on sqlx | 1 |
+| libs | rusty_db | rusty-db-mysql | MySQL/MariaDB driver for rusty_db, built on sqlx | 0 |
 | libs | rusty_db | rusty-db-postgres | PostgreSQL driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_db | rusty-db-sqlite | SQLite driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_fedora | rusty_fedora | Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write. | 1 |
-| libs | rusty_font | rusty_font | A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer | 4 |
+| libs | rusty_font | rusty_font | A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer | 3 |
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary | 1 |
-| libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
-| libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
+| libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 2 |
+| libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 3 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 14 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 13 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
@@ -108,23 +108,23 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_request | rusty_request | An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http. | 14 |
 | libs | rusty_rusqlite | rusty_rusqlite | Pure-Rust, from-scratch SQLite reimplementation aiming for rusqlite API parity | 0 |
 | libs | rusty_search | rusty-search | Async, pluggable search interface for Rust: swap search engines without changing application code | 0 |
-| libs | rusty_search | rusty-search-algolia | Algolia-backed SearchBackend implementation for rusty_search: a hosted search SaaS | 1 |
-| libs | rusty_search | rusty-search-azure-search | Azure AI Search-backed SearchBackend implementation for rusty_search: a hosted search-as-a-service on Azure | 1 |
+| libs | rusty_search | rusty-search-algolia | Algolia-backed SearchBackend implementation for rusty_search: a hosted search SaaS | 0 |
+| libs | rusty_search | rusty-search-azure-search | Azure AI Search-backed SearchBackend implementation for rusty_search: a hosted search-as-a-service on Azure | 0 |
 | libs | rusty_search | rusty-search-cloud | Sovereign zero-dependency HTTP JSON remote cloud search provider for rusty_search | 0 |
 | libs | rusty_search | rusty-search-core | Backend-agnostic async search interface: documents, schema, query DSL, and the pluggable SearchBackend trait | 11 |
-| libs | rusty_search | rusty-search-elasticsearch | Elasticsearch-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 2 |
-| libs | rusty_search | rusty-search-meilisearch | Meilisearch-backed SearchBackend implementation for rusty_search: a remote HTTP search engine | 1 |
-| libs | rusty_search | rusty-search-memory | In-memory SearchBackend implementation for rusty_search: no external engine required | 1 |
-| libs | rusty_search | rusty-search-opensearch | OpenSearch-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
-| libs | rusty_search | rusty-search-solr | Apache Solr-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
-| libs | rusty_search | rusty-search-sqlite-fts5 | SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables | 1 |
-| libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 1 |
-| libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
+| libs | rusty_search | rusty-search-elasticsearch | Elasticsearch-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
+| libs | rusty_search | rusty-search-meilisearch | Meilisearch-backed SearchBackend implementation for rusty_search: a remote HTTP search engine | 0 |
+| libs | rusty_search | rusty-search-memory | In-memory SearchBackend implementation for rusty_search: no external engine required | 0 |
+| libs | rusty_search | rusty-search-opensearch | OpenSearch-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 0 |
+| libs | rusty_search | rusty-search-solr | Apache Solr-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 0 |
+| libs | rusty_search | rusty-search-sqlite-fts5 | SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables | 0 |
+| libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 0 |
+| libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 9 |
 | libs | rusty_stream | rusty_stream | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
-| libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 1 |
-| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 4 |
-| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 19 |
+| libs | rusty_term | rusty_term_l13 | rusty_term's L13 structured side-channel: a private-OSC JSON-RPC transport hosting MCP + LSP/ACP negotiation, addressed against a narrow TerminalState trait rather than rusty_term's own Grid type. | 0 |
+| libs | rusty_tls | rusty_tls | A TLS library implementation in Rust | 2 |
+| libs | rusty_tokio | rusty_tokio | A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives. | 18 |
 | libs | rusty_tokio | rusty_tokio-macros | Proc-macro attributes (#[main], #[test]) for rusty_tokio -- not meant to be depended on directly, use rusty_tokio's re-exports. | 1 |
 | libs | rusty_vulkan | rusty_vulkan | A #![no_std] + alloc sovereign raw Vulkan / Metal hardware command buffer and GPU surface layer | 1 |
 | libs | rusty_whisper | rusty-whisper | A pure-Rust port of whisper.cpp (OpenAI Whisper speech recognition) | 1 |

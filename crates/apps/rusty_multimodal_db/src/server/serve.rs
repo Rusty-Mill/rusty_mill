@@ -695,6 +695,27 @@ pub trait ConnectionStore: Send + Sync {
         None
     }
 
+    /// `CHL-FR-004` (ADR-0131, protocol 34): the committed writes after
+    /// `after` in the change log's `epoch` — the log's position and the
+    /// entries, oldest first. The default has no change log: `Unsupported`.
+    fn changes_since(
+        &self,
+        _epoch: u64,
+        _after: u64,
+        _limit: usize,
+    ) -> Result<(crate::server::changelog::LogPosition, Vec<Vec<WriteOp>>), ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// `CHL-FR-005` (ADR-0131, protocol 34): [`Self::fetch_snapshot`] plus the
+    /// change log's `(epoch, seq)` at the instant of the copy, taken
+    /// consistently with it. `None` for a table with no log, which is
+    /// answered as before.
+    #[allow(clippy::type_complexity)]
+    fn fetch_snapshot_at(&self) -> Result<(Vec<(String, Vec<u8>)>, Option<(u64, u64)>), ErrorCode> {
+        Ok((self.fetch_snapshot()?, None))
+    }
+
     /// `NLC-FR-001` (ADR-0128, protocol 32): the fields this table stores
     /// as a sentinel but shows as `NULL` to a connection at 32 or above —
     /// `handle_connection` translates at the wire edge
@@ -927,6 +948,7 @@ fn error_message(code: ErrorCode) -> &'static str {
             "this table's on-disk size exceeds the snapshot size limit; nothing was read"
         }
         ErrorCode::Busy => "the server is at its connection limit; retry later",
+        ErrorCode::Gone => "the change log no longer holds that position; resync from a snapshot",
     }
 }
 
@@ -2547,6 +2569,9 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
                 })
                 .collect(),
         },
+        // `CHL-FR-005` (ADR-0131): below 34 the position is dropped and the
+        // files go as a plain `Snapshot`.
+        Response::SnapshotAt { files, .. } if negotiated < 34 => Response::Snapshot { files },
         Response::Schema(mut schema) if negotiated < 11 => {
             schema
                 .fields
@@ -2802,7 +2827,9 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::BackedUp { .. }
         | Response::Snapshot { .. }
         | Response::RowsClamped { .. }
-        | Response::NullableFields { .. } => access::Outcome::Ok,
+        | Response::NullableFields { .. }
+        | Response::Changes { .. }
+        | Response::SnapshotAt { .. } => access::Outcome::Ok,
     }
 }
 
@@ -4151,8 +4178,27 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // `ServeOptions` access beyond the `TokenClass::Replication`
         // gate `handle_connection` already checked before dispatching —
         // so, unlike `Backup`, it goes through the generic loop.
-        Request::FetchSnapshot => match store.fetch_snapshot() {
-            Ok(files) => Response::Snapshot { files },
+        Request::FetchSnapshot => match store.fetch_snapshot_at() {
+            Ok((files, None)) => Response::Snapshot { files },
+            // `CHL-FR-005` (ADR-0131): with a change log, the position rides
+            // along; `downgrade_for_version` sends `Snapshot` below 34.
+            Ok((files, Some((epoch, seq)))) => Response::SnapshotAt { files, epoch, seq },
+            Err(code) => err_response(code),
+        },
+        // `CHL-FR-004` (ADR-0131): the entries after `after`. The
+        // `Replication` class and the protocol gate ran in
+        // `handle_connection`.
+        Request::FetchSince {
+            epoch,
+            after,
+            limit,
+        } => match store.changes_since(epoch, after, limit as usize) {
+            Ok((position, entries)) => Response::Changes {
+                epoch: position.epoch,
+                first: after + 1,
+                head: position.head,
+                entries,
+            },
             Err(code) => err_response(code),
         },
         // `FPG-FR-002`/`FPG-FR-003` (ADR-0068): `Page`'s own
@@ -4669,7 +4715,9 @@ fn handle_connection(
         // cannot be folded into a boolean flag on `ReadWrite` — the
         // match above already proves at compile time that no future
         // `TokenClass` variant is silently exempted here.
-        if matches!(req, Request::FetchSnapshot) && class != TokenClass::Replication {
+        if matches!(req, Request::FetchSnapshot | Request::FetchSince { .. })
+            && class != TokenClass::Replication
+        {
             sink.record(&audit::AuditEvent::now(
                 peer,
                 audit::AuditKind::Refused {
@@ -5042,6 +5090,9 @@ fn handle_connection(
             Request::FetchSnapshot if negotiated < 25 => err_response(ErrorCode::Malformed),
             // `NLC-FR-005` (ADR-0128): gated like every appended request.
             Request::DescribeNullable if negotiated < 32 => err_response(ErrorCode::Malformed),
+            // `CHL-FR-004` (ADR-0131): gated like every appended request; the
+            // `Replication` class gate ran above.
+            Request::FetchSince { .. } if negotiated < 34 => err_response(ErrorCode::Malformed),
             // `FPG-FR-007` (ADR-0068): a read, `Page`'s own gate shape —
             // no `SessionOpen` gate, `Malformed` below the protocol
             // version that introduced it. Falls through to `dispatch`'s

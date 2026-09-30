@@ -628,8 +628,28 @@ class Client:
         server's configured ceiling. Below 25, ``UnsupportedError`` with
         no frame sent."""
         reply = self._roundtrip(p.FetchSnapshot())
-        if isinstance(reply, p.Snapshot):
+        if isinstance(reply, (p.Snapshot, p.SnapshotAt)):
             return list(reply.files)
+        raise ProtocolError(type(reply).__name__)
+
+    def fetch_snapshot_at(self) -> Tuple[List[Tuple[str, bytes]], int, int]:
+        """``fetch_snapshot`` plus the change-log position ``(epoch, seq)``
+        the files are consistent with (ADR-0131, protocol 34). Raises
+        ``ProtocolError`` when the table keeps no change log."""
+        reply = self._roundtrip(p.FetchSnapshot())
+        if isinstance(reply, p.SnapshotAt):
+            return list(reply.files), reply.epoch, reply.seq
+        raise ProtocolError(type(reply).__name__)
+
+    def fetch_since(self, epoch: int, after: int, limit: int = 1000) -> p.Changes:
+        """Change-log entries after ``after`` in ``epoch`` (RPL-FR-002,
+        ADR-0131, protocol 34). Replication token only;
+        ``ErrorCode.Gone`` when the epoch changed or the log was trimmed
+        past ``after`` — re-fetch a snapshot. Below 34,
+        ``UnsupportedError`` with no frame sent."""
+        reply = self._roundtrip(p.FetchSince(epoch, after, limit))
+        if isinstance(reply, p.Changes):
+            return reply
         raise ProtocolError(type(reply).__name__)
 
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:

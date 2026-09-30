@@ -119,7 +119,16 @@ not a guess.
   pruning old ones; the standby's restart is still the operator's.
   *Since `ADR-0123`:* the script connects over TLS when
   `REPLICA_REFRESH_TLS_SERVER_NAME` is set, so a standby can sit
-  across an untrusted network.
+  across an untrusted network. *Since `ADR-0131` (protocol 34, phase 1):*
+  a per-table change log (`SERVER_CHANGE_LOG_DIR`) of effective write
+  batches, `FetchSince`/`Changes`, and `FetchSnapshot` answering
+  `SnapshotAt` with the log position; a standby that restores a snapshot
+  and tails the log equals the primary, and a standby on a stale epoch or
+  behind retention is told `Gone` and resyncs. Still absent: the standby
+  tail tool (`replica_refresh --follow`) and manual promotion (phases 2/3),
+  logging `detach_record` cascades and `Compact`, lifting the 8 MiB
+  snapshot cap; automatic failover, consensus and write forwarding stay
+  non-goals.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
   (`ADR-0064`, protocol 23) renders a bounded, fixed set of

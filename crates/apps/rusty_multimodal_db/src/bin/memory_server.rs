@@ -86,6 +86,17 @@
 //! connection finish the request it is in and then closes it, and exits 0
 //! once they have — or after `SERVER_DRAIN_TIMEOUT_SECS` (default 30).
 //!
+//! # Change log for a standby — `SERVER_CHANGE_LOG_DIR` (ADR-0131)
+//!
+//! With `SERVER_DATA_DIR` set, `SERVER_CHANGE_LOG_DIR=<dir>` records each
+//! table's committed writes in `<dir>/<table>.changes`, in commit order, so a
+//! standby with the replication token (`SERVER_AUTH_REPLICATION_TOKEN`) can
+//! tail them (`Request::FetchSince`) after restoring a `FetchSnapshot`. The
+//! log keeps `SERVER_CHANGE_LOG_RETAIN_MB` (default 64) per table; a standby
+//! behind that, or across an epoch, is told `Gone` and resyncs. A clean drain
+//! (SIGTERM) continues the epoch at the next start; any other end starts a
+//! new one.
+//!
 //! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
 //!
 //! An `Insert`/`Replace`/`Delete`/`Link` is `fsync`ed to the insert log
@@ -193,6 +204,8 @@ use rusty_multimodal_db::generic::relation::{
 };
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
+use rusty_multimodal_db::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
+use rusty_multimodal_db::server::changelogged::ChangeLogged;
 use rusty_multimodal_db::server::data_lock::DataDirLock;
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::exposure::{
@@ -783,16 +796,49 @@ fn main() {
     // — `Use entity` reaches the second; `JOIN entity e ON mentions`
     // crosses between them; `Use relation` (ADR-0058) reaches the third.
     let memory_connection_store: Arc<dyn ConnectionStore> = connection_store;
-    serve_tables(
-        listener,
-        vec![
-            ("memory".to_string(), memory_connection_store),
-            ("entity".to_string(), entity_connection_store),
-            ("relation".to_string(), relation_connection_store),
-        ],
-        0,
-        options,
-    );
+    let mut tables: Vec<(String, Arc<dyn ConnectionStore>)> = vec![
+        ("memory".to_string(), memory_connection_store),
+        ("entity".to_string(), entity_connection_store),
+        ("relation".to_string(), relation_connection_store),
+    ];
+    // `SERVER_CHANGE_LOG_DIR` (ADR-0131, `CHL-FR-006`): opt-in, durable data
+    // only. Each table's writes are recorded in `<dir>/<table>.changes` so a
+    // standby can tail them; a clean drain says goodbye, and any other end
+    // starts a new epoch at the next open (a standby then resyncs).
+    let change_logs = match std::env::var_os("SERVER_CHANGE_LOG_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            assert!(
+                durable,
+                "SERVER_CHANGE_LOG_DIR needs SERVER_DATA_DIR: a scratch dataset is recreated every start"
+            );
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("SERVER_CHANGE_LOG_DIR {dir:?}: {e}"));
+            let retain = bounded_env("SERVER_CHANGE_LOG_RETAIN_MB", None)
+                .map_or(DEFAULT_RETAIN_BYTES, |mb| mb.saturating_mul(1 << 20));
+            let mut logs = Vec::new();
+            for (name, store) in tables.iter_mut() {
+                let path = dir.join(format!("{name}.changes"));
+                let log = Arc::new(
+                    ChangeLog::open(&path, retain)
+                        .unwrap_or_else(|e| panic!("change log {path:?}: {e}")),
+                );
+                let at = log.position();
+                eprintln!(
+                    "memory_server change log for {name}: {path:?} (epoch {}, head {})",
+                    at.epoch, at.head
+                );
+                *store = Arc::new(ChangeLogged::new(Arc::clone(store), Arc::clone(&log)));
+                logs.push(log);
+            }
+            logs
+        }
+        None => Vec::new(),
+    };
+    serve_tables(listener, tables, 0, options);
+    for log in change_logs {
+        let _ = log.close_clean();
+    }
 }
 
 /// Where this process keeps its three tables (`DDR-FR-002`).

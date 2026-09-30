@@ -1,6 +1,6 @@
 # ADR-0131: Continuous Replication by Shipping a Change Log (Proposal)
 
-- Status: **Proposed — design only, no code. Forks for the owner below.**
+- Status: **Accepted — phase 1 built (protocol 34), on the owner's "go with recommendations": option 1, its own log file, compaction not logged. Phases 2 and 3 are open.**
 - Date: 2026-09-30
 - Deciders: baileyrd
 - Related: `ADR-0067` (`FetchSnapshot`, full snapshots), `ADR-0118`/`0123`
@@ -9,7 +9,7 @@
   (a change feed stays app-side for `rusty_tick`), `docs/FUTURE-GROWTH.md`
   ("Replication/high availability").
 - Supersedes/Superseded by: none yet. If accepted: wire change, protocol
-  32 → 33 (or later).
+  32 → 34 (built; 33 went to `ADR-0130`).
 
 ## Context
 
@@ -68,3 +68,36 @@ its entries only replay against an identical starting snapshot.
   bound, and a correctness surface (log/store agreement across a crash) that
   needs the crash-safety trials before it ships. Independent inspection before
   merge.
+
+## Phase 1 as built (protocol 34)
+
+- `src/server/changelog.rs`: `ChangeLog`, an append-only file per table
+  (`<dir>/<table>.changes`, `SERVER_CHANGE_LOG_DIR`, needs `SERVER_DATA_DIR`).
+  Each entry is one write batch of *effective* `WriteOp`s, fsynced under the
+  log's lock, so log order is apply order. Header: magic, version, `epoch`,
+  base `seq`, a clean-shutdown flag. An unclean open (kill, crash) bumps the
+  epoch; a clean drain (`ADR-0127`) keeps it.
+- `src/server/changelogged.rs`: `ChangeLogged`, a `ConnectionStore` decorator
+  over any adapter; logs only writes that succeeded and changed something
+  (`Duplicate`, `GuardFailed`, `AlreadyLinked`, `NotFound`, `Failed` are not
+  logged). A `ReplaceIf` that applied is logged as a `Replace`.
+- Wire (protocol 34): `Request::FetchSince { epoch, after, limit }` (39),
+  `Response::Changes { epoch, first, head, entries }` (26),
+  `Response::SnapshotAt { files, epoch, seq }` (27), `ErrorCode::Gone` (16).
+  `FetchSnapshot` answers `SnapshotAt` when the table has a log (`Snapshot`
+  below 34). `FetchSince` needs the Replication token.
+- Retention: `SERVER_CHANGE_LOG_RETAIN_MB` drops the oldest half; a standby
+  behind it, or on another epoch, is told `Gone` and re-bootstraps.
+- Crash contract: a write applied but not logged leaves the log unclean, so
+  the next open is a new epoch and the standby resyncs from a snapshot. The
+  log never claims a write the store lacks.
+- Verified: unit tests (append, reopen, epoch, retention, torn tail), an
+  integration test where a standby restores a snapshot at a position, tails
+  the log and equals the primary, and a real-binary test that a clean drain
+  keeps the epoch while a kill starts a new one.
+
+**Known limits, named:** the log mutex serialises a table's writers and
+defeats journal group commit (measure before enabling under load);
+`MAX_SNAPSHOT_BYTES` still caps the bootstrap snapshot; `detach_record`
+cascades and `Compact` are not logged; the standby-side tail tool
+(`replica_refresh --follow`) and promotion are phases 2 and 3.

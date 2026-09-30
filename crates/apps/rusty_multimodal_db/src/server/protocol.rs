@@ -88,6 +88,7 @@
 //! | 31 | `SERVER-001` v0.96.0 | + [`ScanValue::Null`] (6) — `NUL-FR-001`, ADR-0117: the absence of a value, a unit variant. No shipped column is nullable yet, so a server never emits it and answers `Malformed` to any request carrying it where a value is read (a write, a predicate, a transaction op, a guard). Stripped from `Record`/`Rows` below 31 by `downgrade_for_version` (rule 3, `StrList`'s precedent). No new `Request`/`ErrorCode`. ADR-0117 |
 //! | 32 | `SERVER-001` v0.104.0 | + [`Request::DescribeNullable`] (38) and [`Response::NullableFields`] (25) — `NLC-FR-005`, ADR-0128: the first nullable columns. A `Null` a request carries for a nullable field is stored as the field's sentinel and a stored sentinel is answered `Null`, on a connection negotiated at 32 or above only (`super::nullable`): `Memory`'s `deleted_at_unix_ms` (`0`) and `node_id` (`""`). `DescribeNullable` lists the tags. Below 32 nothing changes: the sentinel is still what a client sees, and the request is `Malformed` (rule 3). No stored-layout change. ADR-0128 |
 //! | 33 | `SERVER-001` v0.106.0 | + [`WriteOp::UpdateField`] (5) and [`WriteResult::Updated`] (9) — `TXS-FR-001`, ADR-0130: `UpdateField`'s own three fields as a batch op, so one ordered list can hold an update and a record write. With it a transaction session (`Begin`/`Commit`) may stage `Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link` beside `UpdateField`, on a connection at 33 or above, and commit them as one atomic `WriteBatch`; a session that asked for read-your-writes, snapshot isolation or real MVCC refuses them `Unsupported` (whole-record overlays are phase 2). A `WriteBatch` carrying an `UpdateField` is `Malformed` below 33 (rule 3). ADR-0130 |
+//! | 34 | `SERVER-001` v0.107.0 | + [`Request::FetchSince`] (39), [`Response::Changes`] (26), [`Response::SnapshotAt`] (27) and [`ErrorCode::Gone`] (16) — `CHL-FR-004`/`005`, ADR-0131: continuous replication over a table's change log. `FetchSince { epoch, after, limit }` answers the committed writes after sequence number `after` in the log's `epoch`, as `Changes` (a `Replication` token, like `FetchSnapshot`); `Gone` when the epoch is another or `after` is older than the log holds — the standby resyncs. `FetchSnapshot` answers `SnapshotAt` (the files plus the log's `epoch` and `seq` at that instant) on a table with a log and a connection at 34+, `Snapshot` otherwise. `Unsupported` for a table with no log; `Malformed` below 34 (rule 3). ADR-0131 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -122,7 +123,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -720,6 +721,12 @@ pub enum ErrorCode {
     /// and fails the connect exactly as it failed on the silent close
     /// before. Never answers a request, so it needs no downgrade arm.
     Busy,
+    /// Protocol 34 (`CHL-FR-005`, ADR-0131): the change log no longer holds
+    /// what was asked — another epoch, or a sequence number older than it
+    /// retains. The standby resyncs from a snapshot. Below 34 a client
+    /// cannot decode it (`Unsupported` on the wire, rule 3), but only a
+    /// 34-or-above `FetchSince` can produce it.
+    Gone,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1209,6 +1216,18 @@ pub enum Request {
     /// a sentinel. Answered [`Response::NullableFields`]; a table with no
     /// nullable field answers an empty list. A read; `Malformed` below 32.
     DescribeNullable,
+    /// Protocol 34 (`CHL-FR-004`, ADR-0131): the committed writes after
+    /// sequence number `after` in the log's `epoch`, oldest first, at most
+    /// `limit` (and the server's own bound). Answered
+    /// [`Response::Changes`]. `TokenClass::Replication` only, like
+    /// [`Request::FetchSnapshot`]; `Unsupported` for a table with no change
+    /// log; `Gone` for another epoch or an `after` older than the log holds;
+    /// `Malformed` for an `after` past the head, or below 34.
+    FetchSince {
+        epoch: u64,
+        after: u64,
+        limit: u32,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
@@ -1369,6 +1388,26 @@ pub enum Response {
     NullableFields {
         tags: Vec<FieldRef>,
     },
+    /// Protocol 34 (`CHL-FR-004`, ADR-0131). Answers [`Request::FetchSince`]:
+    /// `entries` are the effective writes of consecutive commit units, the
+    /// first being sequence number `first` (`after + 1`); `head` is the
+    /// log's last sequence number now, so `head - (first + entries.len() -
+    /// 1)` is how far behind the standby still is. A standby applies each
+    /// entry as one atomic `WriteBatch`.
+    Changes {
+        epoch: u64,
+        first: u64,
+        head: u64,
+        entries: Vec<Vec<WriteOp>>,
+    },
+    /// Protocol 34 (`CHL-FR-005`, ADR-0131). [`Response::Snapshot`] plus the
+    /// change log's `epoch` and last sequence number `seq` at the instant of
+    /// the copy: a standby restored from `files` tails from `seq`.
+    SnapshotAt {
+        files: Vec<(String, Vec<u8>)>,
+        epoch: u64,
+        seq: u64,
+    },
 }
 
 #[cfg(test)]
@@ -1419,6 +1458,7 @@ mod tests {
             "Record(Null)" | "Rows(Null)" => 31,
             "DescribeNullable" | "NullableFields" => 32,
             "WriteBatch(UpdateField)" | "BatchResults(Updated)" => 33,
+            "FetchSince" | "Changes" | "SnapshotAt" | "Err(Gone)" => 34,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1798,6 +1838,22 @@ mod tests {
                 &[0x03, 0x00, 0x00, 0x00], // WriteOp::Delete
                 &ID2,                      // id 2
                 &[0x01],                   // atomic: true
+            ]),
+        );
+        // Protocol 34 (`CHL-FR-004`, ADR-0131): `FetchSince` at 39 — the log's
+        // epoch, the sequence number to continue after, and the entry limit.
+        assert_golden(
+            "FetchSince",
+            &Request::FetchSince {
+                epoch: 2,
+                after: 5,
+                limit: 10,
+            },
+            &bytes(&[
+                &[0x27, 0x00, 0x00, 0x00],                         // FetchSince
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // epoch 2
+                &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // after 5
+                &[0x0a, 0x00, 0x00, 0x00],                         // limit 10
             ]),
         );
         // Protocol 33 (`TXS-FR-001`, ADR-0130): `WriteOp::UpdateField` at 5 —
@@ -2448,6 +2504,48 @@ mod tests {
                 &LEN1,                                             // cap: 1
             ]),
         );
+        // Protocol 34 (`CHL-FR-004`, ADR-0131): `Changes` at 26 — epoch,
+        // the first entry's sequence number, the head, then the entries
+        // (each a length-prefixed `WriteOp` list).
+        assert_golden_eq(
+            "Changes",
+            &Response::Changes {
+                epoch: 2,
+                first: 6,
+                head: 9,
+                entries: vec![vec![WriteOp::Delete { id }]],
+            },
+            &bytes(&[
+                &[0x1a, 0x00, 0x00, 0x00],                         // Changes
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // epoch 2
+                &[0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // first 6
+                &[0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // head 9
+                &LEN1,                                             // one entry
+                &LEN1,                                             // one op
+                &[0x03, 0x00, 0x00, 0x00],                         // WriteOp::Delete
+                &ID1,
+            ]),
+        );
+        // Protocol 34 (`CHL-FR-005`, ADR-0131): `SnapshotAt` at 27 —
+        // `Snapshot`'s files, then the epoch and the sequence number.
+        assert_golden_eq(
+            "SnapshotAt",
+            &Response::SnapshotAt {
+                files: vec![("a".to_string(), vec![0xff])],
+                epoch: 2,
+                seq: 5,
+            },
+            &bytes(&[
+                &[0x1b, 0x00, 0x00, 0x00], // SnapshotAt
+                &LEN1,                     // files: one pair
+                &LEN1,                     // name len
+                b"a",
+                &LEN1, // bytes len
+                &[0xff],
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // epoch 2
+                &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // seq 5
+            ]),
+        );
         // Protocol 33 (`TXS-FR-001`, ADR-0130): `WriteResult::Updated` at 9.
         assert_golden_eq(
             "BatchResults(Updated)",
@@ -2524,6 +2622,8 @@ mod tests {
             (ErrorCode::TooLarge, 0x0e),
             // Protocol 30 (`WCB-FR-002`, ADR-0103): `Busy` at 15.
             (ErrorCode::Busy, 0x0f),
+            // Protocol 34 (`CHL-FR-005`, ADR-0131): `Gone` at 16.
+            (ErrorCode::Gone, 0x10),
         ] {
             assert_golden_eq(
                 &format!("Err({code:?})"),
@@ -2598,7 +2698,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+        assert_eq!(PROTOCOL_VERSION, 34);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

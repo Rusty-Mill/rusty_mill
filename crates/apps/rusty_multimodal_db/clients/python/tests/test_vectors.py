@@ -71,7 +71,7 @@ class WireVectors(unittest.TestCase):
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
-        self.assertEqual(p.PROTOCOL_VERSION, 33)
+        self.assertEqual(p.PROTOCOL_VERSION, 34)
         req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
         data = p.encode_request(req)
         self.assertEqual(p.decode_request(data), req)
@@ -107,6 +107,22 @@ class WireVectors(unittest.TestCase):
         self.assertEqual(data, bytes.fromhex("19000000" "0200000000000000" "0b00" "0c00"))
         self.assertEqual(p.decode_response(data), reply)
         self.assertEqual(p.REQUEST_INTRODUCED_AT[p.DescribeNullable], 32)
+
+    def test_fetch_since_is_request_39_and_changes_snapshot_at_are_26_27(self):
+        # RPL-FR-002, ADR-0131 (protocol 34).
+        req = p.FetchSince(2, 5, 10)
+        data = p.encode_request(req)
+        self.assertEqual(
+            data, bytes.fromhex("27000000" "0200000000000000" "0500000000000000" "0a000000")
+        )
+        self.assertEqual(p.decode_request(data), req)
+        self.assertEqual(p.REQUEST_INTRODUCED_AT[p.FetchSince], 34)
+        for reply in (
+            p.Changes(2, 6, 9, ()),
+            p.SnapshotAt((("a", b"\xff"),), 2, 5),
+        ):
+            self.assertEqual(p.decode_response(p.encode_response(reply)), reply)
+        self.assertEqual(p.ErrorCode.Gone, 16)
 
     def test_write_op_update_field_is_5_and_write_result_updated_is_9(self):
         # TXS-FR-001, ADR-0130 (protocol 33).

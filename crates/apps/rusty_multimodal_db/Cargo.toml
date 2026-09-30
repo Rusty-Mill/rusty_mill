@@ -258,6 +258,10 @@ name = "server_session_writes_integration"
 required-features = ["server"]
 
 [[test]]
+name = "server_change_log_integration"
+required-features = ["server"]
+
+[[test]]
 name = "memory_server_exposure"
 required-features = ["server"]
 

@@ -846,6 +846,27 @@ pub enum BatchOp<'a> {
     },
 }
 
+/// [`SchemaDrivenClient::fetch_snapshot_at`]'s answer (`CHL-FR-005`,
+/// ADR-0131): the table's files and, for a table with a change log, the
+/// log's `(epoch, seq)` at the instant they were copied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotAt {
+    pub files: Vec<(String, Vec<u8>)>,
+    pub position: Option<(u64, u64)>,
+}
+
+/// [`SchemaDrivenClient::fetch_since`]'s answer (`CHL-FR-004`, ADR-0131):
+/// `entries` are consecutive commit units, the first being sequence number
+/// `first`; `head` is the log's last sequence number now. A standby applies
+/// each entry as one atomic `WriteBatch`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangeBatch {
+    pub epoch: u64,
+    pub first: u64,
+    pub head: u64,
+    pub entries: Vec<Vec<WriteOp>>,
+}
+
 /// One [`QueryResult::Groups`] row: one group's `GROUP BY` key values and
 /// computed aggregate values, named and ordered exactly as the original
 /// `SELECT` list — not the wire's own `key`/`values` split, which the
@@ -2686,9 +2707,69 @@ impl SchemaDrivenClient {
             return Err(ClientError::Unsupported("fetch_snapshot"));
         }
         match self.roundtrip(Request::FetchSnapshot)? {
-            Response::Snapshot { files } => Ok(files),
+            Response::Snapshot { files } | Response::SnapshotAt { files, .. } => Ok(files),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Snapshot")),
+        }
+    }
+
+    /// [`Self::fetch_snapshot`] with the change log's position at the
+    /// instant of the copy (`CHL-FR-005`, ADR-0131, protocol 34): a standby
+    /// restored from `files` tails with [`Self::fetch_since`] from `seq` in
+    /// `epoch`. `position` is `None` for a table with no change log (or a
+    /// server below 34), which is a plain snapshot.
+    pub fn fetch_snapshot_at(&mut self) -> Result<SnapshotAt, ClientError> {
+        if self.server_protocol_version() < 25 {
+            return Err(ClientError::Unsupported("fetch_snapshot"));
+        }
+        match self.roundtrip(Request::FetchSnapshot)? {
+            Response::Snapshot { files } => Ok(SnapshotAt {
+                files,
+                position: None,
+            }),
+            Response::SnapshotAt { files, epoch, seq } => Ok(SnapshotAt {
+                files,
+                position: Some((epoch, seq)),
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Snapshot")),
+        }
+    }
+
+    /// The committed writes after sequence number `after` in the change log's
+    /// `epoch` (`CHL-FR-004`, ADR-0131, protocol 34), at most `limit`.
+    /// `Server(Unauthorized, _)` without the replication token;
+    /// `Server(Unsupported, _)` for a table with no change log;
+    /// `Server(Gone, _)` when the epoch is another or `after` is older than
+    /// the log holds — resync from [`Self::fetch_snapshot_at`].
+    /// [`ClientError::Unsupported`]`("fetch_since")` below 34, no frame sent.
+    pub fn fetch_since(
+        &mut self,
+        epoch: u64,
+        after: u64,
+        limit: u32,
+    ) -> Result<ChangeBatch, ClientError> {
+        if self.server_protocol_version() < 34 {
+            return Err(ClientError::Unsupported("fetch_since"));
+        }
+        match self.roundtrip(Request::FetchSince {
+            epoch,
+            after,
+            limit,
+        })? {
+            Response::Changes {
+                epoch,
+                first,
+                head,
+                entries,
+            } => Ok(ChangeBatch {
+                epoch,
+                first,
+                head,
+                entries,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Changes")),
         }
     }
 
