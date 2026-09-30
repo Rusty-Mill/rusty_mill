@@ -19,7 +19,7 @@
 
 ## Purpose and scope
 
-`Symmetric<S, R, Marker>` (`src/generic/store.rs`) is the one relation
+`Symmetric<S, R, Marker>` (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs`) is the one relation
 layer in `crate::generic` whose state is not derivable from records:
 `Symmetric::new(inner, edges: &[(R::Id, R::Id)])` takes an external edge
 list, builds an adjacency map from it, and holds it in memory only.
@@ -162,7 +162,7 @@ tag mismatch` on the read-only paths and a rewrite on `open`.
 
 ## Architecture and interfaces
 
-- `src/generic/edge_blob.rs` (new, `pub(crate)`, unconditional): `MAGIC
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/edge_blob.rs` (new, `pub(crate)`, unconditional): `MAGIC
   = GENEDGE\0`, `BLOB_VERSION = 2` (was `1` in v0.1.0), `EDGES_SUFFIX =
   ".edges"`; `EdgeBlob<'a, Id: Serialize>` borrowing `&'a [(Id, Id)]`
   and, since v0.2.0, the tag (`new(edges, tag: &'static str)` — the tag
@@ -181,9 +181,9 @@ tag mismatch` on the read-only paths and a rewrite on `open`.
   machinery (`encode_image`, `parse_header`, `EncodedRecordBlob::write`,
   `Fnv1a64`, `HEADER_LEN`) gains a third call site. The
   `RecordBlobUnreadable` doc comment in `src/durability/mod.rs` gains one
-  sentence naming the edge blob. `src/generic/record_blob.rs`'s tagged
+  sentence naming the edge blob. `crates/libs/storage/rusty_multimodal_db_engine/src/generic/record_blob.rs`'s tagged
   helpers (`STORAGE-015` v0.2.0) are the second call site of those.
-- `src/generic/store.rs`: one added `impl` block (`create`, `open`,
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs`: one added `impl` block (`create`, `open`,
   `read_portable_edges`, `open_portable`) with its `use` lines, plus a
   new `#[cfg(test)] mod tests` — the file had none — with 6 tests over an
   in-memory `BaseStore` inner (the blob is independent of `S`); v0.2.0
@@ -279,7 +279,7 @@ tag mismatch` on the read-only paths and a rewrite on `open`.
   changed; `create` over an existing blob always rewrites.
 - A `GENBLOB\0` or `DOGBLOB\0` file at `edges_path` is a magic error, not
   a decode attempt.
-- `git diff src/generic/store.rs` adds one `impl` block (with its
+- `git diff crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs` adds one `impl` block (with its
   imports and a private `PortableEdges<R>` return-type alias) and a new
   test module, and removes nothing;
   `tests/mmap_record_identity_keying.rs`, `record_blob.rs`'s 9 generic
@@ -365,11 +365,11 @@ rather than swallowing it.
   FR-001/-004/-005/-006, "Architecture", "Data/state and invariants",
   "Errors", "Security, privacy, and compatibility", "Acceptance
   criteria", "Verification plan", "Traceability" updated; the first
-  open question resolved. Code: `src/generic/edge_blob.rs`,
-  `src/generic/store.rs`; 5 new tests in this spec's scope.
+  open question resolved. Code: `crates/libs/storage/rusty_multimodal_db_engine/src/generic/edge_blob.rs`,
+  `crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs`; 5 new tests in this spec's scope.
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
-  implementation (`src/generic/edge_blob.rs`, one `impl` block in
-  `src/generic/store.rs`, the `Employee` helpers in
+  implementation (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/edge_blob.rs`, one `impl` block in
+  `crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs`, the `Employee` helpers in
   `src/generic_spike/employee_impl.rs`) and 23 new tests. Registers the
   design ADR-0018 accepted on 2026-09-02 as requirements; records the one
   deliberate deviation from the design sketch under "Traceability".

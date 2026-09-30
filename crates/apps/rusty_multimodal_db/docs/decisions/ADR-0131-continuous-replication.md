@@ -1,4 +1,4 @@
-# ADR-0131: Continuous Replication by Shipping a Change Log (Proposal)
+# ADR-0131: Continuous Replication by Shipping a Change Log
 
 - Status: **Accepted — phase 1 built (protocol 34), on the owner's "go with recommendations": option 1, its own log file, compaction not logged. Phase 2 (`replica_refresh --follow`) and phase 3 (documented manual promotion) are built too.**
 - Date: 2026-09-30

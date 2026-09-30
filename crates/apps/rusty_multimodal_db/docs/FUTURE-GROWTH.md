@@ -16,8 +16,8 @@ Every current boundary in this project is a deliberate scope line from a specifi
 
 An app built on the engine (`crates/apps/rusty_tick`, a self-hosted task manager) named six gaps; each ended as engine code, an app-side recipe, or a documented boundary:
 
-* **Full-text forms.** `fulltext::Query` gained `any_of_prefix`, `all_of`, `except`, `in_columns` and `except_columns`, differentially tested against bundled SQLite FTS5 (`tests/fulltext_vs_fts5.rs`). One pinned exception: `(a AND b) NOT c` matches like FTS5 but scores differently (an FTS5 quirk), so only its matches are compared. `rusty_tick` search is type-ahead on `any_of_prefix`.
-* **One store per user** (`tests/store_lifecycle.rs`): open, close and idle memory are linear in the records, so a bounded least-recently-used pool of open stores is cheap and stays app-side (`rusty_tick::pool`). The store does not lock itself; take the `DirLock` first.
+* **Full-text forms.** `fulltext::Query` gained `any_of_prefix`, `all_of`, `except`, `in_columns` and `except_columns`, differentially tested against bundled SQLite FTS5 (`crates/libs/storage/rusty_multimodal_db_engine/tests/fulltext_vs_fts5.rs`). One pinned exception: `(a AND b) NOT c` matches like FTS5 but scores differently (an FTS5 quirk), so only its matches are compared. `rusty_tick` search is type-ahead on `any_of_prefix`.
+* **One store per user** (`crates/libs/storage/rusty_multimodal_db_engine/tests/store_lifecycle.rs`): open, close and idle memory are linear in the records, so a bounded least-recently-used pool of open stores is cheap and stays app-side (`rusty_tick::pool`). The store does not lock itself; take the `DirLock` first.
 * **Change feed** stays app-side (`ADR-0125`): a `seq` from `Journal::allocate`, an `Ordered` layer on it, tombstone replaces. Not an engine feature.
 * **Inner orders** of stacked `Ordered` layers are reached through `.inner()`; forwarding `RangeBy` through the stack is impossible (`E0119`, coherence), so it is documented rather than built.
 
