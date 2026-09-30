@@ -24,9 +24,10 @@
 //! `Receiver` half is passed in, and sending `true` stops the accept loop
 //! from taking any *new* connection while every connection already
 //! in-flight keeps running until it finishes on its own (the peer
-//! disconnects, or a real I/O error) — `serve` itself returns only once
-//! the last one has. Nothing is aborted just because shutdown was
-//! requested.
+//! disconnects, or a real I/O error) — `serve` itself returns once the
+//! last one has, or once [`DEFAULT_DRAIN_TIMEOUT`] passes (design review
+//! 3.7, N03): an idle peer that never disconnects used to hold the drain
+//! open forever. Connections still open at the deadline are aborted.
 
 use std::sync::Arc;
 
@@ -62,7 +63,21 @@ pub struct AppState {
 pub async fn serve(
     listener: TcpListener,
     state: AppState,
+    shutdown: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    serve_with_drain_timeout(listener, state, shutdown, DEFAULT_DRAIN_TIMEOUT).await
+}
+
+/// How long a graceful shutdown waits for in-flight connections before
+/// aborting the rest.
+pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// [`serve`] with an explicit graceful-drain deadline.
+pub async fn serve_with_drain_timeout(
+    listener: TcpListener,
+    state: AppState,
     mut shutdown: watch::Receiver<bool>,
+    drain_timeout: std::time::Duration,
 ) -> std::io::Result<()> {
     let mut connections: JoinSet<std::io::Result<()>> = JoinSet::new();
 
@@ -81,6 +96,10 @@ pub async fn serve(
         };
         match result {
             Ok((stream, _addr)) => {
+                // Drop connections that already finished (design review
+                // 3.7, N03): the set used to keep every task ever spawned
+                // until shutdown.
+                while connections.try_join_next().is_some() {}
                 let state = state.clone();
                 connections.spawn(async move { handle_connection(stream, state).await });
             }
@@ -88,7 +107,13 @@ pub async fn serve(
         }
     }
 
-    while connections.join_next().await.is_some() {}
+    let drain = async { while connections.join_next().await.is_some() {} };
+    if rusty_tokio::time::timeout(drain_timeout, drain)
+        .await
+        .is_err()
+    {
+        connections.shutdown().await;
+    }
     Ok(())
 }
 
@@ -557,5 +582,27 @@ mod tests {
         drop(client);
         let result = server.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    /// Design review 3.7 (N03): a graceful shutdown used to wait forever on
+    /// a peer that stays connected and idle; it is bounded now.
+    #[rusty_tokio::test]
+    async fn shutdown_drain_is_bounded_by_its_deadline() {
+        let state = test_state().await;
+        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = rusty_tokio::spawn(serve_with_drain_timeout(
+            listener,
+            state,
+            shutdown_rx,
+            std::time::Duration::from_millis(200),
+        ));
+        let idle = TcpStream::connect(addr).await.unwrap();
+        let _ = send_request(&idle, &Request::Fetch { offset: Offset(0) }).await;
+        shutdown_tx.send(true).unwrap();
+        let finished = rusty_tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        assert!(finished.is_ok(), "serve must return despite the idle peer");
+        drop(idle);
     }
 }
