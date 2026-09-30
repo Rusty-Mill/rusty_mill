@@ -4,10 +4,10 @@ import { DEFAULT_PREFS, PREFS_ID, resolveTheme, sanitize, usePrefs } from './pre
 
 describe('sanitize', () => {
   it('keeps good values and defaults the rest', () => {
-    expect(sanitize({ weekStart: 0, hour12: true, theme: 'dark', defaultReminder: 'TRIGGER:-PT1H' })).toEqual({
-      weekStart: 0, hour12: true, theme: 'dark', defaultReminder: 'TRIGGER:-PT1H',
+    expect(sanitize({ weekStart: 0, hour12: true, theme: 'dark', defaultReminder: 'TRIGGER:-PT1H', notifications: true })).toEqual({
+      weekStart: 0, hour12: true, theme: 'dark', defaultReminder: 'TRIGGER:-PT1H', notifications: true,
     })
-    expect(sanitize({ weekStart: 3, hour12: 'yes', theme: 'neon', defaultReminder: 5 })).toEqual(DEFAULT_PREFS)
+    expect(sanitize({ weekStart: 3, hour12: 'yes', theme: 'neon', defaultReminder: 5, notifications: 'yes' })).toEqual(DEFAULT_PREFS)
     expect(sanitize(null)).toEqual(DEFAULT_PREFS)
     expect(sanitize('junk')).toEqual(DEFAULT_PREFS)
   })

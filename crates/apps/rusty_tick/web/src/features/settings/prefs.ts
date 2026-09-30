@@ -15,9 +15,11 @@ export interface Prefs {
   theme: Theme
   /** Reminder given to a task when it gets a time (`TRIGGER:PT0S` is "at the due time"). */
   defaultReminder: string
+  /** Show a browser notification when a reminder comes due (the browser must also allow it). */
+  notifications: boolean
 }
 
-export const DEFAULT_PREFS: Prefs = { weekStart: 1, hour12: false, theme: 'light', defaultReminder: 'TRIGGER:PT0S' }
+export const DEFAULT_PREFS: Prefs = { weekStart: 1, hour12: false, theme: 'light', defaultReminder: 'TRIGGER:PT0S', notifications: false }
 
 /** The single prefs document's id. */
 export const PREFS_ID = '00000000-0000-7000-8000-0000000000aa'
@@ -41,6 +43,7 @@ export function sanitize(input: unknown): Prefs {
     hour12: typeof o.hour12 === 'boolean' ? o.hour12 : DEFAULT_PREFS.hour12,
     theme: o.theme === 'light' || o.theme === 'dark' || o.theme === 'system' ? o.theme : DEFAULT_PREFS.theme,
     defaultReminder: typeof o.defaultReminder === 'string' && o.defaultReminder.length <= 64 ? o.defaultReminder : DEFAULT_PREFS.defaultReminder,
+    notifications: typeof o.notifications === 'boolean' ? o.notifications : DEFAULT_PREFS.notifications,
   }
 }
 
