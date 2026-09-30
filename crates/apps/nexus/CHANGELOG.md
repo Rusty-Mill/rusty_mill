@@ -9,6 +9,18 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **Memory hub last-write-wins compares time, not text** (`nexus-memory-hub`,
+  design review 2.8 / N3).
+  - A pushed `updated_at` is parsed as RFC 3339 and stored as a canonical
+    ordering key (UTC, nanoseconds, `Z`), so offsets and precision no longer
+    decide which write is newer. The payload keeps the node's own string.
+  - A non-RFC 3339 value (e.g. `"zzzz"`, which used to outrank every real
+    timestamp and freeze the record) is refused. The push reply now lists
+    each refused record's id and reason (`rejected`).
+  - Pull cursors are compared as time too, and a malformed one is `400`.
+  - On first open, an existing hub's keys are canonicalized, and rows whose
+    `updated_at` never parsed move to `records_rejected` (payload kept).
+    This is gated by `PRAGMA user_version`, so it runs once.
 - **Memory sync no longer loses records it cannot decode** (`nexus-memory`,
   design review 2.7 / N2).
   - The pull loop used to advance its cursor past a whole page but drop
