@@ -38,7 +38,7 @@ export function MonthView({ range, anchor, events, ctx }: Props) {
     <div role="grid" aria-label="Month" className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <div role="row" className="sticky top-0 z-20 grid shrink-0 grid-cols-7 border-b border-line bg-surface">
         {range.days.slice(0, 7).map((d) => (
-          <div key={d} role="columnheader" className="px-2 py-1.5 text-right text-s font-semibold text-grey">
+          <div key={d} role="columnheader" className="px-2 py-1.5 text-center text-s font-semibold text-grey">
             {weekdayShort(new Date(d).getDay())}
           </div>
         ))}
@@ -96,7 +96,7 @@ export function MonthView({ range, anchor, events, ctx }: Props) {
                   <span
                     aria-hidden
                     className={`m-1 flex h-6 min-w-6 items-center justify-center rounded-full px-1 text-s ${isToday ? 'bg-primary font-semibold text-white' : outside ? 'text-grey' : 'text-text'} ${d.getDate() === 1 && !isToday ? 'font-semibold' : ''}`}
-                    style={{ width: 'fit-content', marginLeft: 'auto' }}
+                    style={{ width: 'fit-content' }}
                   >
                     {d.getDate() === 1 ? `${new Date(day).toLocaleString('en-US', { month: 'short' })} 1` : d.getDate()}
                   </span>
