@@ -14,33 +14,54 @@ fn canonical(name: &str) -> CanonicalMatch {
     build_canonical(&BoxcarsParser::new().parse(&data).expect("decode"), name)
 }
 
-#[test]
-fn recovery_speed_is_the_mean_recovery_duration() {
+fn is_recovery(e: &&Episode) -> bool {
+    matches!(e, Episode::Recovery { .. })
+}
+fn is_challenge(e: &&Episode) -> bool {
+    matches!(e, Episode::Challenge { .. })
+}
+
+/// For each player on both sample replays: `reduce(that player's episodes of one
+/// kind)` must equal the report's raw `key`, bit for bit.
+fn assert_reducer(key: &str, kind: fn(&&Episode) -> bool, reduce: fn(&[&Episode]) -> Option<f32>) {
     let cfg = ScoreConfig::default();
     for name in ["42f2", "419a"] {
         let m = canonical(name);
         let eps = extract(&m, &cfg);
-        assert!(!eps.is_empty(), "{name}: no recoveries");
+        assert!(eps.iter().any(|e| kind(&e)), "{name}: no {key} episodes");
         for t in &m.tracks {
-            let durs: Vec<f32> = eps
+            let mine: Vec<&Episode> = eps
                 .iter()
+                .filter(kind)
                 .filter(|e| e.pri() == t.pri)
-                .map(Episode::dur)
                 .collect();
-            let want = (!durs.is_empty()).then(|| durs.iter().sum::<f32>() / durs.len() as f32);
             let got = score(&m, t.pri, &cfg)
                 .metrics
                 .iter()
-                .find(|b| b.key == "recovery_speed")
+                .find(|b| b.key == key)
                 .and_then(|b| b.raw);
             assert_eq!(
-                want.map(f32::to_bits),
+                reduce(&mine).map(f32::to_bits),
                 got.map(f32::to_bits),
-                "{name} pri {}",
+                "{name} {key} pri {}",
                 t.pri
             );
         }
     }
+}
+
+#[test]
+fn recovery_speed_is_the_mean_recovery_duration() {
+    assert_reducer("recovery_speed", is_recovery, |es| {
+        (!es.is_empty()).then(|| es.iter().map(|e| e.dur()).sum::<f32>() / es.len() as f32)
+    });
+}
+
+#[test]
+fn challenge_timing_is_the_share_of_clean_challenges() {
+    assert_reducer("challenge_timing", is_challenge, |es| {
+        (!es.is_empty()).then(|| es.iter().filter(|e| e.is_ok()).count() as f32 / es.len() as f32)
+    });
 }
 
 #[test]
@@ -49,9 +70,10 @@ fn extract_is_time_ordered_and_deterministic() {
     let eps = extract(&m, &cfg);
     assert!(eps.windows(2).all(|w| w[0].t() <= w[1].t()));
     assert_eq!(eps, extract(&m, &cfg));
+    let n = |k: fn(&&Episode) -> bool| eps.iter().filter(k).count();
     assert_eq!(
-        eps.len(),
-        100,
-        "419a recovery count — a change means the definition moved"
+        (n(is_recovery), n(is_challenge)),
+        (100, 186), // recorded from the first run
+        "419a episode counts — a change means a definition moved"
     );
 }

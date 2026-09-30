@@ -36,6 +36,12 @@ pub use episodes::{extract, Episode};
 pub use relative::{attach_relative, BucketNorm, RankNorms, RelativeReport};
 pub use report::{Confidence, MetricBreakdown, Report};
 
+/// The teams present, sorted.
+pub(crate) fn teams(m: &CanonicalMatch) -> Vec<i32> {
+    let set: BTreeSet<i32> = m.tracks.iter().filter_map(|t| t.team).collect();
+    set.into_iter().collect()
+}
+
 /// Score one target player (by stable PRI) against `cfg`.
 pub fn score(m: &CanonicalMatch, target_pri: i32, cfg: &ScoreConfig) -> Report {
     let target = m.tracks.iter().find(|t| t.pri == target_pri);
@@ -45,16 +51,8 @@ pub fn score(m: &CanonicalMatch, target_pri: i32, cfg: &ScoreConfig) -> Report {
     let target_team = target.and_then(|t| t.team);
     let team = target_team.unwrap_or(0);
 
-    let teams: Vec<i32> = m
-        .tracks
-        .iter()
-        .filter_map(|t| t.team)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
     let frames = features::build_frames(m, cfg);
-    let roles = roles::assign(&frames, &teams, cfg);
+    let roles = roles::assign(&frames, &teams(m), cfg);
     let raws = metrics::compute(&frames, &roles, &m.events, target_pri, team, cfg);
 
     let valid_frames = frames

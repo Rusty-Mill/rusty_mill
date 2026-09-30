@@ -11,19 +11,12 @@ use replay_analyzer::field::{BACK_WALL_Y, SUPERSONIC_SPEED};
 use replay_analyzer::model::{Event, Vec3};
 
 use crate::config::{Metric, ScoreConfig};
-use crate::episodes::recoveries;
-use crate::features::{sub, CarView, FrameView, Third};
+use crate::episodes::{challenges, recoveries};
+use crate::features::{dist, FrameView, Third};
 use crate::roles::{ManRole, Roles};
 
 fn speed(v: Vec3) -> f32 {
     (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
-}
-fn dist(a: Vec3, b: Vec3) -> f32 {
-    speed(Vec3 {
-        x: a.x - b.x,
-        y: a.y - b.y,
-        z: a.z - b.z,
-    })
 }
 fn ratio(num: usize, den: usize) -> Option<f32> {
     (den > 0).then(|| num as f32 / den as f32)
@@ -374,36 +367,6 @@ fn frame_at_time(frames: &[FrameView], t: f32) -> Option<usize> {
     }
 }
 
-/// A detected 50/50 at frame `i`: the target (1st man, valid) and the opponent's
-/// 1st man are both inside `challenge_radius_uu` of the ball. Returns the target
-/// car, the opponent's 1st man, and the target→ball vector.
-fn contest_at<'a>(
-    f: &'a FrameView,
-    roles: &Roles,
-    i: usize,
-    pri: i32,
-    team: i32,
-    cfg: &ScoreConfig,
-) -> Option<(&'a CarView, &'a CarView, Vec3)> {
-    if roles.role_of(i, team, pri, f) != Some(ManRole::First) {
-        return None;
-    }
-    let c = f.car(pri)?;
-    if !c.valid_pos {
-        return None;
-    }
-    let ball = f.ball?;
-    let opp_team = f.cars.iter().find(|o| o.team != team).map(|o| o.team)?;
-    let opp = f.car(roles.first(i, opp_team)?)?;
-    if dist(ball.p, c.p) <= cfg.challenge_radius_uu
-        && dist(ball.p, opp.p) <= cfg.challenge_radius_uu
-    {
-        Some((c, opp, sub(ball.p, c.p)))
-    } else {
-        None
-    }
-}
-
 /// Quality of arrival on detected 50/50s: fraction of contests the target (as
 /// 1st man) reaches with boost, facing the ball, and not late versus the
 /// opponent's 1st man. A decision-discipline (coaching) signal: it is weak for
@@ -417,32 +380,9 @@ fn challenge_timing(
     team: i32,
     cfg: &ScoreConfig,
 ) -> Option<f32> {
-    let (mut num, mut den) = (0usize, 0usize);
-    let mut in_contest = false;
-    for (i, f) in frames.iter().enumerate() {
-        match contest_at(f, roles, i, pri, team, cfg) {
-            Some((c, opp, to_ball)) => {
-                if !in_contest {
-                    den += 1;
-                    let boost_ok = c
-                        .boost
-                        .map(|b| b as f32 / 2.55 >= cfg.challenge_boost_min)
-                        .unwrap_or(false);
-                    let face_ok = c
-                        .forward_align(to_ball)
-                        .map(|a| a >= cfg.facing_cos_min)
-                        .unwrap_or(false);
-                    let timing_ok = c.time_to_ball <= opp.time_to_ball * cfg.challenge_late_margin;
-                    if boost_ok && face_ok && timing_ok {
-                        num += 1;
-                    }
-                }
-                in_contest = true;
-            }
-            None => in_contest = false,
-        }
-    }
-    ratio(num, den)
+    let eps = challenges(frames, roles, pri, team, cfg);
+    let ok = eps.iter().filter(|e| e.is_ok()).count();
+    ratio(ok, eps.len())
 }
 
 /// Mean post-touch ball progression over the target's 1st-man touches: `+`

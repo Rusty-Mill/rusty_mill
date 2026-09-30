@@ -570,13 +570,18 @@ function seekViewer(t, tries = 50) {
   const w = $("viewerFrame").contentWindow;
   if (w.seek) w.seek(t); else if (tries) setTimeout(() => seekViewer(t, tries - 1), 100);
 }
+const MISS = [[1, "low boost"], [2, "not facing the ball"], [4, "late"]];
+const momentCols = (e, who) => e.kind === "challenge"
+  ? ["50/50 vs " + esc(who[e.opp]?.target_player ?? "?"),
+     e.miss ? "✗ " + MISS.filter(([b]) => e.miss & b).map(m => m[1]).join(", ") : "✓ clean arrival"]
+  : ["Recovery", e.done ? "✓ recovered" : "✗ not within the cap"];
 function renderMoments(d) {
   const who = Object.fromEntries((d.scores || []).map(r => [r.target_pri, r]));
   const draw = pri => {
     const rows = (d.episodes || []).filter(e => who[e.pri] && (pri === "" || String(e.pri) === pri))
-      .map(e => `<tr class="mrow" data-t="${e.t0}"><td class="num">${mmss(e.t0)}</td>
-        <td>${nameCell(who[e.pri].target_team, who[e.pri].target_player)}</td><td>Recovery</td>
-        <td class="num">${fmt(e.dur, 2)} s</td><td>${e.done ? "✓ recovered" : "✗ not within the cap"}</td></tr>`).join("");
+      .map(e => { const [what, res] = momentCols(e, who); return `<tr class="mrow" data-t="${e.t0}"><td class="num">${mmss(e.t0)}</td>
+        <td>${nameCell(who[e.pri].target_team, who[e.pri].target_player)}</td><td>${what}</td>
+        <td class="num">${fmt(e.dur, 2)} s</td><td>${res}</td></tr>`; }).join("");
     $("momentsBody").innerHTML = cardTable("Click a moment to jump to it in the 3D viewer.",
       `<th class="num">Time</th><th>Player</th><th>Moment</th><th class="num">Duration</th><th>Result</th>`,
       rows, "No moments.", 5);

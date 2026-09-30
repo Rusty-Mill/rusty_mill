@@ -97,6 +97,10 @@ pub(crate) fn sub(a: Vec3, b: Vec3) -> Vec3 {
         z: a.z - b.z,
     }
 }
+pub(crate) fn dist(a: Vec3, b: Vec3) -> f32 {
+    let d = sub(a, b);
+    dot(d, d).sqrt()
+}
 fn dot(a: Vec3, b: Vec3) -> f32 {
     a.x * b.x + a.y * b.y + a.z * b.z
 }

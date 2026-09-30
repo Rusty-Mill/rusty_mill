@@ -1,6 +1,6 @@
 # Episodes — design proposal (assessment rec. #6)
 
-Status: **proposal, no code yet.** Source: `docs/competitor/spire/ASSESSMENT.md` §5 #6.
+Status: **PR A (Recovery) and PR B (Challenge) shipped; C, D pending.** Source: `docs/competitor/spire/ASSESSMENT.md` §5 #6.
 
 ## Problem
 We score recovery, possession loss and challenge only as **per-player aggregates**
