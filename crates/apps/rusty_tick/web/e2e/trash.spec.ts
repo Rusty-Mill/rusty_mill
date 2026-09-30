@@ -17,7 +17,7 @@ test('move a task to the trash and restore it', async ({ page }) => {
   const list = page.getByRole('list', { name: 'Tasks' })
   await list.getByText(t).click()
   await page.getByRole('complementary', { name: 'Task details' }).getByRole('button', { name: 'More' }).click()
-  await page.getByRole('menuitem', { name: 'Move to Trash' }).click()
+  await page.getByRole('menuitem', { name: 'Delete' }).click()
   await expect(list.getByText(t)).toHaveCount(0)
 
   await page.goto('/#/q/all/trash')
