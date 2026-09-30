@@ -107,6 +107,31 @@ impl Allowlist {
             Err(AgentError::PathNotAllowed(path.display().to_string()))
         }
     }
+
+    /// [`Self::check_config_path`], then the same question asked of the
+    /// filesystem object the path names (design review 3.2): the path must
+    /// not itself be a symlink, and its parent, resolved through any
+    /// symlinks, must still lie under a (resolved) allowed prefix. The
+    /// lexical check alone let a symlink inside an allowed prefix reach
+    /// any file on the box.
+    pub fn resolve_config_path(&self, path: &Path) -> Result<PathBuf, AgentError> {
+        let path = self.check_config_path(path)?;
+        let refuse = || AgentError::PathNotAllowed(path.display().to_string());
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(refuse());
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(refuse());
+        };
+        let resolved = parent.canonicalize()?.join(name);
+        let inside = self
+            .config
+            .config_path_prefixes
+            .iter()
+            .filter_map(|prefix| prefix.canonicalize().ok())
+            .any(|prefix| resolved.starts_with(prefix));
+        if inside { Ok(resolved) } else { Err(refuse()) }
+    }
 }
 
 #[cfg(test)]

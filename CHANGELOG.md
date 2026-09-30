@@ -31,6 +31,10 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **Design review Tranche 3 (#419), receive and config confinement (3.2):**
+  - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
+  - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
+  - Neither can write through a symlink out of its allowed folder.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
