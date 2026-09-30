@@ -937,6 +937,11 @@ impl ConnectionStore for EntityConnectionStore {
             .collect()
     }
 
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.all_ids::<Entity>().len())
+    }
+
     /// `PAG-FR-002` (ADR-0055): the sort key of every record read
     /// straight off [`Entity`], so a page materializes only its own rows.
     /// A field this arm list does not name falls back to the wire shape

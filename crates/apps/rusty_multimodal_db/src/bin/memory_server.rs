@@ -75,6 +75,10 @@
 //! ADR-0102), and refuses a `Query` or page whose `limit` is above `n`
 //! with `TooLarge` before any read. A value that is not a non-negative
 //! integer is a startup error.
+//! `SERVER_MAX_SCAN_ROWS=<n>` (ADR-0126, unset by default) refuses with
+//! `TooLarge` an `Aggregate` or `Join` whose candidate step would full-scan
+//! a table of more than `n` records; an indexed or walked plan is never
+//! refused.
 //!
 //! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
 //!
@@ -651,6 +655,13 @@ fn main() {
     };
     let options = match bounded_env("SERVER_MAX_QUERY_ROWS", Some(DEFAULT_MAX_QUERY_ROWS)) {
         Some(max) => options.with_max_query_rows(usize::try_from(max).unwrap_or(usize::MAX)),
+        None => options,
+    };
+    // `SERVER_MAX_SCAN_ROWS` (ADR-0126, `SCB-FR-005`): opt-in, no default
+    // — turning it on changes what a running deployment's `Aggregate` and
+    // `Join` answer, which is the owner's call, as it was for ADR-0093.
+    let options = match bounded_env("SERVER_MAX_SCAN_ROWS", None) {
+        Some(max) => options.with_max_scan_rows(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
     };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):

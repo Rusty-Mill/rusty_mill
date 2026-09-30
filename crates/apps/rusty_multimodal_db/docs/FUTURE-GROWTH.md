@@ -208,8 +208,10 @@ not a guess.
   at most sixteen short-lived refusal threads. *Declined
   (2026-09-23):* a retry-after hint in `Busy` — the server has no
   honest estimate of when a slot frees, and a constant is one the
-  client can hold itself. Still absent: a scan budget for
-  `Aggregate`/`Join`, graceful drain, and any per-peer cap.
+  client can hold itself. *Since `ADR-0126`:* an opt-in scan budget
+  (`SERVER_MAX_SCAN_ROWS`) refuses a full-scan `Aggregate`/`Join` over a table
+  of more records than it, `TooLarge` before any read. Still absent:
+  graceful drain, and any per-peer cap.
 * **Schema migration tooling.** *Partly built since this was written:*
   a documented three-step pattern — a caller-defined old-layout struct
   implementing `SchemaTag` under the old tag; the existing

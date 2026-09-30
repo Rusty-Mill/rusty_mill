@@ -970,6 +970,11 @@ impl ConnectionStore for RelationConnectionStore {
             .collect()
     }
 
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.all_ids::<Relation>().len())
+    }
+
     /// `ORD-FR-005` (ADR-0059): a page ordered by `updated_at_unix_ms`
     /// is a range walk of the stack's sorted index; any other orderable
     /// field takes the scan path. A cursor here is `I64` or absent

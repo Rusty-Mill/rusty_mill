@@ -677,6 +677,14 @@ pub trait ConnectionStore: Send + Sync {
     /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`.
     fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>;
 
+    /// `SCB-FR-002` (ADR-0126): how many records a [`Self::scan_all`]
+    /// would read, from the id list alone — no record is decoded. `None`
+    /// is "unknown", which never trips a scan budget. Every shipped
+    /// adapter answers `Some`.
+    fn record_count(&self) -> Option<usize> {
+        None
+    }
+
     fn apply_transaction(
         &self,
         updates: &[TransactionOp],
@@ -2519,6 +2527,22 @@ pub fn request_exceeds_row_cap(req: &Request, cap: usize) -> bool {
     }
 }
 
+/// `SCB-FR-003` (ADR-0126): whether `req` is an `Aggregate` or `Join`
+/// that would full-scan a table holding more than `budget` records. Pure
+/// over the request and the store's declarations: [`plan_of`] says whether
+/// the candidate step is a full scan, [`ConnectionStore::record_count`]
+/// how big the table is. Every other request, every indexed or walked
+/// plan, and an adapter that cannot count are never over the budget.
+pub fn request_exceeds_scan_budget<S: ConnectionStore + ?Sized>(
+    store: &S,
+    req: &Request,
+    budget: usize,
+) -> bool {
+    matches!(req, Request::Aggregate { .. } | Request::Join(_))
+        && plan_of(store, req) == Some(PlanKind::FullScan)
+        && store.record_count().is_some_and(|n| n > budget)
+}
+
 /// `CLP-FR-001` (ADR-0102): under a row cap, a `Query` that names no
 /// `limit` asks for every matching row — the one shape the cap exists
 /// to bound — so it is answered as if it had asked for `cap`: the first
@@ -2782,6 +2806,9 @@ pub struct ServeOptions {
     /// `LIM-FR-003` (ADR-0093): the most rows one `Query`/page may ask
     /// for; `None` is unbounded and a `Query` may omit its `limit`.
     max_query_rows: Option<usize>,
+    /// `SCB-FR-001` (ADR-0126): the most records one full-scan
+    /// `Aggregate`/`Join` may read; `None` is unbounded.
+    max_scan_rows: Option<usize>,
     /// `BTL-FR-002` (ADR-0104): refusal threads alive right now — a
     /// refused connection's `Busy` frame is written from a thread that
     /// lives at most a few `BUSY_REFUSAL_TIMEOUT`s; at most
@@ -2848,6 +2875,7 @@ impl std::fmt::Debug for ServeOptions {
             .field("idle_timeout", &self.idle_timeout)
             .field("max_connections", &self.max_connections)
             .field("max_query_rows", &self.max_query_rows)
+            .field("max_scan_rows", &self.max_scan_rows)
             .finish()
     }
 }
@@ -2878,6 +2906,7 @@ impl ServeOptions {
             max_connections: None,
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
+            max_scan_rows: None,
             busy_refusals: AtomicUsize::new(0),
         }
     }
@@ -2929,6 +2958,21 @@ impl ServeOptions {
     /// The configured row cap, or `None`.
     pub fn max_query_rows(&self) -> Option<usize> {
         self.max_query_rows
+    }
+
+    /// `SCB-FR-001` (ADR-0126): refuse `TooLarge` (`Malformed` below
+    /// protocol 25), before any read, an `Aggregate` or `Join` whose
+    /// candidate step is a full scan of a table holding more than `max`
+    /// records. An indexed or walked plan reads less than the table and is
+    /// never refused. `0` means unset, as `with_max_query_rows` does.
+    pub fn with_max_scan_rows(mut self, max: usize) -> Self {
+        self.max_scan_rows = (max > 0).then_some(max);
+        self
+    }
+
+    /// The configured scan budget, or `None`.
+    pub fn max_scan_rows(&self) -> Option<usize> {
+        self.max_scan_rows
     }
 
     /// `LIM-FR-002`: claim one in-flight slot at accept — `true` and the
@@ -3026,6 +3070,7 @@ impl ServeOptions {
             max_connections: None,
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
+            max_scan_rows: None,
             busy_refusals: AtomicUsize::new(0),
         }
     }
@@ -4792,6 +4837,20 @@ fn handle_connection(
                 if options
                     .max_query_rows()
                     .is_some_and(|cap| request_exceeds_row_cap(capped, cap)) =>
+            {
+                err_response(if negotiated >= 25 {
+                    ErrorCode::TooLarge
+                } else {
+                    ErrorCode::Malformed
+                })
+            }
+            // `SCB-FR-004` (ADR-0126): under an opt-in scan budget, a full
+            // scan of a table over it is refused before any read, with the
+            // row cap's own error and downgrade.
+            ref scanning
+                if options
+                    .max_scan_rows()
+                    .is_some_and(|budget| request_exceeds_scan_budget(store, scanning, budget)) =>
             {
                 err_response(if negotiated >= 25 {
                     ErrorCode::TooLarge
@@ -9739,6 +9798,9 @@ mod tests {
                 })
                 .collect()
         }
+        fn record_count(&self) -> Option<usize> {
+            Some(3)
+        }
         fn filter_eq(&self, _f: FieldRef, _v: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
             Err(ErrorCode::Unsupported)
         }
@@ -9830,6 +9892,22 @@ mod tests {
             right_filter: vec![],
             limit: None,
         }
+    }
+
+    /// `SCB-FR-003` (ADR-0126): the budget refuses a `Join` whose left side
+    /// full-scans a table over it, at the table's size and not below, and
+    /// never a request that is not an `Aggregate` or a `Join`.
+    #[test]
+    fn a_join_full_scanning_a_table_over_the_scan_budget_is_over_it() {
+        let join = Request::Join(join_spec(JoinRelation::Parent));
+        assert!(request_exceeds_scan_budget(&JoinFixture, &join, 2));
+        assert!(!request_exceeds_scan_budget(&JoinFixture, &join, 3));
+        let query = Request::Query {
+            select: Selection::All,
+            filter: vec![],
+            limit: None,
+        };
+        assert!(!request_exceeds_scan_budget(&JoinFixture, &query, 0));
     }
 
     fn pairs(rows: &[JoinedRow]) -> Vec<(u128, u128)> {
