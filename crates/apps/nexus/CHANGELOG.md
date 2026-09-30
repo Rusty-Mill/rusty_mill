@@ -9,6 +9,10 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **A forge switch no longer hands out the old AI runtime** (`nexus-ai-runtime`, design review 4 / N5).
+  - The shared pool handle was a `OnceLock`, set by the first forge and never replaced. After shutdown and a new boot in the same process, the indexing daemon got the torn-down runtime.
+  - Each pool now replaces the published handle, and clears it on drop if it is still its own. Readers get the live pool's handle or `None` (their existing fallback).
+  - `publish_shared_handle` now returns whether it replaced another live pool.
 - **An IPC timeout now cancels the handler's token** (`nexus-kernel`, design review 4 / N4). A deadline used to return `Timeout` without signalling the dispatch's cancellation token. Polling handlers, their spawned work, and sync handlers on the blocking pool kept running. A drop guard now cancels the token on timeout or when the caller drops the call, and is disarmed when the handler finishes on its own.
 - **Template substitution no longer panics on a short tag** (`nexus-templates`, design review 3.8).
   - `{{ab` sliced five bytes past a four-byte input and panicked; the escape check now uses `starts_with`.

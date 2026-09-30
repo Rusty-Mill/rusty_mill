@@ -33,6 +33,7 @@ Removed / Fixed / Security, newest first.
 ### Fixed
 - **Design review Tranche 4, lifecycle:**
   - `nexus-kernel`: an IPC deadline or a dropped caller cancels the dispatch token (N4).
+  - `nexus-ai-runtime`: the shared pool handle follows the live pool across a forge switch, never a torn-down runtime (N5).
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
