@@ -38,7 +38,10 @@ pub fn open_ambient_dir(path: &OsStr) -> Result<OwnedWinHandle> {
             std::ptr::null_mut(),
         )
     };
-    OwnedWinHandle::from_raw(handle).ok_or_else(|| errmap::last_win32_err("CreateFileW", path))
+    // SAFETY: `handle` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(handle) }
+        .ok_or_else(|| errmap::last_win32_err("CreateFileW", path))
 }
 
 /// `ReadFile` into `buf` — Track W: `rusty_win32::fs::read_file` (D-15).

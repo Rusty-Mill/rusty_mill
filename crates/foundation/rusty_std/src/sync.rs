@@ -31,9 +31,24 @@ impl<T> Mutex<T> {
 }
 
 /// RAII structure used to release the exclusive lock when dropped.
+///
+/// The guard is `Sync` only when `T: Sync`; a guard over a `!Sync` payload
+/// cannot be shared across threads:
+///
+/// ```compile_fail
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<rusty_std::sync::MutexGuard<'static, core::cell::Cell<u32>>>();
+/// ```
 pub struct MutexGuard<'a, T> {
     lock: &'a Mutex<T>,
 }
+
+// SAFETY: the only field is `&Mutex<T>`, and `Mutex<T>: Sync` needs just
+// `T: Send`. Auto-derivation would therefore make the guard `Sync` for a
+// `Send + !Sync` payload such as `Cell`, letting threads share `&guard` and
+// obtain concurrent `&T` through `Deref`. This explicit impl replaces that
+// auto impl and requires `T: Sync`, the bound for sound concurrent `&T`.
+unsafe impl<'a, T: Sync> Sync for MutexGuard<'a, T> {}
 
 impl<'a, T> core::ops::Deref for MutexGuard<'a, T> {
     type Target = T;
