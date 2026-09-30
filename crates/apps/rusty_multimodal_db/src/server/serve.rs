@@ -1226,7 +1226,7 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
     plan: QueryPlan,
     filter: &[Predicate],
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
-    let bucket = |i: usize| store.filter_eq(filter[i].field, &filter[i].value);
+    let bucket = |i: usize| equality_bucket(store, filter, i);
     // `plan_query` never builds a range with neither side; a refusal is
     // the honest answer if one ever appears, and the caller scans.
     let bounds = |lower: Option<usize>, upper: Option<usize>| {
@@ -1275,6 +1275,77 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
         Err(_) => store.scan_all(),
     }
 }
+
+/// `QPE-FR-002` (ADR-0129): the ids the equality plan reads. `first` is the
+/// predicate the plan names; when `filter` carries `Eq` on *other* fields
+/// the schema also declares `filter_eq: true`, their buckets are read too
+/// (ids only, no record) and intersected, so only the records in every
+/// bucket are decoded. The extra buckets are read only when the first is
+/// large enough for that to pay: a decode costs about
+/// [`EQ_INTERSECT_RATIO`] id visits (`ADR-0079`'s measurement), and the
+/// extra bucket is at most the table, so with `n` records in the table and
+/// `b` in the first bucket, reading more is never worse than the decode it
+/// might save once `b * EQ_INTERSECT_RATIO >= n`. Below that, or with the
+/// table's size unknown, the first bucket alone is read, exactly as before
+/// this round. Exact, never an estimate: two known numbers compared. Every
+/// predicate is still re-checked over what comes back, so the answer is the
+/// same set on every path; a refusing second index is skipped, and a first
+/// bucket that refuses is the caller's fallback to the scan, as ever.
+fn equality_bucket<S: ConnectionStore + ?Sized>(
+    store: &S,
+    filter: &[Predicate],
+    first: usize,
+) -> Result<Vec<RecordId>, ErrorCode> {
+    let head = store.filter_eq(filter[first].field, &filter[first].value)?;
+    let worth = store
+        .record_count()
+        .is_some_and(|n| head.len().saturating_mul(EQ_INTERSECT_RATIO) >= n);
+    if head.is_empty()
+        || !worth
+        || filter
+            .iter()
+            .filter(|p| p.op == protocol::CompareOp::Eq)
+            .count()
+            < 2
+    {
+        return Ok(head);
+    }
+    let schema = store.describe();
+    let indexed = |p: &Predicate| {
+        p.op == protocol::CompareOp::Eq
+            && schema
+                .fields
+                .iter()
+                .any(|f| f.tag == p.field && f.capabilities.filter_eq)
+    };
+    let mut seen = vec![filter[first].field];
+    let mut buckets = vec![head];
+    for (i, p) in filter.iter().enumerate() {
+        if i == first || !indexed(p) || seen.contains(&p.field) {
+            continue;
+        }
+        seen.push(p.field);
+        let Ok(bucket) = store.filter_eq(p.field, &p.value) else {
+            continue; // a refusing index narrows nothing; the rest still do
+        };
+        if bucket.is_empty() {
+            return Ok(bucket);
+        }
+        buckets.push(bucket);
+    }
+    buckets.sort_by_key(Vec::len);
+    let mut buckets = buckets.into_iter();
+    let mut ids = buckets.next().unwrap_or_default();
+    for bucket in buckets {
+        ids = intersect_ids(ids, bucket);
+    }
+    Ok(ids)
+}
+
+/// `QPE-FR-002` (ADR-0129): how many id visits one record decode costs —
+/// `ADR-0079`'s measurement (~1 µs against ~40 ns), the crate's second cost
+/// constant, and like the first a constant, not a setting.
+pub const EQ_INTERSECT_RATIO: usize = 25;
 
 /// `QPB-FR-003` (ADR-0079): how many range-walk ids the intersection
 /// plan may visit per equality-bucket id before giving the walk up and
@@ -6483,6 +6554,13 @@ mod tests {
 
     struct PlannerFixture {
         index: Result<Vec<RecordId>, ErrorCode>,
+        /// `QPE-FR-004` (ADR-0129): a bucket per indexed field, when a test
+        /// needs different answers for different fields; a field not
+        /// listed answers `index`.
+        buckets: Vec<(FieldRef, Vec<RecordId>)>,
+        /// `QPE-FR-004`: the size `record_count` reports, when it is not
+        /// the row count — a table larger than the fixture's rows.
+        table_size: Option<usize>,
         /// `QKG-FR-004`: the fixture's rows when not `sql_test_rows()` —
         /// a table with repeated keys for the grouped walk.
         rows: Option<Vec<FixtureRow>>,
@@ -6509,6 +6587,8 @@ mod tests {
         fn with_index(index: Result<Vec<RecordId>, ErrorCode>) -> Self {
             Self {
                 index,
+                buckets: Vec::new(),
+                table_size: None,
                 rows: None,
                 range_field: None,
                 range_refuses: false,
@@ -6583,10 +6663,16 @@ mod tests {
         }
         fn filter_eq(
             &self,
-            _field: FieldRef,
+            field: FieldRef,
             _value: &ScanValue,
         ) -> Result<Vec<RecordId>, ErrorCode> {
-            self.index.clone()
+            match self.buckets.iter().find(|(f, _)| *f == field) {
+                Some((_, ids)) => Ok(ids.clone()),
+                None => self.index.clone(),
+            }
+        }
+        fn record_count(&self) -> Option<usize> {
+            Some(self.table_size.unwrap_or_else(|| self.rows().len()))
         }
         fn range_field(&self) -> Option<FieldRef> {
             self.range_field
@@ -7177,6 +7263,111 @@ mod tests {
             },
             "Eq on the (not filter_eq) range field alone is still the one-key walk"
         );
+    }
+
+    /// A table of three rows with two indexed fields (`2` a `Str`, `3` a
+    /// `U32`), and per-field buckets: what the equality intersection reads.
+    fn two_index_fixture(table_size: usize, lab: Vec<u128>, nine: Vec<u128>) -> PlannerFixture {
+        let id = RecordId::from_u128;
+        let row = |n: u128, breed: &str, three: u32| {
+            (
+                id(n),
+                vec![
+                    (1, ScanValue::U32(n as u32)),
+                    (2, ScanValue::Str(breed.into())),
+                    (3, ScanValue::U32(three)),
+                ],
+            )
+        };
+        PlannerFixture {
+            rows: Some(vec![
+                row(1, "labrador", 7),
+                row(2, "poodle", 9),
+                row(3, "labrador", 9),
+            ]),
+            buckets: vec![
+                (2, lab.into_iter().map(id).collect()),
+                (3, nine.into_iter().map(id).collect()),
+            ],
+            table_size: Some(table_size),
+            ..PlannerFixture::with_index(Err(ErrorCode::Unsupported))
+        }
+    }
+
+    /// `QPE-FR-002`/`003` (ADR-0129), acceptance criterion 1: two `Eq`
+    /// predicates on indexed fields read both buckets (ids only) and decode
+    /// only the record in both; the answer is the full scan's set.
+    #[test]
+    fn two_indexed_equalities_decode_only_the_records_in_both_buckets() {
+        let fx = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let rows = query_candidates(&fx, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(ids_of(&rows), vec![RecordId::from_u128(3)]);
+        assert_eq!(fx.gets(), 1, "one decode, not the first bucket's two");
+        assert_eq!(fx.scans(), 0);
+        match dispatch(
+            &fx,
+            Request::Query {
+                select: Selection::All,
+                filter: filter.to_vec(),
+                limit: None,
+            },
+        ) {
+            Response::Rows { rows } => assert_eq!(ids_of(&rows), vec![RecordId::from_u128(3)]),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    /// `QPE-FR-002`: a first bucket too small to repay the extra read —
+    /// `b * EQ_INTERSECT_RATIO < n` — is read alone, as before this round;
+    /// (a table whose size the adapter does not report, `record_count` `None`,
+    /// is the same case: it never trips the rule).
+    #[test]
+    fn a_small_first_bucket_reads_the_first_bucket_alone() {
+        let big = two_index_fixture(1_000, vec![1, 3], vec![2, 3]);
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let rows = query_candidates(&big, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(
+            rows.len(),
+            2,
+            "2 * {EQ_INTERSECT_RATIO} < 1000: bucket only"
+        );
+        assert_eq!(big.gets(), 2);
+    }
+
+    /// `QPE-FR-002`: an empty second bucket ends the read with no decode; a
+    /// refusing second index narrows nothing and the first still answers.
+    #[test]
+    fn an_empty_second_bucket_is_empty_and_a_refusing_one_is_skipped() {
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let empty = two_index_fixture(3, vec![1, 3], vec![]);
+        assert!(query_candidates(&empty, QueryPlan::IndexEq(0), &filter).is_empty());
+        assert_eq!(empty.gets(), 0);
+
+        let refusing = PlannerFixture {
+            buckets: vec![(2, vec![RecordId::from_u128(1), RecordId::from_u128(3)])],
+            table_size: Some(3),
+            rows: two_index_fixture(3, vec![], vec![]).rows,
+            ..PlannerFixture::with_index(Err(ErrorCode::Unsupported))
+        };
+        let rows = query_candidates(&refusing, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(rows.len(), 2, "the refusing index is skipped");
+        assert_eq!(
+            refusing.scans(),
+            0,
+            "and it does not send the read to a scan"
+        );
+    }
+
+    /// `QPE-FR-002`: two predicates on one field, and a second `Eq` on an
+    /// unindexed field, add no bucket; only the plan's own is read.
+    #[test]
+    fn a_repeated_field_and_an_unindexed_equality_add_no_bucket() {
+        let fx = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        let filter = [labrador(), labrador(), eq(1, ScanValue::U32(3))];
+        let rows = query_candidates(&fx, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(rows.len(), 2, "the first bucket alone");
+        assert_eq!(fx.gets(), 2);
     }
 
     /// `QPI-FR-002` (ADR-0078): the ids in both lists, in the larger

@@ -250,6 +250,10 @@ name = "server_nullable_integration"
 required-features = ["server"]
 
 [[test]]
+name = "server_planner_eq_integration"
+required-features = ["server"]
+
+[[test]]
 name = "memory_server_exposure"
 required-features = ["server"]
 
