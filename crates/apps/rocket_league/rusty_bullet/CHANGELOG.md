@@ -897,6 +897,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Broken markdown tables: 61 requirement rows (`RB-PHYSICS-001-FR-015`
+  through `FR-075`) sat inside `TRACEABILITY.md`'s ADR table and are now
+  back in the requirements table; unescaped `|` inside code spans (`||`,
+  closures, `|x|`) split cells in `TRACEABILITY.md` and `ROADMAP.md`.
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —
   invisible under the old index-pairwise frame comparison, surfaced once
