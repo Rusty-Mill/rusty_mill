@@ -1,4 +1,4 @@
-import { ArrowLeft, Calendar, Copy, ListChecks, MessageSquare, MoreHorizontal, Plus, RotateCcw, Trash2, Type, X, Link2 } from 'lucide-react'
+import { ArrowLeft, Calendar, Copy, ListChecks, MoreHorizontal, Plus, RotateCcw, Trash2, Type, X, Link2 } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Task } from '@/api/types'
@@ -256,9 +256,6 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
             ))}
           </div>
         </Popover>
-        <button type="button" disabled title="Comments are not available yet" aria-label="Comments" className="flex h-8 w-8 items-center justify-center rounded-row text-grey opacity-40">
-          <MessageSquare size={18} />
-        </button>
         <button ref={moreBtn} type="button" aria-label="More" aria-haspopup="menu" aria-expanded={moreOpen} onClick={() => setMoreOpen((o) => !o)} className="flex h-8 w-8 items-center justify-center rounded-row text-grey hover:bg-hover">
           <MoreHorizontal size={18} />
         </button>

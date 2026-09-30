@@ -43,13 +43,12 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 - No TickTick batch API and no WebSocket "needSync": the UI polls and refreshes on window focus.
 - Focus records, habits, check-ins and the summary template are stored as generic `docs` in the backend, so they sync like everything else.
 
-## Stubs and known gaps
+## Known gaps
 
-- Reminders: task reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in); habit reminders are still stored only.
-- Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
-- Settings: Account, Notifications, Date & Time, Appearance and Shortcuts are real; the other eight tabs are placeholders.
-- Comments button in the detail pane is disabled; Timeline view is a stub.
+- Reminders: task and habit reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in); there is no service worker or push, so nothing fires with the app closed.
+- Settings has the tabs that do something: Account, Notifications, Date & Time, Appearance, Shortcuts, About. There is no premium, AI, collaboration or integration tier in a local app, so those (and the Comments button, Timeline view and list-count badge that stood in for them) are left out rather than stubbed.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
-- Calendar: repeating tasks show only their next occurrence; agenda has no drag and no overdue group; "+N more" lists all of the day's tasks.
-- Habits: a check-in means "done" (goal amount is text); reminders are stored, not fired.
+- Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
+- Habits: a check-in means "done" (the goal amount is text).
+- Sync is by polling and on window focus (no server push).
 - No reference screenshots were available, so there is no pixel comparison; layout, spacing and copy follow the prompt's description.

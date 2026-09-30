@@ -59,7 +59,7 @@ describe('SettingsModal', () => {
     const list = screen.getByRole('tablist', { name: 'Settings' })
     expect(list).toHaveAttribute('aria-orientation', 'vertical')
     const tabs = within(list).getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Account', 'Premium', 'Features', 'Smart List', 'Notifications', 'Date & Time', 'Appearance', 'AI Features', 'More', 'Integrations & Import', 'Collaborate', 'Shortcuts', 'About'])
+    expect(tabs.map((t) => t.textContent)).toEqual(['Account', 'Notifications', 'Date & Time', 'Appearance', 'Shortcuts', 'About'])
     expect(tabs).toHaveLength(SETTINGS_TABS.length)
     expect(tabs.filter((t) => t.tabIndex === 0)).toHaveLength(1)
   })
@@ -76,8 +76,8 @@ describe('SettingsModal', () => {
     const user = setup()
     screen.getByRole('tab', { name: 'Account' }).focus()
     await user.keyboard('{ArrowDown}')
-    await waitFor(() => expect(screen.getByRole('tab', { name: 'Premium' })).toHaveFocus())
-    expect(search()).toContain('tabs=premium')
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Notifications' })).toHaveFocus())
+    expect(search()).toContain('tabs=notifications')
     await user.keyboard('{ArrowUp}{ArrowUp}')
     await waitFor(() => expect(screen.getByRole('tab', { name: 'About' })).toHaveFocus())
     expect(search()).toContain('tabs=about')
@@ -94,18 +94,10 @@ describe('SettingsModal', () => {
     expect(search()).toBe('?x=1')
   })
 
-  it.each(['premium', 'features', 'smart-list', 'ai', 'more', 'integrations', 'collaborate'])('%s is an honest placeholder', (tab) => {
-    setup(`/?modalType=settings&tabs=${tab}`)
-    const panel = screen.getByRole('tabpanel')
-    expect(within(panel).getByRole('heading')).toBeInTheDocument()
-    expect(panel).toHaveTextContent('is not available in Tick Local.')
-    expect(within(panel).queryByRole('button')).toBeNull() // nothing to click, nothing to buy
-  })
-
   it('Notifications turns task reminders on once the browser allows them', async () => {
     vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'default', requestPermission: async () => ((Notification as unknown as { permission: string }).permission = 'granted') }))
     setup('/?modalType=settings&tabs=notifications')
-    await userEvent.setup().click(screen.getByRole('switch', { name: 'Task reminders' }))
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Reminders' }))
     expect(usePrefs.getState().prefs.notifications).toBe(true)
     vi.unstubAllGlobals()
   })
@@ -113,7 +105,7 @@ describe('SettingsModal', () => {
   it('Notifications stays off and says why when the browser refuses', async () => {
     vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'denied' }))
     setup('/?modalType=settings&tabs=notifications')
-    await userEvent.setup().click(screen.getByRole('switch', { name: 'Task reminders' }))
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Reminders' }))
     expect(usePrefs.getState().prefs.notifications).toBe(false)
     expect(within(screen.getByRole('tabpanel')).getByRole('status')).toHaveTextContent('blocked')
     vi.unstubAllGlobals()

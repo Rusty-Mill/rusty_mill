@@ -100,8 +100,6 @@ export function ListColumn({ spec, selectedId }: Props) {
 
       {viewMode === 'kanban' ? (
         <KanbanBoard spec={spec} data={data} selectedId={selectedId} />
-      ) : viewMode === 'timeline' ? (
-        <div className="flex flex-1 items-center justify-center text-grey">The timeline view is not available yet.</div>
       ) : total === 0 ? (
         <button type="button" onClick={() => useUi.getState().focusQuickAdd()} className="flex flex-1 flex-col items-center justify-center gap-2 pb-24 text-grey outline-none">
           <NoTasksArt />

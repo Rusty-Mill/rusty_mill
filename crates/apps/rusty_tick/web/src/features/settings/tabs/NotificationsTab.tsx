@@ -19,8 +19,8 @@ export function NotificationsTab() {
   return (
     <>
       <PaneTitle>Notifications</PaneTitle>
-      <Row label="Task reminders" hint="Notify when a task's reminder comes due. Works while Tick Local is open in a tab." htmlFor="notify">
-        <Switch id="notify" checked={on} onChange={(v) => void toggle(v)} label="Task reminders" />
+      <Row label="Reminders" hint="Notify when a task or habit reminder comes due. Works while Tick Local is open in a tab." htmlFor="notify">
+        <Switch id="notify" checked={on} onChange={(v) => void toggle(v)} label="Reminders" />
       </Row>
       {denied && <p role="status" className="mt-3 text-s text-grey">Notifications are blocked for this site. Allow them in the browser's site settings, then turn this on.</p>}
     </>

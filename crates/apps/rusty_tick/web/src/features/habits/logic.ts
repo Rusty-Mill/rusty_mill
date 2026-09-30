@@ -9,7 +9,7 @@ export interface HabitBody {
   /** Free text such as "1 time per day" or "8 glasses per day". */
   goal: string
   frequency: Frequency
-  /** `HH:MM`, or null. Stored for other clients; this UI does not fire habit notifications. */
+  /** `HH:MM`, or null. Fired as a browser notification when the user has turned notifications on. */
   reminder: string | null
   createdMs: number
   archived: boolean

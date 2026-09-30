@@ -56,7 +56,7 @@ export const PATHS = {
 } as const
 
 /** Settings is a modal over whatever route is open: `?modalType=settings&tabs=account`. */
-export const SETTINGS_TABS = ['account', 'premium', 'features', 'smart-list', 'notifications', 'date-time', 'appearance', 'ai', 'more', 'integrations', 'collaborate', 'shortcuts', 'about'] as const
+export const SETTINGS_TABS = ['account', 'notifications', 'date-time', 'appearance', 'shortcuts', 'about'] as const
 export type SettingsTab = (typeof SETTINGS_TABS)[number]
 
 export function settingsHref(tab: SettingsTab = 'account'): string {

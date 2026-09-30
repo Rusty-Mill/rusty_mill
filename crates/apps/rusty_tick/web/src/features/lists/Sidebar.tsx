@@ -15,7 +15,6 @@ import { TagDialog } from '../tags/TagDialog'
 import { ListDialog } from './ListDialog'
 
 /** TickTick's free tier allows nine lists; shown for parity but not enforced here. */
-const LIST_LIMIT = 9
 
 interface RowProps {
   to: string
@@ -66,14 +65,13 @@ function Row({ to, active, icon, label, count, menu, draggable, indicator }: Row
   )
 }
 
-function SectionHeader({ label, collapsed, onToggle, badge, onAdd, addLabel }: { label: string; collapsed?: boolean; onToggle?: () => void; badge?: string; onAdd?: () => void; addLabel?: string }) {
+function SectionHeader({ label, collapsed, onToggle, onAdd, addLabel }: { label: string; collapsed?: boolean; onToggle?: () => void; onAdd?: () => void; addLabel?: string }) {
   return (
     <div className="group mt-3 flex h-8 items-center px-3 text-s font-semibold text-grey">
       <button type="button" onClick={onToggle} aria-expanded={collapsed === undefined ? undefined : !collapsed} className="flex items-center gap-1 rounded hover:text-text">
         {collapsed !== undefined && (collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />)}
         {label}
       </button>
-      {badge && <span className="ml-2 rounded-full bg-black/5 px-2 py-px text-[11px] font-normal">{badge}</span>}
       {onAdd && (
         <button type="button" aria-label={addLabel} onClick={onAdd} className="ml-auto hidden h-6 w-6 items-center justify-center rounded hover:bg-black/5 group-focus-within:flex group-hover:flex">
           <Plus size={16} />
@@ -148,7 +146,7 @@ export function Sidebar() {
         <Row to="/p/inbox/tasks" active={active('/p/inbox/tasks')} icon={<Inbox size={18} />} label="Inbox" count={count({ kind: 'inbox' })} />
         <Row to={PATHS.summary} active={active(PATHS.summary)} icon={<FileText size={18} />} label="Summary" />
 
-        <SectionHeader label="Lists" badge={`Used: ${userLists.length + archived.length}/${LIST_LIMIT}`} onAdd={() => setListDialog({ list: null })} addLabel="Add list" />
+        <SectionHeader label="Lists" onAdd={() => setListDialog({ list: null })} addLabel="Add list" />
         {userLists.map((l) => (
           <Row
             key={l.id}
@@ -204,9 +202,6 @@ export function Sidebar() {
       <div className="border-t border-line px-2 py-2">
         <Row to={PATHS.completed} active={active(PATHS.completed)} icon={<CheckCircle2 size={18} />} label="Completed" />
         <Row to={PATHS.trash} active={active(PATHS.trash)} icon={<Trash2 size={18} />} label="Trash" />
-        <button type="button" disabled title="Not applicable in Tick Local" className="mt-1 flex h-9 w-full cursor-not-allowed items-center justify-center rounded-row bg-black/5 text-base text-grey/70">
-          Upgrade to Premium
-        </button>
       </div>
 
       <ListDialog
