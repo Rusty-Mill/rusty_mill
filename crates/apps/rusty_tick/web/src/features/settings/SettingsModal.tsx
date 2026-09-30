@@ -6,6 +6,7 @@ import { AboutTab } from './tabs/AboutTab'
 import { AccountTab } from './tabs/AccountTab'
 import { AppearanceTab } from './tabs/AppearanceTab'
 import { DateTimeTab } from './tabs/DateTimeTab'
+import { NotificationsTab } from './tabs/NotificationsTab'
 import { PlaceholderTab } from './tabs/PlaceholderTab'
 import { ShortcutsTab } from './tabs/ShortcutsTab'
 
@@ -15,6 +16,8 @@ function Pane({ tab }: { tab: SettingsTab }) {
   switch (tab) {
     case 'account':
       return <AccountTab />
+    case 'notifications':
+      return <NotificationsTab />
     case 'date-time':
       return <DateTimeTab />
     case 'appearance':

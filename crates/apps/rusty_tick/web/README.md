@@ -45,8 +45,9 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 
 ## Stubs and known gaps
 
+- Reminders: task reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in); habit reminders are still stored only.
 - Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
-- Settings: Account, Date & Time, Appearance and Shortcuts are real; the other nine tabs are placeholders. Notifications are stored, never fired.
+- Settings: Account, Notifications, Date & Time, Appearance and Shortcuts are real; the other eight tabs are placeholders.
 - Comments button in the detail pane is disabled; Timeline view is a stub.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: repeating tasks show only their next occurrence; agenda has no drag and no overdue group; "+N more" lists all of the day's tasks.

@@ -94,12 +94,29 @@ describe('SettingsModal', () => {
     expect(search()).toBe('?x=1')
   })
 
-  it.each(['premium', 'features', 'smart-list', 'notifications', 'ai', 'more', 'integrations', 'collaborate'])('%s is an honest placeholder', (tab) => {
+  it.each(['premium', 'features', 'smart-list', 'ai', 'more', 'integrations', 'collaborate'])('%s is an honest placeholder', (tab) => {
     setup(`/?modalType=settings&tabs=${tab}`)
     const panel = screen.getByRole('tabpanel')
     expect(within(panel).getByRole('heading')).toBeInTheDocument()
     expect(panel).toHaveTextContent('is not available in Tick Local.')
     expect(within(panel).queryByRole('button')).toBeNull() // nothing to click, nothing to buy
+  })
+
+  it('Notifications turns task reminders on once the browser allows them', async () => {
+    vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'default', requestPermission: async () => ((Notification as unknown as { permission: string }).permission = 'granted') }))
+    setup('/?modalType=settings&tabs=notifications')
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Task reminders' }))
+    expect(usePrefs.getState().prefs.notifications).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
+  it('Notifications stays off and says why when the browser refuses', async () => {
+    vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'denied' }))
+    setup('/?modalType=settings&tabs=notifications')
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Task reminders' }))
+    expect(usePrefs.getState().prefs.notifications).toBe(false)
+    expect(within(screen.getByRole('tabpanel')).getByRole('status')).toHaveTextContent('blocked')
+    vi.unstubAllGlobals()
   })
 
   it('About shows the app name, a description and the version', () => {
