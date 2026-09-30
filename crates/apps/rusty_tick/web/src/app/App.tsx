@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { RouterProvider } from 'react-router-dom'
 import { usePrefs, applyTheme } from '@/features/settings/prefs'
-import { clearToken, getMode, getToken, setMode, type Mode } from './env'
+import { getMode, getToken, setMode, type Mode } from './env'
 import { Splash, TokenPrompt, Welcome } from './Gate'
 import { createRouter } from './router'
 import { createServices, ServicesProvider, useData, type Services } from './services'
@@ -17,10 +17,10 @@ export function App() {
   if (mode === 'server' && !getToken()) {
     return <TokenPrompt onSubmit={() => setEpoch((e) => e + 1)} onDemo={() => setModeState('demo')} />
   }
-  return <Connected key={`${mode}:${epoch}`} mode={mode} onNeedToken={() => { clearToken(); setEpoch((e) => e + 1) }} onDemo={() => { setMode('demo'); setModeState('demo') }} />
+  return <Connected key={`${mode}:${epoch}`} mode={mode} onRetry={() => setEpoch((e) => e + 1)} onDemo={() => { setMode('demo'); setModeState('demo') }} />
 }
 
-function Connected({ mode, onNeedToken, onDemo }: { mode: Mode; onNeedToken: () => void; onDemo: () => void }) {
+function Connected({ mode, onRetry, onDemo }: { mode: Mode; onRetry: () => void; onDemo: () => void }) {
   const services = useMemo(() => createServices(mode), [mode])
   useEffect(() => {
     const { store, api } = services
@@ -34,18 +34,19 @@ function Connected({ mode, onNeedToken, onDemo }: { mode: Mode; onNeedToken: () 
   }, [services])
   return (
     <ServicesProvider services={services}>
-      <Ready services={services} onNeedToken={onNeedToken} onDemo={onDemo} />
+      <Ready services={services} onRetry={onRetry} onDemo={onDemo} />
     </ServicesProvider>
   )
 }
 
-function Ready({ services, onNeedToken, onDemo }: { services: Services; onNeedToken: () => void; onDemo: () => void }) {
+function Ready({ services, onRetry, onDemo }: { services: Services; onRetry: () => void; onDemo: () => void }) {
   const status = useData((s) => s.status)
   const error = useData((s) => s.error)
   const router = useMemo(createRouter, [])
   if (status === 'loading') return <Splash>Loading…</Splash>
   if (status === 'unauthorized') {
-    return <TokenPrompt error={error ?? 'The server did not accept that token.'} onSubmit={onNeedToken} onDemo={onDemo} />
+    // The prompt stores the new token itself; retrying only rebuilds the services with it (clearing it here would discard it).
+    return <TokenPrompt error={error ?? 'The server did not accept that token.'} onSubmit={onRetry} onDemo={onDemo} />
   }
   if (status === 'error') {
     return (
