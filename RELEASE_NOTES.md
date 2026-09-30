@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db: documentation brought up to date
+**2026-09-30**
+
+- **Docs:** `README.md`, `AGENTS.md`, `WORKFLOW.md`, `clients/python/README.md`, `docs/architecture/SYSTEM-ARCHITECTURE.md`, `docs/PROJECT-STATUS.md`, the specs and the traceability matrix now describe the crate as it is: a monorepo member whose storage core lives in `rusty_multimodal_db_engine`, wire protocol 35, seven adapters, the commands CI actually runs. About 170 file paths in the specs, `TRACEABILITY.md` and the registry that still named the pre-extraction `src/generic/*` locations now point at the engine crate; three ADR titles that still said "(Proposal)" were corrected.
+- Known limitation: about 270 stale paths remain in `ROADMAP.md`, `PROJECT-STATUS.md`'s dated entries, `RESULTS.md`, the design docs and older ADRs. Those are records of what was true when written and were left as written. The audit is `crates/apps/rusty_multimodal_db/docs/reports/DOCS-AUDIT-2026-09-30.md`.
+
+---
+
 ## rusty_tick: type-ahead search
 **2026-09-30**
 

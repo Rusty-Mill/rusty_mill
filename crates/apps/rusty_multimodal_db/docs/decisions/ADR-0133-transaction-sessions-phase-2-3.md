@@ -1,4 +1,4 @@
-# ADR-0133: Transaction Sessions, Phases 2 and 3 (Proposal)
+# ADR-0133: Transaction Sessions, Phases 2 and 3
 
 - Status: **Accepted — options 1A and 2 built (protocol 35), on the owner's "go with recommendations"; multi-table commit deferred as recommended.**
 - Date: 2026-09-30

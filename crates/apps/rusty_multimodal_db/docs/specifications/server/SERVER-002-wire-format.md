@@ -1033,7 +1033,7 @@ whichever is found — see `tests/server_python_client.rs`'s own
   the reference client gains `Client.insert` and declares 13.
 - 0.1.0 (`SERVER-001` v0.35.1 patch entry, ADR-0043, `ECO-FR-004`–`006`):
   initial specification at protocol version 12, transcribed from
-  `src/server/protocol.rs`, `src/server/framing.rs`, `src/codec.rs`, and
+  `src/server/protocol.rs`, `src/server/framing.rs`, `crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs`, and
   `SERVER-001`'s requirements; fixture `tests/fixtures/wire-vectors.txt`
   (48 vectors) generated and enforced; reference client `clients/python/`
   verified against both.
