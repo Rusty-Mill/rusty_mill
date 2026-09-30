@@ -34,10 +34,7 @@ pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> 
     }
 
     if n + m > MAX_DIFF_INPUT_LEN {
-        let mut result = Vec::with_capacity(n + m);
-        result.extend(old.iter().cloned().map(DiffOp::Delete));
-        result.extend(new.iter().cloned().map(DiffOp::Insert));
-        return result;
+        return fallback(old, new);
     }
 
     let max_d = n + m;
@@ -45,10 +42,23 @@ pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> 
     let mut v = vec![0isize; 2 * max_d + 1];
     let offset = max_d as isize;
 
-    let mut trace = Vec::new();
+    let mut trace: Vec<Frontier> = Vec::new();
+    let mut cells = 0usize;
 
     for d in 0..=max_d {
-        trace.push(v.clone());
+        // Only the band step `d` reads, `[-d-1, d+1]`: the full `v` per
+        // step made the trace `(n+m) * (2(n+m)+1)` cells, about 6.4 GB at
+        // the input cap (design review 3.8).
+        let lo = (offset - d as isize - 1).max(0) as usize;
+        let hi = (offset + d as isize + 1).min(2 * max_d as isize) as usize;
+        cells += hi - lo + 1;
+        if cells > MAX_TRACE_CELLS {
+            return fallback(old, new);
+        }
+        trace.push(Frontier {
+            base: lo as isize,
+            cells: v[lo..=hi].to_vec(),
+        });
         let mut k = -(d as isize);
         while k <= (d as isize) {
             let idx = (k + offset) as usize;
@@ -79,8 +89,35 @@ pub fn diff_myers<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> 
     backtrack(&trace, old, new, offset)
 }
 
+/// Most edit-graph trace cells (`isize`s) one [`diff_myers`] call may
+/// retain -- 128 MiB on 64-bit. The trace grows with the square of the edit
+/// distance, so [`MAX_DIFF_INPUT_LEN`] alone still allowed gigabytes for
+/// two dissimilar inputs at the cap (design review 3.8). Past this, the
+/// linear delete-all/insert-all diff is returned instead.
+pub const MAX_TRACE_CELLS: usize = 16 * 1024 * 1024;
+
+/// One step's saved frontier: `cells[i]` is `v[base + i]`.
+struct Frontier {
+    base: isize,
+    cells: Vec<isize>,
+}
+
+impl Frontier {
+    fn at(&self, index: isize) -> isize {
+        self.cells[(index - self.base) as usize]
+    }
+}
+
+/// The linear-memory diff: delete all of `old`, then insert all of `new`.
+fn fallback<T: Clone>(old: &[T], new: &[T]) -> Vec<DiffOp<T>> {
+    let mut result = Vec::with_capacity(old.len() + new.len());
+    result.extend(old.iter().cloned().map(DiffOp::Delete));
+    result.extend(new.iter().cloned().map(DiffOp::Insert));
+    result
+}
+
 fn backtrack<T: PartialEq + Clone>(
-    trace: &[Vec<isize>],
+    trace: &[Frontier],
     old: &[T],
     new: &[T],
     offset: isize,
@@ -93,14 +130,13 @@ fn backtrack<T: PartialEq + Clone>(
         let d = d as isize;
         let k = x - y;
 
-        let prev_k =
-            if k == -d || (k != d && v[(k - 1 + offset) as usize] < v[(k + 1 + offset) as usize]) {
-                k + 1
-            } else {
-                k - 1
-            };
+        let prev_k = if k == -d || (k != d && v.at(k - 1 + offset) < v.at(k + 1 + offset)) {
+            k + 1
+        } else {
+            k - 1
+        };
 
-        let prev_x = v[(prev_k + offset) as usize];
+        let prev_x = v.at(prev_k + offset);
         let prev_y = prev_x - prev_k;
 
         while x > prev_x && y > prev_y {
@@ -494,5 +530,70 @@ mod tests {
 
         let patched = apply_patch(old_text, &patch).expect("patch application failed");
         assert_eq!(patched, new_text);
+    }
+
+    /// Design review 3.8: two dissimilar inputs under `MAX_DIFF_INPUT_LEN`
+    /// could still build a multi-gigabyte trace. The cell budget stops it:
+    /// fully disjoint inputs at the cap need an edit distance of the whole
+    /// input, far past the budget, so the linear fallback is returned.
+    #[test]
+    fn test_diff_myers_disjoint_inputs_at_cap_stay_within_the_trace_budget() {
+        let half = MAX_DIFF_INPUT_LEN / 2;
+        let old: Vec<usize> = (0..half).collect();
+        let new: Vec<usize> = (half..2 * half).collect();
+        let start = std::time::Instant::now();
+        let ops = diff_myers(&old, &new);
+        assert_eq!(ops.len(), 2 * half);
+        assert!(ops[..half].iter().all(|op| matches!(op, DiffOp::Delete(_))));
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    }
+
+    /// The banded trace still reconstructs a minimal diff.
+    #[test]
+    fn test_diff_myers_banded_trace_matches_a_known_edit_script() {
+        let old: Vec<char> = "ABCABBA".chars().collect();
+        let new: Vec<char> = "CBABAC".chars().collect();
+        let ops = diff_myers(&old, &new);
+        let edits = ops
+            .iter()
+            .filter(|op| !matches!(op, DiffOp::Keep(_)))
+            .count();
+        assert_eq!(edits, 5, "Myers' paper example has D = 5: {ops:?}");
+        let rebuilt: String = ops
+            .iter()
+            .filter_map(|op| match op {
+                DiffOp::Keep(c) | DiffOp::Insert(c) => Some(*c),
+                DiffOp::Delete(_) => None,
+            })
+            .collect();
+        assert_eq!(rebuilt, "CBABAC");
+    }
+
+    /// The banded trace's diffs rebuild both inputs exactly, over many
+    /// small pseudo-random inputs (a tiny LCG; no dependency).
+    #[test]
+    fn test_diff_myers_banded_trace_round_trips_random_inputs() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |bound: u64| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) % bound
+        };
+        for _ in 0..500 {
+            let old: Vec<u64> = (0..next(12)).map(|_| next(4)).collect();
+            let new: Vec<u64> = (0..next(12)).map(|_| next(4)).collect();
+            let ops = diff_myers(&old, &new);
+            let side = |keep_deleted: bool| -> Vec<u64> {
+                ops.iter()
+                    .filter_map(|op| match op {
+                        DiffOp::Keep(v) => Some(*v),
+                        DiffOp::Delete(v) if keep_deleted => Some(*v),
+                        DiffOp::Insert(v) if !keep_deleted => Some(*v),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            assert_eq!(side(true), old, "{old:?} -> {new:?}");
+            assert_eq!(side(false), new, "{old:?} -> {new:?}");
+        }
     }
 }

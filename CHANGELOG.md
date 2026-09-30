@@ -59,6 +59,7 @@ Removed / Fixed / Security, newest first.
 - **Design review Tranche 3 (#419), input budgets (3.8):**
   - `rush`: numeric brace ranges stop at their endpoint without overflow. Brace expansion is capped at 1 Mi words and 8 Mi characters.
   - `nexus-templates`: a four-byte `{{ab` no longer panics, and literal non-ASCII text is no longer garbled.
+  - `rusty_diff`: the Myers trace keeps only each step's live band. It is capped at `MAX_TRACE_CELLS` (128 MiB); over that it returns the linear fallback, instead of up to about 6.4 GB for two dissimilar inputs at `MAX_DIFF_INPUT_LEN`.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
