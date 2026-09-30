@@ -92,6 +92,30 @@ impl DocStore {
         self.table.delete(id)
     }
 
+    /// Delete every comment that belongs to one of `tasks`; returns how many went.
+    pub fn delete_comments_of(&mut self, tasks: &[Uuid]) -> Result<usize, TickError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Owner {
+            task_id: String,
+        }
+        let gone: Vec<Uuid> = self
+            .of_kind("comment")
+            .into_iter()
+            .filter(|d| {
+                rusty_json::from_str::<Owner>(&d.body)
+                    .ok()
+                    .and_then(|o| Uuid::parse_str(&o.task_id).ok())
+                    .is_some_and(|id| tasks.contains(&id))
+            })
+            .map(|d| d.id)
+            .collect();
+        for id in &gone {
+            self.table.delete(*id)?;
+        }
+        Ok(gone.len())
+    }
+
     /// Documents of `kind`, oldest first.
     pub fn of_kind(&self, kind: &str) -> Vec<Doc> {
         let mut docs = self.table.with_index(&kind.to_string());

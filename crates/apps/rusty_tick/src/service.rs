@@ -429,10 +429,13 @@ impl Service {
     /// Delete a task and its subtasks for good.
     pub fn purge_task(&mut self, id: Uuid) -> Result<()> {
         let task = self.task(id)?;
+        let mut gone = vec![id];
         for child in self.children(&task) {
             self.tasks.delete(child.id)?;
+            gone.push(child.id);
         }
         self.tasks.delete(id)?;
+        self.docs.delete_comments_of(&gone)?;
         Ok(())
     }
 
@@ -448,6 +451,7 @@ impl Service {
         for id in &trashed {
             self.tasks.delete(*id)?;
         }
+        self.docs.delete_comments_of(&trashed)?;
         Ok(trashed.len())
     }
 
