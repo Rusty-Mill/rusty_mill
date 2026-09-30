@@ -74,6 +74,9 @@ const HEADER_LEN: u64 = 12;
 /// Version-2 entry kind bytes (`WBJ-FR-001`, ADR-0063).
 const KIND_TRANSACTION: u8 = 0;
 const KIND_WRITE: u8 = 1;
+/// `STC-FR-002` (ADR-0133): a `WriteOp` batch committed strictly — replay
+/// re-runs the strict check first and skips the batch if it failed live.
+const KIND_STRICT_WRITE: u8 = 2;
 
 /// One journal entry about to be appended — borrowed, chosen by the
 /// caller's own typed [`CommitGroup::commit`]/[`CommitGroup::
@@ -81,6 +84,7 @@ const KIND_WRITE: u8 = 1;
 pub(crate) enum JournalEntry<'a> {
     Transaction(&'a [TransactionOp]),
     Write(&'a [WriteOp]),
+    StrictWrite(&'a [WriteOp]),
 }
 
 /// One journal entry replayed from disk, oldest first (`WBJ-FR-001`,
@@ -91,6 +95,7 @@ pub(crate) enum JournalEntry<'a> {
 pub(crate) enum JournaledBatch {
     Transaction(Vec<TransactionOp>),
     Write(Vec<WriteOp>),
+    StrictWrite(Vec<WriteOp>),
 }
 
 /// `JMC-FR-001` (ADR-0114): what an adapter's `with_journal` replay
@@ -327,6 +332,12 @@ impl BatchJournal {
                     })?;
                     JournaledBatch::Write(ops)
                 }
+                KIND_STRICT_WRITE => {
+                    let ops: Vec<WriteOp> = crate::codec::decode(payload).map_err(|e| {
+                        JournalError::Format(format!("entry at byte {pos} does not decode: {e}"))
+                    })?;
+                    JournaledBatch::StrictWrite(ops)
+                }
                 other => {
                     return Err(JournalError::Format(format!(
                         "entry at byte {pos} has unknown kind {other}"
@@ -380,6 +391,7 @@ impl BatchJournal {
         let (kind, payload) = match entry {
             JournalEntry::Transaction(batch) => (KIND_TRANSACTION, crate::codec::encode(batch)?),
             JournalEntry::Write(batch) => (KIND_WRITE, crate::codec::encode(batch)?),
+            JournalEntry::StrictWrite(batch) => (KIND_STRICT_WRITE, crate::codec::encode(batch)?),
         };
         let len = u32::try_from(payload.len())
             .map_err(|_| JournalError::Format("batch too large to journal".into()))?;
@@ -630,6 +642,17 @@ impl CommitGroup {
         apply: impl FnOnce(Turn) -> Result<bool, E>,
     ) -> Result<(), CommitError<E>> {
         self.commit_entry(JournalEntry::Write(ops), apply)
+    }
+
+    /// [`commit_write`] for a strict commit (`STC-FR-002`, ADR-0133): the
+    /// entry carries its own kind, so replay knows to re-run the strict
+    /// check and skip a batch the live check refused.
+    pub(crate) fn commit_strict_write<E>(
+        &self,
+        ops: &[WriteOp],
+        apply: impl FnOnce(Turn) -> Result<bool, E>,
+    ) -> Result<(), CommitError<E>> {
+        self.commit_entry(JournalEntry::StrictWrite(ops), apply)
     }
 
     fn commit_entry<E>(

@@ -13,7 +13,7 @@ use rusty_multimodal_db::generic::memory::{
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::relation::open_or_create_relation_production_stack;
 use rusty_multimodal_db::server::client::{
-    BatchOp, ClientError, GuardedReplace, QueryResult, SchemaDrivenClient,
+    BatchOp, ClientError, ConnectOptions, GuardedReplace, QueryResult, SchemaDrivenClient,
 };
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
@@ -1169,12 +1169,15 @@ fn compact_each_table_over_the_wire_and_a_restart_serves_the_same_data() {
 /// stamps a deletion and a node; `Page` by `deleted_at_unix_ms` lists the
 /// live rows first; `Query` finds the purge set; `GROUP BY node_id` counts
 /// per node with `""` its own group; a negative stamp is `Malformed`; both
-/// survive a restart.
+/// survive a restart. Over protocol 31: from 32 the same two columns read
+/// as `NULL` (`ADR-0128`, `tests/server_nullable_integration.rs`).
 #[test]
 fn sync_fields_carry_sentinels_and_serve_the_purge_set_over_the_wire() {
     let dir = unique_dir("memory_sync_fields");
     let addr = start_server_at(dir.clone());
-    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().max_protocol_version(31))
+            .unwrap();
     let id = Uuid::from_u128;
     let fields = client.get(id(1)).unwrap().unwrap();
     assert_eq!(fields.len(), 13);
@@ -1263,7 +1266,9 @@ fn sync_fields_carry_sentinels_and_serve_the_purge_set_over_the_wire() {
     drop(client);
 
     let addr = start_server_at(dir);
-    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().max_protocol_version(31))
+            .unwrap();
     let two = client.get(id(2)).unwrap().unwrap();
     assert_eq!(two[11].1, ScanValue::I64(7_000));
     assert_eq!(two[12].1, ScanValue::Str("laptop".into()));

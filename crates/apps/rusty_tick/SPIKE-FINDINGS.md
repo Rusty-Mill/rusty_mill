@@ -61,8 +61,8 @@ build for the scale numbers.
 
 - **Gap 3, prefix, AND, NOT and column filters** now exist on the engine's
   `fulltext::Query` (`any_of_prefix`, `all_of`, `except`, `in_columns`) and are
-  differentially tested against FTS5. `rusty_tick` can replace its whole-word
-  search with `any_of_prefix` for type-ahead.
+  differentially tested against FTS5. `rusty_tick` search now uses
+  `any_of_prefix`, so `grocer` finds `groceries`.
 - **Gap 6, one store directory per user**, measured in `rusty_multimodal_db_engine`
   (`tests/store_lifecycle.rs`, release build, one machine, one run, records of a
   few dozen bytes with one equality index and one ordered index):

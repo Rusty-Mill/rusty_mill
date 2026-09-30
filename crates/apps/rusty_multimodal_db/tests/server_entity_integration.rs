@@ -1328,12 +1328,13 @@ fn link_over_the_wire_creates_labels_every_read_sees_and_a_restart_serves() {
             == 1
     );
 
-    // Inside a session: refused; the session still commits.
+    // Inside a session: refused (at 32; from 33 it is staged, `ADR-0130`);
+    // the session still commits.
     let mut raw = TcpStream::connect(addr).unwrap();
     write_message(
         &mut raw,
         &Request::Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 32,
         },
     )
     .unwrap();

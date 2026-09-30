@@ -14094,6 +14094,7 @@ dependencies = [
  "redb",
  "rusqlite",
  "rusty_http",
+ "rusty_libc",
  "rusty_multimodal_db_engine",
  "rusty_tls",
  "serde",

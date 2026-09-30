@@ -431,7 +431,12 @@ impl EntityConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    JournaledBatch::Write(ops) => {
+                    // `STC-FR-002`: a strict batch the live check refused was
+                    // never applied; the same check on the same pre-state
+                    // refuses it again, so replay skips it.
+                    JournaledBatch::StrictWrite(ops)
+                        if Self::strict_refusal(inner, ops).is_some() => {}
+                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite(ops) => {
                         let results = Self::replay_write_batch(inner, &schema, ops).map_err(
                             |(index, code)| JournalError::Replay {
                                 batch: batch_index,
@@ -478,6 +483,99 @@ impl EntityConnectionStore {
             results.push(Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?);
         }
         Ok(results)
+    }
+
+    /// `STC-FR-001` (ADR-0133): the first op of `ops` that would end soft
+    /// against `inner` plus the batch's own earlier ops — see
+    /// [`crate::server::strict`]. Run inside the exclusive section, so it
+    /// cannot go stale before the apply.
+    fn strict_refusal(
+        inner: &EntityProductionStack,
+        ops: &[WriteOp],
+    ) -> Option<(usize, ErrorCode)> {
+        use crate::generic::query::MultiNeighbors;
+        use crate::server::strict::first_soft_failure;
+        first_soft_failure(
+            ops,
+            &|id| GetById::<Entity>::get(inner, id).map(Self::fields_of),
+            &|left, right, relation| {
+                MultiNeighbors::<Entity>::neighbors_by_relation(inner, relation, left)
+                    .is_some_and(|near| near.contains(&right))
+            },
+        )
+    }
+
+    fn write_batch_impl(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+        strict: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
+        }
+        let schema = self.describe();
+        let mut prepared = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
+        }
+        let apply = |inner: &mut EntityProductionStack| {
+            if strict {
+                if let Some(refused) = Self::strict_refusal(inner, ops) {
+                    return Err(refused);
+                }
+            }
+            for (i, p) in prepared.iter().enumerate() {
+                if let PreparedWrite::Link { left, .. } = p {
+                    if GetById::<Entity>::get(inner, *left).is_none() {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+            }
+            let mut results = Vec::with_capacity(prepared.len());
+            for (i, p) in prepared.into_iter().enumerate() {
+                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
+            }
+            self.mvcc_record_write_ops(ops, &results);
+            Ok(results)
+        };
+        match &self.journal {
+            // See `MemoryConnectionStore::write_batch`: no journal means no
+            // checkpoint boundary, so this atomic batch flushes MVCC
+            // history immediately.
+            None => self.store.with_exclusive(|inner| {
+                let results = apply(inner)?;
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
+                Ok(results)
+            }),
+            Some(journal) => {
+                let results_cell: std::cell::RefCell<Option<Vec<WriteResult>>> =
+                    std::cell::RefCell::new(None);
+                let step = |turn: crate::server::journal::Turn| {
+                    self.store.with_exclusive(|inner| {
+                        let results = apply(inner)?;
+                        *results_cell.borrow_mut() = Some(results);
+                        Ok(turn.checkpoint_due
+                            && inner.checkpoint_flush().is_ok()
+                            && self.mvcc_flush_now(turn.journal_entries))
+                    })
+                };
+                let committed = if strict {
+                    journal.commit_strict_write(ops, step)
+                } else {
+                    journal.commit_write(ops, step)
+                };
+                committed.map_err(|e| match e {
+                    CommitError::Journal(_) => (0, ErrorCode::Journal),
+                    CommitError::Apply(e) => e,
+                })?;
+                Ok(results_cell
+                    .into_inner()
+                    .expect("commit_write's apply closure always sets results_cell on Ok"))
+            }
+        }
     }
 
     /// This domain's `DomainSchema`, without an instance — needed at
@@ -758,6 +856,10 @@ impl EntityConnectionStore {
                 | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
                     Some((*id, (!deletes.contains(id)).then(|| fields.clone())))
                 }
+                // `TXS-FR-001`: an update records the one field it wrote.
+                (WriteOp::UpdateField { id, field, value }, WriteResult::Updated) => {
+                    Some((*id, Some(vec![(*field, value.clone())])))
+                }
                 (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, None)),
                 _ => None,
             })
@@ -821,6 +923,8 @@ enum PreparedWrite {
     Replace(Entity),
     ReplaceIf(Entity, Predicate),
     Delete(RecordId),
+    /// `TXS-FR-001` (ADR-0130): one pre-validated field update.
+    Update(TransactionOp),
     Link {
         left: RecordId,
         right: RecordId,
@@ -845,6 +949,18 @@ impl EntityConnectionStore {
                 )
             }
             WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            // `TXS-FR-001` (ADR-0130): the field, kind and read-only rule of
+            // `UpdateField`; the record's existence is the apply step's.
+            WriteOp::UpdateField { id, field, value } => {
+                let op = TransactionOp {
+                    id: *id,
+                    field: *field,
+                    value: value.clone(),
+                };
+                Self::validate_batch(std::slice::from_ref(&op), |_| true)
+                    .map_err(|(_, code)| code)?;
+                PreparedWrite::Update(op)
+            }
             WriteOp::Link {
                 left,
                 right,
@@ -894,6 +1010,13 @@ impl EntityConnectionStore {
                     }
                 }
             }
+            PreparedWrite::Update(op) => {
+                match Self::apply_batch(inner, std::slice::from_ref(&op)) {
+                    Ok(()) => WriteResult::Updated,
+                    Err((_, ErrorCode::RecordNotFound)) => WriteResult::NotFound,
+                    Err((_, code)) => return Err(code),
+                }
+            }
             PreparedWrite::Delete(id) => match Delete::<Entity>::delete(inner, id) {
                 Ok(()) => WriteResult::Deleted,
                 Err(DeleteError::NotFound(_)) => WriteResult::NotFound,
@@ -935,6 +1058,11 @@ impl ConnectionStore for EntityConnectionStore {
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect()
+    }
+
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.all_ids::<Entity>().len())
     }
 
     /// `PAG-FR-002` (ADR-0055): the sort key of every record read
@@ -1263,62 +1391,16 @@ impl ConnectionStore for EntityConnectionStore {
         ops: &[WriteOp],
         atomic: bool,
     ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
-        if !atomic {
-            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
-        }
-        let schema = self.describe();
-        let mut prepared = Vec::with_capacity(ops.len());
-        for (i, op) in ops.iter().enumerate() {
-            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
-        }
-        let apply = |inner: &mut EntityProductionStack| {
-            for (i, p) in prepared.iter().enumerate() {
-                if let PreparedWrite::Link { left, .. } = p {
-                    if GetById::<Entity>::get(inner, *left).is_none() {
-                        return Err((i, ErrorCode::RecordNotFound));
-                    }
-                }
-            }
-            let mut results = Vec::with_capacity(prepared.len());
-            for (i, p) in prepared.into_iter().enumerate() {
-                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
-            }
-            self.mvcc_record_write_ops(ops, &results);
-            Ok(results)
-        };
-        match &self.journal {
-            // See `MemoryConnectionStore::write_batch`: no journal means no
-            // checkpoint boundary, so this atomic batch flushes MVCC
-            // history immediately.
-            None => self.store.with_exclusive(|inner| {
-                let results = apply(inner)?;
-                if !self.mvcc_flush_now(0) {
-                    return Err((0, ErrorCode::Storage));
-                }
-                Ok(results)
-            }),
-            Some(journal) => {
-                let results_cell: std::cell::RefCell<Option<Vec<WriteResult>>> =
-                    std::cell::RefCell::new(None);
-                journal
-                    .commit_write(ops, |turn| {
-                        self.store.with_exclusive(|inner| {
-                            let results = apply(inner)?;
-                            *results_cell.borrow_mut() = Some(results);
-                            Ok(turn.checkpoint_due
-                                && inner.checkpoint_flush().is_ok()
-                                && self.mvcc_flush_now(turn.journal_entries))
-                        })
-                    })
-                    .map_err(|e| match e {
-                        CommitError::Journal(_) => (0, ErrorCode::Journal),
-                        CommitError::Apply(e) => e,
-                    })?;
-                Ok(results_cell
-                    .into_inner()
-                    .expect("commit_write's apply closure always sets results_cell on Ok"))
-            }
-        }
+        self.write_batch_impl(ops, atomic, false)
+    }
+
+    fn strict_commit_supported(&self) -> bool {
+        true
+    }
+
+    /// `STC-FR-001` (ADR-0133): all or nothing, soft outcomes included.
+    fn write_batch_strict(&self, ops: &[WriteOp]) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        self.write_batch_impl(ops, true, true)
     }
 
     fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {

@@ -64,13 +64,13 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | GET, PATCH, DELETE | `/api/v1/tasks/{id}` | PATCH: absent = keep, `"dueMs":null` = clear; delete removes subtasks |
 | POST | `/api/v1/tasks/{id}/complete`, `/reopen` | |
 | PUT | `/api/v1/tasks/{id}/order` | `{"sortOrder": n}`: one durable slot write |
-| GET | `/api/v1/search?q=` | whole-word match on title and notes (no prefix search yet) |
+| GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`) |
 | GET | `/api/v1/tags/{tag}/tasks` | |
 | GET | `/api/v1/smart/today`, `/next7`, `/overdue` | `?utcOffsetMin=` (default 0); open tasks in non-archived lists |
 
 Priority is 0, 1, 3 or 5. Times are Unix milliseconds. Subtasks nest one level
-and stay in their parent's list. Not yet: moving a task between lists,
-recurrence, reminders, accounts.
+and stay in their parent's list (moving a parent moves them). Not yet:
+recurrence, reminders.
 
 ## Layout
 

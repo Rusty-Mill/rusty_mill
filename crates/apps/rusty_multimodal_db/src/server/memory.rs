@@ -22,6 +22,7 @@ use super::journal::{
     ReplayedBatch,
 };
 use super::mvcc::{self, MvccIndex, MvccState, TxnId};
+use super::nullable::NullableField;
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
@@ -62,6 +63,20 @@ pub const FIELD_ACCESS_COUNT: FieldRef = 10;
 pub const FIELD_DELETED_AT: FieldRef = 11;
 /// `SYN-FR-001` (ADR-0056): the writing node; `""` is unattributed.
 pub const FIELD_NODE_ID: FieldRef = 12;
+
+/// `NLC-FR-001` (ADR-0128): the two columns `ADR-0056` stores as a
+/// sentinel, shown as `NULL` to a connection at protocol 32 or above. Both
+/// sentinels are lossless: no real record holds them.
+static NULLABLE_FIELDS: [NullableField; 2] = [
+    NullableField {
+        tag: FIELD_DELETED_AT,
+        sentinel: ScanValue::I64(0),
+    },
+    NullableField {
+        tag: FIELD_NODE_ID,
+        sentinel: ScanValue::Str(String::new()),
+    },
+];
 
 /// Every field but `access_count`: refused by `UpdateField`
 /// (`MEM-FR-004`) — changed only whole, with every other field, through
@@ -486,7 +501,12 @@ impl MemoryConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    JournaledBatch::Write(ops) => {
+                    // `STC-FR-002`: a strict batch the live check refused was
+                    // never applied; the same check on the same pre-state
+                    // refuses it again, so replay skips it.
+                    JournaledBatch::StrictWrite(ops)
+                        if Self::strict_refusal(inner, ops).is_some() => {}
+                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite(ops) => {
                         let results = Self::replay_write_batch(inner, &schema, ops).map_err(
                             |(index, code)| JournalError::Replay {
                                 batch: batch_index,
@@ -542,6 +562,111 @@ impl MemoryConnectionStore {
             results.push(Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?);
         }
         Ok(results)
+    }
+
+    /// `STC-FR-001` (ADR-0133): the first op of `ops` that would end soft
+    /// against `inner` plus the batch's own earlier ops — see
+    /// [`crate::server::strict`]. Run inside the exclusive section, so it
+    /// cannot go stale before the apply.
+    fn strict_refusal(
+        inner: &MemoryProductionStack,
+        ops: &[WriteOp],
+    ) -> Option<(usize, ErrorCode)> {
+        use crate::generic::query::MultiNeighbors;
+        use crate::server::strict::first_soft_failure;
+        first_soft_failure(
+            ops,
+            &|id| GetById::<Memory>::get(inner, id).map(Self::fields_of),
+            &|left, right, relation| {
+                MultiNeighbors::<Memory>::neighbors_by_relation(inner, relation, left)
+                    .is_some_and(|near| near.contains(&right))
+            },
+        )
+    }
+
+    fn write_batch_impl(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+        strict: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
+        }
+        let schema = self.describe();
+        let mut prepared = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
+        }
+        let apply = |inner: &mut MemoryProductionStack| {
+            if strict {
+                if let Some(refused) = Self::strict_refusal(inner, ops) {
+                    return Err(refused);
+                }
+            }
+            for (i, p) in prepared.iter().enumerate() {
+                if let PreparedWrite::Link { left, .. } = p {
+                    if GetById::<Memory>::get(inner, *left).is_none() {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+            }
+            let mut results = Vec::with_capacity(prepared.len());
+            for (i, p) in prepared.into_iter().enumerate() {
+                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
+            }
+            // `ADR-0072`'s `MVCC2-FR-002`/`008`: an atomic `WriteBatch` is
+            // one unit — one txn id for the whole batch, assigned here,
+            // inside the same exclusive section, immediately after every
+            // op in it has actually applied.
+            self.mvcc_record_write_ops(ops, &results);
+            Ok(results)
+        };
+        match &self.journal {
+            // `WBJ-FR-004`: no journal, no change from before ADR-0063,
+            // except `ADR-0072`'s `MVCC2-FR-010`: with no checkpoint
+            // boundary to piggyback on, every MVCC-recording batch flushes
+            // immediately after `apply` records it, still inside the same
+            // exclusive section.
+            None => self.store.with_exclusive(|inner| {
+                let results = apply(inner)?;
+                if !self.mvcc_flush_now(0) {
+                    return Err((0, ErrorCode::Storage));
+                }
+                Ok(results)
+            }),
+            // `WBJ-FR-002` (ADR-0063): journal the raw, already-validated
+            // `ops` before applying — a crash after the journal `fsync`
+            // but before/during apply replays cleanly (`WBJ-FR-003`).
+            // The apply closure's own results escape via `results_cell`
+            // since `CommitGroup::commit_write`'s own contract only
+            // reports whether a checkpoint happened, not arbitrary data.
+            Some(journal) => {
+                let results_cell: std::cell::RefCell<Option<Vec<WriteResult>>> =
+                    std::cell::RefCell::new(None);
+                let step = |turn: crate::server::journal::Turn| {
+                    self.store.with_exclusive(|inner| {
+                        let results = apply(inner)?;
+                        *results_cell.borrow_mut() = Some(results);
+                        Ok(turn.checkpoint_due
+                            && inner.checkpoint_flush().is_ok()
+                            && self.mvcc_flush_now(turn.journal_entries))
+                    })
+                };
+                let committed = if strict {
+                    journal.commit_strict_write(ops, step)
+                } else {
+                    journal.commit_write(ops, step)
+                };
+                committed.map_err(|e| match e {
+                    CommitError::Journal(_) => (0, ErrorCode::Journal),
+                    CommitError::Apply(e) => e,
+                })?;
+                Ok(results_cell
+                    .into_inner()
+                    .expect("commit_write's apply closure always sets results_cell on Ok"))
+            }
+        }
     }
 
     /// This domain's `DomainSchema`, without an instance — needed at
@@ -921,6 +1046,10 @@ impl MemoryConnectionStore {
                 | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
                     Some((*id, (!deletes.contains(id)).then(|| fields.clone())))
                 }
+                // `TXS-FR-001`: an update records the one field it wrote.
+                (WriteOp::UpdateField { id, field, value }, WriteResult::Updated) => {
+                    Some((*id, Some(vec![(*field, value.clone())])))
+                }
                 (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, None)),
                 _ => None,
             })
@@ -980,6 +1109,8 @@ enum PreparedWrite {
     Replace(Memory),
     ReplaceIf(Memory, Predicate),
     Delete(RecordId),
+    /// `TXS-FR-001` (ADR-0130): one pre-validated field update.
+    Update(TransactionOp),
     Link {
         left: RecordId,
         right: RecordId,
@@ -1008,6 +1139,18 @@ impl MemoryConnectionStore {
                 )
             }
             WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            // `TXS-FR-001` (ADR-0130): the field, kind and read-only rule of
+            // `UpdateField`; the record's existence is the apply step's.
+            WriteOp::UpdateField { id, field, value } => {
+                let op = TransactionOp {
+                    id: *id,
+                    field: *field,
+                    value: value.clone(),
+                };
+                Self::validate_batch(std::slice::from_ref(&op), |_| true)
+                    .map_err(|(_, code)| code)?;
+                PreparedWrite::Update(op)
+            }
             WriteOp::Link {
                 left,
                 right,
@@ -1061,6 +1204,13 @@ impl MemoryConnectionStore {
                     }
                 }
             }
+            PreparedWrite::Update(op) => {
+                match Self::apply_batch(inner, std::slice::from_ref(&op)) {
+                    Ok(()) => WriteResult::Updated,
+                    Err((_, ErrorCode::RecordNotFound)) => WriteResult::NotFound,
+                    Err((_, code)) => return Err(code),
+                }
+            }
             PreparedWrite::Delete(id) => match Delete::<Memory>::delete(inner, id) {
                 Ok(()) => WriteResult::Deleted,
                 Err(DeleteError::NotFound(_)) => WriteResult::NotFound,
@@ -1096,12 +1246,22 @@ impl ConnectionStore for MemoryConnectionStore {
 
     /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,
     /// each mapped through this adapter's own `get`.
+    /// `NLC-FR-001` (ADR-0128): `deleted_at_unix_ms` and `node_id`.
+    fn nullable_fields(&self) -> &[NullableField] {
+        &NULLABLE_FIELDS
+    }
+
     fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
         self.store
             .all_ids::<Memory>()
             .into_iter()
             .filter_map(|id| self.get(id).map(|fields| (id, fields)))
             .collect()
+    }
+
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.all_ids::<Memory>().len())
     }
 
     /// `ORD-FR-005` (ADR-0059): a page ordered by `updated_at_unix_ms`
@@ -1611,74 +1771,16 @@ impl ConnectionStore for MemoryConnectionStore {
         ops: &[WriteOp],
         atomic: bool,
     ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
-        if !atomic {
-            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
-        }
-        let schema = self.describe();
-        let mut prepared = Vec::with_capacity(ops.len());
-        for (i, op) in ops.iter().enumerate() {
-            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
-        }
-        let apply = |inner: &mut MemoryProductionStack| {
-            for (i, p) in prepared.iter().enumerate() {
-                if let PreparedWrite::Link { left, .. } = p {
-                    if GetById::<Memory>::get(inner, *left).is_none() {
-                        return Err((i, ErrorCode::RecordNotFound));
-                    }
-                }
-            }
-            let mut results = Vec::with_capacity(prepared.len());
-            for (i, p) in prepared.into_iter().enumerate() {
-                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
-            }
-            // `ADR-0072`'s `MVCC2-FR-002`/`008`: an atomic `WriteBatch` is
-            // one unit — one txn id for the whole batch, assigned here,
-            // inside the same exclusive section, immediately after every
-            // op in it has actually applied.
-            self.mvcc_record_write_ops(ops, &results);
-            Ok(results)
-        };
-        match &self.journal {
-            // `WBJ-FR-004`: no journal, no change from before ADR-0063,
-            // except `ADR-0072`'s `MVCC2-FR-010`: with no checkpoint
-            // boundary to piggyback on, every MVCC-recording batch flushes
-            // immediately after `apply` records it, still inside the same
-            // exclusive section.
-            None => self.store.with_exclusive(|inner| {
-                let results = apply(inner)?;
-                if !self.mvcc_flush_now(0) {
-                    return Err((0, ErrorCode::Storage));
-                }
-                Ok(results)
-            }),
-            // `WBJ-FR-002` (ADR-0063): journal the raw, already-validated
-            // `ops` before applying — a crash after the journal `fsync`
-            // but before/during apply replays cleanly (`WBJ-FR-003`).
-            // The apply closure's own results escape via `results_cell`
-            // since `CommitGroup::commit_write`'s own contract only
-            // reports whether a checkpoint happened, not arbitrary data.
-            Some(journal) => {
-                let results_cell: std::cell::RefCell<Option<Vec<WriteResult>>> =
-                    std::cell::RefCell::new(None);
-                journal
-                    .commit_write(ops, |turn| {
-                        self.store.with_exclusive(|inner| {
-                            let results = apply(inner)?;
-                            *results_cell.borrow_mut() = Some(results);
-                            Ok(turn.checkpoint_due
-                                && inner.checkpoint_flush().is_ok()
-                                && self.mvcc_flush_now(turn.journal_entries))
-                        })
-                    })
-                    .map_err(|e| match e {
-                        CommitError::Journal(_) => (0, ErrorCode::Journal),
-                        CommitError::Apply(e) => e,
-                    })?;
-                Ok(results_cell
-                    .into_inner()
-                    .expect("commit_write's apply closure always sets results_cell on Ok"))
-            }
-        }
+        self.write_batch_impl(ops, atomic, false)
+    }
+
+    fn strict_commit_supported(&self) -> bool {
+        true
+    }
+
+    /// `STC-FR-001` (ADR-0133): all or nothing, soft outcomes included.
+    fn write_batch_strict(&self, ops: &[WriteOp]) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        self.write_batch_impl(ops, true, true)
     }
 
     fn count_edges(&self, relation: &str) -> Result<u64, ErrorCode> {
@@ -3791,6 +3893,253 @@ mod tests {
             std::fs::metadata(&journal).unwrap().len(),
             header_len,
             "checkpointed after replay"
+        );
+    }
+
+    /// `TXS-FR-001`/`004` (ADR-0130): a batch mixing a record write and a
+    /// field update is one journal entry and replays whole — the insert and
+    /// the update both land after a crash right after the `fsync`; an update
+    /// of a record the batch did not find is a soft `NotFound`, applied
+    /// beside the rest.
+    #[test]
+    fn a_mixed_batch_with_an_update_is_crash_atomic_via_the_journal() {
+        let dir = fresh_temp_dir("server_memory_mixed_batch_journal").unwrap();
+        let seed = || vec![memory(1, "general", false), memory(2, "preference", false)];
+        let journal = dir.join("mixed.journal");
+
+        let path_a = dir.join("a.mmap");
+        let stack_a = create_memory_production_stack(seed(), &[], &path_a).unwrap();
+        let adapter =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_a), &journal)
+                .unwrap();
+        let ops = vec![
+            WriteOp::Insert {
+                id: Uuid::from_u128(10),
+                fields: full_fields(10),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(10),
+                field: FIELD_ACCESS_COUNT,
+                value: ScanValue::I64(4),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_ACCESS_COUNT,
+                value: ScanValue::I64(7),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(99),
+                field: FIELD_ACCESS_COUNT,
+                value: ScanValue::I64(1),
+            },
+        ];
+        assert_eq!(
+            adapter.write_batch(&ops, true).unwrap(),
+            vec![
+                WriteResult::Inserted,
+                WriteResult::Updated,
+                WriteResult::Updated,
+                WriteResult::NotFound,
+            ]
+        );
+        // A bad update is refused before anything is applied or journaled.
+        let bad = [
+            WriteOp::Insert {
+                id: Uuid::from_u128(11),
+                fields: full_fields(11),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_CONTENT,
+                value: ScanValue::Str("x".into()),
+            },
+        ];
+        assert_eq!(
+            adapter.write_batch(&bad, true),
+            Err((1, ErrorCode::Unsupported))
+        );
+        assert!(
+            adapter.get(Uuid::from_u128(11)).is_none(),
+            "nothing applied"
+        );
+        drop(adapter);
+
+        let path_b = dir.join("b.mmap");
+        let stack_b = create_memory_production_stack(seed(), &[], &path_b).unwrap();
+        let replayed =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_b), &journal)
+                .unwrap();
+        let count = |n: u128| {
+            replayed
+                .get(Uuid::from_u128(n))
+                .unwrap()
+                .into_iter()
+                .find(|(f, _)| *f == FIELD_ACCESS_COUNT)
+                .unwrap()
+                .1
+        };
+        assert_eq!(
+            count(10),
+            ScanValue::I64(4),
+            "the update of the inserted record"
+        );
+        assert_eq!(count(1), ScanValue::I64(7), "the update of a seeded record");
+        assert!(replayed.get(Uuid::from_u128(11)).is_none());
+    }
+
+    /// `STC-FR-001` (ADR-0133): the strict check predicts exactly what the
+    /// apply step would answer. Random op lists over six ids (inserts,
+    /// replaces, guarded replaces, updates, deletes, links) go through the
+    /// check on one store and, op by op, through the real apply on an
+    /// identical one; the check's first soft failure is the apply's first
+    /// soft (or hard) outcome, the same index and the same code.
+    #[test]
+    fn the_strict_check_predicts_the_apply_step_s_first_soft_outcome() {
+        use crate::server::protocol::{CompareOp, Predicate};
+        let dir = fresh_temp_dir("server_memory_strict_property").unwrap();
+        let seed = || vec![memory(1, "general", false), memory(2, "preference", false)];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        for round in 0..200 {
+            let oracle = MemoryConnectionStore::new(GenericProductionStore::new(
+                create_memory_production_stack(
+                    seed(),
+                    &[],
+                    &dir.join(format!("oracle{round}.mmap")),
+                )
+                .unwrap(),
+            ));
+            let checked = MemoryConnectionStore::new(GenericProductionStore::new(
+                create_memory_production_stack(
+                    seed(),
+                    &[],
+                    &dir.join(format!("checked{round}.mmap")),
+                )
+                .unwrap(),
+            ));
+            let ops: Vec<WriteOp> = (0..1 + next(7))
+                .map(|_| {
+                    let id = Uuid::from_u128(1 + next(6) as u128);
+                    match next(6) {
+                        0 => WriteOp::Insert {
+                            id,
+                            fields: full_fields(1),
+                        },
+                        1 => WriteOp::Replace {
+                            id,
+                            fields: full_fields(1),
+                        },
+                        2 => WriteOp::ReplaceIf {
+                            id,
+                            fields: full_fields(1),
+                            guard: Predicate {
+                                field: FIELD_ACCESS_COUNT,
+                                op: CompareOp::Eq,
+                                value: ScanValue::I64(next(2) as i64 * 3),
+                            },
+                        },
+                        3 => WriteOp::UpdateField {
+                            id,
+                            field: FIELD_ACCESS_COUNT,
+                            value: ScanValue::I64(next(2) as i64 * 3),
+                        },
+                        4 => WriteOp::Delete { id },
+                        _ => WriteOp::Link {
+                            left: id,
+                            right: Uuid::from_u128(1 + next(6) as u128),
+                            relation: "mentions".into(),
+                        },
+                    }
+                })
+                .collect();
+            let predicted = checked
+                .store
+                .with_exclusive(|inner| MemoryConnectionStore::strict_refusal(inner, &ops));
+            let actual =
+                ops.iter()
+                    .enumerate()
+                    .find_map(|(i, op)| match oracle.apply_write_op(op) {
+                        WriteResult::Duplicate | WriteResult::AlreadyLinked => {
+                            Some((i, ErrorCode::Duplicate))
+                        }
+                        WriteResult::NotFound => Some((i, ErrorCode::RecordNotFound)),
+                        WriteResult::GuardFailed => Some((i, ErrorCode::GuardFailed)),
+                        WriteResult::Failed(code) => Some((i, code)),
+                        _ => None,
+                    });
+            assert_eq!(predicted, actual, "round {round}: {ops:?}");
+        }
+    }
+
+    /// `STC-FR-002` (ADR-0133): a strict batch is all or nothing, and the
+    /// journal agrees. A batch with one soft op applies nothing and leaves
+    /// the store as it was; the entry it left in the journal is skipped on
+    /// replay rather than applied loosely; a clean strict batch replays whole.
+    #[test]
+    fn a_strict_batch_is_all_or_nothing_and_replay_honours_it() {
+        let dir = fresh_temp_dir("server_memory_strict_journal").unwrap();
+        let seed = || vec![memory(1, "general", false)];
+        let journal = dir.join("strict.journal");
+        let path_a = dir.join("a.mmap");
+        let stack_a = create_memory_production_stack(seed(), &[], &path_a).unwrap();
+        let adapter =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_a), &journal)
+                .unwrap();
+        let insert = |n: u128| WriteOp::Insert {
+            id: Uuid::from_u128(n),
+            fields: full_fields(n),
+        };
+        // 10 is new, 1 already exists: the second op is soft.
+        assert_eq!(
+            adapter.write_batch_strict(&[insert(10), insert(1)]),
+            Err((1, ErrorCode::Duplicate))
+        );
+        assert!(
+            adapter.get(Uuid::from_u128(10)).is_none(),
+            "nothing applied"
+        );
+        // Loose apply of the same list is unchanged: 10 applies beside the soft 1.
+        assert_eq!(
+            adapter.write_batch(&[insert(11), insert(1)], true).unwrap(),
+            vec![WriteResult::Inserted, WriteResult::Duplicate]
+        );
+        // A clean strict batch, insert then update the new record.
+        assert_eq!(
+            adapter
+                .write_batch_strict(&[
+                    insert(12),
+                    WriteOp::UpdateField {
+                        id: Uuid::from_u128(12),
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(5),
+                    },
+                ])
+                .unwrap(),
+            vec![WriteResult::Inserted, WriteResult::Updated]
+        );
+        drop(adapter);
+
+        let path_b = dir.join("b.mmap");
+        let stack_b = create_memory_production_stack(seed(), &[], &path_b).unwrap();
+        let replayed =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_b), &journal)
+                .unwrap();
+        assert!(
+            replayed.get(Uuid::from_u128(10)).is_none(),
+            "the refused strict batch is skipped, not applied loosely"
+        );
+        assert!(
+            replayed.get(Uuid::from_u128(11)).is_some(),
+            "the loose batch"
+        );
+        assert!(
+            replayed.get(Uuid::from_u128(12)).is_some(),
+            "the clean strict batch"
         );
     }
 }

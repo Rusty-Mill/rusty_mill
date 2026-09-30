@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: type-ahead search
+**2026-09-30**
+
+- **Changed:** `GET /api/v1/search?q=` treats each term as a prefix (`grocer` finds `groceries`), using the engine's `Query::any_of_prefix`. Terms are still alternatives; a prefix, not a substring.
+- **Docs:** README no longer lists moving a task between lists or accounts as missing (both exist); `docs/FUTURE-GROWTH.md` records what the `rusty_tick` spike (#382) changed in the engine.
+- Known limitation: finding prefix terms scans the index vocabulary, fine for a task corpus and a cost to weigh for a very large one.
+
+---
+
 ## rusty_tick: `user adopt`, and `user` commands no longer race
 **2026-09-30** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
 

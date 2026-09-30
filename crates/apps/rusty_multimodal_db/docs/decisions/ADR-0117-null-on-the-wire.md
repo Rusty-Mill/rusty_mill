@@ -10,7 +10,7 @@
   for stripping a value variant below its version), `ADR-0022` (the
   compatibility rules), `ADR-0043` (the Python client and the wire
   vectors).
-- Supersedes/Superseded by: none. Additive: `ScanValue::Null` (6).
+- Supersedes/Superseded by: none; its deferred nullable-field part is `ADR-0128`. Additive: `ScanValue::Null` (6).
 
 ## Context
 

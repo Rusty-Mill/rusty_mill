@@ -31,7 +31,7 @@ unchanged (`LIM-FR-006`).
 
 - **An error frame for a refused accept.** Nothing is written; the
   client sees EOF. A `Busy` code would be a protocol round.
-- **Capping `Aggregate`/`Join`/`Compact`.** Their cost is the scan or
+- **Capping `Aggregate`/`Join`/`Compact`.** (`Aggregate`/`Join` since `ADR-0126`.) Their cost is the scan or
   the rewrite, not the reply; a scan budget is a planner question.
 - **Defaults on.** The fork for the owner; here every limit is opt-in.
 - **Graceful drain / shutdown.** Still `ADR-0010`'s non-goal.
