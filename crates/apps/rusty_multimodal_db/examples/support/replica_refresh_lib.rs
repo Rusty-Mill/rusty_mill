@@ -469,6 +469,27 @@ pub fn read_position(dir: &Path) -> io::Result<Position> {
     }
 }
 
+/// The first failed op of a replayed batch that means divergence. A `Link`
+/// that fails `RecordNotFound` is not one when a later op of the same batch
+/// deletes an endpoint: the batch was applied before, up to a crash ahead
+/// of the position write, and its final state holds no such edge (review
+/// 2.3, R2). Any other failure is real.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub fn first_real_failure(ops: &[WriteOp], results: &[WriteResult]) -> Option<(usize, ErrorCode)> {
+    results.iter().enumerate().find_map(|(i, r)| {
+        let WriteResult::Failed(code) = r else {
+            return None;
+        };
+        let moot = match (&ops[i], code) {
+            (WriteOp::Link { left, right, .. }, ErrorCode::RecordNotFound) => ops[i + 1..]
+                .iter()
+                .any(|later| matches!(later, WriteOp::Delete { id } if id == left || id == right)),
+            _ => false,
+        };
+        (!moot).then_some((i, *code))
+    })
+}
+
 #[cfg(feature = "server")]
 mod follow_impl {
     use super::*;
@@ -512,25 +533,32 @@ mod follow_impl {
     }
 
     impl Applier {
+        /// Every applied op is durable when `apply` returns — inserts,
+        /// replaces, deletes and links through their synced logs, in-place
+        /// field updates through `with_synced_updates` — so the position
+        /// written after it never runs ahead of the data (review 2.3, R1).
         fn open(dir: &Path, domain: Domain) -> Result<Self, FollowError> {
             let stem = dir.join(domain.stem());
             let open = |e: DurabilityError| FollowError::Open(e.to_string());
             Ok(match domain {
-                Domain::Memory => {
-                    Self::Memory(MemoryConnectionStore::new(GenericProductionStore::new(
+                Domain::Memory => Self::Memory(
+                    MemoryConnectionStore::new(GenericProductionStore::new(
                         open_memory_production_stack_portable(&stem).map_err(open)?,
-                    )))
-                }
-                Domain::Entity => {
-                    Self::Entity(EntityConnectionStore::new(GenericProductionStore::new(
+                    ))
+                    .with_synced_updates(true),
+                ),
+                Domain::Entity => Self::Entity(
+                    EntityConnectionStore::new(GenericProductionStore::new(
                         open_entity_production_stack_portable(&stem).map_err(open)?,
-                    )))
-                }
-                Domain::Relation => {
-                    Self::Relation(RelationConnectionStore::new(GenericProductionStore::new(
+                    ))
+                    .with_synced_updates(true),
+                ),
+                Domain::Relation => Self::Relation(
+                    RelationConnectionStore::new(GenericProductionStore::new(
                         open_relation_production_stack_portable(&stem).map_err(open)?,
-                    )))
-                }
+                    ))
+                    .with_synced_updates(true),
+                ),
             })
         }
 
@@ -546,11 +574,8 @@ mod follow_impl {
                 Self::Relation(s) => s.write_batch(ops, false),
             };
             match results {
-                Ok(results) => match results.iter().find_map(|r| match r {
-                    WriteResult::Failed(code) => Some(*code),
-                    _ => None,
-                }) {
-                    Some(code) => Err(FollowError::Apply(format!("{code:?}"))),
+                Ok(results) => match first_real_failure(ops, &results) {
+                    Some((i, code)) => Err(FollowError::Apply(format!("op {i}: {code:?}"))),
                     None => Ok(()),
                 },
                 Err((i, code)) => Err(FollowError::Apply(format!("op {i}: {code:?}"))),

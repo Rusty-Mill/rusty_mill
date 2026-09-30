@@ -111,6 +111,14 @@ struct Inner {
     offsets: Vec<u64>,
     len: u64,
     retain_bytes: u64,
+    /// Set when an append failed after its write was applied: the log no
+    /// longer holds the table's whole history, and the file may be torn
+    /// mid-record. Writes, fetches and a clean close are refused from then
+    /// on, so the next open is a new epoch and every standby resyncs.
+    poisoned: bool,
+    /// Tests only: the next append fails, as a full disk would.
+    #[cfg(test)]
+    fail_next_append: bool,
 }
 
 /// A header for a log that is open (the clean flag clear).
@@ -239,6 +247,9 @@ impl ChangeLog {
                 offsets,
                 len,
                 retain_bytes,
+                poisoned: false,
+                #[cfg(test)]
+                fail_next_append: false,
             }),
         }
     }
@@ -256,16 +267,25 @@ impl ChangeLog {
     /// entry (`fsync`ed) before returning — all under the lock, so the log's
     /// order is the apply order. `apply` returns its own result and the ops
     /// that took effect (`None`/empty: nothing to record). An append failure
-    /// is `Err(Storage)`: the write is applied and not logged, which the
-    /// next open turns into a new epoch (a standby resyncs).
+    /// is `Err(Storage)`: the write is applied and not logged. It poisons
+    /// the log: every later commit is `Storage` without running `apply`,
+    /// fetches are `Storage`, and [`Self::close_clean`] refuses, so the next
+    /// open is a new epoch and every standby resyncs. Continuing would
+    /// present a history with a hole in it as whole.
     pub fn commit<R>(
         &self,
         apply: impl FnOnce() -> (R, Option<Vec<WriteOp>>),
     ) -> Result<R, ErrorCode> {
         let mut inner = self.lock();
+        if inner.poisoned {
+            return Err(ErrorCode::Storage);
+        }
         let (result, ops) = apply();
         if let Some(ops) = ops.filter(|ops| !ops.is_empty()) {
-            inner.append(&ops).map_err(|_| ErrorCode::Storage)?;
+            if inner.append(&ops).is_err() {
+                inner.poisoned = true;
+                return Err(ErrorCode::Storage);
+            }
         }
         Ok(result)
     }
@@ -288,6 +308,9 @@ impl ChangeLog {
         limit: usize,
     ) -> Result<(LogPosition, Vec<Vec<WriteOp>>), ErrorCode> {
         let mut inner = self.lock();
+        if inner.poisoned {
+            return Err(ErrorCode::Storage);
+        }
         let position = inner.position();
         if epoch != position.epoch || after + 1 < position.first {
             return Err(ErrorCode::Gone);
@@ -306,8 +329,14 @@ impl ChangeLog {
 
     /// Say goodbye: a clean-shutdown marker, so the next open continues this
     /// epoch instead of starting a new one.
+    /// Refused on a poisoned log (see [`Self::commit`]).
     pub fn close_clean(&self) -> Result<(), ChangeLogError> {
         let mut inner = self.lock();
+        if inner.poisoned {
+            return Err(ChangeLogError::Format(
+                "an append failed: the log is not whole, so it does not close clean".into(),
+            ));
+        }
         let end = inner.file.stream_position()?;
         inner.file.seek(SeekFrom::Start(CLEAN_FLAG_AT))?;
         inner.file.write_all(&[1])?;
@@ -339,6 +368,10 @@ impl Inner {
     }
 
     fn append(&mut self, ops: &[WriteOp]) -> Result<(), ChangeLogError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_append) {
+            return Err(ChangeLogError::Io(io::Error::other("injected")));
+        }
         let payload = crate::codec::encode(&ops.to_vec())
             .map_err(|e| ChangeLogError::Format(format!("encoding an entry: {e}")))?;
         if payload.len() > MAX_ENTRY_BYTES {
@@ -594,5 +627,38 @@ mod tests {
             ChangeLog::open(&path, DEFAULT_RETAIN_BYTES),
             Err(ChangeLogError::Format(_))
         ));
+    }
+
+    /// Review 2.3 (R3): an append that fails after its write applied
+    /// poisons the log: later writes are refused without applying, fetches
+    /// fail, a clean close is refused, and the next open is a new epoch.
+    #[test]
+    fn a_failed_append_poisons_the_log_until_a_new_epoch() {
+        let d = dir("poison");
+        let path = d.join("t.changes");
+        let log = ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).unwrap();
+        log.commit(|| ((), Some(delete(1)))).unwrap();
+        let epoch = log.position().epoch;
+
+        log.lock().fail_next_append = true;
+        assert_eq!(
+            log.commit(|| ((), Some(delete(2)))),
+            Err(ErrorCode::Storage)
+        );
+        let mut applied = false;
+        assert_eq!(
+            log.commit(|| {
+                applied = true;
+                ((), Some(delete(3)))
+            }),
+            Err(ErrorCode::Storage)
+        );
+        assert!(!applied, "a poisoned log runs no further writes");
+        assert!(matches!(log.since(epoch, 0, 10), Err(ErrorCode::Storage)));
+        assert!(log.close_clean().is_err());
+        drop(log);
+
+        let reopened = ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).unwrap();
+        assert!(reopened.position().epoch > epoch, "standbys must resync");
     }
 }

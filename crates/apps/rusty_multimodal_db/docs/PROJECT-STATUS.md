@@ -494,6 +494,11 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 - Continuous replication, phase 1 (`ADR-0131`) — implemented 2026-09-30, protocol 33 → 34, on the owner's "go with recommendations": a per-table change log (`SERVER_CHANGE_LOG_DIR`), `FetchSince`/`Changes`, `SnapshotAt`, `ErrorCode::Gone`; a standby restores a snapshot at a position and tails to equal the primary. Phase 2 (`replica_refresh --follow`, a position file, resync on `Gone`) and phase 3 (documented manual promotion) are built; `MAX_SNAPSHOT_BYTES` still caps the bootstrap. `SERVER-001` v0.107.0 / `FR-120`, `SERVER-002` 0.23.0.
 - Planner cost model (`ADR-0132`) — decided 2026-09-30, no code: exact counts and two measured constants stay; statistics are not built, with the condition that reopens it named.
 - Strict commit and whole-record read-your-writes (`ADR-0133`) — implemented 2026-09-30, protocol 34 → 35, on the owner's "go with recommendations": `BeginWith` flag `SESSION_STRICT_COMMIT`, an all-or-nothing commit over soft outcomes, journal-safe (a strict entry kind; replay skips a refused batch). Multi-table commit stays deferred until a consumer needs it. `SERVER-001` v0.108.0 / `FR-121`, `SERVER-002` 0.24.0.
+- Strict commit recovery (`ADR-0134`) — 2026-09-30, from the monorepo design review. A strict batch replays only if a synced accepted marker names it, and is then redone whole from any crash prefix. Insert-then-link commits strictly. Journal format 3, version 2 still opens. Fixes a refused batch applying after a restart and a partly applied batch being skipped.
+- Replication recovery fixes (`ADR-0131` follow-up) — 2026-09-30, from the same review:
+  - A failed change-log append poisons the log. Writes and fetches are refused and there is no clean close, so the next open is a new epoch.
+  - `replica_refresh --follow` appliers use synced updates, so the position never runs ahead of the data.
+  - A replayed `Link` whose endpoint the same entry deletes is not treated as divergence.
 
 ## Blocked
 
