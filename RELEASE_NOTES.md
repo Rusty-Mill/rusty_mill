@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Design review Tranche 1: soundness and safe-API contracts
+**2026-09-30** · [#409](https://github.com/Rusty-Mill/rusty_mill/pull/409)
+
+- **Fixed:** `rusty_std` `MutexGuard<Cell<_>>` was `Sync`; it now requires `T: Sync`, and compile-fail doctests cover both guards.
+- **Fixed:** `rusty_sync` channels could report `Disconnected` with the final value still queued.
+- **Fixed:** `rusty_rand` on Windows reported success after a truncated fill of a buffer over 4 GiB.
+- **Fixed:** `kill_single` (Linux, async Linux, Windows) no longer signals a reaped child; it returns `Ok`, like `std`.
+- **Changed (breaking):** `OwnedWinHandle::from_raw` and `rusty_libc::process::process_vm_writev` are now `unsafe fn`.
+- **Docs:** remediation plan at `docs/Monorepo_Reviews/DESIGN-REVIEW-2026-09-30-PLAN.md`.
+
+---
+
 ## rusty_multimodal_db: documentation brought up to date
 **2026-09-30**
 

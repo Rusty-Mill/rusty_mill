@@ -588,6 +588,10 @@ fn linux_wait_any_and_try_wait() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert_eq!(child.try_wait().expect("repoll"), Some(ExitStatus::Code(4)));
+    // Reaped: the pid may be recycled, so no signal is sent (review 1.6).
+    child
+        .kill_single(Signal::Kill)
+        .expect("kill after reap is a no-op");
     assert_eq!(child.wait().expect("wait"), ExitStatus::Code(4));
 
     // wait_any: returns the quick child's index, sleeper still running.
