@@ -43,6 +43,7 @@ Removed / Fixed / Security, newest first.
   - Outgoing frames go through a new `send_frame` instead of the receive path.
   - The dead duplicate `flow.rs` is removed.
 - **Design review Tranche 3 (#419), RDP trust (3.6):** `rusty_rdp`'s TLS connectors take a `TrustPolicy` (breaking). They used to force no certificate verification. Skipping verification now takes the explicitly named `connect_tls_unverified` / `connect_tls_kerberos_unverified`.
+- **Design review Tranche 3 (#419), A2A webhooks (3.6):** `rusty_a2a`'s webhook SSRF filter blocks IPv6 unique-local and other non-global address classes. Its DNS-pinned delivery client no longer follows redirects.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
