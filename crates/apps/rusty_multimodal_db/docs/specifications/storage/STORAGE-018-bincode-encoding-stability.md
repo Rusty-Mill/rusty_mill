@@ -27,7 +27,7 @@ the same configuration is used"*. `ADR-0010` and `SERVER-001` both
 recorded the wire format's cross-version stability as unverified;
 `PROJECT-STATUS` item 33 carried the same open item.
 
-This spec adds one `pub(crate)` module, **`src/codec.rs`**, that
+This spec adds one `pub(crate)` module, **`crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs`**, that
 states the configuration explicitly as a `bincode::Options` value and
 exposes `encode`/`encode_into`/`decode` over it; routes all 23 sites
 through it; pins the resulting bytes with golden vectors captured on
@@ -86,7 +86,7 @@ adds none.
 
 ## Requirements
 
-- `BINENC-FR-001`: `src/codec.rs`, `pub(crate)`, defines the one
+- `BINENC-FR-001`: `crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs`, `pub(crate)`, defines the one
   `bincode::Options` this crate encodes and decodes with (see
   "Context") and exposes `encode<T: Serialize + ?Sized>(&T) ->
   Result<Vec<u8>, bincode::Error>`, `encode_into<W: Write, T:
@@ -101,7 +101,7 @@ adds none.
 - `BINENC-FR-003`: no production code in `src/` calls
   `bincode::serialize`, `deserialize`, `serialize_into`,
   `deserialize_from`, `options()`, or `DefaultOptions` outside
-  `src/codec.rs`; all 23 sites route through the codec. Test modules
+  `crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs`; all 23 sites route through the codec. Test modules
   may use the free functions to *state* an expectation (the codec's
   own equivalence test does).
 - `BINENC-FR-004`: golden tests pin, in `codec.rs`, one vector each for
@@ -111,8 +111,8 @@ adds none.
   `src/server/protocol.rs` (behind `server`), every `Request` and
   `Response` variant with one representative value; in
   `src/durability/record_blob.rs`, one `DOGBLOB\0` body holding one
-  record and one edge; in `src/generic/record_blob.rs`, one `GENBLOB\0`
-  body holding one `Order`; in `src/generic/edge_blob.rs`, one
+  record and one edge; in `crates/libs/storage/rusty_multimodal_db_engine/src/generic/record_blob.rs`, one `GENBLOB\0`
+  body holding one `Order`; in `crates/libs/storage/rusty_multimodal_db_engine/src/generic/edge_blob.rs`, one
   `GENEDGE\0` body holding one `(Uuid, Uuid)` pair. Each asserts
   `encode(&v) == GOLDEN` and that `GOLDEN` decodes back to `v` (by
   `PartialEq` where the type has it, by re-encoding where it does not
@@ -142,7 +142,7 @@ adds none.
 
 ## Architecture and interfaces
 
-- `src/codec.rs` (new, `pub(crate)`): module docs per `BINENC-FR-005`;
+- `crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs` (new, `pub(crate)`): module docs per `BINENC-FR-005`;
   private `fn options() -> impl Options`; `encode`, `encode_into`,
   `decode`. Tests: the primitive/enum/struct/`Uuid` golden vectors
   (7 tests), the trailing-bytes-rejected + free-function-equivalence
@@ -155,7 +155,7 @@ adds none.
   caller]` and printing the actual bytes as a literal on drift.
 - The 23 routed sites, unchanged in behaviour and error mapping:
   `src/server/framing.rs` (`write_message`, `read_message`);
-  `src/generic/record_blob.rs` and `src/generic/edge_blob.rs`
+  `crates/libs/storage/rusty_multimodal_db_engine/src/generic/record_blob.rs` and `crates/libs/storage/rusty_multimodal_db_engine/src/generic/edge_blob.rs`
   (fingerprint via `encode_into` into `Fnv1a64`, `encode` for the
   image, `decode` on read); `src/durability/record_blob.rs` (`encode`,
   `read`, and the test-only `write_legacy_v1`);
@@ -214,7 +214,7 @@ adds none.
 Numbered as in the design document.
 
 1. `grep -rn "bincode::" src --include=*.rs`, outside `#[cfg(test)]`
-   modules, matches only `src/codec.rs` and the two error-type
+   modules, matches only `crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs` and the two error-type
    positions (`FrameError::Encoding(bincode::Error)`,
    `DurabilityError::Serde(bincode::Error)`). ✔ (the routing commit's
    `grep`: those three files only; `codec.rs`'s remaining free-function
@@ -338,7 +338,7 @@ to it:
   buys only a different error cause for files no conforming writer
   produces. No code change, no test change; re-arm trigger recorded.
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
-  implementation (`src/codec.rs`, `src/lib.rs`, the
+  implementation (`crates/libs/storage/rusty_multimodal_db_engine/src/codec.rs`, `src/lib.rs`, the
   `src/test_support.rs` golden helpers, 23 call-site renames across
   `src/server/framing.rs`, the three blob modules, `src/durability/
   {mod,snapshot_rebuild,hybrid,lsm_store}.rs`) and 17 new tests across

@@ -26,6 +26,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_remind_me`'s hub applies each push through it.
 
 ### Changed
+- **`rusty_multimodal_db`: documentation brought up to date** (README, AGENTS, WORKFLOW, architecture, specs, traceability, status, Python client README).
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
