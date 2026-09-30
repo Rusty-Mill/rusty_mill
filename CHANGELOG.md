@@ -35,6 +35,7 @@ Removed / Fixed / Security, newest first.
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
   - Neither can write through a symlink out of its allowed folder.
+- **Design review Tranche 3 (#419), redirect credentials (3.3):** `rusty_request` now drops a caller-set `Cookie` and `Proxy-Authorization`, as well as `Authorization`, when a redirect leaves the origin. Buffered and streaming sends share one redirect policy.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
