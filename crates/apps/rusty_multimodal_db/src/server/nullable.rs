@@ -5,10 +5,10 @@
 //! `deleted_at_unix_ms`: `0`, `node_id`: `""`, `ADR-0056`) can be a real
 //! `NULL` to a client that negotiated 32 without changing the stored
 //! layout: an adapter names the fields and their sentinel through
-//! [`super::ConnectionStore::nullable_fields`], and `handle_connection`
-//! translates at the wire edge — [`to_storage`] turns a `Null` a request
+//! `ConnectionStore::nullable_fields`, and `handle_connection`
+//! translates at the wire edge — `to_storage` turns a `Null` a request
 //! carries for such a field into the sentinel before anything else reads
-//! the request, and [`to_wire`] turns a stored sentinel in a response into
+//! the request, and `to_wire` turns a stored sentinel in a response into
 //! `Null`. Everything between (validation, the planner, sessions, MVCC,
 //! the journal) sees only the sentinels it always saw, and a connection
 //! below 32 sees exactly what it always saw.
