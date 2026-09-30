@@ -499,6 +499,16 @@ class Client:
             return reply.count
         raise ProtocolError(type(reply).__name__)
 
+    def describe_nullable(self) -> List[str]:
+        """The names of the selected table's nullable fields (NLC-FR-005,
+        protocol 32): read and written as ``None`` on a connection at 32 or
+        above while stored as a sentinel. One round trip; ``UnsupportedError``
+        below 32 with no frame sent."""
+        reply = self._roundtrip(p.DescribeNullable())
+        if isinstance(reply, p.NullableFields):
+            return [self._name(tag) for tag in reply.tags]
+        raise ProtocolError(type(reply).__name__)
+
     def write_batch(self, ops: Sequence[Tuple], atomic: bool) -> List[str]:
         """Apply a batch of runtime writes in one request (WBT-FR-004,
         protocol 22). Each op is a tuple: ``("insert", id, fields)``,

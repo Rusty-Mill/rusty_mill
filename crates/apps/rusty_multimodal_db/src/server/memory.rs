@@ -22,6 +22,7 @@ use super::journal::{
     ReplayedBatch,
 };
 use super::mvcc::{self, MvccIndex, MvccState, TxnId};
+use super::nullable::NullableField;
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
@@ -62,6 +63,20 @@ pub const FIELD_ACCESS_COUNT: FieldRef = 10;
 pub const FIELD_DELETED_AT: FieldRef = 11;
 /// `SYN-FR-001` (ADR-0056): the writing node; `""` is unattributed.
 pub const FIELD_NODE_ID: FieldRef = 12;
+
+/// `NLC-FR-001` (ADR-0128): the two columns `ADR-0056` stores as a
+/// sentinel, shown as `NULL` to a connection at protocol 32 or above. Both
+/// sentinels are lossless: no real record holds them.
+static NULLABLE_FIELDS: [NullableField; 2] = [
+    NullableField {
+        tag: FIELD_DELETED_AT,
+        sentinel: ScanValue::I64(0),
+    },
+    NullableField {
+        tag: FIELD_NODE_ID,
+        sentinel: ScanValue::Str(String::new()),
+    },
+];
 
 /// Every field but `access_count`: refused by `UpdateField`
 /// (`MEM-FR-004`) — changed only whole, with every other field, through
@@ -1096,6 +1111,11 @@ impl ConnectionStore for MemoryConnectionStore {
 
     /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,
     /// each mapped through this adapter's own `get`.
+    /// `NLC-FR-001` (ADR-0128): `deleted_at_unix_ms` and `node_id`.
+    fn nullable_fields(&self) -> &[NullableField] {
+        &NULLABLE_FIELDS
+    }
+
     fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
         self.store
             .all_ids::<Memory>()

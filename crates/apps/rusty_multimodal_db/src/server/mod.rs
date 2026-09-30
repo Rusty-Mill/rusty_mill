@@ -185,6 +185,9 @@ mod metrics_http;
 /// only; see the module's own docs.
 #[cfg(feature = "server")]
 pub mod mvcc;
+/// Nullable columns as a wire view over stored sentinels (`ADR-0128`, protocol 32).
+#[cfg(feature = "server")]
+pub mod nullable;
 #[cfg(all(feature = "server", feature = "research"))]
 pub mod order;
 mod pem;

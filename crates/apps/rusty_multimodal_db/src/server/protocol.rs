@@ -86,6 +86,7 @@
 //! | 29 | `SERVER-001` v0.76.0 | No new variant: a filter no record can satisfy — two bounds on one field whose intersection is empty (`a > 5 AND a < 3`, `a = 3 AND a > 3`, `a = 1 AND a = 2`, `a = 1 AND a != 1`) — is refused with `Err { Malformed }` before any read, on a connection negotiated at 29 or above (`QCX-FR-002`, `ADR-0091`); below 29 it keeps the empty answer every earlier version gave (rule 3's nearest older shape, applied to a semantics change as version 27 did). Pure over the request ([`contradicted`]); `Query`, `Aggregate`, `FilteredPage`/`FilteredPageDesc`, and both sides of `Join`. ADR-0091 |
 //! | 30 | `SERVER-001` v0.84.0 | + [`Response::RowsClamped`] (24) and [`ErrorCode::Busy`] (15) — `WCB-FR-001`/`002`, ADR-0103: the two wire-level forks `ADR-0093`/`ADR-0102` held open. `RowsClamped { rows, cap }` is [`Response::Rows`] plus the cap it was clamped to — what a `Query` with no `limit` under `ServeOptions::max_query_rows` (`CLP-FR-001`) is answered with, so the client can see its answer is short; `Rows` below 30 (rule 3, `serve::downgrade_for_version`). `Err { Busy }` is the one frame a server ever writes *before* negotiation: on a plaintext listener a connection refused at accept under `max_connections` (`LIM-FR-002`) is answered `Err { Busy, .. }` then closed instead of closed silently, so a client can tell a full server from a dead one; a client below 30 cannot decode index 15 and fails the connect as it failed on the EOF before; since ADR-0104 every refusal, plaintext or TLS, runs on one of at most [`super::serve::MAX_BUSY_REFUSALS`] short-lived refusal threads (`BTL-FR-001`/`002`) — the handshake first under TLS, then the frame, then a wait for the peer's close so the frame is never lost to a reset (`BTL-FR-004`) — past which the socket is closed silently. ADR-0103, ADR-0104 |
 //! | 31 | `SERVER-001` v0.96.0 | + [`ScanValue::Null`] (6) — `NUL-FR-001`, ADR-0117: the absence of a value, a unit variant. No shipped column is nullable yet, so a server never emits it and answers `Malformed` to any request carrying it where a value is read (a write, a predicate, a transaction op, a guard). Stripped from `Record`/`Rows` below 31 by `downgrade_for_version` (rule 3, `StrList`'s precedent). No new `Request`/`ErrorCode`. ADR-0117 |
+//! | 32 | `SERVER-001` v0.104.0 | + [`Request::DescribeNullable`] (38) and [`Response::NullableFields`] (25) — `NLC-FR-005`, ADR-0128: the first nullable columns. A `Null` a request carries for a nullable field is stored as the field's sentinel and a stored sentinel is answered `Null`, on a connection negotiated at 32 or above only (`super::nullable`): `Memory`'s `deleted_at_unix_ms` (`0`) and `node_id` (`""`). `DescribeNullable` lists the tags. Below 32 nothing changes: the sentinel is still what a client sees, and the request is `Malformed` (rule 3). No stored-layout change. ADR-0128 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -120,7 +121,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -1188,6 +1189,12 @@ pub enum Request {
         limit: u64,
         filter: Vec<Predicate>,
     },
+    /// Protocol 32 (`NLC-FR-005`, ADR-0128): which fields of the
+    /// connection's table are nullable — read and written as
+    /// [`ScanValue::Null`] on a connection at 32 or above while stored as
+    /// a sentinel. Answered [`Response::NullableFields`]; a table with no
+    /// nullable field answers an empty list. A read; `Malformed` below 32.
+    DescribeNullable,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
@@ -1342,6 +1349,12 @@ pub enum Response {
         rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
         cap: u64,
     },
+    /// Protocol 32 (`NLC-FR-005`, ADR-0128). Answers
+    /// [`Request::DescribeNullable`]: the tag of every nullable field,
+    /// ascending.
+    NullableFields {
+        tags: Vec<FieldRef>,
+    },
 }
 
 #[cfg(test)]
@@ -1390,6 +1403,7 @@ mod tests {
             "PageDesc" | "FilteredPageDesc" => 28,
             "RowsClamped" | "Err(Busy)" => 30,
             "Record(Null)" | "Rows(Null)" => 31,
+            "DescribeNullable" | "NullableFields" => 32,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1714,6 +1728,12 @@ mod tests {
             "DescribeRelations",
             &Request::DescribeRelations,
             &[0x14, 0x00, 0x00, 0x00],
+        );
+        // Protocol 32 (`NLC-FR-005`, ADR-0128): `DescribeNullable` at 38.
+        assert_golden(
+            "DescribeNullable",
+            &Request::DescribeNullable,
+            &[0x26, 0x00, 0x00, 0x00],
         );
         // Protocol 14 (`LNK-FR-010`, ADR-0047): `Link` at 22.
         assert_golden(
@@ -2389,6 +2409,18 @@ mod tests {
                 &LEN1,                                             // cap: 1
             ]),
         );
+        // Protocol 32 (`NLC-FR-005`, ADR-0128): `NullableFields` at 25 —
+        // the tags as a length-prefixed `u16` sequence.
+        assert_golden_eq(
+            "NullableFields",
+            &Response::NullableFields { tags: vec![11, 12] },
+            &bytes(&[
+                &[0x19, 0x00, 0x00, 0x00],                         // NullableFields
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // two tags
+                &[0x0b, 0x00],                                     // 11
+                &[0x0c, 0x00],                                     // 12
+            ]),
+        );
         // Protocol 18 (`CMP-FR-006`, ADR-0052): `Compacted` at 18.
         assert_golden_eq(
             "Compacted",
@@ -2515,7 +2547,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 31);
+        assert_eq!(PROTOCOL_VERSION, 32);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

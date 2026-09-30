@@ -65,13 +65,13 @@ class WireVectors(unittest.TestCase):
             bytes.fromhex("1c000000" "00000000" "1000000000000000" + "00" * 15 + "01"),
         )
 
-    def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_31(self):
+    def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_32(self):
         # MVCC2-FR-004/011, ADR-0072: real MVCC's BeginWith bit — this
-        # client declares protocol 31, so it may send it (compatibility
+        # client declares protocol 32, so it may send it (compatibility
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
-        self.assertEqual(p.PROTOCOL_VERSION, 31)
+        self.assertEqual(p.PROTOCOL_VERSION, 32)
         req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
         data = p.encode_request(req)
         self.assertEqual(p.decode_request(data), req)
@@ -98,6 +98,15 @@ class WireVectors(unittest.TestCase):
         self.assertTrue(data.endswith(bytes.fromhex("0b00" "06000000")))
         self.assertEqual(p.decode_response(data), record)
         self.assertIsNone(p.scan_value_py(p.Null()))
+
+    def test_describe_nullable_is_request_38_and_nullable_fields_is_response_25(self):
+        # NLC-FR-005, ADR-0128 (protocol 32).
+        self.assertEqual(p.encode_request(p.DescribeNullable()), bytes.fromhex("26000000"))
+        reply = p.NullableFields([11, 12])
+        data = p.encode_response(reply)
+        self.assertEqual(data, bytes.fromhex("19000000" "0200000000000000" "0b00" "0c00"))
+        self.assertEqual(p.decode_response(data), reply)
+        self.assertEqual(p.REQUEST_INTRODUCED_AT[p.DescribeNullable], 32)
 
 
 if __name__ == "__main__":

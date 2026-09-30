@@ -1,6 +1,6 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.20.1 (protocol version 31, unchanged — `SERVER-001` v0.99.0,
+- Version: 0.21.0 (protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
   `RGM-FR-004`, `ADR-0121`: the `Null` strip below 31 covers `JoinedRows` too; 0.20.0 was `SERVER-001` v0.96.0,
   `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
@@ -106,12 +106,12 @@ fixture and are asserted by the reference client's tests):
 
 - `Request::Hello { protocol_version: 2 }`, framed:
   `08 00 00 00` · `0a 00 00 00` (variant 10) · `02 00 00 00` (2) — the
-  fixture's own `Request/Hello`; a current client sends 31 (`1f 00 00 00`).
+  fixture's own `Request/Hello`; a current client sends 32 (`20 00 00 00`).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 31
+## 5. Types at protocol version 32
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -142,7 +142,7 @@ unmarked is version 1.
 | 3 | `Str` | `String` |
 | 4 | `F64` (since 9) | `f64` — only ever `AggregateFn::Avg`'s result; never a stored field's kind |
 | 5 | `StrList` (since 11) | `Vec<String>` — a stored list-of-strings field, read-only over the wire |
-| 6 | `Null` (since 31) | none — the absence of a value; a unit variant, the index alone. No shipped column is nullable yet: a server never sends it and answers `Malformed` to a request carrying it where a value is read (§7 item 28) |
+| 6 | `Null` (since 31) | none — the absence of a value; a unit variant, the index alone. A server sends it, and accepts it, only for a nullable field on a connection at 32 or above (§7 item 29); everywhere else a request carrying it where a value is read is `Malformed` (§7 item 28) |
 
 ### 5.4 `Selection` (since 8), `JoinRelation` (since 12)
 
@@ -238,6 +238,7 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 35 | `FilteredPage` | `order_by: FieldRef`, `after: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `Page`'s three fields plus a `WHERE`-shaped filter | 26 | `Rows` |
 | 36 | `PageDesc` | `order_by: FieldRef`, `before: Option<(ScanValue, RecordId)>`, `limit: u64` — `Page` walked the other way | 28 | `Rows` |
 | 37 | `FilteredPageDesc` | `order_by: FieldRef`, `before: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `FilteredPage` walked the other way | 28 | `Rows` |
+| 38 | `DescribeNullable` | — — which fields of the connection's table are nullable | 32 | `NullableFields` |
 
 Any request may instead be answered by `Err`. A request index the
 server does not know closes the connection with no reply (§6.3).
@@ -271,6 +272,7 @@ server does not know closes the connection with no reply (§6.3).
 | 22 | `BackedUp` | `files: u64`, `bytes: u64` | 24 |
 | 23 | `Snapshot` | `files: Vec<(String, Vec<u8>)>` | 25 |
 | 24 | `RowsClamped` | `rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>`, `cap: u64` — `Rows`'s exact payload followed by the row cap the answer was clamped to | 30 |
+| 25 | `NullableFields` | `tags: Vec<FieldRef>` — every nullable field of the table, ascending; answers `DescribeNullable` | 32 |
 
 ## 6. Connection lifecycle
 
@@ -675,6 +677,22 @@ Each item names the `SERVER-001` requirement that owns it.
    nullability is a property of a field, not a `ValueKind`, and will
    arrive as a field capability when the first nullable column does.
    (`FR-109`)
+29. **Nullable fields** (32) — a table may name fields it stores as a
+   sentinel and shows as `NULL` (`ADR-0128`; `Memory`'s
+   `deleted_at_unix_ms`, stored `0`, and `node_id`, stored `""`).
+   `DescribeNullable` lists their tags. On a connection negotiated at 32
+   or above the server (a) reads a `Null` a request carries for such a
+   field — an `Insert`/`Replace`/`ReplaceIf`/`WriteBatch` field, an
+   `UpdateField` or `Transaction` value, a `FilterEq` value, and an
+   `Eq`/`Ne` predicate or guard — as the sentinel, and (b) answers `Null`
+   wherever the sentinel is stored, in a `Record`, `Rows`,
+   `RowsClamped`, `JoinedRows` (the right side only when it is this
+   table's), `ScanValues` of that field, and a `Groups` key of that
+   field. An ordering comparison (`<`, `<=`, `>`, `>=`) against `Null`
+   stays `Malformed`, as does `Null` for a field that is not nullable.
+   Aggregate values read the stored sentinel. Below 32 the wire is what
+   it was: the sentinel is what a client sees, and `DescribeNullable` is
+   `Malformed` (rule 3). No stored layout changes. (`FR-117`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -733,6 +751,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 29 | v0.76.0 | no new variant — a contradictory filter is `Err { Malformed }` at ≥ 29 (§7 item 26) |
 | 30 | v0.84.0 | `RowsClamped` (24), `ErrorCode::Busy` (15) — `Rows` below 30 for a clamped `Query` (§7 item 27); `Busy` written only before negotiation, never as an answer |
 | 31 | v0.96.0 | `ScanValue::Null` (6) — a unit variant; a `Null` field pair is dropped from `Record`/`Rows` below 31 (§7 item 28); no shipped field is nullable yet |
+| 32 | v0.104.0 | `DescribeNullable` (38), `NullableFields` (25) — the first nullable columns, a sentinel shown as `Null` at 32 and above (§7 item 29) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -784,6 +803,15 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.21.0 (`SERVER-001` v0.104.0, `ADR-0128`, `NLC-FR-001`..`007`): protocol
+  version 32 — `DescribeNullable` (38) and `NullableFields` (25); a
+  table's nullable fields read and write as `Null` at 32 and above while
+  stored as a sentinel; `Memory`'s `deleted_at_unix_ms` and `node_id` are
+  the first. §5, §7 item 29. Fixture: `Request/DescribeNullable`,
+  `Response/NullableFields` at 32. Python client: `DescribeNullable`,
+  `NullableFields`, `describe_nullable()`, declares 32; the Rust client
+  gains `describe_nullable()`, SQL `IS [NOT] NULL`, and
+  `ConnectOptions::max_protocol_version`.
 - 0.20.1 (`SERVER-001` v0.99.0, `ADR-0121`, `RGM-FR-004`): no wire
   change — the `Null` strip below 31 also covers both field lists of a
   `JoinedRows` row; §7 item 28. A client below 31 must not send `Null`

@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 31
+PROTOCOL_VERSION = 32
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -755,12 +755,20 @@ class FilteredPageDesc:
         object.__setattr__(self, "filter", tuple(self.filter))
 
 
+@_variant(38, [])
+class DescribeNullable:
+    """NLC-FR-005, ADR-0128, protocol 32: which fields of the selected
+    table are nullable — read and written as Null on a connection at 32 or
+    above while stored as a sentinel. Answered NullableFields."""
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
     WriteBatch, Metrics, Backup, FetchSnapshot, FilteredPage, PageDesc, FilteredPageDesc,
+    DescribeNullable,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -773,6 +781,7 @@ REQUEST_INTRODUCED_AT = {
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
     ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22, Metrics: 23, Backup: 24,
     FetchSnapshot: 25, FilteredPage: 26, PageDesc: 28, FilteredPageDesc: 28,
+    DescribeNullable: 32,
 }
 
 
@@ -970,10 +979,21 @@ class RowsClamped:
         )
 
 
+@_variant(25, [("tags", ("vec", "u16"))])
+class NullableFields:
+    """NLC-FR-005, ADR-0128 (protocol 32). Answers DescribeNullable: the tag
+    of every nullable field, ascending."""
+
+    tags: Tuple[int, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "tags", tuple(self.tags))
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
-    BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped,
+    BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped, NullableFields,
 ]
 
 

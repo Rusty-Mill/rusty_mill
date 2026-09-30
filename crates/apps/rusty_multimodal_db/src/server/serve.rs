@@ -11,6 +11,7 @@
 
 use super::journal::JournalStats;
 use super::metrics::{ConnectionMetricsGuard, PlanKind, ServerMetrics};
+use super::nullable::{self, NullableField};
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
@@ -683,6 +684,15 @@ pub trait ConnectionStore: Send + Sync {
     /// adapter answers `Some`.
     fn record_count(&self) -> Option<usize> {
         None
+    }
+
+    /// `NLC-FR-001` (ADR-0128, protocol 32): the fields this table stores
+    /// as a sentinel but shows as `NULL` to a connection at 32 or above —
+    /// `handle_connection` translates at the wire edge
+    /// ([`nullable::to_storage`]/[`nullable::to_wire`]). The default is
+    /// none, which leaves every request and response untouched.
+    fn nullable_fields(&self) -> &[NullableField] {
+        &[]
     }
 
     fn apply_transaction(
@@ -2465,23 +2475,22 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
         }
         Response::ScanValues { ref values } => {
             debug_assert!(
-                !values
-                    .iter()
-                    .any(|v| matches!(v, ScanValue::StrList(_) | ScanValue::Null)),
-                "a StrList field is never scannable (ENT4-FR-003); no field is nullable yet (RGM-FR-004)"
+                !values.iter().any(|v| matches!(v, ScanValue::StrList(_)))
+                    && (negotiated >= 32 || !values.iter().any(|v| matches!(v, ScanValue::Null))),
+                "a StrList field is never scannable (ENT4-FR-003); a Null is only sent at 32 or above (NLC-FR-003)"
             );
             resp
         }
         Response::Groups { ref groups } => {
             debug_assert!(
-                !groups.iter().any(|g| g
-                    .key
-                    .iter()
-                    .any(|p| is_str_list(p) || matches!(p.1, ScanValue::Null))
-                    || g.values
-                        .iter()
-                        .any(|v| matches!(v, ScanValue::StrList(_) | ScanValue::Null))),
-                "a StrList field is never groupable or aggregatable (ENT4-FR-003); no field is nullable yet (RGM-FR-004)"
+                !groups.iter().any(|g| g.key.iter().any(is_str_list)
+                    || g.values.iter().any(|v| matches!(v, ScanValue::StrList(_))))
+                    && (negotiated >= 32
+                        || !groups.iter().any(|g| g
+                            .key
+                            .iter()
+                            .any(|p| matches!(p.1, ScanValue::Null)))),
+                "a StrList field is never groupable or aggregatable (ENT4-FR-003); a Null key is only sent at 32 or above (NLC-FR-003)"
             );
             resp
         }
@@ -2712,7 +2721,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Metrics { .. }
         | Response::BackedUp { .. }
         | Response::Snapshot { .. }
-        | Response::RowsClamped { .. } => access::Outcome::Ok,
+        | Response::RowsClamped { .. }
+        | Response::NullableFields { .. } => access::Outcome::Ok,
     }
 }
 
@@ -4117,6 +4127,12 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             },
             Err(code) => err_response(code),
         },
+        // `NLC-FR-005` (ADR-0128): which fields are nullable — the tags, ascending.
+        Request::DescribeNullable => {
+            let mut tags: Vec<FieldRef> = store.nullable_fields().iter().map(|f| f.tag).collect();
+            tags.sort_unstable();
+            Response::NullableFields { tags }
+        }
     }
 }
 
@@ -4582,6 +4598,19 @@ fn handle_connection(
             continue;
         }
 
+        // `NLC-FR-002`/`003` (ADR-0128): on a connection at 32 or above, a
+        // `Null` for one of the table's nullable fields becomes its stored
+        // sentinel here, before anything else reads the request, and a
+        // stored sentinel in the answer becomes `Null` just before
+        // `downgrade_for_version`. Below 32, or for a table with none, this
+        // is the identity.
+        let nullable: &[NullableField] = if negotiated >= 32 {
+            store.nullable_fields()
+        } else {
+            &[]
+        };
+        let wire_ctx = nullable::WireContext::of(&req, store.table_name());
+        let req = nullable::to_storage(req, nullable, store.table_name());
         // `ACC-FR-004`: everything from here on is a dispatched request —
         // past `Hello`/`Authenticate` (handled above) and the
         // unauthenticated/`ReadOnly` gates (also above, each its own
@@ -4843,6 +4872,8 @@ fn handle_connection(
             // below), since — unlike `Backup` — it needs no `options`
             // access this match arm would otherwise have to thread through.
             Request::FetchSnapshot if negotiated < 25 => err_response(ErrorCode::Malformed),
+            // `NLC-FR-005` (ADR-0128): gated like every appended request.
+            Request::DescribeNullable if negotiated < 32 => err_response(ErrorCode::Malformed),
             // `FPG-FR-007` (ADR-0068): a read, `Page`'s own gate shape —
             // no `SessionOpen` gate, `Malformed` below the protocol
             // version that introduced it. Falls through to `dispatch`'s
@@ -4936,6 +4967,7 @@ fn handle_connection(
             }
             _ => resp,
         };
+        let resp = nullable::to_wire(resp, nullable, &wire_ctx);
         let resp = downgrade_for_version(resp, negotiated);
         // `MET-FR-003` (ADR-0064): the identical call site `AccessEvent`
         // is recorded at — one increment per dispatched request.

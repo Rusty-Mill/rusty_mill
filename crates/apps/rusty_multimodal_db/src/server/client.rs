@@ -390,6 +390,10 @@ pub struct ConnectOptions {
     /// (protocol 1, `SERVER-001` v0.9.1) no longer exist to fall back
     /// to; [`Self::allow_pre_hello_fallback`] restores the old behaviour.
     require_hello: bool,
+    /// `NLC-FR-007` (ADR-0128): the highest protocol version to offer.
+    /// Default [`PROTOCOL_VERSION`]. A client that does not want a nullable
+    /// column reported as `Null` (protocol 32) connects with 31.
+    max_protocol_version: u32,
 }
 
 impl Default for ConnectOptions {
@@ -398,6 +402,7 @@ impl Default for ConnectOptions {
             token: None,
             tls: None,
             require_hello: true,
+            max_protocol_version: PROTOCOL_VERSION,
         }
     }
 }
@@ -417,6 +422,15 @@ impl ConnectOptions {
     /// Complete a TLS handshake (as `tls` describes) before the `Hello`.
     pub fn tls(mut self, tls: ClientTlsConfig) -> Self {
         self.tls = Some(tls);
+        self
+    }
+
+    /// Offer at most protocol `version` in the `Hello` (`NLC-FR-007`,
+    /// ADR-0128): the server answers the lower of this and its own, so a
+    /// client written before protocol 32 keeps seeing a nullable column's
+    /// sentinel by connecting with `31`.
+    pub fn max_protocol_version(mut self, version: u32) -> Self {
+        self.max_protocol_version = version.min(PROTOCOL_VERSION);
         self
     }
 
@@ -825,6 +839,9 @@ fn resolve_literal(
         (ValueKind::I64, sql::Literal::Number(n)) => Ok(ScanValue::I64(*n)),
         (ValueKind::Bool, sql::Literal::Bool(b)) => Ok(ScanValue::Bool(*b)),
         (ValueKind::Str, sql::Literal::Str(s)) => Ok(ScanValue::Str(s.clone())),
+        // `NLC-FR-006` (ADR-0128): `IS [NOT] NULL` — any kind; the server
+        // says whether the field is nullable.
+        (_, sql::Literal::Null) => Ok(ScanValue::Null),
         _ => Err(ClientError::Sql(format!(
             "{field_name}: this literal does not match the field's type ({kind:?})"
         ))),
@@ -904,7 +921,7 @@ impl SchemaDrivenClient {
         let server_protocol_version = match Self::exchange(
             &mut stream,
             &Request::Hello {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: options.max_protocol_version,
             },
         ) {
             Ok(Response::Hello { protocol_version }) => protocol_version,
@@ -2342,6 +2359,27 @@ impl SchemaDrivenClient {
             Response::Count { count } => Ok(count),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Count")),
+        }
+    }
+
+    /// The names of the selected table's nullable fields (`NLC-FR-005`,
+    /// ADR-0128, protocol 32): fields a connection at 32 reads and writes
+    /// as [`ScanValue::Null`] (SQL `IS NULL` tests them). One round trip;
+    /// a table with none answers an empty list.
+    /// [`ClientError::Unsupported`]`("describe_nullable")` below 32, no
+    /// frame sent (rule 4).
+    pub fn describe_nullable(&mut self) -> Result<Vec<String>, ClientError> {
+        if self.server_protocol_version() < 32 {
+            return Err(ClientError::Unsupported("describe_nullable"));
+        }
+        match self.roundtrip(Request::DescribeNullable)? {
+            Response::NullableFields { tags } => Ok(tags
+                .into_iter()
+                .filter_map(|tag| self.schema.fields.iter().find(|f| f.tag == tag))
+                .map(|f| f.name.clone())
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("NullableFields")),
         }
     }
 

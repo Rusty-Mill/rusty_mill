@@ -238,6 +238,18 @@ name = "server_limits_integration"
 required-features = ["server"]
 
 [[test]]
+name = "server_drain_integration"
+required-features = ["server"]
+
+[[test]]
+name = "memory_server_drain"
+required-features = ["server"]
+
+[[test]]
+name = "server_nullable_integration"
+required-features = ["server"]
+
+[[test]]
 name = "memory_server_exposure"
 required-features = ["server"]
 
