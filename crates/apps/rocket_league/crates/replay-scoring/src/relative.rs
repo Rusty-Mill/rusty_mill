@@ -200,6 +200,9 @@ pub struct RelativeMetric {
     pub within_rank_pct: f32,
     /// The bracket's median raw for this metric — "expected for your level".
     pub bracket_median: f32,
+    /// The next bracket up's median for this metric — the target to climb toward
+    /// (`None` in the top bracket).
+    pub next_median: Option<f32>,
 }
 
 /// The rank-relative companion to a [`Report`]: how the player compares to peers
@@ -235,11 +238,13 @@ fn orient(curve: &Curve, q: f32) -> f32 {
 }
 
 /// Place a single report against `bucket`, producing its [`RelativeReport`].
-/// `basis` records how the bracket was chosen. Only non-experimental metrics with
+/// `next` is the bracket above (for the gap-to-next-bracket medians); `basis`
+/// records how the bracket was chosen. Only non-experimental metrics with
 /// a computable raw and a bracket sketch contribute to the leak/strength picks.
 pub fn relativize(
     report: &Report,
     bucket: &BucketNorm,
+    next: Option<&BucketNorm>,
     cfg: &ScoreConfig,
     basis: &str,
 ) -> RelativeReport {
@@ -264,6 +269,9 @@ pub fn relativize(
             raw: bd.raw,
             within_rank_pct: within,
             bracket_median,
+            next_median: next
+                .and_then(|n| n.metrics.get(&spec.metric))
+                .map(|p| p.value_at(0.5)),
         });
         // Leak/strength weigh by composite weight so trivial metrics don't win.
         if !spec.experimental && bd.effective_weight > 0.0 {
@@ -319,8 +327,13 @@ pub fn attach_relative(
         }
     };
     let Some(bucket) = bucket else { return };
+    let next = norms
+        .buckets
+        .iter()
+        .skip_while(|b| b.name != bucket.name)
+        .nth(1);
     for r in reports.iter_mut() {
-        r.relative = Some(relativize(r, bucket, cfg, basis));
+        r.relative = Some(relativize(r, bucket, next, cfg, basis));
     }
 }
 

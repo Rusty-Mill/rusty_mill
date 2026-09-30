@@ -222,6 +222,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <input type="file" id="file" accept=".replay" hidden>
       </div>
       <div class="samples" id="samples"><span class="lbl">Samples</span></div>
+      <div class="samples"><span class="lbl">Rank</span>
+        <select id="uploadRank"><option value="">auto (from the lobby)</option><option>silver</option><option>gold</option><option>platinum</option><option>diamond</option><option>champion</option><option>grand-champion</option></select></div>
       <div class="samples" id="teamPick" style="display:none"><span class="lbl">Share with team</span>
         <select id="uploadTeam"><option value="">just me</option></select></div>
       <div class="status" id="status"></div>
@@ -383,6 +385,23 @@ function cardTable(hint, head, body, empty, cols) {
   </table></div></div>`;
 }
 
+// Per player: each metric against the bracket median and the next bracket's median.
+function rankGaps(d) {
+  const cards = (d.scores || []).filter(r => r.relative).map(r => {
+    const rows = r.relative.metrics.filter(m => m.raw != null).map(m => `<tr>
+      <td>${esc(m.key.replaceAll("_", " "))}</td><td class="num">${fmt(m.raw, 2)}</td>
+      <td class="num">${fmt(m.within_rank_pct, 0)}</td><td class="num">${fmt(m.bracket_median, 2)}</td>
+      <td class="num">${m.next_median == null ? "—" : fmt(m.next_median, 2)}</td>
+      <td class="num">${m.next_median == null ? "—" : signed(m.next_median - m.raw, 2)}</td></tr>`).join("");
+    return `<details class="card"><summary>${nameCell(r.target_team, r.target_player)} — vs ${esc(r.relative.bracket)}</summary>
+      <div class="tablewrap"><table><thead><tr><th>Metric</th><th class="num">You</th><th class="num">Peer pct</th>
+      <th class="num">${esc(r.relative.bracket)} median</th><th class="num">Next bracket median</th><th class="num">To next</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></details>`;
+  }).join("");
+  return cards ? `<p class="hint">Where each metric sits against your bracket, and the median of the bracket above it. ` +
+    `“To next” is a raw difference — for lower-is-better metrics a negative number is the way up.</p>` + cards : "";
+}
+
 function renderOverview(d) {
   const impactByPri = {}; (d.impact.players || []).forEach(p => impactByPri[p.pri] = p);
   const skillByPri = {}; (d.skill_profiles || []).forEach(p => skillByPri[p.pri] = p);
@@ -424,7 +443,7 @@ function renderOverview(d) {
       `is unchanged; <b>vs rank</b> is your percentile within that bracket, and the <b>vs rank</b> leak is where you ` +
       `most lag peers of your own level.</p>`
     : "";
-  $("tab-overview").innerHTML = banner + cardTable(
+  $("tab-overview").innerHTML = banner + rankGaps(d) + cardTable(
     "One row per player — decision-discipline composite (scoring), mechanical activity (skills/min), and value impact (ΔV). Open the tabs for the full 3D replay, the scoring report, and per-skill detail.",
     head, rows, "No players scored.", rel0 ? 9 : 8);
 }
@@ -885,9 +904,11 @@ $("signOut").onclick = async (e) => {
 };
 
 // ---- teams: shared match pool + roster view (needs --teams on the server) ----
+// The optional query params of an analyze call: share team and declared rank.
 function teamParam(prefix) {
-  const t = $("uploadTeam").value;
-  return t ? prefix + "team=" + encodeURIComponent(t) : "";
+  const q = [["team", $("uploadTeam").value], ["rank", $("uploadRank").value]]
+    .filter(([, v]) => v).map(([k, v]) => k + "=" + encodeURIComponent(v));
+  return q.length ? prefix + q.join("&") : "";
 }
 let TEAMS = [];
 async function loadTeams(quiet = false) {
