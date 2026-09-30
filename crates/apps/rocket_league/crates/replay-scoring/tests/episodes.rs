@@ -2,7 +2,7 @@
 //! raw value bit for bit, so the list a player sees can never disagree with the score.
 
 use replay_analyzer::{analyze::build_canonical, decode::boxcars_adapter::BoxcarsParser};
-use replay_analyzer::{decode::ReplayParser, CanonicalMatch};
+use replay_analyzer::{decode::ReplayParser, model::Event, CanonicalMatch};
 use replay_scoring::{extract, score, Episode, ScoreConfig};
 
 fn canonical(name: &str) -> CanonicalMatch {
@@ -16,6 +16,9 @@ fn canonical(name: &str) -> CanonicalMatch {
 
 fn is_recovery(e: &&Episode) -> bool {
     matches!(e, Episode::Recovery { .. })
+}
+fn is_loss(e: &&Episode) -> bool {
+    matches!(e, Episode::Loss { .. })
 }
 fn is_challenge(e: &&Episode) -> bool {
     matches!(e, Episode::Challenge { .. })
@@ -65,6 +68,42 @@ fn challenge_timing_is_the_share_of_clean_challenges() {
 }
 
 #[test]
+fn dangerous_turnover_is_total_loss_danger_per_followed_touch() {
+    let cfg = ScoreConfig::default();
+    for name in ["42f2", "419a"] {
+        let m = canonical(name);
+        let eps = extract(&m, &cfg);
+        let touches: Vec<i32> = m
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Touch { pri, .. } => Some(*pri),
+                _ => None,
+            })
+            .collect();
+        for t in &m.tracks {
+            let followed = touches.windows(2).filter(|w| w[0] == t.pri).count();
+            let danger = eps
+                .iter()
+                .filter(|e| is_loss(e) && e.pri() == t.pri)
+                .fold(0.0f32, |s, e| s + e.danger());
+            let want = (followed > 0).then(|| danger / followed as f32);
+            let got = score(&m, t.pri, &cfg)
+                .metrics
+                .iter()
+                .find(|b| b.key == "dangerous_turnover")
+                .and_then(|b| b.raw);
+            assert_eq!(
+                want.map(f32::to_bits),
+                got.map(f32::to_bits),
+                "{name} pri {}",
+                t.pri
+            );
+        }
+    }
+}
+
+#[test]
 fn extract_is_time_ordered_and_deterministic() {
     let (m, cfg) = (canonical("419a"), ScoreConfig::default());
     let eps = extract(&m, &cfg);
@@ -72,8 +111,8 @@ fn extract_is_time_ordered_and_deterministic() {
     assert_eq!(eps, extract(&m, &cfg));
     let n = |k: fn(&&Episode) -> bool| eps.iter().filter(k).count();
     assert_eq!(
-        (n(is_recovery), n(is_challenge)),
-        (100, 186), // recorded from the first run
+        (n(is_recovery), n(is_challenge), n(is_loss)),
+        (100, 186, 100), // recorded from the first run
         "419a episode counts — a change means a definition moved"
     );
 }

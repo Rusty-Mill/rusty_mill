@@ -4,11 +4,12 @@
 //! over its episodes — so the list a player sees and the score they get cannot
 //! drift apart. Design: `docs/episodes-design.md`.
 
-use replay_analyzer::model::{CanonicalMatch, Vec3};
+use replay_analyzer::field::BACK_WALL_Y;
+use replay_analyzer::model::{CanonicalMatch, Event, Vec3};
 use serde::Serialize;
 
 use crate::config::ScoreConfig;
-use crate::features::{build_frames, dist, sub, CarView, FrameView};
+use crate::features::{build_frames, dist, frame_at_time, sub, CarView, FrameView};
 use crate::roles::{self, ManRole, Roles};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -31,6 +32,16 @@ pub enum Episode {
         dur: f32,
         miss: u8,
     },
+    /// A touch whose next known touch is the other team's. `danger` is the depth
+    /// of the ball in the player's own half (0 = midfield or beyond, 1 = back
+    /// wall); `opp_dist` is the nearest opponent to the ball.
+    Loss {
+        pri: i32,
+        t: f32,
+        at: [f32; 2],
+        danger: f32,
+        opp_dist: f32,
+    },
 }
 
 pub const MISS_BOOST: u8 = 1;
@@ -41,17 +52,22 @@ impl Episode {
     /// Start time (s).
     pub fn t(&self) -> f32 {
         match self {
-            Self::Recovery { t0, .. } | Self::Challenge { t0, .. } => *t0,
+            Self::Recovery { t0: t, .. } | Self::Challenge { t0: t, .. } | Self::Loss { t, .. } => {
+                *t
+            }
         }
     }
     pub fn pri(&self) -> i32 {
         match self {
-            Self::Recovery { pri, .. } | Self::Challenge { pri, .. } => *pri,
+            Self::Recovery { pri, .. } | Self::Challenge { pri, .. } | Self::Loss { pri, .. } => {
+                *pri
+            }
         }
     }
     pub fn dur(&self) -> f32 {
         match self {
             Self::Recovery { dur, .. } | Self::Challenge { dur, .. } => *dur,
+            Self::Loss { .. } => 0.0,
         }
     }
 }
@@ -91,6 +107,13 @@ pub(crate) fn recoveries(frames: &[FrameView], pri: i32, cfg: &ScoreConfig) -> V
 }
 
 impl Episode {
+    /// Own-half depth of a `Loss` (0 for other kinds).
+    pub fn danger(&self) -> f32 {
+        match self {
+            Self::Loss { danger, .. } => *danger,
+            _ => 0.0,
+        }
+    }
     /// A challenge that passed every arrival test.
     pub fn is_ok(&self) -> bool {
         matches!(self, Self::Challenge { miss: 0, .. })
@@ -175,6 +198,55 @@ pub(crate) fn challenges(
     out
 }
 
+/// `pri`'s touches that have a following touch (the loss-rate denominator).
+pub(crate) fn followed_touches(events: &[Event], pri: i32) -> usize {
+    touches(events).windows(2).filter(|w| w[0].0 == pri).count()
+}
+
+fn touches(events: &[Event]) -> Vec<(i32, Option<i32>, f32)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Touch { pri, team, t, .. } => Some((*pri, *team, *t)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `pri`'s possession losses, in time order. Dead-ball and goal-ended
+/// possessions have no next touch, so they are not losses.
+pub(crate) fn losses(frames: &[FrameView], events: &[Event], pri: i32, team: i32) -> Vec<Episode> {
+    let mut out = Vec::new();
+    for w in touches(events).windows(2) {
+        if w[0].0 != pri || !matches!(w[1].1, Some(nt) if nt != team) {
+            continue;
+        }
+        let Some(i) = frame_at_time(frames, w[0].2) else {
+            continue;
+        };
+        let f = &frames[i];
+        let (Some(c), Some(ball)) = (f.car(pri), f.ball) else {
+            continue;
+        };
+        // Forward (+) is toward the opponent goal; the deep own half is negative.
+        let fwd = ball.p.y * c.attack_sign as f32;
+        let opp_dist = f
+            .cars
+            .iter()
+            .filter(|o| o.team != team)
+            .map(|o| dist(o.p, ball.p))
+            .fold(f32::INFINITY, f32::min);
+        out.push(Episode::Loss {
+            pri,
+            t: w[0].2,
+            at: [ball.p.x, ball.p.y],
+            danger: (-fwd / BACK_WALL_Y).clamp(0.0, 1.0),
+            opp_dist,
+        });
+    }
+    out
+}
+
 /// Every player's episodes, in time order.
 pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
     let frames = build_frames(m, cfg);
@@ -182,7 +254,9 @@ pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
     let mut out: Vec<Episode> = Vec::new();
     for t in &m.tracks {
         out.extend(recoveries(&frames, t.pri, cfg));
-        out.extend(challenges(&frames, &roles, t.pri, t.team.unwrap_or(0), cfg));
+        let team = t.team.unwrap_or(0);
+        out.extend(challenges(&frames, &roles, t.pri, team, cfg));
+        out.extend(losses(&frames, &m.events, t.pri, team));
     }
     out.sort_by(|a, b| a.t().total_cmp(&b.t()).then(a.pri().cmp(&b.pri())));
     out
@@ -329,5 +403,61 @@ mod tests {
         assert_eq!(miss(miss_of(255, std::f32::consts::PI, 0.5)), MISS_FACE);
         assert_eq!(miss(miss_of(255, 0.0, 2.0)), MISS_LATE);
         assert_eq!(miss(miss_of(0, std::f32::consts::PI, 2.0)), 7);
+    }
+
+    fn touch(t: f32, pri: i32, team: Option<i32>) -> Event {
+        Event::Touch {
+            t,
+            pri,
+            player: None,
+            team,
+        }
+    }
+
+    #[test]
+    fn a_loss_needs_a_known_opposing_next_touch() {
+        // pri 1 (blue) at y = -2560 with the ball, attacking +y: half the back wall deep.
+        let mut f = duel(0, 255, 0.0, 0.5);
+        f.ball = Some(replay_analyzer::model::Kin {
+            p: Vec3 {
+                x: 0.0,
+                y: -2560.0,
+                z: 0.0,
+            },
+            v: Z,
+        });
+        f.cars[0].attack_sign = 1;
+        f.cars[1].p = Vec3 {
+            x: 300.0,
+            y: -2560.0,
+            z: 0.0,
+        };
+        let frames = [f];
+        let run = |next: Option<i32>| {
+            losses(
+                &frames,
+                &[touch(0.0, 1, Some(0)), touch(1.0, 2, next)],
+                1,
+                0,
+            )
+        };
+        let [Episode::Loss {
+            t,
+            danger,
+            opp_dist,
+            ..
+        }] = run(Some(1))[..]
+        else {
+            panic!("{:?}", run(Some(1)))
+        };
+        assert!(t == 0.0 && (danger - 0.5).abs() < 1e-3 && (opp_dist - 300.0).abs() < 1e-3);
+        assert!(
+            run(None).is_empty(),
+            "unknown-team next touch is not a loss"
+        );
+        assert!(
+            run(Some(0)).is_empty(),
+            "a teammate's touch keeps possession"
+        );
     }
 }

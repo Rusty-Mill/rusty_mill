@@ -11,8 +11,8 @@ use replay_analyzer::field::{BACK_WALL_Y, SUPERSONIC_SPEED};
 use replay_analyzer::model::{Event, Vec3};
 
 use crate::config::{Metric, ScoreConfig};
-use crate::episodes::{challenges, recoveries};
-use crate::features::{dist, FrameView, Third};
+use crate::episodes::{challenges, followed_touches, losses, recoveries};
+use crate::features::{dist, frame_at_time, FrameView, Third};
 use crate::roles::{ManRole, Roles};
 
 fn speed(v: Vec3) -> f32 {
@@ -97,7 +97,10 @@ pub fn compute(
     // redundant with the mechanical-tempo metrics, so out of the composite.
     out.insert(Metric::Pace, pace(frames, target_pri));
     out.insert(Metric::Agility, agility(frames, target_pri));
-    out.insert(Metric::BoostStarvation, boost_starvation(frames, target_pri));
+    out.insert(
+        Metric::BoostStarvation,
+        boost_starvation(frames, target_pri),
+    );
     out.insert(Metric::ShotAngle, shot_angle(frames, events, target_pri));
     out.insert(Metric::WhiffRate, whiff_rate(frames, events, target_pri));
     out
@@ -280,36 +283,11 @@ fn possession_retention(events: &[Event], pri: i32, team: i32) -> Option<f32> {
 /// though plain `possession_retention` treats them the same. Lower is better;
 /// `None` with no touches.
 fn dangerous_turnover(frames: &[FrameView], events: &[Event], pri: i32, team: i32) -> Option<f32> {
-    let seq: Vec<(i32, Option<i32>, f32)> = events
+    let touches = followed_touches(events, pri);
+    let danger = losses(frames, events, pri, team)
         .iter()
-        .filter_map(|e| match e {
-            Event::Touch { pri, team, t, .. } => Some((*pri, *team, *t)),
-            _ => None,
-        })
-        .collect();
-
-    let (mut danger_sum, mut touches) = (0.0f32, 0usize);
-    for w in seq.windows(2) {
-        if w[0].0 != pri {
-            continue;
-        }
-        touches += 1;
-        // Turnover only if the next touch is a *known* opposing team.
-        if !matches!(w[1].1, Some(nt) if nt != team) {
-            continue;
-        }
-        let Some(i) = frame_at_time(frames, w[0].2) else {
-            continue;
-        };
-        let f = &frames[i];
-        let (Some(c), Some(ball)) = (f.car(pri), f.ball) else {
-            continue;
-        };
-        // Forward (+) is toward the opponent goal; the deep own half is negative.
-        let fwd = ball.p.y * c.attack_sign as f32;
-        danger_sum += (-fwd / BACK_WALL_Y).clamp(0.0, 1.0);
-    }
-    (touches > 0).then(|| danger_sum / touches as f32)
+        .fold(0.0f32, |s, e| s + e.danger());
+    (touches > 0).then(|| danger / touches as f32)
 }
 
 /// Mean chase-correlation: both teammates driving at the ball together.
@@ -345,26 +323,6 @@ fn goalside_team(frames: &[FrameView], pri: i32, team: i32) -> Option<f32> {
         }
     }
     ratio(num, den)
-}
-
-/// Index of the grid frame nearest `t` (frames are time-sorted ascending).
-fn frame_at_time(frames: &[FrameView], t: f32) -> Option<usize> {
-    if frames.is_empty() {
-        return None;
-    }
-    let i = frames.partition_point(|f| f.t < t);
-    if i == 0 {
-        return Some(0);
-    }
-    if i >= frames.len() {
-        return Some(frames.len() - 1);
-    }
-    let prev = i - 1;
-    if (frames[i].t - t).abs() <= (t - frames[prev].t).abs() {
-        Some(i)
-    } else {
-        Some(prev)
-    }
 }
 
 /// Quality of arrival on detected 50/50s: fraction of contests the target (as
@@ -736,4 +694,3 @@ fn reverse_driving(frames: &[FrameView], pri: i32) -> Option<f32> {
     }
     ratio(num, den)
 }
-

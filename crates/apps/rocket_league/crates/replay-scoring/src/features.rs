@@ -97,6 +97,26 @@ pub(crate) fn sub(a: Vec3, b: Vec3) -> Vec3 {
         z: a.z - b.z,
     }
 }
+/// Index of the grid frame nearest `t` (frames are time-sorted ascending).
+pub(crate) fn frame_at_time(frames: &[FrameView], t: f32) -> Option<usize> {
+    if frames.is_empty() {
+        return None;
+    }
+    let i = frames.partition_point(|f| f.t < t);
+    if i == 0 {
+        return Some(0);
+    }
+    if i >= frames.len() {
+        return Some(frames.len() - 1);
+    }
+    let prev = i - 1;
+    if (frames[i].t - t).abs() <= (t - frames[prev].t).abs() {
+        Some(i)
+    } else {
+        Some(prev)
+    }
+}
+
 pub(crate) fn dist(a: Vec3, b: Vec3) -> f32 {
     let d = sub(a, b);
     dot(d, d).sqrt()
