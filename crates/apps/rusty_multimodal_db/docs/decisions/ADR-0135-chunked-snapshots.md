@@ -83,8 +83,8 @@ So the lock is held for a local copy and never for a transfer.
   crate already depends on `sha2`).
 - `Request::FetchChunk { snapshot, file: u32, offset: u64, len: u32 }` (41) →
   `Response::Chunk { bytes }` (29). `len` is at most `MAX_CHUNK_BYTES` (4 MiB,
-  well under the frame cap); a chunk past the file's end is short, at it is
-  empty. Chunks may be asked in any order, so a client can resume.
+  well under the frame cap); a chunk that runs past the file's end is short, and one that
+  starts at or past it is empty. Chunks may be asked in any order, so a client can resume.
 - `Request::EndSnapshot { snapshot }` (42) → `Ok`; frees the staging copy.
 - `ErrorCode::NoSnapshot` (17): the handle is unknown, expired, or another
   connection's. `Busy` (15) when the table already has a staged snapshot.
