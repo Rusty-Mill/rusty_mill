@@ -4,6 +4,7 @@ import { useMedia } from '@/lib/hooks'
 import { useUi } from '@/store/ui'
 import { IconRail } from '@/components/IconRail'
 import { Toasts } from '@/components/Toasts'
+import { Reminders } from '@/features/reminders/Reminders'
 import { SearchModal } from '@/features/search/SearchModal'
 import { Sidebar } from '@/features/lists/Sidebar'
 
@@ -34,6 +35,7 @@ export function Shell() {
           <SettingsModal />
         </Suspense>
       )}
+      <Reminders />
       <Toasts />
     </div>
   )
