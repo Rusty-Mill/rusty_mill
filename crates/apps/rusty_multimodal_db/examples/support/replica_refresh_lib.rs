@@ -179,6 +179,7 @@ pub fn refresh(
 /// [`refresh`] for a table served with a change log (`ADR-0131`): the
 /// snapshot's log position is written into the directory as
 /// [`POSITION_FILE`], so [`follow`] can continue from it.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn refresh_at(
     target: &Target,
     root: &Path,
@@ -446,6 +447,7 @@ pub const POSITION_FILE: &str = "replica.position";
 
 /// Write `position` crash-safely: a temporary file, synced, renamed over
 /// the old one, the directory synced.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn write_position(dir: &Path, position: Position) -> io::Result<()> {
     let tmp = dir.join(format!("{POSITION_FILE}.tmp"));
     let mut file = std::fs::File::create(&tmp)?;
@@ -456,6 +458,7 @@ pub fn write_position(dir: &Path, position: Position) -> io::Result<()> {
 }
 
 /// The [`Position`] a directory was refreshed or last followed to.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn read_position(dir: &Path) -> io::Result<Position> {
     let text = std::fs::read_to_string(dir.join(POSITION_FILE))?;
     let bad = || io::Error::new(io::ErrorKind::InvalidData, "malformed replica.position");
