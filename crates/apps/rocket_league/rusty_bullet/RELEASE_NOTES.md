@@ -6,6 +6,27 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## ADRs for Phase 1 physics modeling choices
+**2026-09-30** · docs only
+
+- Five ADRs recorded retroactively. Each cites the FRs and PRs where the
+  choice was made, the alternatives the spec actually documents, and when
+  to revisit:
+  - ADR-0006: arena from analytic primitives, not the dumped triangle mesh.
+  - ADR-0007: car vs. curved geometry by 8-corner testing. The FR-032 GJK
+    attempt was reverted, and corner testing was proven exact for
+    containment contact.
+  - ADR-0008: one combined contact solve. The pinch test went from ~98.9 to
+    ~89.5 to ~32 units/s.
+  - ADR-0009: one rigid box with direct forces, not a raycast vehicle. It
+    records the FR-065 steering-curve mismatch as a known cost.
+  - ADR-0010: goal nets as a mass-spring mesh of rigid point bodies. This
+    is original code, not a Bullet soft-body port.
+- Where the spec records no alternative at decision time (the arena mesh
+  was only named afterwards), the ADR says so rather than inventing one.
+
+---
+
 ## Trimmed `PROJECT-STATUS.md`; fixed broken doc tables
 **2026-09-30** · docs only
 

@@ -106,6 +106,11 @@ requirement, defect, maintenance policy, or ADR.
 | ADR-0003 | Target Bullet-derived fidelity, defer engine choice | `RB-PHYSICS-001`, `RB-RESEARCH-O001` |
 | ADR-0004 | Resolve build-vs-integrate via direct Bullet3 source port | `RB-PHYSICS-001-FR-001..003`, `PHASE-1-PHYSICS-CORE-V0`, `RB-RESEARCH-O001` |
 | ADR-0005 | JSON-Lines capture file format and shared `ControllerInput` schema | `RB-VERIFY-002-FR-001..002`, `RB-VERIFY-001-FR-004`, `RB-RESEARCH-O003` |
+| ADR-0006 | Model the standard arena from analytic primitives, not a triangle mesh | `RB-PHYSICS-001-FR-019..026`, `FR-029`, `FR-031`, `FR-036`, `FR-040` |
+| ADR-0007 | Detect car contact with curved static geometry by testing the box's 8 corners | `RB-PHYSICS-001-FR-027`, `FR-028`, `FR-032`, `FR-054` |
+| ADR-0008 | Resolve every contact manifold in a step in one combined solve | `RB-PHYSICS-001-FR-030`, `FR-034`, `FR-035`, `FR-041`, `FR-050..052` |
+| ADR-0009 | Drive the car as one rigid box with direct forces and torques, not a raycast vehicle | `RB-PHYSICS-001-FR-007..009`, `FR-065..067`, `FR-005` |
+| ADR-0010 | Model each goal net as a mass-spring mesh of rigid point bodies | `RB-PHYSICS-001-FR-029`, `FR-033`, `FR-038`, `FR-050` |
 
 ## Research traceability
 

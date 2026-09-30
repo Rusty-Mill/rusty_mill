@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0006 to ADR-0010, recorded retroactively for Phase 1's physics
+  modeling choices: analytic-primitive arena, corner testing for car vs.
+  curved geometry, combined multi-body contact solve, single-rigid-box car
+  with direct forces, and mass-spring goal nets. Indexed in
+  `TRACEABILITY.md`.
 - Repo lifecycle bootstrap: charter, system architecture, spec tree
   (`RB-VERIFY-001/002/003`, `RB-PHYSICS-001`, `RB-SIM-001`, `RB-NET-001`),
   ADR-0001..0003, research backlog, roadmap, traceability, AGENTS.md,
