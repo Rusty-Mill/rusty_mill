@@ -31,8 +31,8 @@ export function CalendarPage() {
   const [showDone, setShowDone] = useState(false)
   const [pop, setPop] = useState<Pop | null>(null)
 
-  const events = useMemo(() => buildEvents(Object.values(tasks), showDone), [tasks, showDone])
   const range = useMemo(() => visibleRange(mode, anchor, weekStart), [mode, anchor, weekStart])
+  const events = useMemo(() => buildEvents(Object.values(tasks), showDone, range.end), [tasks, showDone, range.end])
   const closePop = useCallback(() => setPop(null), [])
 
   const colorOf = useCallback((t: Task): string => lists[t.listId]?.color ?? DEFAULT_COLOR, [lists])

@@ -50,6 +50,6 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 - Settings: Account, Notifications, Date & Time, Appearance and Shortcuts are real; the other eight tabs are placeholders.
 - Comments button in the detail pane is disabled; Timeline view is a stub.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
-- Calendar: repeating tasks show only their next occurrence; agenda has no drag and no overdue group; "+N more" lists all of the day's tasks.
+- Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
 - Habits: a check-in means "done" (goal amount is text); reminders are stored, not fired.
 - No reference screenshots were available, so there is no pixel comparison; layout, spacing and copy follow the prompt's description.
