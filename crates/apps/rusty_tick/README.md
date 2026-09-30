@@ -36,12 +36,14 @@ restart. Every refusal is the same bare `401`.
 ```
 rusty_tick user add alice phone --data-dir DIR   # prints alice's token, once
 rusty_tick user list | revoke KEY TOKEN_ID | disable KEY | enable KEY
+rusty_tick user adopt alice --data-dir DIR       # move a single-user store into alice
 ```
 
 `add` creates `users.json` in a fresh directory (and adds a token to an
 existing user). It refuses a directory that already holds a single-user
-store, which a `users.json` would hide. A running server picks the change up
-within a second.
+store, which a `users.json` would hide; `adopt` moves that store into a user
+(server stopped) and prints their token. Commands take `users.lock`, so two at
+once cannot lose a write. A running server picks the change up within a second.
 
 Either way the server locks the data directory it opens, so a second
 `rusty_tick` on the same directory refuses to start.

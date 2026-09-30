@@ -13,15 +13,23 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: `user adopt`, and `user` commands no longer race
+**2026-09-30** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** `rusty_tick user adopt KEY [--data-dir DIR]` moves a single-user store into `users/KEY/`, creates the user and prints a token, so existing data keeps working under a per-user token. It needs the server stopped and refuses if there is nothing to adopt or the user's directory exists.
+- **Fixed:** two `user` commands at the same moment could lose one write. Commands that edit `users.json` now hold `users.lock`; a second one refuses instead of merging.
+
+---
+
 ## rusty_tick: the `user` commands (ADR-0002 step 4)
 **2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
 
 - **Added:** `rusty_tick user add KEY [LABEL] | list | revoke KEY TOKEN_ID | disable KEY | enable KEY [--data-dir DIR]`, which edit `users.json` and exit. A running multi-user server sees the change within a second.
   - `add` creates `users.json` in a fresh directory, or gives an existing user another token. It prints the token alone on stdout, once, so `TOKEN=$(rusty_tick user add alice phone)` works.
   - Failures go to stderr with a non-zero exit and print nothing on stdout.
-  - `add` refuses a directory that holds a single-user store (`tasks.mmap`), which a new `users.json` would stop serving. Moving that data into a user is still manual.
+  - `add` refuses a directory that holds a single-user store (`tasks.mmap`), which a new `users.json` would stop serving. `user adopt` (below) moves it.
 - **Added:** `rusty_tick::admin::run`, the command layer, over `users::Registry`. No new dependencies.
-- Known limitations: two `user` commands run at the same moment can lose one write (each reads the file, edits, and renames it); a running server is not told, it re-reads the file.
+- Known limitations: a running server is not told, it re-reads the file.
 
 ---
 
