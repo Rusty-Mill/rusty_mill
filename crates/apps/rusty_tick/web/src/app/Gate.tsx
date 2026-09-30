@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { NoTasksArt } from '@/components/Illustrations'
-import { clearToken, getToken, setMode, setToken, type Mode } from './env'
+import { adoptIdentity, clearToken, getToken, setMode, setToken, type Mode } from './env'
 
 const Card = ({ children }: { children: React.ReactNode }) => (
   <div className="flex h-full items-center justify-center bg-side p-4">
@@ -38,6 +38,7 @@ export function TokenPrompt({ error, onSubmit, onDemo }: { error?: string | null
     e.preventDefault()
     if (!token.trim()) return
     setToken(token.trim(), remember)
+    if (adoptIdentity(token.trim())) return location.reload() // another user: start from their data, not the last one's
     onSubmit()
   }
   return (
