@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, LayoutGrid, MoreHorizontal, Plus } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useActions, useServices } from '@/app/services'
 import { Confirm } from '@/components/Confirm'
@@ -52,7 +52,9 @@ export function HabitsPage() {
   return (
     <main className="flex min-w-0 flex-1 flex-col">
       <header className="flex h-14 shrink-0 items-center gap-3 px-4">
-        <h1 className="text-h1 font-semibold">Habit</h1>
+        <h1 className="flex items-center gap-1 text-h1 font-semibold">
+          Habit <ChevronDown size={16} aria-hidden className="text-grey" />
+        </h1>
         <div className="ml-auto flex items-center gap-1">
           <button type="button" aria-label="Previous week" onClick={() => setOffset((o) => o - 1)} className={iconBtn}>
             <ChevronLeft size={20} strokeWidth={1.5} />
@@ -66,11 +68,17 @@ export function HabitsPage() {
           <button type="button" disabled={offset === 0} onClick={() => setOffset(0)} className="ml-1 h-8 rounded-row border border-line px-3 hover:bg-hover disabled:opacity-40">
             This week
           </button>
+          <button type="button" disabled aria-label="Habit sections" title="Sections are not available yet" className={`${iconBtn} ml-2 opacity-50`}>
+            <LayoutGrid size={20} strokeWidth={1.5} />
+          </button>
           {visible.length > 0 && (
-            <button type="button" aria-label="Add habit" onClick={() => setDialog({ habit: null })} className={`${iconBtn} ml-2 bg-primary text-white hover:bg-primary`}>
+            <button type="button" aria-label="Add habit" onClick={() => setDialog({ habit: null })} className={iconBtn}>
               <Plus size={20} strokeWidth={1.5} />
             </button>
           )}
+          <button type="button" disabled aria-label="More" className={`${iconBtn} opacity-50`}>
+            <MoreHorizontal size={20} strokeWidth={1.5} />
+          </button>
         </div>
       </header>
 
