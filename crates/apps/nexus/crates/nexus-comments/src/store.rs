@@ -89,8 +89,11 @@ impl CommentStore {
     }
 
     /// Persist a [`CommentFile`] to disk, replacing any existing
-    /// sidecar. When `file.threads` is empty the sidecar is removed
-    /// to avoid littering the forge with empty JSON.
+    /// sidecar crash-atomically: the sidecar is the only copy of its
+    /// threads, so a crash or short write must leave the previous one
+    /// whole, never a truncated file (design review 2.9 / N6). When
+    /// `file.threads` is empty the sidecar is removed to avoid littering
+    /// the forge with empty JSON.
     ///
     /// # Errors
     /// I/O failures bubble up unchanged.
@@ -112,7 +115,7 @@ impl CommentStore {
                     path: sidecar.clone(),
                     source,
                 })?;
-            fs::write(&sidecar, body)?;
+            write_atomically(&sidecar, &body)?;
             Ok(())
         }
     }
@@ -385,6 +388,49 @@ fn extract_mentions(body: &str) -> Vec<String> {
     seen
 }
 
+/// Replace `path` with `body` crash-atomically: write a sibling temp file,
+/// sync it, rename it over `path`, then sync the directory (Unix) so the
+/// rename itself survives a power loss. Callers serialize saves of one
+/// sidecar (the plugin loader's mutex), so a fixed temp name is enough.
+///
+/// Nexus has this pattern three times (here, `nexus-editor`'s save,
+/// `nexus-storage::atomic`); consolidating them into one leaf helper is
+/// tracked with the design review's consolidation work.
+fn write_atomically(path: &Path, body: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no file name"));
+    };
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    let mut file = fs::File::create(&tmp)?;
+    let written = file.write_all(body).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(err) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    fs::rename(&tmp, path)?;
+    sync_parent_dir(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => fs::File::open(dir)?.sync_all(),
+        _ => Ok(()),
+    }
+}
+
+/// Windows cannot open a directory to sync it; the rename is the
+/// durability point there.
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +633,32 @@ mod tests {
     fn normalize_collapses_curdir_segments() {
         assert_eq!(normalize_relpath("./foo.md").unwrap(), "foo.md");
         assert_eq!(normalize_relpath("a/./b.md").unwrap(), "a/b.md");
+    }
+
+    /// Review 2.9 (N6): a save that fails partway leaves the previous
+    /// sidecar whole (the old `fs::write` truncated it first), and a
+    /// successful save leaves no temp file behind.
+    #[test]
+    fn a_failed_save_leaves_the_previous_sidecar_whole() {
+        let (d, s) = store();
+        let block = Uuid::new_v4();
+        let first = s
+            .create_thread("foo.md", block, "keep me".into(), None)
+            .unwrap();
+        let sidecar = s.sidecar_path("foo.md");
+        let tmp = sidecar.with_file_name(format!(
+            ".{}.tmp",
+            sidecar.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!tmp.exists(), "no temp file after a good save");
+
+        std::fs::create_dir(&tmp).unwrap(); // the next save cannot write it
+        assert!(s
+            .create_thread("foo.md", block, "lost".into(), None)
+            .is_err());
+        let threads = s.list_threads("foo.md").unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, first.id);
+        drop(d);
     }
 }

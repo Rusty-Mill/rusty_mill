@@ -9,6 +9,11 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **Comment sidecars are written crash-atomically** (`nexus-comments`, design
+  review 2.9 / N6). `save` used `fs::write` on the only copy of a file's
+  threads, so a crash or short write could leave a truncated sidecar that
+  then failed to load. It now writes a synced sibling temp file, renames it
+  over the sidecar, and syncs the directory on Unix.
 - **Memory hub last-write-wins compares time, not text** (`nexus-memory-hub`,
   design review 2.8 / N3).
   - A pushed `updated_at` is parsed as RFC 3339 and stored as a canonical
