@@ -11,6 +11,7 @@ import { NARROW } from '@/app/Shell'
 import { useUi } from '@/store/ui'
 import { usePrefs } from '../settings/prefs'
 import { KanbanBoard } from './KanbanBoard'
+import { TimelineView } from './TimelineView'
 import { QuickAdd } from './QuickAdd'
 import { TaskRow, type RowActions } from './TaskRow'
 import { reorderItems, viewKey, type ViewSpec } from './organize'
@@ -100,6 +101,8 @@ export function ListColumn({ spec, selectedId }: Props) {
 
       {viewMode === 'kanban' ? (
         <KanbanBoard spec={spec} data={data} selectedId={selectedId} />
+      ) : viewMode === 'timeline' ? (
+        <TimelineView spec={spec} data={data} selectedId={selectedId} />
       ) : total === 0 ? (
         <button type="button" onClick={() => useUi.getState().focusQuickAdd()} className="flex flex-1 flex-col items-center justify-center gap-2 pb-24 text-grey outline-none">
           <NoTasksArt />

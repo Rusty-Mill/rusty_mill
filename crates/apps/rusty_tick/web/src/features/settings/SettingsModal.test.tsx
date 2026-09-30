@@ -59,7 +59,7 @@ describe('SettingsModal', () => {
     const list = screen.getByRole('tablist', { name: 'Settings' })
     expect(list).toHaveAttribute('aria-orientation', 'vertical')
     const tabs = within(list).getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Account', 'Notifications', 'Date & Time', 'Appearance', 'Shortcuts', 'About'])
+    expect(tabs.map((t) => t.textContent)).toEqual(['Account', 'Premium', 'Features', 'Smart List', 'Notifications', 'Date & Time', 'Appearance', 'AI Features', 'More', 'Integrations & Import', 'Collaborate', 'Shortcuts', 'About'])
     expect(tabs).toHaveLength(SETTINGS_TABS.length)
     expect(tabs.filter((t) => t.tabIndex === 0)).toHaveLength(1)
   })
@@ -76,8 +76,8 @@ describe('SettingsModal', () => {
     const user = setup()
     screen.getByRole('tab', { name: 'Account' }).focus()
     await user.keyboard('{ArrowDown}')
-    await waitFor(() => expect(screen.getByRole('tab', { name: 'Notifications' })).toHaveFocus())
-    expect(search()).toContain('tabs=notifications')
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Premium' })).toHaveFocus())
+    expect(search()).toContain('tabs=premium')
     await user.keyboard('{ArrowUp}{ArrowUp}')
     await waitFor(() => expect(screen.getByRole('tab', { name: 'About' })).toHaveFocus())
     expect(search()).toContain('tabs=about')
@@ -92,6 +92,14 @@ describe('SettingsModal', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(search()).toBe('?x=1')
+  })
+
+  it.each(['premium', 'features', 'smart-list', 'ai', 'more', 'integrations', 'collaborate'])('%s is an honest placeholder', (tab) => {
+    setup(`/?modalType=settings&tabs=${tab}`)
+    const panel = screen.getByRole('tabpanel')
+    expect(within(panel).getByRole('heading')).toBeInTheDocument()
+    expect(panel).toHaveTextContent('is not available in Tick Local.')
+    expect(within(panel).queryByRole('button')).toBeNull() // nothing to click, nothing to buy
   })
 
   it('Notifications turns task reminders on once the browser allows them', async () => {
@@ -171,6 +179,23 @@ describe('SettingsModal', () => {
   })
 
   describe('Account', () => {
+    it('Generate Backup downloads every task, list and tag as JSON', async () => {
+      const blobs: Blob[] = []
+      URL.createObjectURL = vi.fn((b: Blob | MediaSource) => (blobs.push(b as Blob), 'blob:x'))
+      URL.revokeObjectURL = vi.fn()
+      const names: string[] = []
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        names.push(this.download)
+      })
+      const user = setup()
+      await user.click(screen.getByRole('button', { name: 'Generate Backup' }))
+      await waitFor(() => expect(names).toHaveLength(1))
+      expect(names[0]).toMatch(/^tick-backup-\d{4}-\d{2}-\d{2}\.json$/)
+      const snap = JSON.parse(await new Promise<string>((ok) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.readAsText(blobs[0]!) })) as { lists: unknown[]; tasks: unknown[] }
+      expect(snap.lists.length).toBeGreaterThan(0)
+      expect(snap.tasks.length).toBeGreaterThan(0)
+    })
+
     it('server mode: shows the masked token and signs out', async () => {
       setToken('secret-token-abcd1234', false)
       const reload = vi.spyOn(page, 'reload').mockImplementation(() => undefined)

@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { getToken } from '@/app/env'
-import { useServices } from '@/app/services'
+import { getToken, identity } from '@/app/env'
+import { useActions, useServices } from '@/app/services'
+import { downloadFile } from '@/features/summary/download'
+import { dayKey } from '@/lib/date'
 import { Confirm } from '@/components/Confirm'
 import { resetDemoData, signOut } from '../session'
 import { APP_NAME, APP_VERSION } from './AboutTab'
@@ -14,12 +16,68 @@ export function maskToken(token: string | null): string {
 
 const button = 'h-8 rounded-row border border-line px-4 hover:bg-hover'
 
+const card = 'flex flex-col rounded-[10px] bg-side px-4 py-1 [&>*+*]:border-t [&>*+*]:border-line'
+const line = 'flex min-h-10 items-center justify-between gap-3 py-2 text-base'
+const soon = 'text-primary/50'
+
 export function AccountTab() {
-  const { mode } = useServices()
+  const { mode, api } = useServices()
+  const { notify } = useActions()
+  const who = mode === 'server' ? identity(getToken()) || 'Tick Local' : 'Demo'
+  const backup = (): void => {
+    api
+      .snapshot()
+      .then((snap) => downloadFile(`tick-backup-${dayKey(Date.now())}.json`, 'application/json', JSON.stringify(snap, null, 2)))
+      .catch(() => notify('error', 'Could not create a backup'))
+  }
   const [confirming, setConfirming] = useState(false)
   return (
     <>
       <PaneTitle>Account</PaneTitle>
+      <div className="mb-4 flex flex-col items-center gap-1">
+        <span aria-hidden className="flex h-16 w-16 items-center justify-center rounded-full bg-selected text-title font-semibold text-grey">
+          {who.charAt(0).toUpperCase()}
+        </span>
+        <p className="mt-1 font-semibold">{who}</p>
+        <p className="text-s text-grey">{mode === 'server' ? location.host : 'Stored in this browser'}</p>
+      </div>
+      <div className={`${card} mb-3`}>
+        <div className={line}>
+          <span>Email</span>
+          <span className="text-grey">Not used</span>
+        </div>
+        <div className={line}>
+          <span>Password</span>
+          <span className={soon} title="Tick Local signs in with a token">Change Password</span>
+        </div>
+        <div className={line}>
+          <span>2-Step Verification</span>
+          <span className={soon} title="Not available">Setting</span>
+        </div>
+      </div>
+      <div className={`${card} mb-3`}>
+        <div className={line}>
+          <span>Login Devices</span>
+          <span className={soon} title="Not available">Manage</span>
+        </div>
+        <div className={line}>
+          <span>API Keys</span>
+          <span className={soon} title="Tokens are managed with the rusty_tick command line">Manage</span>
+        </div>
+        <div className={line}>
+          <span>Backup &amp; Restore</span>
+          <span className="flex gap-4">
+            <button type="button" onClick={backup} className="text-primary hover:underline">
+              Generate Backup
+            </button>
+            <span className={soon} title="Not available">Import Backups</span>
+          </span>
+        </div>
+        <div className={line}>
+          <span>Manage Account</span>
+          <span className="text-danger/50" title="Not available">Delete Account</span>
+        </div>
+      </div>
       {mode === 'server' ? (
         <>
           <Row label="Connected to" hint="The Tick Local server that stores your data.">

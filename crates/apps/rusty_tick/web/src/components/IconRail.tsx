@@ -1,11 +1,12 @@
-import { Bell, Calendar, CheckSquare, Clock, HelpCircle, RefreshCw, Search, Target, WifiOff } from 'lucide-react'
+import { Bell, HelpCircle, RefreshCw, WifiOff } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { calendarPath, HOME, PATHS, railSection, type RailSection } from '@/app/paths'
+import { calendarPath, HOME, PATHS, railSection } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { AccountMenu } from '@/features/settings/AccountMenu'
 import { useUi } from '@/store/ui'
 import { Popover } from './Popover'
+import { CalendarIcon, FocusIcon, HabitIcon, SearchIcon, TasksIcon } from './RailIcons'
 import { Tooltip } from './Tooltip'
 
 const ICON = 20
@@ -36,10 +37,6 @@ export function IconRail() {
   const [account, setAccount] = useState(false)
   const avatarRef = useRef<HTMLButtonElement>(null)
 
-  const icon = (Icon: typeof CheckSquare, id: RailSection) => (
-    <Icon size={ICON} strokeWidth={STROKE} fill={section === id ? 'rgb(var(--primary))' : 'none'} stroke={section === id ? 'rgb(var(--rail))' : 'currentColor'} className={section === id ? 'text-primary' : ''} />
-  )
-
   return (
     <nav aria-label="Sections" className="flex h-full w-[50px] shrink-0 flex-col items-center bg-rail">
       <button
@@ -55,19 +52,19 @@ export function IconRail() {
       <AccountMenu anchor={avatarRef.current} open={account} onClose={() => setAccount(false)} />
 
       <RailButton label="Tasks" active={section === 'tasks'} onClick={() => navigate(HOME)}>
-        {icon(CheckSquare, 'tasks')}
+        <TasksIcon />
       </RailButton>
       <RailButton label="Calendar" active={section === 'calendar'} onClick={() => navigate(calendarPath())}>
-        {icon(Calendar, 'calendar')}
+        <CalendarIcon />
       </RailButton>
       <RailButton label="Pomodoro" active={section === 'focus'} onClick={() => navigate(PATHS.focus)}>
-        {icon(Target, 'focus')}
+        <FocusIcon />
       </RailButton>
       <RailButton label="Habit Tracker" active={section === 'habit'} onClick={() => navigate(PATHS.habit)}>
-        {icon(Clock, 'habit')}
+        <HabitIcon />
       </RailButton>
       <RailButton label="Search" onClick={() => setSearchOpen(true)}>
-        <Search size={ICON} strokeWidth={STROKE} />
+        <SearchIcon />
       </RailButton>
 
       <div className="mt-auto flex flex-col items-center pb-2">

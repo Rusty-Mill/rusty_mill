@@ -1,12 +1,13 @@
 import { useSearchParams } from 'react-router-dom'
 import { SETTINGS_TABS, type SettingsTab } from '@/app/paths'
 import { Dialog } from '@/components/Dialog'
-import { SettingsNav, panelId, tabId } from './SettingsNav'
+import { SettingsNav, TAB_META, panelId, tabId } from './SettingsNav'
 import { AboutTab } from './tabs/AboutTab'
 import { AccountTab } from './tabs/AccountTab'
 import { AppearanceTab } from './tabs/AppearanceTab'
 import { DateTimeTab } from './tabs/DateTimeTab'
 import { NotificationsTab } from './tabs/NotificationsTab'
+import { PlaceholderTab } from './tabs/PlaceholderTab'
 import { ShortcutsTab } from './tabs/ShortcutsTab'
 
 const isTab = (v: string | null): v is SettingsTab => SETTINGS_TABS.some((t) => t === v)
@@ -25,6 +26,8 @@ function Pane({ tab }: { tab: SettingsTab }) {
       return <ShortcutsTab />
     case 'about':
       return <AboutTab />
+    default:
+      return <PlaceholderTab title={TAB_META.find((t) => t.id === tab)?.label ?? ''} />
   }
 }
 

@@ -29,9 +29,9 @@ const toggle = <T,>(xs: T[], x: T): T[] => (xs.includes(x) ? xs.filter((y) => y 
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-2 border-b border-line px-5 py-4 last:border-b-0">
+    <section className="flex flex-col gap-2 px-5 py-3">
       <h3 className="text-base font-semibold">{title}</h3>
-      {children}
+      <div className="flex flex-col gap-2 rounded-[10px] bg-side px-3 py-2.5">{children}</div>
     </section>
   )
 }
@@ -80,9 +80,9 @@ export function SummaryFilters({ options: o, onChange, lists, tags }: Props) {
       </Section>
 
       <Section title="Filter">
-        <label className="flex flex-col gap-1 text-s text-grey">
+        <label className="flex items-center justify-between gap-3 text-base">
           Date range
-          <select value={o.range} onChange={(e) => onChange({ range: e.target.value as SummaryOptions['range'] })} className={`${field} text-text`}>
+          <select value={o.range} onChange={(e) => onChange({ range: e.target.value as SummaryOptions['range'] })} className="h-8 min-w-0 max-w-[180px] rounded-row bg-transparent text-right text-grey outline-none">
             {RANGE_KEYS.map((k) => (
               <option key={k} value={k}>
                 {RANGE_LABELS[k]}
