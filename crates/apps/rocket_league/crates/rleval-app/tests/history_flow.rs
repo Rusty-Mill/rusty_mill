@@ -5,15 +5,19 @@
 
 use std::path::PathBuf;
 
-use rleval_app::history::{habits, summarize, SessionRecord};
 use replay_scoring::XgModel;
+use rleval_app::history::{habits, summarize, SessionRecord};
 use rleval_app::pipeline;
 use rleval_app::store::{session_key, AccountId, FsSessionStore, SaveOutcome, SessionStore};
 
 fn analyzed_record() -> SessionRecord {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/42f2.replay");
     let bytes = std::fs::read(&path).expect("sample replay");
-    let analysis = pipeline::analyze(&bytes, "42f2", None, None, &XgModel::default()).expect("analyze");
+    let norms = pipeline::load_rank_norms(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/corpus"),
+    );
+    let analysis = pipeline::analyze(&bytes, "42f2", norms.as_ref(), None, &XgModel::default())
+        .expect("analyze");
 
     let record = SessionRecord::from_analysis(session_key(&bytes), 1, &analysis);
     assert_eq!(record.players.len(), analysis.pacifist.players.len());
@@ -26,6 +30,11 @@ fn analyzed_record() -> SessionRecord {
         record.players.iter().any(|p| p.won == Some(true))
             && record.players.iter().any(|p| p.won == Some(false)),
         "a decided match has winners and losers"
+    );
+    assert!(
+        record.players.iter().all(|p| p.composite.is_some())
+            && record.players.iter().any(|p| !p.metrics.is_empty()),
+        "the composite and rank-relative metrics are kept for progress tracking"
     );
     record
 }

@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use replay_scoring::Report;
+
 use crate::pipeline::Analysis;
 
 /// Wins *and* losses needed before a win-vs-loss contrast is claimed as a habit.
@@ -31,8 +33,21 @@ pub struct DimensionSnapshot {
     pub opportunities: usize,
 }
 
-/// One player's stored result for one match.
+/// One scoring metric in one match, against the player's rank bracket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricSnapshot {
+    pub key: String,
+    pub raw: f32,
+    /// Standing within the bracket, 0–100 (higher is better).
+    pub pct: f32,
+    /// The bracket's median raw for this metric.
+    pub median: f32,
+    /// The next bracket up's median — the target to climb toward.
+    pub next: Option<f32>,
+}
+
+/// One player's stored result for one match.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerSnapshot {
     pub player: String,
     /// Stable platform identity; `None` for bots and sessions saved before ids
@@ -49,10 +64,16 @@ pub struct PlayerSnapshot {
     /// Most frequent Minor-fault criterion that match (e.g. `"F9"`).
     pub top_minor_fault: Option<String>,
     pub dimensions: Vec<DimensionSnapshot>,
+    /// Decision-discipline composite (0–100) that match; `None` in records saved before it was kept.
+    #[serde(default)]
+    pub composite: Option<f32>,
+    /// Scoring metrics against the rank bracket; empty without rank norms or in older records.
+    #[serde(default)]
+    pub metrics: Vec<MetricSnapshot>,
 }
 
 /// One analysed match as stored in an account's history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
     /// Content hash of the replay bytes — the idempotency key.
     pub key: String,
@@ -60,6 +81,9 @@ pub struct SessionRecord {
     pub label: String,
     /// Unix seconds when the session was saved; orders the history.
     pub saved_at: u64,
+    /// The play session the uploader named; unnamed matches are grouped by time (see `progress`).
+    #[serde(default)]
+    pub session: Option<String>,
     pub players: Vec<PlayerSnapshot>,
 }
 
@@ -83,33 +107,76 @@ impl SessionRecord {
             .pacifist
             .players
             .iter()
-            .map(|p| PlayerSnapshot {
-                player: p.player.clone(),
-                platform_id: p.platform_id.clone(),
-                team: p.team,
-                won: winner.map(|w| w == p.team),
-                value: p.value,
-                majors: p.majors,
-                minors: p.minors,
-                top_minor_fault: p.top_minor_fault.as_ref().map(|f| f.criterion.clone()),
-                dimensions: p
-                    .dimensions
-                    .iter()
-                    .map(|d| DimensionSnapshot {
-                        label: d.label.clone(),
-                        value: d.value,
-                        opportunities: d.opportunities,
-                    })
-                    .collect(),
+            .map(|p| {
+                let report = analysis.scores.iter().find(|r| r.target_player == p.player);
+                PlayerSnapshot {
+                    player: p.player.clone(),
+                    platform_id: p.platform_id.clone(),
+                    team: p.team,
+                    won: winner.map(|w| w == p.team),
+                    value: p.value,
+                    majors: p.majors,
+                    minors: p.minors,
+                    top_minor_fault: p.top_minor_fault.as_ref().map(|f| f.criterion.clone()),
+                    dimensions: p
+                        .dimensions
+                        .iter()
+                        .map(|d| DimensionSnapshot {
+                            label: d.label.clone(),
+                            value: d.value,
+                            opportunities: d.opportunities,
+                        })
+                        .collect(),
+                    composite: report.map(|r| r.composite),
+                    metrics: report.map(metric_snapshots).unwrap_or_default(),
+                }
             })
             .collect();
         Self {
             key,
             label: analysis.replay_id.clone(),
             saved_at,
+            session: None,
             players,
         }
     }
+
+    /// Put this match in the named play session (blank names mean "unnamed").
+    pub fn in_session(mut self, name: &str) -> Self {
+        let name: String = name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_SESSION_NAME)
+            .collect();
+        self.session = Some(name.trim().to_string()).filter(|n| !n.is_empty());
+        self
+    }
+}
+
+/// Longest stored session name.
+pub const MAX_SESSION_NAME: usize = 64;
+
+/// The bracket-relative metrics of `report` (none without rank norms).
+fn metric_snapshots(report: &Report) -> Vec<MetricSnapshot> {
+    let experimental = |key: &str| {
+        report
+            .metrics
+            .iter()
+            .any(|m| m.key == key && m.experimental)
+    };
+    (report.relative.iter())
+        .flat_map(|rel| &rel.metrics)
+        .filter(|m| !experimental(&m.key))
+        .filter_map(|m| {
+            Some(MetricSnapshot {
+                key: m.key.clone(),
+                raw: m.raw?,
+                pct: m.within_rank_pct,
+                median: m.bracket_median,
+                next: m.next_median,
+            })
+        })
+        .collect()
 }
 
 /// The team with the strictly highest score, or `None` for a draw / no scores.
@@ -414,6 +481,7 @@ mod tests {
             minors: 1,
             top_minor_fault: Some("F9".into()),
             dimensions: dims,
+            ..Default::default()
         }
     }
 
@@ -423,6 +491,7 @@ mod tests {
             label: format!("m{i}"),
             saved_at: i as u64,
             players: vec![p],
+            ..Default::default()
         }
     }
 

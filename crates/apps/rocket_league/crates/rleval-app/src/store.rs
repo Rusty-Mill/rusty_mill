@@ -239,6 +239,7 @@ mod tests {
             label: key.into(),
             saved_at,
             players: vec![],
+            ..Default::default()
         }
     }
 

@@ -209,6 +209,7 @@ mod tests {
             label: seed.into(),
             saved_at,
             players: vec![],
+            ..Default::default()
         }
     }
 

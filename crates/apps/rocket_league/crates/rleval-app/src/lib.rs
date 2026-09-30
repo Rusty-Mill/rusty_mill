@@ -15,6 +15,7 @@ pub mod oidc;
 pub mod oidc_transport;
 pub mod panels;
 pub mod pipeline;
+pub mod progress;
 pub mod server;
 pub mod store;
 #[cfg(feature = "mmdb")]

@@ -169,7 +169,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   #history { display: none; margin-top: 22px; }
   #history.open { display: block; animation: rise .26s ease both; }
   .hist-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
-  .hist-bar select, .hist-bar input { background: var(--card-2); color: var(--fg); border: 1px solid var(--line);
+  .hist-bar select, .hist-bar input, .samples select, .samples input { background: var(--card-2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 9px; padding: 8px 12px; font-size: 13px; }
   .focus { border-left: 3px solid var(--accent); }
   .focus .reco-tag { color: var(--accent); }
@@ -222,6 +222,8 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
         <input type="file" id="file" accept=".replay" hidden>
       </div>
       <div class="samples" id="samples"><span class="lbl">Samples</span></div>
+      <div class="samples"><span class="lbl">Session</span>
+        <input id="uploadSession" maxlength="64" placeholder="optional name, groups this match in History" style="min-width:260px"></div>
       <div class="samples"><span class="lbl">Rank</span>
         <select id="uploadRank"><option value="">auto (from the lobby)</option><option>silver</option><option>gold</option><option>platinum</option><option>diamond</option><option>champion</option><option>grand-champion</option></select></div>
       <div class="samples" id="teamPick" style="display:none"><span class="lbl">Share with team</span>
@@ -974,7 +976,7 @@ $("signOut").onclick = async (e) => {
 // ---- teams: shared match pool + roster view (needs --teams on the server) ----
 // The optional query params of an analyze call: share team and declared rank.
 function teamParam(prefix) {
-  const q = [["team", $("uploadTeam").value], ["rank", $("uploadRank").value]]
+  const q = [["team", $("uploadTeam").value], ["rank", $("uploadRank").value], ["session", $("uploadSession").value.trim()]]
     .filter(([, v]) => v).map(([k, v]) => k + "=" + encodeURIComponent(v));
   return q.length ? prefix + q.join("&") : "";
 }
@@ -1050,10 +1052,29 @@ async function loadHabits(player) {
   try {
     const r = await authFetch("/api/history/habits?player=" + encodeURIComponent(player));
     if (!r.ok) throw new Error(await r.text());
-    box.innerHTML = renderHabits(await r.json());
+    box.innerHTML = renderHabits(await r.json()) + await progressHtml(player);
   } catch (e) {
     box.innerHTML = `<div class="card"><div class="reco reco-major">${esc(e.message || e)}</div></div>`;
   }
+}
+
+// Play-session rollups and the ranked plan; empty until the player has stored metrics.
+async function progressHtml(player) {
+  const r = await authFetch("/api/history/progress?player=" + encodeURIComponent(player));
+  if (!r.ok) return "";
+  const p = await r.json();
+  const arrow = { improving: "▲ improving", worse: "▼ slipping", flat: "● flat", unknown: "play another session, then this re-checks" };
+  const plan = p.plan.map(i => `<tr><td>${esc(i.metric.replaceAll("_", " "))}</td><td class="num">${fmt(i.now, 2)}</td>
+    <td class="num">${fmt(i.target, 2)}</td><td class="num">${fmt(i.pct, 0)}</td><td class="num">${i.matches}</td>
+    <td class="${i.trend === "improving" ? "pos" : i.trend === "worse" ? "neg" : "muted"}">${arrow[i.trend]}</td></tr>`).join("");
+  const sess = p.sessions.map(s => `<tr><td>${esc(s.name)}</td><td class="num">${s.matches}</td><td class="num">${s.wins}–${s.losses}</td>
+    <td class="num">${fmt(s.composite, 0)}</td><td class="num">${fmt(s.pacifist, 0)}</td></tr>`).join("");
+  return `<div style="height:16px"></div>` + (plan
+    ? cardTable("Training plan — your lowest metrics against your rank bracket, with the next bracket's median as the target. Needs 3 matches per metric; the trend compares your latest session with the ones before it.",
+        `<th>Metric</th><th class="num">Now</th><th class="num">Target</th><th class="num">Peer pct</th><th class="num">Matches</th><th>Latest session</th>`, plan, "", 6)
+    : `<div class="card"><div class="reco muted">A training plan needs 3 saved matches with rank norms applied.</div></div>`) +
+    `<div style="height:16px"></div>` + cardTable("Play sessions — matches grouped by the name you gave them, else by time (a 2-hour gap starts a new one).",
+      `<th>Session</th><th class="num">Matches</th><th class="num">W–L</th><th class="num">Composite</th><th class="num">Pacifist</th>`, sess, "", 5);
 }
 
 function renderHabits(h) {

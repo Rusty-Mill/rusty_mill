@@ -117,6 +117,16 @@ at `<data-dir>/<account>/<key>.json`. Tokens are operator-supplied and compared
 in constant time; this is a local seam meant to be replaced by a real identity
 provider, not a hardened public-internet login — put it behind TLS if exposed.
 
+**Play sessions and the training plan.** Add `?session=<name>` to an analysis (the
+"Session" box in the UI) to group matches; unnamed matches are grouped by time — a
+gap of over 2 hours starts a new session. History then also shows each session's
+record and mean composite, and a **training plan** for the selected player: the three
+metrics where they sit lowest against their rank bracket, each with the next
+bracket's median as the target and whether the latest session moved toward it. A
+metric needs 3 matches with rank norms applied before it is planned (fewer is one
+match's noise). Sessions saved before this only carry the Pacifist data and do not
+feed the plan.
+
 ### 2.2 Team workspaces
 
 For a coach and a roster: one shared pool of matches, one read of how the team

@@ -22,6 +22,7 @@ use rleval_app::authn::{
 };
 use rleval_app::history::{self, SessionRecord};
 use rleval_app::panels::{PanelCache, Panels};
+use rleval_app::progress;
 use rleval_app::server::{self, Request, Response};
 use rleval_app::store::{
     copy_all, session_key, AccountId, FsSessionStore, SaveOutcome, SessionStore,
@@ -403,9 +404,6 @@ fn route(req: &Request, state: &AppState) -> Response {
         }
         ("POST", "/api/analyze") => with_account(req, state, |account| {
             let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
-            // Optional explicit rank bracket override (?rank=diamond); absent ⇒
-            // the lobby's level is inferred.
-            let rank = query_param(&req.path, "rank");
             let team = match upload_team(req, state, account) {
                 Ok(t) => t,
                 Err(resp) => return resp,
@@ -413,8 +411,7 @@ fn route(req: &Request, state: &AppState) -> Response {
             analyze_response(
                 &req.body,
                 &stem(&name),
-                rank.as_deref(),
-                wants_inline(req),
+                &AnalyzeOpts::from_request(req),
                 state,
                 account,
                 team,
@@ -427,7 +424,6 @@ fn route(req: &Request, state: &AppState) -> Response {
                 if name.contains('/') || name.contains("..") {
                     return Response::text(400, "invalid sample name");
                 }
-                let rank = query_param(&req.path, "rank");
                 let team = match upload_team(req, state, account) {
                     Ok(t) => t,
                     Err(resp) => return resp,
@@ -436,8 +432,7 @@ fn route(req: &Request, state: &AppState) -> Response {
                     Ok(bytes) => analyze_response(
                         &bytes,
                         &stem(&name),
-                        rank.as_deref(),
-                        wants_inline(req),
+                        &AnalyzeOpts::from_request(req),
                         state,
                         account,
                         team,
@@ -446,16 +441,26 @@ fn route(req: &Request, state: &AppState) -> Response {
                 }
             })
         }
-        ("GET", path) if path.starts_with("/api/analysis/") => with_account(req, state, |account| {
-            let (id, panel) = path
-                .trim_start_matches("/api/analysis/")
-                .split_once('/')
-                .unwrap_or_default();
-            match state.panels.get(account, id).as_deref().and_then(|p| p.get(panel)) {
-                Some(html) => Response::html(html),
-                None => Response::text(404, "no such panel (analyses are kept only briefly; re-run it)"),
-            }
-        }),
+        ("GET", path) if path.starts_with("/api/analysis/") => {
+            with_account(req, state, |account| {
+                let (id, panel) = path
+                    .trim_start_matches("/api/analysis/")
+                    .split_once('/')
+                    .unwrap_or_default();
+                match state
+                    .panels
+                    .get(account, id)
+                    .as_deref()
+                    .and_then(|p| p.get(panel))
+                {
+                    Some(html) => Response::html(html),
+                    None => Response::text(
+                        404,
+                        "no such panel (analyses are kept only briefly; re-run it)",
+                    ),
+                }
+            })
+        }
         ("GET", "/api/teams") => with_account(req, state, |account| {
             let mine: Vec<TeamEntry> = state
                 .teams
@@ -475,6 +480,15 @@ fn route(req: &Request, state: &AppState) -> Response {
         }),
         ("GET", "/api/history") => with_history(req, state, |records| {
             json_response(&history::summarize(&records))
+        }),
+        ("GET", "/api/history/progress") => with_history(req, state, |records| {
+            let Some(player) = query_param(&req.path, "player") else {
+                return Response::text(400, "missing ?player=");
+            };
+            match progress::progress(&player, &records) {
+                Some(report) => json_response(&report),
+                None => Response::text(404, format!("no stored matches for {player:?}")),
+            }
         }),
         ("GET", "/api/history/habits") => with_history(req, state, |records| {
             let Some(player) = query_param(&req.path, "player") else {
@@ -609,9 +623,24 @@ fn with_account(
     }
 }
 
-/// `?inline=1` asks for the legacy response shape, with the HTML panels embedded.
-fn wants_inline(req: &Request) -> bool {
-    query_param(&req.path, "inline").is_some_and(|v| v == "1")
+/// What the caller asked of an analysis, from the query string.
+struct AnalyzeOpts {
+    /// `?rank=diamond`: pin the rank bracket instead of inferring it from the lobby.
+    rank: Option<String>,
+    /// `?inline=1`: the legacy response shape, with the HTML panels embedded.
+    inline: bool,
+    /// `?session=name`: the play session this match belongs to in history.
+    session: Option<String>,
+}
+
+impl AnalyzeOpts {
+    fn from_request(req: &Request) -> Self {
+        Self {
+            rank: query_param(&req.path, "rank"),
+            inline: query_param(&req.path, "inline").is_some_and(|v| v == "1"),
+            session: query_param(&req.path, "session"),
+        }
+    }
 }
 
 /// Like [`with_account`], for endpoints that read the account's stored sessions.
@@ -639,8 +668,7 @@ fn with_history(
 fn analyze_response(
     bytes: &[u8],
     replay_id: &str,
-    override_bracket: Option<&str>,
-    inline: bool,
+    opts: &AnalyzeOpts,
     state: &AppState,
     account: &AccountId,
     team: Option<&Team>,
@@ -651,12 +679,19 @@ fn analyze_response(
     let norms = pipeline::load_rank_norms(&state.corpus);
     let xg = pipeline::load_xg(&state.corpus);
     let result = catch_unwind(AssertUnwindSafe(|| {
-        pipeline::analyze(bytes, replay_id, norms.as_ref(), override_bracket, &xg)
+        pipeline::analyze(bytes, replay_id, norms.as_ref(), opts.rank.as_deref(), &xg)
     }));
     match result {
         Ok(Ok(mut analysis)) => {
-            persist(state, account, team, bytes, &analysis);
-            if !inline {
+            persist(
+                state,
+                account,
+                team,
+                bytes,
+                opts.session.as_deref(),
+                &analysis,
+            );
+            if !opts.inline {
                 // Default: just the data; the panels are fetched on first use.
                 let id = session_key(bytes);
                 state.panels.put(account, &id, Panels::take(&mut analysis));
@@ -680,13 +715,15 @@ fn persist(
     account: &AccountId,
     team: Option<&Team>,
     bytes: &[u8],
+    session: Option<&str>,
     analysis: &pipeline::Analysis,
 ) {
     let Some(store) = &state.store else { return };
     let saved_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let record = SessionRecord::from_analysis(session_key(bytes), saved_at, analysis);
+    let record = SessionRecord::from_analysis(session_key(bytes), saved_at, analysis)
+        .in_session(session.unwrap_or_default());
     save_logged(
         store.as_ref(),
         account,

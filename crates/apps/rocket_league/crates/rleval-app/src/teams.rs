@@ -319,7 +319,9 @@ fn rollup(team: &Team, pool: &[SessionRecord]) -> Option<HabitReport> {
                     minors: mine.iter().map(|p| p.minors).sum(),
                     top_minor_fault: None,
                     dimensions: mine.iter().flat_map(|p| p.dimensions.clone()).collect(),
+                    ..Default::default()
                 }],
+                ..Default::default()
             })
         })
         .collect();
@@ -397,6 +399,7 @@ mod tests {
                 value: shadow,
                 opportunities: 10,
             }],
+            ..Default::default()
         }
     }
 
@@ -416,6 +419,7 @@ mod tests {
                         snap("bob", won, s),
                         snap("Opp", !won, 10.0),
                     ],
+                    ..Default::default()
                 }
             })
             .collect()
