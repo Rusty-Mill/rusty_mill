@@ -55,12 +55,12 @@ export function HabitsPage() {
 
   const days = useMemo(() => weekDays(addDays(today, offset * 7), weekStart), [today, offset, weekStart])
   const visible = useMemo(() => habits.filter((h) => !h.archived), [habits])
-  const checkedByHabit = useMemo(() => {
-    const map = new Map<string, Set<string>>()
+  const countsByHabit = useMemo(() => {
+    const map = new Map<string, Map<string, number>>()
     for (const c of Object.values(checkins)) {
-      const set = map.get(c.habitId) ?? new Set<string>()
-      set.add(c.day)
-      map.set(c.habitId, set)
+      const days = map.get(c.habitId) ?? new Map<string, number>()
+      days.set(c.day, c.count)
+      map.set(c.habitId, days)
     }
     return map
   }, [checkins])
@@ -141,7 +141,7 @@ export function HabitsPage() {
                   key={h.id}
                   habit={h}
                   days={days}
-                  checked={checkedByHabit.get(h.id) ?? EMPTY}
+                  counts={countsByHabit.get(h.id) ?? EMPTY}
                   today={today}
                   weekStart={weekStart}
                   onToggle={(day) => useHabits.getState().toggle(h.id, day)}
@@ -171,5 +171,5 @@ export function HabitsPage() {
   )
 }
 
-const EMPTY: ReadonlySet<string> = new Set()
+const EMPTY: ReadonlyMap<string, number> = new Map()
 const iconBtn = 'flex h-8 w-8 items-center justify-center rounded-row text-grey hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary'

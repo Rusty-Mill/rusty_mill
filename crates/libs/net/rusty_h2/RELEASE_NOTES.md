@@ -6,6 +6,18 @@ than a version.
 
 ---
 
+## Design review 3.5: HTTP/2 connection hardening
+
+- **Security:** limits and checks on incoming frames:
+  - CONTINUATION frames are limited per header block, by count and by size.
+  - Any other frame inside a header block is refused.
+  - DATA past a receive window is refused.
+- **Added:** `Connection::send_frame` records frames you send; `Connection::release_capacity` returns WINDOW_UPDATE frames once you have consumed received data.
+  - **Migration:** receive windows are now enforced. A reader that never calls `release_capacity` stalls after 64 KiB.
+- **Removed:** the unused, uncompiled `connect/flow.rs`.
+
+---
+
 ## PR #9 — Add standard repo governance files and Rust CI workflow
 **2026-07-23** · [#9](https://github.com/baileyrd/rusty_h2/pull/9)
 

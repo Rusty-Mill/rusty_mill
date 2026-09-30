@@ -103,10 +103,52 @@ impl FlowControl {
         Ok(())
     }
 
-    fn consume_recv(&mut self, n: u32) {
-        self.recv_window -= n as i64;
+    /// Account `n` received bytes against the receive window. More than
+    /// the window allows is the peer violating flow control (RFC 9113
+    /// §6.9.1); it used to be accepted and drive the window negative.
+    fn consume_recv(&mut self, n: u32) -> core::result::Result<(), ()> {
+        if i64::from(n) > self.recv_window {
+            return Err(());
+        }
+        self.recv_window -= i64::from(n);
+        Ok(())
+    }
+
+    /// Account `n` bytes this endpoint is sending against the send window.
+    fn consume_send(&mut self, n: u32) -> core::result::Result<(), ()> {
+        if i64::from(n) > self.send_window {
+            return Err(());
+        }
+        self.send_window -= i64::from(n);
+        Ok(())
+    }
+
+    /// Give `n` bytes of receive capacity back (the application consumed
+    /// them), capped at the largest legal window.
+    fn release_recv(&mut self, n: u32) -> u32 {
+        let room = (i64::from(MAX_WINDOW) - self.recv_window).max(0);
+        let n = i64::from(n).min(room);
+        self.recv_window += n;
+        n as u32
     }
 }
+
+/// The largest flow-control window RFC 9113 §6.9.1 allows (2^31 - 1).
+const MAX_WINDOW: u32 = i32::MAX as u32;
+
+/// Default cap on one reassembled header block (HEADERS/PUSH_PROMISE plus
+/// its CONTINUATIONs), in compressed bytes, when this endpoint advertises
+/// no `SETTINGS_MAX_HEADER_LIST_SIZE`. A block is buffered whole before
+/// HPACK can run, so without a cap CONTINUATION frames grow it without
+/// bound (design review 3.5).
+pub const DEFAULT_MAX_HEADER_BLOCK: usize = 64 * 1024;
+/// Ceiling on the header block cap however large the advertised
+/// `SETTINGS_MAX_HEADER_LIST_SIZE` is (the builders default it to
+/// "unlimited").
+const HARD_MAX_HEADER_BLOCK: usize = 1024 * 1024;
+/// Cap on CONTINUATION frames per header block: zero-length ones grow no
+/// buffer but still cost a dispatch each (the 2024 "CONTINUATION flood").
+pub const MAX_CONTINUATION_FRAMES: usize = 64;
 
 /// One active (or reserved) stream's state plus its own flow-control
 /// window.
@@ -119,18 +161,21 @@ struct StreamEntry {
 /// The still-buffering state of a HEADERS or PUSH_PROMISE frame whose
 /// `END_HEADERS` flag was not set, waiting for CONTINUATION frame(s)
 /// (RFC 9113 §6.10) to complete the header block before it can be run
-/// through the (stateful, connection-wide) HPACK decoder.
+/// through the (stateful, connection-wide) HPACK decoder. `continuations`
+/// counts the CONTINUATION frames folded in so far.
 #[derive(Debug, Clone)]
 enum PendingHeaderBlock {
     Headers {
         stream_id: u32,
         end_stream: bool,
         fragment: Vec<u8>,
+        continuations: usize,
     },
     PushPromise {
         stream_id: u32,
         promised_stream_id: u32,
         fragment: Vec<u8>,
+        continuations: usize,
     },
 }
 
@@ -142,10 +187,18 @@ impl PendingHeaderBlock {
         }
     }
 
-    fn fragment_mut(&mut self) -> &mut Vec<u8> {
+    fn buffer_mut(&mut self) -> (&mut Vec<u8>, &mut usize) {
         match self {
-            PendingHeaderBlock::Headers { fragment, .. } => fragment,
-            PendingHeaderBlock::PushPromise { fragment, .. } => fragment,
+            PendingHeaderBlock::Headers {
+                fragment,
+                continuations,
+                ..
+            }
+            | PendingHeaderBlock::PushPromise {
+                fragment,
+                continuations,
+                ..
+            } => (fragment, continuations),
         }
     }
 }
@@ -314,7 +367,104 @@ impl Connection {
         self.apply_frame(frame)
     }
 
+    /// Records a frame this endpoint is about to *send*: the one place
+    /// outgoing frames change connection state (design review 3.5).
+    /// Outgoing frames used to go through [`Self::apply_frame`], which ran
+    /// this endpoint's own HEADERS through the *peer's* HPACK decoder
+    /// (desynchronizing it), applied `Recv*` stream transitions, and
+    /// charged outgoing DATA to the receive window. DATA beyond the
+    /// connection or stream send window is refused and nothing changes.
+    pub fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        if let Some(reason) = &self.close_reason {
+            return Err(reason.clone());
+        }
+        match frame {
+            Frame::Headers(h) => {
+                let entry = self.stream_entry(h.stream_id);
+                entry.stream.apply(Event::SendHeaders)?;
+                if h.end_stream {
+                    entry.stream.apply(Event::SendEndStream)?;
+                }
+                self.prune_if_closed(h.stream_id);
+            }
+            Frame::Data(d) => {
+                let len = u32::try_from(d.data.len()).unwrap_or(u32::MAX);
+                let over = |stream| {
+                    H2Error::Stream(
+                        stream,
+                        ErrorCode::FlowControlError,
+                        "DATA exceeds the send window",
+                    )
+                };
+                let stream_window = self.stream_entry(d.stream_id).flow.send_window;
+                if i64::from(len) > stream_window || i64::from(len) > self.conn_flow.send_window {
+                    return Err(over(d.stream_id));
+                }
+                self.conn_flow
+                    .consume_send(len)
+                    .map_err(|()| over(d.stream_id))?;
+                let entry = self.stream_entry(d.stream_id);
+                entry
+                    .flow
+                    .consume_send(len)
+                    .map_err(|()| over(d.stream_id))?;
+                if d.end_stream {
+                    entry.stream.apply(Event::SendEndStream)?;
+                }
+                self.prune_if_closed(d.stream_id);
+            }
+            Frame::RstStream(r) => {
+                self.stream_entry(r.stream_id)
+                    .stream
+                    .apply(Event::SendRstStream)?;
+                self.prune_if_closed(r.stream_id);
+            }
+            Frame::PushPromise(pp) => {
+                self.stream_entry(pp.promised_stream_id)
+                    .stream
+                    .apply(Event::SendPushPromise)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Returns `n` bytes of `stream_id`'s received DATA to the flow-control
+    /// windows once the application has consumed them, and the
+    /// WINDOW_UPDATE frames to send so the peer may send more. The receive
+    /// window is enforced (design review 3.5), so a reader that never
+    /// releases capacity stalls the peer after the initial window.
+    pub fn release_capacity(&mut self, stream_id: u32, n: u32) -> Vec<Frame> {
+        let mut out = Vec::new();
+        let conn = self.conn_flow.release_recv(n);
+        if conn > 0 {
+            out.push(Frame::WindowUpdate(WindowUpdateFrame {
+                stream_id: 0,
+                window_size_increment: conn,
+            }));
+        }
+        if let Some(entry) = self.streams.get_mut(&stream_id) {
+            let stream = entry.flow.release_recv(n);
+            if stream > 0 {
+                out.push(Frame::WindowUpdate(WindowUpdateFrame {
+                    stream_id,
+                    window_size_increment: stream,
+                }));
+            }
+        }
+        out
+    }
+
     fn handle_frame(&mut self, frame: Frame) -> Result<Vec<Frame>> {
+        // RFC 9113 §6.10: a header block is a contiguous run of frames;
+        // anything but its CONTINUATION in between is a connection error
+        // (design review 3.5; only HEADERS/PUSH_PROMISE were refused).
+        if self.pending_header_block.is_some() && !matches!(frame, Frame::Continuation(_)) {
+            return Err(H2Error::Connection(
+                ErrorCode::ProtocolError,
+                "a frame other than CONTINUATION interleaved a pending header block",
+            ));
+        }
         match frame {
             Frame::Settings(settings) => self.handle_settings(settings),
             Frame::Ping(ping) => Ok(self.handle_ping(ping)),
@@ -391,10 +541,12 @@ impl Connection {
             // through the (stateful) HPACK decoder -- decoding a lone
             // fragment here would desync the shared dynamic table for
             // the rest of the connection.
+            self.check_header_block_len(headers.header_block_fragment.len())?;
             self.pending_header_block = Some(PendingHeaderBlock::Headers {
                 stream_id: headers.stream_id,
                 end_stream: headers.end_stream,
                 fragment: headers.header_block_fragment,
+                continuations: 0,
             });
             return Ok(vec![]);
         }
@@ -431,10 +583,22 @@ impl Connection {
     }
 
     fn handle_data(&mut self, data: DataFrame) -> Result<Vec<Frame>> {
-        let len = data.data.len() as u32;
-        self.conn_flow.consume_recv(len);
-        let entry = self.stream_entry(data.stream_id);
-        entry.flow.consume_recv(len);
+        let len = u32::try_from(data.data.len()).unwrap_or(u32::MAX);
+        self.conn_flow.consume_recv(len).map_err(|()| {
+            H2Error::Connection(
+                ErrorCode::FlowControlError,
+                "DATA exceeded the connection receive window",
+            )
+        })?;
+        let stream_id = data.stream_id;
+        let entry = self.stream_entry(stream_id);
+        entry.flow.consume_recv(len).map_err(|()| {
+            H2Error::Stream(
+                stream_id,
+                ErrorCode::FlowControlError,
+                "DATA exceeded the stream receive window",
+            )
+        })?;
         if data.end_stream {
             entry.stream.apply(Event::RecvEndStream)?;
         }
@@ -472,10 +636,12 @@ impl Connection {
         }
         if !pp.end_headers {
             // Same reassembly requirement as HEADERS (RFC 9113 §6.10).
+            self.check_header_block_len(pp.header_block_fragment.len())?;
             self.pending_header_block = Some(PendingHeaderBlock::PushPromise {
                 stream_id: pp.stream_id,
                 promised_stream_id: pp.promised_stream_id,
                 fragment: pp.header_block_fragment,
+                continuations: 0,
             });
             return Ok(vec![]);
         }
@@ -501,6 +667,24 @@ impl Connection {
         Ok(vec![])
     }
 
+    /// The header block size this endpoint accepts: its advertised
+    /// `SETTINGS_MAX_HEADER_LIST_SIZE`, else [`DEFAULT_MAX_HEADER_BLOCK`],
+    /// never above an internal hard ceiling.
+    fn check_header_block_len(&self, len: usize) -> Result<()> {
+        let cap = self
+            .local_settings
+            .max_header_list_size
+            .map_or(DEFAULT_MAX_HEADER_BLOCK, |v| v as usize)
+            .min(HARD_MAX_HEADER_BLOCK);
+        if len > cap {
+            return Err(H2Error::Connection(
+                ErrorCode::EnhanceYourCalm,
+                "header block exceeded the size limit",
+            ));
+        }
+        Ok(())
+    }
+
     /// Merges a CONTINUATION frame's fragment into the pending
     /// HEADERS/PUSH_PROMISE header block it continues (RFC 9113 §6.10),
     /// only running the reassembled block through HPACK once
@@ -521,9 +705,18 @@ impl Connection {
                 "CONTINUATION stream id does not match the header block it continues",
             ));
         }
-        pending
-            .fragment_mut()
-            .extend_from_slice(&cont.header_block_fragment);
+        let (fragment, continuations) = pending.buffer_mut();
+        *continuations += 1;
+        if *continuations > MAX_CONTINUATION_FRAMES {
+            return Err(H2Error::Connection(
+                ErrorCode::EnhanceYourCalm,
+                "header block exceeded the CONTINUATION frame limit",
+            ));
+        }
+        let len = fragment.len() + cont.header_block_fragment.len();
+        self.check_header_block_len(len)?;
+        let (fragment, _) = pending.buffer_mut();
+        fragment.extend_from_slice(&cont.header_block_fragment);
         if !cont.end_headers {
             self.pending_header_block = Some(pending);
             return Ok(vec![]);
@@ -533,6 +726,7 @@ impl Connection {
                 stream_id,
                 end_stream,
                 fragment,
+                ..
             } => self.finish_headers(stream_id, end_stream, &fragment),
             PendingHeaderBlock::PushPromise {
                 promised_stream_id,
@@ -886,5 +1080,131 @@ mod tests {
         .unwrap();
         assert_eq!(conn.streams[&3].stream.state, StreamState::Open);
         assert_eq!(conn.decoder.dynamic_table_len(), 1);
+    }
+
+    fn open_headers(stream_id: u32, end_headers: bool, fragment: Vec<u8>) -> Frame {
+        Frame::Headers(HeadersFrame {
+            stream_id,
+            end_stream: false,
+            end_headers,
+            priority: None,
+            header_block_fragment: fragment,
+        })
+    }
+
+    fn continuation(stream_id: u32, end_headers: bool, fragment: Vec<u8>) -> Frame {
+        Frame::Continuation(crate::frame::continuation::ContinuationFrame {
+            stream_id,
+            end_headers,
+            header_block_fragment: fragment,
+        })
+    }
+
+    fn is_conn_error(r: Result<Vec<Frame>>, code: ErrorCode) -> bool {
+        matches!(r, Err(H2Error::Connection(c, _)) if c == code)
+    }
+
+    /// Design review 3.5: any frame but CONTINUATION between a HEADERS
+    /// without END_HEADERS and its CONTINUATION is a connection error
+    /// (only HEADERS/PUSH_PROMISE were refused before).
+    #[test]
+    fn a_frame_interleaving_a_header_block_is_a_connection_error() {
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        conn.apply_frame(open_headers(1, false, vec![])).unwrap();
+        let ping = Frame::Ping(crate::frame::ping::PingFrame {
+            ack: false,
+            opaque_data: [0; 8],
+        });
+        assert!(is_conn_error(
+            conn.apply_frame(ping),
+            ErrorCode::ProtocolError
+        ));
+    }
+
+    /// Design review 3.5: CONTINUATION frames used to grow a header block
+    /// without bound; both the frame count and the block size are capped.
+    #[test]
+    fn continuation_floods_are_capped() {
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        conn.apply_frame(open_headers(1, false, vec![])).unwrap();
+        for _ in 0..MAX_CONTINUATION_FRAMES {
+            conn.apply_frame(continuation(1, false, vec![])).unwrap();
+        }
+        assert!(is_conn_error(
+            conn.apply_frame(continuation(1, false, vec![])),
+            ErrorCode::EnhanceYourCalm
+        ));
+
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        conn.apply_frame(open_headers(
+            1,
+            false,
+            vec![0; DEFAULT_MAX_HEADER_BLOCK - 1],
+        ))
+        .unwrap();
+        assert!(is_conn_error(
+            conn.apply_frame(continuation(1, false, vec![0; 2])),
+            ErrorCode::EnhanceYourCalm
+        ));
+    }
+
+    /// Design review 3.5: DATA beyond the receive window used to be
+    /// accepted (the window went negative). It is refused now, and
+    /// `release_capacity` is how a reader lets the peer continue.
+    #[test]
+    fn receive_windows_are_enforced_and_released() {
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        conn.apply_frame(open_headers(1, true, vec![])).unwrap();
+        let data = |n: usize| {
+            Frame::Data(DataFrame {
+                stream_id: 1,
+                end_stream: false,
+                data: vec![0; n],
+            })
+        };
+        conn.apply_frame(data(65_535)).unwrap();
+        assert!(matches!(
+            conn.apply_frame(data(1)),
+            Err(H2Error::Connection(ErrorCode::FlowControlError, _))
+        ));
+
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Server);
+        conn.apply_frame(open_headers(1, true, vec![])).unwrap();
+        conn.apply_frame(data(65_535)).unwrap();
+        let updates = conn.release_capacity(1, 1_000);
+        assert_eq!(updates.len(), 2, "connection and stream WINDOW_UPDATE");
+        conn.apply_frame(data(1_000)).unwrap();
+    }
+
+    /// Design review 3.5: outgoing frames go through `send_frame`, which
+    /// applies `Send*` transitions and the send window -- not the receive
+    /// path, which decoded our own HEADERS with the peer's HPACK state.
+    #[test]
+    fn sent_frames_use_send_transitions_and_the_send_window() {
+        let mut conn = Connection::new(ServerSettings::default(), PeerType::Client);
+        let headers = Frame::Headers(HeadersFrame {
+            stream_id: 1,
+            end_stream: false,
+            end_headers: true,
+            priority: None,
+            header_block_fragment: vec![0xff],
+        });
+        conn.send_frame(&headers).unwrap();
+        assert_eq!(conn.streams[&1].stream.state, StreamState::Open);
+        let big = Frame::Data(DataFrame {
+            stream_id: 1,
+            end_stream: false,
+            data: vec![0; 65_536],
+        });
+        assert!(conn.send_frame(&big).is_err());
+        let last = Frame::Data(DataFrame {
+            stream_id: 1,
+            end_stream: true,
+            data: vec![0; 10],
+        });
+        conn.send_frame(&last).unwrap();
+        assert_eq!(conn.streams[&1].stream.state, StreamState::HalfClosedLocal);
+        assert_eq!(conn.conn_flow.send_window, 65_525);
+        assert_eq!(conn.conn_flow.recv_window, 65_535, "receive side untouched");
     }
 }

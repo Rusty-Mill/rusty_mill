@@ -3,7 +3,7 @@ import { useActions, useData } from '@/app/services'
 import { Popover } from '@/components/Popover'
 import { formatTime } from '@/lib/date'
 import { usePrefs } from '../settings/prefs'
-import { buildQuickAdd } from '../tasks/quickAdd'
+import { buildQuickAdd } from '../tasks/quickAddParse'
 import type { AddTarget } from './context'
 import { shortDate } from './layout'
 

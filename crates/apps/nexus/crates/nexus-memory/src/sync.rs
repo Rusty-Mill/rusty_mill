@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::db::MemoryDb;
+use crate::db::{MemoryDb, PageOutcome, PulledEntry, RejectedRecord};
 use crate::model::Memory;
 
 /// Per-request HTTP timeout.
@@ -231,7 +231,15 @@ pub(crate) async fn sync(db: MemoryDb, args: &Value) -> Result<Value, String> {
         .map_err(|e| format!("sync: http client: {e}"))?;
     let pushed = push(&db, &client, &cfg).await?;
     let pulled = pull(&db, &client, &cfg).await?;
-    Ok(json!({ "pushed": pushed, "pulled": pulled }))
+    Ok(json!({
+        "pushed": pushed,
+        "pulled": pulled.received,
+        "applied": pulled.page.applied,
+        "unchanged": pulled.page.unchanged,
+        "rejected": pulled.page.rejected,
+        "replayed": pulled.replayed,
+        "dead_letters": pulled.dead_letters,
+    }))
 }
 
 /// Push local memories newer than the stored push cursor, advancing it.
@@ -298,13 +306,22 @@ async fn push(db: &MemoryDb, client: &reqwest::Client, cfg: &HubConfig) -> Resul
 
 /// Pull remote memories newer than the stored pull cursor, applying each with
 /// last-write-wins and advancing the cursor.
-async fn pull(db: &MemoryDb, client: &reqwest::Client, cfg: &HubConfig) -> Result<u64, String> {
+async fn pull(
+    db: &MemoryDb,
+    client: &reqwest::Client,
+    cfg: &HubConfig,
+) -> Result<PullReport, String> {
+    // Retry what earlier pulls could not apply: a newer build may decode it.
+    let (replayed, _) = db.replay_rejected().map_err(de)?;
+    let mut report = PullReport {
+        replayed,
+        ..PullReport::default()
+    };
     let mut ts = db
         .sync_state_get(PULL_TS)
         .map_err(de)?
         .unwrap_or_else(|| EPOCH.to_string());
     let mut id = db.sync_state_get(PULL_ID).map_err(de)?;
-    let mut total = 0_u64;
     loop {
         let mut req = client
             .get(format!("{}/sync/pull", cfg.url))
@@ -332,8 +349,10 @@ async fn pull(db: &MemoryDb, client: &reqwest::Client, cfg: &HubConfig) -> Resul
         if records.is_empty() {
             break;
         }
-        // Advance the cursor across the whole page (even records we can't decode,
-        // so a bad row never wedges the cursor), and apply the decodable ones.
+        // The cursor moves across the whole page, so a bad record never
+        // wedges it — but only together with every record's outcome: each
+        // is applied or dead-lettered in the same transaction (N2).
+        let mut page = Vec::with_capacity(records.len());
         for rec in &records {
             if let Some(u) = rec.get("updated_at").and_then(Value::as_str) {
                 ts = u.to_string();
@@ -341,19 +360,50 @@ async fn pull(db: &MemoryDb, client: &reqwest::Client, cfg: &HubConfig) -> Resul
             if let Some(i) = rec.get("id").and_then(Value::as_str) {
                 id = Some(i.to_string());
             }
-            if let Ok(m) = serde_json::from_value::<Memory>(rec.clone()) {
-                let _ = db.upsert_lww(&m).map_err(de)?;
-            }
+            page.push(pulled_entry(rec));
         }
-        db.sync_state_set(PULL_TS, &ts).map_err(de)?;
-        db.sync_state_set(PULL_ID, id.as_deref().unwrap_or(""))
+        let outcome = db
+            .apply_pull_page(
+                &page,
+                &[(PULL_TS, &ts), (PULL_ID, id.as_deref().unwrap_or(""))],
+            )
             .map_err(de)?;
-        total += records.len() as u64;
+        report.page.applied += outcome.applied;
+        report.page.unchanged += outcome.unchanged;
+        report.page.rejected += outcome.rejected;
+        report.received += records.len() as u64;
         if records.len() < BATCH {
             break;
         }
     }
-    Ok(total)
+    report.dead_letters = db.replay_rejected_count().map_err(de)?;
+    Ok(report)
+}
+
+/// What one pull did: records received, their outcomes, dead letters
+/// replayed at the start, and how many remain dead-lettered.
+#[derive(Debug, Default)]
+struct PullReport {
+    received: u64,
+    page: PageOutcome,
+    replayed: u64,
+    dead_letters: u64,
+}
+
+/// Decode one pulled record, or keep it verbatim with why it did not.
+fn pulled_entry(rec: &Value) -> PulledEntry {
+    match serde_json::from_value::<Memory>(rec.clone()) {
+        Ok(m) => PulledEntry::Memory(Box::new(m)),
+        Err(e) => PulledEntry::Rejected(RejectedRecord {
+            id: rec.get("id").and_then(Value::as_str).map(str::to_string),
+            updated_at: rec
+                .get("updated_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            payload: rec.to_string(),
+            reason: e.to_string(),
+        }),
+    }
 }
 
 /// Read `resp`'s body into memory, refusing anything over `cap` bytes
@@ -555,5 +605,45 @@ mod tests {
             err.contains("too large") || err.contains("exceeded cap"),
             "got: {err}"
         );
+    }
+
+    /// Review 2.7 (N2): a good/bad/good page applies the good records,
+    /// dead-letters the bad one with its payload and reason, still moves
+    /// the cursor past it, and reports each count apart. A later pull
+    /// retries the dead letter.
+    #[tokio::test]
+    async fn a_bad_pulled_record_is_dead_lettered_not_lost() {
+        let (hub_url, store) = spawn_hub().await;
+        let good = |text: &str| {
+            let mut m = Memory::new(text);
+            m.node_id = Some("other".into());
+            serde_json::to_value(&m).unwrap()
+        };
+        let bad = json!({
+            "id": "mem_0000000000000000000000000000bad0",
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+            "content": 42,
+        });
+        store
+            .push("other", &[good("first ferry"), bad, good("second ferry")])
+            .unwrap();
+        let db = MemoryDb::open_in_memory().unwrap();
+        let args = json!({
+            "hub_url": hub_url,
+            "secret": SECRET,
+            "node_id": "n",
+            "allow_private_hub": true,
+        });
+        let first = sync(db.clone(), &args).await.unwrap();
+        assert_eq!(first["pulled"], 3);
+        assert_eq!(first["applied"], 2);
+        assert_eq!(first["rejected"], 1);
+        assert_eq!(first["dead_letters"], 1);
+        assert_eq!(db.search("ferry", 10).unwrap().len(), 2);
+
+        let again = sync(db.clone(), &args).await.unwrap();
+        assert_eq!(again["pulled"], 0, "the cursor moved past the page");
+        assert_eq!(again["replayed"], 0, "still undecodable");
+        assert_eq!(again["dead_letters"], 1, "kept, not dropped");
     }
 }

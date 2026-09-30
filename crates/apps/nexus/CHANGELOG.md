@@ -8,6 +8,49 @@ lives in the git log and in `docs/0.1.2/audits/`.
 
 ## [Unreleased]
 
+### Fixed
+- **Template substitution no longer panics on a short tag** (`nexus-templates`, design review 3.8).
+  - `{{ab` sliced five bytes past a four-byte input and panicked; the escape check now uses `starts_with`.
+  - Literal non-ASCII text used to be copied byte by byte and came out garbled (`é` became mojibake); it now survives intact.
+- **Comment sidecars are written crash-atomically** (`nexus-comments`, design
+  review 2.9 / N6). `save` used `fs::write` on the only copy of a file's
+  threads, so a crash or short write could leave a truncated sidecar that
+  then failed to load. It now writes a synced sibling temp file, renames it
+  over the sidecar, and syncs the directory on Unix.
+- **Memory hub last-write-wins compares time, not text** (`nexus-memory-hub`,
+  design review 2.8 / N3).
+  - A pushed `updated_at` is parsed as RFC 3339 and stored as a canonical
+    ordering key (UTC, nanoseconds, `Z`), so offsets and precision no longer
+    decide which write is newer. The payload keeps the node's own string.
+  - A non-RFC 3339 value (e.g. `"zzzz"`, which used to outrank every real
+    timestamp and freeze the record) is refused. The push reply now lists
+    each refused record's id and reason (`rejected`).
+  - Pull cursors are compared as time too, and a malformed one is `400`.
+  - On first open, an existing hub's keys are canonicalized, and rows whose
+    `updated_at` never parsed move to `records_rejected` (payload kept).
+    This is gated by `PRAGMA user_version`, so it runs once.
+- **Memory sync no longer loses records it cannot decode** (`nexus-memory`,
+  design review 2.7 / N2).
+  - The pull loop used to advance its cursor past a whole page but drop
+    undecodable records silently, and counted them as transferred.
+  - Each page's applied rows, dead-lettered records (new `sync_rejected`
+    table: payload, reason) and cursor now commit in one transaction.
+  - Every pull first retries the dead letters, so an upgrade that can
+    decode them (such as opaque memory ids) recovers them.
+  - The sync reply adds `applied`, `unchanged`, `rejected`, `replayed` and
+    `dead_letters` beside `pushed`/`pulled`.
+- **Importing a real `remind_me` database** (`nexus-memory`, design review
+  2.6 / N1).
+  - Memory ids are now an opaque `MemoryId`, kept verbatim: Nexus's UUIDs
+    and `remind_me`'s `mem_<hex>` alike. `superseded_by` links survive.
+  - Previously every `mem_…` row failed UUID parsing and was counted as
+    "skipped", so a migration could report success having imported nothing.
+  - A row that cannot be imported is now listed in
+    `ImportReport::failures`, with its source id and the reason.
+  - A re-import is last-write-wins on id instead of aborting on the
+    primary key.
+  - Stored ids were already `TEXT`, so no migration is needed.
+
 ### Added
 - **Per-user relay credentials** (`nexus-collab`, gap-analysis §1.4) —
   new `TokenSet`: named tokens with constant-time, full-scan

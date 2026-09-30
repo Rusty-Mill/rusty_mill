@@ -505,12 +505,14 @@ impl MemoryConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    // `STC-FR-002`: a strict batch the live check refused was
-                    // never applied; the same check on the same pre-state
-                    // refuses it again, so replay skips it.
-                    JournaledBatch::StrictWrite(ops)
-                        if Self::strict_refusal(inner, ops).is_some() => {}
-                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite(ops) => {
+                    // ADR-0135: a strict entry the live check never accepted
+                    // touched nothing and is skipped; an accepted one is
+                    // redone whole. A version-2 journal (no markers) falls
+                    // back to re-running the check.
+                    JournaledBatch::StrictWrite { ops, accepted }
+                        if !accepted
+                            .unwrap_or_else(|| Self::strict_refusal(inner, ops).is_none()) => {}
+                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite { ops, .. } => {
                         let results = Self::replay_write_batch(inner, &schema, ops).map_err(
                             |(index, code)| JournalError::Replay {
                                 batch: batch_index,
@@ -564,7 +566,14 @@ impl MemoryConnectionStore {
         let mut results = Vec::with_capacity(ops.len());
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
-            results.push(Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?);
+            let result = match Self::apply_prepared(inner, prepared) {
+                // ADR-0135: a link whose endpoint a later op of the same
+                // batch deleted, before the crash. Redo converges anyway:
+                // the edge went with the record.
+                Err(ErrorCode::RecordNotFound) => WriteResult::NotFound,
+                applied => applied.map_err(|code| (i, code))?,
+            };
+            results.push(result);
         }
         Ok(results)
     }
@@ -627,15 +636,27 @@ impl MemoryConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
-        let apply = |inner: &mut MemoryProductionStack| {
+        // `accept` durably marks a strict batch accepted before its first
+        // write (ADR-0135); a no-op without a journal.
+        let apply = |inner: &mut MemoryProductionStack,
+                     accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
+            // A poisoned change log is missing a write this table applied
+            // (a failed append or group sync): apply nothing more (review 2.3).
+            if let Some(log) = &self.change_log {
+                log.ensure_writable().map_err(|code| (0, code))?;
+            }
             if strict {
                 if let Some(refused) = Self::strict_refusal(inner, ops) {
                     return Err(refused);
                 }
+                accept()?;
             }
+            // A loose atomic batch refuses a link to a record absent
+            // before the batch. A strict batch's check already saw each
+            // endpoint as the batch's earlier ops leave it (ADR-0135).
             for (i, p) in prepared.iter().enumerate() {
                 if let PreparedWrite::Link { left, .. } = p {
-                    if GetById::<Memory>::get(inner, *left).is_none() {
+                    if !strict && GetById::<Memory>::get(inner, *left).is_none() {
                         return Err((i, ErrorCode::RecordNotFound));
                     }
                 }
@@ -665,7 +686,7 @@ impl MemoryConnectionStore {
             // immediately after `apply` records it, still inside the same
             // exclusive section.
             None => self.store.with_exclusive(|inner| {
-                let results = apply(inner)?;
+                let results = apply(inner, &|| Ok(()))?;
                 if !self.mvcc_flush_now(0) {
                     return Err((0, ErrorCode::Storage));
                 }
@@ -682,7 +703,12 @@ impl MemoryConnectionStore {
                     std::cell::RefCell::new(None);
                 let step = |turn: crate::server::journal::Turn| {
                     self.store.with_exclusive(|inner| {
-                        let results = apply(inner)?;
+                        let accept = || {
+                            journal
+                                .accept_strict(turn)
+                                .map_err(|_| (0, ErrorCode::Journal))
+                        };
+                        let results = apply(inner, &accept)?;
                         *results_cell.borrow_mut() = Some(results);
                         Ok(turn.checkpoint_due
                             && inner.checkpoint_flush().is_ok()
@@ -4179,6 +4205,204 @@ mod tests {
         );
     }
 
+    /// The six ids the strict property tests use: each record and its
+    /// sorted `mentions` neighbours.
+    type StrictSnapshot = Vec<(Option<Vec<(FieldRef, ScanValue)>>, Vec<RecordId>)>;
+
+    fn strict_snapshot(adapter: &MemoryConnectionStore) -> StrictSnapshot {
+        use crate::generic::query::MultiNeighbors;
+        (1..=6u128)
+            .map(|n| {
+                let id = Uuid::from_u128(n);
+                let mut near = adapter.store.with_exclusive(|inner| {
+                    MultiNeighbors::<Memory>::neighbors_by_relation(inner, "mentions", id)
+                        .unwrap_or_default()
+                });
+                near.sort();
+                (adapter.get(id), near)
+            })
+            .collect()
+    }
+
+    /// Reopen the same files, journal and all — a process restart.
+    fn reopen_journaled(path: &Path, journal: &Path) -> MemoryConnectionStore {
+        let stack = open_memory_production_stack_portable(path).unwrap();
+        MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), journal).unwrap()
+    }
+
+    /// ADR-0135 (review 2.1): a strict batch that inserts a record and then
+    /// links it commits — the check sees the batch's own insert — and a
+    /// restart on the same files agrees with what the client was told.
+    #[test]
+    fn insert_then_link_commits_strictly_and_a_restart_agrees() {
+        let dir = fresh_temp_dir("server_memory_strict_insert_link").unwrap();
+        let path = dir.join("m.mmap");
+        let journal = dir.join("m.journal");
+        let stack =
+            create_memory_production_stack(vec![memory(1, "general", false)], &[], &path).unwrap();
+        let adapter =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        let link = WriteOp::Link {
+            left: Uuid::from_u128(10),
+            right: Uuid::from_u128(1),
+            relation: "mentions".into(),
+        };
+        let insert = WriteOp::Insert {
+            id: Uuid::from_u128(10),
+            fields: full_fields(10),
+        };
+        assert_eq!(
+            adapter.write_batch_strict(&[insert, link]),
+            Ok(vec![WriteResult::Inserted, WriteResult::Linked])
+        );
+        // Refused before any write: a duplicate, then a self-loop.
+        let refused = [
+            vec![
+                WriteOp::Insert {
+                    id: Uuid::from_u128(11),
+                    fields: full_fields(11),
+                },
+                WriteOp::Insert {
+                    id: Uuid::from_u128(1),
+                    fields: full_fields(1),
+                },
+            ],
+            vec![
+                WriteOp::Insert {
+                    id: Uuid::from_u128(12),
+                    fields: full_fields(12),
+                },
+                WriteOp::Link {
+                    left: Uuid::from_u128(12),
+                    right: Uuid::from_u128(12),
+                    relation: "mentions".into(),
+                },
+            ],
+        ];
+        for ops in &refused {
+            assert!(adapter.write_batch_strict(ops).is_err());
+        }
+        let before = strict_snapshot(&adapter);
+        drop(adapter);
+
+        let reopened = reopen_journaled(&path, &journal);
+        assert_eq!(strict_snapshot(&reopened), before);
+        assert!(reopened.get(Uuid::from_u128(10)).is_some());
+        assert!(reopened.get(Uuid::from_u128(11)).is_none());
+        assert!(reopened.get(Uuid::from_u128(12)).is_none());
+    }
+
+    /// ADR-0135 (review 2.2): an accepted strict batch is redone whole from
+    /// whatever prefix of it reached the store before a crash; an entry
+    /// with no acceptance marker is never applied. Random accepted batches
+    /// over six ids, every crash prefix, the same files reopened.
+    #[test]
+    fn an_accepted_strict_batch_is_redone_whole_from_any_crash_prefix() {
+        use crate::server::journal::BatchJournal;
+        use crate::server::protocol::{CompareOp, Predicate};
+        let dir = fresh_temp_dir("server_memory_strict_redo").unwrap();
+        let seed = || vec![memory(1, "general", false), memory(2, "preference", false)];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let open_new = |name: String| {
+            let path = dir.join(name);
+            let stack = create_memory_production_stack(seed(), &[], &path).unwrap();
+            (
+                path,
+                MemoryConnectionStore::new(GenericProductionStore::new(stack)),
+            )
+        };
+        for round in 0..40 {
+            // Grow an accepted batch op by op: keep a random candidate only
+            // if the strict check still passes on the seed state.
+            let (_, pristine) = open_new(format!("pristine{round}.mmap"));
+            let refused = |ops: &[WriteOp]| {
+                pristine
+                    .store
+                    .with_exclusive(|inner| MemoryConnectionStore::strict_refusal(inner, ops))
+                    .is_some()
+            };
+            let mut ops: Vec<WriteOp> = Vec::new();
+            for _ in 0..40 {
+                if ops.len() == 6 {
+                    break;
+                }
+                let id = Uuid::from_u128(1 + next(6) as u128);
+                let candidate = match next(6) {
+                    0 => WriteOp::Insert {
+                        id,
+                        fields: full_fields(1 + next(3) as u128),
+                    },
+                    1 => WriteOp::Replace {
+                        id,
+                        fields: full_fields(1 + next(3) as u128),
+                    },
+                    2 => WriteOp::ReplaceIf {
+                        id,
+                        fields: full_fields(1 + next(3) as u128),
+                        guard: Predicate {
+                            field: FIELD_ACCESS_COUNT,
+                            op: CompareOp::Eq,
+                            value: ScanValue::I64(next(2) as i64 * 3),
+                        },
+                    },
+                    3 => WriteOp::UpdateField {
+                        id,
+                        field: FIELD_ACCESS_COUNT,
+                        value: ScanValue::I64(next(2) as i64 * 3),
+                    },
+                    4 => WriteOp::Delete { id },
+                    _ => WriteOp::Link {
+                        left: id,
+                        right: Uuid::from_u128(1 + next(6) as u128),
+                        relation: "mentions".into(),
+                    },
+                };
+                ops.push(candidate);
+                if refused(&ops) {
+                    ops.pop();
+                }
+            }
+            let (_, oracle) = open_new(format!("oracle{round}.mmap"));
+            assert!(oracle.write_batch_strict(&ops).is_ok(), "{ops:?}");
+            let expected = strict_snapshot(&oracle);
+            let untouched = strict_snapshot(&pristine);
+
+            for crashed_after in 0..=ops.len() {
+                for accepted in [true, false] {
+                    if !accepted && crashed_after > 0 {
+                        continue; // unaccepted means nothing was written
+                    }
+                    let name = format!("r{round}p{crashed_after}{accepted}");
+                    let (path, partial) = open_new(format!("{name}.mmap"));
+                    for op in &ops[..crashed_after] {
+                        partial.apply_write_op(op);
+                    }
+                    drop(partial);
+                    let journal = dir.join(format!("{name}.journal"));
+                    BatchJournal::open(&journal)
+                        .unwrap()
+                        .0
+                        .append_strict(&ops, accepted)
+                        .unwrap();
+                    let reopened = reopen_journaled(&path, &journal);
+                    let want = if accepted { &expected } else { &untouched };
+                    assert_eq!(
+                        &strict_snapshot(&reopened),
+                        want,
+                        "round {round}, crashed after {crashed_after}, accepted {accepted}: {ops:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// `ADR-0134` (spike): with the change log appended from inside the
     /// ordered section and synced in a group, the log's order is still the
     /// apply order under concurrent writers — the record's final value is the
@@ -4247,6 +4471,48 @@ mod tests {
             last,
             &ScanValue::I64(*logged.last().unwrap()),
             "the store ends where the log's last entry says"
+        );
+    }
+
+    /// Review 2.3 × ADR-0134: with a change log appended from inside the
+    /// ordered section, a poisoned log stops the next batch before it
+    /// applies — no write the log cannot hold.
+    #[test]
+    fn a_poisoned_grouped_change_log_refuses_before_applying() {
+        use crate::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
+        let dir = fresh_temp_dir("server_memory_change_sink_poison").unwrap();
+        let stack = create_memory_production_stack(
+            vec![memory(1, "general", false)],
+            &[],
+            &dir.join("memories.mmap"),
+        )
+        .unwrap();
+        let log = std::sync::Arc::new(
+            ChangeLog::open(&dir.join("table.changes"), DEFAULT_RETAIN_BYTES).unwrap(),
+        );
+        let adapter = MemoryConnectionStore::with_journal(
+            GenericProductionStore::new(stack),
+            &dir.join("table.journal"),
+        )
+        .unwrap()
+        .with_change_log(log.clone());
+        let bump = |v: i64| WriteOp::UpdateField {
+            id: Uuid::from_u128(1),
+            field: FIELD_ACCESS_COUNT,
+            value: ScanValue::I64(v),
+        };
+        adapter.write_batch(&[bump(5)], true).unwrap();
+        log.poison();
+        assert!(adapter.write_batch(&[bump(6)], true).is_err());
+        let stored = adapter.get(Uuid::from_u128(1)).unwrap();
+        let count = stored
+            .iter()
+            .find(|(tag, _)| *tag == FIELD_ACCESS_COUNT)
+            .unwrap();
+        assert_eq!(
+            count.1,
+            ScanValue::I64(5),
+            "the refused batch did not apply"
         );
     }
 }

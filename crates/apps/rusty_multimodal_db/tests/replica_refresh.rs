@@ -8,8 +8,8 @@
 mod replica_refresh;
 
 use replica_refresh::{
-    follow, is_plain_file_name, prune, read_position, refresh, refresh_at, refresh_loop, snapshots,
-    write_position, Domain, FollowError, Position, RefreshError, Target,
+    first_real_failure, follow, is_plain_file_name, prune, read_position, refresh, refresh_at,
+    refresh_loop, snapshots, write_position, Domain, FollowError, Position, RefreshError, Target,
 };
 use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
@@ -21,7 +21,7 @@ use rusty_multimodal_db::server::changelogged::ChangeLogged;
 use rusty_multimodal_db::server::client::{BatchOp, SchemaDrivenClient};
 use rusty_multimodal_db::server::client::{ClientTlsConfig, ConnectOptions, TrustPolicy};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
-use rusty_multimodal_db::server::protocol::ScanValue;
+use rusty_multimodal_db::server::protocol::{ErrorCode, ScanValue, WriteOp};
 use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions, TlsConfig};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -365,4 +365,45 @@ fn follow_applies_the_primarys_later_writes_to_a_refreshed_directory() {
         |_, _| false,
     );
     assert!(matches!(stale, Err(FollowError::Resync)), "{stale:?}");
+}
+
+/// Review 2.3 (R2): a logged `[Link(A, B), Delete(A)]` applied, then applied
+/// again after a crash ahead of the position write, is not divergence: the
+/// replayed link fails `RecordNotFound` because the batch itself deletes A.
+/// A link to a missing record that nothing deletes still is.
+#[test]
+fn a_replayed_link_then_delete_batch_is_not_divergence() {
+    let dir = unique_dir("replica_follow_link_delete");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stack = create_memory_production_stack(
+        vec![memory(1, "a"), memory(2, "b")],
+        &[],
+        &dir.join("memories"),
+    )
+    .unwrap();
+    let standby = MemoryConnectionStore::new(GenericProductionStore::new(stack));
+    let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+    let entry = vec![
+        WriteOp::Link {
+            left: a,
+            right: b,
+            relation: "mentions".into(),
+        },
+        WriteOp::Delete { id: a },
+    ];
+    let first = standby.write_batch(&entry, false).unwrap();
+    assert_eq!(first_real_failure(&entry, &first), None);
+    let replayed = standby.write_batch(&entry, false).unwrap();
+    assert_eq!(first_real_failure(&entry, &replayed), None);
+
+    let dangling = vec![WriteOp::Link {
+        left: a,
+        right: b,
+        relation: "mentions".into(),
+    }];
+    let results = standby.write_batch(&dangling, false).unwrap();
+    assert_eq!(
+        first_real_failure(&dangling, &results),
+        Some((0, ErrorCode::RecordNotFound))
+    );
 }

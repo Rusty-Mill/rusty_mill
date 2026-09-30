@@ -190,6 +190,55 @@ pub const MAX_STAGED_OPS: usize = 4096;
 /// over this is `Malformed`, applying nothing.
 pub const MAX_BATCH_OPS: usize = 4096;
 
+/// The most bytes one connection's session may stage (design review 3.7):
+/// [`MAX_STAGED_OPS`] alone bounds the count, but each op may carry close
+/// to a whole frame, so the retained total could reach tens of GiB. Past
+/// this, staging is refused `ErrorCode::SessionFull` exactly as past the
+/// count, before the op is retained; commit, rollback and disconnect
+/// release it. Four frames' worth.
+pub const MAX_STAGED_BYTES: usize = 64 * 1024 * 1024;
+
+/// The retained size one staged op is charged against
+/// [`MAX_STAGED_BYTES`]: its string payloads plus a fixed per-op and
+/// per-field overhead. An estimate of memory held, not of wire bytes.
+pub fn staged_op_bytes(op: &WriteOp) -> usize {
+    let fields = |fields: &[(FieldRef, ScanValue)]| -> usize {
+        fields
+            .iter()
+            .map(|(_, v)| FIELD + scan_value_bytes(v))
+            .sum()
+    };
+    OP + match op {
+        WriteOp::Insert { fields: f, .. } | WriteOp::Replace { fields: f, .. } => fields(f),
+        WriteOp::ReplaceIf {
+            fields: f, guard, ..
+        } => {
+            // The guard's own strings, approximated by its debug form.
+            fields(f) + format!("{guard:?}").len()
+        }
+        WriteOp::Delete { .. } => 0,
+        WriteOp::Link { relation, .. } => relation.len(),
+        WriteOp::UpdateField { value, .. } => return staged_update_bytes(value),
+    }
+}
+
+const OP: usize = 64;
+const FIELD: usize = 32;
+
+/// [`staged_op_bytes`] of an update setting `value`, without building the
+/// op (and cloning a possibly large value) first.
+pub fn staged_update_bytes(value: &ScanValue) -> usize {
+    OP + FIELD + scan_value_bytes(value)
+}
+
+fn scan_value_bytes(value: &ScanValue) -> usize {
+    match value {
+        ScanValue::Str(s) => s.len(),
+        ScanValue::StrList(list) => list.iter().map(|s| 24 + s.len()).sum(),
+        _ => 0,
+    }
+}
+
 /// The most distinct `(id, field)` keys a snapshot-isolated session's own
 /// read set tracks (`ISO-FR-004`, ADR-0033): past the cap, a `GetById` for
 /// a *new* key is simply not added — the request still succeeds, `Commit`
@@ -2844,5 +2893,22 @@ mod tests {
         let bytes = crate::codec::encode(&resp).unwrap();
         let decoded: Response = crate::codec::decode(&bytes).unwrap();
         assert_eq!(decoded, resp);
+    }
+
+    /// Design review 3.7: staged ops are charged by their retained strings.
+    #[test]
+    fn staged_op_bytes_charges_string_payloads() {
+        let big = ScanValue::Str("x".repeat(1 << 20));
+        let update = WriteOp::UpdateField {
+            id: uuid::Uuid::nil(),
+            field: 1,
+            value: big.clone(),
+        };
+        assert!(staged_op_bytes(&update) > 1 << 20);
+        assert_eq!(staged_op_bytes(&update), staged_update_bytes(&big));
+        let delete = WriteOp::Delete {
+            id: uuid::Uuid::nil(),
+        };
+        assert!(staged_op_bytes(&delete) < 1024);
     }
 }

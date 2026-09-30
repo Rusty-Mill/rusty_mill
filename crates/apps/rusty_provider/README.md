@@ -44,8 +44,11 @@ cargo run -p rp-server
 ```
 
 The server listens on `server.host:server.port` from `config.toml`
-(default `0.0.0.0:8080`). Set `server.api_key_env` in the config to require
-clients to send `Authorization: Bearer <token>`.
+(default `127.0.0.1:8080`; set `host = "0.0.0.0"` in a container). Set
+`server.api_key_env` in the config to require clients to send
+`Authorization: Bearer <token>`. A configured key whose env var is unset stops
+the server at startup, and with no auth configured `/v1` answers `401` unless
+`server.allow_unauthenticated = true`.
 
 ### Docker
 

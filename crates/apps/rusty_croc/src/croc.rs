@@ -600,12 +600,23 @@ fn zip_directory(dest: &Path, src_dir: &Path) -> Result<()> {
 fn unzip_directory(dest: &Path, zip_path: &Path) -> Result<()> {
     let f = File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(f)?;
+    std::fs::create_dir_all(dest)?;
+    let root = dest.canonicalize()?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let Some(rel) = entry.enclosed_name() else {
             return Err(format!("unsafe zip entry: {}", entry.name()).into());
         };
         let out = dest.join(rel);
+        // `enclosed_name` is lexical only; existing (or earlier-extracted)
+        // symlinks must not carry an entry outside `dest` (design review 3.2).
+        if ancestor_escapes_root(&out.join("_"), &root)? {
+            return Err(format!(
+                "refusing to extract '{}': it escapes the destination via a symlink",
+                out.display()
+            )
+            .into());
+        }
         if entry.is_dir() {
             std::fs::create_dir_all(&out)?;
             continue;
@@ -613,7 +624,8 @@ fn unzip_directory(dest: &Path, zip_path: &Path) -> Result<()> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut of = File::create(&out)?;
+        let (mut of, _) = open_confined(&out, &root)?;
+        of.set_len(0)?;
         std::io::copy(&mut entry, &mut of)?;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
@@ -1904,7 +1916,11 @@ impl Client {
                 if !fi.symlink.is_empty() {
                     make_symlink(&fi.symlink, &dest)?;
                 } else {
-                    File::create(&dest)?;
+                    // Through the same confinement as every other write
+                    // (design review 3.2): `File::create` followed a symlink
+                    // already at `dest` and truncated its target.
+                    let (f, _) = open_confined(&dest, &root)?;
+                    f.set_len(0)?;
                 }
                 self.files_finished.insert(i);
                 self.transferred_files += 1;
@@ -2103,43 +2119,70 @@ fn make_symlink(target: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_receive_file(dest: &Path, fi: &FileInfo) -> Result<File> {
-    // Refuse to write through a symlink, mirroring rejectSymlinkDestination.
-    if let Ok(meta) = std::fs::symlink_metadata(dest) {
-        if meta.file_type().is_symlink() {
-            return Err(
-                format!("refusing to open symlink destination: '{}'", dest.display()).into(),
-            );
-        }
-    }
-    // Refuse to write if a prior entry in this batch — or a pre-existing
-    // symlink — redirected an ancestor of `dest` outside the receive root.
-    let root = std::env::current_dir()?;
-    if ancestor_escapes_root(dest, &root)? {
-        return Err(format!(
-            "refusing to write '{}': an ancestor directory escapes the receive root via a symlink",
-            dest.display()
-        )
-        .into());
-    }
-    let file = match std::fs::OpenOptions::new().write(true).open(dest) {
-        Ok(f) => {
-            let need_truncate = f
-                .metadata()
-                .map(|m| m.len() as i64 != fi.size)
-                .unwrap_or(true);
-            if need_truncate {
-                f.set_len(fi.size as u64)?;
-            }
-            f
-        }
-        Err(_) => {
-            let f = File::create(dest)?;
-            f.set_len(fi.size as u64)?;
-            set_perm(dest, fi.mode);
-            f
-        }
+/// Open `dest` for writing without ever writing outside `root` (design
+/// review 3.2): every receive path — regular, zero-byte and ZIP entries —
+/// goes through here, so none can write through a symlink.
+///
+/// Refuses a final-component symlink and an ancestor that resolves outside
+/// `root`. A new file is created with `create_new`, which never follows a
+/// symlink. An existing one is opened *without* truncation and, on Unix,
+/// accepted only if the opened handle is the same regular file `lstat` sees
+/// at `dest` — so a symlink swapped in between check and open is refused
+/// before a byte is written. Returns the handle and whether it was created;
+/// the caller sizes it. Residual: a *local* process racing ancestor
+/// directories is not stopped (that needs `openat`); a sender, who can only
+/// plant symlinks through earlier entries, is.
+fn open_confined(dest: &Path, root: &Path) -> Result<(File, bool)> {
+    let refuse = |why: &str| -> Result<(File, bool)> {
+        Err(format!("refusing to write '{}': {why}", dest.display()).into())
     };
+    if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()) {
+        return refuse("the destination is a symlink");
+    }
+    if ancestor_escapes_root(dest, root)? {
+        return refuse("an ancestor directory escapes the receive root via a symlink");
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+    {
+        Ok(f) => return Ok((f, true)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    let f = std::fs::OpenOptions::new().write(true).open(dest)?;
+    let opened = f.metadata()?;
+    let at_path = std::fs::symlink_metadata(dest)?;
+    if !opened.is_file() || at_path.file_type().is_symlink() || !same_file(&opened, &at_path) {
+        return refuse("the destination changed while it was being opened");
+    }
+    Ok((f, false))
+}
+
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// Windows: std exposes no stable file identity; the symlink checks above
+/// stand (creating a symlink there needs privilege the sender lacks).
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn open_receive_file(dest: &Path, fi: &FileInfo) -> Result<File> {
+    let root = std::env::current_dir()?;
+    let (file, created) = open_confined(dest, &root)?;
+    let need_resize = created || file.metadata().map_or(true, |m| m.len() as i64 != fi.size);
+    if need_resize {
+        file.set_len(fi.size as u64)?;
+    }
+    if created {
+        set_perm(dest, fi.mode);
+    }
     Ok(file)
 }
 
@@ -2497,5 +2540,79 @@ mod tests {
         drop(st);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn scratch(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "rusty-croc-{label}-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        (base, root.canonicalize().unwrap(), outside)
+    }
+
+    /// Design review 3.2: the zero-byte branch used `File::create`, which
+    /// followed a symlink at the destination and truncated its target. It
+    /// now goes through `open_confined`, which refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn confined_open_refuses_a_symlinked_destination() {
+        let (base, root, outside) = scratch("confined");
+        let victim = outside.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        let link = root.join("empty.txt");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(open_confined(&link, &root).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+
+        // Through a symlinked ancestor, too.
+        std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
+        assert!(open_confined(&root.join("dir/new.txt"), &root).is_err());
+        assert!(!outside.join("new.txt").exists());
+
+        // An ordinary new or existing file inside the root opens.
+        let (_, created) = open_confined(&root.join("fresh"), &root).unwrap();
+        assert!(created);
+        let (_, created) = open_confined(&root.join("fresh"), &root).unwrap();
+        assert!(!created);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Design review 3.2: ZIP extraction checked only `enclosed_name`
+    /// (lexical), then created through existing symlinks.
+    #[cfg(unix)]
+    #[test]
+    fn zip_extraction_does_not_write_through_symlinks() {
+        let (base, root, outside) = scratch("unzip");
+        let zip_path = base.join("in.zip");
+        let make_zip = |name: &str| {
+            let mut zw = zip::ZipWriter::new(File::create(&zip_path).unwrap());
+            zw.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(b"payload").unwrap();
+            zw.finish().unwrap();
+        };
+        std::fs::write(outside.join("victim"), b"keep").unwrap();
+        std::os::unix::fs::symlink(outside.join("victim"), root.join("file")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
+
+        make_zip("file");
+        assert!(unzip_directory(&root, &zip_path).is_err());
+        make_zip("dir/planted");
+        assert!(unzip_directory(&root, &zip_path).is_err());
+        assert_eq!(std::fs::read(outside.join("victim")).unwrap(), b"keep");
+        assert!(!outside.join("planted").exists());
+
+        make_zip("ok/inside.txt");
+        unzip_directory(&root, &zip_path).unwrap();
+        assert_eq!(
+            std::fs::read(root.join("ok/inside.txt")).unwrap(),
+            b"payload"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

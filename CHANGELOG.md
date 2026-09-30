@@ -32,6 +32,43 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **Design review Tranche 3 (#419), receive and config confinement (3.2):**
+  - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
+  - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
+  - Neither can write through a symlink out of its allowed folder.
+- **Design review Tranche 3 (#419), redirect credentials (3.3):** `rusty_request` now drops a caller-set `Cookie` and `Proxy-Authorization`, as well as `Authorization`, when a redirect leaves the origin. Buffered and streaming sends share one redirect policy.
+- **Design review Tranche 3 (#419), HTTP/1 framing (3.4):** `rusty_http` reads every `Transfer-Encoding` field as one coding list. It refuses `chunked` anywhere but once and last, and a request carrying `Transfer-Encoding` together with `Content-Length`. These are request-smuggling ambiguities that used to fall back to `Content-Length`.
+- **Design review Tranche 3 (#419), HTTP/2 hardening (3.5):** `rusty_h2` changes:
+  - Header blocks cap CONTINUATION frames by count and size, and refuse interleaved frames.
+  - Receive windows are enforced, and `release_capacity` replenishes them.
+  - Outgoing frames go through a new `send_frame` instead of the receive path.
+  - The dead duplicate `flow.rs` is removed.
+- **Design review Tranche 3 (#419), RDP trust (3.6):** `rusty_rdp`'s TLS connectors take a `TrustPolicy` (breaking). They used to force no certificate verification. Skipping verification now takes the explicitly named `connect_tls_unverified` / `connect_tls_kerberos_unverified`.
+- **Design review Tranche 3 (#419), A2A webhooks (3.6):** `rusty_a2a`'s webhook SSRF filter blocks IPv6 unique-local and other non-global address classes. Its DNS-pinned delivery client no longer follows redirects.
+- **Design review Tranche 3 (#419), admission and deadlines (3.7):**
+  - `adk-mcp`: a request's deadline now covers writing it to the subprocess, so a child that stops reading stdin can no longer hold the connection lock forever.
+  - `rusty-whisper` server:
+    - Request and header lines are capped at 8 KiB, with at most 100 headers.
+    - Sockets have 30-second read and write deadlines.
+    - At most 64 connections at once; the rest get `503`.
+    - One model load at a time; a second `POST /load` gets `409`.
+  - `rusty_multimodal_db`: a session is also capped at 64 MiB of staged data (`MAX_STAGED_BYTES`), answered `SessionFull` like the op-count cap. The byte budget is released at commit, rollback and disconnect.
+  - `rusty_stream`: the accept loop drops finished connection tasks as it goes, using the new `rusty_tokio` `JoinSet::try_join_next`. Graceful shutdown now aborts connections still open after `DEFAULT_DRAIN_TIMEOUT` (30 s); set it with `serve_with_drain_timeout`.
+  - `rusty_kafka`: a call interrupted mid-frame (timeout, I/O error, correlation mismatch, or a dropped future) poisons the connection, and later calls fail `NotConnected`. It used to be reused with a partial frame on the stream. `KafkaClient::is_poisoned` reports it.
+  - `rusty_lsp`: pending requests are capped (1,024 by default; excess requests are answered `RequestFailed` immediately). A notification backlog over 4,096 ends the connection with an error. Before, only handler execution was bounded.
+  - `rusty_llama` server: the job queue is bounded (`RUSTY_LLAMA_QUEUE`, 64) and connections are capped (`RUSTY_LLAMA_MAX_CONNECTIONS`, 128). Over either limit a request gets `503` at once, instead of the queue and thread count growing without limit.
+- **Design review Tranche 3 (#419), input budgets (3.8):**
+  - `rush`: numeric brace ranges stop at their endpoint without overflow. Brace expansion is capped at 1 Mi words and 8 Mi characters.
+  - `nexus-templates`: a four-byte `{{ab` no longer panics, and literal non-ASCII text is no longer garbled.
+  - `rusty_diff`: the Myers trace keeps only each step's live band. It is capped at `MAX_TRACE_CELLS` (128 MiB); over that it returns the linear fallback, instead of up to about 6.4 GB for two dissimilar inputs at `MAX_DIFF_INPUT_LEN`.
+- **Design review Tranche 2 (#412), persisted invariants:**
+  - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
+  - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
+  - FTS5 delete runs in one transaction.
+  - Nexus memory: opaque ids, dead-lettered sync pages, and hub last-write-wins compared as time.
+  - Nexus comment sidecars are written atomically.
+  - `rusty_inventory`: a stale process copy cannot overwrite another's seal, and the tray reports unsaved changes.
+  - `rusty_tick`: an interrupted parent/child move is realigned on open.
 - **Design review Tranche 1 (soundness):**
   - `rusty_std` `MutexGuard` is `Sync` only for `T: Sync`.
   - `rusty_sync` `try_recv` no longer returns `Disconnected` while a value is queued.

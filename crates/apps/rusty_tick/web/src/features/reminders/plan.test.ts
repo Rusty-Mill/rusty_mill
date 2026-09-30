@@ -52,6 +52,12 @@ describe('upcomingHabits', () => {
     expect(upcomingHabits([habit()], {}, day(29, 21), 24 * H).map((d) => d.atMs)).toEqual([day(30, 20)])
     expect(upcomingHabits([habit()], done, day(29, 9), 48 * H).map((d) => d.atMs)).toEqual([day(30, 20)])
   })
+  it('keeps reminding until the goal is met, not just started', () => {
+    const goal = { goal: '3 glasses per day' }
+    const at = (count: number): Record<string, Checkin> => ({ [checkinId('h1', '2026-09-29')]: { id: 'x', habitId: 'h1', day: '2026-09-29', count } })
+    expect(upcomingHabits([habit(goal)], at(2), day(29, 9), 24 * H).map((d) => d.atMs)).toEqual([day(29, 20)])
+    expect(upcomingHabits([habit(goal)], at(3), day(29, 9), 24 * H)).toEqual([])
+  })
   it('skips habits with no reminder, archived ones, and days a weekday habit is not due', () => {
     const wed = day(30).valueOf() // 2026-09-30 is a Wednesday
     expect(upcomingHabits([habit({ reminder: null }), habit({ archived: true })], {}, day(29, 9), 48 * H)).toEqual([])

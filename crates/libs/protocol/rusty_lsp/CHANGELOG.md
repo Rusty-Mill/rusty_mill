@@ -10,6 +10,8 @@ each release.
 
 ### Added
 
+- `Server::with_max_pending_requests` (default `DEFAULT_MAX_PENDING_REQUESTS`, 1024): a request past the cap is answered `RequestFailed` immediately instead of being spawned to wait for a permit (design review 3.7).
+- `Server::with_max_pending_notifications` (default `DEFAULT_MAX_PENDING_NOTIFICATIONS`, 4096): past the cap the connection is torn down with an error, since notifications cannot be dropped safely.
 - `WorkspaceServerCapabilities::workspace_folders`
   (`WorkspaceFoldersServerCapabilities { supported, change_notifications }`):
   advertise multi-root workspace support and interest in

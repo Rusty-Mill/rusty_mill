@@ -23,6 +23,16 @@ entry per PR.
 
 ---
 
+## PR #412 — transactions reach the file only at commit, crash-atomically
+
+- **Fixed:** a rolled-back insert was visible after reopening the file. Writes inside a transaction stay in memory until the outermost commit.
+- **Fixed:** rollback now restores index metadata as well as tables.
+- **Fixed:** the file is replaced through a synced temporary file and a rename, so an interrupted write leaves the previous complete image.
+- **Changed (breaking):** `Database::snapshot`/`restore` use an opaque `Snapshot`.
+- Known limitation: the directory sync is Unix-only; on Windows the rename is the durability point. A drop-time commit (`DropBehavior::Commit`) cannot report a write error; call `finish` to see it.
+
+---
+
 ## PR #151 — Add subqueries: scalar + IN (SELECT ...) (closes #131)
 **2026-08-16** · [#151](https://github.com/baileyrd/rusty_-rusqlite/pull/151)
 
