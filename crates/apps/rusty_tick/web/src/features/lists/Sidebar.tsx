@@ -1,10 +1,11 @@
-import { Archive, Calendar, CalendarDays, CheckCircle2, ChevronDown, ChevronRight, FileText, Inbox, LayoutList, ListTodo, MoreHorizontal, Pencil, Plus, Trash2, Undo2 } from 'lucide-react'
+import { AlignJustify, Archive, CheckCircle2, ChevronDown, ChevronRight, Crown, FileText, Inbox, Layers, MoreHorizontal, Pencil, Plus, Trash2, Undo2 } from 'lucide-react'
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import type { List, Tag } from '@/api/types'
 import { PATHS, viewPath } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { Confirm } from '@/components/Confirm'
+import { DateIcon } from '@/components/DateIcon'
 import { FunnelArt, TagArt } from '@/components/Illustrations'
 import { Menu, type MenuEntry } from '@/components/Menu'
 import { useNow } from '@/lib/hooks'
@@ -41,7 +42,7 @@ function Row({ to, active, icon, label, count, menu, draggable, indicator }: Row
       className={`group relative flex h-[38px] items-center rounded-row ${active ? 'bg-selected' : 'hover:bg-hover'} ${indicator === 'before' ? 'before:absolute before:-top-px before:left-2 before:right-2 before:h-0.5 before:rounded before:bg-primary' : ''} ${indicator === 'after' ? 'after:absolute after:-bottom-px after:left-2 after:right-2 after:h-0.5 after:rounded after:bg-primary' : ''}`}
     >
       <NavLink to={to} aria-current={active ? 'page' : undefined} className="flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-row pl-3 pr-2">
-        <span className="flex h-5 w-5 shrink-0 items-center justify-center text-grey">{icon}</span>
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center">{icon}</span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {count !== undefined && count > 0 && <span className="text-s text-grey group-hover:hidden group-focus-within:hidden">{count}</span>}
       </NavLink>
@@ -135,16 +136,16 @@ export function Sidebar() {
     { id: 'delete', label: 'Delete', icon: <Trash2 size={16} />, danger: true, onSelect: () => setDeletingTag(t) },
   ]
 
-  const listIcon = (l: List): ReactNode => <ListTodo size={18} style={l.color ? { color: l.color } : undefined} />
+  const listIcon = (l: List): ReactNode => <AlignJustify size={18} style={l.color ? { color: l.color } : undefined} />
   const dot = (t: Tag): ReactNode => <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: t.color ?? 'rgb(var(--grey))' }} />
   const marker = (d: { indicator: { id: string; after: boolean } | null }, id: string): 'before' | 'after' | null => (d.indicator?.id === id ? (d.indicator.after ? 'after' : 'before') : null)
 
   return (
     <aside aria-label="Lists" className="flex h-full w-[240px] shrink-0 flex-col bg-side">
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-3">
-        <Row to="/q/all/tasks" active={active('/q/all/tasks')} icon={<LayoutList size={18} />} label="All" count={count({ kind: 'all' })} />
-        <Row to="/q/today/tasks" active={active('/q/today/tasks')} icon={<Calendar size={18} />} label="Today" count={count({ kind: 'today' })} />
-        <Row to="/q/week/tasks" active={active('/q/week/tasks')} icon={<CalendarDays size={18} />} label="Next 7 Days" count={count({ kind: 'week' })} />
+        <Row to="/q/all/tasks" active={active('/q/all/tasks')} icon={<Layers size={18} />} label="All" count={count({ kind: 'all' })} />
+        <Row to="/q/today/tasks" active={active('/q/today/tasks')} icon={<DateIcon label={String(new Date(now).getDate())} />} label="Today" count={count({ kind: 'today' })} />
+        <Row to="/q/week/tasks" active={active('/q/week/tasks')} icon={<DateIcon label={new Date(now).toLocaleDateString('en-US', { weekday: 'short' }).slice(0, 2)} />} label="Next 7 Days" count={count({ kind: 'week' })} />
         <Row to="/p/inbox/tasks" active={active('/p/inbox/tasks')} icon={<Inbox size={18} />} label="Inbox" count={count({ kind: 'inbox' })} />
         <Row to={PATHS.summary} active={active(PATHS.summary)} icon={<FileText size={18} />} label="Summary" />
 
@@ -204,8 +205,10 @@ export function Sidebar() {
       <div className="border-t border-line px-2 py-2">
         <Row to={PATHS.completed} active={active(PATHS.completed)} icon={<CheckCircle2 size={18} />} label="Completed" />
         <Row to={PATHS.trash} active={active(PATHS.trash)} icon={<Trash2 size={18} />} label="Trash" />
-        <button type="button" disabled title="Not applicable in Tick Local" className="mt-1 flex h-9 w-full cursor-not-allowed items-center justify-center rounded-row bg-black/5 text-base text-grey/70">
-          Upgrade to Premium
+        <button type="button" disabled title="Not applicable in Tick Local" className="mt-1 flex h-9 w-full cursor-not-allowed items-center gap-2 rounded-row bg-black/5 px-3 text-s text-grey/80">
+          <Crown size={16} />
+          <span className="flex-1 text-left">Upgrade to Premium</span>
+          <ChevronRight size={14} />
         </button>
       </div>
 

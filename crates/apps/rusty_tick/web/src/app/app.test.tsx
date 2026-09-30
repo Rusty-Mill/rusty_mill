@@ -276,7 +276,7 @@ describe('trash', () => {
     await user.click(screen.getByText('bin me'))
     await screen.findByLabelText('Title')
     await user.click(pane().getByRole('button', { name: 'More' }))
-    await user.click(screen.getByRole('menuitem', { name: 'Move to Trash' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
     await waitFor(() => expect(screen.queryByText('bin me')).toBeNull())
     expect((await api.snapshot()).tasks[0]?.deletedMs).not.toBeNull()
 

@@ -1,7 +1,8 @@
-import { ArrowLeft, Calendar, Copy, ListChecks, MessageSquare, MoreHorizontal, Plus, RotateCcw, Trash2, Type, X, Link2 } from 'lucide-react'
+import { ArrowLeft, Calendar, Copy, FileText, History, Link2, ListChecks, ListPlus, MessageSquare, MoreHorizontal, Paperclip, Pin, Plus, Printer, RotateCcw, StickyNote, Tag, Target, Trash2, Type, Upload, X, XCircle } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Task } from '@/api/types'
+import { PATHS } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { DetailArt } from '@/components/Illustrations'
 import { Menu } from '@/components/Menu'
@@ -133,6 +134,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
           <ArrowLeft size={18} />
         </button>
         <TaskCheck checked={task.status === 'done'} priority={task.priority} label={`Complete: ${task.title}`} onChange={() => taskActions.toggle(task.id)} size={18} />
+        <span aria-hidden className="mx-1 h-4 w-px bg-line" />
         <button
           ref={dateBtn}
           type="button"
@@ -269,14 +271,24 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
           label="Task options"
           placement="top-end"
           items={[
-            { id: 'dup', label: 'Duplicate', icon: <Copy size={16} />, disabled: trashed, onSelect: () => void taskActions.duplicate(task).then((t) => t && navigate(paths.task(t.id))) },
-            { id: 'link', label: 'Copy link', icon: <Link2 size={16} />, onSelect: () => void navigator.clipboard?.writeText(`${location.origin}${location.pathname}#${paths.task(task.id)}`).then(() => actions.notify('info', 'Link copied')) },
+            { id: 'sub', label: 'Add Subtask', icon: <ListPlus size={16} />, disabled: true },
+            { id: 'pin', label: 'Pin', icon: <Pin size={16} />, disabled: true },
+            { id: 'wontdo', label: "Won't Do", icon: <XCircle size={16} />, disabled: true },
+            { id: 'tags', label: 'Tags', icon: <Tag size={16} />, disabled: trashed, onSelect: () => setTagsOpen(true) },
+            { id: 'attach', label: 'Upload Attachment', icon: <Paperclip size={16} />, disabled: true },
+            { id: 'focus', label: 'Start Focus', icon: <Target size={16} />, disabled: trashed, onSelect: () => navigate(PATHS.focus) },
             'separator',
+            { id: 'activity', label: 'Task Activities', icon: <History size={16} />, disabled: true },
+            { id: 'template', label: 'Save as Template', icon: <FileText size={16} />, disabled: true },
+            { id: 'dup', label: 'Duplicate', icon: <Copy size={16} />, disabled: trashed, onSelect: () => void taskActions.duplicate(task).then((t) => t && navigate(paths.task(t.id))) },
+            { id: 'link', label: 'Copy Link', icon: <Link2 size={16} />, onSelect: () => void navigator.clipboard?.writeText(`${location.origin}${location.pathname}#${paths.task(task.id)}`).then(() => actions.notify('info', 'Link copied')) },
+            { id: 'note', label: 'Convert to Note', icon: <StickyNote size={16} />, disabled: true },
+            'separator',
+            { id: 'export', label: 'Export', icon: <Upload size={16} />, disabled: true },
+            { id: 'print', label: 'Print', icon: <Printer size={16} />, onSelect: () => window.print() },
             trashed
               ? { id: 'purge', label: 'Delete forever', icon: <Trash2 size={16} />, danger: true, onSelect: () => { taskActions.purge(task.id); navigate(paths.list) } }
-              : { id: 'delete', label: 'Move to Trash', icon: <Trash2 size={16} />, danger: true, onSelect: () => { taskActions.remove(task.id); navigate(paths.list) } },
-            'separator',
-            { id: 'created', label: `Created ${new Date(task.createdMs).toLocaleDateString()}`, disabled: true },
+              : { id: 'delete', label: 'Delete', icon: <Trash2 size={16} />, danger: true, onSelect: () => { taskActions.remove(task.id); navigate(paths.list) } },
           ]}
         />
       </footer>
