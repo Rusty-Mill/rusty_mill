@@ -10,6 +10,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
+use crate::gzip;
+
 /// Hard cap on a request body — comfortably above a large `.replay`.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
@@ -130,12 +132,24 @@ fn handle_connection<H>(stream: TcpStream, handler: &H) -> io::Result<()>
 where
     H: Fn(&Request) -> Response,
 {
-    let response = match read_request(&stream) {
-        Ok(Some(req)) => handler(&req),
+    let (response, gzip_ok) = match read_request(&stream) {
+        Ok(Some(req)) => {
+            let ok = req
+                .header("accept-encoding")
+                .is_some_and(|v| v.contains("gzip"));
+            (handler(&req), ok)
+        }
         Ok(None) => return Ok(()), // empty/closed connection
-        Err(e) => Response::text(400, format!("bad request: {e}")),
+        Err(e) => (Response::text(400, format!("bad request: {e}")), false),
     };
-    write_response(&stream, &response)
+    write_response(
+        &stream,
+        &if gzip_ok {
+            compressed(response)
+        } else {
+            response
+        },
+    )
 }
 
 fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
@@ -186,6 +200,25 @@ fn read_request(stream: &TcpStream) -> io::Result<Option<Request>> {
     }))
 }
 
+/// Bodies smaller than this are not worth compressing.
+const GZIP_MIN_BYTES: usize = 1024;
+
+/// `resp` gzip-encoded, if it is a text or JSON body big enough to gain from it.
+fn compressed(mut resp: Response) -> Response {
+    let text =
+        resp.content_type.starts_with("text/") || resp.content_type.starts_with("application/json");
+    if resp.status != 200 || !text || resp.body.len() < GZIP_MIN_BYTES {
+        return resp;
+    }
+    let z = gzip::compress(&resp.body);
+    if z.len() >= resp.body.len() {
+        return resp;
+    }
+    resp.body = z;
+    resp.with_header("Content-Encoding", "gzip")
+        .with_header("Vary", "Accept-Encoding")
+}
+
 fn write_response(mut stream: &TcpStream, resp: &Response) -> io::Result<()> {
     let extra: String = resp
         .headers
@@ -207,6 +240,34 @@ fn write_response(mut stream: &TcpStream, resp: &Response) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_big_text_bodies_are_gzipped_and_say_so() {
+        let big = "<td>row</td>".repeat(500);
+        let z = compressed(Response::html(big.clone()));
+        assert!(z.body.len() < big.len() / 5 && z.body[..2] == [0x1f, 0x8b]);
+        assert!(z
+            .headers
+            .iter()
+            .any(|(n, v)| n == "Content-Encoding" && v == "gzip"));
+        assert!(z.headers.iter().any(|(n, _)| n == "Vary"));
+        assert!(
+            compressed(Response::html("tiny")).headers.is_empty(),
+            "too small"
+        );
+        assert!(
+            compressed(Response::text(404, big.clone()))
+                .headers
+                .is_empty(),
+            "errors stay plain"
+        );
+        let mut png = Response::html(big);
+        png.content_type = "image/png".into();
+        assert!(
+            compressed(png).headers.is_empty(),
+            "binary types are left alone"
+        );
+    }
 
     #[test]
     fn header_values_cannot_inject_new_headers() {

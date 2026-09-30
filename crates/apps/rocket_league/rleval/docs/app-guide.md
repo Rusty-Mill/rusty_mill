@@ -84,7 +84,7 @@ embedded. The 3D viewer, scoring report and ballchasing dashboard stay on the
 server, and the UI fetches each from `GET /api/analysis/<analysis_id>/<panel>`
 (`viewer`, `scoring`, `ballchasing`) the first time its tab is opened. The server
 keeps the panels of the last four analyses, per account; an evicted or unknown id
-is a 404 (re-run the analysis). Add `?inline=1` for the previous shape, with the
+is a 404 (re-run the analysis). Text and JSON responses over 1 KB are gzip-compressed when the client sends `Accept-Encoding: gzip` (a built-in encoder, no dependency): the 7.6 MB viewer panel travels as about 1.6 MB. Add `?inline=1` for the previous shape, with the
 panels embedded in the response and no `analysis_id`. `rleval analyze --out` bundles
 are unchanged (everything inline).
 

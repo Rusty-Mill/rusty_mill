@@ -8,6 +8,7 @@
 pub mod admin;
 pub mod auth;
 pub mod authn;
+pub mod gzip;
 pub mod history;
 #[cfg(feature = "oidc")]
 pub mod oidc;

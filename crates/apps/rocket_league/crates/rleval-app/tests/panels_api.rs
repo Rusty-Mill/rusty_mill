@@ -34,6 +34,26 @@ impl Server {
         panic!("server did not come up");
     }
 
+    /// The raw `(head, body)` bytes of a GET sent with `extra` headers.
+    fn get_raw(&self, path: &str, extra: &str) -> (String, Vec<u8>) {
+        let mut s = TcpStream::connect(("127.0.0.1", self.1)).unwrap();
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\n{extra}Connection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).unwrap();
+        let at = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("header end");
+        (
+            String::from_utf8_lossy(&raw[..at]).into_owned(),
+            raw[at + 4..].to_vec(),
+        )
+    }
+
     /// `(status, body)` of a GET.
     fn get(&self, path: &str) -> (u16, String) {
         let Ok(mut s) = TcpStream::connect(("127.0.0.1", self.1)) else {
@@ -102,4 +122,28 @@ fn inline_keeps_the_legacy_shape() {
         .as_str()
         .is_some_and(|h| h.contains("<html")));
     assert!(full.get("analysis_id").is_none());
+}
+
+#[test]
+fn gzip_is_sent_only_when_asked_for_and_decodes_to_the_same_bytes() {
+    let srv = Server::start();
+    let (head, plain) = srv.get_raw("/", "");
+    assert!(!head.to_lowercase().contains("content-encoding"), "{head}");
+    let (head, z) = srv.get_raw("/", "Accept-Encoding: gzip\r\n");
+    assert!(head.contains("Content-Encoding: gzip"), "{head}");
+    assert!(z.len() < plain.len() / 2 && z[..2] == [0x1f, 0x8b]);
+    let mut gz = Command::new("gzip")
+        .arg("-dc")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("gzip");
+    let mut stdin = gz.stdin.take().unwrap();
+    let feeder = std::thread::spawn(move || stdin.write_all(&z));
+    let out = gz.wait_with_output().unwrap();
+    feeder.join().unwrap().unwrap();
+    assert_eq!(
+        out.stdout, plain,
+        "the compressed page decodes to the plain page"
+    );
 }
