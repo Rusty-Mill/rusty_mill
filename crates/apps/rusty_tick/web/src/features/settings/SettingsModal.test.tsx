@@ -179,6 +179,23 @@ describe('SettingsModal', () => {
   })
 
   describe('Account', () => {
+    it('Generate Backup downloads every task, list and tag as JSON', async () => {
+      const blobs: Blob[] = []
+      URL.createObjectURL = vi.fn((b: Blob | MediaSource) => (blobs.push(b as Blob), 'blob:x'))
+      URL.revokeObjectURL = vi.fn()
+      const names: string[] = []
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        names.push(this.download)
+      })
+      const user = setup()
+      await user.click(screen.getByRole('button', { name: 'Generate Backup' }))
+      await waitFor(() => expect(names).toHaveLength(1))
+      expect(names[0]).toMatch(/^tick-backup-\d{4}-\d{2}-\d{2}\.json$/)
+      const snap = JSON.parse(await new Promise<string>((ok) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.readAsText(blobs[0]!) })) as { lists: unknown[]; tasks: unknown[] }
+      expect(snap.lists.length).toBeGreaterThan(0)
+      expect(snap.tasks.length).toBeGreaterThan(0)
+    })
+
     it('server mode: shows the masked token and signs out', async () => {
       setToken('secret-token-abcd1234', false)
       const reload = vi.spyOn(page, 'reload').mockImplementation(() => undefined)

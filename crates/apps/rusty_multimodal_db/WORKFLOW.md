@@ -48,6 +48,9 @@ repository-stored flag. See the `rust-repo-lifecycle` skill's
 
 ## Safeguards
 
+- CI for this crate is the monorepo's root workflow (its `multimodal-db-*`
+  jobs and the feature-set clippy job, `ADR-0100`/`ADR-0106`); the crate
+  has no workflow of its own.
 - Never merge failing, pending, missing, stale, or older-head CI.
 - Restart review if the head changes.
 - Don't begin a competing increment while a PR is active.
@@ -60,7 +63,7 @@ repository-stored flag. See the `rust-repo-lifecycle` skill's
 
 Write one per delivery cycle during active major development (this
 project's current regime — see `docs/roadmap/ROADMAP.md`); taper to
-decisions-that-matter once the baseline (all four `STORAGE-*` units
+decisions-that-matter once the baseline (the `STORAGE-*` units
 implemented and `RESULTS.md` published) is stable and complete.
 
 ## `next`

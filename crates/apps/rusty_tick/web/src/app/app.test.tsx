@@ -627,4 +627,22 @@ describe('large lists', () => {
     })
     expect(within(tasksList()).getAllByRole('checkbox')).toHaveLength(30)
   })
+
+  it('shows tasks as bars on a timeline: dated ones get a bar, undated ones only a row, and a click opens the task', async () => {
+    const user = userEvent.setup()
+    const { router } = await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'dated', dueMs: startOfDay(Date.now()), isAllDay: true })
+      await a.createTask({ listId: INBOX_ID, title: 'spans', startMs: startOfDay(addDays(Date.now(), 1)), dueMs: startOfDay(addDays(Date.now(), 3)), isAllDay: true })
+      await a.createTask({ listId: INBOX_ID, title: 'someday' })
+    })
+    await user.click(screen.getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('radio', { name: 'Timeline' }))
+    const timeline = await screen.findByRole('region', { name: 'Timeline' })
+    expect(within(timeline).getByRole('button', { name: 'dated, bar' })).toBeInTheDocument()
+    expect(within(timeline).getByRole('button', { name: 'spans, bar' })).toBeInTheDocument()
+    expect(within(timeline).getByText('someday')).toBeInTheDocument()
+    expect(within(timeline).queryByRole('button', { name: 'someday, bar' })).toBeNull()
+    await user.click(within(timeline).getByRole('button', { name: 'spans, bar' }))
+    expect(router.state.location.pathname).toMatch(/^\/p\/inbox\/tasks\/[0-9a-f-]{36}$/)
+  })
 })
