@@ -11,6 +11,11 @@ into a near-complete POSIX-style shell. Work is grouped by area below; see the
 git history for the commit-by-commit narrative.
 
 ### Expansion
+
+- Brace expansion is bounded and cannot overflow (design review 3.8).
+  - A numeric range stops at its endpoint with checked stepping. `{9223372036854775807..9223372036854775807}` used to overflow: a panic in debug builds, an endless wrapped expansion in release ones.
+  - A range's item count is computed before generating it.
+  - Ranges and cross products are capped at 1,048,576 words and 8 Mi characters. Over the cap is an expansion error, not an out-of-memory crash.
 - **Variables** — `$VAR`, `${VAR}`; shell variables shadow the environment.
 - **`${…}` operators** — `:-`/`-`, `:=`/`=`, `:+`/`+`, `:?`/`?`, and `${#name}`
   (length); the default/alternate word is itself expanded.

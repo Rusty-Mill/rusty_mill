@@ -56,6 +56,8 @@ Removed / Fixed / Security, newest first.
   - `rusty_kafka`: a call interrupted mid-frame (timeout, I/O error, correlation mismatch, or a dropped future) poisons the connection, and later calls fail `NotConnected`. It used to be reused with a partial frame on the stream. `KafkaClient::is_poisoned` reports it.
   - `rusty_lsp`: pending requests are capped (1,024 by default; excess requests are answered `RequestFailed` immediately). A notification backlog over 4,096 ends the connection with an error. Before, only handler execution was bounded.
   - `rusty_llama` server: the job queue is bounded (`RUSTY_LLAMA_QUEUE`, 64) and connections are capped (`RUSTY_LLAMA_MAX_CONNECTIONS`, 128). Over either limit a request gets `503` at once, instead of the queue and thread count growing without limit.
+- **Design review Tranche 3 (#419), input budgets (3.8):**
+  - `rush`: numeric brace ranges stop at their endpoint without overflow. Brace expansion is capped at 1 Mi words and 8 Mi characters.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.

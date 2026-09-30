@@ -251,8 +251,11 @@ fn expand_simple(rc: &RawSimple) -> Result<Command, String> {
         // directly: it becomes two words, `x=a` then `x=b`, applied in
         // order, leaving `x=b`). Brace-expand each word here, before
         // `assignment_split` ever sees it.
-        for word in rest.iter().flat_map(brace_expand) {
-            let word = &word;
+        let words = rest
+            .iter()
+            .map(brace_expand)
+            .collect::<Result<Vec<_>, _>>()?;
+        for word in words.iter().flatten() {
             match assignment_split(word) {
                 Some((name, RawAssign::Whole(append, raw_value))) => {
                     let value = match raw_value {
@@ -564,7 +567,7 @@ fn parse_assoc_literal_element(word: &Word) -> Option<(String, Word)> {
 /// in. Each resulting word is then expanded independently below.
 fn expand_argv_word(word: &Word) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    for w in brace_expand(word) {
+    for w in brace_expand(word)? {
         out.extend(expand_argv_word_after_braces(&w)?);
     }
     Ok(out)
@@ -729,11 +732,25 @@ fn expand_argv_word_after_braces(word: &Word) -> Result<Vec<String>, String> {
 /// itself still expands normally afterwards. Returns `vec![word.clone()]`
 /// unchanged when no valid group exists anywhere in the word (the common
 /// case).
-fn brace_expand(word: &Word) -> Vec<Word> {
-    brace_expand_atoms(&word_to_atoms(word))
+fn brace_expand(word: &Word) -> Result<Vec<Word>, String> {
+    Ok(brace_expand_atoms(&word_to_atoms(word))?
         .into_iter()
         .map(|a| atoms_to_word(&a))
-        .collect()
+        .collect())
+}
+
+/// Most words one brace expansion may produce (design review 3.7/3.8):
+/// ranges and cross products used to be generated eagerly without limit
+/// (`{1..9999999999}`, or `{a,b}` repeated 40 times) until allocation
+/// failed. Over budget is an expansion error, not a crash.
+const MAX_BRACE_WORDS: usize = 1 << 20;
+/// Most characters those words may hold in total.
+const MAX_BRACE_CHARS: usize = 8 << 20;
+
+fn brace_budget_error() -> String {
+    format!(
+        "brace expansion too large (over {MAX_BRACE_WORDS} words or {MAX_BRACE_CHARS} characters)"
+    )
 }
 
 /// One atomic unit of a word's text for brace-expansion scanning: a single
@@ -783,7 +800,7 @@ fn atoms_to_word(atoms: &[BraceAtom]) -> Word {
 /// since the first `}` closes the inner one, so it falls back to literal
 /// and the scan finds `{a,b}` starting one character later — verified
 /// directly against bash).
-fn brace_expand_atoms(atoms: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
+fn brace_expand_atoms(atoms: &[BraceAtom]) -> Result<Vec<Vec<BraceAtom>>, String> {
     let mut i = 0;
     while i < atoms.len() {
         // A `{` immediately after `$` is a parameter expansion `${...}`,
@@ -793,11 +810,29 @@ fn brace_expand_atoms(atoms: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
         if !dollar_prefixed
             && matches!(atoms[i], BraceAtom::Ch('{'))
             && let Some(j) = matching_close(atoms, i)
-            && let Some(alternatives) = expand_group(&atoms[i + 1..j])
+            && let Some(alternatives) = expand_group(&atoms[i + 1..j])?
         {
             let prefix = &atoms[..i];
-            let suffix_alts = brace_expand_atoms(&atoms[j + 1..]);
-            let mut out = Vec::new();
+            let suffix_alts = brace_expand_atoms(&atoms[j + 1..])?;
+            // Refuse before allocating the product, not after.
+            let words = alternatives.len().saturating_mul(suffix_alts.len());
+            let chars = alternatives
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                .saturating_mul(suffix_alts.len())
+                .saturating_add(
+                    suffix_alts
+                        .iter()
+                        .map(Vec::len)
+                        .sum::<usize>()
+                        .saturating_mul(alternatives.len()),
+                )
+                .saturating_add(prefix.len().saturating_mul(words));
+            if words > MAX_BRACE_WORDS || chars > MAX_BRACE_CHARS {
+                return Err(brace_budget_error());
+            }
+            let mut out = Vec::with_capacity(words);
             for alt in &alternatives {
                 for suffix in &suffix_alts {
                     let mut combined = prefix.to_vec();
@@ -806,11 +841,11 @@ fn brace_expand_atoms(atoms: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
                     out.push(combined);
                 }
             }
-            return out;
+            return Ok(out);
         }
         i += 1;
     }
-    vec![atoms.to_vec()]
+    Ok(vec![atoms.to_vec()])
 }
 
 /// The position of the `}` matching the `{` at `atoms[open]`, tracking
@@ -837,14 +872,17 @@ fn matching_close(atoms: &[BraceAtom], open: usize) -> Option<usize> {
 /// `{...}` doesn't count) or, failing that, a range (`1..5`, `a..z..2`).
 /// `None` if it's neither — an invalid/malformed group, left as literal
 /// text by the caller.
-fn expand_group(content: &[BraceAtom]) -> Option<Vec<Vec<BraceAtom>>> {
+fn expand_group(content: &[BraceAtom]) -> Result<Option<Vec<Vec<BraceAtom>>>, String> {
     let segments = split_top_level_commas(content);
     if segments.len() > 1 {
         let mut out = Vec::new();
         for seg in &segments {
-            out.extend(brace_expand_atoms(seg));
+            out.extend(brace_expand_atoms(seg)?);
+            if out.len() > MAX_BRACE_WORDS {
+                return Err(brace_budget_error());
+            }
         }
-        return Some(out);
+        return Ok(Some(out));
     }
     expand_range(content)
 }
@@ -877,39 +915,43 @@ fn split_top_level_commas(content: &[BraceAtom]) -> Vec<Vec<BraceAtom>> {
 /// both integers or both single ASCII letters (verified directly: a
 /// mismatched pair like `{1..a}` or a quoted endpoint like `{"1"..5}` is
 /// left as literal text, same as any other invalid group).
-fn expand_range(content: &[BraceAtom]) -> Option<Vec<Vec<BraceAtom>>> {
+fn expand_range(content: &[BraceAtom]) -> Result<Option<Vec<Vec<BraceAtom>>>, String> {
     let mut text = String::new();
     for atom in content {
         match atom {
             BraceAtom::Ch(c) => text.push(*c),
-            BraceAtom::Opaque(_) => return None,
+            BraceAtom::Opaque(_) => return Ok(None),
         }
     }
     let fields: Vec<&str> = text.split("..").collect();
     let (start, end, step_field) = match fields.as_slice() {
         [a, b] => (*a, *b, None),
         [a, b, c] => (*a, *b, Some(*c)),
-        _ => return None,
+        _ => return Ok(None),
     };
     let step = match step_field {
-        Some(s) => Some(parse_range_int(s)?.value),
+        Some(s) => match parse_range_int(s) {
+            Some(e) => Some(e.value),
+            None => return Ok(None),
+        },
         None => None,
     };
 
     let strings = if let (Some(a), Some(b)) = (parse_range_int(start), parse_range_int(end)) {
-        numeric_range(&a, &b, step)
+        numeric_range(&a, &b, step)?
     } else {
-        let a = single_letter(start)?;
-        let b = single_letter(end)?;
+        let (Some(a), Some(b)) = (single_letter(start), single_letter(end)) else {
+            return Ok(None);
+        };
         char_range(a, b, step.unwrap_or(1))
     };
 
-    Some(
+    Ok(Some(
         strings
             .into_iter()
             .map(|s| s.chars().map(BraceAtom::Ch).collect())
             .collect(),
-    )
+    ))
 }
 
 /// A parsed numeric range endpoint: its value, whether it triggers
@@ -941,27 +983,40 @@ fn parse_range_int(s: &str) -> Option<RangeEndpoint> {
     })
 }
 
-fn numeric_range(a: &RangeEndpoint, b: &RangeEndpoint, explicit_step: Option<i64>) -> Vec<String> {
-    let step = match explicit_step.map(i64::abs) {
-        None | Some(0) => 1,
+/// `{a..b..step}`. Stepping stops at the endpoint and is checked: it used
+/// to add `step` after the last element unconditionally, so a range ending
+/// at `i64::MAX` overflowed -- a panic in checked builds, a wrap and an
+/// endless expansion in release ones (design review 3.8). The item count
+/// is computed first and held to [`MAX_BRACE_WORDS`].
+fn numeric_range(
+    a: &RangeEndpoint,
+    b: &RangeEndpoint,
+    explicit_step: Option<i64>,
+) -> Result<Vec<String>, String> {
+    let step = match explicit_step.map(i64::unsigned_abs) {
+        None | Some(0) => 1u64,
         Some(s) => s,
     };
+    let span = (i128::from(a.value) - i128::from(b.value)).unsigned_abs();
+    let count = span / u128::from(step) + 1;
+    if count > MAX_BRACE_WORDS as u128 {
+        return Err(brace_budget_error());
+    }
     let pad = a.pads || b.pads;
     let width = a.width.max(b.width);
-    let mut out = Vec::new();
-    let mut v = a.value;
-    if a.value <= b.value {
-        while v <= b.value {
-            out.push(format_range_int(v, pad, width));
-            v += step;
-        }
-    } else {
-        while v >= b.value {
-            out.push(format_range_int(v, pad, width));
-            v -= step;
+    let ascending = a.value <= b.value;
+    let mut out = Vec::with_capacity(count as usize);
+    let mut v = i128::from(a.value);
+    for _ in 0..count {
+        // `v` stays within [min(a, b), max(a, b)] for all `count` steps.
+        out.push(format_range_int(v as i64, pad, width));
+        if ascending {
+            v += i128::from(step);
+        } else {
+            v -= i128::from(step);
         }
     }
-    out
+    Ok(out)
 }
 
 fn format_range_int(v: i64, pad: bool, width: usize) -> String {
@@ -987,9 +1042,11 @@ fn single_letter(s: &str) -> Option<char> {
 /// `{A..z}` stepping through the punctuation between `Z` and `a` in the
 /// ASCII table (verified directly), not just same-case letter ranges.
 fn char_range(a: char, b: char, step: i64) -> Vec<String> {
-    let step = match step.abs() {
+    // `unsigned_abs`: `i64::MIN.abs()` overflows. Letters are ASCII, so
+    // the loop below never steps past a few hundred.
+    let step = match step.unsigned_abs() {
         0 => 1,
-        s => s,
+        s => i64::try_from(s).unwrap_or(i64::MAX),
     };
     let (a, b) = (a as i64, b as i64);
     let mut out = Vec::new();
@@ -3684,5 +3741,43 @@ mod tests {
     #[test]
     fn unmatched_glob_stays_literal() {
         assert_eq!(one("ls no-such-*.zzz"), vec!["ls", "no-such-*.zzz"]);
+    }
+
+    fn try_expand(input: &str) -> Result<crate::exec::Pipeline, String> {
+        let list = parser::parse(input).unwrap();
+        expand(&list.jobs[0].list.first)
+    }
+
+    /// Design review 3.8: a range ending at `i64::MAX` stepped past it
+    /// (overflow panic, or an endless wrapped expansion in release); it
+    /// stops at the endpoint now, and a huge step is one item.
+    #[test]
+    fn numeric_ranges_stop_at_their_endpoint_without_overflow() {
+        assert_eq!(
+            one("echo {9223372036854775807..9223372036854775807}"),
+            ["echo", "9223372036854775807"]
+        );
+        assert_eq!(
+            one("echo {9223372036854775806..9223372036854775807}"),
+            ["echo", "9223372036854775806", "9223372036854775807"]
+        );
+        assert_eq!(
+            one("echo {-9223372036854775807..-9223372036854775807}"),
+            ["echo", "-9223372036854775807"]
+        );
+        assert_eq!(one("echo {1..5..9223372036854775807}"), ["echo", "1"]);
+        assert_eq!(one("echo {5..1..2}"), ["echo", "5", "3", "1"]);
+    }
+
+    /// Design review 3.8: ranges and cross products were generated eagerly
+    /// with no bound; past the word/character budget it is an error.
+    #[test]
+    fn oversized_brace_expansions_are_refused() {
+        let err = try_expand("echo {1..9999999999}").unwrap_err();
+        assert!(err.contains("brace expansion too large"), "{err}");
+        let product = "{a,b}".repeat(24);
+        let err = try_expand(&format!("echo {product}")).unwrap_err();
+        assert!(err.contains("brace expansion too large"), "{err}");
+        assert_eq!(one("echo {1..3}{a,b}").len(), 7);
     }
 }
