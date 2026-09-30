@@ -50,6 +50,13 @@ impl<T> SpinLock<T> {
 }
 
 /// RAII Guard for SpinLock.
+///
+/// `Sync` only when `T: Sync`:
+///
+/// ```compile_fail
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<rusty_sync::SpinLockGuard<'static, core::cell::Cell<u32>>>();
+/// ```
 pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
 }
