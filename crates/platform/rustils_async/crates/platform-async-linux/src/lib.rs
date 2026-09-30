@@ -128,6 +128,15 @@ impl AsyncChild for AsyncLinuxChild {
     }
 
     fn kill_single(&self, sig: Signal) -> Result<()> {
+        // A reaped pid may be recycled; see `LinuxChild::kill_single`.
+        if self
+            .reaped
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            return Ok(());
+        }
         self.inner.kill_single(sig)
     }
 
