@@ -32,7 +32,9 @@ mod replica_refresh;
 #[cfg(feature = "server")]
 use replica_refresh::{follow, refresh_at, FollowError};
 use replica_refresh::{prune, refresh, refresh_loop, Domain, RefreshError, RefreshReport, Target};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "server")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
