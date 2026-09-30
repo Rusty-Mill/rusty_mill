@@ -893,6 +893,15 @@ mod tests {
     }
 
     #[test]
+    fn every_client_document_kind_is_accepted() {
+        for kind in KINDS {
+            assert!(check_kind(kind).is_ok(), "{kind}");
+        }
+        assert!(KINDS.contains(&"comment"));
+        assert!(check_kind("nope").is_err());
+    }
+
+    #[test]
     fn colors_must_be_hex() {
         assert_eq!(
             clean_color(Some("#ED70A5".into())).unwrap(),
