@@ -105,7 +105,7 @@ describe('SettingsModal', () => {
   it('Notifications turns task reminders on once the browser allows them', async () => {
     vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'default', requestPermission: async () => ((Notification as unknown as { permission: string }).permission = 'granted') }))
     setup('/?modalType=settings&tabs=notifications')
-    await userEvent.setup().click(screen.getByRole('switch', { name: 'Task reminders' }))
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Reminders' }))
     expect(usePrefs.getState().prefs.notifications).toBe(true)
     vi.unstubAllGlobals()
   })
@@ -113,7 +113,7 @@ describe('SettingsModal', () => {
   it('Notifications stays off and says why when the browser refuses', async () => {
     vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'denied' }))
     setup('/?modalType=settings&tabs=notifications')
-    await userEvent.setup().click(screen.getByRole('switch', { name: 'Task reminders' }))
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Reminders' }))
     expect(usePrefs.getState().prefs.notifications).toBe(false)
     expect(within(screen.getByRole('tabpanel')).getByRole('status')).toHaveTextContent('blocked')
     vi.unstubAllGlobals()

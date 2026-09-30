@@ -3,11 +3,14 @@
  * what is due next; the component owns the timers and the notification.
  */
 import type { Task } from '@/api/types'
+import { addDays, atTime, dayKey, startOfDay } from '@/lib/date'
+import { checkinId, isDue, type Checkin, type Habit } from '@/features/habits/logic'
 
 export interface Due {
-  key: string // task, reminder and time: the same reminder is never shown twice
-  taskId: string
+  key: string // what and when: the same reminder is never shown twice
   title: string
+  /** Notification text under the title. */
+  body: string
   atMs: number
 }
 
@@ -31,7 +34,22 @@ export function upcoming(tasks: Iterable<Task>, now: number, horizonMs: number):
       const offset = triggerOffsetMs(trigger)
       if (offset === null) continue
       const atMs = t.dueMs + offset
-      if (atMs > now && atMs <= now + horizonMs) out.push({ key: `${t.id}|${trigger}|${atMs}`, taskId: t.id, title: t.title, atMs })
+      if (atMs > now && atMs <= now + horizonMs) out.push({ key: `${t.id}|${trigger}|${atMs}`, title: t.title, body: 'Task reminder', atMs })
+    }
+  }
+  return out.sort((a, b) => a.atMs - b.atMs)
+}
+
+/** Habit reminders (`HH:MM` each day) that fall after `now` within `horizonMs`, for habits due that day and not yet checked in. */
+export function upcomingHabits(habits: Habit[], checkins: Record<string, Checkin>, now: number, horizonMs: number): Due[] {
+  const out: Due[] = []
+  for (const h of habits) {
+    const m = h.archived || h.reminder === null ? null : /^(\d{2}):(\d{2})$/.exec(h.reminder)
+    if (!m) continue
+    for (let day = startOfDay(now); day <= now + horizonMs; day = addDays(day, 1)) {
+      const atMs = atTime(day, Number(m[1]), Number(m[2]))
+      if (atMs <= now || atMs > now + horizonMs || !isDue(h, day) || checkinId(h.id, dayKey(day)) in checkins) continue
+      out.push({ key: `habit|${h.id}|${atMs}`, title: h.name, body: 'Habit reminder', atMs })
     }
   }
   return out.sort((a, b) => a.atMs - b.atMs)
