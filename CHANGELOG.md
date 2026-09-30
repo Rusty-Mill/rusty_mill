@@ -35,6 +35,9 @@ Removed / Fixed / Security, newest first.
   - `nexus-kernel`: an IPC deadline or a dropped caller cancels the dispatch token (N4).
   - `nexus-ai-runtime`: the shared pool handle follows the live pool across a forge switch, never a torn-down runtime (N5).
   - `platform-async(-linux)`: `Timeout`, `WaitJob` and `PidfdReady` wake the latest poller, not the first.
+  - `rusty_yirp` (sessionmgr):
+    - Teardown signals a recorded pid only when its start fingerprint still matches, and `terminate` refuses pid 0 and out-of-range values.
+    - Processes still alive after termination block a destructive close. A timeout is no longer treated as proof that nothing is running.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
