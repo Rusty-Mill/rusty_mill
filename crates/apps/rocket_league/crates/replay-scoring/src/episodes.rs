@@ -54,6 +54,16 @@ pub enum Episode {
         on_target: bool,
         outcome: Outcome,
     },
+    /// `pri` demolished `victim`. `down` is how long the victim was out (until their
+    /// car reappears, at most `DEMO_DOWN_CAP_S`); `goal` is whether the demolisher's
+    /// team scored within `GOAL_AFTER_DEMO_S` of it.
+    Demo {
+        pri: i32,
+        victim: i32,
+        t: f32,
+        down: f32,
+        goal: bool,
+    },
 }
 
 /// How a shot ended.
@@ -76,7 +86,8 @@ impl Episode {
             Self::Recovery { t0: t, .. }
             | Self::Challenge { t0: t, .. }
             | Self::Loss { t, .. }
-            | Self::Shot { t, .. } => *t,
+            | Self::Shot { t, .. }
+            | Self::Demo { t, .. } => *t,
         }
     }
     pub fn pri(&self) -> i32 {
@@ -84,12 +95,14 @@ impl Episode {
             Self::Recovery { pri, .. }
             | Self::Challenge { pri, .. }
             | Self::Loss { pri, .. }
-            | Self::Shot { pri, .. } => *pri,
+            | Self::Shot { pri, .. }
+            | Self::Demo { pri, .. } => *pri,
         }
     }
     pub fn dur(&self) -> f32 {
         match self {
             Self::Recovery { dur, .. } | Self::Challenge { dur, .. } => *dur,
+            Self::Demo { down, .. } => *down,
             Self::Loss { .. } | Self::Shot { .. } => 0.0,
         }
     }
@@ -270,6 +283,12 @@ pub(crate) fn losses(frames: &[FrameView], events: &[Event], pri: i32, team: i32
     out
 }
 
+/// A victim that hasn't reappeared by now is counted as down this long.
+const DEMO_DOWN_CAP_S: f32 = 10.0;
+/// The victim of a demo must leave the grid within this long of the event.
+const DEMO_GONE_S: f32 = 1.0;
+/// A goal this soon after a demo is credited to it.
+const GOAL_AFTER_DEMO_S: f32 = 8.0;
 const GRAVITY: f32 = 650.0;
 /// Ball bounce restitution off the floor.
 const RESTITUTION: f32 = 0.6;
@@ -436,6 +455,45 @@ pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
     out
 }
 
+/// Every demolition with a known attacker and victim, in time order.
+pub(crate) fn demos(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
+    let team_of = |pri: i32| m.tracks.iter().find(|t| t.pri == pri).and_then(|t| t.team);
+    m.events
+        .iter()
+        .filter_map(|e| {
+            let Event::Demo {
+                t,
+                attacker_pri: Some(a),
+                victim_pri: Some(v),
+                ..
+            } = e
+            else {
+                return None;
+            };
+            // The victim is out from the demo until their car is back on the grid; one that
+            // never leaves it within `DEMO_GONE_S` of the event was not actually removed.
+            let mut later = frames.iter().skip_while(|f| f.t < *t - 0.2);
+            let gone = later.find(|f| f.t <= *t + DEMO_GONE_S && f.car(*v).is_none());
+            let down = gone.map_or(0.0, |_| {
+                let back = later.find(|f| f.car(*v).is_some());
+                back.map_or(DEMO_DOWN_CAP_S, |f| f.t - t)
+                    .min(DEMO_DOWN_CAP_S)
+            });
+            let goal = m.events.iter().any(|g| {
+                matches!(g, Event::Goal { t: gt, team, .. }
+                    if *team == team_of(*a) && (*t..=*t + GOAL_AFTER_DEMO_S).contains(gt))
+            });
+            Some(Episode::Demo {
+                pri: *a,
+                victim: *v,
+                t: *t,
+                down,
+                goal,
+            })
+        })
+        .collect()
+}
+
 /// Every player's episodes, in time order.
 pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
     let frames = build_frames(m, cfg);
@@ -448,6 +506,7 @@ pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
         out.extend(losses(&frames, &m.events, t.pri, team));
     }
     out.extend(shots(m, &frames));
+    out.extend(demos(m, &frames));
     out.sort_by(|a, b| a.t().total_cmp(&b.t()).then(a.pri().cmp(&b.pri())));
     out
 }

@@ -598,7 +598,22 @@ function shotMap(shots) {
     <svg viewBox="-1800 -800 3600 900" style="max-width:640px;width:100%;display:block;margin:0 auto"><rect x="-893" y="-643" width="1785" height="643" fill="none" stroke="var(--muted)" stroke-width="8"/>
     <line x1="-1800" y1="0" x2="1800" y2="0" stroke="var(--muted)" stroke-width="4"/>${dots}</svg></div>`;
 }
-const momentCols = (e, who) => e.kind === "shot"
+// Per player: demos dealt/taken, seconds the victims were out, and goals within 8 s of a demo they dealt.
+function physicality(d, who) {
+  const demos = (d.episodes || []).filter(e => e.kind === "demo");
+  if (!demos.length) return "";
+  const rows = Object.values(who).map(r => {
+    const dealt = demos.filter(e => e.pri === r.target_pri);
+    return `<tr><td>${nameCell(r.target_team, r.target_player)}</td><td class="num">${dealt.length}</td>
+      <td class="num">${demos.filter(e => e.victim === r.target_pri).length}</td>
+      <td class="num">${fmt(dealt.reduce((s, e) => s + e.down, 0), 1)} s</td><td class="num">${dealt.filter(e => e.goal).length}</td></tr>`;
+  }).join("");
+  return cardTable("Physicality — demolitions from the replay's own events. “Opponents down” is how long the victims were out of the match; “goals after” counts your team scoring within 8 s of one of your demos.",
+    `<th>Player</th><th class="num">Dealt</th><th class="num">Taken</th><th class="num">Opponents down</th><th class="num">Goals after</th>`, rows, "", 5);
+}
+const momentCols = (e, who) => e.kind === "demo"
+  ? ["Demo of " + esc(who[e.victim]?.target_player ?? "?"), e.down > 0 ? `${e.goal ? "✓ goal within 8 s · " : ""}out ${fmt(e.down, 1)} s` : "not seen leaving the field"]
+  : e.kind === "shot"
   ? ["Shot · " + fmt(e.speed * 0.036, 0) + " km/h", `<span class="${e.outcome === "goal" ? "pos" : "muted"}">${OUT[e.outcome][0]}</span>`]
   : e.kind === "loss"
   ? ["Possession lost", `${e.danger >= 0.5 ? "✗ deep in own half" : e.danger > 0 ? "own half" : "midfield or beyond"} · opponent ${fmt(e.opp_dist / 100, 0)} m away`]
@@ -616,7 +631,7 @@ function renderMoments(d) {
     $("momentsBody").innerHTML = cardTable("Click a moment to jump to it in the 3D viewer.",
       `<th class="num">Time</th><th>Player</th><th>Moment</th><th class="num">Duration</th><th>Result</th>`,
       rows, "No moments.", 5);
-    $("momentsBody").insertAdjacentHTML("afterbegin", shotMap(evs.filter(e => e.kind === "shot")));
+    $("momentsBody").insertAdjacentHTML("afterbegin", physicality(d, who) + shotMap(evs.filter(e => e.kind === "shot")));
     document.querySelectorAll("#momentsBody .mrow").forEach(tr => tr.onclick = () => seekViewer(+tr.dataset.t));
   };
   $("tab-moments").innerHTML = `<div class="hist-bar"><select id="momentsWho"><option value="">All players</option>` +

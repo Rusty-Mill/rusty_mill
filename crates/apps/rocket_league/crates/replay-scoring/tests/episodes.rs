@@ -21,6 +21,9 @@ fn is_recovery(e: &&Episode) -> bool {
 fn is_loss(e: &&Episode) -> bool {
     matches!(e, Episode::Loss { .. })
 }
+fn is_demo(e: &&Episode) -> bool {
+    matches!(e, Episode::Demo { .. })
+}
 fn is_shot(e: &&Episode) -> bool {
     matches!(e, Episode::Shot { .. })
 }
@@ -115,8 +118,14 @@ fn extract_is_time_ordered_and_deterministic() {
     assert_eq!(eps, extract(&m, &cfg));
     let n = |k: fn(&&Episode) -> bool| eps.iter().filter(k).count();
     assert_eq!(
-        (n(is_recovery), n(is_challenge), n(is_loss), n(is_shot)),
-        (100, 186, 100, 19), // recorded from the first run
+        (
+            n(is_recovery),
+            n(is_challenge),
+            n(is_loss),
+            n(is_shot),
+            n(is_demo)
+        ),
+        (100, 186, 100, 19, 3), // recorded from the first run
         "419a episode counts — a change means a definition moved"
     );
 }
@@ -147,4 +156,27 @@ fn shots_per_player_match_the_header_counters_and_carry_outcomes() {
         // A rebound goal can come without its own shot tick, so goals can trail the header.
         assert_eq!(outcome(Outcome::Goal), goals_credited, "{name} goals");
     }
+}
+
+#[test]
+fn demo_episodes_match_the_authoritative_demo_events() {
+    let m = canonical("419a");
+    let eps = extract(&m, &ScoreConfig::default());
+    let demos: Vec<(i32, i32, f32, bool)> = eps
+        .iter()
+        .filter_map(|e| match e {
+            Episode::Demo {
+                pri,
+                victim,
+                down,
+                goal,
+                ..
+            } => Some((*pri, *victim, *down, *goal)),
+            _ => None,
+        })
+        .collect();
+    // Same three demolitions the header/replicated events record; each victim is out ~3 s.
+    assert_eq!(demos.len(), 3);
+    assert!(demos.iter().all(|d| (2.8..3.3).contains(&d.2)), "{demos:?}");
+    assert!(demos.iter().all(|d| d.0 != d.1));
 }
