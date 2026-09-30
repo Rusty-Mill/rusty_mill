@@ -294,3 +294,34 @@ fn single_user_mode_keeps_its_shared_token_and_its_directory() {
     assert!(dir.path().join("tasks.mmap").exists());
     assert!(!dir.path().join(USERS_DIR).exists());
 }
+
+#[test]
+fn an_adopted_single_user_store_is_served_under_the_new_users_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = "test-token-0123456789";
+    let mut single = Backend::single(dir.path(), shared.into(), system_clock()).unwrap();
+    create_list(&mut single, shared, "Kept");
+    drop(single);
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rusty_tick"))
+        .args(["user", "adopt", "alice", "--data-dir"])
+        .arg(dir.path())
+        .env_remove("RUSTY_TICK_TOKEN")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let token = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+
+    assert!(!dir.path().join("tasks.mmap").exists());
+    let mut multi = Backend::multi(
+        dir.path(),
+        NonZeroUsize::new(4).unwrap(),
+        Box::new(system_clock),
+    )
+    .unwrap();
+    assert_eq!(list_names(&mut multi, &token), [INBOX, "Kept"]);
+}

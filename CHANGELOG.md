@@ -10,6 +10,7 @@ Removed / Fixed / Security, newest first.
 ## [Unreleased]
 ### Added
 - **`rusty_tick user ...`**: add, list, revoke, disable and enable users in `users.json` from the command line (ADR-0002 step 4).
+- **`rusty_tick`: `user adopt`** moves a single-user store into a user; `user` commands are serialised by `users.lock`.
 - **`rusty_tick`: several users on one server**, chosen by `<data-dir>/users.json`: per-user tokens, a store per user, live revocation, uniform `401`s (ADR-0002 step 3).
 - **`rusty_tick`: `users`**, the per-user token registry and check (`Token`, `Registry`, `RegistryFile`); not yet wired to the API (ADR-0002 step 2).
 - **`rusty_multimodal_db_engine`: `Query::except_columns`** (FTS5 column exclusion) and **`rusty_tick`: `StorePool`**, a bounded per-user store pool (not yet wired to the API). Issue #382.
