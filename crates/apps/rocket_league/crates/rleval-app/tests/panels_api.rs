@@ -54,6 +54,29 @@ impl Server {
         )
     }
 
+    /// `(status, body)` of a POST of `body`.
+    fn post(&self, path: &str, body: &[u8]) -> (u16, String) {
+        let mut s = TcpStream::connect(("127.0.0.1", self.1)).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        s.write_all(body).unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+        (
+            head.split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0),
+            body.to_string(),
+        )
+    }
+
     /// `(status, body)` of a GET.
     fn get(&self, path: &str) -> (u16, String) {
         let Ok(mut s) = TcpStream::connect(("127.0.0.1", self.1)) else {
@@ -146,4 +169,56 @@ fn gzip_is_sent_only_when_asked_for_and_decodes_to_the_same_bytes() {
         out.stdout, plain,
         "the compressed page decodes to the plain page"
     );
+}
+
+/// Submit `bytes` as a job and long-poll it to the end: `(final state, states seen)`.
+fn run_job(srv: &Server, bytes: &[u8]) -> (String, String, Vec<String>) {
+    let (status, body) = srv.post("/api/jobs?name=419a", bytes);
+    assert_eq!(status, 202, "{body}");
+    let queued: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let id = queued["job"].as_str().unwrap().to_string();
+    let (mut state, mut seen) = ("queued".to_string(), vec!["queued".to_string()]);
+    while state != "done" && state != "failed" {
+        let (status, body) = srv.get(&format!("/api/jobs/{id}?since={state}&wait=20"));
+        assert_eq!(status, 200, "{body}");
+        state = serde_json::from_str::<serde_json::Value>(&body).unwrap()["state"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        seen.push(state.clone());
+    }
+    (id, state, seen)
+}
+
+#[test]
+fn a_job_runs_to_done_and_its_result_and_panels_are_served() {
+    let srv = Server::start();
+    let bytes = std::fs::read(format!(
+        "{}/../assets/replays/419a.replay",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let (id, state, seen) = run_job(&srv, &bytes);
+    assert_eq!(state, "done", "{seen:?}");
+    let (status, body) = srv.get(&format!("/api/jobs/{id}/result"));
+    assert_eq!(status, 200);
+    let result: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let analysis_id = result["analysis_id"].as_str().expect("light result");
+    assert_eq!(
+        srv.get(&format!("/api/analysis/{analysis_id}/scoring")).0,
+        200
+    );
+    assert_eq!(srv.get("/api/jobs/nope").0, 404);
+    assert_eq!(srv.get("/api/jobs/nope/result").0, 404);
+}
+
+#[test]
+fn a_bad_upload_fails_the_job_with_a_reason_and_an_empty_one_is_refused() {
+    let srv = Server::start();
+    let (id, state, _) = run_job(&srv, b"not a replay");
+    assert_eq!(state, "failed");
+    let (status, body) = srv.get(&format!("/api/jobs/{id}/result"));
+    assert_eq!(status, 422);
+    assert!(body.contains("could not"), "{body}");
+    assert_eq!(srv.post("/api/jobs", b"").0, 400);
 }

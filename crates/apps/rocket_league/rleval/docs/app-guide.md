@@ -88,6 +88,18 @@ is a 404 (re-run the analysis). Text and JSON responses over 1 KB are gzip-compr
 panels embedded in the response and no `analysis_id`. `rleval analyze --out` bundles
 are unchanged (everything inline).
 
+**Asynchronous jobs.** `POST /api/jobs` (same query as `/api/analyze`: `name`, `rank`,
+`session`, `team`, `inline`) queues an analysis on a worker thread and answers
+`202 {"job": "<id>", "state": "queued"}`. `GET /api/jobs/<id>` returns
+`queued → running → done | failed` (with `error` on failure); add
+`?since=<state>&wait=<seconds, max 25>` to long-poll — it returns as soon as the job
+leaves that state. `GET /api/jobs/<id>/result` returns the analysis JSON once done
+(`409` while running, `422` with the reason if it failed). At most 4 jobs are unfinished
+at once (`429` beyond), the last 64 are remembered, and a job is visible only to the
+account that submitted it. The UI still uses the synchronous route — an analysis takes
+about half a second. Not built: signed-URL uploads and server-sent events (both need
+object storage or a streaming server), and billing or entitlements.
+
 ### 2.1 History and habits
 
 Start with `--data-dir` and each analysis is saved (the Pacifist headline, fault

@@ -15,12 +15,16 @@ use std::error::Error;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use rleval_app::auth::Accounts;
 use rleval_app::authn::{
     clearing_cookie, session_cookie, Authn, AuthnError, Credentials, LoginProvider,
 };
 use rleval_app::history::{self, SessionRecord};
+use rleval_app::jobs::{JobState, Jobs};
 use rleval_app::panels::{PanelCache, Panels};
 use rleval_app::progress;
 use rleval_app::server::{self, Request, Response};
@@ -154,7 +158,7 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         (None, Some(_)) => return Err("--store needs --data-dir".into()),
         (None, None) => (None, None),
     };
-    let state = AppState {
+    let state = Arc::new(AppState {
         replays,
         corpus,
         allow_run,
@@ -163,7 +167,8 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         authn,
         teams,
         panels: PanelCache::default(),
-    };
+        jobs: Jobs::default(),
+    });
 
     eprintln!(
         "RLEval unified app serving on http://{host}:{port}  (sample dir: {})",
@@ -366,11 +371,13 @@ struct AppState {
     teams: Teams,
     /// The viewer/scoring/ballchasing HTML of recent analyses, fetched lazily by the UI.
     panels: PanelCache,
+    /// Analyses submitted through `POST /api/jobs`.
+    jobs: Jobs,
 }
 
 const TEAM_POOL_DIR: &str = "_teams";
 
-fn route(req: &Request, state: &AppState) -> Response {
+fn route(req: &Request, state: &Arc<AppState>) -> Response {
     match (req.method.as_str(), req.route()) {
         ("GET", "/") => Response::html(ui::INDEX_HTML),
         ("GET", "/admin") => Response::html(ui::ADMIN_HTML),
@@ -402,6 +409,15 @@ fn route(req: &Request, state: &AppState) -> Response {
                 None => Response::text(400, "unknown action"),
             }
         }
+        ("POST", "/api/jobs") => with_account(req, state, |account| {
+            match upload_team(req, state, account) {
+                Ok(team) => submit_job(req, state, account, team.cloned()),
+                Err(resp) => resp,
+            }
+        }),
+        ("GET", path) if path.starts_with("/api/jobs/") => with_account(req, state, |account| {
+            job_response(req, state, account, path.trim_start_matches("/api/jobs/"))
+        }),
         ("POST", "/api/analyze") => with_account(req, state, |account| {
             let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
             let team = match upload_team(req, state, account) {
@@ -663,8 +679,49 @@ fn with_history(
 
 /// Run the pipeline and return the JSON bundle, isolating decoder panics. Loads
 /// the rank-relative norms from the corpus dir (if present) so scores are graded
-/// against their bracket; `override_bracket` pins an explicit rank when known.
-/// On success the session is saved to `account`'s history when history is on.
+/// against their bracket; `opts.rank` pins an explicit rank when known. On success the
+/// session is saved to `account`'s history when history is on, and (unless
+/// `opts.inline`) the HTML panels are held for `/api/analysis/<id>/<panel>`.
+fn analyze_json(
+    bytes: &[u8],
+    replay_id: &str,
+    opts: &AnalyzeOpts,
+    state: &AppState,
+    account: &AccountId,
+    team: Option<&Team>,
+) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        return Err("empty request body — no replay bytes".into());
+    }
+    let norms = pipeline::load_rank_norms(&state.corpus);
+    let xg = pipeline::load_xg(&state.corpus);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        pipeline::analyze(bytes, replay_id, norms.as_ref(), opts.rank.as_deref(), &xg)
+    }));
+    let mut analysis = match result {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => return Err(format!("could not analyze replay: {e}")),
+        Err(_) => {
+            return Err("could not decode replay (the file may be corrupt or unsupported)".into())
+        }
+    };
+    persist(
+        state,
+        account,
+        team,
+        bytes,
+        opts.session.as_deref(),
+        &analysis,
+    );
+    if !opts.inline {
+        // Default: just the data; the panels are fetched on first use.
+        let id = session_key(bytes);
+        state.panels.put(account, &id, Panels::take(&mut analysis));
+        analysis.analysis_id = id;
+    }
+    serde_json::to_vec(&analysis).map_err(|e| format!("serialize error: {e}"))
+}
+
 fn analyze_response(
     bytes: &[u8],
     replay_id: &str,
@@ -673,39 +730,78 @@ fn analyze_response(
     account: &AccountId,
     team: Option<&Team>,
 ) -> Response {
-    if bytes.is_empty() {
-        return Response::text(400, "empty request body — no replay bytes");
-    }
-    let norms = pipeline::load_rank_norms(&state.corpus);
-    let xg = pipeline::load_xg(&state.corpus);
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        pipeline::analyze(bytes, replay_id, norms.as_ref(), opts.rank.as_deref(), &xg)
-    }));
-    match result {
-        Ok(Ok(mut analysis)) => {
-            persist(
-                state,
-                account,
-                team,
-                bytes,
-                opts.session.as_deref(),
-                &analysis,
-            );
-            if !opts.inline {
-                // Default: just the data; the panels are fetched on first use.
-                let id = session_key(bytes);
-                state.panels.put(account, &id, Panels::take(&mut analysis));
-                analysis.analysis_id = id;
-            }
-            json_response(&analysis)
-        }
-        Ok(Err(e)) => Response::text(400, format!("could not analyze replay: {e}")),
-        Err(_) => Response::text(
-            400,
-            "could not decode replay (the file may be corrupt or unsupported)",
-        ),
+    match analyze_json(bytes, replay_id, opts, state, account, team) {
+        Ok(json) => Response::json(json),
+        Err(e) => Response::text(400, e),
     }
 }
+
+/// `POST /api/jobs`: queue the analysis on a worker thread and answer `202` with the job id.
+fn submit_job(
+    req: &Request,
+    state: &Arc<AppState>,
+    account: &AccountId,
+    team: Option<Team>,
+) -> Response {
+    if req.body.is_empty() {
+        return Response::text(400, "empty request body — no replay bytes");
+    }
+    let Some(id) = state.jobs.submit(account) else {
+        return Response::text(
+            429,
+            "too many analyses in progress — retry when one finishes",
+        );
+    };
+    let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
+    let (bytes, opts, account) = (
+        req.body.clone(),
+        AnalyzeOpts::from_request(req),
+        account.clone(),
+    );
+    let (state, job) = (Arc::clone(state), id.clone());
+    thread::spawn(move || {
+        state.jobs.start(&job);
+        let outcome = analyze_json(&bytes, &stem(&name), &opts, &state, &account, team.as_ref());
+        state.jobs.finish(&job, outcome);
+    });
+    let body = serde_json::json!({ "job": id, "state": JobState::Queued });
+    let mut resp = json_response(&body);
+    resp.status = 202;
+    resp
+}
+
+/// `GET /api/jobs/<id>[/result]`. `?since=<state>&wait=<secs>` long-polls until the job leaves that state.
+fn job_response(req: &Request, state: &AppState, account: &AccountId, rest: &str) -> Response {
+    let (id, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    if tail == "result" {
+        return match (
+            state.jobs.result(account, id),
+            state.jobs.status(account, id),
+        ) {
+            (Some(json), _) => Response::json(json.as_slice().to_vec()),
+            (None, Some(s)) if s.state == JobState::Failed => {
+                Response::text(422, s.error.unwrap_or_default())
+            }
+            (None, Some(_)) => Response::text(409, "the analysis is not finished"),
+            (None, None) => Response::text(404, "no such job"),
+        };
+    }
+    let wait = query_param(&req.path, "wait")
+        .and_then(|w| w.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(MAX_WAIT_S);
+    let since = query_param(&req.path, "since").and_then(|s| JobState::parse(&s));
+    let status = match since {
+        Some(since) => state
+            .jobs
+            .wait(account, id, since, Duration::from_secs(wait)),
+        None => state.jobs.status(account, id),
+    };
+    status.map_or_else(|| Response::text(404, "no such job"), |s| json_response(&s))
+}
+
+/// Longest a status request may wait for a change (s).
+const MAX_WAIT_S: u64 = 25;
 
 /// Save the analysis to the account's history and, when uploading for a team,
 /// to that team's shared pool. A storage failure must not lose the user's

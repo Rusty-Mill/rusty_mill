@@ -10,6 +10,7 @@ pub mod auth;
 pub mod authn;
 pub mod gzip;
 pub mod history;
+pub mod jobs;
 #[cfg(feature = "oidc")]
 pub mod oidc;
 #[cfg(feature = "oidc")]
