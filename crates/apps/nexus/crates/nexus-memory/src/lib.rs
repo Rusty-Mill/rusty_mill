@@ -63,9 +63,9 @@ pub use semantic::{SemanticEntry, SemanticId, SemanticStore};
 
 pub use capture::event_to_memory;
 pub use core_plugin::MemoryCorePlugin;
-pub use db::{MemoryDb, MemoryDbError};
-pub use import::{import_chat_log, import_remind_me_db, ImportReport};
-pub use model::{Memory, MemoryStatus, MemoryType};
+pub use db::{MemoryDb, MemoryDbError, PageOutcome, PulledEntry, RejectedRecord};
+pub use import::{import_chat_log, import_remind_me_db, ImportFailure, ImportReport};
+pub use model::{InvalidMemoryId, Memory, MemoryId, MemoryStatus, MemoryType};
 
 /// Unified memory handle carrying all three memory kinds.
 ///

@@ -71,6 +71,29 @@ describe('HabitsPage', () => {
     await waitFor(async () => expect(await services.api.listDocs('habit_checkin')).toHaveLength(0))
   })
 
+  it('counts toward a goal of several: one click adds one, the goal shows a check and earns the streak, one more clears', async () => {
+    const { user, services } = await setup()
+    await user.click(screen.getByRole('button', { name: 'Add habit' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Create Habit' })
+    await user.type(within(dialog).getByPlaceholderText('Habit name'), 'Water')
+    const amount = within(dialog).getByRole('spinbutton', { name: 'Goal amount' })
+    await user.clear(amount)
+    await user.type(amount, '3')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    const click = (status: string) => user.click(screen.getByRole('button', { name: `Water, Tuesday Sep 29, ${status}` }))
+    await click('0 of 3')
+    expect(screen.getByRole('button', { name: 'Water, Tuesday Sep 29, 1 of 3' })).toHaveTextContent('1')
+    expect(screen.getByText('0 days')).toBeInTheDocument() // partway does not earn the streak
+    await click('1 of 3')
+    await click('2 of 3')
+    expect(screen.getByRole('button', { name: 'Water, Tuesday Sep 29, 3 of 3' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('1 day')).toBeInTheDocument()
+    await waitFor(async () => expect((await services.api.listDocs<{ count: number }>('habit_checkin'))[0]?.body.count).toBe(3))
+    await click('3 of 3')
+    await waitFor(async () => expect(await services.api.listDocs('habit_checkin')).toHaveLength(0))
+  })
+
   it('cannot check in a future day', async () => {
     const { user } = await setup()
     await user.click(screen.getByRole('button', { name: 'Add habit' }))
