@@ -23,7 +23,7 @@ field on a kind is additive.
 | Challenge outcomes (won / delayed / lost) | `Challenge` | a per-contest outcome rule; `miss` bits stay |
 | Last-man decisions, necessity | new `Decision` kind | a last-man definition (roles are 1st/2nd man today) |
 | Approach events (controlled / rushed / hesitated) | new `Approach` kind | thresholds validated on the corpus |
-| Shots and xG | new `Shot` kind | the shot log (assessment #3) |
+| xG | `Shot` (shipped in assessment #3: strike time, speed, goal-plane `aim`, outcome) | a labelled dataset — the shot log now supplies it |
 | Possession chains | consumes `Loss` + touches | a chain unit (assessment #8) |
 | Any tunable threshold | `ScoreConfig` + a version bump | evidence the default is wrong |
 

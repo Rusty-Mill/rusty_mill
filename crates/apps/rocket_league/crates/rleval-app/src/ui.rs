@@ -590,7 +590,17 @@ function seekViewer(t, tries = 50) {
   if (w.seek) w.seek(t); else if (tries) setTimeout(() => seekViewer(t, tries - 1), 100);
 }
 const MISS = [[1, "low boost"], [2, "not facing the ball"], [4, "late"]];
-const momentCols = (e, who) => e.kind === "loss"
+const OUT = { goal: ["✓ goal", "good"], saved: ["saved", "warn"], off: ["off target", "muted"] };
+// Shooter's view of the goal mouth (uu): 1785 wide, 643 high; dots are where each shot crossed the goal plane.
+function shotMap(shots) {
+  const dots = shots.filter(e => e.aim).map(e => `<circle cx="${Math.max(-1700, Math.min(1700, e.aim[0]))}" cy="${-e.aim[1]}" r="32" fill="var(--${OUT[e.outcome][1]})" opacity=".85"><title>${mmss(e.t)} · ${OUT[e.outcome][0]}</title></circle>`).join("");
+  return `<div class="card"><p class="hint">Where each shot crossed the goal plane, as the shooter sees it — projected from the ball's post-touch velocity (bounces included), so treat it as approximate. ${shots.length} shots.</p>
+    <svg viewBox="-1800 -800 3600 900" style="max-width:640px;width:100%;display:block;margin:0 auto"><rect x="-893" y="-643" width="1785" height="643" fill="none" stroke="var(--muted)" stroke-width="8"/>
+    <line x1="-1800" y1="0" x2="1800" y2="0" stroke="var(--muted)" stroke-width="4"/>${dots}</svg></div>`;
+}
+const momentCols = (e, who) => e.kind === "shot"
+  ? ["Shot · " + fmt(e.speed * 0.036, 0) + " km/h", `<span class="${e.outcome === "goal" ? "pos" : "muted"}">${OUT[e.outcome][0]}</span>`]
+  : e.kind === "loss"
   ? ["Possession lost", `${e.danger >= 0.5 ? "✗ deep in own half" : e.danger > 0 ? "own half" : "midfield or beyond"} · opponent ${fmt(e.opp_dist / 100, 0)} m away`]
   : e.kind === "challenge"
   ? ["50/50 vs " + esc(who[e.opp]?.target_player ?? "?"),
@@ -599,13 +609,14 @@ const momentCols = (e, who) => e.kind === "loss"
 function renderMoments(d) {
   const who = Object.fromEntries((d.scores || []).map(r => [r.target_pri, r]));
   const draw = pri => {
-    const rows = (d.episodes || []).filter(e => who[e.pri] && (pri === "" || String(e.pri) === pri))
-      .map(e => { const [what, res] = momentCols(e, who); return `<tr class="mrow" data-t="${e.t ?? e.t0}"><td class="num">${mmss(e.t ?? e.t0)}</td>
+    const evs = (d.episodes || []).filter(e => who[e.pri] && (pri === "" || String(e.pri) === pri));
+    const rows = evs.map(e => { const [what, res] = momentCols(e, who); return `<tr class="mrow" data-t="${e.t ?? e.t0}"><td class="num">${mmss(e.t ?? e.t0)}</td>
         <td>${nameCell(who[e.pri].target_team, who[e.pri].target_player)}</td><td>${what}</td>
         <td class="num">${e.dur == null ? "" : fmt(e.dur, 2) + " s"}</td><td>${res}</td></tr>`; }).join("");
     $("momentsBody").innerHTML = cardTable("Click a moment to jump to it in the 3D viewer.",
       `<th class="num">Time</th><th>Player</th><th>Moment</th><th class="num">Duration</th><th>Result</th>`,
       rows, "No moments.", 5);
+    $("momentsBody").insertAdjacentHTML("afterbegin", shotMap(evs.filter(e => e.kind === "shot")));
     document.querySelectorAll("#momentsBody .mrow").forEach(tr => tr.onclick = () => seekViewer(+tr.dataset.t));
   };
   $("tab-moments").innerHTML = `<div class="hist-bar"><select id="momentsWho"><option value="">All players</option>` +

@@ -3,6 +3,7 @@
 
 use replay_analyzer::{analyze::build_canonical, decode::boxcars_adapter::BoxcarsParser};
 use replay_analyzer::{decode::ReplayParser, model::Event, CanonicalMatch};
+use replay_scoring::episodes::Outcome;
 use replay_scoring::{extract, score, Episode, ScoreConfig};
 
 fn canonical(name: &str) -> CanonicalMatch {
@@ -19,6 +20,9 @@ fn is_recovery(e: &&Episode) -> bool {
 }
 fn is_loss(e: &&Episode) -> bool {
     matches!(e, Episode::Loss { .. })
+}
+fn is_shot(e: &&Episode) -> bool {
+    matches!(e, Episode::Shot { .. })
 }
 fn is_challenge(e: &&Episode) -> bool {
     matches!(e, Episode::Challenge { .. })
@@ -111,8 +115,36 @@ fn extract_is_time_ordered_and_deterministic() {
     assert_eq!(eps, extract(&m, &cfg));
     let n = |k: fn(&&Episode) -> bool| eps.iter().filter(k).count();
     assert_eq!(
-        (n(is_recovery), n(is_challenge), n(is_loss)),
-        (100, 186, 100), // recorded from the first run
+        (n(is_recovery), n(is_challenge), n(is_loss), n(is_shot)),
+        (100, 186, 100, 19), // recorded from the first run
         "419a episode counts — a change means a definition moved"
     );
+}
+
+#[test]
+fn shots_per_player_match_the_header_counters_and_carry_outcomes() {
+    for (name, goals_credited) in [("42f2", 6), ("419a", 4)] {
+        let m = canonical(name);
+        let eps = extract(&m, &ScoreConfig::default());
+        for t in &m.tracks {
+            let shots = eps
+                .iter()
+                .filter(is_shot)
+                .filter(|e| e.pri() == t.pri)
+                .count();
+            let want = m
+                .players
+                .iter()
+                .find(|p| p.name == t.player)
+                .map(|p| p.shots);
+            assert_eq!(Some(shots as i32), want, "{name} {}", t.player);
+        }
+        let outcome = |o: Outcome| {
+            eps.iter()
+                .filter(|e| matches!(e, Episode::Shot { outcome, .. } if *outcome == o))
+                .count()
+        };
+        // A rebound goal can come without its own shot tick, so goals can trail the header.
+        assert_eq!(outcome(Outcome::Goal), goals_credited, "{name} goals");
+    }
 }

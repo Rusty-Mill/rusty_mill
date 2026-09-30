@@ -4,8 +4,8 @@
 //! over its episodes — so the list a player sees and the score they get cannot
 //! drift apart. Design: `docs/episodes-design.md`.
 
-use replay_analyzer::field::BACK_WALL_Y;
-use replay_analyzer::model::{CanonicalMatch, Event, Vec3};
+use replay_analyzer::field::{BACK_WALL_Y, BALL_RADIUS, SIDE_WALL_X};
+use replay_analyzer::model::{CanonicalMatch, Event, StatKind, Vec3};
 use serde::Serialize;
 
 use crate::config::ScoreConfig;
@@ -42,6 +42,27 @@ pub enum Episode {
         danger: f32,
         opp_dist: f32,
     },
+    /// A shot on the opponent goal. `t` is the shooter's touch just before the
+    /// scoreboard counter ticked; `aim` is where the ball crosses the goal plane
+    /// (x, z; +x is the shooter's right), from its post-touch velocity under gravity, and `tta` the time to get there.
+    Shot {
+        pri: i32,
+        t: f32,
+        speed: f32,
+        aim: Option<[f32; 2]>,
+        tta: Option<f32>,
+        on_target: bool,
+        outcome: Outcome,
+    },
+}
+
+/// How a shot ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Goal,
+    Saved,
+    Off,
 }
 
 pub const MISS_BOOST: u8 = 1;
@@ -52,22 +73,24 @@ impl Episode {
     /// Start time (s).
     pub fn t(&self) -> f32 {
         match self {
-            Self::Recovery { t0: t, .. } | Self::Challenge { t0: t, .. } | Self::Loss { t, .. } => {
-                *t
-            }
+            Self::Recovery { t0: t, .. }
+            | Self::Challenge { t0: t, .. }
+            | Self::Loss { t, .. }
+            | Self::Shot { t, .. } => *t,
         }
     }
     pub fn pri(&self) -> i32 {
         match self {
-            Self::Recovery { pri, .. } | Self::Challenge { pri, .. } | Self::Loss { pri, .. } => {
-                *pri
-            }
+            Self::Recovery { pri, .. }
+            | Self::Challenge { pri, .. }
+            | Self::Loss { pri, .. }
+            | Self::Shot { pri, .. } => *pri,
         }
     }
     pub fn dur(&self) -> f32 {
         match self {
             Self::Recovery { dur, .. } | Self::Challenge { dur, .. } => *dur,
-            Self::Loss { .. } => 0.0,
+            Self::Loss { .. } | Self::Shot { .. } => 0.0,
         }
     }
 }
@@ -247,6 +270,172 @@ pub(crate) fn losses(frames: &[FrameView], events: &[Event], pri: i32, team: i32
     out
 }
 
+const GRAVITY: f32 = 650.0;
+/// Ball bounce restitution off the floor.
+const RESTITUTION: f32 = 0.6;
+/// Goal mouth half-width and height (uu).
+const GOAL_HALF_W: f32 = 892.755;
+const GOAL_H: f32 = 642.775;
+/// A shot counter's tick may lag the strike; a touch this far back is still the shooter's.
+const STRIKE_LAG_S: f32 = 1.5;
+/// A save follows its shot by at most this long.
+const SAVE_WITHIN_S: f32 = 5.0;
+/// A goal follows its shot by at most this long.
+const GOAL_WITHIN_S: f32 = 10.0;
+/// Trajectories that take longer than this to reach the goal plane are not projected.
+const MAX_TTA_S: f32 = 5.0;
+
+/// Where a ball at `p` with velocity `v` crosses the plane `y = goal_y`: `(x, z, time)`.
+/// Steps at 60 Hz under gravity, bouncing off the floor and the side walls; `None` if
+/// it isn't heading to the plane within `MAX_TTA_S`.
+fn goal_plane_crossing(mut p: Vec3, mut v: Vec3, goal_y: f32) -> Option<(f32, f32, f32)> {
+    const DT: f32 = 1.0 / 60.0;
+    if (goal_y - p.y) * v.y <= 0.0 {
+        return None;
+    }
+    let mut t = 0.0;
+    while t < MAX_TTA_S {
+        let prev = p;
+        v.z -= GRAVITY * DT;
+        p = Vec3 {
+            x: p.x + v.x * DT,
+            y: p.y + v.y * DT,
+            z: p.z + v.z * DT,
+        };
+        t += DT;
+        if p.z < BALL_RADIUS {
+            p.z = BALL_RADIUS;
+            v.z = if v.z < -GRAVITY * DT {
+                -v.z * RESTITUTION
+            } else {
+                0.0
+            };
+        }
+        if p.x.abs() > SIDE_WALL_X - BALL_RADIUS {
+            v.x = -v.x;
+            p.x = prev.x;
+        }
+        if (p.y - goal_y) * (prev.y - goal_y) <= 0.0 {
+            return Some((p.x, p.z, t));
+        }
+    }
+    None
+}
+
+/// Every shot (scoreboard `Shot` counter), in time order. A goal is credited to the
+/// scorer's latest earlier shot, a save to the latest unresolved opposing shot before
+/// it; anything else is `Off`.
+pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
+    let mut out = Vec::new();
+    let mut shooters = Vec::new(); // (player name, team) per shot, aligned with `out`
+    for e in &m.events {
+        let Event::Stat {
+            t: stat_t,
+            pri,
+            player,
+            team: Some(team),
+            kind: StatKind::Shot,
+        } = e
+        else {
+            continue;
+        };
+        let strike = (m.events.iter())
+            .filter_map(|e| match e {
+                Event::Touch { t, pri: p, .. }
+                    if p == pri && *t <= *stat_t && stat_t - t <= STRIKE_LAG_S =>
+                {
+                    Some(*t)
+                }
+                _ => None,
+            })
+            .next_back()
+            .unwrap_or(*stat_t);
+        let Some(i) = frame_at_time(frames, strike) else {
+            continue;
+        };
+        // The ball a frame after the touch carries the post-touch velocity.
+        let Some(ball) = frames[(i + 1).min(frames.len() - 1)].ball else {
+            continue;
+        };
+        let Some(&sign) = m.resampled.team_attack_sign.get(team) else {
+            continue;
+        };
+        let cross = goal_plane_crossing(ball.p, ball.v, sign as f32 * BACK_WALL_Y);
+        let on_target = cross.is_some_and(|(x, z, _)| {
+            x.abs() <= GOAL_HALF_W - BALL_RADIUS && z <= GOAL_H - BALL_RADIUS
+        });
+        out.push(Episode::Shot {
+            pri: *pri,
+            t: strike,
+            speed: dist(
+                ball.v,
+                Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            ),
+            aim: cross.map(|(x, z, _)| [x * sign as f32, z]),
+            tta: cross.map(|(_, _, t)| t),
+            on_target,
+            outcome: Outcome::Off,
+        });
+        shooters.push((player.clone(), *team));
+    }
+    // Resolve outcomes in time order so each goal/save claims one shot.
+    let mut claimed = vec![false; out.len()];
+    let mut claim =
+        |out: &mut [Episode], at: f32, within: f32, ok: &dyn Fn(usize) -> bool, to: Outcome| {
+            let hit = (0..out.len())
+                .rev()
+                .find(|&k| !claimed[k] && ok(k) && out[k].t() <= at && at - out[k].t() <= within);
+            if let Some(k) = hit {
+                claimed[k] = true;
+                if let Episode::Shot {
+                    outcome, on_target, ..
+                } = &mut out[k]
+                {
+                    (*outcome, *on_target) = (to, true);
+                }
+            }
+        };
+    // Goals are authoritative, so they claim first; saves take what is left.
+    for e in &m.events {
+        if let Event::Goal {
+            t,
+            scorer: Some(name),
+            ..
+        } = e
+        {
+            claim(
+                &mut out,
+                *t,
+                GOAL_WITHIN_S,
+                &|k| shooters[k].0.as_deref() == Some(name),
+                Outcome::Goal,
+            );
+        }
+    }
+    for e in &m.events {
+        if let Event::Stat {
+            t,
+            team: Some(team),
+            kind: StatKind::Save,
+            ..
+        } = e
+        {
+            claim(
+                &mut out,
+                *t,
+                SAVE_WITHIN_S,
+                &|k| shooters[k].1 != *team,
+                Outcome::Saved,
+            );
+        }
+    }
+    out
+}
+
 /// Every player's episodes, in time order.
 pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
     let frames = build_frames(m, cfg);
@@ -258,6 +447,7 @@ pub fn extract(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<Episode> {
         out.extend(challenges(&frames, &roles, t.pri, team, cfg));
         out.extend(losses(&frames, &m.events, t.pri, team));
     }
+    out.extend(shots(m, &frames));
     out.sort_by(|a, b| a.t().total_cmp(&b.t()).then(a.pri().cmp(&b.pri())));
     out
 }
@@ -458,6 +648,35 @@ mod tests {
         assert!(
             run(Some(0)).is_empty(),
             "a teammate's touch keeps possession"
+        );
+    }
+
+    const V: fn(f32, f32, f32) -> Vec3 = |x, y, z| Vec3 { x, y, z };
+
+    #[test]
+    fn a_straight_shot_crosses_the_goal_plane_where_it_is_aimed() {
+        // 2000 uu/s down the field from mid-air, centred: drops under gravity to z ≈ 0.5·g·t².
+        let (x, z, t) =
+            goal_plane_crossing(V(0.0, 0.0, 400.0), V(0.0, 2000.0, 0.0), BACK_WALL_Y).unwrap();
+        assert!((t - BACK_WALL_Y / 2000.0).abs() < 0.02 && x.abs() < 1e-3);
+        assert!(
+            (z - (400.0 - 0.5 * GRAVITY * t * t).max(BALL_RADIUS)).abs() < 40.0,
+            "{z}"
+        );
+    }
+
+    #[test]
+    fn a_rolling_ball_stays_on_the_floor_and_a_backwards_one_never_arrives() {
+        let (_, z, _) =
+            goal_plane_crossing(V(0.0, 0.0, BALL_RADIUS), V(0.0, 1500.0, 0.0), BACK_WALL_Y)
+                .unwrap();
+        assert!((z - BALL_RADIUS).abs() < 1.0, "{z}");
+        assert!(
+            goal_plane_crossing(V(0.0, 0.0, 100.0), V(0.0, -1500.0, 0.0), BACK_WALL_Y).is_none()
+        );
+        assert!(
+            goal_plane_crossing(V(0.0, 0.0, 100.0), V(0.0, 100.0, 0.0), BACK_WALL_Y).is_none(),
+            "too slow"
         );
     }
 }
