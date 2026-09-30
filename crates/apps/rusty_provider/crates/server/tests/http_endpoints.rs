@@ -91,6 +91,7 @@ async fn spawn_app(config_toml: &str) -> String {
         mcp_path,
         concurrency_limiter,
         cors_allowed_origins: config.server.cors_allowed_origins.clone(),
+        allow_unauthenticated: true,
     };
 
     let app = build_app(state);
