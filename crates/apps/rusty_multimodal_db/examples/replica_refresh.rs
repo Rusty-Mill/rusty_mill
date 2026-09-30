@@ -29,11 +29,12 @@
 #[path = "support/replica_refresh_lib.rs"]
 mod replica_refresh;
 
+#[cfg(feature = "server")]
+use replica_refresh::{follow, FollowError};
 use replica_refresh::{
-    follow, prune, refresh, refresh_at, refresh_loop, Domain, FollowError, RefreshError,
-    RefreshReport, Target,
+    prune, refresh, refresh_at, refresh_loop, Domain, RefreshError, RefreshReport, Target,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -110,7 +111,13 @@ fn main() -> ExitCode {
     };
 
     if follow_log {
+        #[cfg(feature = "server")]
         return follow_forever(&target, &root, domain, keep);
+        #[cfg(not(feature = "server"))]
+        {
+            eprintln!("--follow needs this example built with the `server` feature");
+            return ExitCode::FAILURE;
+        }
     }
     let Some(secs) = every else {
         let outcome = refresh(&target, &root, domain);
@@ -145,9 +152,10 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(feature = "server")]
 /// `--follow`: refresh with a position, tail it, and start over when the
 /// log no longer reaches this standby.
-fn follow_forever(target: &Target, root: &PathBuf, domain: Domain, keep: usize) -> ExitCode {
+fn follow_forever(target: &Target, root: &Path, domain: Domain, keep: usize) -> ExitCode {
     loop {
         let report = match refresh_at(target, root, domain) {
             Ok(report) => report,
