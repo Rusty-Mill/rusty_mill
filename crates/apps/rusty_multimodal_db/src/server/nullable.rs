@@ -125,6 +125,11 @@ fn op_to_stored(fields: &[NullableField], op: WriteOp) -> WriteOp {
             fields: map_pairs(f, |t, v| to_stored(fields, t, v)),
             guard: predicate_to_stored(fields, guard),
         },
+        WriteOp::UpdateField { id, field, value } => WriteOp::UpdateField {
+            id,
+            field,
+            value: to_stored(fields, field, value),
+        },
         other @ (WriteOp::Delete { .. } | WriteOp::Link { .. }) => other,
     }
 }

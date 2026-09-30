@@ -513,10 +513,11 @@ class Client:
         """Apply a batch of runtime writes in one request (WBT-FR-004,
         protocol 22). Each op is a tuple: ``("insert", id, fields)``,
         ``("replace", id, fields)``, ``("replace_if", id, fields, guard)``,
-        ``("delete", id)``, or ``("link", left, right, relation)`` — field
+        ``("delete", id)``, ``("link", left, right, relation)``, or (protocol
+        33) ``("update", id, field, value)`` — field
         names resolved to tags here. Returns one outcome string per op, in
         order (``"inserted"``/``"duplicate"``/``"replaced"``/``"notfound"``/
-        ``"guardfailed"``/``"linked"``/``"alreadylinked"``/``"deleted"``, or
+        ``"guardfailed"``/``"linked"``/``"alreadylinked"``/``"deleted"``/``"updated"``, or
         ``"failed:<CODE>"``). ``atomic=False`` is pipelined (each op stands
         on its own); ``atomic=True`` is precondition- and isolation-atomic
         (nothing applies unless every op validates), an abort raised as
@@ -556,6 +557,15 @@ class Client:
         if kind == "link":
             _, left, right, relation = op
             return p.WoLink(left, right, relation)
+        if kind == "update":
+            # TXS-FR-002 (ADR-0130, protocol 33): ("update", id, field, value)
+            if self.server_protocol_version < 33:
+                raise UnsupportedError("a WriteBatch update needs protocol 33")
+            _, rid, name, value = op
+            d = self.field(name)
+            if not d.capabilities.update:
+                raise UnsupportedError(f"update on {name}")
+            return p.WoUpdateField(rid, d.tag, _to_scan_value(d.value_kind, value))
         raise ValueError(f"unknown write-batch op kind {kind!r}")
 
     def _tag_fields(self, fields: Sequence[Tuple[str, Any]]):
@@ -799,6 +809,7 @@ def _write_result_str(r) -> str:
         p.WrLinked: "linked",
         p.WrAlreadyLinked: "alreadylinked",
         p.WrDeleted: "deleted",
+        p.WrUpdated: "updated",
     }
     if isinstance(r, p.WrFailed):
         return f"failed:{r.code.name}"

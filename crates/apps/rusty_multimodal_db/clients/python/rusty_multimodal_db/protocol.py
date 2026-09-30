@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 32
+PROTOCOL_VERSION = 33
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -389,7 +389,19 @@ class WoLink:
     _spec: ClassVar[list] = [("left", "uuid"), ("right", "uuid"), ("relation", "str")]
 
 
-WriteOp = [WoInsert, WoReplace, WoReplaceIf, WoDelete, WoLink]
+@dataclass(frozen=True)
+class WoUpdateField:
+    """TXS-FR-001, ADR-0130, protocol 33: UpdateField's own three fields as
+    a batch op."""
+
+    id: uuid.UUID
+    field: int
+    value: Any
+    _index: ClassVar[int] = 5
+    _spec: ClassVar[list] = [("id", "uuid"), ("field", "u16"), ("value", ScanValue)]
+
+
+WriteOp = [WoInsert, WoReplace, WoReplaceIf, WoDelete, WoLink, WoUpdateField]
 
 
 @dataclass(frozen=True)
@@ -447,9 +459,17 @@ class WrFailed:
     _spec: ClassVar[list] = [("code", ErrorCode)]
 
 
+@dataclass(frozen=True)
+class WrUpdated:
+    """TXS-FR-001, ADR-0130, protocol 33: a WoUpdateField wrote."""
+
+    _index: ClassVar[int] = 9
+    _spec: ClassVar[list] = []
+
+
 WriteResult = [
     WrInserted, WrDuplicate, WrReplaced, WrNotFound, WrGuardFailed, WrLinked, WrAlreadyLinked,
-    WrDeleted, WrFailed,
+    WrDeleted, WrFailed, WrUpdated,
 ]
 
 

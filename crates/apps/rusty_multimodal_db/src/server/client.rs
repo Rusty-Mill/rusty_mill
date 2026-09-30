@@ -629,6 +629,92 @@ impl Session<'_> {
         }
     }
 
+    /// Stage one whole-record write beside the session's updates
+    /// (`TXS-FR-003`, ADR-0130, protocol 33): the request is the same
+    /// single-shot one, and the server stages it, answering `Staged`. On a
+    /// session that asked for read-your-writes, snapshot isolation or
+    /// real MVCC it is `Server(Unsupported, _)` (whole-record overlays are a
+    /// later phase). [`ClientError::Unsupported`]`("session record writes")`
+    /// below 33, no frame sent.
+    fn stage_record_write(&mut self, request: Request) -> Result<u32, ClientError> {
+        if self.client.server_protocol_version() < 33 {
+            return Err(ClientError::Unsupported("session record writes"));
+        }
+        match self.client.roundtrip(request)? {
+            Response::Staged { index } => Ok(index),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Staged")),
+        }
+    }
+
+    /// Stage an insert (`TXS-FR-003`); fields named as
+    /// [`SchemaDrivenClient::insert`] names them.
+    pub fn insert(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<u32, ClientError> {
+        let fields = self.client.tag_fields(fields)?;
+        self.stage_record_write(Request::Insert { id, fields })
+    }
+
+    /// Stage a whole-record replace (`TXS-FR-003`).
+    pub fn replace(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<u32, ClientError> {
+        let fields = self.client.tag_fields(fields)?;
+        self.stage_record_write(Request::Replace { id, fields })
+    }
+
+    /// Stage a delete (`TXS-FR-003`). A batch does not cascade into other
+    /// tables (`WriteBatch`'s own rule).
+    pub fn delete(&mut self, id: RecordId) -> Result<u32, ClientError> {
+        self.stage_record_write(Request::Delete { id })
+    }
+
+    /// Stage an edge under a relation label (`TXS-FR-003`).
+    pub fn link(
+        &mut self,
+        left: RecordId,
+        right: RecordId,
+        relation: &str,
+    ) -> Result<u32, ClientError> {
+        self.stage_record_write(Request::Link {
+            left,
+            right,
+            relation: relation.to_string(),
+        })
+    }
+
+    /// [`Session::commit`], returning what a session with record writes
+    /// reports per staged op (`TXS-FR-004`): one [`WriteResult`] each, in
+    /// staged order. Empty for a session that staged only updates. A
+    /// `Duplicate`/`NotFound`/`GuardFailed` outcome is a result, not an
+    /// error, exactly as in an atomic `WriteBatch`: the ops beside it still
+    /// applied (a strict all-or-nothing commit is a later phase).
+    pub fn commit_results(mut self) -> Result<Vec<WriteResult>, ClientError> {
+        self.open = false;
+        match self.client.roundtrip(Request::Commit)? {
+            Response::Ok => Ok(Vec::new()),
+            Response::BatchResults { results } => Ok(results),
+            Response::TransactionFailed {
+                index,
+                code,
+                message,
+            } => Err(ClientError::TransactionFailed {
+                index,
+                code,
+                message,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse(
+                "Ok, BatchResults or TransactionFailed",
+            )),
+        }
+    }
+
     /// Apply every staged write as one all-or-nothing batch and close the
     /// session. `Ok(())` means every write is now visible to every
     /// connection; [`ClientError::TransactionFailed`] means none is.
@@ -636,6 +722,9 @@ impl Session<'_> {
         self.open = false;
         match self.client.roundtrip(Request::Commit)? {
             Response::Ok => Ok(()),
+            // `TXS-FR-004`: a session that staged record writes answers its
+            // per-op results; `commit` drops them, `commit_results` keeps them.
+            Response::BatchResults { .. } => Ok(()),
             Response::TransactionFailed {
                 index,
                 code,
@@ -747,6 +836,13 @@ pub enum BatchOp<'a> {
         left: RecordId,
         right: RecordId,
         relation: &'a str,
+    },
+    /// `TXS-FR-002` (ADR-0130, protocol 33): one field update, named as
+    /// [`SchemaDrivenClient::update`] names it.
+    UpdateField {
+        id: RecordId,
+        field: &'a str,
+        value: ScanValue,
     },
 }
 
@@ -1173,6 +1269,17 @@ impl SchemaDrivenClient {
 
     fn field(&self, name: &str) -> Result<&FieldDescriptor, ClientError> {
         Self::field_in(&self.schema, name)
+    }
+
+    /// Field names resolved to tags, in order (`TXS-FR-003`).
+    fn tag_fields(
+        &self,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<Vec<(FieldRef, ScanValue)>, ClientError> {
+        fields
+            .iter()
+            .map(|(name, value)| Ok((self.field(name)?.tag, value.clone())))
+            .collect()
     }
 
     /// [`Self::field`] against an arbitrary schema — another table's,
@@ -2406,6 +2513,14 @@ impl SchemaDrivenClient {
         if ops.len() > super::protocol::MAX_BATCH_OPS {
             return Err(ClientError::Unsupported("write_batch size"));
         }
+        // `TXS-FR-002` (ADR-0130): `UpdateField` is a protocol-33 op (rule 4).
+        if self.server_protocol_version() < 33
+            && ops
+                .iter()
+                .any(|op| matches!(op, BatchOp::UpdateField { .. }))
+        {
+            return Err(ClientError::Unsupported("write_batch update"));
+        }
         let mut wire = Vec::with_capacity(ops.len());
         for op in ops {
             wire.push(self.to_wire_op(op)?);
@@ -2465,6 +2580,17 @@ impl SchemaDrivenClient {
                 }
             }
             BatchOp::Delete { id } => WriteOp::Delete { id: *id },
+            BatchOp::UpdateField { id, field, value } => {
+                let descriptor = self.field(field)?;
+                if !descriptor.capabilities.update {
+                    return Err(ClientError::Unsupported("update on this field"));
+                }
+                WriteOp::UpdateField {
+                    id: *id,
+                    field: descriptor.tag,
+                    value: value.clone(),
+                }
+            }
             BatchOp::Link {
                 left,
                 right,
@@ -2804,6 +2930,7 @@ fn carries_null(req: &Request) -> bool {
             WriteOp::ReplaceIf {
                 fields: f, guard, ..
             } => fields(f) || null(&guard.value),
+            WriteOp::UpdateField { value, .. } => null(value),
             WriteOp::Delete { .. } | WriteOp::Link { .. } => false,
         }),
         Request::Query { filter, .. } | Request::Aggregate { filter, .. } => preds(filter),

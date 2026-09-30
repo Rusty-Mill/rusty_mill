@@ -410,16 +410,22 @@ fn concurrent_transactions_and_updates_match_a_sequential_replay() {
 /// A client that negotiated protocol version 3 — the session requests are
 /// `Malformed` on anything older (`SESS-FR-006`).
 fn connect_v3(addr: std::net::SocketAddr) -> TcpStream {
+    connect_at(addr, PROTOCOL_VERSION)
+}
+
+/// A connection negotiated at exactly `version` — how a client from before
+/// a wire change sees the same server (rule 3).
+fn connect_at(addr: std::net::SocketAddr, version: u32) -> TcpStream {
     let mut stream = connect(addr);
     assert_eq!(
         roundtrip(
             &mut stream,
             Request::Hello {
-                protocol_version: PROTOCOL_VERSION
+                protocol_version: version
             }
         ),
         Response::Hello {
-            protocol_version: PROTOCOL_VERSION
+            protocol_version: version
         }
     );
     stream
@@ -521,7 +527,10 @@ fn a_commit_failure_names_the_staged_index_and_applies_nothing() {
 #[test]
 fn session_state_errors_leave_the_connection_open() {
     let addr = start_server(sample_records(), ServeOptions::default());
-    let mut c = connect_v3(addr);
+    // At 32: from 33 a session may stage a record write (`ADR-0130`,
+    // exercised below in `a_session_stages_record_writes_beside_updates...`),
+    // so the "never staged" rules are the pre-33 view.
+    let mut c = connect_at(addr, 32);
 
     assert_err(roundtrip(&mut c, Request::Commit), ErrorCode::NoSession);
     assert_err(roundtrip(&mut c, Request::Rollback), ErrorCode::NoSession);

@@ -1,6 +1,6 @@
 # ADR-0130: Transaction Sessions Over Record Writes (Proposal)
 
-- Status: **Proposed — design only, no code. Forks for the owner below.**
+- Status: **Accepted (the owner: "go with recommendations", 2026-09-30) and phase 1 implemented** as option 1 (unify on `WriteOp`), `SERVER-001` v0.106.0 / `FR-119`, `SERVER-002` 0.22.0. Phases 2 and 3 are not built.
 - Date: 2026-09-30
 - Deciders: baileyrd
 - Related: `ADR-0024`/`0025` (the session and the journal), `ADR-0060`/
@@ -73,3 +73,22 @@ Independent of the choice, three scope forks:
   is correctness-critical code: independent inspection before merge.
 - Not proposed: holding a lock across round trips (`ADR-0013`'s rejection
   stands), or interactive reads inside a commit.
+
+## Phase 1 as built (2026-09-30)
+
+`WriteOp::UpdateField` (5) and `WriteResult::Updated` (9), protocol 33;
+`Memory`, `Entity` and `Relation` prepare and apply it in their atomic
+pipeline (validated as `UpdateField` is, an absent record is a soft
+`NotFound`), record it into MVCC and journal it with the batch (a mixed
+batch is one journal entry and replays whole:
+`a_mixed_batch_with_an_update_is_crash_atomic_via_the_journal`). A session at
+33+ stages record writes and later updates in one ordered list; `Commit` is
+one `write_batch(atomic)`. **What phase 1 does not do, stated plainly:** the
+commit is `WriteBatch`'s atomic mode, so a soft outcome (`Duplicate`,
+`NotFound`, `GuardFailed`) is a per-op result and the ops beside it still
+applied; a strictly all-or-nothing commit needs a precondition pass under the
+write lock (phase 2). A session with read-your-writes, snapshot isolation or
+real MVCC refuses a record write `Unsupported`. A batch does not cascade a
+`Delete` into other tables, nor check a cross-table `Link` endpoint
+(`WriteBatch`'s own rule). Existing tests that pinned "never staged" now
+connect at 32; the 33 behaviour has `tests/server_session_writes_integration.rs`.

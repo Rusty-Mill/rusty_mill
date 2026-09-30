@@ -87,6 +87,7 @@
 //! | 30 | `SERVER-001` v0.84.0 | + [`Response::RowsClamped`] (24) and [`ErrorCode::Busy`] (15) — `WCB-FR-001`/`002`, ADR-0103: the two wire-level forks `ADR-0093`/`ADR-0102` held open. `RowsClamped { rows, cap }` is [`Response::Rows`] plus the cap it was clamped to — what a `Query` with no `limit` under `ServeOptions::max_query_rows` (`CLP-FR-001`) is answered with, so the client can see its answer is short; `Rows` below 30 (rule 3, `serve::downgrade_for_version`). `Err { Busy }` is the one frame a server ever writes *before* negotiation: on a plaintext listener a connection refused at accept under `max_connections` (`LIM-FR-002`) is answered `Err { Busy, .. }` then closed instead of closed silently, so a client can tell a full server from a dead one; a client below 30 cannot decode index 15 and fails the connect as it failed on the EOF before; since ADR-0104 every refusal, plaintext or TLS, runs on one of at most [`super::serve::MAX_BUSY_REFUSALS`] short-lived refusal threads (`BTL-FR-001`/`002`) — the handshake first under TLS, then the frame, then a wait for the peer's close so the frame is never lost to a reset (`BTL-FR-004`) — past which the socket is closed silently. ADR-0103, ADR-0104 |
 //! | 31 | `SERVER-001` v0.96.0 | + [`ScanValue::Null`] (6) — `NUL-FR-001`, ADR-0117: the absence of a value, a unit variant. No shipped column is nullable yet, so a server never emits it and answers `Malformed` to any request carrying it where a value is read (a write, a predicate, a transaction op, a guard). Stripped from `Record`/`Rows` below 31 by `downgrade_for_version` (rule 3, `StrList`'s precedent). No new `Request`/`ErrorCode`. ADR-0117 |
 //! | 32 | `SERVER-001` v0.104.0 | + [`Request::DescribeNullable`] (38) and [`Response::NullableFields`] (25) — `NLC-FR-005`, ADR-0128: the first nullable columns. A `Null` a request carries for a nullable field is stored as the field's sentinel and a stored sentinel is answered `Null`, on a connection negotiated at 32 or above only (`super::nullable`): `Memory`'s `deleted_at_unix_ms` (`0`) and `node_id` (`""`). `DescribeNullable` lists the tags. Below 32 nothing changes: the sentinel is still what a client sees, and the request is `Malformed` (rule 3). No stored-layout change. ADR-0128 |
+//! | 33 | `SERVER-001` v0.106.0 | + [`WriteOp::UpdateField`] (5) and [`WriteResult::Updated`] (9) — `TXS-FR-001`, ADR-0130: `UpdateField`'s own three fields as a batch op, so one ordered list can hold an update and a record write. With it a transaction session (`Begin`/`Commit`) may stage `Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link` beside `UpdateField`, on a connection at 33 or above, and commit them as one atomic `WriteBatch`; a session that asked for read-your-writes, snapshot isolation or real MVCC refuses them `Unsupported` (whole-record overlays are phase 2). A `WriteBatch` carrying an `UpdateField` is `Malformed` below 33 (rule 3). ADR-0130 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -121,7 +122,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -365,6 +366,17 @@ pub enum WriteOp {
         right: RecordId,
         relation: String,
     },
+    /// Protocol 33 (`TXS-FR-001`, ADR-0130): the one field-level write a
+    /// batch can carry — [`Request::UpdateField`]'s own `(id, field, value)`,
+    /// so a session can stage an update and a record write in one ordered,
+    /// atomically committed list. Validated as `UpdateField` is (`Unsupported`
+    /// for a read-only field, `Malformed` for a wrong-kind value,
+    /// `UnknownField`); an id with no record is [`WriteResult::NotFound`].
+    UpdateField {
+        id: RecordId,
+        field: FieldRef,
+        value: ScanValue,
+    },
 }
 
 /// The outcome of one [`WriteOp`] in a [`Response::BatchResults`]
@@ -387,6 +399,8 @@ pub enum WriteResult {
     AlreadyLinked,
     Deleted,
     Failed(ErrorCode),
+    /// Protocol 33 (`TXS-FR-001`, ADR-0130): a [`WriteOp::UpdateField`] wrote.
+    Updated,
 }
 
 /// [`Request::Query`]'s column list — `All` is SQL's bare `*`, `Fields`
@@ -1404,6 +1418,7 @@ mod tests {
             "RowsClamped" | "Err(Busy)" => 30,
             "Record(Null)" | "Rows(Null)" => 31,
             "DescribeNullable" | "NullableFields" => 32,
+            "WriteBatch(UpdateField)" | "BatchResults(Updated)" => 33,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1782,6 +1797,30 @@ mod tests {
                 &LEN1,                     // ops: one
                 &[0x03, 0x00, 0x00, 0x00], // WriteOp::Delete
                 &ID2,                      // id 2
+                &[0x01],                   // atomic: true
+            ]),
+        );
+        // Protocol 33 (`TXS-FR-001`, ADR-0130): `WriteOp::UpdateField` at 5 —
+        // `UpdateField`'s own id, field and value.
+        assert_golden(
+            "WriteBatch(UpdateField)",
+            &Request::WriteBatch {
+                ops: vec![WriteOp::UpdateField {
+                    id: Uuid::from_u128(1),
+                    field: 10,
+                    value: ScanValue::I64(5),
+                }],
+                atomic: true,
+            },
+            &bytes(&[
+                &[0x1f, 0x00, 0x00, 0x00], // WriteBatch
+                &LEN1,                     // ops: one
+                &[0x05, 0x00, 0x00, 0x00], // WriteOp::UpdateField
+                &ID1,                      // id 1
+                &[0x0a, 0x00],             // field 10
+                &[
+                    0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ], // I64(5)
                 &[0x01],                   // atomic: true
             ]),
         );
@@ -2409,6 +2448,18 @@ mod tests {
                 &LEN1,                                             // cap: 1
             ]),
         );
+        // Protocol 33 (`TXS-FR-001`, ADR-0130): `WriteResult::Updated` at 9.
+        assert_golden_eq(
+            "BatchResults(Updated)",
+            &Response::BatchResults {
+                results: vec![WriteResult::Updated],
+            },
+            &bytes(&[
+                &[0x14, 0x00, 0x00, 0x00], // BatchResults
+                &LEN1,                     // results: one
+                &[0x09, 0x00, 0x00, 0x00], // WriteResult::Updated
+            ]),
+        );
         // Protocol 32 (`NLC-FR-005`, ADR-0128): `NullableFields` at 25 —
         // the tags as a length-prefixed `u16` sequence.
         assert_golden_eq(
@@ -2547,7 +2598,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 32);
+        assert_eq!(PROTOCOL_VERSION, 33);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

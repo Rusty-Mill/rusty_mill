@@ -1,6 +1,6 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.21.0 (protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
+- Version: 0.22.0 (protocol version 33 — `SERVER-001` v0.106.0, `TXS-FR-001`, `ADR-0130`: `WriteOp::UpdateField` (5), `WriteResult::Updated` (9), a session may stage record writes; 0.21.0 was protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
   `RGM-FR-004`, `ADR-0121`: the `Null` strip below 31 covers `JoinedRows` too; 0.20.0 was `SERVER-001` v0.96.0,
   `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
@@ -106,12 +106,12 @@ fixture and are asserted by the reference client's tests):
 
 - `Request::Hello { protocol_version: 2 }`, framed:
   `08 00 00 00` · `0a 00 00 00` (variant 10) · `02 00 00 00` (2) — the
-  fixture's own `Request/Hello`; a current client sends 32 (`20 00 00 00`).
+  fixture's own `Request/Hello`; a current client sends 33 (`21 00 00 00`).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
 
-## 5. Types at protocol version 32
+## 5. Types at protocol version 33
 
 Enum indices are declaration order and **append-only** (§8, rule 1).
 "Since" is the protocol version that introduced the item; everything
@@ -163,6 +163,7 @@ its single-shot request:
 | 2 | `ReplaceIf` | `id: RecordId`, `fields: Vec<(FieldRef, ScanValue)>`, `guard: Predicate` |
 | 3 | `Delete` | `id: RecordId` |
 | 4 | `Link` | `left: RecordId`, `right: RecordId`, `relation: String` |
+| 5 | `UpdateField` (since 33) | `id: RecordId`, `field: FieldRef`, `value: ScanValue` |
 
 `WriteResult` — one op's outcome in a `BatchResults`:
 
@@ -177,6 +178,7 @@ its single-shot request:
 | 6 | `AlreadyLinked` | — |
 | 7 | `Deleted` | — |
 | 8 | `Failed` | `code: ErrorCode` |
+| 9 | `Updated` (since 33) | — |
 
 ### 5.5 Structs (fields in order)
 
@@ -693,6 +695,25 @@ Each item names the `SERVER-001` requirement that owns it.
    Aggregate values read the stored sentinel. Below 32 the wire is what
    it was: the sentinel is what a client sees, and `DescribeNullable` is
    `Malformed` (rule 3). No stored layout changes. (`FR-117`)
+30. **Sessions over record writes** (33) — `WriteOp::UpdateField` carries
+   `UpdateField`'s three fields as a batch op (`Updated`, or `NotFound` for
+   an id with no record; the field, kind and read-only rules are
+   `UpdateField`'s, refused as a batch abort). On a connection negotiated at
+   33 or above, a session (`Begin`/`BeginWith`) may stage `Insert`,
+   `Replace`, `ReplaceIf`, `Delete` and `Link` beside `UpdateField`, each
+   answered `Staged { index }`; the staged list is ordered, updates
+   included. `Commit` then applies it as one atomic `WriteBatch` (isolated
+   under one write lock, crash-atomic where the table is journaled) and
+   answers `BatchResults` — one `WriteResult` per staged op — or
+   `TransactionFailed` naming the first op that failed validation, with
+   nothing applied. A soft outcome (`Duplicate`, `NotFound`, `GuardFailed`)
+   is a result, as in an atomic `WriteBatch`, and the ops beside it still
+   applied; a session that staged only updates commits as before and
+   answers `Ok`. A session opened with read-your-writes, snapshot isolation
+   or real MVCC answers a record write `Unsupported` (their overlays are
+   per-field). A batch does not cascade a `Delete` into other tables. Below
+   33 the record-write requests inside a session stay `SessionOpen`, and a
+   `WriteBatch` carrying `UpdateField` is `Malformed` (rule 3). (`FR-119`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -752,6 +773,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 30 | v0.84.0 | `RowsClamped` (24), `ErrorCode::Busy` (15) — `Rows` below 30 for a clamped `Query` (§7 item 27); `Busy` written only before negotiation, never as an answer |
 | 31 | v0.96.0 | `ScanValue::Null` (6) — a unit variant; a `Null` field pair is dropped from `Record`/`Rows` below 31 (§7 item 28); no shipped field is nullable yet |
 | 32 | v0.104.0 | `DescribeNullable` (38), `NullableFields` (25) — the first nullable columns, a sentinel shown as `Null` at 32 and above (§7 item 29) |
+| 33 | v0.106.0 | `WriteOp::UpdateField` (5), `WriteResult::Updated` (9) — a session stages record writes beside updates and commits them as one atomic `WriteBatch` (§7 item 30) |
 
 Four rules (`SERVER-001-FR-020`, ADR-0022), restated for an implementer:
 
@@ -803,6 +825,14 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.22.0 (`SERVER-001` v0.106.0, `ADR-0130`, `TXS-FR-001`..`005`): protocol
+  version 33 — `WriteOp::UpdateField` (5), `WriteResult::Updated` (9); a
+  session stages record writes and commits them as one atomic `WriteBatch`.
+  §5.4b, §7 item 30. Fixture: `Request/WriteBatch(UpdateField)`,
+  `Response/BatchResults(Updated)` at 33. Python client: `WoUpdateField`,
+  `WrUpdated`, `("update", ...)` batch op, declares 33; the Rust client
+  gains `Session::{insert, replace, delete, link, commit_results}` and
+  `BatchOp::UpdateField`.
 - 0.21.0 (`SERVER-001` v0.104.0, `ADR-0128`, `NLC-FR-001`..`007`): protocol
   version 32 — `DescribeNullable` (38) and `NullableFields` (25); a
   table's nullable fields read and write as `Null` at 32 and above while

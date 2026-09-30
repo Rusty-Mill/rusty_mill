@@ -65,13 +65,13 @@ class WireVectors(unittest.TestCase):
             bytes.fromhex("1c000000" "00000000" "1000000000000000" + "00" * 15 + "01"),
         )
 
-    def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_32(self):
+    def test_mvcc_isolation_flag_is_8_and_the_declared_version_is_33(self):
         # MVCC2-FR-004/011, ADR-0072: real MVCC's BeginWith bit — this
-        # client declares protocol 32, so it may send it (compatibility
+        # client declares protocol 33, so it may send it (compatibility
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
-        self.assertEqual(p.PROTOCOL_VERSION, 32)
+        self.assertEqual(p.PROTOCOL_VERSION, 33)
         req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
         data = p.encode_request(req)
         self.assertEqual(p.decode_request(data), req)
@@ -107,6 +107,23 @@ class WireVectors(unittest.TestCase):
         self.assertEqual(data, bytes.fromhex("19000000" "0200000000000000" "0b00" "0c00"))
         self.assertEqual(p.decode_response(data), reply)
         self.assertEqual(p.REQUEST_INTRODUCED_AT[p.DescribeNullable], 32)
+
+    def test_write_op_update_field_is_5_and_write_result_updated_is_9(self):
+        # TXS-FR-001, ADR-0130 (protocol 33).
+        batch = p.WriteBatch((p.WoUpdateField(uuid.UUID(int=1), 10, p.I64(5)),), True)
+        data = p.encode_request(batch)
+        self.assertEqual(
+            data,
+            bytes.fromhex(
+                "1f000000" "0100000000000000" "05000000" "1000000000000000" + "00" * 15 + "01"
+                "0a00" "01000000" "0500000000000000" "01"
+            ),
+        )
+        self.assertEqual(p.decode_request(data), batch)
+        reply = p.BatchResults((p.WrUpdated(),))
+        self.assertEqual(
+            p.encode_response(reply), bytes.fromhex("14000000" "0100000000000000" "09000000")
+        )
 
 
 if __name__ == "__main__":

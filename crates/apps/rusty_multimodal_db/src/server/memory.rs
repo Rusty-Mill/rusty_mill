@@ -936,6 +936,10 @@ impl MemoryConnectionStore {
                 | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
                     Some((*id, (!deletes.contains(id)).then(|| fields.clone())))
                 }
+                // `TXS-FR-001`: an update records the one field it wrote.
+                (WriteOp::UpdateField { id, field, value }, WriteResult::Updated) => {
+                    Some((*id, Some(vec![(*field, value.clone())])))
+                }
                 (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, None)),
                 _ => None,
             })
@@ -995,6 +999,8 @@ enum PreparedWrite {
     Replace(Memory),
     ReplaceIf(Memory, Predicate),
     Delete(RecordId),
+    /// `TXS-FR-001` (ADR-0130): one pre-validated field update.
+    Update(TransactionOp),
     Link {
         left: RecordId,
         right: RecordId,
@@ -1023,6 +1029,18 @@ impl MemoryConnectionStore {
                 )
             }
             WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            // `TXS-FR-001` (ADR-0130): the field, kind and read-only rule of
+            // `UpdateField`; the record's existence is the apply step's.
+            WriteOp::UpdateField { id, field, value } => {
+                let op = TransactionOp {
+                    id: *id,
+                    field: *field,
+                    value: value.clone(),
+                };
+                Self::validate_batch(std::slice::from_ref(&op), |_| true)
+                    .map_err(|(_, code)| code)?;
+                PreparedWrite::Update(op)
+            }
             WriteOp::Link {
                 left,
                 right,
@@ -1074,6 +1092,13 @@ impl MemoryConnectionStore {
                             WriteResult::GuardFailed
                         }
                     }
+                }
+            }
+            PreparedWrite::Update(op) => {
+                match Self::apply_batch(inner, std::slice::from_ref(&op)) {
+                    Ok(()) => WriteResult::Updated,
+                    Err((_, ErrorCode::RecordNotFound)) => WriteResult::NotFound,
+                    Err((_, code)) => return Err(code),
                 }
             }
             PreparedWrite::Delete(id) => match Delete::<Memory>::delete(inner, id) {
@@ -3817,5 +3842,96 @@ mod tests {
             header_len,
             "checkpointed after replay"
         );
+    }
+
+    /// `TXS-FR-001`/`004` (ADR-0130): a batch mixing a record write and a
+    /// field update is one journal entry and replays whole — the insert and
+    /// the update both land after a crash right after the `fsync`; an update
+    /// of a record the batch did not find is a soft `NotFound`, applied
+    /// beside the rest.
+    #[test]
+    fn a_mixed_batch_with_an_update_is_crash_atomic_via_the_journal() {
+        let dir = fresh_temp_dir("server_memory_mixed_batch_journal").unwrap();
+        let seed = || vec![memory(1, "general", false), memory(2, "preference", false)];
+        let journal = dir.join("mixed.journal");
+
+        let path_a = dir.join("a.mmap");
+        let stack_a = create_memory_production_stack(seed(), &[], &path_a).unwrap();
+        let adapter =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_a), &journal)
+                .unwrap();
+        let ops = vec![
+            WriteOp::Insert {
+                id: Uuid::from_u128(10),
+                fields: full_fields(10),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(10),
+                field: FIELD_ACCESS_COUNT,
+                value: ScanValue::I64(4),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_ACCESS_COUNT,
+                value: ScanValue::I64(7),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(99),
+                field: FIELD_ACCESS_COUNT,
+                value: ScanValue::I64(1),
+            },
+        ];
+        assert_eq!(
+            adapter.write_batch(&ops, true).unwrap(),
+            vec![
+                WriteResult::Inserted,
+                WriteResult::Updated,
+                WriteResult::Updated,
+                WriteResult::NotFound,
+            ]
+        );
+        // A bad update is refused before anything is applied or journaled.
+        let bad = [
+            WriteOp::Insert {
+                id: Uuid::from_u128(11),
+                fields: full_fields(11),
+            },
+            WriteOp::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_CONTENT,
+                value: ScanValue::Str("x".into()),
+            },
+        ];
+        assert_eq!(
+            adapter.write_batch(&bad, true),
+            Err((1, ErrorCode::Unsupported))
+        );
+        assert!(
+            adapter.get(Uuid::from_u128(11)).is_none(),
+            "nothing applied"
+        );
+        drop(adapter);
+
+        let path_b = dir.join("b.mmap");
+        let stack_b = create_memory_production_stack(seed(), &[], &path_b).unwrap();
+        let replayed =
+            MemoryConnectionStore::with_journal(GenericProductionStore::new(stack_b), &journal)
+                .unwrap();
+        let count = |n: u128| {
+            replayed
+                .get(Uuid::from_u128(n))
+                .unwrap()
+                .into_iter()
+                .find(|(f, _)| *f == FIELD_ACCESS_COUNT)
+                .unwrap()
+                .1
+        };
+        assert_eq!(
+            count(10),
+            ScanValue::I64(4),
+            "the update of the inserted record"
+        );
+        assert_eq!(count(1), ScanValue::I64(7), "the update of a seeded record");
+        assert!(replayed.get(Uuid::from_u128(11)).is_none());
     }
 }

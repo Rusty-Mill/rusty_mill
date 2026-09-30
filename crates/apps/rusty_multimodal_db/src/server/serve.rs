@@ -541,6 +541,15 @@ pub trait ConnectionStore: Send + Sync {
                 Ok(LinkOutcome::AlreadyLinked) => WriteResult::AlreadyLinked,
                 Err(code) => WriteResult::Failed(code),
             },
+            // `TXS-FR-001` (ADR-0130): the single-shot update, mapped as a
+            // batch outcome; an id with no record is `NotFound`.
+            WriteOp::UpdateField { id, field, value } => {
+                match self.update_field(*id, *field, value.clone()) {
+                    Ok(true) => WriteResult::Updated,
+                    Ok(false) => WriteResult::NotFound,
+                    Err(code) => WriteResult::Failed(code),
+                }
+            }
         }
     }
 
@@ -4490,6 +4499,12 @@ fn handle_connection(
     let mut table: usize = primary;
     // `SESS-FR-002`: the staged writes of an open session, if any.
     let mut session: Option<Vec<TransactionOp>> = None;
+    // `TXS-FR-003` (ADR-0130): once a session stages a record write, its
+    // whole staged list — updates included, in order — is this list of
+    // `WriteOp`s, committed as one atomic `write_batch`. `None` for a session
+    // that has staged only updates (committed through `apply_transaction`
+    // exactly as before).
+    let mut session_writes: Option<Vec<WriteOp>> = None;
     // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
     // session is open; cleared with the session.
     let mut read_your_writes: Option<Vec<FieldRef>> = None;
@@ -4703,6 +4718,7 @@ fn handle_connection(
                     err_response(ErrorCode::SessionOpen)
                 } else {
                     session = Some(Vec::new());
+                    session_writes = None;
                     read_your_writes = None;
                     validate_on_stage = false;
                     snapshot_reads = None;
@@ -4746,6 +4762,7 @@ fn handle_connection(
                     err_response(ErrorCode::Unsupported)
                 } else {
                     session = Some(Vec::new());
+                    session_writes = None;
                     read_your_writes = (flags & SESSION_READ_YOUR_WRITES != 0).then(|| {
                         store
                             .describe()
@@ -4764,6 +4781,7 @@ fn handle_connection(
                 }
             }
             Request::Rollback => {
+                session_writes = None;
                 read_your_writes = None;
                 validate_on_stage = false;
                 snapshot_reads = None;
@@ -4823,6 +4841,25 @@ fn handle_connection(
                     None => Response::NotFound,
                 }
             }
+            // `TXS-FR-004` (ADR-0130): a session that staged record writes
+            // commits its whole ordered list as one atomic `write_batch` —
+            // crash-atomic where the table is journaled, isolated under one
+            // write lock — and answers one `WriteResult` per staged op.
+            Request::Commit if session_writes.is_some() => {
+                read_your_writes = None;
+                validate_on_stage = false;
+                snapshot_reads = None;
+                session = None;
+                let ops = session_writes.take().unwrap_or_default();
+                match store.write_batch(&ops, true) {
+                    Ok(results) => Response::BatchResults { results },
+                    Err((index, code)) => Response::TransactionFailed {
+                        index,
+                        code,
+                        message: error_message(code).to_string(),
+                    },
+                }
+            }
             Request::Commit => {
                 read_your_writes = None;
                 validate_on_stage = false;
@@ -4868,6 +4905,21 @@ fn handle_connection(
                 };
                 match (refused, session.as_mut()) {
                     (Some(code), _) => err_response(code),
+                    // `TXS-FR-003`: with record writes already staged, the
+                    // update joins the one ordered `WriteOp` list.
+                    (None, Some(_)) if session_writes.is_some() => match session_writes.as_mut() {
+                        Some(list) if list.len() < MAX_STAGED_OPS => {
+                            list.push(WriteOp::UpdateField {
+                                id: op.id,
+                                field: op.field,
+                                value: op.value,
+                            });
+                            Response::Staged {
+                                index: (list.len() - 1) as u32,
+                            }
+                        }
+                        _ => err_response(ErrorCode::SessionFull),
+                    },
                     (None, Some(staged)) if staged.len() < MAX_STAGED_OPS => {
                         staged.push(op);
                         Response::Staged {
@@ -4879,6 +4931,42 @@ fn handle_connection(
             }
             Request::Transaction { .. } if session.is_some() => {
                 err_response(ErrorCode::SessionOpen)
+            }
+            // `TXS-FR-003` (ADR-0130, protocol 33): a connection at 33 or
+            // above may stage a record write in its session; below, the
+            // refusals that follow stand. Refused `Unsupported` on a session
+            // that asked for read-your-writes, snapshot isolation or real
+            // MVCC — their overlays and read sets are per-field (phase 2).
+            ref write
+                if session.is_some() && negotiated >= 33 && staged_write_op(write).is_some() =>
+            {
+                match (staged_write_op(write), session.as_mut()) {
+                    (Some(op), Some(updates))
+                        if read_your_writes.is_none()
+                            && snapshot_reads.is_none()
+                            && mvcc_snapshot.get().is_none() =>
+                    {
+                        let list = session_writes.get_or_insert_with(|| {
+                            updates
+                                .drain(..)
+                                .map(|u| WriteOp::UpdateField {
+                                    id: u.id,
+                                    field: u.field,
+                                    value: u.value,
+                                })
+                                .collect()
+                        });
+                        if list.len() < MAX_STAGED_OPS {
+                            list.push(op);
+                            Response::Staged {
+                                index: (list.len() - 1) as u32,
+                            }
+                        } else {
+                            err_response(ErrorCode::SessionFull)
+                        }
+                    }
+                    _ => err_response(ErrorCode::Unsupported),
+                }
             }
             // `INS-FR-007` (ADR-0046): an insert is never staged — the
             // `Transaction`-inside-a-session rule — and, as a write, is
@@ -4917,6 +5005,15 @@ fn handle_connection(
             // (nothing applied).
             Request::WriteBatch { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::WriteBatch { .. } if negotiated < 22 => err_response(ErrorCode::Malformed),
+            // `TXS-FR-001` (ADR-0130), rule 3: `UpdateField` is a protocol-33 op.
+            Request::WriteBatch { ref ops, .. }
+                if negotiated < 33
+                    && ops
+                        .iter()
+                        .any(|op| matches!(op, WriteOp::UpdateField { .. })) =>
+            {
+                err_response(ErrorCode::Malformed)
+            }
             Request::WriteBatch { ref ops, .. } if ops.len() > MAX_BATCH_OPS => {
                 err_response(ErrorCode::Malformed)
             }
@@ -5451,6 +5548,37 @@ fn join_across(
             ),
         },
         Err(code) => err_response(code),
+    }
+}
+
+/// `TXS-FR-003` (ADR-0130): the batch op a session stages for a record-write
+/// request, or `None` for every other request. Pure.
+fn staged_write_op(req: &Request) -> Option<WriteOp> {
+    match req {
+        Request::Insert { id, fields } => Some(WriteOp::Insert {
+            id: *id,
+            fields: fields.clone(),
+        }),
+        Request::Replace { id, fields } => Some(WriteOp::Replace {
+            id: *id,
+            fields: fields.clone(),
+        }),
+        Request::ReplaceIf { id, fields, guard } => Some(WriteOp::ReplaceIf {
+            id: *id,
+            fields: fields.clone(),
+            guard: guard.clone(),
+        }),
+        Request::Delete { id } => Some(WriteOp::Delete { id: *id }),
+        Request::Link {
+            left,
+            right,
+            relation,
+        } => Some(WriteOp::Link {
+            left: *left,
+            right: *right,
+            relation: relation.clone(),
+        }),
+        _ => None,
     }
 }
 

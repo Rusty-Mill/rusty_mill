@@ -758,6 +758,10 @@ impl EntityConnectionStore {
                 | (WriteOp::ReplaceIf { id, fields, .. }, WriteResult::Replaced) => {
                     Some((*id, (!deletes.contains(id)).then(|| fields.clone())))
                 }
+                // `TXS-FR-001`: an update records the one field it wrote.
+                (WriteOp::UpdateField { id, field, value }, WriteResult::Updated) => {
+                    Some((*id, Some(vec![(*field, value.clone())])))
+                }
                 (WriteOp::Delete { id }, WriteResult::Deleted) => Some((*id, None)),
                 _ => None,
             })
@@ -821,6 +825,8 @@ enum PreparedWrite {
     Replace(Entity),
     ReplaceIf(Entity, Predicate),
     Delete(RecordId),
+    /// `TXS-FR-001` (ADR-0130): one pre-validated field update.
+    Update(TransactionOp),
     Link {
         left: RecordId,
         right: RecordId,
@@ -845,6 +851,18 @@ impl EntityConnectionStore {
                 )
             }
             WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            // `TXS-FR-001` (ADR-0130): the field, kind and read-only rule of
+            // `UpdateField`; the record's existence is the apply step's.
+            WriteOp::UpdateField { id, field, value } => {
+                let op = TransactionOp {
+                    id: *id,
+                    field: *field,
+                    value: value.clone(),
+                };
+                Self::validate_batch(std::slice::from_ref(&op), |_| true)
+                    .map_err(|(_, code)| code)?;
+                PreparedWrite::Update(op)
+            }
             WriteOp::Link {
                 left,
                 right,
@@ -892,6 +910,13 @@ impl EntityConnectionStore {
                             WriteResult::GuardFailed
                         }
                     }
+                }
+            }
+            PreparedWrite::Update(op) => {
+                match Self::apply_batch(inner, std::slice::from_ref(&op)) {
+                    Ok(()) => WriteResult::Updated,
+                    Err((_, ErrorCode::RecordNotFound)) => WriteResult::NotFound,
+                    Err((_, code)) => return Err(code),
                 }
             }
             PreparedWrite::Delete(id) => match Delete::<Entity>::delete(inner, id) {
