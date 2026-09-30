@@ -9,6 +9,7 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **An IPC timeout now cancels the handler's token** (`nexus-kernel`, design review 4 / N4). A deadline used to return `Timeout` without signalling the dispatch's cancellation token. Polling handlers, their spawned work, and sync handlers on the blocking pool kept running. A drop guard now cancels the token on timeout or when the caller drops the call, and is disarmed when the handler finishes on its own.
 - **Template substitution no longer panics on a short tag** (`nexus-templates`, design review 3.8).
   - `{{ab` sliced five bytes past a four-byte input and panicked; the escape check now uses `starts_with`.
   - Literal non-ASCII text used to be copied byte by byte and came out garbled (`é` became mojibake); it now survives intact.
