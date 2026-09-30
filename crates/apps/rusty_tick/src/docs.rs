@@ -92,8 +92,12 @@ impl DocStore {
         self.table.delete(id)
     }
 
-    /// Delete every comment that belongs to one of `tasks`; returns how many went.
-    pub fn delete_comments_of(&mut self, tasks: &[Uuid]) -> Result<usize, TickError> {
+    /// Delete every comment for which `doomed` says so, given the task it names
+    /// (`None` when its body names no readable task); returns how many went.
+    pub fn delete_comments_where(
+        &mut self,
+        doomed: impl Fn(Option<Uuid>) -> bool,
+    ) -> Result<usize, TickError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Owner {
@@ -103,10 +107,10 @@ impl DocStore {
             .of_kind("comment")
             .into_iter()
             .filter(|d| {
-                rusty_json::from_str::<Owner>(&d.body)
+                let owner = rusty_json::from_str::<Owner>(&d.body)
                     .ok()
-                    .and_then(|o| Uuid::parse_str(&o.task_id).ok())
-                    .is_some_and(|id| tasks.contains(&id))
+                    .and_then(|o| Uuid::parse_str(&o.task_id).ok());
+                doomed(owner)
             })
             .map(|d| d.id)
             .collect();
@@ -114,6 +118,11 @@ impl DocStore {
             self.table.delete(*id)?;
         }
         Ok(gone.len())
+    }
+
+    /// Delete every comment that belongs to one of `tasks`.
+    pub fn delete_comments_of(&mut self, tasks: &[Uuid]) -> Result<usize, TickError> {
+        self.delete_comments_where(|owner| owner.is_some_and(|id| tasks.contains(&id)))
     }
 
     /// Documents of `kind`, oldest first.
