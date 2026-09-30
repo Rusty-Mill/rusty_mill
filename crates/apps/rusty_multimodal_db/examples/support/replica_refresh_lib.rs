@@ -628,4 +628,8 @@ mod follow_impl {
     }
 }
 #[cfg(feature = "server")]
-pub use follow_impl::{first_real_failure, follow, FollowError};
+pub use follow_impl::{follow, FollowError};
+// Used by `tests/replica_refresh.rs`; the example binary does not call it.
+#[cfg(feature = "server")]
+#[allow(unused_imports)]
+pub use follow_impl::first_real_failure;
