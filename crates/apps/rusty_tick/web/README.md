@@ -41,16 +41,16 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 
 - Ids are client-generated UUIDs and times are epoch milliseconds (not 24-hex ids / ISO strings); task status is `open | done`.
 - No TickTick batch API and no WebSocket "needSync": the UI polls and refreshes on window focus.
-- Focus records, habits, check-ins and the summary template are stored as generic `docs` in the backend, so they sync like everything else.
+- Focus records, habits, check-ins, comments and the summary template are stored as generic `docs` in the backend, so they sync like everything else.
 
 ## Stubs and known gaps
 
-- Reminders: task and habit reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in); there is no service worker or push, so nothing fires with the app closed.
+- Reminders: task and habit reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in). Firing with the app closed needs Web Push (a push service and VAPID keys), which conflicts with staying self-contained; it is not planned.
 - Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
 - Settings: Account, Notifications, Date & Time, Appearance, Shortcuts and About are real; the other seven tabs are placeholders.
-- Comments button in the detail pane is disabled; Import Backups and Delete Account (Settings → Account) are inert.
+- Comments are `comment` docs; deleting a task leaves its comments behind (they are removed by Delete All Data). Import Backups adds what a backup lacks (habits and comments are not in a backup); Delete All Data empties the account but keeps the sign-in — there is no account deletion.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
 - Habits: a check-in means "done" (the goal amount is text).
-- Sync is by polling and on window focus (no server push).
+- Sync is by polling every 30 s and on window focus. A push channel would need a streaming endpoint and a service worker, which the self-hosted server does not have; it is not planned.
 - Compared by eye against screenshots of the real app (not pixel-diffed); differences that remain are listed in the pull requests that closed the gap.
