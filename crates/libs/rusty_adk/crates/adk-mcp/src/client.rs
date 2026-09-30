@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -125,28 +125,71 @@ impl StdioConnection {
         self.next_id += 1;
 
         let payload = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        self.write(&payload).await?;
-
-        wait_for_response(&mut self.stdout, id, method, self.timeout).await
+        exchange(
+            &mut self.stdin,
+            &mut self.stdout,
+            &payload,
+            Some(id),
+            method,
+            self.timeout,
+        )
+        .await
     }
 
-    /// Sends a notification, which expects no response.
+    /// Sends a notification, which expects no response -- still bounded,
+    /// since a child that stops reading stdin blocks the write itself.
     async fn notify(&mut self, method: &str) -> Result<()> {
-        self.write(&json!({"jsonrpc": "2.0", "method": method}))
-            .await
-    }
-
-    async fn write(&mut self, payload: &Value) -> Result<()> {
-        let text = serde_json::to_string(payload)?;
-        self.stdin.write_all(text.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
-        Ok(())
+        let payload = json!({"jsonrpc": "2.0", "method": method});
+        exchange(
+            &mut self.stdin,
+            &mut self.stdout,
+            &payload,
+            None,
+            method,
+            self.timeout,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn shutdown(&mut self) -> Result<()> {
         let _ = self.child.kill().await;
         Ok(())
+    }
+}
+
+/// Writes `payload` to `stdin` and, when `id` is set, waits for its
+/// response -- the whole exchange under one `deadline` (design review 3.7,
+/// N16). The deadline used to start only after the write and flush, so a
+/// child that stopped reading stdin blocked the write forever while the
+/// caller held the connection mutex.
+async fn exchange<W, R>(
+    stdin: &mut W,
+    stdout: &mut BufReader<R>,
+    payload: &Value,
+    id: Option<i64>,
+    method: &str,
+    deadline: Duration,
+) -> Result<Value>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
+{
+    let text = serde_json::to_string(payload)?;
+    let round_trip = async {
+        stdin.write_all(text.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        match id {
+            Some(id) => wait_for_response(stdout, id, method, deadline).await,
+            None => Ok(Value::Null),
+        }
+    };
+    match timeout(deadline, round_trip).await {
+        Ok(result) => result,
+        Err(_) => Err(AdkError::Other(format!(
+            "MCP server did not accept or answer '{method}' within {deadline:?}"
+        ))),
     }
 }
 
@@ -658,5 +701,26 @@ mod tests {
             err.to_string().contains("did not respond"),
             "expected a timeout error message, got: {err}"
         );
+    }
+
+    /// Design review 3.7 (N16): a child that never reads stdin used to block
+    /// the request write forever (the deadline began after the flush).
+    #[tokio::test]
+    async fn a_child_that_stops_reading_stdin_times_out_the_write() {
+        let (mut stdin, _child_side_never_read) = tokio::io::duplex(8);
+        let (_child_stdout, ours) = tokio::io::duplex(8);
+        let mut stdout = BufReader::new(ours);
+        let payload =
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": "x".repeat(1024)});
+        let result = exchange(
+            &mut stdin,
+            &mut stdout,
+            &payload,
+            Some(1),
+            "tools/call",
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(result.is_err());
     }
 }
