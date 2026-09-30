@@ -1,4 +1,4 @@
-# ADR-0134: Strict Commit Recovery — a Durable Acceptance, Then Redo
+# ADR-0135: Strict Commit Recovery — a Durable Acceptance, Then Redo
 
 - Status: **Accepted** — the monorepo design review remediation (Tranche 2, rows 2.1–2.2), on the owner's "go with your recommendations".
 - Date: 2026-09-30

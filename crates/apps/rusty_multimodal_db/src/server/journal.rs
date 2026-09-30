@@ -62,7 +62,7 @@ pub const JOURNAL_MAGIC: &[u8; 8] = b"TXNJRNL\0";
 /// before this round — a version-1 journal left over from an older
 /// build is refused, not silently upgraded; the journal is expected to
 /// be small and frequently checkpointed, unlike a long-lived blob.
-/// Version 3 (ADR-0134) adds the strict-accepted marker (kind `3`); a
+/// Version 3 (ADR-0135) adds the strict-accepted marker (kind `3`); a
 /// version-2 journal still opens (see [`JournaledBatch::StrictWrite`]),
 /// and the truncate that follows every replay rewrites its header.
 pub const JOURNAL_FORMAT_VERSION: u32 = 3;
@@ -82,7 +82,7 @@ const KIND_WRITE: u8 = 1;
 /// `STC-FR-002` (ADR-0133): a `WriteOp` batch committed strictly. It
 /// replays only if a [`KIND_STRICT_ACCEPTED`] marker names it.
 const KIND_STRICT_WRITE: u8 = 2;
-/// ADR-0134: the strict check passed for the strict entry at the byte
+/// ADR-0135: the strict check passed for the strict entry at the byte
 /// offset this entry's `u64 LE` payload names. Synced before the batch's
 /// first write, so an entry without one never touched the store.
 const KIND_STRICT_ACCEPTED: u8 = 3;
@@ -104,7 +104,7 @@ pub(crate) enum JournalEntry<'a> {
 pub(crate) enum JournaledBatch {
     Transaction(Vec<TransactionOp>),
     Write(Vec<WriteOp>),
-    /// ADR-0134: `accepted` is `Some(true)` when a strict-accepted marker
+    /// ADR-0135: `accepted` is `Some(true)` when a strict-accepted marker
     /// names the entry — replay redoes it whole, from whatever prefix of it
     /// reached the store — and `Some(false)` when none does: the live check
     /// refused it, or the process died before deciding, and either way
@@ -326,7 +326,7 @@ impl BatchJournal {
         }
 
         let mut entries = Vec::new();
-        // ADR-0134: each strict entry's byte offset -> its index in `entries`.
+        // ADR-0135: each strict entry's byte offset -> its index in `entries`.
         let mut strict_at: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
         let mut pos = HEADER_LEN as usize;
         // Stops at the first incomplete entry — a torn tail, or exactly the
@@ -444,7 +444,7 @@ impl BatchJournal {
     /// whole entry was written. The kind byte is `entry`'s own variant
     /// (`WBJ-FR-001`).
     /// Returns the entry's byte offset, its identity until the next
-    /// truncate (ADR-0134).
+    /// truncate (ADR-0135).
     pub(crate) fn append_unsynced(&mut self, entry: JournalEntry<'_>) -> Result<u64, JournalError> {
         let (kind, payload) = match entry {
             JournalEntry::Transaction(batch) => (KIND_TRANSACTION, crate::codec::encode(batch)?),
@@ -514,7 +514,7 @@ pub(crate) struct Turn {
     /// leading replayed entries the flush already covers, whether or not
     /// the truncate that was meant to follow actually completed.
     pub(crate) journal_entries: u64,
-    /// ADR-0134: this batch's entry offset, for
+    /// ADR-0135: this batch's entry offset, for
     /// [`CommitGroup::accept_strict`].
     pub(crate) entry_offset: u64,
 }
@@ -724,7 +724,7 @@ impl CommitGroup {
         self.commit_entry(JournalEntry::StrictWrite(ops), apply)
     }
 
-    /// ADR-0134: record, durably, that the strict check passed for the
+    /// ADR-0135: record, durably, that the strict check passed for the
     /// entry at `turn.entry_offset` — called from that batch's own apply,
     /// after the check and before its first write. Replay redoes a strict
     /// entry only when this marker names it. The batch's own turn keeps a
@@ -1285,7 +1285,7 @@ mod tests {
         assert!(entries.is_empty());
     }
 
-    /// ADR-0134: a marker accepts exactly the strict entry it names; one
+    /// ADR-0135: a marker accepts exactly the strict entry it names; one
     /// naming no strict entry is corruption.
     #[test]
     fn a_strict_entry_is_accepted_only_by_its_own_marker() {
@@ -1319,7 +1319,7 @@ mod tests {
         ));
     }
 
-    /// ADR-0134: a version-2 journal still opens, its strict entries
+    /// ADR-0135: a version-2 journal still opens, its strict entries
     /// undecided (replay re-runs the check), and its truncate upgrades the
     /// header.
     #[test]

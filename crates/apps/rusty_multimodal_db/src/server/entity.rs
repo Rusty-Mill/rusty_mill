@@ -431,7 +431,7 @@ impl EntityConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    // ADR-0134: a strict entry the live check never accepted
+                    // ADR-0135: a strict entry the live check never accepted
                     // touched nothing and is skipped; an accepted one is
                     // redone whole. A version-2 journal (no markers) falls
                     // back to re-running the check.
@@ -483,7 +483,7 @@ impl EntityConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
             let result = match Self::apply_prepared(inner, prepared) {
-                // ADR-0134: a link whose endpoint a later op of the same
+                // ADR-0135: a link whose endpoint a later op of the same
                 // batch deleted, before the crash. Redo converges anyway:
                 // the edge went with the record.
                 Err(ErrorCode::RecordNotFound) => WriteResult::NotFound,
@@ -529,7 +529,7 @@ impl EntityConnectionStore {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
         // `accept` durably marks a strict batch accepted before its first
-        // write (ADR-0134); a no-op without a journal.
+        // write (ADR-0135); a no-op without a journal.
         let apply = |inner: &mut EntityProductionStack,
                      accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
             if strict {
@@ -540,7 +540,7 @@ impl EntityConnectionStore {
             }
             // A loose atomic batch refuses a link to a record absent
             // before the batch. A strict batch's check already saw each
-            // endpoint as the batch's earlier ops leave it (ADR-0134).
+            // endpoint as the batch's earlier ops leave it (ADR-0135).
             for (i, p) in prepared.iter().enumerate() {
                 if let PreparedWrite::Link { left, .. } = p {
                     if !strict && GetById::<Entity>::get(inner, *left).is_none() {
@@ -2561,7 +2561,7 @@ mod tests {
         assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::NotFound));
     }
 
-    /// ADR-0134 (review 2.1) on `Entity`: insert then link in one strict
+    /// ADR-0135 (review 2.1) on `Entity`: insert then link in one strict
     /// batch commits, and a restart on the same files agrees.
     #[test]
     fn insert_then_link_commits_strictly_and_a_restart_agrees() {

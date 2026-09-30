@@ -501,7 +501,7 @@ impl MemoryConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    // ADR-0134: a strict entry the live check never accepted
+                    // ADR-0135: a strict entry the live check never accepted
                     // touched nothing and is skipped; an accepted one is
                     // redone whole. A version-2 journal (no markers) falls
                     // back to re-running the check.
@@ -562,7 +562,7 @@ impl MemoryConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
             let result = match Self::apply_prepared(inner, prepared) {
-                // ADR-0134: a link whose endpoint a later op of the same
+                // ADR-0135: a link whose endpoint a later op of the same
                 // batch deleted, before the crash. Redo converges anyway:
                 // the edge went with the record.
                 Err(ErrorCode::RecordNotFound) => WriteResult::NotFound,
@@ -608,7 +608,7 @@ impl MemoryConnectionStore {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
         // `accept` durably marks a strict batch accepted before its first
-        // write (ADR-0134); a no-op without a journal.
+        // write (ADR-0135); a no-op without a journal.
         let apply = |inner: &mut MemoryProductionStack,
                      accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
             if strict {
@@ -619,7 +619,7 @@ impl MemoryConnectionStore {
             }
             // A loose atomic batch refuses a link to a record absent
             // before the batch. A strict batch's check already saw each
-            // endpoint as the batch's earlier ops leave it (ADR-0134).
+            // endpoint as the batch's earlier ops leave it (ADR-0135).
             for (i, p) in prepared.iter().enumerate() {
                 if let PreparedWrite::Link { left, .. } = p {
                     if !strict && GetById::<Memory>::get(inner, *left).is_none() {
@@ -4189,7 +4189,7 @@ mod tests {
         MemoryConnectionStore::with_journal(GenericProductionStore::new(stack), journal).unwrap()
     }
 
-    /// ADR-0134 (review 2.1): a strict batch that inserts a record and then
+    /// ADR-0135 (review 2.1): a strict batch that inserts a record and then
     /// links it commits — the check sees the batch's own insert — and a
     /// restart on the same files agrees with what the client was told.
     #[test]
@@ -4252,7 +4252,7 @@ mod tests {
         assert!(reopened.get(Uuid::from_u128(12)).is_none());
     }
 
-    /// ADR-0134 (review 2.2): an accepted strict batch is redone whole from
+    /// ADR-0135 (review 2.2): an accepted strict batch is redone whole from
     /// whatever prefix of it reached the store before a crash; an entry
     /// with no acceptance marker is never applied. Random accepted batches
     /// over six ids, every crash prefix, the same files reopened.

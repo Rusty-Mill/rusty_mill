@@ -411,7 +411,7 @@ impl RelationConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    // ADR-0134: a strict entry the live check never accepted
+                    // ADR-0135: a strict entry the live check never accepted
                     // touched nothing and is skipped; an accepted one is
                     // redone whole. A version-2 journal (no markers) falls
                     // back to re-running the check.
@@ -463,7 +463,7 @@ impl RelationConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
             let result = match Self::apply_prepared(inner, prepared) {
-                // ADR-0134: a link whose endpoint a later op of the same
+                // ADR-0135: a link whose endpoint a later op of the same
                 // batch deleted, before the crash. Redo converges anyway:
                 // the edge went with the record.
                 Err(ErrorCode::RecordNotFound) => WriteResult::NotFound,
@@ -505,7 +505,7 @@ impl RelationConnectionStore {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
         // `accept` durably marks a strict batch accepted before its first
-        // write (ADR-0134); a no-op without a journal.
+        // write (ADR-0135); a no-op without a journal.
         let apply = |inner: &mut RelationProductionStack,
                      accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
             if strict {

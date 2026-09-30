@@ -277,17 +277,28 @@ impl ChangeLog {
         apply: impl FnOnce() -> (R, Option<Vec<WriteOp>>),
     ) -> Result<R, ErrorCode> {
         let mut inner = self.lock();
-        if inner.poisoned {
-            return Err(ErrorCode::Storage);
-        }
+        inner.ensure_writable()?;
         let (result, ops) = apply();
         if let Some(ops) = ops.filter(|ops| !ops.is_empty()) {
-            if inner.append(&ops).is_err() {
-                inner.poisoned = true;
-                return Err(ErrorCode::Storage);
-            }
+            inner.append(&ops).map_err(|_| ErrorCode::Storage)?;
         }
         Ok(result)
+    }
+
+    /// `Err(Storage)` once the log is poisoned. A writer that logs from
+    /// inside its own ordered section, rather than through [`Self::commit`],
+    /// must call this **before applying** each write it will log: after a
+    /// failed append or sync the table already holds a write the log lacks,
+    /// and no later write may be applied as if the history were whole.
+    pub fn ensure_writable(&self) -> Result<(), ErrorCode> {
+        self.lock().ensure_writable()
+    }
+
+    /// Poison the log for a failure it did not see itself: an `fsync` of
+    /// already-appended entries, made outside the append, that failed. The
+    /// writes those entries record are applied; their durability is not.
+    pub fn poison(&self) {
+        self.lock().poisoned = true;
     }
 
     /// `f` under the lock, with the position — for a read that must agree
@@ -367,7 +378,28 @@ impl Inner {
         Ok(())
     }
 
+    fn ensure_writable(&self) -> Result<(), ErrorCode> {
+        if self.poisoned {
+            return Err(ErrorCode::Storage);
+        }
+        Ok(())
+    }
+
+    /// Every append goes through here, so any failure — whoever appended,
+    /// synced or deferred — poisons the log (see [`ChangeLog::commit`]); a
+    /// poisoned log appends nothing more.
     fn append(&mut self, ops: &[WriteOp]) -> Result<(), ChangeLogError> {
+        if self.poisoned {
+            return Err(ChangeLogError::Format("the log is poisoned".into()));
+        }
+        let appended = self.append_record(ops);
+        if appended.is_err() {
+            self.poisoned = true;
+        }
+        appended
+    }
+
+    fn append_record(&mut self, ops: &[WriteOp]) -> Result<(), ChangeLogError> {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_append) {
             return Err(ChangeLogError::Io(io::Error::other("injected")));
@@ -660,5 +692,23 @@ mod tests {
 
         let reopened = ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).unwrap();
         assert!(reopened.position().epoch > epoch, "standbys must resync");
+    }
+
+    /// The user-flagged interaction with a deferred/grouped writer: a
+    /// failure the log only hears about afterwards (a failed group `fsync`)
+    /// poisons it too, and `ensure_writable` is the pre-apply check such a
+    /// writer uses.
+    #[test]
+    fn a_poisoned_log_refuses_before_apply_for_any_writer() {
+        let d = dir("poison_external");
+        let log = ChangeLog::open(&d.join("t.changes"), DEFAULT_RETAIN_BYTES).unwrap();
+        assert_eq!(log.ensure_writable(), Ok(()));
+        log.poison();
+        assert_eq!(log.ensure_writable(), Err(ErrorCode::Storage));
+        assert!(
+            log.lock().append(&delete(1)).is_err(),
+            "no append after poison"
+        );
+        assert!(log.close_clean().is_err());
     }
 }
