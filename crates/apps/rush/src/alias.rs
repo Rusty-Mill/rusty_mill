@@ -58,21 +58,20 @@ pub fn unset_all() {
 }
 
 /// Populates default Rusty Mill aliases to map standard GNU/POSIX tools to pure Rust implementations.
+/// Tools with no Rusty Mill implementation (e.g. `tail`, `wc`, `xargs`) are
+/// left unaliased and resolve through `PATH`.
 pub fn init_rusty_mill_defaults() {
     let defaults = [
         ("ls", "rls"),
         ("cat", "rcat"),
         ("grep", "rgrep"),
         ("find", "rfind"),
-        ("xargs", "rxargs"),
         ("cp", "rcp"),
         ("mv", "rmv"),
         ("rm", "rrm"),
         ("mkdir", "rmkdir"),
         ("touch", "rtouch"),
-        ("wc", "rwc"),
         ("head", "rhead"),
-        ("tail", "rtail"),
         ("sort", "rsort"),
         ("uniq", "runiq"),
         ("cut", "rcut"),

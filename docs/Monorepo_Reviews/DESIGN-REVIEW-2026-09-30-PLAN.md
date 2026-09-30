@@ -110,7 +110,10 @@ settings. The results decide any later simplification.
 3. **coreutils daily-driver utilities:** fund conformance, or retire the
    overlapping incomplete binaries and keep only the reference consumers
    (`cat`/`ls`/`rrun`/`rpar`)?
+   *Decided 2026-09-30: retire. `rtail`/`rwc`/`rxargs` removed in Tranche 4;
+   the other overlapping binaries await the same call.*
 4. **Public API breaks** in 1.2, 3.6 renames and the `MockServer` removal: OK
    to break now (pre-1.0), or deprecate first?
+   *Decided 2026-09-30 for `MockServer`: removed now (no callers).*
 5. **Tracking:** one GitHub issue per table row (≈40), or one issue per
    tranche with checklists (recommended — less noise)?
