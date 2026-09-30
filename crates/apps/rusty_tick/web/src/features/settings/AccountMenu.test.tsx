@@ -40,10 +40,11 @@ async function setup(mode: Mode = 'demo', prepare?: (s: Services) => Promise<voi
 afterEach(() => vi.restoreAllMocks())
 
 describe('AccountMenu', () => {
-  it('lists Settings, Statistics and Sign Out', async () => {
+  it('lists Settings, Statistics, a disabled Premium and Sign Out', async () => {
     await setup('server')
     const menu = screen.getByRole('menu', { name: 'Account' })
-    expect(within(menu).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Settings', 'Statistics', 'Sign Out'])
+    expect(within(menu).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Settings', 'Statistics', 'PremiumNot applicable in Tick Local', 'Sign Out'])
+    expect(within(menu).getByRole('menuitem', { name: /Premium/ })).toHaveAttribute('aria-disabled', 'true')
   })
 
   it('Settings goes to the account tab', async () => {
@@ -51,6 +52,13 @@ describe('AccountMenu', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Settings' }))
     expect(screen.getByTestId('where')).toHaveTextContent('?modalType=settings&tabs=account')
     expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('Premium does nothing', async () => {
+    const user = await setup()
+    await user.click(screen.getByRole('menuitem', { name: /Premium/ }))
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    expect(screen.getByTestId('where')).toBeEmptyDOMElement()
   })
 
   it('Statistics opens a dialog of real numbers', async () => {

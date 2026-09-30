@@ -13,7 +13,7 @@ const rowFor = (title: string) => within(tasksList()).getByText(title).closest('
 const titles = () => within(tasksList()).queryAllByRole('listitem').map((li) => li.textContent)
 
 describe('the shell', () => {
-  it('shows the smart lists with counts, lists and tags', async () => {
+  it('shows the smart lists with counts, lists, tags and the pinned footer', async () => {
     await renderApp('/q/all/tasks', async (api) => {
       const work = await api.createList({ name: 'Work' })
       await api.createTask({ listId: work.id, title: 'A', tags: ['q4'] })
@@ -24,6 +24,8 @@ describe('the shell', () => {
     expect(within(side).getByRole('link', { name: /^All\s*2$/ })).toBeInTheDocument()
     expect(within(side).getByRole('link', { name: /^Work\s*1$/ })).toBeInTheDocument()
     expect(within(side).getByRole('link', { name: /^q4\s*1$/i })).toBeInTheDocument()
+    expect(within(side).getByText(/Used: 1\/9/)).toBeInTheDocument()
+    expect(within(side).getByRole('button', { name: 'Upgrade to Premium' })).toBeDisabled()
   })
 
   it('shows the empty-state hints when there are no tags', async () => {
@@ -274,7 +276,7 @@ describe('trash', () => {
     await user.click(screen.getByText('bin me'))
     await screen.findByLabelText('Title')
     await user.click(pane().getByRole('button', { name: 'More' }))
-    await user.click(screen.getByRole('menuitem', { name: 'Move to Trash' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
     await waitFor(() => expect(screen.queryByText('bin me')).toBeNull())
     expect((await api.snapshot()).tasks[0]?.deletedMs).not.toBeNull()
 
