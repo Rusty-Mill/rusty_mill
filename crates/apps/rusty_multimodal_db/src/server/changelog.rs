@@ -43,7 +43,7 @@ use super::protocol::{ErrorCode, WriteOp};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 /// The change log file's magic.
 pub const CHANGELOG_MAGIC: &[u8; 8] = b"RMDBCHLG";
@@ -99,6 +99,17 @@ pub struct LogPosition {
 /// writers, which is what makes the log's order the apply order.
 pub struct ChangeLog {
     inner: Mutex<Inner>,
+    /// `ADR-0134` (spike): the group-sync state behind [`Self::sync_through`].
+    synced: Mutex<SyncState>,
+    /// Wakes the callers waiting on a leader's `fsync`.
+    synced_cv: Condvar,
+}
+
+/// The group-sync state: the highest durable head and whether a caller is
+/// leading an `fsync` right now.
+struct SyncState {
+    durable: u64,
+    syncing: bool,
 }
 
 struct Inner {
@@ -240,6 +251,11 @@ impl ChangeLog {
                 len,
                 retain_bytes,
             }),
+            synced: Mutex::new(SyncState {
+                durable: 0,
+                syncing: false,
+            }),
+            synced_cv: Condvar::new(),
         }
     }
 
@@ -265,9 +281,56 @@ impl ChangeLog {
         let mut inner = self.lock();
         let (result, ops) = apply();
         if let Some(ops) = ops.filter(|ops| !ops.is_empty()) {
-            inner.append(&ops).map_err(|_| ErrorCode::Storage)?;
+            inner.append(&ops, true).map_err(|_| ErrorCode::Storage)?;
         }
         Ok(result)
+    }
+
+    /// `ADR-0134` (spike): append one entry **without** `fsync`, returning the
+    /// head it made — the ticket to hand [`Self::sync_through`]. Called from
+    /// inside the wrapped store's own ordered section, so the log's order is
+    /// the apply order without this lock being held across the apply.
+    pub fn append_deferred(&self, ops: &[WriteOp]) -> Result<u64, ErrorCode> {
+        let mut inner = self.lock();
+        inner.append(ops, false).map_err(|_| ErrorCode::Storage)?;
+        Ok(inner.position().head)
+    }
+
+    /// `ADR-0134` (spike): make every entry through `ticket` durable. One
+    /// caller does the `fsync` for all the entries appended so far; callers
+    /// that arrive while it runs find their entry covered and return.
+    pub fn sync_through(&self, ticket: u64) -> Result<(), ErrorCode> {
+        let mut state = self.synced.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if state.durable >= ticket {
+                return Ok(());
+            }
+            if state.syncing {
+                state = self
+                    .synced_cv
+                    .wait(state)
+                    .unwrap_or_else(|p| p.into_inner());
+                continue;
+            }
+            state.syncing = true;
+            drop(state);
+            // Read how far to sync as late as possible: everything appended
+            // before the `fsync` starts is covered by it.
+            let (head, handle) = {
+                let inner = self.lock();
+                (inner.position().head, inner.file.try_clone())
+            };
+            let synced = handle.and_then(|f| f.sync_data());
+            state = self.synced.lock().unwrap_or_else(|p| p.into_inner());
+            state.syncing = false;
+            if synced.is_ok() {
+                state.durable = state.durable.max(head);
+            }
+            self.synced_cv.notify_all();
+            if synced.is_err() {
+                return Err(ErrorCode::Storage);
+            }
+        }
     }
 
     /// `f` under the lock, with the position — for a read that must agree
@@ -338,7 +401,7 @@ impl Inner {
         Ok(())
     }
 
-    fn append(&mut self, ops: &[WriteOp]) -> Result<(), ChangeLogError> {
+    fn append(&mut self, ops: &[WriteOp], sync: bool) -> Result<(), ChangeLogError> {
         let payload = crate::codec::encode(&ops.to_vec())
             .map_err(|e| ChangeLogError::Format(format!("encoding an entry: {e}")))?;
         if payload.len() > MAX_ENTRY_BYTES {
@@ -346,7 +409,9 @@ impl Inner {
         }
         let at = self.len;
         self.write_record(KIND_ENTRY, &payload)?;
-        self.file.sync_data()?;
+        if sync {
+            self.file.sync_data()?;
+        }
         self.offsets.push(at);
         if self.len > self.retain_bytes && self.offsets.len() > 1 {
             self.compact()?;

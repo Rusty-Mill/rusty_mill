@@ -129,7 +129,7 @@ not a guess.
   manual step (stop the tool, serve the directory). Still absent: logging `detach_record` cascades and `Compact`, lifting the 8 MiB
   snapshot cap, and a cheaper log (measured, `ADR-0131`: the log costs one
   `fsync` per write and, on an update-heavy journaled table, group commit —
-  17k against 3k ops/s at 16 writers on the test disk); automatic failover, consensus and write forwarding stay
+  17k against 3k ops/s at 16 writers on the test disk; `ADR-0134` proposes and spikes a grouped sync that recovers most of it); automatic failover, consensus and write forwarding stay
   non-goals.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`

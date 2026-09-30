@@ -157,3 +157,7 @@ share its `fsync` the way the journal does (`GRP-FR-001`: append under the lock,
 one `fsync` for the group, apply in turn order), or log from inside the journal
 turn so the two share one `fsync`. Either is a change to the crash contract
 (what is durable when a write is acknowledged), so it wants its own ADR.
+
+**Follow-up:** `ADR-0134` proposes appending from inside the store's ordered section and
+syncing in a group, and records a `Memory` spike (journaled updates at 16 writers: 10.1k with
+it against 2.5k with the decorator, 14.9k with no log).

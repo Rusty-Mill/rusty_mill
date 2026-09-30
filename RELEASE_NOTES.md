@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db: a grouped change-log sync, spiked on Memory
+**2026-09-30** · [ADR-0134](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0134-grouped-change-log-sync.md)
+
+- **Added:** `ChangeLog::append_deferred` and `sync_through` (append without `fsync`, then one leader syncs for the group), `MemoryConnectionStore::with_change_log`, and `sink` rows in `change_log_bench`. Proposal only: the server does not use it, and `ChangeLogged` is unchanged.
+- **Measured:** journaled updates at 16 writers, 10.1k ops/s with the sink against 2.5k with the decorator (14.9k with no log). Insert-dominated tables lose nothing to the log.
+- Known limitation: only `Memory`'s atomic `write_batch` is wired; `Entity`, `Relation` and the single-shot write paths are not, so a table served this way must not use the sink yet.
+
+---
+
 ## rusty_multimodal_db: what the change log costs under load
 **2026-09-30** · [ADR-0131](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0131-continuous-replication.md)
 

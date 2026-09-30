@@ -1,7 +1,8 @@
 //! What the change log costs under concurrent writers (`ADR-0131`): the log's
 //! lock is held across the wrapped store's whole apply, so writers that the
 //! crash journal would group-commit into one `fsync` are serialised instead.
-//! This measures it: `Memory` writes through `write_batch(atomic)` from N
+//! `sink` rows are `ADR-0134`'s spike: the log appended inside the store's
+//! ordered section and synced in a group. This measures it: `Memory` writes through `write_batch(atomic)` from N
 //! threads, journaled or not, with and without `ChangeLogged`. `insert`
 //! (the default) appends to the insert log under the store's lock, so it
 //! already pays one `fsync` per write inside the apply; `update` sets a field
@@ -45,8 +46,17 @@ fn seed() -> Memory {
     }
 }
 
-/// A fresh table in `dir`: journaled or not, logged or not.
-fn build(dir: &Path, journaled: bool, logged: bool) -> Arc<dyn ConnectionStore> {
+#[derive(Clone, Copy)]
+enum Logging {
+    None,
+    /// `ChangeLogged`: the log's lock is held across the whole apply.
+    Decorator,
+    /// `ADR-0134`'s spike: appended inside the ordered section, synced in a group.
+    Sink,
+}
+
+/// A fresh table in `dir`: journaled or not, and logged how.
+fn build(dir: &Path, journaled: bool, logging: Logging) -> Arc<dyn ConnectionStore> {
     std::fs::create_dir_all(dir).expect("bench dir");
     let stack = create_memory_production_stack(vec![seed()], &[], &dir.join("memories.mmap"))
         .expect("create stack");
@@ -56,12 +66,14 @@ fn build(dir: &Path, journaled: bool, logged: bool) -> Arc<dyn ConnectionStore> 
     } else {
         MemoryConnectionStore::new(store)
     };
-    let adapter: Arc<dyn ConnectionStore> = Arc::new(adapter);
-    if !logged {
-        return adapter;
+    let open_log = || {
+        Arc::new(ChangeLog::open(&dir.join("table.changes"), DEFAULT_RETAIN_BYTES).expect("log"))
+    };
+    match logging {
+        Logging::None => Arc::new(adapter),
+        Logging::Decorator => Arc::new(ChangeLogged::new(Arc::new(adapter), open_log())),
+        Logging::Sink => Arc::new(adapter.with_change_log(open_log())),
     }
-    let log = ChangeLog::open(&dir.join("table.changes"), DEFAULT_RETAIN_BYTES).expect("log");
-    Arc::new(ChangeLogged::new(adapter, Arc::new(log)))
 }
 
 struct Cell {
@@ -132,15 +144,17 @@ fn main() {
         "{:<12} {:>7} {:>12} {:>10} {:>10}",
         "config", "threads", "ops/s", "p50 µs", "p99 µs"
     );
-    for (journaled, logged, name) in [
-        (false, false, "plain"),
-        (false, true, "logged"),
-        (true, false, "journal"),
-        (true, true, "journal+log"),
+    for (journaled, logging, name) in [
+        (false, Logging::None, "plain"),
+        (false, Logging::Decorator, "logged"),
+        (false, Logging::Sink, "sink"),
+        (true, Logging::None, "journal"),
+        (true, Logging::Decorator, "journal+log"),
+        (true, Logging::Sink, "journal+sink"),
     ] {
         for threads in [1usize, 2, 4, 8, 16] {
             let dir = root.join(format!("{name}_{threads}"));
-            let cell = run(build(&dir, journaled, logged), threads, secs, update);
+            let cell = run(build(&dir, journaled, logging), threads, secs, update);
             println!(
                 "{name:<12} {threads:>7} {:>12.0} {:>10.0} {:>10.0}",
                 cell.ops_per_sec, cell.p50_us, cell.p99_us
