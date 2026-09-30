@@ -199,7 +199,8 @@ fn main() {
         if access_logged { "configured" } else { "NOT configured" },
     );
 
-    serve(listener, connection_store, options);
+    // No `Shutdown` is configured, so this serves until the process ends.
+    let _ = serve(listener, connection_store, options);
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`) — see

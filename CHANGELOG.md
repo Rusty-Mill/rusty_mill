@@ -39,6 +39,9 @@ Removed / Fixed / Security, newest first.
     - Teardown signals a recorded pid only when its start fingerprint still matches, and `terminate` refuses pid 0 and out-of-range values.
     - Processes still alive after termination block a destructive close. A timeout is no longer treated as proof that nothing is running.
   - `rusty_tailscale` (`ts-engine`, `ts-magicsock`): a peer the netmap drops — absent from a full `Peers` snapshot, listed in `PeersRemoved`, or replaced by a rekey — loses its WireGuard session, address ownership, metadata, DNS names and disco state. Traffic from a non-member peer is dropped.
+  - `rusty_multimodal_db` drain:
+    - A request pipelined behind the one in flight is no longer executed after a shutdown (D4).
+    - `serve`/`serve_tables` return a `DrainOutcome`, and `memory_server` marks change logs clean only after a completed drain. It exits non-zero otherwise (D5).
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.

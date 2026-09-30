@@ -5,12 +5,12 @@
 use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memory};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::memory::MemoryConnectionStore;
+use rusty_multimodal_db::server::memory::{MemoryConnectionStore, FIELD_ACCESS_COUNT};
 use rusty_multimodal_db::server::protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
     Selection, TransactionOp, PROTOCOL_VERSION,
 };
-use rusty_multimodal_db::server::{serve, ConnectionStore, ServeOptions, Shutdown};
+use rusty_multimodal_db::server::{serve, ConnectionStore, DrainOutcome, ServeOptions, Shutdown};
 use std::io::{BufReader, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -111,7 +111,16 @@ fn memory(i: u128) -> Memory {
 }
 
 /// A `serve` on a thread, its `Shutdown`, and where to reach it.
-fn start(delay: Duration, drain: Duration) -> (SocketAddr, Shutdown, JoinHandle<()>) {
+fn start(delay: Duration, drain: Duration) -> (SocketAddr, Shutdown, JoinHandle<DrainOutcome>) {
+    let (addr, shutdown, handle, _) = start_with_store(delay, drain);
+    (addr, shutdown, handle)
+}
+
+/// [`start`], keeping a handle on the served store.
+fn start_with_store(
+    delay: Duration,
+    drain: Duration,
+) -> (SocketAddr, Shutdown, JoinHandle<DrainOutcome>, Arc<Slow>) {
     let dir = unique_dir("drain_integration");
     std::fs::create_dir_all(&dir).unwrap();
     let stack = create_memory_production_stack(
@@ -130,8 +139,9 @@ fn start(delay: Duration, drain: Duration) -> (SocketAddr, Shutdown, JoinHandle<
     let options = ServeOptions::new(None, None)
         .with_shutdown(shutdown.clone())
         .with_drain_timeout(drain);
-    let handle = thread::spawn(move || serve(listener, store, options));
-    (addr, shutdown, handle)
+    let served = Arc::clone(&store);
+    let handle = thread::spawn(move || serve(listener, served, options));
+    (addr, shutdown, handle, store)
 }
 
 fn connect(addr: SocketAddr) -> (BufReader<TcpStream>, BufWriter<TcpStream>) {
@@ -164,7 +174,7 @@ fn scan_query() -> Request {
     }
 }
 
-fn join_within(handle: JoinHandle<()>, limit: Duration) {
+fn join_within(handle: JoinHandle<DrainOutcome>, limit: Duration) -> DrainOutcome {
     let started = Instant::now();
     while !handle.is_finished() {
         assert!(
@@ -173,7 +183,7 @@ fn join_within(handle: JoinHandle<()>, limit: Duration) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    handle.join().unwrap();
+    handle.join().unwrap()
 }
 
 /// `DRN-FR-001`/`002`/`003`: an idle connection is closed, `serve` returns,
@@ -185,12 +195,13 @@ fn a_shutdown_closes_idle_connections_stops_accepting_and_returns() {
     assert!(!shutdown.is_requested());
     shutdown.request();
     assert!(shutdown.is_requested());
-    join_within(handle, Duration::from_secs(3));
+    let outcome = join_within(handle, Duration::from_secs(3));
     assert!(
         read_message::<_, Response>(&mut reader).is_err(),
         "the idle connection ended"
     );
     assert!(TcpStream::connect(addr).is_err(), "nothing is listening");
+    assert_eq!(outcome, DrainOutcome::Drained);
 }
 
 /// `DRN-FR-002`: a request in flight when the shutdown lands is answered in
@@ -211,7 +222,10 @@ fn a_request_in_flight_when_shutdown_lands_is_answered_first() {
         read_message::<_, Response>(&mut reader).is_err(),
         "then the connection ends"
     );
-    join_within(handle, Duration::from_secs(3));
+    assert_eq!(
+        join_within(handle, Duration::from_secs(3)),
+        DrainOutcome::Drained
+    );
 }
 
 /// `DRN-FR-004`: without a `Shutdown`, `serve` is what it always was; a
@@ -235,5 +249,67 @@ fn a_shutdown_requested_before_serve_starts_returns_at_once() {
             ServeOptions::new(None, None).with_shutdown(shutdown),
         )
     });
-    join_within(handle, Duration::from_secs(3));
+    assert_eq!(
+        join_within(handle, Duration::from_secs(3)),
+        DrainOutcome::Drained
+    );
+}
+
+/// Design review D4: a request pipelined behind the one in flight — already
+/// in the server's read buffer when the shutdown lands — is never executed.
+/// Only the in-flight request is answered.
+#[test]
+fn a_request_pipelined_behind_the_in_flight_one_is_not_executed() {
+    let (addr, shutdown, handle, store) =
+        start_with_store(Duration::from_millis(400), Duration::from_secs(5));
+    let (mut reader, mut writer) = connect(addr);
+    let id = Uuid::from_u128(1);
+    let before = store.get(id).unwrap();
+    // Both frames in one flush, so they arrive (and are buffered) together.
+    write_message(&mut writer, &scan_query()).unwrap();
+    write_message(
+        &mut writer,
+        &Request::UpdateField {
+            id,
+            field: FIELD_ACCESS_COUNT,
+            value: ScanValue::I64(99),
+        },
+    )
+    .unwrap();
+    writer.flush().unwrap();
+    thread::sleep(Duration::from_millis(100)); // the scan is now sleeping
+    shutdown.request();
+    assert!(matches!(
+        read_message::<_, Response>(&mut reader).unwrap(),
+        Response::Rows { .. }
+    ));
+    assert!(
+        read_message::<_, Response>(&mut reader).is_err(),
+        "the pipelined request gets no answer: the connection ends"
+    );
+    assert_eq!(
+        join_within(handle, Duration::from_secs(3)),
+        DrainOutcome::Drained
+    );
+    assert_eq!(
+        store.get(id).unwrap(),
+        before,
+        "the pipelined write never ran"
+    );
+}
+
+/// Design review D5: a drain whose deadline passes with a connection still
+/// busy says so. It is not reported as a completed drain.
+#[test]
+fn a_drain_that_misses_its_deadline_reports_the_open_connections() {
+    let (addr, shutdown, handle) = start(Duration::from_millis(1500), Duration::from_millis(200));
+    let (_reader, mut writer) = connect(addr);
+    write_message(&mut writer, &scan_query()).unwrap();
+    writer.flush().unwrap();
+    thread::sleep(Duration::from_millis(100));
+    shutdown.request();
+    assert_eq!(
+        join_within(handle, Duration::from_secs(3)),
+        DrainOutcome::TimedOut { open: 1 }
+    );
 }
