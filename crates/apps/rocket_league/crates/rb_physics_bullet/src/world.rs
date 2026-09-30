@@ -84,27 +84,12 @@ fn clamp_ball_velocity(ball: &mut RigidBody) {
 /// setup ever reads the shared body's velocity (see `step`'s own doc
 /// comment). Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
-/// `ControllerInput::default()` — neutral — until set), a boost resource
-/// (`car_boost`, set via `set_car_boost`, starting full), a remembered base
-/// friction (`car_base_friction`, snapshotted from the car's own
-/// `RigidBody.friction` when added) that `drive::apply_driven_forces` uses
-/// to restore grip after a handbrake-induced reduction, a remembered
-/// jump-held state (`car_jump_held`, starting `false`) that
-/// `drive::apply_driven_forces` uses to fire jump only on a fresh press,
-/// a remembered double-jump-available flag (`car_double_jump_available`,
-/// starting `true`) that `drive::apply_driven_forces` resets whenever the
-/// car touches the ground *or* a wall and consumes when an airborne fresh
-/// press spends it on a plain double jump (not a wall jump), and a
-/// remembered jump-hold-window (`car_jump_hold_time_remaining`, starting
-/// `0.0`) that `drive::apply_driven_forces` uses to give the ground jump
-/// variable height — armed to `drive::JUMP_HOLD_MAX_DURATION` by a fresh
-/// ground-jump press, counted down while `jump` stays held, and zeroed
-/// immediately on release — and a remembered cancelable-flip flag
-/// (`car_dodge_flip_active`, starting `false`) that `drive::apply_driven_forces`
-/// sets whenever a dodge fires, clears whenever a plain double jump fires
-/// (so a stale flag from an earlier dodge can't leak into a later,
-/// unrelated double jump), and spends on a further fresh press to
-/// flip-cancel the dodge's spin — all driving the car via
+/// `ControllerInput::default()` — neutral — until set) and a
+/// `drive::DriveState` (`car_drive`, starting at `DriveState::new` with the
+/// car's own `RigidBody.friction` snapshotted as its base friction): boost
+/// fuel (settable via `set_car_boost`), jump-held edge tracking, the double
+/// jump, the jump-hold window, and the cancelable dodge flip — all driving
+/// the car via
 /// `drive::apply_driven_forces`. Since `RB-PHYSICS-001-FR-033`, `nets`
 /// (added via `with_net`) gives the ball a real mass-spring net to be
 /// caught by, resolved after every other contact each step, and since
@@ -113,12 +98,7 @@ pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
     car_inputs: Vec<ControllerInput>,
-    car_boost: Vec<f32>,
-    car_base_friction: Vec<f32>,
-    car_jump_held: Vec<bool>,
-    car_double_jump_available: Vec<bool>,
-    car_jump_hold_time_remaining: Vec<f32>,
-    car_dodge_flip_active: Vec<bool>,
+    car_drive: Vec<drive::DriveState>,
     pub ground: StaticPlane,
     pub walls: Vec<StaticPlane>,
     /// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`),
@@ -203,12 +183,7 @@ impl PhysicsWorld {
             ball,
             cars: Vec::new(),
             car_inputs: Vec::new(),
-            car_boost: Vec::new(),
-            car_base_friction: Vec::new(),
-            car_jump_held: Vec::new(),
-            car_double_jump_available: Vec::new(),
-            car_jump_hold_time_remaining: Vec::new(),
-            car_dodge_flip_active: Vec::new(),
+            car_drive: Vec::new(),
             ground,
             walls: Vec::new(),
             curves: Vec::new(),
@@ -305,10 +280,10 @@ impl PhysicsWorld {
     /// candidate frame outside any real capture's own alignment tolerance.
     ///
     /// Each car's `boost_amount` is seeded from the frame's own recorded
-    /// value via `set_car_boost`. Every other per-car runtime state
-    /// `PhysicsWorld` tracks but a `PhysicsFrame` doesn't carry at all
-    /// (`car_jump_held`, `car_double_jump_available`,
-    /// `car_jump_hold_time_remaining`, `car_dodge_flip_active`) is left at
+    /// value via `set_car_boost`. Every other `DriveState` field a
+    /// `PhysicsFrame` doesn't carry at all (`jump_held`,
+    /// `double_jump_available`, `jump_hold_time_remaining`,
+    /// `dodge_flip_active`) is left at
     /// `with_car`'s own fixed defaults (not held, double-jump available,
     /// zero hold time, no dodge in progress) — accurate only if `frame`
     /// captures a genuinely neutral, grounded moment. Choosing such a
@@ -426,14 +401,9 @@ impl PhysicsWorld {
     /// two-car scene — since a car's `player_id` in `frame()` is just its
     /// index in `cars`, added cars are always appended, never inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
-        self.car_base_friction.push(car.friction);
+        self.car_drive.push(drive::DriveState::new(car.friction));
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
-        self.car_boost.push(drive::MAX_BOOST);
-        self.car_jump_held.push(false);
-        self.car_double_jump_available.push(true);
-        self.car_jump_hold_time_remaining.push(0.0);
-        self.car_dodge_flip_active.push(false);
         self
     }
 
@@ -450,7 +420,7 @@ impl PhysicsWorld {
     /// `[0, drive::MAX_BOOST]`. Panics if `index` is out of bounds (see
     /// `set_car_input`).
     pub fn set_car_boost(&mut self, index: usize, amount: f32) {
-        self.car_boost[index] = amount.clamp(0.0, drive::MAX_BOOST);
+        self.car_drive[index].boost_amount = amount.clamp(0.0, drive::MAX_BOOST);
     }
 
     /// Applies forces and integrates velocities for one body — the first
@@ -468,9 +438,10 @@ impl PhysicsWorld {
     /// applies `drive::apply_driven_forces` (throttle/steer/handbrake/jump
     /// gated on `on_ground`, computed from the car's position at the start
     /// of this step, before anything moves; boost not gated on it, but
-    /// draining `boost_amount`; handbrake temporarily lowering
-    /// `car.friction` below `base_friction`; jump firing an instantaneous
-    /// upward velocity change on a fresh press, tracked via `jump_held`;
+    /// draining `drive_state.boost_amount`; handbrake temporarily lowering
+    /// `car.friction` below `drive_state.base_friction`; jump firing an
+    /// instantaneous upward velocity change on a fresh press, tracked via
+    /// `drive_state.jump_held`;
     /// double jump firing the same kind of impulse on a fresh airborne
     /// press, gated on and consuming `double_jump_available`, restored on
     /// landing; wall jump firing an outward-plus-upward impulse instead,
@@ -485,36 +456,18 @@ impl PhysicsWorld {
     /// this step's angular velocity — air control torque and any direct
     /// writes (a dodge's kick, the landing-orientation assist) alike —
     /// never leaves this function above `drive::MAX_CAR_ANGULAR_SPEED`.
-    #[allow(clippy::too_many_arguments)]
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
         on_ground: bool,
         wall_normal: Option<Vec3>,
-        boost_amount: &mut f32,
-        jump_held: &mut bool,
-        double_jump_available: &mut bool,
-        jump_hold_time_remaining: &mut f32,
-        dodge_flip_active: &mut bool,
-        base_friction: f32,
+        drive_state: &mut drive::DriveState,
         gravity: Vec3,
         dt: f32,
     ) {
         car.clear_forces();
         integrate::apply_gravity(car, gravity);
-        drive::apply_driven_forces(
-            car,
-            input,
-            on_ground,
-            wall_normal,
-            boost_amount,
-            jump_held,
-            double_jump_available,
-            jump_hold_time_remaining,
-            dodge_flip_active,
-            base_friction,
-            dt,
-        );
+        drive::apply_driven_forces(car, input, on_ground, wall_normal, drive_state, dt);
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
         drive::clamp_angular_speed(car);
@@ -726,39 +679,20 @@ impl PhysicsWorld {
             .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for (
-            (
-                (
-                    ((((((car, input), on_ground), wall_normal), boost), base_friction), jump_held),
-                    double_jump_available,
-                ),
-                jump_hold_time_remaining,
-            ),
-            dodge_flip_active,
-        ) in self
+        for ((((car, input), on_ground), wall_normal), drive_state) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
             .zip(car_on_ground.iter())
             .zip(car_wall_normal.iter())
-            .zip(self.car_boost.iter_mut())
-            .zip(self.car_base_friction.iter())
-            .zip(self.car_jump_held.iter_mut())
-            .zip(self.car_double_jump_available.iter_mut())
-            .zip(self.car_jump_hold_time_remaining.iter_mut())
-            .zip(self.car_dodge_flip_active.iter_mut())
+            .zip(self.car_drive.iter_mut())
         {
             Self::drive_and_integrate_velocities(
                 car,
                 input,
                 *on_ground,
                 *wall_normal,
-                boost,
-                jump_held,
-                double_jump_available,
-                jump_hold_time_remaining,
-                dodge_flip_active,
-                *base_friction,
+                drive_state,
                 self.gravity,
                 dt,
             );
@@ -875,15 +809,15 @@ impl PhysicsWorld {
             .cars
             .iter()
             .zip(self.car_inputs.iter())
-            .zip(self.car_boost.iter())
+            .zip(self.car_drive.iter())
             .enumerate()
-            .map(|(i, ((car, input), boost))| CarState {
+            .map(|(i, ((car, input), drive_state))| CarState {
                 player_id: i as u32,
                 position: car.position,
                 rotation: car.orientation,
                 velocity: car.linear_velocity,
                 angular_velocity: car.angular_velocity,
-                boost_amount: *boost,
+                boost_amount: drive_state.boost_amount,
                 input: Some(*input),
             })
             .collect();

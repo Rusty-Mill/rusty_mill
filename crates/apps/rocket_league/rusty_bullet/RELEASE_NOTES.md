@@ -6,6 +6,23 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Grouped per-car drive state into `DriveState`
+**2026-09-30** · refactor, no behavior change
+
+- New `rb_physics_bullet::drive::DriveState` holds the six per-car values
+  `apply_driven_forces` carries across steps; `DriveState::new(base_friction)`
+  gives `with_car`'s old defaults. Each field's rules moved from the
+  function's doc comment onto the field itself.
+- `apply_driven_forces(car, input, on_ground, wall_normal, &mut state, dt)`
+  replaces the 11-parameter form, and `PhysicsWorld` keeps a
+  `Vec<DriveState>` instead of six parallel `Vec`s. Both production
+  `too_many_arguments` suppressions in the drive path are gone.
+- 2 new tests (`DriveState::new` defaults; one step updates every field it
+  owns). The existing test helper chain packs/unpacks at its innermost
+  call, so all 395 existing tests pass unmodified (397 total).
+
+---
+
 ## Split `drive.rs` by mechanic; fixed stale docs
 **2026-09-30** · refactor, no behavior change
 
