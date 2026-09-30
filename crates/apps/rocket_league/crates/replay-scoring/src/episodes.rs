@@ -8,6 +8,7 @@ use replay_analyzer::field::{BACK_WALL_Y, BALL_RADIUS, SIDE_WALL_X};
 use replay_analyzer::model::{CanonicalMatch, Event, StatKind, Vec3};
 use serde::Serialize;
 
+use crate::chains::ChainEnd;
 use crate::config::ScoreConfig;
 use crate::features::{build_frames, dist, frame_at_time, sub, CarView, FrameView};
 use crate::roles::{self, ManRole, Roles};
@@ -61,6 +62,21 @@ pub enum Episode {
         /// Chance of scoring, from the [`XgModel`] the episodes were extracted with.
         xg: f32,
     },
+    /// A team's run of touches (see [`crate::chains`]); `pri` is who started it.
+    Chain {
+        pri: i32,
+        team: i32,
+        t: f32,
+        dur: f32,
+        touches: u8,
+        /// Ball progress toward the goal the team attacks, first to last touch (uu).
+        gained: f32,
+        end: ChainEnd,
+        /// Σ ΔV of the chain's touches.
+        dv: f32,
+        /// Σ xG of the shots it produced.
+        xg: f32,
+    },
     /// `pri` demolished `victim`. `down` is how long the victim was out (until their
     /// car reappears, at most `DEMO_DOWN_CAP_S`); `goal` is whether the demolisher's
     /// team scored within `GOAL_AFTER_DEMO_S` of it.
@@ -94,7 +110,8 @@ impl Episode {
             | Self::Challenge { t0: t, .. }
             | Self::Loss { t, .. }
             | Self::Shot { t, .. }
-            | Self::Demo { t, .. } => *t,
+            | Self::Demo { t, .. }
+            | Self::Chain { t, .. } => *t,
         }
     }
     pub fn pri(&self) -> i32 {
@@ -103,13 +120,15 @@ impl Episode {
             | Self::Challenge { pri, .. }
             | Self::Loss { pri, .. }
             | Self::Shot { pri, .. }
-            | Self::Demo { pri, .. } => *pri,
+            | Self::Demo { pri, .. }
+            | Self::Chain { pri, .. } => *pri,
         }
     }
     pub fn dur(&self) -> f32 {
         match self {
             Self::Recovery { dur, .. } | Self::Challenge { dur, .. } => *dur,
             Self::Demo { down, .. } => *down,
+            Self::Chain { dur, .. } => *dur,
             Self::Loss { .. } | Self::Shot { .. } => 0.0,
         }
     }
@@ -154,6 +173,13 @@ impl Episode {
     pub fn danger(&self) -> f32 {
         match self {
             Self::Loss { danger, .. } => *danger,
+            _ => 0.0,
+        }
+    }
+    /// Expected goals of a `Shot`, or of the shots behind a `Chain` (0 otherwise).
+    pub fn xg(&self) -> f32 {
+        match self {
+            Self::Shot { xg, .. } | Self::Chain { xg, .. } => *xg,
             _ => 0.0,
         }
     }

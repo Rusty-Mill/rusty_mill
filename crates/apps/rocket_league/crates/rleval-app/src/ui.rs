@@ -625,7 +625,25 @@ function finishing(d, who) {
     `${d.xg_version.includes("prior") ? " (a hand-set prior, not yet fitted on the corpus)" : ""}. Goals − xG over a single match is mostly noise; read it across many matches.`,
     `<th>Player</th><th class="num">Shots</th><th class="num">Goals</th><th class="num">xG</th><th class="num">Goals − xG</th>`, rows, "", 5);
 }
-const momentCols = (e, who) => e.kind === "demo"
+const CHAIN_END = { goal: "✓ goal", shot: "shot", lost: "lost to the opponent", dead: "stoppage / loose ball" };
+// Per team: how its possession chains ended, and what they were worth (ΔV, xG).
+function chainSummary(d) {
+  const cs = (d.episodes || []).filter(e => e.kind === "chain");
+  if (!cs.length) return "";
+  const rows = [0, 1].map(t => {
+    const mine = cs.filter(e => e.team === t), n = mine.length || 1, end = k => mine.filter(e => e.end === k).length;
+    const sum = f => mine.reduce((s, e) => s + f(e), 0);
+    return `<tr><td><span class="badge t${t}">${teamName(t)}</span></td><td class="num">${mine.length}</td>
+      <td class="num">${fmt(sum(e => e.touches) / n, 1)}</td><td class="num">${fmt(sum(e => e.gained) / n / 100, 0)} m</td>
+      <td class="num">${end("shot")} / ${end("goal")}</td><td class="num">${end("lost")}</td>
+      <td class="num ${sum(e => e.dv) >= 0 ? "pos" : "neg"}">${signed(sum(e => e.dv), 2)}</td><td class="num">${fmt(sum(e => e.xg), 2)}</td></tr>`;
+  }).join("");
+  return cardTable("Possession chains — a team's run of touches (each within 3 s of the last), ended by the other team's touch, a stoppage, a shot or a goal. ΔV is the value model's swing over the chain's touches; xG is from its shots.",
+    `<th>Team</th><th class="num">Chains</th><th class="num">Touches</th><th class="num">Gained</th><th class="num">Shots / goals</th><th class="num">Lost</th><th class="num">ΔV</th><th class="num">xG</th>`, rows, "", 8);
+}
+const momentCols = (e, who) => e.kind === "chain"
+  ? [`Possession · ${e.touches} touch${e.touches > 1 ? "es" : ""}`, `${CHAIN_END[e.end]} · ${signed(e.gained / 100, 0)} m · ΔV ${signed(e.dv, 2)}${e.xg ? " · xG " + fmt(e.xg, 2) : ""}`]
+  : e.kind === "demo"
   ? ["Demo of " + esc(who[e.victim]?.target_player ?? "?"), e.down > 0 ? `${e.goal ? "✓ goal within 8 s · " : ""}out ${fmt(e.down, 1)} s` : "not seen leaving the field"]
   : e.kind === "shot"
   ? ["Shot · " + fmt(e.speed * 0.036, 0) + " km/h", `<span class="${e.outcome === "goal" ? "pos" : "muted"}">${OUT[e.outcome][0]}</span> · xG ${fmt(e.xg, 2)}`]
@@ -637,22 +655,26 @@ const momentCols = (e, who) => e.kind === "demo"
   : ["Recovery", e.done ? "✓ recovered" : "✗ not within the cap"];
 function renderMoments(d) {
   const who = Object.fromEntries((d.scores || []).map(r => [r.target_pri, r]));
-  const draw = pri => {
-    const evs = (d.episodes || []).filter(e => who[e.pri] && (pri === "" || String(e.pri) === pri));
+  const draw = () => {
+    const pri = $("momentsWho").value, kind = $("momentsKind").value;
+    const evs = (d.episodes || []).filter(e => who[e.pri] && (pri === "" || String(e.pri) === pri) && (kind === "" || e.kind === kind));
     const rows = evs.map(e => { const [what, res] = momentCols(e, who); return `<tr class="mrow" data-t="${e.t ?? e.t0}"><td class="num">${mmss(e.t ?? e.t0)}</td>
         <td>${nameCell(who[e.pri].target_team, who[e.pri].target_player)}</td><td>${what}</td>
         <td class="num">${e.dur == null ? "" : fmt(e.dur, 2) + " s"}</td><td>${res}</td></tr>`; }).join("");
     $("momentsBody").innerHTML = cardTable("Click a moment to jump to it in the 3D viewer.",
       `<th class="num">Time</th><th>Player</th><th>Moment</th><th class="num">Duration</th><th>Result</th>`,
       rows, "No moments.", 5);
-    $("momentsBody").insertAdjacentHTML("afterbegin", physicality(d, who) + finishing(d, who) + shotMap(evs.filter(e => e.kind === "shot")));
+    $("momentsBody").insertAdjacentHTML("afterbegin", physicality(d, who) + finishing(d, who) + chainSummary(d) + shotMap(evs.filter(e => e.kind === "shot")));
     document.querySelectorAll("#momentsBody .mrow").forEach(tr => tr.onclick = () => seekViewer(+tr.dataset.t));
   };
   $("tab-moments").innerHTML = `<div class="hist-bar"><select id="momentsWho"><option value="">All players</option>` +
     Object.values(who).map(r => `<option value="${r.target_pri}">${esc(r.target_player)}</option>`).join("") +
+    `</select><select id="momentsKind"><option value="">All moments</option>` +
+    Object.entries({ recovery: "Recoveries", challenge: "50/50s", loss: "Possession losses", shot: "Shots", demo: "Demos", chain: "Possession chains" })
+      .map(([k, v]) => `<option value="${k}">${v}</option>`).join("") +
     `</select></div><div id="momentsBody"></div>`;
-  $("momentsWho").onchange = e => draw(e.target.value);
-  draw("");
+  $("momentsWho").onchange = $("momentsKind").onchange = draw;
+  draw();
 }
 
 function renderStats(d) {

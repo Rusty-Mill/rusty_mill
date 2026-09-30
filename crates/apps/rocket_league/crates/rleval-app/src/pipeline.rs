@@ -26,13 +26,13 @@ use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
 use replay_scoring::{
-    attach_relative, extract_with, score_all, Episode, RankNorms, Report, ScoreConfig, XgModel,
+    attach_relative, chains, extract_with, score_all, Episode, RankNorms, Report, ScoreConfig, XgModel,
 };
 
 use replay_skills::profile::{profiles, PlayerSkillProfile};
 use replay_skills::{detect_all, SkillConfig, SkillReport};
 
-use replay_value::{evaluate, PlayerValue, ValueConfig};
+use replay_value::{evaluate, per_touch_delta_v, PlayerValue, ValueConfig};
 
 use replay_viewer::{
     attach_impact, attach_player_stats, attach_roles, attach_winprob, build_scene, html_offline,
@@ -236,7 +236,7 @@ pub fn analyze(
     // 2. Decision-discipline scoring (per player) + the lobby report HTML.
     let score_cfg = ScoreConfig::default();
     let mut scores = score_all(&canonical, &score_cfg);
-    let episodes = extract_with(&canonical, &score_cfg, xg);
+    let mut episodes = extract_with(&canonical, &score_cfg, xg);
     // Additive rank-relative layer: grade each player against their bracket. No
     // norms ⇒ untouched (every report stays purely absolute).
     if let Some(norms) = norms {
@@ -261,6 +261,11 @@ pub fn analyze(
     // 4. Value model (ΔV) — trained in-process on this match, no model file.
     let value_cfg = ValueConfig::default();
     let evaluation = evaluate(&canonical, &value_cfg);
+    // Possession chains are valued with the same per-touch ΔV, so they come after it.
+    let touch_dv = per_touch_delta_v(&canonical, &evaluation.model, &value_cfg);
+    let runs = chains(&canonical, &touch_dv, &episodes);
+    episodes.extend(runs);
+    episodes.sort_by(|a, b| a.t().total_cmp(&b.t()).then(a.pri().cmp(&b.pri())));
     let impact = ImpactSummary {
         base_rate: evaluation.base_rate,
         log_loss: evaluation.log_loss,

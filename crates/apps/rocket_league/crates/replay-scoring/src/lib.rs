@@ -11,6 +11,7 @@
 //! numbers require a labeled corpus (see the design spec §0/§13).
 
 pub mod calibrate;
+pub mod chains;
 pub mod config;
 pub mod contract;
 pub mod coverage;
@@ -33,6 +34,7 @@ use replay_analyzer::model::CanonicalMatch;
 
 pub use config::{ScoreConfig, SCORE_CONFIG_VERSION};
 pub use contract::{cross_check, BallchasingReplay, CrossCheckReport};
+pub use chains::{chains, ChainEnd};
 pub use episodes::{extract, extract_with, Episode};
 pub use xg::XgModel;
 pub use relative::{attach_relative, BucketNorm, RankNorms, RelativeReport};
