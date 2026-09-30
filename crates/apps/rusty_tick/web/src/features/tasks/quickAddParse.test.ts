@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { List, Task } from '@/api/types'
 import { startOfDay } from '@/lib/date'
-import { buildQuickAdd, defaultListId, type QuickAddContext } from './quickAdd'
+import { buildQuickAdd, defaultListId, type QuickAddContext } from './quickAddParse'
 
 const NOW = new Date(2026, 8, 29, 12).getTime()
 const INBOX = 'inbox'
