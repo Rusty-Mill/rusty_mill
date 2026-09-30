@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_tick`: type-ahead search** on the engine's `any_of_prefix`.
 - **`rusty_tick user ...`**: add, list, revoke, disable and enable users in `users.json` from the command line (ADR-0002 step 4).
 - **`rusty_tick`: `user adopt`** moves a single-user store into a user; `user` commands are serialised by `users.lock`.
 - **`rusty_tick`: several users on one server**, chosen by `<data-dir>/users.json`: per-user tokens, a store per user, live revocation, uniform `401`s (ADR-0002 step 3).
