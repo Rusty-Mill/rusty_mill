@@ -9,7 +9,7 @@ import type { ApiClient } from '@/api/client'
 import { NotFoundError } from '@/api/errors'
 import type { DocKind } from '@/api/types'
 import { newId } from '@/lib/id'
-import { asCheckinBody, asHabitBody, checkinId, type Checkin, type Habit, type HabitBody } from './logic'
+import { asCheckinBody, asHabitBody, checkinId, parseGoal, type Checkin, type Habit, type HabitBody } from './logic'
 
 const CACHE = 'tick-local:habits:v1'
 type Notify = (kind: 'error' | 'info', message: string) => void
@@ -148,13 +148,16 @@ export const useHabits = create<HabitsState>()((set, get) => {
 
     toggle(habitId, day) {
       const id = checkinId(habitId, day)
+      const goal = parseGoal(get().habits.find((h) => h.id === habitId)?.goal ?? '').count
+      const count = get().checkins[id]?.count ?? 0
+      const next = count >= goal ? 0 : count + 1 // each click adds one until the goal is met; one more clears the day
       const checkins = { ...get().checkins }
-      if (checkins[id]) {
+      if (next === 0) {
         delete checkins[id]
         commit({ habits: get().habits, checkins })
         del('habit_checkin', id, 'the check-in')
       } else {
-        const body = { habitId, day, count: 1 }
+        const body = { habitId, day, count: next }
         checkins[id] = { id, ...body }
         commit({ habits: get().habits, checkins })
         put('habit_checkin', id, body, 'the check-in')

@@ -48,9 +48,9 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 - Reminders: task and habit reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in). Firing with the app closed needs Web Push (a push service and VAPID keys), which conflicts with staying self-contained; it is not planned.
 - Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
 - Settings: Account, Notifications, Date & Time, Appearance, Shortcuts and About are real; the other seven tabs are placeholders.
-- Comments are `comment` docs; a task's comments are deleted when the task is purged (they survive the Trash, so a restore loses nothing); opening an account also sweeps any that an older version left behind. Import Backups adds what a backup lacks (habits and comments are not in a backup); Delete All Data empties the account but keeps the sign-in — there is no account deletion.
+- Comments are `comment` docs; a task's comments are deleted when the task is purged (they survive the Trash, so a restore loses nothing); opening an account also sweeps any that an older version left behind. A backup carries tasks, lists, tags and the client documents (habits, check-ins, comments, focus records, preferences); Import Backups adds what the account lacks, and leaves out the comments of tasks that were in the Trash; Delete All Data empties the account but keeps the sign-in — there is no account deletion.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
-- Habits: a check-in means "done" (the goal amount is text).
+- Habits: the goal amount counts — each click adds one until the goal is met; a day only keeps a streak and silences its reminder once it is. Changing a habit's goal later re-judges its past days.
 - Sync is by polling every 30 s and on window focus. A push channel would need a streaming endpoint and a service worker, which the self-hosted server does not have; it is not planned.
 - Compared by eye against screenshots of the real app (not pixel-diffed); differences that remain are listed in the pull requests that closed the gap.
