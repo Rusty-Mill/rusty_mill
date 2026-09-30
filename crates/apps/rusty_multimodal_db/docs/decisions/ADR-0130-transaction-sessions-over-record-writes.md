@@ -1,4 +1,4 @@
-# ADR-0130: Transaction Sessions Over Record Writes (Proposal)
+# ADR-0130: Transaction Sessions Over Record Writes
 
 - Status: **Accepted (the owner: "go with recommendations", 2026-09-30) and phase 1 implemented** as option 1 (unify on `WriteOp`), `SERVER-001` v0.106.0 / `FR-119`, `SERVER-002` 0.22.0. Phases 2 and 3 are not built.
 - Date: 2026-09-30

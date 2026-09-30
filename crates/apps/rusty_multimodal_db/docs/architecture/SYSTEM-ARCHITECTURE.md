@@ -24,6 +24,37 @@ corners named in ADR-0008/ADR-0007/ADR-0006 (e.g. sharded locking for a
 small, write-heavy, high-thread-count deployment); otherwise, use
 `ProductionStore`.
 
+## Current layering (added after the first pass)
+
+The crate is now three layers, from the bottom up. The rest of this
+document describes only the first pass's benchmark harness.
+
+1. **The engine** — `crates/libs/storage/rusty_multimodal_db_engine`
+   (`ADR-0124`): the generic record/schema/query layers, mmap slot files
+   and blobs, the insert log, the redo journal, the full-text index and the
+   data-directory lock. This crate re-exports it as
+   `rusty_multimodal_db::generic::*`.
+2. **The stores and domains** (this crate, default features):
+   `ProductionStore`, `GenericProductionStore`, and the domain stacks
+   `generic::{memory,entity,relation,reminder}`.
+3. **The server and clients** (`server`/`client` features):
+   `src/server/` — the versioned wire protocol (`protocol.rs`, currently
+   version 35, specified in `SERVER-002`), framing, `dispatch`/`serve`, seven
+   `ConnectionStore` adapters (`memory`, `entity`, `relation`, `reminder`;
+   reference: `dog`, `order`, `employee`), the query planner inside `serve`
+   (`ADR-0073` onward, `ADR-0132`), sessions and MVCC (`mvcc`, `strict`),
+   the redo journal glue (`journal`), the change log for replication
+   (`changelog`, `changelogged`, `ADR-0131`), auth/TLS/audit, metrics, and
+   the Rust and Python clients (`client`, `clients/python/`). Binaries:
+   `dog_server`, `reminder_server`, `entity_server`, `memory_server`;
+   operator tools in `examples/` (`restore_backup`, `replica_refresh`,
+   `migrate_memory_v1_to_v2`).
+
+Dependencies point down: the server depends on the stores and the engine;
+the engine depends on neither. The requirement-level account of the server
+is `docs/specifications/server/SERVER-001-query-layer.md`; the byte-level
+one is `SERVER-002`.
+
 ## Context
 
 > **Written for the first pass; kept as written.** The paragraph below
@@ -31,9 +62,10 @@ small, write-heavy, high-thread-count deployment); otherwise, use
 > the crate gained durable, concurrency-safe stores (`ProductionStore`,
 > `GenericProductionStore` — "Start here" above), and behind the `server`
 > feature a real network server/query layer with a versioned wire
-> protocol, six domain adapters, sessions, a redo journal, runtime
+> protocol, seven domain adapters, sessions, a redo journal, runtime
 > insertion/linking/replacement/deletion, several tables on one
-> connection, and compaction (`ADR-0010` through `ADR-0052`). For how
+> connection, compaction, MVCC, a query planner, and replication
+> (`ADR-0010` through `ADR-0133`). For how
 > *that* fits together, `src/server/mod.rs`'s module docs and
 > `docs/specifications/server/SERVER-001-query-layer.md` are the current
 > account; this document remains the benchmark's.
@@ -126,7 +158,7 @@ that same process on Linux.
 | `durability` | Eight durability prototypes for `CanonicalCachedStore`'s architecture (WAL/snapshot/hybrid/mmap/LSM/`redb`) | `store`, `record` |
 | `concurrency` | Four concurrent-access strategies for `CanonicalCachedStore` (global `RwLock`/sharded/`dashmap`/actor) | `store`, `record` |
 | `production` | **Start here** — `ProductionStore`, wiring `durability::MmapAgeStore` and the `concurrency::global_rwlock` pattern together | `durability`, `concurrency`, `store`, `record`, `bench_support` |
-| `benches/workloads` | Criterion harness, backend-agnostic | `generator`, `store`, all backends including `production` |
+| `benches/workloads.rs` | Criterion harness, backend-agnostic | `generator`, `store`, all backends including `production` |
 
 Dependency direction is one-way: backends depend on `store` and `record`,
 never the reverse; `production` depends on one durability variant and one

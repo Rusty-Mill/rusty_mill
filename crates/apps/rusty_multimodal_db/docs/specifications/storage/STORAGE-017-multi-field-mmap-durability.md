@@ -17,7 +17,7 @@
 
 ## Purpose and scope
 
-`GenericMmapStore<R, IndexMarker, ScanMarker>` (`src/generic/mmap_store.rs`)
+`GenericMmapStore<R, IndexMarker, ScanMarker>` (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`)
 owns every record, one equality index, and exactly *one* mmap-backed
 scannable field. Every other field of `R` is durable through the
 companion `.records` blob but immutable through the store: for `Order`,
@@ -33,7 +33,7 @@ mmap_scanned.rs`), the durable twin of `Scanned<S, R, Marker>` — one
 more mutable, durable, scannable field over any inner store, backed by
 its own slot file in exactly `GenericMmapStore`'s existing `GMMAPST\0`
 version-2 format. The file mechanics both stores share are extracted
-into a `pub(crate)` **`SlotFile<Id, V>`** (`src/generic/slot_file.rs`)
+into a `pub(crate)` **`SlotFile<Id, V>`** (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/slot_file.rs`)
 with `GenericMmapStore` delegating to it and no behaviour change.
 `forward_scannable_pairs!` gains a `for MmapScanned;` arm so the
 cross-marker forwards are generated, not hand-written. The reference
@@ -169,7 +169,7 @@ document's `MFMD-FR-001..009`, renumbered into this spec's namespace.
 
 ## Architecture and interfaces
 
-- `src/generic/slot_file.rs` (new, `pub(crate)`): `MAGIC`,
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/slot_file.rs` (new, `pub(crate)`): `MAGIC`,
   `SCHEMA_VERSION`, `HEADER_LEN`, `COMMITTED` (moved verbatim from
   `mmap_store.rs`); `SlotFile<Id, V> { mmap: MmapMut, path: PathBuf }`
   with `slot_width()`, `slot_offset(position)`, `read_value`,
@@ -182,20 +182,20 @@ document's `MFMD-FR-001..009`, renumbered into this spec's namespace.
   Private: `write_slot_into`, `is_committed`, `append_committed_slot`,
   `write_header`, `read_header`. No tests of its own — `mmap_store.rs`'s
   16 tests are the guard, unchanged.
-- `src/generic/mmap_store.rs`: `GenericMmapStore` holds a `SlotFile`
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`: `GenericMmapStore` holds a `SlotFile`
   instead of a raw `MmapMut` + path and delegates every file operation;
   `create`/`open`/`scan`/`update`/`get`/`flush` semantics unchanged.
   Module docs gain a closing section on the shared engine and on the
   one policy divergence (this store tolerates trailing partial bytes;
   the layer refuses them). Tests textually unchanged; test-only imports
   now come from `slot_file`.
-- `src/generic/mmap_scanned.rs` (new, `pub`): the struct; `inner()`,
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_scanned.rs` (new, `pub`): the struct; `inner()`,
   `inner_mut()`, `path()`; the `R: SchemaTag`-bounded `create`/`open`;
   `ScanField<R, Marker>`, `UpdateField<R, Marker>`, `GetById<R>`,
   `Flush`; generic `FilterEq`, `Neighbors`, `Children` forwards
   (`Parent` is the blanket impl). 8 tests, `research`-gated fixtures
   over `Order`.
-- `src/generic/store.rs`: `forward_scannable_pairs!` gains two entry
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs`: `forward_scannable_pairs!` gains two entry
   arms — `(for Scanned; $record; …)` and `(for MmapScanned; $record;
   …)` — ahead of the original `($record; …)` arm (which now expands to
   `for Scanned`; the `for` arms must come first because `for` also
@@ -208,7 +208,7 @@ document's `MFMD-FR-001..009`, renumbered into this spec's namespace.
   usize }` — *"mmap slot file at {path}: {body_len} bytes of slot data
   is not a whole number of {slot_width}-byte slots (written for another
   record shape, or truncated mid-slot)"*.
-- `src/generic/order_customer.rs` (research-gated): the second
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/order_customer.rs` (research-gated): the second
   `forward_scannable_pairs!(for MmapScanned; …)` invocation; the new
   `OrderProductionStack` alias; `pub fn discount_cents_path`; a private
   `layer_and_reverse(core, orders, path, open)` shared by `create`/
@@ -412,11 +412,11 @@ Where the implementation settles something the design left to it:
 - 0.1.1 (2026-09-21, ADR-0092): `SlotFile::create` and `SlotFile::rewrite` — and every other write-to-temp-then-rename install in the crate (`RecordBlob::write`, `MmapAgeStore::write_via_rename`, the insert log's version-1 upgrade, the MVCC history write) — call `durability::sync_parent_dir` after the rename or creation, so the directory entry is on disk, not only the file's bytes (`DDL-FR-004`). Format unchanged.
 
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
-  implementation (`src/generic/slot_file.rs`, `src/generic/
+  implementation (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/slot_file.rs`, `src/generic/
   mmap_scanned.rs`, the `SlotFile` delegation in `src/generic/
   mmap_store.rs`, the `for Layer;` arms of `forward_scannable_pairs!`
-  in `src/generic/store.rs`, the `SlotWidthMismatch` variant, the
-  `Order` stack changes in `src/generic/order_customer.rs`, two
+  in `crates/libs/storage/rusty_multimodal_db_engine/src/generic/store.rs`, the `SlotWidthMismatch` variant, the
+  `Order` stack changes in `crates/libs/storage/rusty_multimodal_db_engine/src/generic/order_customer.rs`, two
   Criterion groups) and 9 new tests, 1 extended, plus 2 compile-time
   checks.
   Registers the design ADR-0020 accepted on 2026-09-02 as requirements;
