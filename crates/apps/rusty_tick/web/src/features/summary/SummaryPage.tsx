@@ -77,37 +77,39 @@ export function SummaryPage() {
   return (
     <main className="flex min-w-0 flex-1 overflow-hidden">
       <section aria-label="Summary editor" className="flex min-w-0 flex-1 flex-col">
-        <header className="px-8 pb-2 pt-5">
+        <header className="px-4 pb-2 pt-4">
           <h1 className="text-h1 font-semibold">Summary</h1>
         </header>
-        <SummaryToolbar editor={editor} />
-        <RichEditor ref={editor} />
+        <div className="mx-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line">
+          <SummaryToolbar editor={editor} />
+          <RichEditor ref={editor} />
+        </div>
+        <footer className="flex justify-end gap-2 px-4 py-3">
+          <button
+            ref={saveBtn}
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={saveOpen}
+            onClick={() => setSaveOpen((o) => !o)}
+            className="flex h-8 items-center gap-1.5 rounded-row px-3 hover:bg-hover"
+          >
+            Save as <ChevronDown size={14} className="text-grey" aria-hidden />
+          </button>
+          <button type="button" onClick={() => void copy()} className="flex h-8 items-center gap-1.5 rounded-row px-3 hover:bg-hover">
+            <Copy size={14} className="text-grey" aria-hidden /> Copy
+          </button>
+          <Menu anchor={saveBtn.current} open={saveOpen} onClose={() => setSaveOpen(false)} items={saveItems} label="Save as" placement="top-end" />
+        </footer>
       </section>
 
-      <aside aria-label="Summary settings" className="flex w-[290px] shrink-0 flex-col border-l border-line">
+      <aside aria-label="Summary settings" className="flex w-[340px] shrink-0 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto">
           <SummaryFilters options={options} onChange={update} lists={listArray} tags={tagArray} />
         </div>
-        <footer className="flex flex-col gap-2 border-t border-line p-4">
-          <button type="button" onClick={() => generate(true)} className="flex h-9 items-center justify-center gap-2 rounded-row bg-primary text-white">
+        <footer className="border-t border-line p-4">
+          <button type="button" onClick={() => generate(true)} className="flex h-9 w-full items-center justify-center gap-2 rounded-row bg-primary text-white">
             <Sparkles size={16} aria-hidden /> Generate
           </button>
-          <div className="flex gap-2">
-            <button
-              ref={saveBtn}
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={saveOpen}
-              onClick={() => setSaveOpen((o) => !o)}
-              className="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-row border border-line hover:bg-hover"
-            >
-              Save as <ChevronDown size={16} className="text-grey" aria-hidden />
-            </button>
-            <button type="button" onClick={() => void copy()} className="flex h-9 flex-1 items-center justify-center gap-1.5 rounded-row border border-line hover:bg-hover">
-              <Copy size={16} className="text-grey" aria-hidden /> Copy
-            </button>
-          </div>
-          <Menu anchor={saveBtn.current} open={saveOpen} onClose={() => setSaveOpen(false)} items={saveItems} label="Save as" placement="top-start" />
         </footer>
       </aside>
     </main>
