@@ -28,17 +28,6 @@ export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onN
       <h1 className="mr-1 min-w-0 text-title font-semibold" aria-live="polite">
         {title}
       </h1>
-      <div className="flex items-center gap-1">
-        <button type="button" aria-label={`Previous ${NAV[mode]}`} onClick={onPrev} className={`${btn} w-8 text-grey`}>
-          <ChevronLeft size={20} strokeWidth={1.5} />
-        </button>
-        <button type="button" onClick={onToday} className={`${btn} border border-line px-3`}>
-          Today
-        </button>
-        <button type="button" aria-label={`Next ${NAV[mode]}`} onClick={onNext} className={`${btn} w-8 text-grey`}>
-          <ChevronRight size={20} strokeWidth={1.5} />
-        </button>
-      </div>
       <div className="ml-auto flex items-center gap-2">
         <button type="button" aria-label="Add task" onClick={(e) => onAdd(e.currentTarget)} className={`${btn} w-8 text-primary`}>
           <Plus size={20} strokeWidth={1.5} />
@@ -55,6 +44,17 @@ export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onN
           {MODE_LABEL[mode]}
           <ChevronDown size={16} strokeWidth={1.5} className="text-grey" />
         </button>
+        <div className="flex items-center overflow-hidden rounded-row border border-line">
+          <button type="button" aria-label={`Previous ${NAV[mode]}`} onClick={onPrev} className={`${btn} w-8 rounded-none text-grey`}>
+            <ChevronLeft size={20} strokeWidth={1.5} />
+          </button>
+          <button type="button" onClick={onToday} className={`${btn} rounded-none border-x border-line px-3`}>
+            Today
+          </button>
+          <button type="button" aria-label={`Next ${NAV[mode]}`} onClick={onNext} className={`${btn} w-8 rounded-none text-grey`}>
+            <ChevronRight size={20} strokeWidth={1.5} />
+          </button>
+        </div>
       </div>
       <Menu
         anchor={viewAnchor}
