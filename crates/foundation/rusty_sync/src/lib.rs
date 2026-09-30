@@ -232,14 +232,21 @@ impl<T> Receiver<T> {
     /// [`RecvError::Disconnected`] if the channel is empty and every
     /// `Sender` has been dropped.
     pub fn try_recv(&self) -> Result<T, RecvError> {
-        if let Some(value) = self.inner.queue.pop() {
-            return Ok(value);
+        match self.inner.queue.pop() {
+            Some(value) => Ok(value),
+            None => self.after_empty_pop(),
         }
-        if self.inner.senders.load(Ordering::Acquire) == 0 {
-            Err(RecvError::Disconnected)
-        } else {
-            Err(RecvError::Empty)
+    }
+
+    /// Classifies an empty pop. A sender may push its last value and drop
+    /// between that pop and the sender-count load, so on seeing zero
+    /// senders the queue is re-popped: the `Acquire` load synchronizes with
+    /// the final `Sender::drop`, making every push before it visible.
+    fn after_empty_pop(&self) -> Result<T, RecvError> {
+        if self.inner.senders.load(Ordering::Acquire) != 0 {
+            return Err(RecvError::Empty);
         }
+        self.inner.queue.pop().ok_or(RecvError::Disconnected)
     }
 }
 
@@ -387,6 +394,19 @@ mod tests {
         tx.try_send(1).unwrap();
         drop(tx);
         assert_eq!(rx.try_recv(), Ok(1));
+        assert_eq!(rx.try_recv(), Err(RecvError::Disconnected));
+    }
+
+    #[test]
+    fn final_send_racing_an_empty_pop_is_not_reported_disconnected() {
+        // Replays the interleaving deterministically: the receiver's pop
+        // has already come back empty when the last sender pushes and
+        // drops; the value must still be delivered, not Disconnected.
+        let (tx, rx) = channel(4);
+        assert!(rx.inner.queue.pop().is_none());
+        tx.try_send(7).unwrap();
+        drop(tx);
+        assert_eq!(rx.after_empty_pop(), Ok(7));
         assert_eq!(rx.try_recv(), Err(RecvError::Disconnected));
     }
 
