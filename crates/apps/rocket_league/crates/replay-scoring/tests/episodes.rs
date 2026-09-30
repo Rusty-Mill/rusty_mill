@@ -21,6 +21,9 @@ fn is_recovery(e: &&Episode) -> bool {
 fn is_loss(e: &&Episode) -> bool {
     matches!(e, Episode::Loss { .. })
 }
+fn is_bump(e: &&Episode) -> bool {
+    matches!(e, Episode::Bump { .. })
+}
 fn is_demo(e: &&Episode) -> bool {
     matches!(e, Episode::Demo { .. })
 }
@@ -123,9 +126,10 @@ fn extract_is_time_ordered_and_deterministic() {
             n(is_challenge),
             n(is_loss),
             n(is_shot),
-            n(is_demo)
+            n(is_demo),
+            n(is_bump)
         ),
-        (100, 186, 100, 19, 3), // recorded from the first run
+        (100, 186, 100, 19, 3, 8), // recorded from the first run
         "419a episode counts — a change means a definition moved"
     );
 }

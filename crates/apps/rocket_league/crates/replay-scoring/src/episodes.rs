@@ -77,6 +77,15 @@ pub enum Episode {
         /// Σ xG of the shots it produced.
         xg: f32,
     },
+    /// `pri` drove into `victim` hard enough to knock them off their line, without a demo.
+    /// Inferred from car–car proximity and a sudden velocity change — the replay has no
+    /// bump event. `impulse` is the victim's speed change along the contact (uu/s).
+    Bump {
+        pri: i32,
+        victim: i32,
+        t: f32,
+        impulse: f32,
+    },
     /// `pri` demolished `victim`. `down` is how long the victim was out (until their
     /// car reappears, at most `DEMO_DOWN_CAP_S`); `goal` is whether the demolisher's
     /// team scored within `GOAL_AFTER_DEMO_S` of it.
@@ -111,7 +120,8 @@ impl Episode {
             | Self::Loss { t, .. }
             | Self::Shot { t, .. }
             | Self::Demo { t, .. }
-            | Self::Chain { t, .. } => *t,
+            | Self::Chain { t, .. }
+            | Self::Bump { t, .. } => *t,
         }
     }
     pub fn pri(&self) -> i32 {
@@ -121,7 +131,8 @@ impl Episode {
             | Self::Loss { pri, .. }
             | Self::Shot { pri, .. }
             | Self::Demo { pri, .. }
-            | Self::Chain { pri, .. } => *pri,
+            | Self::Chain { pri, .. }
+            | Self::Bump { pri, .. } => *pri,
         }
     }
     pub fn dur(&self) -> f32 {
@@ -129,7 +140,7 @@ impl Episode {
             Self::Recovery { dur, .. } | Self::Challenge { dur, .. } => *dur,
             Self::Demo { down, .. } => *down,
             Self::Chain { dur, .. } => *dur,
-            Self::Loss { .. } | Self::Shot { .. } => 0.0,
+            Self::Loss { .. } | Self::Shot { .. } | Self::Bump { .. } => 0.0,
         }
     }
 }
@@ -322,6 +333,16 @@ const DEMO_DOWN_CAP_S: f32 = 10.0;
 const DEMO_GONE_S: f32 = 1.0;
 /// A goal this soon after a demo is credited to it.
 const GOAL_AFTER_DEMO_S: f32 = 8.0;
+/// Opposing car centres closer than this are in contact (uu).
+const BUMP_DIST: f32 = 200.0;
+/// The bumped car's speed change along the contact within one frame for a bump (uu/s).
+const BUMP_DV: f32 = 400.0;
+/// A car this close to the ball is contesting it, not bumping (uu).
+const BUMP_BALL_NEAR: f32 = 350.0;
+/// A pair is not counted again for this long (s).
+const BUMP_REFRACTORY_S: f32 = 1.0;
+/// A demo this close in time to a contact explains it.
+const BUMP_DEMO_S: f32 = 0.5;
 const GRAVITY: f32 = 650.0;
 /// Ball bounce restitution off the floor.
 const RESTITUTION: f32 = 0.6;
@@ -507,6 +528,72 @@ pub(crate) fn shots(m: &CanonicalMatch, frames: &[FrameView], xg: &XgModel) -> V
     out
 }
 
+/// Inferred bumps between opposing cars, in time order (see [`Episode::Bump`]).
+pub(crate) fn bumps(frames: &[FrameView], events: &[Event]) -> Vec<Episode> {
+    let demo_near = |t: f32| {
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Demo { t: d, .. } if (d - t).abs() <= BUMP_DEMO_S))
+    };
+    let mut last: Vec<((i32, i32), f32)> = Vec::new(); // when each pair last bumped
+    let mut out = Vec::new();
+    for w in frames.windows(2) {
+        let (prev, f) = (&w[0], &w[1]);
+        for a in f.cars.iter().filter(|c| c.valid_pos) {
+            for b in f.cars.iter().filter(|c| c.valid_pos && c.team > a.team) {
+                let (Some(pa), Some(pb)) = (prev.car(a.pri), prev.car(b.pri)) else {
+                    continue;
+                };
+                let d = dist(a.p, b.p);
+                if !(1.0..=BUMP_DIST).contains(&d) {
+                    continue;
+                }
+                if f.ball
+                    .is_some_and(|ball| dist(ball.p, a.p).min(dist(ball.p, b.p)) < BUMP_BALL_NEAR)
+                {
+                    continue;
+                }
+                // Contact axis a→b; who was driving into whom before contact.
+                let n = sub(b.p, a.p);
+                let n = Vec3 {
+                    x: n.x / d,
+                    y: n.y / d,
+                    z: n.z / d,
+                };
+                let along = |v: Vec3| v.x * n.x + v.y * n.y + v.z * n.z;
+                let (dva, dvb) = (along(sub(a.v, pa.v)), along(sub(b.v, pb.v)));
+                let (into_b, into_a) = (along(pa.v), -along(pb.v));
+                // The one driven into gains speed away from the other; the driver is whoever
+                // was closing faster.
+                let (bumper, victim, impulse) = if into_b >= into_a {
+                    (a.pri, b.pri, dvb)
+                } else {
+                    (b.pri, a.pri, -dva)
+                };
+                if impulse < BUMP_DV || demo_near(f.t) {
+                    continue;
+                }
+                let pair = (bumper.min(victim), bumper.max(victim));
+                if last
+                    .iter()
+                    .any(|(p, t)| *p == pair && f.t - t < BUMP_REFRACTORY_S)
+                {
+                    continue;
+                }
+                last.retain(|(p, _)| *p != pair);
+                last.push((pair, f.t));
+                out.push(Episode::Bump {
+                    pri: bumper,
+                    victim,
+                    t: f.t,
+                    impulse,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Every demolition with a known attacker and victim, in time order.
 pub(crate) fn demos(m: &CanonicalMatch, frames: &[FrameView]) -> Vec<Episode> {
     let team_of = |pri: i32| m.tracks.iter().find(|t| t.pri == pri).and_then(|t| t.team);
@@ -564,6 +651,7 @@ pub fn extract_with(m: &CanonicalMatch, cfg: &ScoreConfig, xg: &XgModel) -> Vec<
     }
     out.extend(shots(m, &frames, xg));
     out.extend(demos(m, &frames));
+    out.extend(bumps(&frames, &m.events));
     out.sort_by(|a, b| a.t().total_cmp(&b.t()).then(a.pri().cmp(&b.pri())));
     out
 }
@@ -794,5 +882,86 @@ mod tests {
             goal_plane_crossing(V(0.0, 0.0, 100.0), V(0.0, 100.0, 0.0), BACK_WALL_Y).is_none(),
             "too slow"
         );
+    }
+
+    /// Two opposing cars 150 uu apart on the x axis; `a` drives at `b`, and `b` is knocked
+    /// away (or not) by the second frame. The ball is far away unless `ball_x` says otherwise.
+    fn contact(b_dv: f32, ball_y: f32) -> Vec<FrameView> {
+        let mk = |t: f32, ax: f32, av: f32, bx: f32, bv: f32| {
+            let mut f = frame(0, Some((false, 0.0)));
+            f.t = t;
+            let a = CarView {
+                pri: 1,
+                team: 0,
+                p: V(ax, 0.0, 17.0),
+                v: V(av, 0.0, 0.0),
+                valid_pos: true,
+                ..f.cars[0]
+            };
+            let b = CarView {
+                pri: 2,
+                team: 1,
+                p: V(bx, 0.0, 17.0),
+                v: V(bv, 0.0, 0.0),
+                ..a
+            };
+            f.cars = vec![a, b];
+            f.ball = Some(replay_analyzer::model::Kin {
+                p: V(100.0, ball_y, 93.0),
+                v: Z,
+            });
+            f
+        };
+        vec![
+            mk(0.0, 0.0, 1500.0, 300.0, 0.0),
+            mk(1.0 / 30.0, 50.0, 1500.0, 200.0, b_dv),
+        ]
+    }
+
+    #[test]
+    fn a_hard_hit_between_opponents_is_a_bump_by_the_faster_car() {
+        let eps = bumps(&contact(900.0, 3000.0), &[]);
+        let [Episode::Bump {
+            pri: 1,
+            victim: 2,
+            impulse,
+            ..
+        }] = eps[..]
+        else {
+            panic!("{eps:?}")
+        };
+        assert!((impulse - 900.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_nudge_a_distant_pass_a_ball_contest_or_a_demo_is_not_a_bump() {
+        assert!(bumps(&contact(100.0, 3000.0), &[]).is_empty(), "too gentle");
+        let mut far = contact(900.0, 3000.0);
+        far[1].cars[1].p = V(2000.0, 0.0, 17.0);
+        assert!(bumps(&far, &[]).is_empty(), "not touching");
+        assert!(
+            bumps(&contact(900.0, 0.0), &[]).is_empty(),
+            "both at the ball: a challenge"
+        );
+        let demo = Event::Demo {
+            t: 0.03,
+            attacker_pri: Some(1),
+            attacker: None,
+            victim_pri: Some(2),
+            victim: None,
+        };
+        assert!(
+            bumps(&contact(900.0, 3000.0), &[demo]).is_empty(),
+            "a demo explains it"
+        );
+    }
+
+    #[test]
+    fn the_same_pair_is_not_counted_twice_within_the_refractory() {
+        let mut fs = contact(900.0, 3000.0);
+        let mut again = fs.clone();
+        again.iter_mut().for_each(|f| f.t += 1.0 / 15.0);
+        fs.extend(again);
+        assert_eq!(bumps(&fs, &[]).len(), 1);
     }
 }

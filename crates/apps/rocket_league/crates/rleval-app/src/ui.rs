@@ -603,15 +603,19 @@ function shotMap(shots) {
 // Per player: demos dealt/taken, seconds the victims were out, and goals within 8 s of a demo they dealt.
 function physicality(d, who) {
   const demos = (d.episodes || []).filter(e => e.kind === "demo");
-  if (!demos.length) return "";
+  const bumps = (d.episodes || []).filter(e => e.kind === "bump");
+  if (!demos.length && !bumps.length) return "";
   const rows = Object.values(who).map(r => {
     const dealt = demos.filter(e => e.pri === r.target_pri);
     return `<tr><td>${nameCell(r.target_team, r.target_player)}</td><td class="num">${dealt.length}</td>
       <td class="num">${demos.filter(e => e.victim === r.target_pri).length}</td>
-      <td class="num">${fmt(dealt.reduce((s, e) => s + e.down, 0), 1)} s</td><td class="num">${dealt.filter(e => e.goal).length}</td></tr>`;
+      <td class="num">${fmt(dealt.reduce((s, e) => s + e.down, 0), 1)} s</td><td class="num">${dealt.filter(e => e.goal).length}</td>
+      <td class="num">${bumps.filter(e => e.pri === r.target_pri).length}</td>
+      <td class="num">${bumps.filter(e => e.victim === r.target_pri).length}</td></tr>`;
   }).join("");
-  return cardTable("Physicality — demolitions from the replay's own events. “Opponents down” is how long the victims were out of the match; “goals after” counts your team scoring within 8 s of one of your demos.",
-    `<th>Player</th><th class="num">Dealt</th><th class="num">Taken</th><th class="num">Opponents down</th><th class="num">Goals after</th>`, rows, "", 5);
+  return cardTable("Physicality — demolitions come from the replay's own events. “Opponents down” is how long the victims were out of the match; “goals after” counts your team scoring within 8 s of one of your demos. " +
+    "Bumps are an inference (contact between opposing cars with a sudden speed change, not a demo, away from the ball) — the replay records no bump event.",
+    `<th>Player</th><th class="num">Demos</th><th class="num">Demoed</th><th class="num">Opponents down</th><th class="num">Goals after</th><th class="num">Bumps</th><th class="num">Bumped</th>`, rows, "", 7);
 }
 // Per player: shots, goals and expected goals. One match is far too small to call finishing luck or skill.
 function finishing(d, who) {
@@ -643,7 +647,9 @@ function chainSummary(d) {
   return cardTable("Possession chains — a team's run of touches (each within 3 s of the last), ended by the other team's touch, a stoppage, a shot or a goal. ΔV is the value model's swing over the chain's touches; xG is from its shots.",
     `<th>Team</th><th class="num">Chains</th><th class="num">Touches</th><th class="num">Gained</th><th class="num">Shots / goals</th><th class="num">Lost</th><th class="num">ΔV</th><th class="num">xG</th>`, rows, "", 8);
 }
-const momentCols = (e, who) => e.kind === "chain"
+const momentCols = (e, who) => e.kind === "bump"
+  ? ["Bump of " + esc(who[e.victim]?.target_player ?? "?"), `${fmt(e.impulse * 0.036, 0)} km/h knock (inferred)`]
+  : e.kind === "chain"
   ? [`Possession · ${e.touches} touch${e.touches > 1 ? "es" : ""}`, `${CHAIN_END[e.end]} · ${signed(e.gained / 100, 0)} m · ΔV ${signed(e.dv, 2)}${e.xg ? " · xG " + fmt(e.xg, 2) : ""}`]
   : e.kind === "demo"
   ? ["Demo of " + esc(who[e.victim]?.target_player ?? "?"), e.down > 0 ? `${e.goal ? "✓ goal within 8 s · " : ""}out ${fmt(e.down, 1)} s` : "not seen leaving the field"]
@@ -672,7 +678,7 @@ function renderMoments(d) {
   $("tab-moments").innerHTML = `<div class="hist-bar"><select id="momentsWho"><option value="">All players</option>` +
     Object.values(who).map(r => `<option value="${r.target_pri}">${esc(r.target_player)}</option>`).join("") +
     `</select><select id="momentsKind"><option value="">All moments</option>` +
-    Object.entries({ recovery: "Recoveries", challenge: "50/50s", loss: "Possession losses", shot: "Shots", demo: "Demos", chain: "Possession chains" })
+    Object.entries({ recovery: "Recoveries", challenge: "50/50s", loss: "Possession losses", shot: "Shots", demo: "Demos", bump: "Bumps", chain: "Possession chains" })
       .map(([k, v]) => `<option value="${k}">${v}</option>`).join("") +
     `</select></div><div id="momentsBody"></div>`;
   $("momentsWho").onchange = $("momentsKind").onchange = draw;
