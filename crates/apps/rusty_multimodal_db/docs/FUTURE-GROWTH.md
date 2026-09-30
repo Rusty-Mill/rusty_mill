@@ -124,9 +124,9 @@ not a guess.
   batches, `FetchSince`/`Changes`, and `FetchSnapshot` answering
   `SnapshotAt` with the log position; a standby that restores a snapshot
   and tails the log equals the primary, and a standby on a stale epoch or
-  behind retention is told `Gone` and resyncs. Still absent: the standby
-  tail tool (`replica_refresh --follow`) and manual promotion (phases 2/3),
-  logging `detach_record` cascades and `Compact`, lifting the 8 MiB
+  behind retention is told `Gone` and resyncs. *Since phases 2/3:* `replica_refresh --follow` tails the log into a
+  refreshed directory, resyncing on `Gone`, and promotion is a documented
+  manual step (stop the tool, serve the directory). Still absent: logging `detach_record` cascades and `Compact`, lifting the 8 MiB
   snapshot cap; automatic failover, consensus and write forwarding stay
   non-goals.
 * **Metrics/observability at the storage-engine layer.** *Partly built

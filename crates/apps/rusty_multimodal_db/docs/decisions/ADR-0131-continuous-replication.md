@@ -1,6 +1,6 @@
 # ADR-0131: Continuous Replication by Shipping a Change Log (Proposal)
 
-- Status: **Accepted — phase 1 built (protocol 34), on the owner's "go with recommendations": option 1, its own log file, compaction not logged. Phases 2 and 3 are open.**
+- Status: **Accepted — phase 1 built (protocol 34), on the owner's "go with recommendations": option 1, its own log file, compaction not logged. Phase 2 (`replica_refresh --follow`) and phase 3 (documented manual promotion) are built too.**
 - Date: 2026-09-30
 - Deciders: baileyrd
 - Related: `ADR-0067` (`FetchSnapshot`, full snapshots), `ADR-0118`/`0123`
@@ -100,4 +100,20 @@ its entries only replay against an identical starting snapshot.
 defeats journal group commit (measure before enabling under load);
 `MAX_SNAPSHOT_BYTES` still caps the bootstrap snapshot; `detach_record`
 cascades and `Compact` are not logged; the standby-side tail tool
-(`replica_refresh --follow`) and promotion are phases 2 and 3.
+(`replica_refresh --follow`) and promotion are phases 2 and 3, below.
+
+## Phases 2 and 3 as built
+
+- `replica_refresh --follow` (`examples/support/replica_refresh_lib.rs`):
+  `refresh_at` installs a snapshot and writes its log position beside the
+  files (`replica.position`, crash-safe); `follow` opens the directory as the
+  domain's table and, per fetched batch, applies it and rewrites the
+  position. Replay is non-atomic and at-least-once: every logged op is
+  idempotent, so a crash between apply and position write converges. A
+  `Gone` answer makes the tool take a fresh snapshot and follow that.
+- Promotion is manual and documented in the tool: stop it, start a server with
+  `SERVER_DATA_DIR` at the directory (it is a complete table; the position
+  file is ignored). No failover, consensus or write forwarding, as before.
+- Test: `follow_applies_the_primarys_later_writes_to_a_refreshed_directory`
+  (a replace and a delete after the snapshot reach the standby; a stale epoch
+  is `Resync`).

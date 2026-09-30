@@ -8,11 +8,17 @@
 use rusty_multimodal_db::durability::DurabilityError;
 use rusty_multimodal_db::generic::entity::open_entity_production_stack_portable;
 use rusty_multimodal_db::generic::memory::open_memory_production_stack_portable;
+use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::query::AllIds;
 use rusty_multimodal_db::generic::relation::open_relation_production_stack_portable;
 use rusty_multimodal_db::server::client::{
     ClientError, ClientTlsConfig, ConnectOptions, SchemaDrivenClient, TrustPolicy,
 };
+use rusty_multimodal_db::server::entity::EntityConnectionStore;
+use rusty_multimodal_db::server::memory::MemoryConnectionStore;
+use rusty_multimodal_db::server::protocol::{ErrorCode, WriteOp, WriteResult};
+use rusty_multimodal_db::server::relation::RelationConnectionStore;
+use rusty_multimodal_db::server::ConnectionStore;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -62,6 +68,10 @@ pub struct RefreshReport {
     pub bytes: u64,
     /// Records the verification reopen counted.
     pub records: usize,
+    /// The change-log position `(epoch, seq)` the snapshot is consistent
+    /// with, recorded beside the files for [`follow`] (`ADR-0131`); `None`
+    /// for a plain [`refresh`].
+    pub position: Option<Position>,
 }
 
 /// Everything that can stop a refresh, each leaving no directory the
@@ -157,9 +167,37 @@ pub fn refresh(
     root: &Path,
     domain: Domain,
 ) -> Result<RefreshReport, RefreshError> {
+    refresh_impl(target, root, domain, false)
+}
+
+/// [`refresh`] for a table served with a change log (`ADR-0131`): the
+/// snapshot's log position is written into the directory as
+/// [`POSITION_FILE`], so [`follow`] can continue from it.
+pub fn refresh_at(
+    target: &Target,
+    root: &Path,
+    domain: Domain,
+) -> Result<RefreshReport, RefreshError> {
+    refresh_impl(target, root, domain, true)
+}
+
+fn refresh_impl(
+    target: &Target,
+    root: &Path,
+    domain: Domain,
+    with_position: bool,
+) -> Result<RefreshReport, RefreshError> {
     let mut client = SchemaDrivenClient::connect_with(&target.addr, target.options.clone())
         .map_err(RefreshError::Connect)?;
-    let files = client.fetch_snapshot().map_err(RefreshError::Fetch)?;
+    let (files, position) = if with_position {
+        let snapshot = client.fetch_snapshot_at().map_err(RefreshError::Fetch)?;
+        let position = snapshot
+            .position
+            .map(|(epoch, seq)| Position { epoch, seq });
+        (snapshot.files, position)
+    } else {
+        (client.fetch_snapshot().map_err(RefreshError::Fetch)?, None)
+    };
     drop(client);
 
     std::fs::create_dir_all(root).map_err(|e| staging(root, e))?;
@@ -201,6 +239,9 @@ pub fn refresh(
             file.write_all(contents)?;
             file.sync_all()?;
             bytes += contents.len() as u64;
+        }
+        if let Some(position) = position {
+            write_position(&staging_dir, position)?;
         }
         std::fs::File::open(&staging_dir)?.sync_all()
     })();
@@ -256,6 +297,7 @@ pub fn refresh(
         files: files.len() as u64,
         bytes,
         records,
+        position,
     })
 }
 
@@ -381,5 +423,166 @@ pub fn refresh_loop(
             return;
         }
         std::thread::sleep(every);
+    }
+}
+
+/// A place in a table's change log: the `epoch` it belongs to and the last
+/// `seq` applied (`ADR-0131`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Position {
+    pub epoch: u64,
+    pub seq: u64,
+}
+
+/// The file holding a standby directory's [`Position`]. Not part of the
+/// table: a server opening the directory ignores it.
+pub const POSITION_FILE: &str = "replica.position";
+
+/// Write `position` crash-safely: a temporary file, synced, renamed over
+/// the old one, the directory synced.
+pub fn write_position(dir: &Path, position: Position) -> io::Result<()> {
+    let tmp = dir.join(format!("{POSITION_FILE}.tmp"));
+    let mut file = std::fs::File::create(&tmp)?;
+    writeln!(file, "{} {}", position.epoch, position.seq)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, dir.join(POSITION_FILE))?;
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// The [`Position`] a directory was refreshed or last followed to.
+pub fn read_position(dir: &Path) -> io::Result<Position> {
+    let text = std::fs::read_to_string(dir.join(POSITION_FILE))?;
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "malformed replica.position");
+    let mut parts = text.split_whitespace().map(|p| p.parse::<u64>());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(epoch)), Some(Ok(seq)), None) => Ok(Position { epoch, seq }),
+        _ => Err(bad()),
+    }
+}
+
+/// Why a [`follow`] stopped.
+#[derive(Debug)]
+pub enum FollowError {
+    /// The directory has no readable position, or does not open as the
+    /// domain's table.
+    Open(String),
+    /// Connecting, or the request, failed. Transient: run [`follow`] again.
+    Client(ClientError),
+    /// The primary's log is on another epoch or no longer reaches this
+    /// standby: take a fresh [`refresh_at`] and follow that.
+    Resync,
+    /// Applying a batch or recording the position failed.
+    Apply(String),
+}
+
+impl std::fmt::Display for FollowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open(m) => write!(f, "opening the standby: {m}"),
+            Self::Client(e) => write!(f, "fetching changes: {e}"),
+            Self::Resync => write!(
+                f,
+                "the change log no longer reaches this standby: refresh again"
+            ),
+            Self::Apply(m) => write!(f, "applying changes: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for FollowError {}
+
+/// The standby's table, opened for applying writes.
+enum Applier {
+    Memory(MemoryConnectionStore),
+    Entity(EntityConnectionStore),
+    Relation(RelationConnectionStore),
+}
+
+impl Applier {
+    fn open(dir: &Path, domain: Domain) -> Result<Self, FollowError> {
+        let stem = dir.join(domain.stem());
+        let open = |e: DurabilityError| FollowError::Open(e.to_string());
+        Ok(match domain {
+            Domain::Memory => {
+                Self::Memory(MemoryConnectionStore::new(GenericProductionStore::new(
+                    open_memory_production_stack_portable(&stem).map_err(open)?,
+                )))
+            }
+            Domain::Entity => {
+                Self::Entity(EntityConnectionStore::new(GenericProductionStore::new(
+                    open_entity_production_stack_portable(&stem).map_err(open)?,
+                )))
+            }
+            Domain::Relation => {
+                Self::Relation(RelationConnectionStore::new(GenericProductionStore::new(
+                    open_relation_production_stack_portable(&stem).map_err(open)?,
+                )))
+            }
+        })
+    }
+
+    /// Replay one logged batch. Non-atomic on purpose: every logged op is
+    /// idempotent (`Insert`/`Link` of a present id is a soft outcome,
+    /// `Replace`/`UpdateField` set a value, `Delete` of an absent id is
+    /// soft), so a crash between the apply and the position write replays
+    /// the batch to the same state.
+    fn apply(&self, ops: &[WriteOp]) -> Result<(), FollowError> {
+        let results = match self {
+            Self::Memory(s) => s.write_batch(ops, false),
+            Self::Entity(s) => s.write_batch(ops, false),
+            Self::Relation(s) => s.write_batch(ops, false),
+        };
+        match results {
+            Ok(results) => match results.iter().find_map(|r| match r {
+                WriteResult::Failed(code) => Some(*code),
+                _ => None,
+            }) {
+                Some(code) => Err(FollowError::Apply(format!("{code:?}"))),
+                None => Ok(()),
+            },
+            Err((i, code)) => Err(FollowError::Apply(format!("op {i}: {code:?}"))),
+        }
+    }
+}
+
+/// Tail the primary's change log into `dir` (a [`refresh_at`] directory),
+/// applying each batch and recording the position after it (`ADR-0131`
+/// phase 2). Polls every `poll` when caught up. `report` gets the last
+/// applied `seq` and the primary's `head` after every fetch and returns
+/// `false` to stop. Returns `Err(Resync)` when the log no longer reaches
+/// this standby.
+///
+/// **Promotion** (phase 3) is the operator's, manual: stop this process,
+/// then start a server with `SERVER_DATA_DIR` at `dir` — it is a complete
+/// table. Nothing is forwarded and no leader is elected.
+pub fn follow(
+    target: &Target,
+    dir: &Path,
+    domain: Domain,
+    poll: std::time::Duration,
+    mut report: impl FnMut(u64, u64) -> bool,
+) -> Result<(), FollowError> {
+    let mut position = read_position(dir).map_err(|e| FollowError::Open(e.to_string()))?;
+    let applier = Applier::open(dir, domain)?;
+    loop {
+        let mut client = SchemaDrivenClient::connect_with(&target.addr, target.options.clone())
+            .map_err(FollowError::Client)?;
+        let batch = match client.fetch_since(position.epoch, position.seq, 1000) {
+            Ok(batch) => batch,
+            Err(ClientError::Server(ErrorCode::Gone, _)) => return Err(FollowError::Resync),
+            Err(e) => return Err(FollowError::Client(e)),
+        };
+        drop(client);
+        for ops in &batch.entries {
+            applier.apply(ops)?;
+            position.seq += 1;
+            write_position(dir, position).map_err(|e| FollowError::Apply(e.to_string()))?;
+        }
+        if !report(position.seq, batch.head) {
+            return Ok(());
+        }
+        if position.seq >= batch.head {
+            std::thread::sleep(poll);
+        }
     }
 }
