@@ -1,6 +1,6 @@
 # Episodes — design proposal (assessment rec. #6)
 
-Status: **PR A (Recovery), B (Challenge) and C (Loss) shipped; D pending.** Source: `docs/competitor/spire/ASSESSMENT.md` §5 #6.
+Status: **A (Recovery), B (Challenge) and C (Loss) shipped; D measured and dropped.** Source: `docs/competitor/spire/ASSESSMENT.md` §5 #6.
 
 ## Problem
 We score recovery, possession loss and challenge only as **per-player aggregates**
@@ -103,7 +103,7 @@ touch-based and needs facing to call a recovery done. The list makes them inspec
 | A | `Episode`, `extract`, **Recovery only**, reducer + drift test, `Analysis.episodes`, Moments tab, viewer seek — a full vertical slice | 3 |
 | B | Challenge emitter + reducer | 2 |
 | C | Loss emitter + `opp_dist` + reducer | 2 |
-| D | Build frames/roles once per lobby in `score_all` (measure first) | 1 |
+| D | ~~Build frames/roles once per lobby in `score_all`~~ — measured, dropped: `score_all` is 33 ms on `419a` and sharing frames saves ≈3 ms (<1% of the 0.45 s analysis); `build_frames` is not the cost | 1 |
 
 A proves the plumbing end to end; B and C are then pure additions.
 
