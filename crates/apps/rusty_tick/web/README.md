@@ -47,9 +47,10 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 
 - Reminders: task and habit reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in); there is no service worker or push, so nothing fires with the app closed.
 - Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
-- Settings: Account, Notifications, Date & Time, Appearance and Shortcuts are real; the other eight tabs are placeholders.
+- Settings: Account, Notifications, Date & Time, Appearance, Shortcuts and About are real; the other seven tabs are placeholders.
 - Comments button in the detail pane is disabled; Timeline view is a stub.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
 - Habits: a check-in means "done" (the goal amount is text).
-- No reference screenshots were available, so there is no pixel comparison; layout, spacing and copy follow the prompt's description.
+- Sync is by polling and on window focus (no server push).
+- Compared by eye against screenshots of the real app (not pixel-diffed); differences that remain are listed in the pull requests that closed the gap.
