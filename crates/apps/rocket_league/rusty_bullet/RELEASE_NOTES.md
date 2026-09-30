@@ -6,6 +6,22 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Split `drive.rs` by mechanic; fixed stale docs
+**2026-09-30** · refactor, no behavior change
+
+- `crates/rb_physics_bullet/src/drive.rs` (4,242 lines, ~2,800 of them
+  tests) is now `drive/{mod,ground,air,jump,boost,tests}.rs`. Each
+  mechanic's constants and logic live together; `apply_driven_forces`
+  keeps its signature and delegates to one function per mechanic.
+- The ground dodge and wall-jump dodge were two near-identical ~30-line
+  blocks; both now call a single `jump::apply_dodge` (float operation
+  order preserved, so results are bit-identical).
+- `AGENTS.md` crate map gained the missing `rb_physics_bullet` entry;
+  `docs/PROJECT-STATUS.md` header now points at `978aa8f`.
+- All 395 tests pass unmodified; fmt/clippy/rustdoc clean.
+
+---
+
 ## Implemented the divergence-growth diagnostic
 **2026-09-04** · `RB-VERIFY-003-FR-004`
 

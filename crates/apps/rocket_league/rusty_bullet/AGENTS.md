@@ -22,6 +22,10 @@ these.
     over replay files (`boxcars` + `subtr-actor`).
   - `crates/rb_capture_ingest` — adapter implementing `PhysicsStateSource`
     over BakkesMod offline captures.
+  - `crates/rb_physics_bullet` — candidate physics engine (a Rust port of
+    Bullet's rigid-body/contact pipeline plus Rocket League car mechanics
+    and arena geometry, see ADR-0004). Pure computation, depends only on
+    `rb_domain`; `rb-verify` scores it against recorded ground truth.
   - `crates/rb_verify_cli` — composition root binary (`rb-verify`); wires
     adapters to domain logic, no domain logic of its own.
 - Architectural boundaries: domain crates never depend on adapter crates;
