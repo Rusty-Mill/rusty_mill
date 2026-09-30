@@ -13,6 +13,7 @@ pub mod history;
 pub mod oidc;
 #[cfg(feature = "oidc")]
 pub mod oidc_transport;
+pub mod panels;
 pub mod pipeline;
 pub mod server;
 pub mod store;

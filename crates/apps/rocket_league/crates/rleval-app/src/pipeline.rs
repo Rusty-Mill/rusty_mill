@@ -79,11 +79,21 @@ pub struct Analysis {
 
     // ---- self-contained embeddable views ----
     /// The full 3D replay viewer as a self-contained (offline) HTML document.
+    ///
+    /// The three panels are omitted from the JSON when empty: the server moves them
+    /// into its `panels::PanelCache` and the UI fetches each on first use.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub viewer_html: String,
     /// The lobby scoring report as a self-contained HTML document.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub scoring_html: String,
     /// Self-contained ballchasing-style stats dashboard (bc-clone).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub ballchasing_html: String,
+    /// Where the server holds this analysis's panels (`/api/analysis/<id>/<panel>`);
+    /// empty when the panels are inline.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub analysis_id: String,
 }
 
 /// Core scoreboard stats for one player — header truth (goals/assists/saves/
@@ -371,6 +381,7 @@ pub fn analyze(
         viewer_html,
         scoring_html,
         ballchasing_html,
+        analysis_id: String::new(),
     })
 }
 

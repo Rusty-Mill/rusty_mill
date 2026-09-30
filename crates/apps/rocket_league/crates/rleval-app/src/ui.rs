@@ -370,7 +370,7 @@ function render() {
   renderImpact(d);
   renderPacifist(d);
   // The heavy iframes are filled lazily on first tab open.
-  viewerLoaded = scoringLoaded = ballchasingLoaded = false;
+  for (const k in panelLoaded) delete panelLoaded[k];
   $("tab-viewer").innerHTML = $("tab-scoring").innerHTML = "";
   selectTab("overview");
 }
@@ -584,10 +584,10 @@ function renderImprove(d) {
 
 // ---- Moments tab: the episodes behind the scores; a row jumps the 3D viewer to it ----
 const mmss = t => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
-function seekViewer(t, tries = 50) {
-  selectTab("viewer");
-  const w = $("viewerFrame").contentWindow;
-  if (w.seek) w.seek(t); else if (tries) setTimeout(() => seekViewer(t, tries - 1), 100);
+async function seekViewer(t, tries = 50) {
+  await selectTab("viewer");
+  const w = $("viewerFrame")?.contentWindow;
+  if (w?.seek) w.seek(t); else if (tries) setTimeout(() => seekViewer(t, tries - 1), 100);
 }
 const MISS = [[1, "low boost"], [2, "not facing the ball"], [4, "late"]];
 const OUT = { goal: ["✓ goal", "good"], saved: ["saved", "warn"], off: ["off target", "muted"] };
@@ -832,30 +832,36 @@ function renderPacifist(d) {
 }
 
 // ---- tabs (lazy iframes for the heavy HTML views) ----
-let viewerLoaded = false, scoringLoaded = false, ballchasingLoaded = false;
-function selectTab(name) {
+// A panel's HTML: inline in a static bundle, otherwise fetched once from the server.
+async function panelHtml(name) {
+  if (DATA[name + "_html"]) return DATA[name + "_html"];
+  const r = await authFetch(`/api/analysis/${encodeURIComponent(DATA.analysis_id)}/${name}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.text();
+}
+const PANELS = {
+  viewer: h => `<div class="vtoolbar"><button class="btn" id="fsBtn" type="button">⛶ Full screen</button>
+      <span class="muted">Press Esc to exit full screen.</span></div>
+      <iframe class="viewer" id="viewerFrame" allow="fullscreen" allowfullscreen srcdoc="${esc(h)}"></iframe>`,
+  scoring: h => `<iframe class="report" srcdoc="${esc(h)}"></iframe>`,
+  ballchasing: h => `<iframe class="report" srcdoc="${esc(h)}"></iframe>`,
+};
+const panelLoaded = {};   // reset on each analysis
+async function selectTab(name) {
   document.querySelectorAll("nav.tabs button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.id === "tab-" + name));
-  if (name === "viewer" && !viewerLoaded) {
-    $("tab-viewer").innerHTML = `
-      <div class="vtoolbar">
-        <button class="btn" id="fsBtn" type="button">⛶ Full screen</button>
-        <span class="muted">Press Esc to exit full screen.</span>
-      </div>
-      <iframe class="viewer" id="viewerFrame" allow="fullscreen" allowfullscreen
-        srcdoc="${esc(DATA.viewer_html)}"></iframe>`;
-    $("fsBtn").onclick = enterViewerFullscreen;
-    viewerLoaded = true;
-  }
-  if (name === "scoring" && !scoringLoaded) {
-    $("tab-scoring").innerHTML = `<iframe class="report" srcdoc="${esc(DATA.scoring_html)}"></iframe>`;
-    scoringLoaded = true;
-  }
-  if (name === "ballchasing" && !ballchasingLoaded) {
-    $("tab-ballchasing").innerHTML = `<iframe class="report" srcdoc="${esc(DATA.ballchasing_html)}"></iframe>`;
-    ballchasingLoaded = true;
+  if (!PANELS[name] || panelLoaded[name]) return;
+  panelLoaded[name] = true;
+  const tab = $("tab-" + name);
+  tab.innerHTML = `<p class="muted"><span class="spinner"></span>Loading…</p>`;
+  try {
+    tab.innerHTML = PANELS[name](await panelHtml(name));
+    if (name === "viewer") $("fsBtn").onclick = enterViewerFullscreen;
+  } catch (e) {
+    panelLoaded[name] = false;
+    tab.innerHTML = `<p class="muted">Could not load this panel: ${esc(e.message || e)}</p>`;
   }
 }
 

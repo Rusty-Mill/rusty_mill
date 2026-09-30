@@ -76,6 +76,18 @@ build is noticeably slower per replay.
   feature importances. Good first stop to check "is this running defaults or a
   corpus fit?"
 
+### 2.0 The analysis API
+
+`POST /api/analyze` (and `GET /api/analyze/sample/<name>`) returns the analysis
+**data** only — about 100 KB for a full lobby, versus 8.9 MB with the HTML panels
+embedded. The 3D viewer, scoring report and ballchasing dashboard stay on the
+server, and the UI fetches each from `GET /api/analysis/<analysis_id>/<panel>`
+(`viewer`, `scoring`, `ballchasing`) the first time its tab is opened. The server
+keeps the panels of the last four analyses, per account; an evicted or unknown id
+is a 404 (re-run the analysis). Add `?inline=1` for the previous shape, with the
+panels embedded in the response and no `analysis_id`. `rleval analyze --out` bundles
+are unchanged (everything inline).
+
 ### 2.1 History and habits
 
 Start with `--data-dir` and each analysis is saved (the Pacifist headline, fault

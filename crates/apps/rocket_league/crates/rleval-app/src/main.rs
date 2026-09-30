@@ -21,6 +21,7 @@ use rleval_app::authn::{
     clearing_cookie, session_cookie, Authn, AuthnError, Credentials, LoginProvider,
 };
 use rleval_app::history::{self, SessionRecord};
+use rleval_app::panels::{PanelCache, Panels};
 use rleval_app::server::{self, Request, Response};
 use rleval_app::store::{
     copy_all, session_key, AccountId, FsSessionStore, SaveOutcome, SessionStore,
@@ -160,6 +161,7 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         team_store,
         authn,
         teams,
+        panels: PanelCache::default(),
     };
 
     eprintln!(
@@ -361,6 +363,8 @@ struct AppState {
     team_store: Option<Box<dyn SessionStore>>,
     authn: Authn,
     teams: Teams,
+    /// The viewer/scoring/ballchasing HTML of recent analyses, fetched lazily by the UI.
+    panels: PanelCache,
 }
 
 const TEAM_POOL_DIR: &str = "_teams";
@@ -410,6 +414,7 @@ fn route(req: &Request, state: &AppState) -> Response {
                 &req.body,
                 &stem(&name),
                 rank.as_deref(),
+                wants_inline(req),
                 state,
                 account,
                 team,
@@ -432,6 +437,7 @@ fn route(req: &Request, state: &AppState) -> Response {
                         &bytes,
                         &stem(&name),
                         rank.as_deref(),
+                        wants_inline(req),
                         state,
                         account,
                         team,
@@ -440,6 +446,16 @@ fn route(req: &Request, state: &AppState) -> Response {
                 }
             })
         }
+        ("GET", path) if path.starts_with("/api/analysis/") => with_account(req, state, |account| {
+            let (id, panel) = path
+                .trim_start_matches("/api/analysis/")
+                .split_once('/')
+                .unwrap_or_default();
+            match state.panels.get(account, id).as_deref().and_then(|p| p.get(panel)) {
+                Some(html) => Response::html(html),
+                None => Response::text(404, "no such panel (analyses are kept only briefly; re-run it)"),
+            }
+        }),
         ("GET", "/api/teams") => with_account(req, state, |account| {
             let mine: Vec<TeamEntry> = state
                 .teams
@@ -593,6 +609,11 @@ fn with_account(
     }
 }
 
+/// `?inline=1` asks for the legacy response shape, with the HTML panels embedded.
+fn wants_inline(req: &Request) -> bool {
+    query_param(&req.path, "inline").is_some_and(|v| v == "1")
+}
+
 /// Like [`with_account`], for endpoints that read the account's stored sessions.
 fn with_history(
     req: &Request,
@@ -619,6 +640,7 @@ fn analyze_response(
     bytes: &[u8],
     replay_id: &str,
     override_bracket: Option<&str>,
+    inline: bool,
     state: &AppState,
     account: &AccountId,
     team: Option<&Team>,
@@ -631,8 +653,14 @@ fn analyze_response(
         pipeline::analyze(bytes, replay_id, norms.as_ref(), override_bracket)
     }));
     match result {
-        Ok(Ok(analysis)) => {
+        Ok(Ok(mut analysis)) => {
             persist(state, account, team, bytes, &analysis);
+            if !inline {
+                // Default: just the data; the panels are fetched on first use.
+                let id = session_key(bytes);
+                state.panels.put(account, &id, Panels::take(&mut analysis));
+                analysis.analysis_id = id;
+            }
             json_response(&analysis)
         }
         Ok(Err(e)) => Response::text(400, format!("could not analyze replay: {e}")),
