@@ -231,6 +231,11 @@ impl ConnectionStore for ReminderConnectionStore {
             .collect()
     }
 
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.all_ids::<Reminder>().len())
+    }
+
     /// `RDO-FR-002` (ADR-0080): a page ordered by `due_at_unix_ms` is a
     /// range walk of the stack's sorted index — the page's cost, not the
     /// table's (`ORD-FR-005`); any other orderable field takes the scan

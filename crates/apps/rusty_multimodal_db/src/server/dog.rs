@@ -297,6 +297,11 @@ where
             .collect()
     }
 
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.all_ids().len())
+    }
+
     /// `BAK-FR-002`/`006` (ADR-0065): copy every file under
     /// `self.backup_source`'s prefix, under `S`'s own write lock —
     /// `Unsupported` when this adapter was built with no known data

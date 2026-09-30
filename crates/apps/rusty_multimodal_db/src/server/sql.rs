@@ -68,10 +68,14 @@
 //! looked up against anything — a connection serves exactly one domain,
 //! so there is nothing to validate it against (a deliberate
 //! simplification, named in the design rather than silently assumed). No
-//! `OR`, no `HAVING`, no `LIKE`/`IN`/`IS NULL`/`BETWEEN`, no descending or
+//! `OR`, no `HAVING`, no `LIKE`/`IN`/`BETWEEN`, no descending or
 //! multi-field `ORDER BY`, no nested/composite aggregate expressions, no
 //! subqueries, no `INSERT`/`UPDATE`/`DELETE` — see each design
-//! document's own "Non-goals".
+//! document's own "Non-goals". `field IS NULL` / `field IS NOT NULL`
+//! (`NLC-FR-006`, `ADR-0128`) are the one null test: they compile to
+//! `Eq`/`Ne` against [`super::protocol::ScanValue::Null`], which a server
+//! at protocol 32 accepts for a nullable field and refuses `Malformed` for
+//! any other; `= NULL` is not accepted (it is never true in SQL).
 
 use super::protocol::{AggregateFn, CompareOp};
 use std::fmt;
@@ -84,6 +88,9 @@ pub(crate) enum Literal {
     Number(i64),
     Str(String),
     Bool(bool),
+    /// `NLC-FR-006` (ADR-0128): the operand of `IS NULL` / `IS NOT NULL`
+    /// only — there is no `NULL` literal on the right of a comparator.
+    Null,
 }
 
 /// One parsed `WHERE`-clause condition — `name` is not yet a
@@ -509,6 +516,25 @@ impl<'a> Parser<'a> {
 
     fn condition(&mut self) -> Result<ParsedCondition, SqlParseError> {
         let (qualifier, name) = self.maybe_qualified()?;
+        // `NLC-FR-006` (ADR-0128): `IS [NOT] NULL` is `Eq`/`Ne` against `Null`.
+        if self.peek_keyword("IS") {
+            self.advance();
+            let negated = self.peek_keyword("NOT");
+            if negated {
+                self.advance();
+            }
+            self.expect_keyword("NULL")?;
+            return Ok(ParsedCondition {
+                qualifier,
+                name,
+                op: if negated {
+                    CompareOp::Ne
+                } else {
+                    CompareOp::Eq
+                },
+                value: Literal::Null,
+            });
+        }
         let op = self.comparator()?;
         let value = self.literal()?;
         Ok(ParsedCondition {
@@ -877,6 +903,22 @@ mod tests {
         assert_eq!(q.conditions[1].value, Literal::Bool(true));
         assert_eq!(q.conditions[2].value, Literal::Bool(false));
         assert_eq!(q.conditions[3].value, Literal::Number(-5));
+    }
+
+    /// `NLC-FR-006` (ADR-0128): `IS NULL` is `Eq` and `IS NOT NULL` is `Ne`
+    /// against the null operand, case-insensitively; `= NULL` is not a
+    /// literal, and a dangling `IS` is a parse error.
+    #[test]
+    fn parses_is_null_and_is_not_null() {
+        let q =
+            parse("SELECT * FROM memory WHERE deleted_at IS NULL AND node_id is not null").unwrap();
+        assert_eq!(q.conditions[0].op, CompareOp::Eq);
+        assert_eq!(q.conditions[0].value, Literal::Null);
+        assert_eq!(q.conditions[1].op, CompareOp::Ne);
+        assert_eq!(q.conditions[1].value, Literal::Null);
+        assert!(parse("SELECT * FROM memory WHERE deleted_at = NULL").is_err());
+        assert!(parse("SELECT * FROM memory WHERE deleted_at IS").is_err());
+        assert!(parse("SELECT * FROM memory WHERE deleted_at IS NOT 5").is_err());
     }
 
     #[test]

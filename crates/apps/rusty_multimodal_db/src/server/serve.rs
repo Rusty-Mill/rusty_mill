@@ -11,13 +11,14 @@
 
 use super::journal::JournalStats;
 use super::metrics::{ConnectionMetricsGuard, PlanKind, ServerMetrics};
+use super::nullable::{self, NullableField};
 use super::protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
     JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
     Request, Response, ScanValue, Selection, TransactionOp, WriteOp, WriteResult, MAX_BATCH_OPS,
     MAX_SNAPSHOT_BYTES, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION,
     SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
 use std::cell::{Cell, RefCell};
@@ -27,7 +28,7 @@ use std::net::{IpAddr, TcpListener, TcpStream};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -540,6 +541,15 @@ pub trait ConnectionStore: Send + Sync {
                 Ok(LinkOutcome::AlreadyLinked) => WriteResult::AlreadyLinked,
                 Err(code) => WriteResult::Failed(code),
             },
+            // `TXS-FR-001` (ADR-0130): the single-shot update, mapped as a
+            // batch outcome; an id with no record is `NotFound`.
+            WriteOp::UpdateField { id, field, value } => {
+                match self.update_field(*id, *field, value.clone()) {
+                    Ok(true) => WriteResult::Updated,
+                    Ok(false) => WriteResult::NotFound,
+                    Err(code) => WriteResult::Failed(code),
+                }
+            }
         }
     }
 
@@ -568,6 +578,22 @@ pub trait ConnectionStore: Send + Sync {
             results.push(result);
         }
         Ok(results)
+    }
+
+    /// `STC-FR-001` (ADR-0133, protocol 35): [`Self::write_batch`] in atomic
+    /// mode, but **all or nothing including soft outcomes**: if any op would
+    /// end `Duplicate`, `NotFound`, `GuardFailed` or `AlreadyLinked` (judged
+    /// against the store and the batch's own earlier ops, under the write
+    /// lock) nothing is applied and the first such op is the `Err`. The
+    /// default answers `Unsupported`; `Memory`, `Entity` and `Relation`
+    /// implement it.
+    fn strict_commit_supported(&self) -> bool {
+        false
+    }
+
+    /// [`Self::write_batch`] all or nothing (see `strict_commit_supported`).
+    fn write_batch_strict(&self, _ops: &[WriteOp]) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        Err((0, ErrorCode::Unsupported))
     }
 
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
@@ -676,6 +702,44 @@ pub trait ConnectionStore: Send + Sync {
     /// this method itself does neither. See
     /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`.
     fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>;
+
+    /// `SCB-FR-002` (ADR-0126): how many records a [`Self::scan_all`]
+    /// would read, from the id list alone — no record is decoded. `None`
+    /// is "unknown", which never trips a scan budget. Every shipped
+    /// adapter answers `Some`.
+    fn record_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// `CHL-FR-004` (ADR-0131, protocol 34): the committed writes after
+    /// `after` in the change log's `epoch` — the log's position and the
+    /// entries, oldest first. The default has no change log: `Unsupported`.
+    fn changes_since(
+        &self,
+        _epoch: u64,
+        _after: u64,
+        _limit: usize,
+    ) -> Result<(crate::server::changelog::LogPosition, Vec<Vec<WriteOp>>), ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    /// `CHL-FR-005` (ADR-0131, protocol 34): [`Self::fetch_snapshot`] plus the
+    /// change log's `(epoch, seq)` at the instant of the copy, taken
+    /// consistently with it. `None` for a table with no log, which is
+    /// answered as before.
+    #[allow(clippy::type_complexity)]
+    fn fetch_snapshot_at(&self) -> Result<(Vec<(String, Vec<u8>)>, Option<(u64, u64)>), ErrorCode> {
+        Ok((self.fetch_snapshot()?, None))
+    }
+
+    /// `NLC-FR-001` (ADR-0128, protocol 32): the fields this table stores
+    /// as a sentinel but shows as `NULL` to a connection at 32 or above —
+    /// `handle_connection` translates at the wire edge
+    /// ([`nullable::to_storage`]/[`nullable::to_wire`]). The default is
+    /// none, which leaves every request and response untouched.
+    fn nullable_fields(&self) -> &[NullableField] {
+        &[]
+    }
 
     fn apply_transaction(
         &self,
@@ -900,6 +964,7 @@ fn error_message(code: ErrorCode) -> &'static str {
             "this table's on-disk size exceeds the snapshot size limit; nothing was read"
         }
         ErrorCode::Busy => "the server is at its connection limit; retry later",
+        ErrorCode::Gone => "the change log no longer holds that position; resync from a snapshot",
     }
 }
 
@@ -1208,7 +1273,7 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
     plan: QueryPlan,
     filter: &[Predicate],
 ) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
-    let bucket = |i: usize| store.filter_eq(filter[i].field, &filter[i].value);
+    let bucket = |i: usize| equality_bucket(store, filter, i);
     // `plan_query` never builds a range with neither side; a refusal is
     // the honest answer if one ever appears, and the caller scans.
     let bounds = |lower: Option<usize>, upper: Option<usize>| {
@@ -1257,6 +1322,77 @@ fn query_candidates<S: ConnectionStore + ?Sized>(
         Err(_) => store.scan_all(),
     }
 }
+
+/// `QPE-FR-002` (ADR-0129): the ids the equality plan reads. `first` is the
+/// predicate the plan names; when `filter` carries `Eq` on *other* fields
+/// the schema also declares `filter_eq: true`, their buckets are read too
+/// (ids only, no record) and intersected, so only the records in every
+/// bucket are decoded. The extra buckets are read only when the first is
+/// large enough for that to pay: a decode costs about
+/// [`EQ_INTERSECT_RATIO`] id visits (`ADR-0079`'s measurement), and the
+/// extra bucket is at most the table, so with `n` records in the table and
+/// `b` in the first bucket, reading more is never worse than the decode it
+/// might save once `b * EQ_INTERSECT_RATIO >= n`. Below that, or with the
+/// table's size unknown, the first bucket alone is read, exactly as before
+/// this round. Exact, never an estimate: two known numbers compared. Every
+/// predicate is still re-checked over what comes back, so the answer is the
+/// same set on every path; a refusing second index is skipped, and a first
+/// bucket that refuses is the caller's fallback to the scan, as ever.
+fn equality_bucket<S: ConnectionStore + ?Sized>(
+    store: &S,
+    filter: &[Predicate],
+    first: usize,
+) -> Result<Vec<RecordId>, ErrorCode> {
+    let head = store.filter_eq(filter[first].field, &filter[first].value)?;
+    let worth = store
+        .record_count()
+        .is_some_and(|n| head.len().saturating_mul(EQ_INTERSECT_RATIO) >= n);
+    if head.is_empty()
+        || !worth
+        || filter
+            .iter()
+            .filter(|p| p.op == protocol::CompareOp::Eq)
+            .count()
+            < 2
+    {
+        return Ok(head);
+    }
+    let schema = store.describe();
+    let indexed = |p: &Predicate| {
+        p.op == protocol::CompareOp::Eq
+            && schema
+                .fields
+                .iter()
+                .any(|f| f.tag == p.field && f.capabilities.filter_eq)
+    };
+    let mut seen = vec![filter[first].field];
+    let mut buckets = vec![head];
+    for (i, p) in filter.iter().enumerate() {
+        if i == first || !indexed(p) || seen.contains(&p.field) {
+            continue;
+        }
+        seen.push(p.field);
+        let Ok(bucket) = store.filter_eq(p.field, &p.value) else {
+            continue; // a refusing index narrows nothing; the rest still do
+        };
+        if bucket.is_empty() {
+            return Ok(bucket);
+        }
+        buckets.push(bucket);
+    }
+    buckets.sort_by_key(Vec::len);
+    let mut buckets = buckets.into_iter();
+    let mut ids = buckets.next().unwrap_or_default();
+    for bucket in buckets {
+        ids = intersect_ids(ids, bucket);
+    }
+    Ok(ids)
+}
+
+/// `QPE-FR-002` (ADR-0129): how many id visits one record decode costs —
+/// `ADR-0079`'s measurement (~1 µs against ~40 ns), the crate's second cost
+/// constant, and like the first a constant, not a setting.
+pub const EQ_INTERSECT_RATIO: usize = 25;
 
 /// `QPB-FR-003` (ADR-0079): how many range-walk ids the intersection
 /// plan may visit per equality-bucket id before giving the walk up and
@@ -2449,6 +2585,9 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
                 })
                 .collect(),
         },
+        // `CHL-FR-005` (ADR-0131): below 34 the position is dropped and the
+        // files go as a plain `Snapshot`.
+        Response::SnapshotAt { files, .. } if negotiated < 34 => Response::Snapshot { files },
         Response::Schema(mut schema) if negotiated < 11 => {
             schema
                 .fields
@@ -2457,23 +2596,22 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
         }
         Response::ScanValues { ref values } => {
             debug_assert!(
-                !values
-                    .iter()
-                    .any(|v| matches!(v, ScanValue::StrList(_) | ScanValue::Null)),
-                "a StrList field is never scannable (ENT4-FR-003); no field is nullable yet (RGM-FR-004)"
+                !values.iter().any(|v| matches!(v, ScanValue::StrList(_)))
+                    && (negotiated >= 32 || !values.iter().any(|v| matches!(v, ScanValue::Null))),
+                "a StrList field is never scannable (ENT4-FR-003); a Null is only sent at 32 or above (NLC-FR-003)"
             );
             resp
         }
         Response::Groups { ref groups } => {
             debug_assert!(
-                !groups.iter().any(|g| g
-                    .key
-                    .iter()
-                    .any(|p| is_str_list(p) || matches!(p.1, ScanValue::Null))
-                    || g.values
-                        .iter()
-                        .any(|v| matches!(v, ScanValue::StrList(_) | ScanValue::Null))),
-                "a StrList field is never groupable or aggregatable (ENT4-FR-003); no field is nullable yet (RGM-FR-004)"
+                !groups.iter().any(|g| g.key.iter().any(is_str_list)
+                    || g.values.iter().any(|v| matches!(v, ScanValue::StrList(_))))
+                    && (negotiated >= 32
+                        || !groups.iter().any(|g| g
+                            .key
+                            .iter()
+                            .any(|p| matches!(p.1, ScanValue::Null)))),
+                "a StrList field is never groupable or aggregatable (ENT4-FR-003); a Null key is only sent at 32 or above (NLC-FR-003)"
             );
             resp
         }
@@ -2517,6 +2655,22 @@ pub fn request_exceeds_row_cap(req: &Request, cap: usize) -> bool {
         },
         _ => false,
     }
+}
+
+/// `SCB-FR-003` (ADR-0126): whether `req` is an `Aggregate` or `Join`
+/// that would full-scan a table holding more than `budget` records. Pure
+/// over the request and the store's declarations: [`plan_of`] says whether
+/// the candidate step is a full scan, [`ConnectionStore::record_count`]
+/// how big the table is. Every other request, every indexed or walked
+/// plan, and an adapter that cannot count are never over the budget.
+pub fn request_exceeds_scan_budget<S: ConnectionStore + ?Sized>(
+    store: &S,
+    req: &Request,
+    budget: usize,
+) -> bool {
+    matches!(req, Request::Aggregate { .. } | Request::Join(_))
+        && plan_of(store, req) == Some(PlanKind::FullScan)
+        && store.record_count().is_some_and(|n| n > budget)
 }
 
 /// `CLP-FR-001` (ADR-0102): under a row cap, a `Query` that names no
@@ -2688,7 +2842,10 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Metrics { .. }
         | Response::BackedUp { .. }
         | Response::Snapshot { .. }
-        | Response::RowsClamped { .. } => access::Outcome::Ok,
+        | Response::RowsClamped { .. }
+        | Response::NullableFields { .. }
+        | Response::Changes { .. }
+        | Response::SnapshotAt { .. } => access::Outcome::Ok,
     }
 }
 
@@ -2782,6 +2939,15 @@ pub struct ServeOptions {
     /// `LIM-FR-003` (ADR-0093): the most rows one `Query`/page may ask
     /// for; `None` is unbounded and a `Query` may omit its `limit`.
     max_query_rows: Option<usize>,
+    /// `SCB-FR-001` (ADR-0126): the most records one full-scan
+    /// `Aggregate`/`Join` may read; `None` is unbounded.
+    max_scan_rows: Option<usize>,
+    /// `DRN-FR-001` (ADR-0127): the handle that asks `serve_tables` to
+    /// stop; `None` serves until the listener errors, as before.
+    shutdown: Option<Shutdown>,
+    /// `DRN-FR-003` (ADR-0127): how long a stopping server waits for its
+    /// connections to end before returning anyway.
+    drain_timeout: Duration,
     /// `BTL-FR-002` (ADR-0104): refusal threads alive right now — a
     /// refused connection's `Busy` frame is written from a thread that
     /// lives at most a few `BUSY_REFUSAL_TIMEOUT`s; at most
@@ -2848,6 +3014,9 @@ impl std::fmt::Debug for ServeOptions {
             .field("idle_timeout", &self.idle_timeout)
             .field("max_connections", &self.max_connections)
             .field("max_query_rows", &self.max_query_rows)
+            .field("max_scan_rows", &self.max_scan_rows)
+            .field("shutdown", &self.shutdown.is_some())
+            .field("drain_timeout", &self.drain_timeout)
             .finish()
     }
 }
@@ -2878,6 +3047,9 @@ impl ServeOptions {
             max_connections: None,
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
+            max_scan_rows: None,
+            shutdown: None,
+            drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             busy_refusals: AtomicUsize::new(0),
         }
     }
@@ -2929,6 +3101,38 @@ impl ServeOptions {
     /// The configured row cap, or `None`.
     pub fn max_query_rows(&self) -> Option<usize> {
         self.max_query_rows
+    }
+
+    /// `SCB-FR-001` (ADR-0126): refuse `TooLarge` (`Malformed` below
+    /// protocol 25), before any read, an `Aggregate` or `Join` whose
+    /// candidate step is a full scan of a table holding more than `max`
+    /// records. An indexed or walked plan reads less than the table and is
+    /// never refused. `0` means unset, as `with_max_query_rows` does.
+    pub fn with_max_scan_rows(mut self, max: usize) -> Self {
+        self.max_scan_rows = (max > 0).then_some(max);
+        self
+    }
+
+    /// The configured scan budget, or `None`.
+    pub fn max_scan_rows(&self) -> Option<usize> {
+        self.max_scan_rows
+    }
+
+    /// `DRN-FR-001` (ADR-0127): let `shutdown.request()` stop the server
+    /// gracefully — accepting stops, every connection finishes the request
+    /// it is in and then closes, and `serve_tables` returns once they have
+    /// (or after [`Self::with_drain_timeout`]). Opt-in: unset, `serve_tables`
+    /// blocks in a plain `accept` loop exactly as before.
+    pub fn with_shutdown(mut self, shutdown: Shutdown) -> Self {
+        self.shutdown = Some(shutdown);
+        self
+    }
+
+    /// `DRN-FR-003` (ADR-0127): the longest a stopping server waits for its
+    /// connections to end (default [`DEFAULT_DRAIN_TIMEOUT`]).
+    pub fn with_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
     }
 
     /// `LIM-FR-002`: claim one in-flight slot at accept — `true` and the
@@ -3026,6 +3230,9 @@ impl ServeOptions {
             max_connections: None,
             in_flight: AtomicUsize::new(0),
             max_query_rows: None,
+            max_scan_rows: None,
+            shutdown: None,
+            drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             busy_refusals: AtomicUsize::new(0),
         }
     }
@@ -3987,8 +4194,27 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // `ServeOptions` access beyond the `TokenClass::Replication`
         // gate `handle_connection` already checked before dispatching —
         // so, unlike `Backup`, it goes through the generic loop.
-        Request::FetchSnapshot => match store.fetch_snapshot() {
-            Ok(files) => Response::Snapshot { files },
+        Request::FetchSnapshot => match store.fetch_snapshot_at() {
+            Ok((files, None)) => Response::Snapshot { files },
+            // `CHL-FR-005` (ADR-0131): with a change log, the position rides
+            // along; `downgrade_for_version` sends `Snapshot` below 34.
+            Ok((files, Some((epoch, seq)))) => Response::SnapshotAt { files, epoch, seq },
+            Err(code) => err_response(code),
+        },
+        // `CHL-FR-004` (ADR-0131): the entries after `after`. The
+        // `Replication` class and the protocol gate ran in
+        // `handle_connection`.
+        Request::FetchSince {
+            epoch,
+            after,
+            limit,
+        } => match store.changes_since(epoch, after, limit as usize) {
+            Ok((position, entries)) => Response::Changes {
+                epoch: position.epoch,
+                first: after + 1,
+                head: position.head,
+                entries,
+            },
             Err(code) => err_response(code),
         },
         // `FPG-FR-002`/`FPG-FR-003` (ADR-0068): `Page`'s own
@@ -4043,6 +4269,12 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             },
             Err(code) => err_response(code),
         },
+        // `NLC-FR-005` (ADR-0128): which fields are nullable — the tags, ascending.
+        Request::DescribeNullable => {
+            let mut tags: Vec<FieldRef> = store.nullable_fields().iter().map(|f| f.tag).collect();
+            tags.sort_unstable();
+            Response::NullableFields { tags }
+        }
     }
 }
 
@@ -4329,6 +4561,14 @@ fn handle_connection(
     let mut table: usize = primary;
     // `SESS-FR-002`: the staged writes of an open session, if any.
     let mut session: Option<Vec<TransactionOp>> = None;
+    // `TXS-FR-003` (ADR-0130): once a session stages a record write, its
+    // whole staged list — updates included, in order — is this list of
+    // `WriteOp`s, committed as one atomic `write_batch`. `None` for a session
+    // that has staged only updates (committed through `apply_transaction`
+    // exactly as before).
+    let mut session_writes: Option<Vec<WriteOp>> = None;
+    // `STC-FR-003` (ADR-0133): the open session commits strictly.
+    let mut strict_commit = false;
     // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
     // session is open; cleared with the session.
     let mut read_your_writes: Option<Vec<FieldRef>> = None;
@@ -4493,7 +4733,9 @@ fn handle_connection(
         // cannot be folded into a boolean flag on `ReadWrite` — the
         // match above already proves at compile time that no future
         // `TokenClass` variant is silently exempted here.
-        if matches!(req, Request::FetchSnapshot) && class != TokenClass::Replication {
+        if matches!(req, Request::FetchSnapshot | Request::FetchSince { .. })
+            && class != TokenClass::Replication
+        {
             sink.record(&audit::AuditEvent::now(
                 peer,
                 audit::AuditKind::Refused {
@@ -4508,6 +4750,19 @@ fn handle_connection(
             continue;
         }
 
+        // `NLC-FR-002`/`003` (ADR-0128): on a connection at 32 or above, a
+        // `Null` for one of the table's nullable fields becomes its stored
+        // sentinel here, before anything else reads the request, and a
+        // stored sentinel in the answer becomes `Null` just before
+        // `downgrade_for_version`. Below 32, or for a table with none, this
+        // is the identity.
+        let nullable: &[NullableField] = if negotiated >= 32 {
+            store.nullable_fields()
+        } else {
+            &[]
+        };
+        let wire_ctx = nullable::WireContext::of(&req, store.table_name());
+        let req = nullable::to_storage(req, nullable, store.table_name());
         // `ACC-FR-004`: everything from here on is a dispatched request —
         // past `Hello`/`Authenticate` (handled above) and the
         // unauthenticated/`ReadOnly` gates (also above, each its own
@@ -4529,6 +4784,8 @@ fn handle_connection(
                     err_response(ErrorCode::SessionOpen)
                 } else {
                     session = Some(Vec::new());
+                    session_writes = None;
+                    strict_commit = false;
                     read_your_writes = None;
                     validate_on_stage = false;
                     snapshot_reads = None;
@@ -4558,11 +4815,24 @@ fn handle_connection(
                         SESSION_MVCC_ISOLATION
                     } else {
                         0
+                    }
+                    | if negotiated >= 35 {
+                        SESSION_STRICT_COMMIT
+                    } else {
+                        0
                     };
                 if flags & !known != 0 {
                     err_response(ErrorCode::Malformed)
                 } else if session.is_some() {
                     err_response(ErrorCode::SessionOpen)
+                } else if flags & SESSION_STRICT_COMMIT != 0
+                    && (flags & !SESSION_STRICT_COMMIT != 0 || !store.strict_commit_supported())
+                {
+                    // `STC-FR-003`: strict commit stands alone — its own
+                    // overlay replaces read-your-writes, and a snapshot or
+                    // MVCC session has its own commit rule. A table that
+                    // cannot commit strictly refuses the bit.
+                    err_response(ErrorCode::Unsupported)
                 } else if flags & SESSION_MVCC_ISOLATION != 0 && !store.mvcc_supported() {
                     // `MVCC2-FR-012`: a domain that doesn't implement real
                     // MVCC (`Dog`/`Order`/`Employee`) refuses the bit —
@@ -4572,6 +4842,8 @@ fn handle_connection(
                     err_response(ErrorCode::Unsupported)
                 } else {
                     session = Some(Vec::new());
+                    strict_commit = flags & SESSION_STRICT_COMMIT != 0;
+                    session_writes = strict_commit.then(Vec::new);
                     read_your_writes = (flags & SESSION_READ_YOUR_WRITES != 0).then(|| {
                         store
                             .describe()
@@ -4590,6 +4862,8 @@ fn handle_connection(
                 }
             }
             Request::Rollback => {
+                session_writes = None;
+                strict_commit = false;
                 read_your_writes = None;
                 validate_on_stage = false;
                 snapshot_reads = None;
@@ -4602,6 +4876,19 @@ fn handle_connection(
                     Response::Ok
                 } else {
                     err_response(ErrorCode::NoSession)
+                }
+            }
+            // `STC-FR-004` (ADR-0133): a strict session reads the record as its
+            // staged list would leave it — the same overlay the commit checks.
+            Request::GetById { id } if strict_commit && session_writes.is_some() => {
+                let stored = match dispatch(store, Request::GetById { id }) {
+                    Response::Record { fields, .. } => Some(fields),
+                    _ => None,
+                };
+                let staged = session_writes.as_deref().unwrap_or_default();
+                match crate::server::strict::overlay_get(id, stored, staged) {
+                    Some(fields) => Response::Record { id, fields },
+                    None => Response::NotFound,
                 }
             }
             Request::GetById { id }
@@ -4649,6 +4936,30 @@ fn handle_connection(
                     None => Response::NotFound,
                 }
             }
+            // `TXS-FR-004` (ADR-0130): a session that staged record writes
+            // commits its whole ordered list as one atomic `write_batch` —
+            // crash-atomic where the table is journaled, isolated under one
+            // write lock — and answers one `WriteResult` per staged op.
+            Request::Commit if session_writes.is_some() => {
+                read_your_writes = None;
+                validate_on_stage = false;
+                snapshot_reads = None;
+                session = None;
+                let ops = session_writes.take().unwrap_or_default();
+                let outcome = if std::mem::take(&mut strict_commit) {
+                    store.write_batch_strict(&ops)
+                } else {
+                    store.write_batch(&ops, true)
+                };
+                match outcome {
+                    Ok(results) => Response::BatchResults { results },
+                    Err((index, code)) => Response::TransactionFailed {
+                        index,
+                        code,
+                        message: error_message(code).to_string(),
+                    },
+                }
+            }
             Request::Commit => {
                 read_your_writes = None;
                 validate_on_stage = false;
@@ -4694,6 +5005,21 @@ fn handle_connection(
                 };
                 match (refused, session.as_mut()) {
                     (Some(code), _) => err_response(code),
+                    // `TXS-FR-003`: with record writes already staged, the
+                    // update joins the one ordered `WriteOp` list.
+                    (None, Some(_)) if session_writes.is_some() => match session_writes.as_mut() {
+                        Some(list) if list.len() < MAX_STAGED_OPS => {
+                            list.push(WriteOp::UpdateField {
+                                id: op.id,
+                                field: op.field,
+                                value: op.value,
+                            });
+                            Response::Staged {
+                                index: (list.len() - 1) as u32,
+                            }
+                        }
+                        _ => err_response(ErrorCode::SessionFull),
+                    },
                     (None, Some(staged)) if staged.len() < MAX_STAGED_OPS => {
                         staged.push(op);
                         Response::Staged {
@@ -4705,6 +5031,42 @@ fn handle_connection(
             }
             Request::Transaction { .. } if session.is_some() => {
                 err_response(ErrorCode::SessionOpen)
+            }
+            // `TXS-FR-003` (ADR-0130, protocol 33): a connection at 33 or
+            // above may stage a record write in its session; below, the
+            // refusals that follow stand. Refused `Unsupported` on a session
+            // that asked for read-your-writes, snapshot isolation or real
+            // MVCC — their overlays and read sets are per-field (phase 2).
+            ref write
+                if session.is_some() && negotiated >= 33 && staged_write_op(write).is_some() =>
+            {
+                match (staged_write_op(write), session.as_mut()) {
+                    (Some(op), Some(updates))
+                        if read_your_writes.is_none()
+                            && snapshot_reads.is_none()
+                            && mvcc_snapshot.get().is_none() =>
+                    {
+                        let list = session_writes.get_or_insert_with(|| {
+                            updates
+                                .drain(..)
+                                .map(|u| WriteOp::UpdateField {
+                                    id: u.id,
+                                    field: u.field,
+                                    value: u.value,
+                                })
+                                .collect()
+                        });
+                        if list.len() < MAX_STAGED_OPS {
+                            list.push(op);
+                            Response::Staged {
+                                index: (list.len() - 1) as u32,
+                            }
+                        } else {
+                            err_response(ErrorCode::SessionFull)
+                        }
+                    }
+                    _ => err_response(ErrorCode::Unsupported),
+                }
             }
             // `INS-FR-007` (ADR-0046): an insert is never staged — the
             // `Transaction`-inside-a-session rule — and, as a write, is
@@ -4743,6 +5105,15 @@ fn handle_connection(
             // (nothing applied).
             Request::WriteBatch { .. } if session.is_some() => err_response(ErrorCode::SessionOpen),
             Request::WriteBatch { .. } if negotiated < 22 => err_response(ErrorCode::Malformed),
+            // `TXS-FR-001` (ADR-0130), rule 3: `UpdateField` is a protocol-33 op.
+            Request::WriteBatch { ref ops, .. }
+                if negotiated < 33
+                    && ops
+                        .iter()
+                        .any(|op| matches!(op, WriteOp::UpdateField { .. })) =>
+            {
+                err_response(ErrorCode::Malformed)
+            }
             Request::WriteBatch { ref ops, .. } if ops.len() > MAX_BATCH_OPS => {
                 err_response(ErrorCode::Malformed)
             }
@@ -4769,6 +5140,11 @@ fn handle_connection(
             // below), since — unlike `Backup` — it needs no `options`
             // access this match arm would otherwise have to thread through.
             Request::FetchSnapshot if negotiated < 25 => err_response(ErrorCode::Malformed),
+            // `NLC-FR-005` (ADR-0128): gated like every appended request.
+            Request::DescribeNullable if negotiated < 32 => err_response(ErrorCode::Malformed),
+            // `CHL-FR-004` (ADR-0131): gated like every appended request; the
+            // `Replication` class gate ran above.
+            Request::FetchSince { .. } if negotiated < 34 => err_response(ErrorCode::Malformed),
             // `FPG-FR-007` (ADR-0068): a read, `Page`'s own gate shape —
             // no `SessionOpen` gate, `Malformed` below the protocol
             // version that introduced it. Falls through to `dispatch`'s
@@ -4792,6 +5168,20 @@ fn handle_connection(
                 if options
                     .max_query_rows()
                     .is_some_and(|cap| request_exceeds_row_cap(capped, cap)) =>
+            {
+                err_response(if negotiated >= 25 {
+                    ErrorCode::TooLarge
+                } else {
+                    ErrorCode::Malformed
+                })
+            }
+            // `SCB-FR-004` (ADR-0126): under an opt-in scan budget, a full
+            // scan of a table over it is refused before any read, with the
+            // row cap's own error and downgrade.
+            ref scanning
+                if options
+                    .max_scan_rows()
+                    .is_some_and(|budget| request_exceeds_scan_budget(store, scanning, budget)) =>
             {
                 err_response(if negotiated >= 25 {
                     ErrorCode::TooLarge
@@ -4848,6 +5238,7 @@ fn handle_connection(
             }
             _ => resp,
         };
+        let resp = nullable::to_wire(resp, nullable, &wire_ctx);
         let resp = downgrade_for_version(resp, negotiated);
         // `MET-FR-003` (ADR-0064): the identical call site `AccessEvent`
         // is recorded at — one increment per dispatched request.
@@ -4883,8 +5274,8 @@ fn handle_connection(
 /// behavior exactly (`TLS-FR-008`); configured, it requires every
 /// connection to complete a TLS handshake before any request is served.
 /// Runs until `listener` itself errors (e.g. the socket is closed) or
-/// forever otherwise — a real deployment's shutdown/drain story is an
-/// explicit non-goal of the accepted design, not solved here.
+/// forever otherwise; since `ADR-0127` a [`Shutdown`] given to
+/// [`ServeOptions::with_shutdown`] stops it gracefully.
 ///
 /// `options` consolidates every cross-cutting server concern —
 /// tokens, certificate classes, the audit/access-log sinks, the
@@ -4899,6 +5290,99 @@ pub fn serve<S: ConnectionStore + 'static>(
 ) {
     let name = store.table_name().to_string();
     serve_tables(listener, vec![(name, store)], 0, options);
+}
+
+/// `DRN-FR-003` (ADR-0127): how long a stopping server waits for its
+/// connections to end before it returns anyway.
+pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the accept loop looks at the shutdown flag when no connection
+/// is waiting (only with a [`Shutdown`] configured).
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
+
+/// `DRN-FR-001` (ADR-0127): a cloneable handle that stops a server
+/// gracefully. Give one to [`ServeOptions::with_shutdown`], keep a clone,
+/// and call [`Self::request`] from anywhere (a signal watcher, a test).
+///
+/// A request stops the accept loop and shuts the *read* side of every open
+/// connection: a request already being answered completes and its response
+/// is written, and the next read is an end of stream, which ends the
+/// connection through the path a client disconnect takes (session rolled
+/// back, MVCC snapshot released, gauges decremented). Nothing is cut
+/// mid-write.
+#[derive(Clone, Default)]
+pub struct Shutdown(Arc<ShutdownState>);
+
+#[derive(Default)]
+struct ShutdownState {
+    requested: AtomicBool,
+    next: AtomicU64,
+    open: Mutex<HashMap<u64, TcpStream>>,
+}
+
+impl Shutdown {
+    /// A handle nothing has asked to stop yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the server to stop. Idempotent; safe from any thread.
+    pub fn request(&self) {
+        self.0.requested.store(true, Ordering::SeqCst);
+        let open = self.0.open.lock().unwrap_or_else(|p| p.into_inner());
+        for stream in open.values() {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+    }
+
+    /// Whether [`Self::request`] has been called.
+    pub fn is_requested(&self) -> bool {
+        self.0.requested.load(Ordering::SeqCst)
+    }
+
+    /// Track `stream` until the returned guard drops, so `request` can wake
+    /// a connection blocked on a read. A connection registered after the
+    /// request is woken at once: the flag is read after the insert.
+    fn register(&self, stream: &TcpStream) -> Option<ShutdownGuard> {
+        let clone = stream.try_clone().ok()?;
+        let id = self.0.next.fetch_add(1, Ordering::Relaxed);
+        self.0
+            .open
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, clone);
+        if self.is_requested() {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+        Some(ShutdownGuard {
+            state: Arc::clone(&self.0),
+            id,
+        })
+    }
+}
+
+impl std::fmt::Debug for Shutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shutdown")
+            .field("requested", &self.is_requested())
+            .finish()
+    }
+}
+
+/// Removes a connection from the shutdown registry when its thread ends.
+struct ShutdownGuard {
+    state: Arc<ShutdownState>,
+    id: u64,
+}
+
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        self.state
+            .open
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
 }
 
 /// `TBL-FR-001` (ADR-0045, implemented by ADR-0050): [`serve`] for more
@@ -4943,11 +5427,41 @@ pub fn serve_tables(
         let options = Arc::clone(&options);
         thread::spawn(move || super::metrics_http::serve_metrics_http(listener, options));
     }
-    for incoming in listener.incoming() {
+    // `DRN-FR-002` (ADR-0127): with a `Shutdown` configured the listener is
+    // polled so the flag is seen while idle; without one, the blocking
+    // `incoming()` loop below is the original path, untouched.
+    let shutdown = options.shutdown.clone();
+    if shutdown.is_some() && listener.set_nonblocking(true).is_err() {
+        return; // cannot poll, so cannot honor a shutdown: do not serve
+    }
+    let mut incoming = listener.incoming();
+    loop {
+        let next = match &shutdown {
+            None => incoming.next(),
+            Some(shutdown) => loop {
+                if shutdown.is_requested() {
+                    break None;
+                }
+                match incoming.next() {
+                    Some(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(ACCEPT_POLL)
+                    }
+                    other => break other,
+                }
+            },
+        };
+        let Some(incoming) = next else {
+            break;
+        };
         let stream = match incoming {
             Ok(s) => s,
             Err(_) => continue, // one bad accept doesn't take down the server
         };
+        // An accepted socket may inherit the listener's non-blocking mode
+        // on some platforms; the connection code expects a blocking one.
+        if shutdown.is_some() && stream.set_nonblocking(false).is_err() {
+            continue;
+        }
         // `LIM-FR-002` (ADR-0093): the cap is checked here, at accept,
         // before a thread exists for the connection; a refused socket
         // is dropped (closed) with nothing written and counted. The
@@ -4967,10 +5481,23 @@ pub fn serve_tables(
         let slot = InFlightGuardOwned(Arc::clone(&options));
         let spawned = thread::Builder::new().spawn(move || {
             let _slot = slot;
+            let _registered = thread_options
+                .shutdown
+                .as_ref()
+                .and_then(|shutdown| shutdown.register(&stream));
             handle_connection(stream, &tables, primary, thread_options.as_ref())
         });
         if spawned.is_err() {
             options.metrics().record_connection_refused();
+        }
+    }
+    // `DRN-FR-003` (ADR-0127): stopped accepting; wait for the connections
+    // (their read sides are shut, so each ends after the request it is in).
+    if shutdown.is_some() {
+        drop(listener);
+        let deadline = Instant::now() + options.drain_timeout;
+        while options.in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            thread::sleep(ACCEPT_POLL / 2);
         }
     }
 }
@@ -5124,6 +5651,37 @@ fn join_across(
             ),
         },
         Err(code) => err_response(code),
+    }
+}
+
+/// `TXS-FR-003` (ADR-0130): the batch op a session stages for a record-write
+/// request, or `None` for every other request. Pure.
+fn staged_write_op(req: &Request) -> Option<WriteOp> {
+    match req {
+        Request::Insert { id, fields } => Some(WriteOp::Insert {
+            id: *id,
+            fields: fields.clone(),
+        }),
+        Request::Replace { id, fields } => Some(WriteOp::Replace {
+            id: *id,
+            fields: fields.clone(),
+        }),
+        Request::ReplaceIf { id, fields, guard } => Some(WriteOp::ReplaceIf {
+            id: *id,
+            fields: fields.clone(),
+            guard: guard.clone(),
+        }),
+        Request::Delete { id } => Some(WriteOp::Delete { id: *id }),
+        Request::Link {
+            left,
+            right,
+            relation,
+        } => Some(WriteOp::Link {
+            left: *left,
+            right: *right,
+            relation: relation.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -6227,6 +6785,13 @@ mod tests {
 
     struct PlannerFixture {
         index: Result<Vec<RecordId>, ErrorCode>,
+        /// `QPE-FR-004` (ADR-0129): a bucket per indexed field, when a test
+        /// needs different answers for different fields; a field not
+        /// listed answers `index`.
+        buckets: Vec<(FieldRef, Vec<RecordId>)>,
+        /// `QPE-FR-004`: the size `record_count` reports, when it is not
+        /// the row count — a table larger than the fixture's rows.
+        table_size: Option<usize>,
         /// `QKG-FR-004`: the fixture's rows when not `sql_test_rows()` —
         /// a table with repeated keys for the grouped walk.
         rows: Option<Vec<FixtureRow>>,
@@ -6253,6 +6818,8 @@ mod tests {
         fn with_index(index: Result<Vec<RecordId>, ErrorCode>) -> Self {
             Self {
                 index,
+                buckets: Vec::new(),
+                table_size: None,
                 rows: None,
                 range_field: None,
                 range_refuses: false,
@@ -6327,10 +6894,16 @@ mod tests {
         }
         fn filter_eq(
             &self,
-            _field: FieldRef,
+            field: FieldRef,
             _value: &ScanValue,
         ) -> Result<Vec<RecordId>, ErrorCode> {
-            self.index.clone()
+            match self.buckets.iter().find(|(f, _)| *f == field) {
+                Some((_, ids)) => Ok(ids.clone()),
+                None => self.index.clone(),
+            }
+        }
+        fn record_count(&self) -> Option<usize> {
+            Some(self.table_size.unwrap_or_else(|| self.rows().len()))
         }
         fn range_field(&self) -> Option<FieldRef> {
             self.range_field
@@ -6921,6 +7494,111 @@ mod tests {
             },
             "Eq on the (not filter_eq) range field alone is still the one-key walk"
         );
+    }
+
+    /// A table of three rows with two indexed fields (`2` a `Str`, `3` a
+    /// `U32`), and per-field buckets: what the equality intersection reads.
+    fn two_index_fixture(table_size: usize, lab: Vec<u128>, nine: Vec<u128>) -> PlannerFixture {
+        let id = RecordId::from_u128;
+        let row = |n: u128, breed: &str, three: u32| {
+            (
+                id(n),
+                vec![
+                    (1, ScanValue::U32(n as u32)),
+                    (2, ScanValue::Str(breed.into())),
+                    (3, ScanValue::U32(three)),
+                ],
+            )
+        };
+        PlannerFixture {
+            rows: Some(vec![
+                row(1, "labrador", 7),
+                row(2, "poodle", 9),
+                row(3, "labrador", 9),
+            ]),
+            buckets: vec![
+                (2, lab.into_iter().map(id).collect()),
+                (3, nine.into_iter().map(id).collect()),
+            ],
+            table_size: Some(table_size),
+            ..PlannerFixture::with_index(Err(ErrorCode::Unsupported))
+        }
+    }
+
+    /// `QPE-FR-002`/`003` (ADR-0129), acceptance criterion 1: two `Eq`
+    /// predicates on indexed fields read both buckets (ids only) and decode
+    /// only the record in both; the answer is the full scan's set.
+    #[test]
+    fn two_indexed_equalities_decode_only_the_records_in_both_buckets() {
+        let fx = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let rows = query_candidates(&fx, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(ids_of(&rows), vec![RecordId::from_u128(3)]);
+        assert_eq!(fx.gets(), 1, "one decode, not the first bucket's two");
+        assert_eq!(fx.scans(), 0);
+        match dispatch(
+            &fx,
+            Request::Query {
+                select: Selection::All,
+                filter: filter.to_vec(),
+                limit: None,
+            },
+        ) {
+            Response::Rows { rows } => assert_eq!(ids_of(&rows), vec![RecordId::from_u128(3)]),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    /// `QPE-FR-002`: a first bucket too small to repay the extra read —
+    /// `b * EQ_INTERSECT_RATIO < n` — is read alone, as before this round;
+    /// (a table whose size the adapter does not report, `record_count` `None`,
+    /// is the same case: it never trips the rule).
+    #[test]
+    fn a_small_first_bucket_reads_the_first_bucket_alone() {
+        let big = two_index_fixture(1_000, vec![1, 3], vec![2, 3]);
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let rows = query_candidates(&big, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(
+            rows.len(),
+            2,
+            "2 * {EQ_INTERSECT_RATIO} < 1000: bucket only"
+        );
+        assert_eq!(big.gets(), 2);
+    }
+
+    /// `QPE-FR-002`: an empty second bucket ends the read with no decode; a
+    /// refusing second index narrows nothing and the first still answers.
+    #[test]
+    fn an_empty_second_bucket_is_empty_and_a_refusing_one_is_skipped() {
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let empty = two_index_fixture(3, vec![1, 3], vec![]);
+        assert!(query_candidates(&empty, QueryPlan::IndexEq(0), &filter).is_empty());
+        assert_eq!(empty.gets(), 0);
+
+        let refusing = PlannerFixture {
+            buckets: vec![(2, vec![RecordId::from_u128(1), RecordId::from_u128(3)])],
+            table_size: Some(3),
+            rows: two_index_fixture(3, vec![], vec![]).rows,
+            ..PlannerFixture::with_index(Err(ErrorCode::Unsupported))
+        };
+        let rows = query_candidates(&refusing, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(rows.len(), 2, "the refusing index is skipped");
+        assert_eq!(
+            refusing.scans(),
+            0,
+            "and it does not send the read to a scan"
+        );
+    }
+
+    /// `QPE-FR-002`: two predicates on one field, and a second `Eq` on an
+    /// unindexed field, add no bucket; only the plan's own is read.
+    #[test]
+    fn a_repeated_field_and_an_unindexed_equality_add_no_bucket() {
+        let fx = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        let filter = [labrador(), labrador(), eq(1, ScanValue::U32(3))];
+        let rows = query_candidates(&fx, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(rows.len(), 2, "the first bucket alone");
+        assert_eq!(fx.gets(), 2);
     }
 
     /// `QPI-FR-002` (ADR-0078): the ids in both lists, in the larger
@@ -9739,6 +10417,9 @@ mod tests {
                 })
                 .collect()
         }
+        fn record_count(&self) -> Option<usize> {
+            Some(3)
+        }
         fn filter_eq(&self, _f: FieldRef, _v: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
             Err(ErrorCode::Unsupported)
         }
@@ -9830,6 +10511,22 @@ mod tests {
             right_filter: vec![],
             limit: None,
         }
+    }
+
+    /// `SCB-FR-003` (ADR-0126): the budget refuses a `Join` whose left side
+    /// full-scans a table over it, at the table's size and not below, and
+    /// never a request that is not an `Aggregate` or a `Join`.
+    #[test]
+    fn a_join_full_scanning_a_table_over_the_scan_budget_is_over_it() {
+        let join = Request::Join(join_spec(JoinRelation::Parent));
+        assert!(request_exceeds_scan_budget(&JoinFixture, &join, 2));
+        assert!(!request_exceeds_scan_budget(&JoinFixture, &join, 3));
+        let query = Request::Query {
+            select: Selection::All,
+            filter: vec![],
+            limit: None,
+        };
+        assert!(!request_exceeds_scan_budget(&JoinFixture, &query, 0));
     }
 
     fn pairs(rows: &[JoinedRow]) -> Vec<(u128, u128)> {
