@@ -13,7 +13,7 @@ npm ci
 npm run dev                # http://localhost:5173, proxies /api to $TICK_BACKEND (default 127.0.0.1:8787)
 npm test                   # 540+ unit/component/integration tests (jsdom, in-memory backend)
 npm run test:integration   # same API contract against the real rusty_tick binary (cargo build -p rusty_tick first)
-npm run e2e                # Playwright smoke flows against the real binary serving dist/ (npm run build first)
+npm run e2e                # Playwright flows against the real binary (single-user and per-user tokens); needs `cargo build -p rusty_tick` and `npm run build` first; also runs in CI
 npm run build              # typecheck + production bundle into dist/
 ```
 
@@ -43,12 +43,13 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 - No TickTick batch API and no WebSocket "needSync": the UI polls and refreshes on window focus.
 - Focus records, habits, check-ins and the summary template are stored as generic `docs` in the backend, so they sync like everything else.
 
-## Known gaps
+## Stubs and known gaps
 
 - Reminders: task and habit reminders show as browser notifications while a tab is open (Settings → Notifications, opt-in); there is no service worker or push, so nothing fires with the app closed.
-- Settings has the tabs that do something: Account, Notifications, Date & Time, Appearance, Shortcuts, About. There is no premium, AI, collaboration or integration tier in a local app, so those (and the Comments button, Timeline view and list-count badge that stood in for them) are left out rather than stubbed.
+- Premium: the upgrade bar and menu entry are disabled; the "Used n/9" list counter is cosmetic (not enforced).
+- Settings: Account, Notifications, Date & Time, Appearance and Shortcuts are real; the other eight tabs are placeholders.
+- Comments button in the detail pane is disabled; Timeline view is a stub.
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
 - Habits: a check-in means "done" (the goal amount is text).
-- Sync is by polling and on window focus (no server push).
 - No reference screenshots were available, so there is no pixel comparison; layout, spacing and copy follow the prompt's description.
