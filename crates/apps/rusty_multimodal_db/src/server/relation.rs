@@ -411,12 +411,14 @@ impl RelationConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    // `STC-FR-002`: a strict batch the live check refused was
-                    // never applied; the same check on the same pre-state
-                    // refuses it again, so replay skips it.
-                    JournaledBatch::StrictWrite(ops)
-                        if Self::strict_refusal(inner, ops).is_some() => {}
-                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite(ops) => {
+                    // ADR-0134: a strict entry the live check never accepted
+                    // touched nothing and is skipped; an accepted one is
+                    // redone whole. A version-2 journal (no markers) falls
+                    // back to re-running the check.
+                    JournaledBatch::StrictWrite { ops, accepted }
+                        if !accepted
+                            .unwrap_or_else(|| Self::strict_refusal(inner, ops).is_none()) => {}
+                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite { ops, .. } => {
                         let results = Self::replay_write_batch(inner, &schema, ops).map_err(
                             |(index, code)| JournalError::Replay {
                                 batch: batch_index,
@@ -460,7 +462,14 @@ impl RelationConnectionStore {
         let mut results = Vec::with_capacity(ops.len());
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
-            results.push(Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?);
+            let result = match Self::apply_prepared(inner, prepared) {
+                // ADR-0134: a link whose endpoint a later op of the same
+                // batch deleted, before the crash. Redo converges anyway:
+                // the edge went with the record.
+                Err(ErrorCode::RecordNotFound) => WriteResult::NotFound,
+                applied => applied.map_err(|code| (i, code))?,
+            };
+            results.push(result);
         }
         Ok(results)
     }
@@ -495,11 +504,15 @@ impl RelationConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
-        let apply = |inner: &mut RelationProductionStack| {
+        // `accept` durably marks a strict batch accepted before its first
+        // write (ADR-0134); a no-op without a journal.
+        let apply = |inner: &mut RelationProductionStack,
+                     accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
             if strict {
                 if let Some(refused) = Self::strict_refusal(inner, ops) {
                     return Err(refused);
                 }
+                accept()?;
             }
             let mut results = Vec::with_capacity(prepared.len());
             for (i, p) in prepared.into_iter().enumerate() {
@@ -513,7 +526,7 @@ impl RelationConnectionStore {
             // checkpoint boundary, so this atomic batch flushes MVCC
             // history immediately.
             None => self.store.with_exclusive(|inner| {
-                let results = apply(inner)?;
+                let results = apply(inner, &|| Ok(()))?;
                 if !self.mvcc_flush_now(0) {
                     return Err((0, ErrorCode::Storage));
                 }
@@ -524,7 +537,12 @@ impl RelationConnectionStore {
                     std::cell::RefCell::new(None);
                 let step = |turn: crate::server::journal::Turn| {
                     self.store.with_exclusive(|inner| {
-                        let results = apply(inner)?;
+                        let accept = || {
+                            journal
+                                .accept_strict(turn)
+                                .map_err(|_| (0, ErrorCode::Journal))
+                        };
+                        let results = apply(inner, &accept)?;
                         *results_cell.borrow_mut() = Some(results);
                         Ok(turn.checkpoint_due
                             && inner.checkpoint_flush().is_ok()
