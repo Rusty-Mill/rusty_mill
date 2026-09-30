@@ -251,12 +251,27 @@ impl Connection {
     /// [`Connection::open`]'s doc comment — so callers don't normally need
     /// this directly; exposed for explicit use (e.g. right before
     /// process exit).
+    ///
+    /// Crash-atomic: the image goes to a temporary file beside the
+    /// database, is synced, then renamed over it (and the directory
+    /// synced), so an interrupted write leaves the previous complete
+    /// image rather than a torn one.
     pub fn flush(&self) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         let bytes = crate::serialize::serialize(&self.db);
-        std::fs::write(path, bytes).map_err(|e| Error::Io(e.to_string()))
+        write_atomically(path, &bytes).map_err(|e| Error::Io(e.to_string()))
+    }
+
+    /// [`Connection::flush`] unless a transaction is open: inside one,
+    /// the outermost commit persists instead, so rolled-back work never
+    /// reaches the file.
+    pub(crate) fn flush_if_autocommit(&self) -> Result<()> {
+        if self.transaction_depth > 0 {
+            return Ok(());
+        }
+        self.flush()
     }
 
     /// Returns the path to the database file, or `None` for an in-memory
@@ -1086,16 +1101,13 @@ impl Connection {
 
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
     /// rollback support.
-    pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
+    pub(crate) fn snapshot_db(&self) -> crate::storage::Snapshot {
         self.db.snapshot()
     }
 
     /// Restores table state previously captured by
     /// [`Connection::snapshot_db`].
-    pub(crate) fn restore_db(
-        &mut self,
-        snapshot: std::collections::HashMap<String, crate::storage::Table>,
-    ) {
+    pub(crate) fn restore_db(&mut self, snapshot: crate::storage::Snapshot) {
         self.db.restore(snapshot);
     }
 
@@ -1301,7 +1313,7 @@ impl Connection {
         }
         self.last_changes = affected;
         self.total_changes += affected;
-        self.flush()?;
+        self.flush_if_autocommit()?;
         self.fire_profile(sql, start.elapsed());
         Ok(affected)
     }
@@ -1572,6 +1584,38 @@ fn is_create_virtual_table(tokens: &[Token]) -> bool {
 /// second token to tell them apart (issue #122).
 fn is_index_statement(tokens: &[Token]) -> bool {
     matches!(tokens.get(1), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("INDEX"))
+}
+
+/// Replace `path` with `bytes` crash-atomically: write a sibling temporary
+/// file, sync it, rename it over `path`, then sync the directory so the
+/// rename itself survives a power loss.
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    sync_parent_dir(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Windows cannot open a directory as a file to sync it; `rename` there
+/// (`MoveFileEx` with replace) is the durability point this crate relies on.
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4231,5 +4275,78 @@ mod tests {
     fn release_memory_is_a_harmless_no_op() {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(conn.release_memory(), Ok(()));
+    }
+
+    fn rows_on_disk(path: &std::path::Path) -> Vec<i64> {
+        Connection::open(path)
+            .unwrap()
+            .query_map("SELECT * FROM t", |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Review 2.4: a rolled-back write never reaches the file, and an open
+    /// transaction's writes reach it only at the outermost commit.
+    #[test]
+    fn only_a_committed_transaction_reaches_the_file() {
+        let path = temp_db_path("rollback_reopen");
+        let _ = std::fs::remove_file(&path);
+        let mut db = Connection::open(&path).unwrap();
+        db.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        {
+            let mut tx = db.transaction().unwrap();
+            tx.execute("INSERT INTO t VALUES (1)").unwrap();
+            tx.rollback().unwrap();
+        }
+        assert!(rows_on_disk(&path).is_empty(), "rolled back");
+
+        let mut tx = db.transaction().unwrap();
+        tx.execute("INSERT INTO t VALUES (2)").unwrap();
+        {
+            let mut sp = tx.savepoint().unwrap();
+            sp.execute("INSERT INTO t VALUES (3)").unwrap();
+            sp.commit().unwrap();
+        }
+        assert!(rows_on_disk(&path).is_empty(), "still uncommitted");
+        tx.commit().unwrap();
+        assert_eq!(rows_on_disk(&path), vec![2, 3]);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Review 2.4: index metadata is part of the transactional state.
+    #[test]
+    fn rolling_back_restores_index_metadata() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        {
+            let mut tx = db.transaction().unwrap();
+            tx.execute("CREATE INDEX i ON t (a)").unwrap();
+            tx.rollback().unwrap();
+        }
+        assert!(db.db().index("i").is_none(), "create rolled back");
+        db.execute("CREATE INDEX i ON t (a)").unwrap();
+        {
+            let mut tx = db.transaction().unwrap();
+            tx.execute("DROP INDEX i").unwrap();
+            tx.rollback().unwrap();
+        }
+        assert!(db.db().index("i").is_some(), "drop rolled back");
+    }
+
+    /// Review 2.4: the file is replaced whole, through a synced sibling,
+    /// even when a previous interrupted flush left that sibling behind.
+    #[test]
+    fn flush_replaces_the_file_through_a_temporary_sibling() {
+        let path = temp_db_path("atomic_flush");
+        let tmp = path.with_file_name("rusty_rusqlite_test_atomic_flush.db.tmp");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&tmp, b"torn leftovers").unwrap();
+        let mut db = Connection::open(&path).unwrap();
+        db.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        db.execute("INSERT INTO t VALUES (7)").unwrap();
+        assert!(!tmp.exists(), "renamed into place");
+        assert_eq!(rows_on_disk(&path), vec![7]);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 }

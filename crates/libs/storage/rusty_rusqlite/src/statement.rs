@@ -686,7 +686,7 @@ impl<'conn> Statement<'conn> {
                 ))
             }
         };
-        self.conn.flush()?;
+        self.conn.flush_if_autocommit()?;
         Ok(affected)
     }
 
