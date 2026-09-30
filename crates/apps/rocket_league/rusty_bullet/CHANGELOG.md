@@ -857,6 +857,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   matched real Rocket League exactly. No new tests; all 322 pre-existing
   tests pass unchanged.
 ### Changed
+- `rb_physics_bullet::drive` split from one 4.2k-line `drive.rs` into a
+  `drive/` module: `ground`, `air`, `jump`, `boost` (one per mechanic) plus
+  `tests.rs`; `apply_driven_forces` now just orchestrates them. The
+  ground dodge and wall-jump dodge share one `apply_dodge` helper instead
+  of two copies. Public API and behavior unchanged (all 395 tests pass
+  unmodified).
+- `AGENTS.md` now lists `rb_physics_bullet` in its crate map;
+  `PROJECT-STATUS.md`'s last-verified commit updated to `978aa8f`.
 - `rb_verify_cli`'s `main.rs` is now a thin CLI wrapper over the new
   `lib.rs`; `rb-verify`'s output is a human-readable summary instead of a
   raw `Debug` dump, now including car-divergence stats.
