@@ -309,11 +309,18 @@ export class MemoryAdapter implements ApiClient {
     const task = this.task(id)
     const gone = new Set([task.id, ...this.children(task).map((c) => c.id)])
     this.state.tasks = this.state.tasks.filter((t) => !gone.has(t.id))
+    this.dropComments(gone)
     this.save()
+  }
+
+  /** A task's comments go with it for good (but not to the trash, so a restore loses nothing). */
+  private dropComments(taskIds: ReadonlySet<string>): void {
+    this.state.docs = this.state.docs.filter((d) => !(d.kind === 'comment' && taskIds.has((d.body as { taskId?: string } | null)?.taskId ?? '')))
   }
 
   async emptyTrash(): Promise<number> {
     const before = this.state.tasks.length
+    this.dropComments(new Set(this.state.tasks.filter((t) => t.deletedMs !== null).map((t) => t.id)))
     this.state.tasks = this.state.tasks.filter((t) => t.deletedMs === null)
     this.save()
     return before - this.state.tasks.length

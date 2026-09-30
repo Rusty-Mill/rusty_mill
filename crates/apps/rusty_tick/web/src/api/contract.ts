@@ -145,6 +145,22 @@ export function runApiContract(label: string, make: () => Promise<ApiClient>): v
       expect(await api.emptyTrash()).toBe(0)
     })
 
+    it('keeps a task\'s comments in the trash and drops them when it is purged or the trash is emptied', async () => {
+      const api = await make()
+      const list = await api.createList({ name: 'C' })
+      const [kept, purged, binned] = await Promise.all(['kept', 'purged', 'binned'].map((title) => api.createTask({ listId: list.id, title })))
+      for (const t of [kept!, purged!, binned!]) await api.putDoc('comment', newId(), { v: 1, taskId: t.id, text: 'hi', createdMs: 1 })
+      const owners = async () => (await api.listDocs<{ taskId: string }>('comment')).map((d) => d.body.taskId).sort()
+
+      await api.trashTask(purged!.id)
+      expect(await owners()).toHaveLength(3)
+      await api.purgeTask(purged!.id)
+      expect(await owners()).toEqual([kept!.id, binned!.id].sort())
+      await api.trashTask(binned!.id)
+      await api.emptyTrash()
+      expect(await owners()).toEqual([kept!.id])
+    })
+
     it('sends a deleted list\'s tasks to the trash, and restores them to the Inbox', async () => {
       const { api, list } = await setup()
       const t = await api.createTask({ listId: list.id, title: 'orphan' })

@@ -649,6 +649,62 @@ fn trash_hides_restores_and_purges() {
 }
 
 #[test]
+fn comments_follow_their_task_to_the_grave_but_not_to_the_trash() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let comment = |h: &mut Harness, task: &str, text: &str| {
+        let id = uuid::Uuid::now_v7();
+        let body = format!(r#"{{"v":1,"taskId":"{task}","text":"{text}","createdMs":1}}"#);
+        assert_eq!(
+            h.call(Method::Put, &format!("/api/v1/docs/comment/{id}"), &body)
+                .0,
+            200
+        );
+    };
+    let count = |h: &mut Harness| {
+        h.call(Method::Get, "/api/v1/docs/comment", "").1["docs"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let kept = h.task(&list, r#""title":"kept""#);
+    let purged = h.task(&list, r#""title":"purged""#);
+    let binned = h.task(&list, r#""title":"binned""#);
+    let (kept, purged, binned) = (
+        kept["id"].as_str().unwrap().to_string(),
+        purged["id"].as_str().unwrap().to_string(),
+        binned["id"].as_str().unwrap().to_string(),
+    );
+    for t in [&kept, &purged, &binned] {
+        comment(&mut h, t, "hello");
+    }
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{purged}"), "");
+    assert_eq!(
+        count(&mut h),
+        3,
+        "the trash keeps comments, so a restore loses nothing"
+    );
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{purged}?permanent=true"),
+        "",
+    );
+    assert_eq!(
+        count(&mut h),
+        2,
+        "a purge takes the task's comments with it"
+    );
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{binned}"), "");
+    h.call(Method::Delete, "/api/v1/trash", "");
+    let (_, docs) = h.call(Method::Get, "/api/v1/docs/comment", "");
+    let docs = docs["docs"].as_array().unwrap();
+    assert_eq!(docs.len(), 1, "emptying the trash does too");
+    assert_eq!(docs[0]["body"]["taskId"], kept.as_str());
+}
+
+#[test]
 fn a_task_whose_list_was_deleted_restores_into_the_inbox() {
     let (_d, mut h) = harness();
     let list = h.list("Doomed");
