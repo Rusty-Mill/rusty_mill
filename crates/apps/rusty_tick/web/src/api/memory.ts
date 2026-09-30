@@ -61,7 +61,15 @@ export class MemoryAdapter implements ApiClient {
     this.storage = options.storage ?? null
     this.state = this.load() ?? this.fresh(options.seed)
     this.ensureInbox()
+    this.sweepOrphanComments()
     this.save()
+  }
+
+  /** Drop comments whose task is gone for good (a trashed one can still come back), left by versions that did not clean up on purge. */
+  private sweepOrphanComments(): void {
+    if (!Array.isArray(this.state.tasks) || !Array.isArray(this.state.docs)) return // a save from an older version may lack either
+    const live = new Set(this.state.tasks.map((t) => t.id))
+    this.state.docs = this.state.docs.filter((d) => d.kind !== 'comment' || live.has((d.body as { taskId?: string } | null)?.taskId ?? ''))
   }
 
   /** A store holding a copy of `snapshot`, for replaying pending operations over server truth. */
