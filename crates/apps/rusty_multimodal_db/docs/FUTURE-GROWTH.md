@@ -12,6 +12,17 @@ Every current boundary in this project is a deliberate scope line from a specifi
 * The generic schema layer (`crate::generic`) was validated against a toy domain (`Order`/`Customer`) and a real one (requirements traceability). Nothing schema-specific is baked into the storage engine itself.
 * Staying off crates.io is a current decision (a `Cargo.toml`/publishing choice), not a technical constraint.
 
+## Since the `rusty_tick` spike (#382, 2026-09-29)
+
+An app built on the engine (`crates/apps/rusty_tick`, a self-hosted task manager) named six gaps; each ended as engine code, an app-side recipe, or a documented boundary:
+
+* **Full-text forms.** `fulltext::Query` gained `any_of_prefix`, `all_of`, `except`, `in_columns` and `except_columns`, differentially tested against bundled SQLite FTS5 (`tests/fulltext_vs_fts5.rs`). One pinned exception: `(a AND b) NOT c` matches like FTS5 but scores differently (an FTS5 quirk), so only its matches are compared. `rusty_tick` search is type-ahead on `any_of_prefix`.
+* **One store per user** (`tests/store_lifecycle.rs`): open, close and idle memory are linear in the records, so a bounded least-recently-used pool of open stores is cheap and stays app-side (`rusty_tick::pool`). The store does not lock itself; take the `DirLock` first.
+* **Change feed** stays app-side (`ADR-0125`): a `seq` from `Journal::allocate`, an `Ordered` layer on it, tombstone replaces. Not an engine feature.
+* **Inner orders** of stacked `Ordered` layers are reached through `.inner()`; forwarding `RangeBy` through the stack is impossible (`E0119`, coherence), so it is documented rather than built.
+
+Still absent, as before: a nullable column, a general transaction manager, a cost-based optimizer, continuous replication.
+
 ## Path to a server / query layer — since built
 
 **Status (2026-09):** this path was taken. The `server` feature (`ADR-0010`, `SERVER-001`) is the binary described below, and every "genuinely new" item was built in its own round: authentication/authorization (`ADR-0012`), transport encryption (`ADR-0014`, mutual TLS `ADR-0023`), transaction sessions (`ADR-0024`, journal `ADR-0025`/`0026`, read-your-writes `ADR-0027`, snapshot isolation `ADR-0033`), a versioned protocol (`ADR-0022`), a client-side SQL subset (`ADR-0034`/`0035`/`0044`), and — for the owner's `rusty_remind_me` service — runtime insertion, linking, replacement, deletion, tables on one connection, and compaction (`ADR-0046`–`ADR-0052`), then — after an integration spike measured the remaining gaps — a durable data directory, an atomic guarded replace, ordered keyset pages, the consumer's sync fields, a global edge count, and its directed open-label edges as a record table (`ADR-0053`–`ADR-0058`). Every gap the spike named is closed. The original accounting is kept below as written, because it was right about the shape: the engine did not change to accommodate any of it.

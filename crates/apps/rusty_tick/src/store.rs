@@ -183,9 +183,13 @@ impl TaskStore {
             .map_err(|_| TickError::NotFound(id))
     }
 
-    /// Ids matching any of `phrases` in title or notes, best match first.
+    /// Ids matching any of `phrases` in title or notes, best match first. The
+    /// last word of each phrase matches as a prefix, so `grocer` finds
+    /// `groceries`: search as you type.
     pub fn search(&self, phrases: &[&str]) -> Vec<Uuid> {
-        let mut hits = self.search.search(&Query::any_of(phrases.iter().copied()));
+        let mut hits = self
+            .search
+            .search(&Query::any_of_prefix(phrases.iter().copied()));
         hits.sort_by(|a, b| a.score.total_cmp(&b.score));
         hits.into_iter().map(|h| h.key).collect()
     }

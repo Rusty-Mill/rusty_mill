@@ -326,6 +326,12 @@ fn search_and_tags() {
         2,
         "terms are alternatives; the query is percent-decoded"
     );
+    let (_, v) = h.call(Method::Get, "/api/v1/search?q=grocer", "");
+    assert_eq!(
+        v["tasks"].as_array().unwrap().len(),
+        2,
+        "a term matches as a prefix: search as you type"
+    );
     assert_eq!(h.call(Method::Get, "/api/v1/search", "").0, 400);
     let (_, v) = h.call(Method::Get, "/api/v1/tags/home/tasks", "");
     assert_eq!(v["tasks"].as_array().unwrap().len(), 2);

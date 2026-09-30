@@ -492,8 +492,8 @@ impl Service {
 
     // ---- search and smart lists --------------------------------------
 
-    /// Tasks matching any of the whitespace-separated `terms` as whole
-    /// words in title or notes (the engine has no prefix matching yet).
+    /// Tasks matching any of the whitespace-separated `terms` in title or
+    /// notes; each term also matches as a prefix (type-ahead).
     pub fn search(&self, query: &str) -> Vec<Task> {
         let terms: Vec<&str> = query.split_whitespace().collect();
         if terms.is_empty() {
