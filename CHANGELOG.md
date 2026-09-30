@@ -30,6 +30,12 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **Design review Tranche 1 (soundness):**
+  - `rusty_std` `MutexGuard` is `Sync` only for `T: Sync`.
+  - `rusty_sync` `try_recv` no longer returns `Disconnected` while a value is queued.
+  - `rusty_rand` fills Windows entropy in ULONG chunks.
+  - `kill_single` no longer signals a reaped (possibly recycled) pid.
+  - **Breaking:** `OwnedWinHandle::from_raw` and `rusty_libc::process::process_vm_writev` are now `unsafe fn`.
 - **`rusty_tick`: single-user startup took no lock on its data directory**, so two servers on one directory overwrote each other; a second now refuses to start.
 - **`rusty_multimodal_db_engine`: a long write pause each time the row count doubled.**
   - `GenericMmapStore` kept its records inline in a `HashMap`, so a regrow copied every record under the caller's lock: 170–370 ms at 115 000 of `rusty_remind_me`'s ~800-byte hub memories.
