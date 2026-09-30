@@ -40,9 +40,9 @@
 //! doesn't re-fire it, and releasing then re-pressing while still airborne
 //! doesn't fire it either (this increment has no double jump to grant).
 //! Edge detection needs one bit of state to remember "was jump held as of
-//! last step," carried by the caller (`PhysicsWorld::car_jump_held`) and
-//! passed in as `jump_held`, the same pattern `boost_amount` already uses
-//! for a resource that must persist across calls.
+//! last step," carried by the caller in `DriveState::jump_held`, the same
+//! pattern `DriveState::boost_amount` already uses for a resource that must
+//! persist across calls.
 //!
 //! Pitch, yaw, and roll each apply torque about one of the car's three
 //! local axes (right, up, forward respectively), scaled directly by the
@@ -474,77 +474,94 @@ fn input_is_active(input: &ControllerInput) -> bool {
         || input.handbrake
 }
 
+/// Per-car state `apply_driven_forces` carries from one step to the next.
+/// `PhysicsWorld` keeps one per car; `DriveState::new` gives the defaults
+/// for a freshly added car (full boost, jump released, double jump
+/// available, no hold window, no dodge flip).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DriveState {
+    /// Remaining boost fuel, `0.0..=MAX_BOOST`. Drained while boost is held,
+    /// even when the force itself doesn't apply.
+    pub boost_amount: f32,
+    /// The car's `input.jump` as of the *previous* call. Every jump variant
+    /// fires only on a rising edge (`input.jump && !jump_held`), so a
+    /// continued press doesn't re-fire every step; updated on every call,
+    /// including while airborne, so a fresh press is still required for a
+    /// double or wall jump even if the button was never released after the
+    /// ground jump.
+    pub jump_held: bool,
+    /// Whether the car still has a double jump (plain or dodge) to spend
+    /// this airborne period. Landing or merely touching a wall (no jump
+    /// press required) both set it back to `true`; only an airborne fresh
+    /// press that fires the double jump or a dodge (including a wall-jump
+    /// dodge, not a plain wall jump) sets it to `false`.
+    pub double_jump_available: bool,
+    /// How much longer, in seconds, continuing to hold `jump` keeps adding
+    /// extra upward acceleration to a ground jump. Checked and decremented
+    /// *before* this call's own ground-jump press can re-arm it, so a fresh
+    /// press's own step only fires the plain `JUMP_SPEED` impulse; the press
+    /// then re-arms it to `JUMP_HOLD_MAX_DURATION`. Since
+    /// `RB-PHYSICS-001-FR-064`, releasing `jump` inside the first
+    /// `JUMP_MIN_TIME` seconds doesn't zero it: that mandatory window keeps
+    /// decrementing it at a `JUMP_PRE_MIN_ACCEL_SCALE`-scaled acceleration.
+    /// Untouched by the double jump, a dodge, or the wall jump.
+    pub jump_hold_time_remaining: f32,
+    /// Whether the car's most recent double-jump-or-dodge press was a dodge
+    /// whose spin hasn't been canceled or superseded yet. A dodge sets it,
+    /// a plain double jump clears it (so a stale `true` can't leak into a
+    /// later unrelated double jump), and a further fresh airborne press
+    /// with no wall contact and no double jump left spends it to cancel the
+    /// flip — see the module doc comment's flip-cancel paragraph.
+    pub dodge_flip_active: bool,
+    /// The car's nominal (non-handbraking) friction. Handbrake lowers
+    /// `car.friction` below it while held and grounded, and each call
+    /// restores it otherwise, so callers need no separate restore step.
+    pub base_friction: f32,
+}
+
+impl DriveState {
+    /// Defaults for a freshly added car whose nominal friction is
+    /// `base_friction`.
+    pub fn new(base_friction: f32) -> DriveState {
+        DriveState {
+            boost_amount: MAX_BOOST,
+            jump_held: false,
+            double_jump_available: true,
+            jump_hold_time_remaining: 0.0,
+            dodge_flip_active: false,
+            base_friction,
+        }
+    }
+}
+
 /// Applies throttle, steering, boost, handbrake, jump, double jump, wall
 /// jump, and air control as forces/torques/impulses (or, for handbrake, a
-/// temporary friction adjustment) on `car`. Throttle, steering, handbrake,
-/// and the ground jump are a no-op unless `on_ground`; air control, double
-/// jump, and wall jump are the reverse — a no-op unless *not* `on_ground`;
-/// boost isn't gated on ground contact at all, but is a no-op once
-/// `*boost_amount` reaches zero. `base_friction` is the car's own nominal
-/// (non-handbraking) friction — handbrake temporarily reduces
-/// `car.friction` below it while held and grounded, and restores it
-/// otherwise, so callers don't need a separate restore step. `jump_held` is
-/// the car's `input.jump` value as of the *previous* call — every jump
-/// variant fires only on a rising edge (`input.jump && !*jump_held`), so a
-/// continued press doesn't re-fire every step; it's updated to `input.jump`
-/// on every call, including while airborne, so a fresh press is still
-/// required for a double or wall jump even if the button was never
-/// released after the ground jump. `double_jump_available` is whether the
-/// car still has a double jump (plain or dodge) to spend this airborne
-/// period — landing (`on_ground`) or merely touching a wall
-/// (`wall_normal.is_some()`, no jump press required) both unconditionally
-/// set it back to `true`; only an airborne fresh press that fires the
-/// double jump or a dodge (not a wall jump) sets it to `false`, until the
-/// next landing or wall touch. `wall_normal` is the outward normal of the
-/// wall the car is currently touching, if any (computed by the caller the
-/// same way `on_ground` is — see `PhysicsWorld`); a fresh press while
-/// airborne and `wall_normal.is_some()` fires a wall jump instead of
-/// consulting `double_jump_available` at all — wall jump never dodges,
-/// regardless of `input.pitch`/`input.roll`. `jump_hold_time_remaining` is
-/// how much longer, in seconds, continuing to hold `jump` should keep
-/// adding extra upward acceleration to a ground jump — checked and
-/// decremented *before* this call's own `on_ground`/`jump_pressed` handling
-/// below, using whatever value the *previous* call left it at, so a fresh
-/// ground-jump press's own step only ever fires the plain `JUMP_SPEED`
-/// impulse; that same press then re-arms `jump_hold_time_remaining` to
-/// `JUMP_HOLD_MAX_DURATION` for subsequent calls to consume. Since
-/// `RB-PHYSICS-001-FR-064`, releasing `jump` doesn't always zero it right
-/// away: `JUMP_MIN_TIME` seconds' own mandatory window (derived as
-/// `JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining < JUMP_MIN_TIME`)
-/// keeps decrementing it, at a `JUMP_PRE_MIN_ACCEL_SCALE`-scaled
-/// acceleration, regardless of `input.jump` — only past that window does
-/// releasing `jump` stop the extra acceleration immediately. It's otherwise
-/// untouched by the double jump, a dodge, or the wall jump — see the module
-/// doc comment. `dodge_flip_active` is whether
-/// the car's most recent double-jump-or-dodge press was a dodge whose spin
-/// hasn't been canceled or superseded yet: the dodge branch sets it `true`,
-/// the plain-double-jump branch explicitly sets it `false` (so a stale
-/// `true` from an earlier, already-landed-from dodge can't leak into a
-/// later unrelated double jump), and a further fresh press while airborne,
-/// not touching a wall, with `double_jump_available` already spent and
-/// `dodge_flip_active` still `true` cancels the flip — see the module doc
-/// comment's flip-cancel paragraph. Since `RB-PHYSICS-001-FR-037`, any
-/// genuinely active `input` (see `input_is_active`) wakes `car`
-/// unconditionally before anything else in this call runs, regardless of
-/// whether `car` was already asleep or what velocity results this step —
-/// see this crate's own `body::RigidBody::wake` doc comment for why a
-/// velocity-only wake check isn't enough here. Call once per step, before
+/// temporary friction adjustment) on `car`, reading and updating `state`
+/// (see each `DriveState` field for its rules). Throttle, steering,
+/// handbrake, and the ground jump are a no-op unless `on_ground`; air
+/// control, double jump, and wall jump are the reverse — a no-op unless
+/// *not* `on_ground`; boost isn't gated on ground contact at all, but is a
+/// no-op once `state.boost_amount` reaches zero. `wall_normal` is the
+/// outward normal of the wall the car is currently touching, if any
+/// (computed by the caller the same way `on_ground` is — see
+/// `PhysicsWorld`); a fresh press while airborne and touching a wall fires
+/// a wall jump instead of consulting `double_jump_available` at all. Since
+/// `RB-PHYSICS-001-FR-037`, any genuinely active `input` (see
+/// `input_is_active`) wakes `car` unconditionally before anything else in
+/// this call runs, regardless of whether `car` was already asleep or what
+/// velocity results this step — see this crate's own
+/// `body::RigidBody::wake` doc comment for why a velocity-only wake check
+/// isn't enough here. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`; follow it
 /// with `clamp_angular_speed` right *after* that same
 /// `integrate_velocities` call, so `MAX_CAR_ANGULAR_SPEED` sees this step's
 /// fully-integrated angular velocity, torque contributions included.
-#[allow(clippy::too_many_arguments)]
 pub fn apply_driven_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
     on_ground: bool,
     wall_normal: Option<Vec3>,
-    boost_amount: &mut f32,
-    jump_held: &mut bool,
-    double_jump_available: &mut bool,
-    jump_hold_time_remaining: &mut f32,
-    dodge_flip_active: &mut bool,
-    base_friction: f32,
+    state: &mut DriveState,
     dt: f32,
 ) {
     // RB-PHYSICS-001-FR-037: any genuinely active input wakes the car
@@ -559,25 +576,25 @@ pub fn apply_driven_forces(
     }
 
     let forward = forward_axis(car);
-    let jump_pressed = input.jump && !*jump_held;
-    *jump_held = input.jump;
+    let jump_pressed = input.jump && !state.jump_held;
+    state.jump_held = input.jump;
 
-    jump::apply_jump_hold(car, input.jump, jump_hold_time_remaining, dt);
+    jump::apply_jump_hold(car, input.jump, &mut state.jump_hold_time_remaining, dt);
 
     if on_ground {
         // Landing (or simply resting) always restores the double jump,
         // regardless of this step's input.
-        *double_jump_available = true;
-        ground::apply_ground_control(car, input, forward, base_friction);
+        state.double_jump_available = true;
+        ground::apply_ground_control(car, input, forward, state.base_friction);
         if jump_pressed {
-            jump::ground_jump(car, jump_hold_time_remaining);
+            jump::ground_jump(car, &mut state.jump_hold_time_remaining);
         }
     } else {
         if wall_normal.is_some() {
             // Touching a wall restores the double jump unconditionally —
             // the same "any surface contact refills your second jump"
             // rule landing uses — regardless of whether jump is pressed.
-            *double_jump_available = true;
+            state.double_jump_available = true;
         }
         air::apply_air_control(car, input, forward, jump_pressed);
         if jump_pressed {
@@ -586,13 +603,20 @@ pub fn apply_driven_forces(
                 input,
                 forward,
                 wall_normal,
-                double_jump_available,
-                dodge_flip_active,
+                &mut state.double_jump_available,
+                &mut state.dodge_flip_active,
             );
         }
     }
 
-    boost::apply_boost(car, input.boost, on_ground, forward, boost_amount, dt);
+    boost::apply_boost(
+        car,
+        input.boost,
+        on_ground,
+        forward,
+        &mut state.boost_amount,
+        dt,
+    );
 }
 
 /// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if

@@ -857,6 +857,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   matched real Rocket League exactly. No new tests; all 322 pre-existing
   tests pass unchanged.
 ### Changed
+- `drive::apply_driven_forces` takes a single `&mut DriveState` instead
+  of six separate per-car values (boost, jump-held, double-jump, hold
+  window, dodge flip, base friction); signature drops from 11 to 6
+  parameters. `PhysicsWorld` stores one `Vec<DriveState>` instead of six
+  parallel `Vec`s, replacing a 10-way `zip` chain. Behavior unchanged.
 - `rb_physics_bullet::drive` split from one 4.2k-line `drive.rs` into a
   `drive/` module: `ground`, `air`, `jump`, `boost` (one per mechanic) plus
   `tests.rs`; `apply_driven_forces` now just orchestrates them. The

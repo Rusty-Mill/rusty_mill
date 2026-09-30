@@ -128,20 +128,24 @@ fn step_with_input_and_dodge_flip(
     dodge_flip_active: &mut bool,
     dt: f32,
 ) {
+    // The helper chain above threads each field separately so older tests
+    // keep their narrow signatures; pack them into one DriveState for the
+    // call and unpack afterward.
+    let mut state = DriveState {
+        boost_amount: *boost_amount,
+        jump_held: *jump_held,
+        double_jump_available: *double_jump_available,
+        jump_hold_time_remaining: *jump_hold_time_remaining,
+        dodge_flip_active: *dodge_flip_active,
+        base_friction: DEFAULT_TEST_FRICTION,
+    };
     car.clear_forces();
-    apply_driven_forces(
-        car,
-        input,
-        on_ground,
-        wall_normal,
-        boost_amount,
-        jump_held,
-        double_jump_available,
-        jump_hold_time_remaining,
-        dodge_flip_active,
-        DEFAULT_TEST_FRICTION,
-        dt,
-    );
+    apply_driven_forces(car, input, on_ground, wall_normal, &mut state, dt);
+    *boost_amount = state.boost_amount;
+    *jump_held = state.jump_held;
+    *double_jump_available = state.double_jump_available;
+    *jump_hold_time_remaining = state.jump_hold_time_remaining;
+    *dodge_flip_active = state.dodge_flip_active;
     integrate::integrate_velocities(car, dt);
     clamp_angular_speed(car);
 }
@@ -2771,4 +2775,42 @@ fn sustained_full_roll_input_never_exceeds_the_hard_angular_speed_cap() {
          it, got {:?}",
         c.angular_velocity
     );
+}
+
+#[test]
+fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
+    let state = DriveState::new(0.7);
+    assert_eq!(
+        state,
+        DriveState {
+            boost_amount: MAX_BOOST,
+            jump_held: false,
+            double_jump_available: true,
+            jump_hold_time_remaining: 0.0,
+            dodge_flip_active: false,
+            base_friction: 0.7,
+        }
+    );
+}
+
+#[test]
+fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
+    // One grounded step with jump + boost pressed: jump_held latches, the
+    // hold window arms, boost drains, and friction restores to base.
+    let mut car = car();
+    car.friction = 0.0;
+    let mut state = DriveState::new(DEFAULT_TEST_FRICTION);
+    state.double_jump_available = false;
+    let input = ControllerInput {
+        jump: true,
+        boost: true,
+        ..Default::default()
+    };
+    let dt = 1.0 / 120.0;
+    apply_driven_forces(&mut car, &input, true, None, &mut state, dt);
+    assert!(state.jump_held);
+    assert!(state.double_jump_available);
+    assert_eq!(state.jump_hold_time_remaining, JUMP_HOLD_MAX_DURATION);
+    assert!(state.boost_amount < MAX_BOOST);
+    assert_eq!(car.friction, DEFAULT_TEST_FRICTION);
 }
