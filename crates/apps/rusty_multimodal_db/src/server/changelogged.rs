@@ -244,6 +244,24 @@ impl ConnectionStore for ChangeLogged {
             .and_then(|r| r)
     }
 
+    fn strict_commit_supported(&self) -> bool {
+        self.inner.strict_commit_supported()
+    }
+
+    fn write_batch_strict(&self, ops: &[WriteOp]) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        self.log
+            .commit(|| {
+                let result = self.inner.write_batch_strict(ops);
+                let effective = result
+                    .as_ref()
+                    .ok()
+                    .map(|results| effective_ops(ops, results));
+                (result, effective)
+            })
+            .map_err(|code| (0, code))
+            .and_then(|r| r)
+    }
+
     fn changes_since(
         &self,
         epoch: u64,

@@ -18,7 +18,7 @@ use super::protocol::{
     Request, Response, ScanValue, Selection, TransactionOp, WriteOp, WriteResult, MAX_BATCH_OPS,
     MAX_SNAPSHOT_BYTES, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION,
     SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
 use std::cell::{Cell, RefCell};
@@ -578,6 +578,22 @@ pub trait ConnectionStore: Send + Sync {
             results.push(result);
         }
         Ok(results)
+    }
+
+    /// `STC-FR-001` (ADR-0133, protocol 35): [`Self::write_batch`] in atomic
+    /// mode, but **all or nothing including soft outcomes**: if any op would
+    /// end `Duplicate`, `NotFound`, `GuardFailed` or `AlreadyLinked` (judged
+    /// against the store and the batch's own earlier ops, under the write
+    /// lock) nothing is applied and the first such op is the `Err`. The
+    /// default answers `Unsupported`; `Memory`, `Entity` and `Relation`
+    /// implement it.
+    fn strict_commit_supported(&self) -> bool {
+        false
+    }
+
+    /// [`Self::write_batch`] all or nothing (see `strict_commit_supported`).
+    fn write_batch_strict(&self, _ops: &[WriteOp]) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        Err((0, ErrorCode::Unsupported))
     }
 
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
@@ -4551,6 +4567,8 @@ fn handle_connection(
     // that has staged only updates (committed through `apply_transaction`
     // exactly as before).
     let mut session_writes: Option<Vec<WriteOp>> = None;
+    // `STC-FR-003` (ADR-0133): the open session commits strictly.
+    let mut strict_commit = false;
     // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
     // session is open; cleared with the session.
     let mut read_your_writes: Option<Vec<FieldRef>> = None;
@@ -4767,6 +4785,7 @@ fn handle_connection(
                 } else {
                     session = Some(Vec::new());
                     session_writes = None;
+                    strict_commit = false;
                     read_your_writes = None;
                     validate_on_stage = false;
                     snapshot_reads = None;
@@ -4796,11 +4815,24 @@ fn handle_connection(
                         SESSION_MVCC_ISOLATION
                     } else {
                         0
+                    }
+                    | if negotiated >= 35 {
+                        SESSION_STRICT_COMMIT
+                    } else {
+                        0
                     };
                 if flags & !known != 0 {
                     err_response(ErrorCode::Malformed)
                 } else if session.is_some() {
                     err_response(ErrorCode::SessionOpen)
+                } else if flags & SESSION_STRICT_COMMIT != 0
+                    && (flags & !SESSION_STRICT_COMMIT != 0 || !store.strict_commit_supported())
+                {
+                    // `STC-FR-003`: strict commit stands alone — its own
+                    // overlay replaces read-your-writes, and a snapshot or
+                    // MVCC session has its own commit rule. A table that
+                    // cannot commit strictly refuses the bit.
+                    err_response(ErrorCode::Unsupported)
                 } else if flags & SESSION_MVCC_ISOLATION != 0 && !store.mvcc_supported() {
                     // `MVCC2-FR-012`: a domain that doesn't implement real
                     // MVCC (`Dog`/`Order`/`Employee`) refuses the bit —
@@ -4810,7 +4842,8 @@ fn handle_connection(
                     err_response(ErrorCode::Unsupported)
                 } else {
                     session = Some(Vec::new());
-                    session_writes = None;
+                    strict_commit = flags & SESSION_STRICT_COMMIT != 0;
+                    session_writes = strict_commit.then(Vec::new);
                     read_your_writes = (flags & SESSION_READ_YOUR_WRITES != 0).then(|| {
                         store
                             .describe()
@@ -4830,6 +4863,7 @@ fn handle_connection(
             }
             Request::Rollback => {
                 session_writes = None;
+                strict_commit = false;
                 read_your_writes = None;
                 validate_on_stage = false;
                 snapshot_reads = None;
@@ -4842,6 +4876,19 @@ fn handle_connection(
                     Response::Ok
                 } else {
                     err_response(ErrorCode::NoSession)
+                }
+            }
+            // `STC-FR-004` (ADR-0133): a strict session reads the record as its
+            // staged list would leave it — the same overlay the commit checks.
+            Request::GetById { id } if strict_commit && session_writes.is_some() => {
+                let stored = match dispatch(store, Request::GetById { id }) {
+                    Response::Record { fields, .. } => Some(fields),
+                    _ => None,
+                };
+                let staged = session_writes.as_deref().unwrap_or_default();
+                match crate::server::strict::overlay_get(id, stored, staged) {
+                    Some(fields) => Response::Record { id, fields },
+                    None => Response::NotFound,
                 }
             }
             Request::GetById { id }
@@ -4899,7 +4946,12 @@ fn handle_connection(
                 snapshot_reads = None;
                 session = None;
                 let ops = session_writes.take().unwrap_or_default();
-                match store.write_batch(&ops, true) {
+                let outcome = if std::mem::take(&mut strict_commit) {
+                    store.write_batch_strict(&ops)
+                } else {
+                    store.write_batch(&ops, true)
+                };
+                match outcome {
                     Ok(results) => Response::BatchResults { results },
                     Err((index, code)) => Response::TransactionFailed {
                         index,

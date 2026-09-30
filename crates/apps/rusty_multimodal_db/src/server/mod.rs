@@ -206,6 +206,9 @@ pub mod relation;
 #[cfg(feature = "server")]
 pub mod reminder;
 mod sql;
+/// The strict-commit check (`ADR-0133`).
+#[cfg(feature = "server")]
+pub(crate) mod strict;
 
 /// The server body — [`crate::server::ConnectionStore`], [`crate::server::dispatch`], [`crate::server::serve`],
 /// [`crate::server::ServeOptions`], [`crate::server::TlsConfig`], and every evaluator — behind the

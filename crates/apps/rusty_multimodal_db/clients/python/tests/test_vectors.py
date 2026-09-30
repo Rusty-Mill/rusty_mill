@@ -71,7 +71,7 @@ class WireVectors(unittest.TestCase):
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
-        self.assertEqual(p.PROTOCOL_VERSION, 34)
+        self.assertEqual(p.PROTOCOL_VERSION, 35)
         req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
         data = p.encode_request(req)
         self.assertEqual(p.decode_request(data), req)
@@ -88,6 +88,12 @@ class WireVectors(unittest.TestCase):
         combined_data = p.encode_request(combined)
         self.assertEqual(p.decode_request(combined_data), combined)
         self.assertEqual(combined_data, bytes.fromhex("0e0000000f000000"))
+        # ADR-0133 (protocol 35): the strict-commit bit is 16.
+        self.assertEqual(p.SESSION_STRICT_COMMIT, 16)
+        self.assertEqual(
+            p.encode_request(p.BeginWith(p.SESSION_STRICT_COMMIT)),
+            bytes.fromhex("0e00000010000000"),
+        )
 
 
     def test_null_is_variant_6_and_decodes_to_none(self):

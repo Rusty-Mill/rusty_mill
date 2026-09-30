@@ -179,7 +179,7 @@ use super::protocol::{
     FieldDescriptor, FieldRef, JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor,
     Request, Response, ScanValue, Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION,
     SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -522,6 +522,7 @@ pub struct SessionOptions {
     validate_on_stage: bool,
     snapshot_isolation: bool,
     mvcc_isolation: bool,
+    strict_commit: bool,
 }
 
 impl SessionOptions {
@@ -563,6 +564,19 @@ impl SessionOptions {
         self
     }
 
+    /// A strict session (`STC-FR-003`, `ADR-0133`, protocol 35): record
+    /// writes and updates stage in one list, `get` answers the record as
+    /// that list would leave it, and `commit` applies it all or nothing
+    /// including soft outcomes — the first op that would be `Duplicate`,
+    /// `NotFound`, `GuardFailed` or `AlreadyLinked` fails it with
+    /// `ClientError::TransactionFailed` and nothing is written. Stands
+    /// alone: combined with another option the server answers
+    /// `ErrorCode::Unsupported`.
+    pub fn strict_commit(mut self) -> Self {
+        self.strict_commit = true;
+        self
+    }
+
     fn flags(self) -> u32 {
         (if self.read_your_writes {
             SESSION_READ_YOUR_WRITES
@@ -580,12 +594,18 @@ impl SessionOptions {
             SESSION_MVCC_ISOLATION
         } else {
             0
+        }) | (if self.strict_commit {
+            SESSION_STRICT_COMMIT
+        } else {
+            0
         })
     }
 
     /// The protocol version the chosen options need.
     fn required_version(self) -> u32 {
-        if self.mvcc_isolation {
+        if self.strict_commit {
+            35
+        } else if self.mvcc_isolation {
             27
         } else if self.snapshot_isolation {
             7
@@ -693,7 +713,9 @@ impl Session<'_> {
     /// staged order. Empty for a session that staged only updates. A
     /// `Duplicate`/`NotFound`/`GuardFailed` outcome is a result, not an
     /// error, exactly as in an atomic `WriteBatch`: the ops beside it still
-    /// applied (a strict all-or-nothing commit is a later phase).
+    /// applied — unless the session was opened with
+    /// [`SessionOptions::strict_commit`] (`ADR-0133`), where any of them
+    /// fails the commit and nothing is written.
     pub fn commit_results(mut self) -> Result<Vec<WriteResult>, ClientError> {
         self.open = false;
         match self.client.roundtrip(Request::Commit)? {

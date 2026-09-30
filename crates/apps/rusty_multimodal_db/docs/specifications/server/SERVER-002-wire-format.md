@@ -1,6 +1,6 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.23.0 (protocol version 34 — `SERVER-001` v0.107.0, `RPL-FR-002`..`005`, `ADR-0131`: `Request::FetchSince` (39), `Response::Changes` (26), `Response::SnapshotAt` (27), `ErrorCode::Gone` (16); 0.22.0 was protocol version 33 — `SERVER-001` v0.106.0, `TXS-FR-001`, `ADR-0130`: `WriteOp::UpdateField` (5), `WriteResult::Updated` (9), a session may stage record writes; 0.21.0 was protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
+- Version: 0.24.0 (protocol version 35 — `SERVER-001` v0.108.0, `STC-FR-001`..`005`, `ADR-0133`: `BeginWith` flag bit 16, `SESSION_STRICT_COMMIT`; no new variant; 0.23.0 was protocol version 34 — `SERVER-001` v0.107.0, `RPL-FR-002`..`005`, `ADR-0131`: `Request::FetchSince` (39), `Response::Changes` (26), `Response::SnapshotAt` (27), `ErrorCode::Gone` (16); 0.22.0 was protocol version 33 — `SERVER-001` v0.106.0, `TXS-FR-001`, `ADR-0130`: `WriteOp::UpdateField` (5), `WriteResult::Updated` (9), a session may stage record writes; 0.21.0 was protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
   `RGM-FR-004`, `ADR-0121`: the `Null` strip below 31 covers `JoinedRows` too; 0.20.0 was `SERVER-001` v0.96.0,
   `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
@@ -106,7 +106,7 @@ fixture and are asserted by the reference client's tests):
 
 - `Request::Hello { protocol_version: 2 }`, framed:
   `08 00 00 00` · `0a 00 00 00` (variant 10) · `02 00 00 00` (2) — the
-  fixture's own `Request/Hello`; a current client sends 34 (`22 00 00 00`).
+  fixture's own `Request/Hello`; a current client sends 35 (`23 00 00 00`).
 - `Request::GetById { id: 00000000-0000-0000-0000-000000000001 }`,
   framed: `1c 00 00 00` (28) · `00 00 00 00` (variant 0) ·
   `10 00 00 00 00 00 00 00` (16) · fifteen `00` · `01`.
@@ -745,6 +745,7 @@ wire. (`FR-050`)
 | `1` | `SESSION_READ_YOUR_WRITES` | 5 | the connection's own `GetById` sees its staged writes |
 | `2` | `SESSION_VALIDATE_ON_STAGE` | 6 | each staged write is validated when staged |
 | `4` | `SESSION_SNAPSHOT_ISOLATION` | 7 | session `GetById`s are tracked and re-checked at `Commit` (`Conflict` on mismatch) |
+| `16` | `SESSION_STRICT_COMMIT` | 35 | a strict session: record writes and updates stage in one ordered list, `GetById` answers the record as that list would leave it, and `Commit` applies the list all or nothing including soft outcomes — the first op that would be `Duplicate`, `NotFound`, `GuardFailed` or `AlreadyLinked` fails it with `TransactionFailed { index, code }`, nothing applied. Stands alone: with any other bit, or on a table that cannot commit strictly, `Unsupported` |
 | `8` | `SESSION_MVCC_ISOLATION` | 27 | real multi-version concurrency control — `Memory`/`Entity`/`Relation` only (`Unsupported` on any other table); `GetById` answers as of the snapshot taken at `Begin`, including against a concurrent ordinary (non-session) write; `Commit`'s write-write check reuses `Conflict` |
 
 An unknown bit for the negotiated version is `Malformed`.
@@ -785,6 +786,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 30 | v0.84.0 | `RowsClamped` (24), `ErrorCode::Busy` (15) — `Rows` below 30 for a clamped `Query` (§7 item 27); `Busy` written only before negotiation, never as an answer |
 | 31 | v0.96.0 | `ScanValue::Null` (6) — a unit variant; a `Null` field pair is dropped from `Record`/`Rows` below 31 (§7 item 28); no shipped field is nullable yet |
 | 32 | v0.104.0 | `DescribeNullable` (38), `NullableFields` (25) — the first nullable columns, a sentinel shown as `Null` at 32 and above (§7 item 29) |
+| 35 | v0.108.0 | flag bit 16, `SESSION_STRICT_COMMIT` — no new variant (§7.6) |
 | 34 | v0.107.0 | `FetchSince` (39), `Changes` (26), `SnapshotAt` (27), `ErrorCode::Gone` (16) — a per-table change log a standby tails (§7 item 31) |
 | 33 | v0.106.0 | `WriteOp::UpdateField` (5), `WriteResult::Updated` (9) — a session stages record writes beside updates and commits them as one atomic `WriteBatch` (§7 item 30) |
 
@@ -838,6 +840,11 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.24.0 (`SERVER-001` v0.108.0, `ADR-0133`, `STC-FR-001`..`005`): protocol
+  version 35 — no new variant; `BeginWith` learns flag bit 16,
+  `SESSION_STRICT_COMMIT` (§7.6). Python client: the constant, declares 35.
+  The journal gains an entry kind for a strict batch (format version
+  unchanged; an older build refuses a journal holding one).
 - 0.23.0 (`SERVER-001` v0.107.0, `ADR-0131`, `RPL-FR-002`..`005`): protocol
   version 34 — `FetchSince` (39), `Changes` (26), `SnapshotAt` (27),
   `ErrorCode::Gone` (16). §5.6, §5.7, §7 item 31. Fixture: `Request/FetchSince`,

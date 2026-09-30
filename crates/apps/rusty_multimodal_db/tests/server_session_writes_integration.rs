@@ -292,3 +292,80 @@ fn update_field_is_a_batch_op_at_33_and_not_below() {
         Err(ClientError::Unsupported("write_batch update"))
     ));
 }
+
+/// `STC-FR-001`..`004` (ADR-0133, protocol 35): a strict session is all or
+/// nothing including soft outcomes, reads the record as its staged list would
+/// leave it, and is refused beside other options and below 35.
+#[test]
+fn a_strict_session_commits_all_or_nothing_and_reads_what_it_staged() {
+    let addr = start();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let mut other = SchemaDrivenClient::connect(addr).unwrap();
+    let new_fields = fields_like(&mut client, 1, "strict insert");
+
+    // A clean list: whole-record read-your-writes, then one commit.
+    let mut session = client
+        .begin_with(SessionOptions::new().strict_commit())
+        .unwrap();
+    session.insert(id(9), &borrowed(&new_fields)).unwrap();
+    session
+        .update(id(9), "access_count", ScanValue::I64(5))
+        .unwrap();
+    session.delete(id(3)).unwrap();
+    let staged = session
+        .get(id(9))
+        .unwrap()
+        .expect("the staged insert is read back");
+    assert!(staged.contains(&("access_count".to_string(), ScanValue::I64(5))));
+    assert!(
+        session.get(id(3)).unwrap().is_none(),
+        "the staged delete is read back"
+    );
+    assert!(
+        other.get(id(9)).unwrap().is_none(),
+        "invisible before commit"
+    );
+    assert_eq!(
+        session.commit_results().unwrap(),
+        vec![
+            WriteResult::Inserted,
+            WriteResult::Updated,
+            WriteResult::Deleted
+        ]
+    );
+    assert_eq!(count_of(&mut other, 9), Some(ScanValue::I64(5)));
+    assert!(other.get(id(3)).unwrap().is_none());
+
+    // One soft op (a duplicate insert) fails the commit; nothing applies.
+    let mut session = client
+        .begin_with(SessionOptions::new().strict_commit())
+        .unwrap();
+    session
+        .update(id(1), "access_count", ScanValue::I64(7))
+        .unwrap();
+    session.insert(id(2), &borrowed(&new_fields)).unwrap();
+    match session.commit_results() {
+        Err(ClientError::TransactionFailed { index, code, .. }) => {
+            assert_eq!((index, code), (1, ErrorCode::Duplicate));
+        }
+        other => panic!("expected TransactionFailed, got {other:?}"),
+    }
+    assert_eq!(
+        count_of(&mut other, 1),
+        Some(ScanValue::I64(0)),
+        "the update beside the duplicate did not apply"
+    );
+
+    // Stands alone, and below 35 the bit is unknown.
+    assert!(matches!(
+        client.begin_with(SessionOptions::new().strict_commit().read_your_writes()),
+        Err(ClientError::Server(ErrorCode::Unsupported, _))
+    ));
+    let mut old =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().max_protocol_version(34))
+            .unwrap();
+    assert!(matches!(
+        old.begin_with(SessionOptions::new().strict_commit()),
+        Err(ClientError::Unsupported("session options"))
+    ));
+}

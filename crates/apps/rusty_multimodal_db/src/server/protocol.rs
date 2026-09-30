@@ -89,6 +89,7 @@
 //! | 32 | `SERVER-001` v0.104.0 | + [`Request::DescribeNullable`] (38) and [`Response::NullableFields`] (25) — `NLC-FR-005`, ADR-0128: the first nullable columns. A `Null` a request carries for a nullable field is stored as the field's sentinel and a stored sentinel is answered `Null`, on a connection negotiated at 32 or above only (`super::nullable`): `Memory`'s `deleted_at_unix_ms` (`0`) and `node_id` (`""`). `DescribeNullable` lists the tags. Below 32 nothing changes: the sentinel is still what a client sees, and the request is `Malformed` (rule 3). No stored-layout change. ADR-0128 |
 //! | 33 | `SERVER-001` v0.106.0 | + [`WriteOp::UpdateField`] (5) and [`WriteResult::Updated`] (9) — `TXS-FR-001`, ADR-0130: `UpdateField`'s own three fields as a batch op, so one ordered list can hold an update and a record write. With it a transaction session (`Begin`/`Commit`) may stage `Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link` beside `UpdateField`, on a connection at 33 or above, and commit them as one atomic `WriteBatch`; a session that asked for read-your-writes, snapshot isolation or real MVCC refuses them `Unsupported` (whole-record overlays are phase 2). A `WriteBatch` carrying an `UpdateField` is `Malformed` below 33 (rule 3). ADR-0130 |
 //! | 34 | `SERVER-001` v0.107.0 | + [`Request::FetchSince`] (39), [`Response::Changes`] (26), [`Response::SnapshotAt`] (27) and [`ErrorCode::Gone`] (16) — `CHL-FR-004`/`005`, ADR-0131: continuous replication over a table's change log. `FetchSince { epoch, after, limit }` answers the committed writes after sequence number `after` in the log's `epoch`, as `Changes` (a `Replication` token, like `FetchSnapshot`); `Gone` when the epoch is another or `after` is older than the log holds — the standby resyncs. `FetchSnapshot` answers `SnapshotAt` (the files plus the log's `epoch` and `seq` at that instant) on a table with a log and a connection at 34+, `Snapshot` otherwise. `Unsupported` for a table with no log; `Malformed` below 34 (rule 3). ADR-0131 |
+//! | 35 | `SERVER-001` v0.108.0 | No new variant: `BeginWith` learns a fifth flag bit, [`SESSION_STRICT_COMMIT`] (`STC-FR-003`, `ADR-0133`) — a strict session stages record writes and updates in one list, its `GetById` answers the record as the list would leave it, and `Commit` applies the list all or nothing including soft outcomes (`TransactionFailed { index, code }` for the first op that would be `Duplicate`, `NotFound`, `GuardFailed` or `AlreadyLinked`). Unknown below 35 (rule 3), sent only after negotiating ≥ 35 (rule 4); `Unsupported` combined with another bit or on a table that cannot commit strictly. `ADR-0133` |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -123,7 +124,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -161,6 +162,17 @@ pub const SESSION_SNAPSHOT_ISOLATION: u32 = 4;
 /// protocol 27 (`Malformed`, as any unknown bit); composes independently
 /// with the three bits above.
 pub const SESSION_MVCC_ISOLATION: u32 = 8;
+
+/// `Request::BeginWith` flag bit 4 (protocol 35, `STC-FR-003`, `ADR-0133`):
+/// a **strict** session. It stages record writes and updates in one ordered
+/// list, `GetById` answers the record as that list would leave it, and
+/// `Commit` applies the list all or nothing including soft outcomes — the
+/// first op that would be `Duplicate`, `NotFound`, `GuardFailed` or
+/// `AlreadyLinked` fails the commit with `TransactionFailed { index, code }`
+/// and nothing is applied. Stands alone: combined with any other bit it is
+/// `Unsupported`, as it is on a table that cannot commit strictly. Unknown
+/// below protocol 35 (`Malformed`, as any unknown bit).
+pub const SESSION_STRICT_COMMIT: u32 = 16;
 
 /// The most `UpdateField`s one connection may stage between
 /// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
@@ -2698,7 +2710,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 34);
+        assert_eq!(PROTOCOL_VERSION, 35);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 34
+PROTOCOL_VERSION = 35
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -29,6 +29,9 @@ SESSION_SNAPSHOT_ISOLATION = 4
 # MVCC2-FR-004/011, ADR-0072: real multi-version concurrency control on
 # Memory/Entity/Relation only (Unsupported elsewhere), protocol 27.
 SESSION_MVCC_ISOLATION = 8
+# STC-FR-003, ADR-0133: a strict session (all-or-nothing commit, whole-record
+# read-your-writes); stands alone, protocol 35.
+SESSION_STRICT_COMMIT = 16
 
 
 # ---- fieldless enums (a u32 index on the wire) ----

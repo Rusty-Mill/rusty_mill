@@ -1,6 +1,6 @@
 # ADR-0133: Transaction Sessions, Phases 2 and 3 (Proposal)
 
-- Status: **Proposed — design only, no code. Forks for the owner below.**
+- Status: **Accepted — options 1A and 2 built (protocol 35), on the owner's "go with recommendations"; multi-table commit deferred as recommended.**
 - Date: 2026-09-30
 - Deciders: baileyrd
 - Related: `ADR-0130` (phase 1), `ADR-0063` (atomic `WriteBatch`), `ADR-0072`
@@ -73,3 +73,27 @@ journal format (version bump, crash trials) and should be its own ADR.
   adapters; a property test and crash trials before it ships. Independent
   inspection before merge.
 - Not proposed: holding a lock across round trips (`ADR-0013`).
+
+## As built (protocol 35)
+
+- `src/server/strict.rs`: `Overlay` and `first_soft_failure`, pure over two read
+  closures (a record getter and an edge test). Each adapter runs it inside its
+  exclusive section (`strict_refusal`), so the answer cannot go stale before
+  the apply. `ConnectionStore::write_batch_strict` / `strict_commit_supported`;
+  `ChangeLogged` forwards and logs.
+- `BeginWith` flag 16, `SESSION_STRICT_COMMIT`. It stands alone; a strict
+  session routes every staged op, updates included, into the ordered list, and
+  its `GetById` is `strict::overlay_get` over that list (option 2 on option 1A's
+  overlay, one definition of "the record as staged").
+- **The journal.** A batch is journaled before it is applied, so a refused
+  strict batch leaves its entry behind. Replay of a plain entry would apply it
+  loosely, so a strict batch is journaled under its own entry kind
+  (`KIND_STRICT_WRITE`, format version unchanged); replay re-runs the check on
+  the same pre-state, gets the same refusal, and skips it. The cost is that an
+  older build refuses a journal holding one.
+- **The check earned its property test.** Random op lists over six ids, through
+  the check on one store and the real apply on another, found two divergences
+  in the first draft (a self-loop link is a *hard* `Malformed` at apply, and
+  the missing-endpoint check comes first); both are fixed and pinned.
+- Not built: multi-table commit; strict commit for `Dog`/`Order`/`Employee`
+  (`Unsupported`).
