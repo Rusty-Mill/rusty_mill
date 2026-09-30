@@ -125,7 +125,9 @@ fn open_relative_attrs(
     if status != w::STATUS_SUCCESS {
         return Err(errmap::nt_err(status, "NtCreateFile", rel));
     }
-    OwnedWinHandle::from_raw(handle).ok_or_else(|| {
+    // SAFETY: `handle` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(handle) }.ok_or_else(|| {
         PlatformError::new(ErrorKind::Other, OsCode::None, "NtCreateFile").with_path(rel)
     })
 }

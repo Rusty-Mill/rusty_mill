@@ -40,12 +40,14 @@ unsafe impl Send for OwnedWinHandle {}
 unsafe impl Sync for OwnedWinHandle {}
 
 impl OwnedWinHandle {
-    /// Take ownership of `handle`.
+    /// Take ownership of `handle`, or `None` for `NULL` /
+    /// `INVALID_HANDLE_VALUE` (the Win32 failure sentinels).
     ///
-    /// # Safety contract (checked by the caller)
-    /// `handle` must be a valid handle returned by a Win32 creation call,
-    /// not `INVALID_HANDLE_VALUE`, and not owned elsewhere.
-    pub fn from_raw(handle: w::HANDLE) -> Option<Self> {
+    /// # Safety
+    /// A non-sentinel `handle` must be a valid, open handle that nothing
+    /// else owns: the result closes it on drop, and safe conversions such
+    /// as `From<OwnedWinHandle> for OwnedHandle` rely on sole ownership.
+    pub unsafe fn from_raw(handle: w::HANDLE) -> Option<Self> {
         (handle != w::INVALID_HANDLE_VALUE && !handle.is_null()).then_some(Self(handle))
     }
 
@@ -113,7 +115,9 @@ pub fn duplicate(handle: &OwnedWinHandle, inheritable: bool) -> Result<OwnedWinH
     // takes `&OwnedWinHandle` rather than a raw value.
     let dup = unsafe { rusty_win32::handle::duplicate(handle.as_raw(), inheritable) }
         .map_err(|e| errmap::trackw_err("DuplicateHandle", e))?;
-    OwnedWinHandle::from_raw(dup)
+    // SAFETY: `dup` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(dup) }
         .ok_or_else(|| errmap::last_win32_err("DuplicateHandle", OsStr::new("")))
 }
 
@@ -137,7 +141,9 @@ pub fn duplicate(handle: &OwnedWinHandle, inheritable: bool) -> Result<OwnedWinH
     if ok == 0 {
         return Err(errmap::last_win32_err("DuplicateHandle", OsStr::new("")));
     }
-    OwnedWinHandle::from_raw(dup)
+    // SAFETY: `dup` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(dup) }
         .ok_or_else(|| errmap::last_win32_err("DuplicateHandle", OsStr::new("")))
 }
 
