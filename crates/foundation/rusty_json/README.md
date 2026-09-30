@@ -67,10 +67,10 @@ assert_eq!(built["items"][1], 2);
   `u64`/`i64`/`f64` representation.
 - `Map` has no insertion-order-preserving mode -- always sorted by key.
 - The optional `rusty_json-derive` crate in this workspace
-  (`#[derive(RustyJson)]`) is an early stub: it doesn't serialize a struct's
-  actual fields and its deserialize path always errors. It isn't wired into
-  this crate's public API (`rusty_json` doesn't re-export it) -- don't
-  depend on it yet.
+  (`#[derive(RustyJson)]`) is reserved but not implemented: using it is a
+  compile error that points to `serde` derives with this crate's `serde`
+  feature. It isn't wired into this crate's public API (`rusty_json`
+  doesn't re-export it).
 
 See [`ROADMAP.md`](ROADMAP.md) for the phased parity plan and
 [`gap-analysis.md`](gap-analysis.md) for the `serde_json`-parity audit this

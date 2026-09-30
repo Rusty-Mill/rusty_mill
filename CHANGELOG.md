@@ -45,6 +45,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_gui::Window` now destroys its native window on drop, and on Linux closes the X display connection it opened. Previously each window leaked its X socket, or its `HWND` on Windows.
   - `rusty_gui::Clipboard::get_text`/`set_text` now return `Err(UNSUPPORTED)` instead of an empty string and a write that never happened.
   - `rusty_multimodal_db`: `Session::commit` docs now say that `Ok(())` means the batch applied, not every write. Per-op outcomes such as `Duplicate` are discarded; use `commit_results` or a strict session to see them.
+  - `#[derive(RustyJson)]` is now a compile error pointing to serde derives, instead of generating a `to_json_string` that serialized no fields and a `from_json_str` that always failed.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
