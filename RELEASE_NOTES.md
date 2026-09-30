@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db: what the change log costs under load
+**2026-09-30** · [ADR-0131](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0131-continuous-replication.md)
+
+- **Added:** `examples/change_log_bench.rs`, a multi-threaded write benchmark with and without the change log, journaled or not (`--example change_log_bench`, release build).
+- **Measured:** the log adds one `fsync` per write (about −40%) and, on an update-heavy journaled table, removes group commit: 17.2k against 3.1k ops/s at 16 writers on one 4-core ext4 host. Recorded in ADR-0131 with a proposed cheaper design.
+- Known limitation: one host, one disk; the ratios are the result, not the absolute numbers. Nothing in the log was changed.
+
+---
+
 ## rusty_multimodal_db: documentation brought up to date
 **2026-09-30**
 

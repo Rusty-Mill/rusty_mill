@@ -127,7 +127,9 @@ not a guess.
   behind retention is told `Gone` and resyncs. *Since phases 2/3:* `replica_refresh --follow` tails the log into a
   refreshed directory, resyncing on `Gone`, and promotion is a documented
   manual step (stop the tool, serve the directory). Still absent: logging `detach_record` cascades and `Compact`, lifting the 8 MiB
-  snapshot cap; automatic failover, consensus and write forwarding stay
+  snapshot cap, and a cheaper log (measured, `ADR-0131`: the log costs one
+  `fsync` per write and, on an update-heavy journaled table, group commit —
+  17k against 3k ops/s at 16 writers on the test disk); automatic failover, consensus and write forwarding stay
   non-goals.
 * **Metrics/observability at the storage-engine layer.** *Partly built
   since this was written:* `Request::Metrics`/`Response::Metrics`
