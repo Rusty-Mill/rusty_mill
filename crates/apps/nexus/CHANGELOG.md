@@ -8,6 +8,19 @@ lives in the git log and in `docs/0.1.2/audits/`.
 
 ## [Unreleased]
 
+### Fixed
+- **Importing a real `remind_me` database** (`nexus-memory`, design review
+  2.6 / N1).
+  - Memory ids are now an opaque `MemoryId`, kept verbatim: Nexus's UUIDs
+    and `remind_me`'s `mem_<hex>` alike. `superseded_by` links survive.
+  - Previously every `mem_…` row failed UUID parsing and was counted as
+    "skipped", so a migration could report success having imported nothing.
+  - A row that cannot be imported is now listed in
+    `ImportReport::failures`, with its source id and the reason.
+  - A re-import is last-write-wins on id instead of aborting on the
+    primary key.
+  - Stored ids were already `TEXT`, so no migration is needed.
+
 ### Added
 - **Per-user relay credentials** (`nexus-collab`, gap-analysis §1.4) —
   new `TokenSet`: named tokens with constant-time, full-scan

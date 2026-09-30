@@ -16,7 +16,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Row};
 use uuid::Uuid;
 
-use crate::model::{CategoryCount, Memory, MemoryStats, MemoryStatus, MemoryType};
+use crate::model::{CategoryCount, Memory, MemoryId, MemoryStats, MemoryStatus, MemoryType};
 
 /// Schema applied on open. Idempotent via `IF NOT EXISTS`. The full
 /// `remind_me`-parity column set is created up front (columns are cheap); the
@@ -236,7 +236,7 @@ impl MemoryDb {
                 m.source_capture_id,
                 m.memory_type.as_str(),
                 m.status.as_str(),
-                m.superseded_by.map(|u| u.to_string()),
+                m.superseded_by.as_ref().map(MemoryId::to_string),
                 m.subject,
                 m.predicate,
                 m.object,
@@ -291,7 +291,7 @@ impl MemoryDb {
                 m.source_capture_id,
                 m.memory_type.as_str(),
                 m.status.as_str(),
-                m.superseded_by.map(|u| u.to_string()),
+                m.superseded_by.as_ref().map(MemoryId::to_string),
                 m.subject,
                 m.predicate,
                 m.object,
@@ -338,12 +338,12 @@ impl MemoryDb {
     ///
     /// # Errors
     /// Returns an error on a query or decode failure.
-    pub fn get(&self, id: Uuid) -> Result<Option<Memory>> {
+    pub fn get(&self, id: &MemoryId) -> Result<Option<Memory>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLS} FROM memories m WHERE m.id = ?1 AND m.status != 'deleted'"
         ))?;
-        let mut rows = stmt.query(params![id.to_string()])?;
+        let mut rows = stmt.query(params![id.as_str()])?;
         match rows.next()? {
             Some(row) => Ok(Some(row_to_memory(row)?)),
             None => Ok(None),
@@ -358,7 +358,7 @@ impl MemoryDb {
     ///
     /// # Errors
     /// Returns an error on a query or decode failure of the fetch itself.
-    pub fn get_recording_access(&self, id: Uuid) -> Result<Option<Memory>> {
+    pub fn get_recording_access(&self, id: &MemoryId) -> Result<Option<Memory>> {
         let Some(mut m) = self.get(id)? else {
             return Ok(None);
         };
@@ -696,7 +696,7 @@ impl MemoryDb {
                 m.client,
                 m.memory_type.as_str(),
                 m.status.as_str(),
-                m.superseded_by.map(|u| u.to_string()),
+                m.superseded_by.as_ref().map(MemoryId::to_string),
                 m.subject,
                 m.predicate,
                 m.object,
@@ -711,12 +711,12 @@ impl MemoryDb {
     ///
     /// # Errors
     /// Returns an error on a write failure.
-    pub fn mark_superseded(&self, id: Uuid, by: Uuid) -> Result<bool> {
+    pub fn mark_superseded(&self, id: &MemoryId, by: &MemoryId) -> Result<bool> {
         let conn = self.pool.get()?;
         let n = conn.execute(
             "UPDATE memories SET status = 'superseded', superseded_by = ?2, updated_at = ?3 \
              WHERE id = ?1 AND status != 'superseded'",
-            params![id.to_string(), by.to_string(), Utc::now().to_rfc3339()],
+            params![id.as_str(), by.as_str(), Utc::now().to_rfc3339()],
         )?;
         Ok(n > 0)
     }
@@ -737,7 +737,7 @@ impl MemoryDb {
     ///
     /// # Errors
     /// Returns an error on a write failure.
-    pub fn delete(&self, id: Uuid) -> Result<bool> {
+    pub fn delete(&self, id: &MemoryId) -> Result<bool> {
         let conn = self.pool.get()?;
         let n = conn.execute(
             "UPDATE memories SET status = 'deleted', updated_at = ?2 \
@@ -1062,6 +1062,11 @@ pub(crate) fn parse_uuid(s: &str) -> Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| MemoryDbError::Decode(format!("uuid {s:?}: {e}")))
 }
 
+/// A stored memory id — any origin's form, kept verbatim (see [`MemoryId`]).
+pub(crate) fn parse_memory_id(s: &str) -> Result<MemoryId> {
+    MemoryId::parse(s).map_err(|e| MemoryDbError::Decode(e.to_string()))
+}
+
 pub(crate) fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
@@ -1147,7 +1152,7 @@ fn row_to_memory(row: &Row<'_>) -> Result<Memory> {
     let metadata = serde_json::from_str::<serde_json::Value>(&metadata_json)
         .map_err(|e| MemoryDbError::Decode(format!("metadata: {e}")))?;
     let superseded_by = match row.get::<_, Option<String>>("superseded_by")? {
-        Some(s) => Some(parse_uuid(&s)?),
+        Some(s) => Some(parse_memory_id(&s)?),
         None => None,
     };
     let accessed_at = match row.get::<_, Option<String>>("accessed_at")? {
@@ -1155,7 +1160,7 @@ fn row_to_memory(row: &Row<'_>) -> Result<Memory> {
         None => None,
     };
     Ok(Memory {
-        id: parse_uuid(&row.get::<_, String>("id")?)?,
+        id: parse_memory_id(&row.get::<_, String>("id")?)?,
         content: row.get("content")?,
         category: row.get("category")?,
         tags,
@@ -1195,7 +1200,7 @@ mod tests {
             .with_client("claude")
             .with_tags(["lang", "pref"]);
         db.insert(&m).unwrap();
-        let got = db.get(m.id).unwrap().expect("row present");
+        let got = db.get(&m.id).unwrap().expect("row present");
         assert_eq!(got.content, m.content);
         assert_eq!(got.memory_type, MemoryType::Semantic);
         assert_eq!(got.category, "preferences");
@@ -1257,8 +1262,8 @@ mod tests {
         let db = MemoryDb::open_in_memory().unwrap();
         let m = Memory::new("ephemeral note about zebras");
         db.insert(&m).unwrap();
-        assert!(db.delete(m.id).unwrap());
-        assert!(db.get(m.id).unwrap().is_none());
+        assert!(db.delete(&m.id).unwrap());
+        assert!(db.get(&m.id).unwrap().is_none());
         assert_eq!(db.search("zebras", 10).unwrap().len(), 0);
         assert_eq!(db.count().unwrap(), 0);
     }
@@ -1273,7 +1278,7 @@ mod tests {
         let m = Memory::new("ephemeral note about zebras");
         db.insert(&m).unwrap();
 
-        assert!(db.delete(m.id).unwrap());
+        assert!(db.delete(&m.id).unwrap());
 
         // list_since (the push scan) still observes the row, carrying the
         // deleted status forward so the tombstone can propagate.
@@ -1297,8 +1302,8 @@ mod tests {
 
         // Idempotent: deleting an already-tombstoned (or nonexistent) id is
         // a no-op that reports no change.
-        assert!(!db.delete(m.id).unwrap());
-        assert!(!db.delete(Uuid::now_v7()).unwrap());
+        assert!(!db.delete(&m.id).unwrap());
+        assert!(!db.delete(&MemoryId::new()).unwrap());
     }
 
     #[test]
@@ -1309,13 +1314,13 @@ mod tests {
         let db = MemoryDb::open_in_memory().unwrap();
         let mut m = Memory::new("shared note");
         db.insert(&m).unwrap();
-        assert!(db.get(m.id).unwrap().is_some());
+        assert!(db.get(&m.id).unwrap().is_some());
 
         m.status = MemoryStatus::Deleted;
         m.updated_at = Utc::now() + chrono::Duration::seconds(1);
         assert!(db.upsert_lww(&m).unwrap());
 
-        assert!(db.get(m.id).unwrap().is_none());
+        assert!(db.get(&m.id).unwrap().is_none());
         let since = db.list_since("1970-01-01T00:00:00+00:00", "", 10).unwrap();
         assert_eq!(since[0].status, MemoryStatus::Deleted);
     }
@@ -1516,22 +1521,25 @@ mod tests {
         db.insert(&m).unwrap();
 
         // Plain get never records an access.
-        assert_eq!(db.get(m.id).unwrap().unwrap().access_count, 0);
-        assert!(db.get(m.id).unwrap().unwrap().accessed_at.is_none());
+        assert_eq!(db.get(&m.id).unwrap().unwrap().access_count, 0);
+        assert!(db.get(&m.id).unwrap().unwrap().accessed_at.is_none());
 
         // Recording get bumps the count and stamps accessed_at each call.
-        let first = db.get_recording_access(m.id).unwrap().unwrap();
+        let first = db.get_recording_access(&m.id).unwrap().unwrap();
         assert_eq!(first.access_count, 1);
         assert!(first.accessed_at.is_some());
         assert_eq!(
-            db.get_recording_access(m.id).unwrap().unwrap().access_count,
+            db.get_recording_access(&m.id)
+                .unwrap()
+                .unwrap()
+                .access_count,
             2
         );
         // The bump is durable, not just reflected in the returned struct.
-        assert_eq!(db.get(m.id).unwrap().unwrap().access_count, 2);
+        assert_eq!(db.get(&m.id).unwrap().unwrap().access_count, 2);
 
         // Missing id stays None (no panic, no write).
-        assert!(db.get_recording_access(Uuid::now_v7()).unwrap().is_none());
+        assert!(db.get_recording_access(&MemoryId::new()).unwrap().is_none());
     }
 
     #[test]
@@ -1568,21 +1576,21 @@ mod tests {
         m.updated_at = DateTime::from_timestamp(1000, 0).unwrap();
         // First upsert inserts.
         assert!(db.upsert_lww(&m).unwrap());
-        assert_eq!(db.get(m.id).unwrap().unwrap().content, "v1");
+        assert_eq!(db.get(&m.id).unwrap().unwrap().content, "v1");
 
         // An older update is ignored (LWW).
         let mut older = m.clone();
         older.content = "stale".to_string();
         older.updated_at = DateTime::from_timestamp(500, 0).unwrap();
         assert!(!db.upsert_lww(&older).unwrap());
-        assert_eq!(db.get(m.id).unwrap().unwrap().content, "v1");
+        assert_eq!(db.get(&m.id).unwrap().unwrap().content, "v1");
 
         // A newer update wins.
         let mut newer = m.clone();
         newer.content = "v2".to_string();
         newer.updated_at = DateTime::from_timestamp(2000, 0).unwrap();
         assert!(db.upsert_lww(&newer).unwrap());
-        assert_eq!(db.get(m.id).unwrap().unwrap().content, "v2");
+        assert_eq!(db.get(&m.id).unwrap().unwrap().content, "v2");
         assert_eq!(db.count().unwrap(), 1);
         // FTS reflects the applied update.
         assert_eq!(db.search("v2", 5).unwrap().len(), 1);
@@ -1637,12 +1645,12 @@ mod tests {
         let canonical = Memory::new("dup");
         db.insert(&loser).unwrap();
         db.insert(&canonical).unwrap();
-        assert!(db.mark_superseded(loser.id, canonical.id).unwrap());
-        let got = db.get(loser.id).unwrap().unwrap();
+        assert!(db.mark_superseded(&loser.id, &canonical.id).unwrap());
+        let got = db.get(&loser.id).unwrap().unwrap();
         assert_eq!(got.status, MemoryStatus::Superseded);
-        assert_eq!(got.superseded_by, Some(canonical.id));
+        assert_eq!(got.superseded_by, Some(canonical.id.clone()));
         // Idempotent: a second supersede is a no-op (already superseded).
-        assert!(!db.mark_superseded(loser.id, canonical.id).unwrap());
+        assert!(!db.mark_superseded(&loser.id, &canonical.id).unwrap());
         // Excluded from the active-only vitality report.
         assert!(db
             .vitality_report(10)
@@ -1685,7 +1693,7 @@ mod tests {
         }
         let db2 = MemoryDb::open(&path).unwrap();
         assert_eq!(db2.count().unwrap(), 1);
-        assert!(db2.get(m.id).unwrap().is_some());
+        assert!(db2.get(&m.id).unwrap().is_some());
     }
 
     #[test]
