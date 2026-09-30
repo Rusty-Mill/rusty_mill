@@ -97,7 +97,7 @@ its entries only replay against an identical starting snapshot.
   keeps the epoch while a kill starts a new one.
 
 **Known limits, named:** the log mutex serialises a table's writers and
-defeats journal group commit (measure before enabling under load);
+defeats journal group commit (measured below: 5.6× at 16 update writers);
 `MAX_SNAPSHOT_BYTES` still caps the bootstrap snapshot; `detach_record`
 cascades and `Compact` are not logged; the standby-side tail tool
 (`replica_refresh --follow`) and promotion are phases 2 and 3, below.
@@ -117,3 +117,47 @@ cascades and `Compact` are not logged; the standby-side tail tool
 - Test: `follow_applies_the_primarys_later_writes_to_a_refreshed_directory`
   (a replace and a delete after the snapshot reach the standby; a stale epoch
   is `Resync`).
+
+## Measured: what the log's lock costs (2026-09-30)
+
+`examples/change_log_bench.rs`, release build, one 4-core ext4 host (`fsync`
+bound: the numbers are this disk's, the ratios are the point), 3 s per cell,
+`Memory` writes through `write_batch(atomic)` from N threads.
+
+**Update** (in place, so with a journal the journal's `fsync` is the only one and
+group commit can batch it), ops/s:
+
+| threads | journal | journal + change log |
+|---:|---:|---:|
+| 1 | 5,593 | 3,130 |
+| 2 | 7,252 | 3,082 |
+| 4 | 8,736 | 3,042 |
+| 8 | 13,056 | 2,534 |
+| 16 | 17,207 | 3,074 |
+
+The journal scales 3× from 1 to 16 writers (group commit); with the log it is
+flat at about 3k. The log's mutex is held across the wrapped store's whole
+apply, so writers reach the journal one at a time and never share an `fsync`:
+**5.6× slower at 16 writers**, 1.8× at one (the log's own `fsync`). p50 latency
+at 16 writers is lower with the log (297 µs against 893 µs) only because the
+queue moved onto the mutex.
+
+**Insert** (the insert log is `fsync`ed under the store's lock, so the baseline
+does not scale either): plain 3.9–4.7k ops/s at every thread count, with the
+log 2.3–2.7k (one more `fsync` per write, −40%); journaled 2.3–2.9k, with the
+log 1.6–1.8k (−36% at 8 writers).
+
+So the cost is one `fsync` per write everywhere, and on top of it the loss of
+group commit wherever group commit was doing the work. A workload of single
+writer or insert-dominated writes pays the first only; a many-writer,
+update-heavy table pays both.
+
+**If it matters** (not built): make the log's append cheap under its lock and
+share its `fsync` the way the journal does (`GRP-FR-001`: append under the lock,
+one `fsync` for the group, apply in turn order), or log from inside the journal
+turn so the two share one `fsync`. Either is a change to the crash contract
+(what is durable when a write is acknowledged), so it wants its own ADR.
+
+**Follow-up:** `ADR-0134` proposes appending from inside the store's ordered section and
+syncing in a group, and records a `Memory` spike (journaled updates at 16 writers: 10.1k with
+it against 2.5k with the decorator, 14.9k with no log).

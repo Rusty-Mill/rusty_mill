@@ -65,7 +65,7 @@ pub fn effective_op(op: &WriteOp, result: &WriteResult) -> Option<WriteOp> {
     }
 }
 
-fn effective_ops(ops: &[WriteOp], results: &[WriteResult]) -> Vec<WriteOp> {
+pub(crate) fn effective_ops(ops: &[WriteOp], results: &[WriteResult]) -> Vec<WriteOp> {
     ops.iter()
         .zip(results)
         .filter_map(|(op, result)| effective_op(op, result))
