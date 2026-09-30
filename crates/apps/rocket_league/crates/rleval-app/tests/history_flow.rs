@@ -90,3 +90,52 @@ fn analysis_round_trips_through_the_engine_store() {
     drop(reopened);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// The training plan over real analysis output: one real match stored as four records
+/// (two play sessions), so the metric snapshots have the shape a real history has.
+#[test]
+fn a_plan_is_built_from_real_snapshots_across_two_sessions() {
+    use rleval_app::progress::{progress, MIN_MATCHES, PLAN_LEN};
+
+    let base = analyzed_record();
+    let t0 = 1_700_000_000;
+    let records: Vec<SessionRecord> = [0, 600, 1200, 4 * 3600]
+        .iter()
+        .enumerate()
+        .map(|(i, dt)| SessionRecord {
+            key: format!("{i:024x}"),
+            saved_at: t0 + dt,
+            ..base.clone()
+        })
+        .collect();
+    let player = records[0]
+        .players
+        .iter()
+        .find(|p| !p.metrics.is_empty())
+        .expect("a player with metrics");
+    let report = progress(player.key(), &records).expect("report");
+
+    assert_eq!(
+        report
+            .sessions
+            .iter()
+            .map(|s| s.matches)
+            .collect::<Vec<_>>(),
+        [3, 1],
+        "a 4 h gap splits sessions"
+    );
+    assert!(!report.plan.is_empty() && report.plan.len() <= PLAN_LEN);
+    assert!(report
+        .plan
+        .iter()
+        .all(|i| i.matches >= MIN_MATCHES && i.now.is_finite() && i.target.is_finite()));
+    assert!(
+        report.plan.windows(2).all(|w| w[0].pct <= w[1].pct),
+        "lowest percentile first"
+    );
+    // Identical matches: nothing moved, so no metric can claim a trend.
+    assert!(report
+        .plan
+        .iter()
+        .all(|i| i.trend == rleval_app::progress::Trend::Flat));
+}
