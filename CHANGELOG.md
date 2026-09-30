@@ -38,6 +38,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_yirp` (sessionmgr):
     - Teardown signals a recorded pid only when its start fingerprint still matches, and `terminate` refuses pid 0 and out-of-range values.
     - Processes still alive after termination block a destructive close. A timeout is no longer treated as proof that nothing is running.
+  - `rusty_tailscale` (`ts-engine`, `ts-magicsock`): a peer the netmap drops — absent from a full `Peers` snapshot, listed in `PeersRemoved`, or replaced by a rekey — loses its WireGuard session, address ownership, metadata, DNS names and disco state. Traffic from a non-member peer is dropped.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
