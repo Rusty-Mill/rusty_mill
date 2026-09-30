@@ -857,6 +857,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   matched real Rocket League exactly. No new tests; all 322 pre-existing
   tests pass unchanged.
 ### Changed
+- `docs/PROJECT-STATUS.md` trimmed to current state only (162 KB → 7 KB):
+  the long-form "Completed" log is replaced by a phase table and the last
+  five merges, with pointers to RELEASE_NOTES/CHANGELOG/ROADMAP for history.
 - `drive::apply_driven_forces` takes a single `&mut DriveState` instead
   of six separate per-car values (boost, jump-held, double-jump, hold
   window, dodge flip, base friction); signature drops from 11 to 6
@@ -894,6 +897,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Broken markdown tables: 61 requirement rows (`RB-PHYSICS-001-FR-015`
+  through `FR-075`) sat inside `TRACEABILITY.md`'s ADR table and are now
+  back in the requirements table; unescaped `|` inside code spans (`||`,
+  closures, `|x|`) split cells in `TRACEABILITY.md` and `ROADMAP.md`.
 - `rb_capture_ingest`'s synthetic test fixture had timestamps that didn't
   overlap the vendored replay fixture's real timeline (off by ~11.78s) —
   invisible under the old index-pairwise frame comparison, surfaced once

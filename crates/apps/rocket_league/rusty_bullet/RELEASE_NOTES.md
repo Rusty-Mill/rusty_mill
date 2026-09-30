@@ -6,6 +6,25 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Trimmed `PROJECT-STATUS.md`; fixed broken doc tables
+**2026-09-30** · docs only
+
+- `docs/PROJECT-STATUS.md` went from 2,046 lines / 162 KB to 137 lines /
+  7 KB. The 89-entry "Completed" log (duplicated by this file, the
+  changelog, and the roadmap) is replaced by a phase table and the last
+  five merges; the full log stays in git history at `a245d35`.
+- Header checkpoint moved to `a245d35`; test counts updated to 397; the
+  `--self-growth` real-capture run is now Next item 1; resolved research
+  risks (O001, O003) dropped.
+- Fixed broken tables: 61 requirement rows (`RB-PHYSICS-001-FR-015`
+  through `FR-075`) had been inserted into `TRACEABILITY.md`'s ADR table
+  instead of its requirements table, and unescaped `|` inside code spans
+  split cells in the `ROADMAP.md` `PHASE-1-PHYSICS-CORE` row and three
+  `TRACEABILITY.md` rows. Every table in ROADMAP, SPEC-REGISTRY,
+  TRACEABILITY, and PROJECT-STATUS now has a consistent column count.
+
+---
+
 ## Grouped per-car drive state into `DriveState`
 **2026-09-30** · refactor, no behavior change
 
