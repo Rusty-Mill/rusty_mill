@@ -46,6 +46,11 @@ Removed / Fixed / Security, newest first.
 - **Design review Tranche 3 (#419), A2A webhooks (3.6):** `rusty_a2a`'s webhook SSRF filter blocks IPv6 unique-local and other non-global address classes. Its DNS-pinned delivery client no longer follows redirects.
 - **Design review Tranche 3 (#419), admission and deadlines (3.7):**
   - `adk-mcp`: a request's deadline now covers writing it to the subprocess, so a child that stops reading stdin can no longer hold the connection lock forever.
+  - `rusty-whisper` server:
+    - Request and header lines are capped at 8 KiB, with at most 100 headers.
+    - Sockets have 30-second read and write deadlines.
+    - At most 64 connections at once; the rest get `503`.
+    - One model load at a time; a second `POST /load` gets `409`.
 - **Design review Tranche 2 (#412), persisted invariants:**
   - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
   - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.

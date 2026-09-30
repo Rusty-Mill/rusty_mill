@@ -46,14 +46,35 @@ fn body_within_limit(content_length: usize) -> bool {
     content_length <= MAX_BODY_BYTES
 }
 
+/// Longest request or header line accepted (design review 3.7, N02): lines
+/// were read unbounded, so a peer could stream one endless header line
+/// into memory past the body cap.
+pub const MAX_LINE_BYTES: usize = 8 * 1024;
+/// Most header lines accepted in one request.
+pub const MAX_HEADERS: usize = 100;
+
+/// One line of the request head, at most [`MAX_LINE_BYTES`] including its
+/// line ending.
+fn read_head_line(reader: &mut impl BufRead) -> io::Result<String> {
+    let mut line = String::new();
+    let limit = (MAX_LINE_BYTES + 1) as u64;
+    reader.by_ref().take(limit).read_line(&mut line)?;
+    if line.len() > MAX_LINE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("request line or header longer than {MAX_LINE_BYTES} bytes"),
+        ));
+    }
+    Ok(line)
+}
+
 /// Read and parse one request from `r`: the request line, headers up to
 /// the blank line, then a `Content-Length`-sized body if present (chunked
 /// transfer-encoding isn't supported — this server only ever needs to
 /// read requests small clients send in one shot).
 pub fn parse_request(r: &mut impl Read) -> io::Result<Request> {
     let mut reader = BufReader::new(r);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let line = read_head_line(&mut reader)?;
     let line = line.trim_end();
     let mut parts = line.split_whitespace();
     let method = parts
@@ -69,12 +90,19 @@ pub fn parse_request(r: &mut impl Read) -> io::Result<Request> {
     };
 
     let mut headers = HashMap::new();
+    let mut count = 0usize;
     loop {
-        let mut hline = String::new();
-        reader.read_line(&mut hline)?;
+        let hline = read_head_line(&mut reader)?;
         let hline = hline.trim_end_matches(['\r', '\n']);
         if hline.is_empty() {
             break;
+        }
+        count += 1;
+        if count > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("more than {MAX_HEADERS} headers"),
+            ));
         }
         if let Some((k, v)) = hline.split_once(':') {
             headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
@@ -453,5 +481,23 @@ mod tests {
         assert!(serve_static(&dir, "/missing.txt").is_none());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Design review 3.7 (N02): an over-long header line and too many
+    /// headers are refused instead of read into memory without bound.
+    #[test]
+    fn oversized_heads_are_refused() {
+        let long = format!(
+            "GET / HTTP/1.1\r\nX: {}\r\n\r\n",
+            "a".repeat(MAX_LINE_BYTES)
+        );
+        assert!(parse_request(&mut long.as_bytes()).is_err());
+        let many = format!(
+            "GET / HTTP/1.1\r\n{}\r\n",
+            "X: y\r\n".repeat(MAX_HEADERS + 1)
+        );
+        assert!(parse_request(&mut many.as_bytes()).is_err());
+        let ok = format!("GET / HTTP/1.1\r\n{}\r\n", "X: y\r\n".repeat(MAX_HEADERS));
+        assert!(parse_request(&mut ok.as_bytes()).is_ok());
     }
 }
