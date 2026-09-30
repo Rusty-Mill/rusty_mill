@@ -32,6 +32,9 @@ pub struct Inventory {
     /// `conn.total_changes()` as of the last successful seal, so
     /// `checkpoint` can skip resealing when nothing has changed.
     sealed_at: Cell<u64>,
+    /// The on-disk image this copy came from or last sealed, so a seal can
+    /// refuse to overwrite another process's (design review 2.9).
+    sealed_as: Cell<db::SealedAs>,
     embedder: Box<dyn Embedder>,
     /// Vectors held in memory so a search does not re-read and re-decode every
     /// embedding blob on each keystroke. Dropped whenever embeddings change,
@@ -143,6 +146,7 @@ impl Inventory {
             _tempdir: opened.tempdir,
             key: opened.key,
             sealed_at: Cell::new(sealed_at),
+            sealed_as: Cell::new(opened.sealed_as),
             embedder,
             cache: RefCell::new(None),
         };
@@ -161,7 +165,14 @@ impl Inventory {
         if changes == self.sealed_at.get() {
             return Ok(false);
         }
-        db::seal(&self.conn, &self.plain_path, &self.path, &self.key)?;
+        let sealed = db::seal(
+            &self.conn,
+            &self.plain_path,
+            &self.path,
+            &self.key,
+            self.sealed_as.get(),
+        )?;
+        self.sealed_as.set(sealed);
         self.sealed_at.set(changes);
         Ok(true)
     }

@@ -22,10 +22,9 @@ use std::time::Duration;
 
 use nexus_kernel::{Ipc as _, KernelPluginContext};
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use crate::db::MemoryDb;
-use crate::model::Memory;
+use crate::model::{Memory, MemoryId};
 
 /// AI plugin id — owns `embed_text`.
 const AI_PLUGIN: &str = "com.nexus.ai";
@@ -46,14 +45,14 @@ const ARM_OVERSAMPLE: usize = 10;
 const DEFAULT_SYNC_LIMIT: usize = 1000;
 
 /// Synthetic vector-store path for a memory id (the store keys rows by path).
-fn vector_path(id: Uuid) -> String {
+fn vector_path(id: &MemoryId) -> String {
     format!("memory://{id}")
 }
 
-/// Recover a memory id from a `memory://<uuid>` vector-store path.
-fn id_from_vector_path(path: &str) -> Option<Uuid> {
+/// Recover a memory id from a `memory://<id>` vector-store path.
+fn id_from_vector_path(path: &str) -> Option<MemoryId> {
     path.strip_prefix("memory://")
-        .and_then(|s| Uuid::parse_str(s).ok())
+        .and_then(|s| MemoryId::parse(s).ok())
 }
 
 /// Reciprocal Rank Fusion. Each input is a ranked list of ids (best first).
@@ -61,16 +60,20 @@ fn id_from_vector_path(path: &str) -> Option<Uuid> {
 /// truncated to `limit`. A higher position in any list lifts an id; appearing
 /// in multiple lists compounds.
 #[must_use]
-pub(crate) fn reciprocal_rank_fusion(rankings: &[Vec<Uuid>], k: f64, limit: usize) -> Vec<Uuid> {
-    let mut scores: HashMap<Uuid, f64> = HashMap::new();
+pub(crate) fn reciprocal_rank_fusion(
+    rankings: &[Vec<MemoryId>],
+    k: f64,
+    limit: usize,
+) -> Vec<MemoryId> {
+    let mut scores: HashMap<MemoryId, f64> = HashMap::new();
     for ranking in rankings {
         for (rank, id) in ranking.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)] // ranks are tiny; f64 is ample.
             let contribution = 1.0 / (k + (rank as f64) + 1.0);
-            *scores.entry(*id).or_insert(0.0) += contribution;
+            *scores.entry(id.clone()).or_insert(0.0) += contribution;
         }
     }
-    let mut ranked: Vec<(Uuid, f64)> = scores.into_iter().collect();
+    let mut ranked: Vec<(MemoryId, f64)> = scores.into_iter().collect();
     // Sort by score desc; break ties by id so the order is deterministic.
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     ranked.into_iter().take(limit).map(|(id, _)| id).collect()
@@ -102,7 +105,7 @@ async fn vector_recall(
     ctx: &KernelPluginContext,
     query: &str,
     limit: usize,
-) -> Result<Vec<Uuid>, String> {
+) -> Result<Vec<MemoryId>, String> {
     let mut embeddings = embed(ctx, vec![query.to_string()]).await?;
     let query_embedding = embeddings
         .pop()
@@ -154,30 +157,30 @@ pub(crate) async fn recall(
     let fts = db
         .search(query, arm_limit)
         .map_err(|e| format!("recall: fts: {e}"))?;
-    let fts_ids: Vec<Uuid> = fts.iter().map(|m| m.id).collect();
+    let fts_ids: Vec<MemoryId> = fts.iter().map(|m| m.id.clone()).collect();
 
     // Semantic arm — best-effort. Any failure (no ctx, no embedder, IPC error)
     // degrades to FTS-only rather than failing the recall.
-    let vec_ids: Vec<Uuid> = match ctx {
+    let vec_ids: Vec<MemoryId> = match ctx {
         Some(ref ctx) => vector_recall(ctx, query, arm_limit)
             .await
             .unwrap_or_default(),
         None => Vec::new(),
     };
 
-    let ordered: Vec<Uuid> = if vec_ids.is_empty() {
+    let ordered: Vec<MemoryId> = if vec_ids.is_empty() {
         fts_ids.into_iter().take(limit).collect()
     } else {
         reciprocal_rank_fusion(&[fts_ids, vec_ids], RRF_K, limit)
     };
 
     // Materialise in fused order, reusing FTS rows and fetching vector-only hits.
-    let mut by_id: HashMap<Uuid, Memory> = fts.into_iter().map(|m| (m.id, m)).collect();
+    let mut by_id: HashMap<MemoryId, Memory> = fts.into_iter().map(|m| (m.id.clone(), m)).collect();
     let mut out: Vec<Memory> = Vec::with_capacity(ordered.len());
     for id in ordered {
         if let Some(m) = by_id.remove(&id) {
             out.push(m);
-        } else if let Ok(Some(m)) = db.get(id) {
+        } else if let Ok(Some(m)) = db.get(&id) {
             out.push(m);
         }
     }
@@ -219,7 +222,7 @@ pub(crate) async fn vector_sync(
 
     let mut indexed = 0_u64;
     for (m, embedding) in memories.iter().zip(embeddings) {
-        let path = vector_path(m.id);
+        let path = vector_path(&m.id);
         let chunk = json!({
             "file_path": path,
             "block_id": 0,
@@ -242,9 +245,10 @@ pub(crate) async fn vector_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
-    fn uuid(n: u8) -> Uuid {
-        Uuid::from_bytes([n; 16])
+    fn uuid(n: u8) -> MemoryId {
+        MemoryId::from(Uuid::from_bytes([n; 16]))
     }
 
     #[test]
@@ -255,8 +259,8 @@ mod tests {
         let w = uuid(4);
         // x: rank 0 in both lists. z: present in both (ranks 2 and 1).
         // y: only the lexical list. w: only the vector list.
-        let fts = vec![x, y, z];
-        let vec = vec![x, z, w];
+        let fts = vec![x.clone(), y.clone(), z.clone()];
+        let vec = vec![x.clone(), z.clone(), w.clone()];
         let fused = reciprocal_rank_fusion(&[fts, vec], RRF_K, 4);
         // x tops both → clear winner; z (in both) beats the single-list y/w.
         assert_eq!(fused, vec![x, z, y, w]);
@@ -264,7 +268,7 @@ mod tests {
 
     #[test]
     fn rrf_single_list_preserves_order_and_truncates() {
-        let ids: Vec<Uuid> = (1..=5).map(uuid).collect();
+        let ids: Vec<MemoryId> = (1..=5).map(uuid).collect();
         let fused = reciprocal_rank_fusion(std::slice::from_ref(&ids), RRF_K, 3);
         assert_eq!(fused, ids[..3].to_vec());
     }
@@ -276,10 +280,11 @@ mod tests {
 
     #[test]
     fn vector_path_round_trips() {
-        let id = Uuid::now_v7();
-        assert_eq!(id_from_vector_path(&vector_path(id)), Some(id));
+        for id in [MemoryId::new(), MemoryId::parse("mem_0123abcd").unwrap()] {
+            assert_eq!(id_from_vector_path(&vector_path(&id)), Some(id));
+        }
         assert_eq!(id_from_vector_path("notes/a.md"), None);
-        assert_eq!(id_from_vector_path("memory://not-a-uuid"), None);
+        assert_eq!(id_from_vector_path("memory://not/an/id"), None);
     }
 
     #[tokio::test]

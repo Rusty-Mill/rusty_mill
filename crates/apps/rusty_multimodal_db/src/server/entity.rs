@@ -431,12 +431,14 @@ impl EntityConnectionStore {
                             replayed.push(ReplayedBatch::Transaction(applied));
                         }
                     }
-                    // `STC-FR-002`: a strict batch the live check refused was
-                    // never applied; the same check on the same pre-state
-                    // refuses it again, so replay skips it.
-                    JournaledBatch::StrictWrite(ops)
-                        if Self::strict_refusal(inner, ops).is_some() => {}
-                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite(ops) => {
+                    // ADR-0135: a strict entry the live check never accepted
+                    // touched nothing and is skipped; an accepted one is
+                    // redone whole. A version-2 journal (no markers) falls
+                    // back to re-running the check.
+                    JournaledBatch::StrictWrite { ops, accepted }
+                        if !accepted
+                            .unwrap_or_else(|| Self::strict_refusal(inner, ops).is_none()) => {}
+                    JournaledBatch::Write(ops) | JournaledBatch::StrictWrite { ops, .. } => {
                         let results = Self::replay_write_batch(inner, &schema, ops).map_err(
                             |(index, code)| JournalError::Replay {
                                 batch: batch_index,
@@ -480,7 +482,14 @@ impl EntityConnectionStore {
         let mut results = Vec::with_capacity(ops.len());
         for (i, op) in ops.iter().enumerate() {
             let prepared = Self::prepare_write(schema, op).map_err(|code| (i, code))?;
-            results.push(Self::apply_prepared(inner, prepared).map_err(|code| (i, code))?);
+            let result = match Self::apply_prepared(inner, prepared) {
+                // ADR-0135: a link whose endpoint a later op of the same
+                // batch deleted, before the crash. Redo converges anyway:
+                // the edge went with the record.
+                Err(ErrorCode::RecordNotFound) => WriteResult::NotFound,
+                applied => applied.map_err(|code| (i, code))?,
+            };
+            results.push(result);
         }
         Ok(results)
     }
@@ -519,15 +528,22 @@ impl EntityConnectionStore {
         for (i, op) in ops.iter().enumerate() {
             prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
         }
-        let apply = |inner: &mut EntityProductionStack| {
+        // `accept` durably marks a strict batch accepted before its first
+        // write (ADR-0135); a no-op without a journal.
+        let apply = |inner: &mut EntityProductionStack,
+                     accept: &dyn Fn() -> Result<(), (usize, ErrorCode)>| {
             if strict {
                 if let Some(refused) = Self::strict_refusal(inner, ops) {
                     return Err(refused);
                 }
+                accept()?;
             }
+            // A loose atomic batch refuses a link to a record absent
+            // before the batch. A strict batch's check already saw each
+            // endpoint as the batch's earlier ops leave it (ADR-0135).
             for (i, p) in prepared.iter().enumerate() {
                 if let PreparedWrite::Link { left, .. } = p {
-                    if GetById::<Entity>::get(inner, *left).is_none() {
+                    if !strict && GetById::<Entity>::get(inner, *left).is_none() {
                         return Err((i, ErrorCode::RecordNotFound));
                     }
                 }
@@ -544,7 +560,7 @@ impl EntityConnectionStore {
             // checkpoint boundary, so this atomic batch flushes MVCC
             // history immediately.
             None => self.store.with_exclusive(|inner| {
-                let results = apply(inner)?;
+                let results = apply(inner, &|| Ok(()))?;
                 if !self.mvcc_flush_now(0) {
                     return Err((0, ErrorCode::Storage));
                 }
@@ -555,7 +571,12 @@ impl EntityConnectionStore {
                     std::cell::RefCell::new(None);
                 let step = |turn: crate::server::journal::Turn| {
                     self.store.with_exclusive(|inner| {
-                        let results = apply(inner)?;
+                        let accept = || {
+                            journal
+                                .accept_strict(turn)
+                                .map_err(|_| (0, ErrorCode::Journal))
+                        };
+                        let results = apply(inner, &accept)?;
                         *results_cell.borrow_mut() = Some(results);
                         Ok(turn.checkpoint_due
                             && inner.checkpoint_flush().is_ok()
@@ -2538,5 +2559,47 @@ mod tests {
             assert!(!adapter.neighbors(neighbor).unwrap().contains(&id));
         }
         assert_eq!(adapter.delete_record(id), Ok(DeleteOutcome::NotFound));
+    }
+
+    /// ADR-0135 (review 2.1) on `Entity`: insert then link in one strict
+    /// batch commits, and a restart on the same files agrees.
+    #[test]
+    fn insert_then_link_commits_strictly_and_a_restart_agrees() {
+        let dir = fresh_temp_dir("server_entity_strict_insert_link").unwrap();
+        let path = dir.join("e.mmap");
+        let journal = dir.join("e.journal");
+        let stack = create_entity_production_stack(sample_entities(), &[], &[], &path).unwrap();
+        let adapter =
+            EntityConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        let babbage = Uuid::from_u128(10);
+        let mut fields = adapter.get(Uuid::from_u128(1)).unwrap();
+        fields[0] = (fields[0].0, ScanValue::Str("Charles Babbage".into()));
+        let ops = [
+            WriteOp::Insert {
+                id: babbage,
+                fields,
+            },
+            WriteOp::Link {
+                left: babbage,
+                right: Uuid::from_u128(2),
+                relation: "relates_to".into(),
+            },
+        ];
+        assert_eq!(
+            adapter.write_batch_strict(&ops),
+            Ok(vec![WriteResult::Inserted, WriteResult::Linked])
+        );
+        drop(adapter);
+
+        let stack = open_entity_production_stack_portable(&path).unwrap();
+        let reopened =
+            EntityConnectionStore::with_journal(GenericProductionStore::new(stack), &journal)
+                .unwrap();
+        assert!(reopened.get(babbage).is_some());
+        assert_eq!(
+            reopened.neighbors_by_relation(babbage, "relates_to"),
+            Ok(vec![Uuid::from_u128(2)])
+        );
     }
 }

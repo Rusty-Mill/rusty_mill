@@ -31,6 +31,14 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **Design review Tranche 2 (#412), persisted invariants:**
+  - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
+  - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
+  - FTS5 delete runs in one transaction.
+  - Nexus memory: opaque ids, dead-lettered sync pages, and hub last-write-wins compared as time.
+  - Nexus comment sidecars are written atomically.
+  - `rusty_inventory`: a stale process copy cannot overwrite another's seal, and the tray reports unsaved changes.
+  - `rusty_tick`: an interrupted parent/child move is realigned on open.
 - **Design review Tranche 1 (soundness):**
   - `rusty_std` `MutexGuard` is `Sync` only for `T: Sync`.
   - `rusty_sync` `try_recv` no longer returns `Disconnected` while a value is queued.

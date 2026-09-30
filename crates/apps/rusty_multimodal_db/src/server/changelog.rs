@@ -122,6 +122,17 @@ struct Inner {
     offsets: Vec<u64>,
     len: u64,
     retain_bytes: u64,
+    /// Set when an append failed after its write was applied: the log no
+    /// longer holds the table's whole history, and the file may be torn
+    /// mid-record. Writes, fetches and a clean close are refused from then
+    /// on, so the next open is a new epoch and every standby resyncs.
+    poisoned: bool,
+    /// Tests only: the next append fails, as a full disk would.
+    #[cfg(test)]
+    fail_next_append: bool,
+    /// Tests only: the next group `fsync` fails.
+    #[cfg(test)]
+    fail_next_sync: bool,
 }
 
 /// A header for a log that is open (the clean flag clear).
@@ -250,6 +261,11 @@ impl ChangeLog {
                 offsets,
                 len,
                 retain_bytes,
+                poisoned: false,
+                #[cfg(test)]
+                fail_next_append: false,
+                #[cfg(test)]
+                fail_next_sync: false,
             }),
             synced: Mutex::new(SyncState {
                 durable: 0,
@@ -272,18 +288,38 @@ impl ChangeLog {
     /// entry (`fsync`ed) before returning — all under the lock, so the log's
     /// order is the apply order. `apply` returns its own result and the ops
     /// that took effect (`None`/empty: nothing to record). An append failure
-    /// is `Err(Storage)`: the write is applied and not logged, which the
-    /// next open turns into a new epoch (a standby resyncs).
+    /// is `Err(Storage)`: the write is applied and not logged. It poisons
+    /// the log: every later commit is `Storage` without running `apply`,
+    /// fetches are `Storage`, and [`Self::close_clean`] refuses, so the next
+    /// open is a new epoch and every standby resyncs. Continuing would
+    /// present a history with a hole in it as whole.
     pub fn commit<R>(
         &self,
         apply: impl FnOnce() -> (R, Option<Vec<WriteOp>>),
     ) -> Result<R, ErrorCode> {
         let mut inner = self.lock();
+        inner.ensure_writable()?;
         let (result, ops) = apply();
         if let Some(ops) = ops.filter(|ops| !ops.is_empty()) {
             inner.append(&ops, true).map_err(|_| ErrorCode::Storage)?;
         }
         Ok(result)
+    }
+
+    /// `Err(Storage)` once the log is poisoned. A writer that logs from
+    /// inside its own ordered section, rather than through [`Self::commit`],
+    /// must call this **before applying** each write it will log: after a
+    /// failed append or sync the table already holds a write the log lacks,
+    /// and no later write may be applied as if the history were whole.
+    pub fn ensure_writable(&self) -> Result<(), ErrorCode> {
+        self.lock().ensure_writable()
+    }
+
+    /// Poison the log for a failure it did not see itself: an `fsync` of
+    /// already-appended entries, made outside the append, that failed. The
+    /// writes those entries record are applied; their durability is not.
+    pub fn poison(&self) {
+        self.lock().poisoned = true;
     }
 
     /// `ADR-0134` (spike): append one entry **without** `fsync`, returning the
@@ -305,6 +341,12 @@ impl ChangeLog {
             if state.durable >= ticket {
                 return Ok(());
             }
+            // A failed sync poisoned the log: every writer it covered fails
+            // too, rather than retrying an `fsync` whose failure may already
+            // have dropped the dirty pages (a later "success" proves nothing).
+            if self.lock().poisoned {
+                return Err(ErrorCode::Storage);
+            }
             if state.syncing {
                 state = self
                     .synced_cv
@@ -317,7 +359,18 @@ impl ChangeLog {
             // Read how far to sync as late as possible: everything appended
             // before the `fsync` starts is covered by it.
             let (head, handle) = {
-                let inner = self.lock();
+                #[allow(unused_mut)]
+                let mut inner = self.lock();
+                #[cfg(test)]
+                if std::mem::take(&mut inner.fail_next_sync) {
+                    drop(inner);
+                    let injected = io::Error::other("injected");
+                    let head = self.position().head;
+                    (head, Err(injected))
+                } else {
+                    (inner.position().head, inner.file.try_clone())
+                }
+                #[cfg(not(test))]
                 (inner.position().head, inner.file.try_clone())
             };
             let synced = handle.and_then(|f| f.sync_data());
@@ -325,6 +378,9 @@ impl ChangeLog {
             state.syncing = false;
             if synced.is_ok() {
                 state.durable = state.durable.max(head);
+            }
+            if synced.is_err() {
+                self.poison();
             }
             self.synced_cv.notify_all();
             if synced.is_err() {
@@ -351,6 +407,9 @@ impl ChangeLog {
         limit: usize,
     ) -> Result<(LogPosition, Vec<Vec<WriteOp>>), ErrorCode> {
         let mut inner = self.lock();
+        if inner.poisoned {
+            return Err(ErrorCode::Storage);
+        }
         let position = inner.position();
         if epoch != position.epoch || after + 1 < position.first {
             return Err(ErrorCode::Gone);
@@ -369,8 +428,14 @@ impl ChangeLog {
 
     /// Say goodbye: a clean-shutdown marker, so the next open continues this
     /// epoch instead of starting a new one.
+    /// Refused on a poisoned log (see [`Self::commit`]).
     pub fn close_clean(&self) -> Result<(), ChangeLogError> {
         let mut inner = self.lock();
+        if inner.poisoned {
+            return Err(ChangeLogError::Format(
+                "an append failed: the log is not whole, so it does not close clean".into(),
+            ));
+        }
         let end = inner.file.stream_position()?;
         inner.file.seek(SeekFrom::Start(CLEAN_FLAG_AT))?;
         inner.file.write_all(&[1])?;
@@ -401,7 +466,32 @@ impl Inner {
         Ok(())
     }
 
+    fn ensure_writable(&self) -> Result<(), ErrorCode> {
+        if self.poisoned {
+            return Err(ErrorCode::Storage);
+        }
+        Ok(())
+    }
+
+    /// Every append goes through here — `commit`'s synced one and
+    /// `append_deferred`'s unsynced one alike — so any failure poisons the
+    /// log (see [`ChangeLog::commit`]); a poisoned log appends nothing more.
     fn append(&mut self, ops: &[WriteOp], sync: bool) -> Result<(), ChangeLogError> {
+        if self.poisoned {
+            return Err(ChangeLogError::Format("the log is poisoned".into()));
+        }
+        let appended = self.append_record(ops, sync);
+        if appended.is_err() {
+            self.poisoned = true;
+        }
+        appended
+    }
+
+    fn append_record(&mut self, ops: &[WriteOp], sync: bool) -> Result<(), ChangeLogError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_append) {
+            return Err(ChangeLogError::Io(io::Error::other("injected")));
+        }
         let payload = crate::codec::encode(&ops.to_vec())
             .map_err(|e| ChangeLogError::Format(format!("encoding an entry: {e}")))?;
         if payload.len() > MAX_ENTRY_BYTES {
@@ -659,5 +749,76 @@ mod tests {
             ChangeLog::open(&path, DEFAULT_RETAIN_BYTES),
             Err(ChangeLogError::Format(_))
         ));
+    }
+
+    /// Review 2.3 (R3): an append that fails after its write applied
+    /// poisons the log: later writes are refused without applying, fetches
+    /// fail, a clean close is refused, and the next open is a new epoch.
+    #[test]
+    fn a_failed_append_poisons_the_log_until_a_new_epoch() {
+        let d = dir("poison");
+        let path = d.join("t.changes");
+        let log = ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).unwrap();
+        log.commit(|| ((), Some(delete(1)))).unwrap();
+        let epoch = log.position().epoch;
+
+        log.lock().fail_next_append = true;
+        assert_eq!(
+            log.commit(|| ((), Some(delete(2)))),
+            Err(ErrorCode::Storage)
+        );
+        let mut applied = false;
+        assert_eq!(
+            log.commit(|| {
+                applied = true;
+                ((), Some(delete(3)))
+            }),
+            Err(ErrorCode::Storage)
+        );
+        assert!(!applied, "a poisoned log runs no further writes");
+        assert!(matches!(log.since(epoch, 0, 10), Err(ErrorCode::Storage)));
+        assert!(log.close_clean().is_err());
+        drop(log);
+
+        let reopened = ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).unwrap();
+        assert!(reopened.position().epoch > epoch, "standbys must resync");
+    }
+
+    /// The user-flagged interaction with a deferred/grouped writer: a
+    /// failure the log only hears about afterwards (a failed group `fsync`)
+    /// poisons it too, and `ensure_writable` is the pre-apply check such a
+    /// writer uses.
+    #[test]
+    fn a_poisoned_log_refuses_before_apply_for_any_writer() {
+        let d = dir("poison_external");
+        let log = ChangeLog::open(&d.join("t.changes"), DEFAULT_RETAIN_BYTES).unwrap();
+        assert_eq!(log.ensure_writable(), Ok(()));
+        log.poison();
+        assert_eq!(log.ensure_writable(), Err(ErrorCode::Storage));
+        assert!(
+            log.lock().append(&delete(1), true).is_err(),
+            "no append after poison"
+        );
+        assert!(log.close_clean().is_err());
+    }
+
+    /// Review 2.3 × ADR-0134: a failed group `fsync` poisons the log, so
+    /// the writer it covered fails, later deferred appends are refused, the
+    /// pre-apply check refuses, and the log does not close clean.
+    #[test]
+    fn a_failed_group_sync_poisons_the_log() {
+        let d = dir("poison_group_sync");
+        let log = ChangeLog::open(&d.join("t.changes"), DEFAULT_RETAIN_BYTES).unwrap();
+        let ticket = log.append_deferred(&delete(1)).unwrap();
+        log.lock().fail_next_sync = true;
+        assert_eq!(log.sync_through(ticket), Err(ErrorCode::Storage));
+        assert_eq!(
+            log.sync_through(ticket),
+            Err(ErrorCode::Storage),
+            "no retry succeeds"
+        );
+        assert_eq!(log.ensure_writable(), Err(ErrorCode::Storage));
+        assert_eq!(log.append_deferred(&delete(2)), Err(ErrorCode::Storage));
+        assert!(log.close_clean().is_err());
     }
 }

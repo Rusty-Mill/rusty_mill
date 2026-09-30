@@ -11,16 +11,29 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Row};
 
-use crate::db::{parse_dt, parse_uuid, MemoryDb, Result};
+use crate::db::{parse_dt, parse_memory_id, MemoryDb, Result};
 use crate::model::{Memory, MemoryStatus, MemoryType};
 
 /// Outcome of an import run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportReport {
     /// Memories written to the target store.
     pub imported: usize,
-    /// Source rows skipped because they failed to map.
+    /// Source entries deliberately left out — a chat log's empty messages,
+    /// or a `remind_me` row already imported and not newer. Not errors.
     pub skipped: usize,
+    /// Source rows that could not be imported, each with why, so a caller
+    /// can report or retry them rather than lose them silently.
+    pub failures: Vec<ImportFailure>,
+}
+
+/// One source row an import could not map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportFailure {
+    /// The row's id in the source, when it could be read.
+    pub source_id: Option<String>,
+    /// What was wrong with it.
+    pub reason: String,
 }
 
 /// Columns added by later `remind_me` migrations — selected only when present.
@@ -71,11 +84,19 @@ pub fn import_remind_me_db(target: &MemoryDb, source: &Path) -> Result<ImportRep
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         match map_row(row, &cols) {
+            // Last-write-wins on id, so a re-import is a no-op and a newer
+            // source row updates the imported one.
             Ok(mem) => {
-                target.insert(&mem)?;
-                report.imported += 1;
+                if target.upsert_lww(&mem)? {
+                    report.imported += 1;
+                } else {
+                    report.skipped += 1;
+                }
             }
-            Err(_) => report.skipped += 1,
+            Err(e) => report.failures.push(ImportFailure {
+                source_id: row.get::<_, String>("id").ok(),
+                reason: e.to_string(),
+            }),
         }
     }
     Ok(report)
@@ -102,7 +123,8 @@ fn opt_str(row: &Row<'_>, cols: &HashSet<String>, name: &str) -> rusqlite::Resul
 
 fn map_row(row: &Row<'_>, cols: &HashSet<String>) -> Result<Memory> {
     let mut m = Memory::new(row.get::<_, String>("content")?);
-    m.id = parse_uuid(&row.get::<_, String>("id")?)?;
+    // Kept verbatim: `remind_me` mints `mem_<hex>`, Nexus UUIDs.
+    m.id = parse_memory_id(&row.get::<_, String>("id")?)?;
     m.category = row.get("category")?;
     if let Ok(tags) = serde_json::from_str::<Vec<String>>(&row.get::<_, String>("tags")?) {
         m.tags = tags;
@@ -125,7 +147,7 @@ fn map_row(row: &Row<'_>, cols: &HashSet<String>) -> Result<Memory> {
         m.status = MemoryStatus::from_db(&v);
     }
     m.superseded_by = match opt_str(row, cols, "superseded_by")? {
-        Some(s) => Some(parse_uuid(&s)?),
+        Some(s) => Some(parse_memory_id(&s)?),
         None => None,
     };
     m.subject = opt_str(row, cols, "subject")?;
@@ -153,6 +175,7 @@ fn map_row(row: &Row<'_>, cols: &HashSet<String>) -> Result<Memory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MemoryId;
     use uuid::Uuid;
 
     /// Build a `remind_me`-shaped source database. When `full`, include the
@@ -231,5 +254,94 @@ mod tests {
         assert_eq!(hits[0].memory_type, MemoryType::Unclassified);
         assert_eq!(hits[0].client, "unknown");
         assert!((hits[0].vitality - 1.0).abs() < 1e-9);
+    }
+
+    /// A `remind_me` source as that app really writes it: ids are
+    /// `mem_<32 hex>` (`remind_me_core::db::queries::add_memory`), and
+    /// `superseded_by` points at another such id.
+    fn make_real_id_source(path: &Path, rows: &[(&str, &str, Option<&str>)]) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY, content TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'general', tags TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT 'manual', metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, superseded_by TEXT);",
+        )
+        .unwrap();
+        for (id, content, superseded_by) in rows {
+            conn.execute(
+                "INSERT INTO memories (id, content, created_at, updated_at, superseded_by) \
+                 VALUES (?1, ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?3)",
+                rusqlite::params![id, content, superseded_by],
+            )
+            .unwrap();
+        }
+    }
+
+    fn remind_me_id() -> String {
+        format!("mem_{}", Uuid::new_v4().simple())
+    }
+
+    /// Review 2.6 (Nexus N1): real `remind_me` ids import verbatim, links
+    /// included, and a second import changes nothing.
+    #[test]
+    fn real_remind_me_ids_import_verbatim_and_reimport_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("memory.db");
+        let (old, new) = (remind_me_id(), remind_me_id());
+        make_real_id_source(
+            &src,
+            &[
+                (&old, "old fact about ferries", Some(&new)),
+                (&new, "new fact about ferries", None),
+            ],
+        );
+        let target = MemoryDb::open_in_memory().unwrap();
+        let report = import_remind_me_db(&target, &src).unwrap();
+        assert_eq!(
+            (report.imported, report.failures.len()),
+            (2, 0),
+            "{report:?}"
+        );
+
+        let old_id = MemoryId::parse(&old).unwrap();
+        let got = target
+            .get(&old_id)
+            .unwrap()
+            .expect("imported under its own id");
+        assert_eq!(got.id.as_str(), old);
+        assert_eq!(
+            got.superseded_by.as_ref().map(MemoryId::as_str),
+            Some(new.as_str())
+        );
+
+        let again = import_remind_me_db(&target, &src).unwrap();
+        assert_eq!(
+            (again.imported, again.skipped, again.failures.len()),
+            (0, 2, 0)
+        );
+        assert_eq!(target.count().unwrap(), 2);
+    }
+
+    /// Review 2.6: a row that cannot be imported is reported with its id and
+    /// reason, and the rest still import.
+    #[test]
+    fn an_unimportable_row_is_reported_not_silently_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("memory.db");
+        let good = remind_me_id();
+        make_real_id_source(&src, &[(&good, "fine", None), ("bad id!", "broken", None)]);
+        let target = MemoryDb::open_in_memory().unwrap();
+        let report = import_remind_me_db(&target, &src).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].source_id.as_deref(), Some("bad id!"));
+        assert!(
+            report.failures[0].reason.contains("invalid memory id"),
+            "{:?}",
+            report.failures
+        );
     }
 }
