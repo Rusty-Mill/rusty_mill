@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.87.0
+- Version: 0.88.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5345,7 +5345,28 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (was falling to -211 uu/s by 5.0 s); orientation error at 5.0 s 1.41
     rad (was 1.63).
   - **Not done here**: air-control magnitudes and damping
-    (`CAR_AIR_CONTROL_TORQUE`/`DAMPING`, `CAR_TORQUE_SCALE`); auto-flip.
+    (`CAR_AIR_CONTROL_TORQUE`/`DAMPING`, `CAR_TORQUE_SCALE`; done in FR-084);
+    auto-flip.
+
+- `RB-PHYSICS-001-FR-084` (RocketSim air control, implemented, verified):
+  after FR-083, orientation error still grew 0.15 to ~1.4 rad through the
+  flip, most likely from pre-dodge roll/pitch spin under the placeholder
+  air control. `air::apply_air_control` now ports RocketSim's
+  `_UpdateAirTorque`: angular acceleration `(torque - damping) *
+  CAR_TORQUE_SCALE`, with `CAR_AIR_CONTROL_TORQUE = (130, 95, 400)` about
+  (-right, up, -forward) and `CAR_AIR_CONTROL_DAMPING = (30, 20, 50)`. Pitch
+  and yaw damping fade as their stick is held, and damping applies with the
+  stick centered. `air::apply_air_throttle` adds `THROTTLE_AIR_ACCEL =
+  200/3`. The placeholder torque and ratio constants (FR-068) and the
+  airborne auto-upright torque (FR-060 found Rocket League has none) are
+  removed, resolving FR-071's damping finding. ADR-0015.
+  - **Verification**: 4 new `drive` tests (per-axis acceleration from
+    rest; roll damping and held-pitch damping off; locked pitch damps
+    without torque; air throttle). The dodge-spin tests now include the
+    press tick's exact air-control contribution. Removed with the
+    mechanics they tested: 2 ratio tests, 3 auto-upright tests, 1
+    "airborne throttle does nothing" test, and 1 `world` auto-upright test.
+  - **Not done here**: grounded auto-roll and auto-flip; the hitbox offset.
 
 ## Architecture and interfaces
 
@@ -6828,6 +6849,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.88.0 (2026-10-01): `RB-PHYSICS-001-FR-084` — RocketSim's air control,
+  damping and air throttle (ADR-0015); placeholder air torque and the
+  airborne auto-upright removed. 354 tests in `rb_physics_bullet`.
 - 0.87.0 (2026-10-01): `RB-PHYSICS-001-FR-083` — a dodge's flip as
   RocketSim's timed torque with vertical damping, pitch lock and
   pitch-stick cancel (ADR-0014); the instant spin kick and jump-press

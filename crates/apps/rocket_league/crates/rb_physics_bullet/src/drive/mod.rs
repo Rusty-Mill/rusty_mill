@@ -36,27 +36,16 @@
 //! pattern `DriveState::boost_amount` already uses for a resource that must
 //! persist across calls.
 //!
-//! Pitch, yaw, and roll each apply torque about one of the car's three
-//! local axes (right, up, forward respectively), scaled directly by the
-//! analog `Option<f32>` value — `None` (an input source that can't recover
-//! an analog value, e.g. replay-derived input, see `rb_domain`) is treated
-//! as zero, same as a centered stick. Unlike ground steering, air control
-//! isn't speed-scaled: a car can spin freely from a standing start in the
-//! air, since there's no wheel grip to require momentum for. Since
-//! `RB-PHYSICS-001-FR-068`, the three axes no longer share one flat
-//! `AIR_CONTROL_TORQUE` magnitude: yaw and roll are scaled from pitch's own
-//! by `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`, RocketSim's own
-//! confirmed real per-axis ratios (`CAR_AIR_CONTROL_TORQUE = Vec(130, 95,
-//! 400)` in pitch-yaw-roll order) — real Rocket League's pitch/yaw/roll
-//! rates still differ in absolute magnitude too, not just this ratio, but
-//! only the ratio transfers cleanly onto this port's own uncalibrated
-//! pitch baseline (see `AIR_CONTROL_TORQUE`'s own doc comment). Real air
-//! control also applies a per-axis angular-velocity damping torque this
-//! port has no equivalent for at all — see `AIR_CONTROL_ROLL_SCALE`'s own
-//! doc comment for `RB-PHYSICS-001-FR-071`'s full finding. Since
-//! `RB-PHYSICS-001-FR-057`, sustained air control (or a dodge's own kick,
-//! or the landing-orientation assist) can no longer spin a car arbitrarily
-//! fast, though: `clamp_angular_speed` caps the result at
+//! Air control (`RB-PHYSICS-001-FR-084`) is RocketSim's `_UpdateAirTorque`:
+//! pitch, yaw and roll each give an angular acceleration of
+//! `CAR_AIR_CONTROL_TORQUE * CAR_TORQUE_SCALE` per unit stick about the
+//! car's -right, up and -forward axes, minus a per-axis damping of the
+//! current spin (`CAR_AIR_CONTROL_DAMPING`, faded out for pitch and yaw as
+//! their stick is held). A `None` analog value (replay-derived input, see
+//! `rb_domain`) counts as a centered stick. Throttle adds a small forward
+//! push in the air (`THROTTLE_AIR_ACCELERATION`). Air control is gated by
+//! the flip (see **Flip** below). Since `RB-PHYSICS-001-FR-057`, spin is
+//! capped at
 //! `MAX_CAR_ANGULAR_SPEED`, a real confirmed Rocket League limit, once per
 //! step, the same way `MAX_CAR_SPEED` already bounds linear speed.
 //!
@@ -189,36 +178,11 @@
 //! instant spin kick and its jump-press-again cancel, which Rocket League
 //! does not have (FR-069, FR-070).
 //!
-//! **Landing auto-orientation assistance**: while airborne, with no active
-//! `pitch`/`roll` air control input this step and no fresh jump press this
-//! step (so the assist never fights the player's own stick input, and
-//! never interacts within one `apply_driven_forces` call with a
-//! dodge/wall-jump-dodge/double-jump/flip-cancel's own direct velocity or
-//! angular-velocity change), a gentle restoring torque nudges the car's
-//! local up axis toward world up: `up_axis(car).cross(&world_up)` gives
-//! both the correction axis and, since both are unit vectors, a magnitude
-//! already proportional to the sine of the tilt angle — a level car earns
-//! no correction, a heavily tilted one earns a stronger nudge. This isn't a
-//! simplification of one specific real system: `RB-PHYSICS-001-FR-060`
-//! fetched RocketSim's real `Car.cpp` and found real Rocket League has no
-//! single mechanic matching "continuously nudge an airborne car upright
-//! with no player input." It instead has two distinct, real, *grounded*,
-//! input-gated systems — **auto-flip** (a turtle-recovery flip, firing only
-//! on an actual jump press while touching a mostly-upright surface
-//! (`CAR_AUTOFLIP_NORMZ_THRESH`) with roll already past a threshold
-//! (`CAR_AUTOFLIP_ROLL_THRESH`), timed over `CAR_AUTOFLIP_TIME`) and
-//! **auto-roll** (a continuous torque aligning the car to the ground's
-//! surface normal, but only while throttle is held and at least one wheel
-//! has contact) — neither of which is this port's own airborne, input-free
-//! nudge. This port's `LANDING_AUTO_UPRIGHT_TORQUE` remains its own
-//! invented placeholder for "eventually right yourself before landing," not
-//! a documented simplification of either real system; implementing either
-//! for real would mean adding new grounded, input-gated state machinery
-//! this port doesn't have, out of scope here — see `RB-PHYSICS-001-FR-060`'s
-//! own Non-goals. A car resting *exactly* upside-down (`up` antiparallel to
-//! world up) is a singularity this simple scheme doesn't resolve (the cross
-//! product is exactly zero, any perpendicular axis would do, but none is
-//! chosen) — an unlikely exact case, not addressed here.
+//! There is no airborne auto-upright: the port's earlier
+//! `LANDING_AUTO_UPRIGHT_TORQUE` nudge was removed in
+//! `RB-PHYSICS-001-FR-084`, since `RB-PHYSICS-001-FR-060` found Rocket
+//! League has no such mechanic (its auto-flip and auto-roll are grounded
+//! and input-gated, not modeled yet).
 //!
 //! A car with no input set (or all-neutral `ControllerInput::default()`)
 //! behaves as a free rigid box except for tire grip while grounded (see
@@ -263,29 +227,13 @@
 //! The handbrake no longer uses a placeholder friction multiplier: since
 //! `RB-PHYSICS-001-FR-081` it scales the tire model's per-axis grip by
 //! RocketSim's real factors, resolving `RB-PHYSICS-001-FR-066`'s
-//! wrong-shape finding. `LANDING_AUTO_UPRIGHT_TORQUE`
-//! remains an uncalibrated placeholder chosen
-//! only to produce a visibly responsive flip for
-//! this car's mass/inertia in tests — in
-//! particular it isn't a simplification of one real system at all, since
-//! `RB-PHYSICS-001-FR-060` found real Rocket League's two closest systems
-//! (auto-flip, auto-roll) are both grounded and input-gated, unlike this
-//! port's own airborne, input-free nudge — see that module doc section's
-//! own detail. `WALL_JUMP_HORIZONTAL_SPEED` remains an uncalibrated
+//! wrong-shape finding. `WALL_JUMP_HORIZONTAL_SPEED` remains an uncalibrated
 //! placeholder too, but since `RB-PHYSICS-001-FR-067` real Rocket League is
 //! confirmed to have no distinct wall-jump mechanic or constant to
 //! calibrate against at all — see that requirement's own entry and
 //! `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for the full finding.
-//! `AIR_CONTROL_TORQUE` itself (pitch's own magnitude) remains an
-//! uncalibrated placeholder too, but since `RB-PHYSICS-001-FR-068` its own
-//! per-axis *ratio* — unlike `WALL_JUMP_HORIZONTAL_SPEED`'s own
-//! confirmed-but-not-adopted finding —
-//! is confirmed and directly adopted: yaw and roll are scaled from pitch's
-//! own by RocketSim's own confirmed real ratios, since real air control
-//! turned out to be the same *kind* of direct per-axis torque mechanism
-//! this port already models, unlike those other findings' own
-//! architecture mismatches — see that requirement's own entry and
-//! `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full finding.
+//! Air control's magnitudes are RocketSim's own since
+//! `RB-PHYSICS-001-FR-084` (FR-068 had adopted only their ratios).
 //! (Historical, before `RB-PHYSICS-001-FR-083` replaced it with the real
 //! flip torque:) `DODGE_ANGULAR_SPEED` remained an uncalibrated placeholder too,
 //! but since `RB-PHYSICS-001-FR-069` real Rocket League's own dodge spin
@@ -369,8 +317,7 @@ pub const MAX_CAR_SPEED: f32 = 2300.0;
 ///
 /// Only covers this port's own driven-forces sources (continuous air
 /// control torque integrated this step, plus any single-step direct
-/// `angular_velocity` write like a dodge's kick or the landing-orientation
-/// assist) — a same-step contact-solver impulse (e.g. a hard collision
+/// `angular_velocity` write like the flip torque or steering) — a same-step contact-solver impulse (e.g. a hard collision
 /// imparting spin) isn't re-clamped until the *next* step's call, so it
 /// could in principle transiently exceed this for one step, unlike
 /// RocketSim's own "can never exceed" phrasing suggests for its engine.
@@ -561,8 +508,9 @@ pub fn apply_driven_forces(
         // it stood, then the jump press, then the flip clock and damping.
         let gate = jump::apply_flip_torque(car, input, state.flip);
         if gate.enabled {
-            air::apply_air_control(car, input, forward, jump_pressed, gate.pitch_scale);
+            air::apply_air_control(car, input, gate.pitch_scale, dt);
         }
+        air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
         if jump_pressed {
             jump::airborne_jump_press(
                 car,

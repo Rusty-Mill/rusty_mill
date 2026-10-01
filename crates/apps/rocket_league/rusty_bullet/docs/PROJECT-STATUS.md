@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#175](https://github.com/baileyrd/rusty_bullet/pull/175) —
+  `RB-PHYSICS-001-FR-083`, the flip as RocketSim has it (ADR-0014); flip
+  vz stall matches the recording.
 - [#174](https://github.com/baileyrd/rusty_bullet/pull/174) —
   `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
   (ADR-0013); real-capture position error at 5.0 s 1,590 to 79 uu.
@@ -64,9 +67,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-083`, the flip as RocketSim has it (ADR-0014):
-  verified on the real capture (flip vz stall -15.5 uu/s, as recorded); in
-  review.
+- `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015): implemented
+  and unit-tested; awaiting the owner's re-trace of 4.3-5.0 s.
 
 ## Blocked
 
@@ -93,11 +95,9 @@ version: `a245d35`).
 
 ## Next
 
-1. Air-control magnitudes and damping (`CAR_AIR_CONTROL_TORQUE`,
-   `CAR_AIR_CONTROL_DAMPING`, `CAR_TORQUE_SCALE`): the port's air torque
-   is still a placeholder, and orientation error grows 0.15 to ~1.4 rad
-   through 4.3-4.97 s, most likely from pre-flip roll/pitch spin carried
-   through the flip. Known small
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.0` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-084`: orientation error
+   at 5.0 s should fall from ~1.4 rad. Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -111,7 +111,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (421 tests: 27 `rb_domain`, 357
+- `cargo test --workspace`: pass (418 tests: 27 `rb_domain`, 354
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
