@@ -5518,6 +5518,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (the recording's rest height) with its box clear of the floor; full
     throttle reaches ~414 uu/s in 0.3 s; sticky-force, airborne and
     never-pulling spring tests; a ball-vs-offset-box contact test.
+  - **Real capture**: rest height 17.0 simulated and recorded; 0-3 s growth
+    0.02 uu (was 2.2); error 0.1 uu / 0.3 uu/s at 4.1-4.133 s; 4-5 s growth
+    7.0 uu (was 7.9).
 
 ## Architecture and interfaces
 

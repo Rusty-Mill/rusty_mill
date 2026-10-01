@@ -101,4 +101,8 @@ Option 1:
   `--self-growth`: the rest height should read ~17.0 like the recording,
   the wheels should keep touching until ~4.183 s after the 4.142 s jump,
   and the 5.575 s landing should not bounce.
+- Real capture, 2026-10-01: confirmed. Rest height 17.0 as recorded; 0-3 s
+  growth 2.2 to 0.02 uu; 0.1 uu / 0.3 uu/s at 4.1-4.133 s. The 5.575 s
+  landing still comes ~6 ticks late, because the candidate falls slower
+  after the 4.94 s boost, not because of the suspension.
 - Revisit for wall and curve driving (wheel rays against every surface).
