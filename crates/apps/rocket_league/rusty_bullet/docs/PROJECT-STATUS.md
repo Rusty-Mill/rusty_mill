@@ -79,8 +79,7 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-089` (engine force at each wheel along its heading):
-  implemented; awaiting the owner's re-trace.
+- None.
 
 ## Blocked
 
@@ -107,16 +106,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.2` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-089`: the simulated yaw
-   spin under full steer near 3.95-4.0 s should reach ~2.40 rad/s like the
-   recording (was 2.27), and velocity error at 4.05 s should stay well
-   under 47 uu/s. Then: raycast suspension and the 20.755 uu hitbox offset
-   (ADR-0017 option 2) — the candidate rides 2.3 uu high (19.3 vs 17.0), so
-   its wheels leave the floor 2 ticks early after a jump and its box
-   bounces on landing (5.575 s); the 5.758 s car-ball hit lands 3 ticks
-   late because the car trails ~33 uu. Brake is still applied at the centre
-   of mass rather than per wheel.
+1. Raycast suspension and the 20.755 uu hitbox offset (ADR-0017 option
+   2), now the earliest real-capture error: the candidate rides 2.3 uu high
+   (19.3 vs 17.0), so after the 4.142 s jump its wheels leave the floor 2
+   ticks early (velocity error 0.5 to 28 uu/s by 4.183 s); its box also
+   bounces on landing (5.575 s), and the 5.758 s car-ball hit lands late.
+   Smaller: brake still acts at the centre of mass, not per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -151,6 +146,13 @@ version: `a245d35`).
   ticks after the 4.142 s jump (the recording keeps it for 5), which
   carries the pre-existing 45 uu/s steering error differently; 6-7 s
   517 uu / 2.27 rad (was 442 / 1.70), dominated by the late car-ball hit.
+- Same, after `RB-PHYSICS-001-FR-089` (per-wheel engine force),
+  2026-10-01: yaw rate under full steer 2.40 rad/s simulated and recorded
+  (3.95-4.0 s, was 2.27); velocity error at 4.05 s 9.4 uu/s (was 47.8),
+  0.5 uu/s at 4.133 s. Growth 3-4 s 2.3 uu / 1.5 uu/s (was 2.5 / 5.2),
+  4-5 s 7.9 uu / 24 uu/s (was 23 / 40), 6-7 s 329 uu / 2.02 rad (was 517 /
+  2.27); 5-6 s 63 uu / 152 uu/s (was 49 / 115) — past the 5.758 s car-ball
+  hit the windows follow a different chaotic path.
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames

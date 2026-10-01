@@ -5491,6 +5491,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     2.331 driving vs 2.334 coasting) and
     `throttle_with_steer_starts_turning_a_car_from_rest`; straight throttle
     still doesn't yaw.
+  - **Real capture** (`--self-trace test2.jsonl 3.7 4.2`): steady yaw 2.40
+    rad/s simulated and recorded (was 2.27); velocity error at 4.05 s 9.4
+    uu/s (was 47.8); `--self-growth` 4-5 s 7.9 uu (was 23).
 
 ## Architecture and interfaces
 
