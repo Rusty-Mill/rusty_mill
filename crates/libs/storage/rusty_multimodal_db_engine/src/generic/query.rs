@@ -117,6 +117,13 @@ pub trait MultiLink<R: Record> {
 /// `ScanField` returns values with no id attached.
 pub trait AllIds<R: Record> {
     fn all_ids(&self) -> Vec<R::Id>;
+
+    /// How many ids [`Self::all_ids`] would return, without building the
+    /// list. The default builds it; a store that knows its size answers in
+    /// O(1) (Tranche 5, D3: the server asks this on its equality path).
+    fn id_count(&self) -> usize {
+        self.all_ids().len()
+    }
 }
 
 /// Generalizes `same_breed` — filter by equality on any `IndexedField`.

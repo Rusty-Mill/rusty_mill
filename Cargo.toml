@@ -120,6 +120,7 @@ members = [
     "crates/foundation/rusty_ansder",
     "crates/libs/ai/rusty_rag",
     "crates/tools/rusty_boot",
+    "crates/tools/rusty_baseline",
     "crates/libs/ai/rusty_whisper",
     "crates/libs/net/rusty_rdp",
     "crates/apps/rusty_voice",

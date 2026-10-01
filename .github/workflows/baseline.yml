@@ -1,0 +1,50 @@
+name: Baseline
+
+# The per-product baseline (design review Tranche 5): binary size,
+# dependency closure, clean and incremental release build, startup, idle
+# and peak RSS, on Linux and Windows. Manual only: every product builds
+# clean, which takes hours, and the numbers are compared by hand.
+
+on:
+  workflow_dispatch:
+    inputs:
+      products:
+        description: "Space-separated binaries to measure (empty: all in products.txt)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_TOOLCHAIN: "1.98.1"
+  NEXUS_NO_KEYRING: '1'
+
+jobs:
+  baseline:
+    name: baseline (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # No rust-cache: every product's build is meant to be clean.
+      - name: Measure
+        shell: bash
+        # Passed through the environment, not interpolated into the script.
+        env:
+          PRODUCTS: ${{ inputs.products }}
+          REPORT: baseline-${{ matrix.os }}.md
+        run: |
+          # $PRODUCTS is split into separate binary names on purpose.
+          # shellcheck disable=SC2086
+          cargo run --release --locked -p rusty_baseline -- --work "$RUNNER_TEMP/baseline" $PRODUCTS > "$REPORT"
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: baseline-${{ matrix.os }}
+          path: baseline-${{ matrix.os }}.md

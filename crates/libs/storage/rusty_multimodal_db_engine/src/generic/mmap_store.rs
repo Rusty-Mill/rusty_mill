@@ -1073,6 +1073,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.records.keys().copied().collect()
     }
+
+    fn id_count(&self) -> usize {
+        self.records.len()
+    }
 }
 
 impl<R, IndexMarker, ScanMarker> FilterEq<R, IndexMarker>

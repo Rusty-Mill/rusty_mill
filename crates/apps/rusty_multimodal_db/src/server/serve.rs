@@ -1344,16 +1344,18 @@ fn equality_bucket<S: ConnectionStore + ?Sized>(
     first: usize,
 ) -> Result<Vec<RecordId>, ErrorCode> {
     let head = store.filter_eq(filter[first].field, &filter[first].value)?;
-    let worth = store
-        .record_count()
-        .is_some_and(|n| head.len().saturating_mul(EQ_INTERSECT_RATIO) >= n);
+    let several_eq = filter
+        .iter()
+        .filter(|p| p.op == protocol::CompareOp::Eq)
+        .count()
+        >= 2;
+    // The table size is asked for last: it only decides whether a second
+    // bucket is worth reading, and an adapter may answer it in O(table).
     if head.is_empty()
-        || !worth
-        || filter
-            .iter()
-            .filter(|p| p.op == protocol::CompareOp::Eq)
-            .count()
-            < 2
+        || !several_eq
+        || !store
+            .record_count()
+            .is_some_and(|n| head.len().saturating_mul(EQ_INTERSECT_RATIO) >= n)
     {
         return Ok(head);
     }
@@ -6865,6 +6867,9 @@ mod tests {
         /// counts every walk-only call.
         key_walks: std::sync::atomic::AtomicUsize,
         stat_folds: std::sync::atomic::AtomicUsize,
+        /// Tranche 5 (D3): `record_count` calls, which a real adapter
+        /// answers by touching every id in the table.
+        record_counts: std::sync::atomic::AtomicUsize,
     }
 
     impl PlannerFixture {
@@ -6883,7 +6888,12 @@ mod tests {
                 range_counts: Default::default(),
                 key_walks: Default::default(),
                 stat_folds: Default::default(),
+                record_counts: Default::default(),
             }
+        }
+        fn record_counts(&self) -> usize {
+            self.record_counts
+                .load(std::sync::atomic::Ordering::Relaxed)
         }
         fn range_counts(&self) -> usize {
             self.range_counts.load(std::sync::atomic::Ordering::Relaxed)
@@ -6956,6 +6966,8 @@ mod tests {
             }
         }
         fn record_count(&self) -> Option<usize> {
+            self.record_counts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(self.table_size.unwrap_or_else(|| self.rows().len()))
         }
         fn range_field(&self) -> Option<FieldRef> {
@@ -7617,6 +7629,31 @@ mod tests {
             "2 * {EQ_INTERSECT_RATIO} < 1000: bucket only"
         );
         assert_eq!(big.gets(), 2);
+    }
+
+    /// Tranche 5 (D3): the table size only decides whether a *second*
+    /// bucket is worth reading, so a lone `Eq` or an empty first bucket
+    /// answers without asking for it. A real adapter's count touches every
+    /// id in the table, which turned an O(bucket) lookup into O(table).
+    #[test]
+    fn equality_reads_the_table_size_only_when_a_second_bucket_could_be_read() {
+        let lone = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        let rows = query_candidates(&lone, QueryPlan::IndexEq(0), &[labrador()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(lone.record_counts(), 0, "one Eq predicate: no count");
+
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let empty_head = two_index_fixture(3, vec![], vec![2, 3]);
+        assert!(query_candidates(&empty_head, QueryPlan::IndexEq(0), &filter).is_empty());
+        assert_eq!(
+            empty_head.record_counts(),
+            0,
+            "empty first bucket: no count"
+        );
+
+        let both = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        query_candidates(&both, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(both.record_counts(), 1, "two Eq predicates: counted once");
     }
 
     /// `QPE-FR-002`: an empty second bucket ends the read with no decode; a

@@ -27,9 +27,9 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 14 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 17 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 18 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
-| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 9 |
+| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 10 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 4 |
@@ -44,7 +44,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
-| foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 10 |
+| foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 11 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
 | platform | portable-runtime | compat |  | 4 |
 | platform | portable-runtime | conformance |  | 0 |
@@ -262,4 +262,5 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_yirp | sessionmgr-protocol | Wire types shared by the sessionmgr daemon, its workers, and its clients. Serde only, no I/O. | 3 |
 | apps | rusty_yirp | sessionmgr-pty | PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY on Windows) via rustils' platform Pty capability. | 1 |
 | apps | rusty_yirp | sessionmgr-tui | The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one. | 1 |
+| tools | rusty_baseline | rusty_baseline | Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS | 0 |
 | tools | rusty_boot | rusty_boot | A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std | 0 |
