@@ -1,0 +1,20 @@
+[package]
+name = "orch-dispatch"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+orch-core = { workspace = true }
+
+[features]
+# Ships the scripted `FakeAgent` fixture for tests; same convention as rk-kernel.
+fake = []
+
+[dev-dependencies]
+orch-dispatch = { path = ".", features = ["fake"] }

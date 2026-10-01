@@ -1,6 +1,6 @@
 # ADR-0003: Dispatcher crate reuses nothing from other `apps/` families
 
-- **Status:** Proposed (draft, awaiting sign-off)
+- **Status:** Accepted
 - **Date:** 2026-10-01
 
 ## Context
@@ -16,7 +16,10 @@ The in-memory dispatcher (`orch-dispatch`) needs a step loop, call metering, rol
 | Plan/Board persistence | `rusty_sqlite` | libs | depend later | Allowed edge; persistence is out of P1 scope. |
 
 ## Decision
-- `orch-dispatch` (at `crates/apps/rusty_orch/crates/orch-dispatch`) depends only on `orch-core` in P1. It defines its own `Agent` port trait, a `Role → orch_core::Agent` routing table, and a call counter checked against `Budget::max_calls`.
+- `orch-dispatch` (at `crates/apps/rusty_orch/crates/orch-dispatch`) depends only on `orch-core` in P1. It defines the `AgentRunner` port, a validated routing table, and a call meter.
+- Routing is a function over a config struct, not a map keyed on `Role` (`Review` carries a `TaskId`). Work roles (`Research`, `Design`, `Implement`, `Triage`) map to one agent each. `Review` takes an ordered reviewer preference list and picks the first agent that is not the target's author. The config is validated at construction: the list must contain at least two distinct agents, otherwise some author could never be reviewed.
+- Both ceilings are enforced before every call: `Budget::max_calls` for the goal and `TaskSpec::max_calls` for the card. Exceeding either returns `DispatchError::CeilingReached` naming the ceiling and the card; nothing is spent on refusal.
+- Ready cards run sequentially in `TaskId` order. This keeps every run reproducible from the plan alone; parallel fan-out over independent ready cards is the trigger for an async dispatcher.
 - `orch-core` stays zero-dependency and I/O-free; nothing from this ADR touches it.
 - Cross-family reuse of `sessionmgr-git`'s worktree logic or `rp-providers` requires first moving the reused crate to `libs/` (root ADR-0003 already anticipates this for `rp-core`/`rp-providers`). That is a separate decision taken when a real adapter needs it, not now.
 - Process spawning for CLI adapters will go through `contract::ProcessRunner`, which is an allowed `platform` edge and already has a native implementation and fakes.

@@ -10211,6 +10211,14 @@ name = "orch-core"
 version = "0.1.0"
 
 [[package]]
+name = "orch-dispatch"
+version = "0.1.0"
+dependencies = [
+ "orch-core",
+ "orch-dispatch",
+]
+
+[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

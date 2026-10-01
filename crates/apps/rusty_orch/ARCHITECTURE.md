@@ -10,13 +10,13 @@ Ports-and-adapters. `orch-core` holds all invariants and does no I/O; everything
 
 | Port | Adapter(s) | Notes |
 | ---- | ---------- | ----- |
-| Agent runner | `claude -p`, `codex exec`, `gemini -p`, Ollama HTTP | Planned. One adapter per CLI; prompt in, entry refs out. Subscriptions only, no API keys. |
+| Agent runner | `orch-dispatch::AgentRunner`; `FakeAgent` today, `claude -p`, `codex exec`, `gemini -p`, Ollama HTTP planned | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
 | Board store | remind-me MCP (`board:<project>`) or SQLite | Planned. Persists `Board`/`Plan`; the domain assigns ids. |
 | Goal intake | CLI / JSON → `GoalDraft` | Planned. Parsing and serde live here, not in the core. |
-| Clock / budget meter | dispatcher | Planned. Wall-clock and call counting are I/O. |
+| Call meter | `orch-dispatch::Dispatcher` | Counts calls against `Budget::max_calls` and each card's `TaskSpec::max_calls` before every call. Wall-clock is still planned (needs a clock adapter). |
 
 ## Structure
-Cargo workspace, modular monolith. `orch-core` is one crate with three aggregates that share `Text`, `Ref`, and the id types:
+Modular monolith inside the `rusty_mill` workspace. `orch-dispatch` is the application layer over `orch-core` and depends on nothing else ([ADR-0003](./docs/adr/0003-dispatcher-reuse-boundary.md)). It runs ready cards one at a time in `TaskId` order; parallel fan-out is the trigger for an async dispatcher later. `orch-core` is one crate with three aggregates that share `Text`, `Ref`, and the id types:
 
 - `goal` — `GoalDraft` → `Goal` via `TryFrom`; rejects drafts missing DONE WHEN, out-of-scope, or budget, reporting every problem at once.
 - `task` — `TaskSpec`, `Task`, and `Plan`, the only mutation point for task state. Dependencies must pre-exist (acyclic by construction); review targets are implicit prerequisites; no agent reviews its own output; completion must return ≥1 board entry.
@@ -25,9 +25,9 @@ Cargo workspace, modular monolith. `orch-core` is one crate with three aggregate
 ## Data flow
 1. Goal intake parses input into `GoalDraft`; `Goal::try_from` validates it.
 2. Dispatcher adds cards to a `Plan` and loops on `Plan::ready()`.
-3. For each ready card: route role → agent, `Plan::start`, run the adapter with the card and its refs.
-4. Agent writes entries to the `Board`; dispatcher calls `Plan::complete` with their ids, or `block` on a `Question`.
-5. Review cards run on a different agent than the author; `Checkpoint` stop rules surface `open_questions()` to the user.
+3. For each ready card, lowest id first: route role → agent (reviews take the first configured reviewer that is not the target's author), check both call ceilings, `Plan::start`, run the adapter with the card and the board.
+4. Dispatcher appends the agent's entries to the `Board` and calls `Plan::complete` with their ids, or `block` on a `Question`.
+5. The loop returns `Blocked` with the waiting cards; once a human appends an `Answer`, the next `run` resumes them. Hitting a ceiling, an agent failure, or zero outputs stops the loop with a typed error.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/).

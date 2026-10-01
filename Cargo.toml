@@ -146,6 +146,7 @@ members = [
     "crates/apps/rusty_skillopt/crates/skillopt-envs",
     "crates/apps/rusty_skillopt/crates/skillopt-cli",
     "crates/apps/rusty_orch/crates/orch-core",
+    "crates/apps/rusty_orch/crates/orch-dispatch",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
     "crates/apps/rusty_key/crates/constrain",
