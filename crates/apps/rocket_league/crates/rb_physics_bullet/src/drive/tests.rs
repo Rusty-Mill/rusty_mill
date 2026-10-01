@@ -2589,14 +2589,14 @@ fn flip_at(time: f32, direction: (f32, f32)) -> Option<FlipState> {
 }
 
 #[test]
-fn a_flip_disables_air_control_and_spins_the_car_while_its_torque_lasts() {
+fn a_flip_limits_air_control_to_yaw_and_spins_the_car_while_its_torque_lasts() {
     let mut c = car();
     let gate = apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(0.1, (1.0, 0.0)),
     );
-    assert!(!gate.enabled, "air control during a flip");
+    assert!(!gate.full, "only yaw air control during a flip");
     assert_close(
         c.angular_velocity.y,
         FLIP_TORQUE_FORWARD / 120.0,
@@ -2613,7 +2613,7 @@ fn a_flips_torque_ends_at_flip_torque_time_and_pitch_unlocks_after_the_extra_tim
         flip_at(0.7, (1.0, 0.0)),
     );
     assert_eq!(c.angular_velocity, Vec3::ZERO, "no torque after 0.65 s");
-    assert!(locked.enabled);
+    assert!(locked.full);
     assert_eq!(locked.pitch_scale, 0.0, "pitch locked until 0.95 s");
     let open = apply_flip_torque(
         &mut c,
@@ -2633,7 +2633,7 @@ fn holding_pitch_against_a_flip_cancels_its_pitch_spin_and_frees_air_control() {
         ..Default::default()
     };
     let gate = apply_flip_torque(&mut c, &input, flip_at(0.1, (1.0, 0.0)));
-    assert!(gate.enabled, "cancel re-enables air control");
+    assert!(gate.full, "cancel re-enables full air control");
     assert_eq!(
         gate.pitch_scale, 0.0,
         "but pitch stays locked while flipping"
@@ -2652,7 +2652,7 @@ fn a_stall_applies_no_flip_torque() {
         &ControllerInput::default(),
         flip_at(0.1, (0.0, 0.0)),
     );
-    assert!(gate.enabled);
+    assert!(gate.full);
     assert_eq!(c.angular_velocity, Vec3::ZERO);
 }
 
@@ -2738,7 +2738,7 @@ fn full_stick_air_control_accelerates_each_axis_at_rocketsims_rate() {
         ),
     ] {
         let mut c = car();
-        apply_air_control(&mut c, &input, 1.0, TICK);
+        apply_air_control(&mut c, &input, true, 1.0, TICK);
         assert!(
             (c.angular_velocity - expected).length() < 1e-5,
             "got {:?}, expected {expected:?}",
@@ -2753,7 +2753,7 @@ fn air_control_damps_free_spin_and_held_pitch_turns_its_damping_off() {
     // Rolling at 1 rad/s with the stick centered: roll damping slows it.
     let mut c = car();
     c.angular_velocity = Vec3::new(1.0, 0.0, 0.0);
-    apply_air_control(&mut c, &ControllerInput::default(), 1.0, TICK);
+    apply_air_control(&mut c, &ControllerInput::default(), true, 1.0, TICK);
     assert_close(
         c.angular_velocity.x,
         1.0 - AIR_CONTROL_DAMPING.z * step,
@@ -2767,7 +2767,7 @@ fn air_control_damps_free_spin_and_held_pitch_turns_its_damping_off() {
         pitch: Some(1.0),
         ..Default::default()
     };
-    apply_air_control(&mut c, &input, 1.0, TICK);
+    apply_air_control(&mut c, &input, true, 1.0, TICK);
     assert_close(
         c.angular_velocity.y,
         -1.0 - AIR_CONTROL_TORQUE.x * step,
@@ -2784,7 +2784,7 @@ fn a_locked_pitch_gives_no_pitch_torque_but_full_pitch_damping() {
         pitch: Some(1.0),
         ..Default::default()
     };
-    apply_air_control(&mut c, &input, 0.0, TICK);
+    apply_air_control(&mut c, &input, true, 0.0, TICK);
     assert_close(
         c.angular_velocity.y,
         -1.0 + AIR_CONTROL_DAMPING.x * step,
@@ -3052,5 +3052,45 @@ fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
         high.linear_velocity,
         Vec3::ZERO,
         "extended past rest: no pull"
+    );
+}
+
+/// One airborne mid-flip tick from rest, with `input`; returns the spin.
+fn mid_flip_spin(input: &ControllerInput) -> Vec3 {
+    let mut c = car();
+    let mut state = DriveState::new();
+    state.flip = flip_at(0.3, (1.0, 0.0));
+    apply_driven_forces(&mut c, input, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+    integrate::integrate_velocities(&mut c, TICK);
+    c.angular_velocity
+}
+
+#[test]
+fn yaw_air_control_turns_a_car_mid_flip() {
+    // RB-PHYSICS-001-FR-093: the owner's capture moves its spin on a 2-tick
+    // yaw input at 4.867 s, mid-flip; RocketSim would ignore it.
+    let neutral = mid_flip_spin(&ControllerInput::default());
+    let yawing = mid_flip_spin(&ControllerInput {
+        yaw: Some(1.0),
+        ..Default::default()
+    });
+    assert_close(
+        yawing.z - neutral.z,
+        AIR_CONTROL_TORQUE.y * CAR_TORQUE_SCALE * TICK,
+        "yaw torque about the car's up axis",
+    );
+}
+
+#[test]
+fn pitch_and_roll_air_control_stay_locked_mid_flip() {
+    let neutral = mid_flip_spin(&ControllerInput::default());
+    let stick = mid_flip_spin(&ControllerInput {
+        roll: Some(-1.0),
+        pitch: Some(-1.0),
+        ..Default::default()
+    });
+    assert_eq!(
+        stick, neutral,
+        "the recording's held roll did nothing mid-flip"
     );
 }

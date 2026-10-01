@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#184](https://github.com/baileyrd/rusty_bullet/pull/184) —
+  `RB-PHYSICS-001-FR-092`, wheel reach and sticky-force timing.
 - [#183](https://github.com/baileyrd/rusty_bullet/pull/183) —
   `RB-PHYSICS-001-FR-091`, ground-jump force from the press tick (ADR-0019).
 - [#182](https://github.com/baileyrd/rusty_bullet/pull/182) —
@@ -85,7 +87,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-093` (yaw air control during a flip, ADR-0015
+  amendment): implemented as an experiment; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -112,12 +115,13 @@ version: `a245d35`).
 
 ## Next
 
-1. Post-boost vertical divergence, now the earliest sizeable real-capture
-   error: trace `--self-trace <test2.jsonl> 4.9 5.6`. From the 4.94 s boost
-   the recorded car falls faster (vz -312 vs -260 uu/s at 5.575 s), so the
-   candidate lands ~6 ticks late. Smaller: ~3 uu/s lateral offset from the
-   4.142 s press tick's tire grip (recorded vy +2.9, candidate +0.1);
-   braking per wheel.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.8 5.2` and
+   `--self-growth` to test `RB-PHYSICS-001-FR-093`: after the 4.867 s
+   mid-flip yaw input the candidate's spin should move from ~(0.4, 5.5,
+   0.2) toward the recorded (0.71, 5.44, -0.35), and the post-boost
+   vertical gap (vz -254 recorded vs -206 at 5.5 s) should shrink. If it
+   does not, revert FR-093. Smaller: ~3 uu/s lateral offset from the
+   4.142 s press tick's tire grip; braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -126,7 +130,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (435 tests: 27 `rb_domain`, 370
+- `cargo test --workspace`: pass (437 tests: 27 `rb_domain`, 372
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

@@ -537,9 +537,7 @@ pub fn apply_driven_forces(
             );
         }
         let gate = jump::apply_flip_torque(car, input, state.flip);
-        if gate.enabled {
-            air::apply_air_control(car, input, gate.pitch_scale, dt);
-        }
+        air::apply_air_control(car, input, gate.full, gate.pitch_scale, dt);
         air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
         jump::advance_flip(car, &mut state.flip, dt);
     }

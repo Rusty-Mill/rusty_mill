@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.96.0
+- Version: 0.97.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5556,6 +5556,18 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     matches; velocity error 2.6-3.3 uu/s over 4.19-4.3 s (was 13);
     `--self-growth` 4-5 s 2.7 uu (was 5.1), 5-6 s 41 uu (was 54).
 
+- `RB-PHYSICS-001-FR-093` (yaw air control during a flip, implemented,
+  verified by unit tests only, ADR-0015 amendment): while a flip's torque
+  lasts, the yaw torque and yaw damping still act; pitch and roll stay
+  locked. RocketSim turns all air control off.
+  - Why: the owner's capture changes its spin on a 2-tick yaw input at
+    4.867 s, mid-flip; the candidate ignored it, and the ~0.12 rad
+    orientation gap that followed tilts the boost from 4.94 s (~50 uu/s
+    vertical error by 5.5 s).
+  - **Verification**: `drive` tests `yaw_air_control_turns_a_car_mid_flip`
+    and `pitch_and_roll_air_control_stay_locked_mid_flip`. Real capture
+    pending: the recorded change is about twice RocketSim's yaw torque.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7037,6 +7049,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.97.0 (2026-10-01): `RB-PHYSICS-001-FR-093` — yaw air control during a
+  flip (ADR-0015 amendment), pending real-capture confirmation. 372 tests in
+  `rb_physics_bullet`.
 - 0.96.0 (2026-10-01): `RB-PHYSICS-001-FR-092` — wheel reach without
   `SUSPENSION_SUBTRACTION`, sticky force one step late (ADR-0019
   amendment). 370 tests in `rb_physics_bullet`.

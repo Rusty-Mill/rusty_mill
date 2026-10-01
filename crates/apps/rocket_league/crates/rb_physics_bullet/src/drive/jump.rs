@@ -308,21 +308,27 @@ impl FlipState {
     }
 }
 
-/// How air control may act this tick given the car's flip, per RocketSim's
-/// `_UpdateAirTorque`: whether it applies at all, and the scale on its
-/// pitch torque.
+/// How air control may act this tick given the car's flip, after RocketSim's
+/// `_UpdateAirTorque`: on all three axes (`full`), or on yaw alone while a
+/// flip spins the car, and the scale on its pitch torque.
+///
+/// Yaw during a flip is not RocketSim's (it turns air control off
+/// entirely): the owner's capture shows a 2-tick yaw input at 4.867 s,
+/// mid-flip, moving the recorded spin while the held roll stick does
+/// nothing (`RB-PHYSICS-001-FR-093`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct AirControlGate {
-    pub enabled: bool,
+    pub full: bool,
     pub pitch_scale: f32,
 }
 
 /// Applies a flip's torque for one airborne tick, before the jump press is
 /// handled, and returns how air control may act (RocketSim's
-/// `_UpdateAirTorque`). While flipping, air control is off and the flip
-/// spins the car at `FLIP_TORQUE_*`, except that holding pitch against the
-/// flip's forward direction scales the flip's pitch torque down by the
-/// stick amount and re-enables air control: the flip cancel. Air-control
+/// `_UpdateAirTorque`). While flipping, air control acts on yaw only
+/// (`RB-PHYSICS-001-FR-093`) and the flip spins the car at `FLIP_TORQUE_*`,
+/// except that holding pitch against the flip's forward direction scales
+/// the flip's pitch torque down by the stick amount and re-enables full air
+/// control: the flip cancel. Air-control
 /// pitch stays locked through `FLIP_PITCHLOCK_EXTRA_TIME` after the flip.
 pub(super) fn apply_flip_torque(
     car: &mut RigidBody,
@@ -330,7 +336,7 @@ pub(super) fn apply_flip_torque(
     flip: Option<FlipState>,
 ) -> AirControlGate {
     let open = AirControlGate {
-        enabled: true,
+        full: true,
         pitch_scale: 1.0,
     };
     let Some(flip) = flip else {
@@ -339,7 +345,7 @@ pub(super) fn apply_flip_torque(
     if !flip.is_flipping() {
         let locked = flip.time < FLIP_TORQUE_TIME + FLIP_PITCHLOCK_EXTRA_TIME;
         return AirControlGate {
-            enabled: true,
+            full: true,
             pitch_scale: if locked { 0.0 } else { 1.0 },
         };
     }
@@ -347,7 +353,7 @@ pub(super) fn apply_flip_torque(
     if forward_part == 0.0 && side_part == 0.0 {
         // Stall: no torque, air control allowed but pitch still locked.
         return AirControlGate {
-            enabled: true,
+            full: true,
             pitch_scale: 0.0,
         };
     }
@@ -364,7 +370,7 @@ pub(super) fn apply_flip_torque(
         - forward_axis(car) * (side_part * FLIP_TORQUE_SIDE);
     car.angular_velocity += spin * TICK_120;
     AirControlGate {
-        enabled: cancelling,
+        full: cancelling,
         pitch_scale: 0.0,
     }
 }
