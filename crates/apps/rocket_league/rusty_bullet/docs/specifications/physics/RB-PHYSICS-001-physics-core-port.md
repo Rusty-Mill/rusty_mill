@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.97.0
+- Version: 0.98.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5574,6 +5574,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     0.03-0.04 rad through 4.97 s (was 0.12-0.13); `--self-growth` 5-6 s
     19 uu (was 41).
 
+- `RB-PHYSICS-001-FR-094` (flip clock starts after the press tick,
+  implemented, verified by unit tests): the press tick's flip torque
+  (FR-085) is extra, and the flip clock starts on the next tick, so the
+  torque, vertical damping and pitch lock end on RocketSim's ticks. The
+  flip clock is compared with its limits within `FLIP_CLOCK_TOLERANCE`
+  (0.1 ms), so summed step times that land a hair either side of a limit
+  count whole ticks the same.
+  - Why: the capture's 4.317 s flip torque acts for 79 ticks (its spin
+    stays clamped at 5.44 through 4.975 s); the candidate's stopped one
+    tick early, and orientation error stepped 0.04 to 0.06 rad there. The
+    same one-tick offset made the flip's vertical damping start a tick
+    early.
+  - **Verification**: `drive` test
+    `a_flips_torque_lasts_the_press_tick_plus_rocketsims_78_ticks`; the
+    flip-start test now expects the clock at 0 after the press tick.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7055,6 +7071,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.98.0 (2026-10-01): `RB-PHYSICS-001-FR-094` — flip clock starts after
+  the press tick, compared within a tolerance. 372 tests in
+  `rb_physics_bullet`.
 - 0.97.0 (2026-10-01): `RB-PHYSICS-001-FR-093` — air control stays on
   during a flip, pitch torque locked (ADR-0015 amendment). 371 tests in
   `rb_physics_bullet`.

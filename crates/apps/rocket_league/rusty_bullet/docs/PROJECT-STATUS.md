@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#185](https://github.com/baileyrd/rusty_bullet/pull/185) —
+  `RB-PHYSICS-001-FR-093`, air control during a flip; `RB-VERIFY-003`
+  0.14.0 car-frame spin.
 - [#183](https://github.com/baileyrd/rusty_bullet/pull/183) —
   `RB-PHYSICS-001-FR-091`, ground-jump force from the press tick (ADR-0019).
 - [#182](https://github.com/baileyrd/rusty_bullet/pull/182) —
@@ -85,7 +88,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-094` (flip clock starts after the press tick):
+  implemented; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -112,14 +116,13 @@ version: `a245d35`).
 
 ## Next
 
-1. Flip end timing, now the earliest real-capture error: the recorded
-   flip torque still acts at 4.975 s (spin 5.44, clamped) and stops at
-   4.983 s; the candidate's stops one tick earlier, and orientation error
-   steps 0.04 to 0.06 rad there, growing to ~0.10 by 5.3 s. That leaves the
-   boost tilted: velocity error 9 to 35 uu/s over 4.94-5.57 s (recorded vz
-   -311 vs -288 at 5.567 s). Then the 5.575 s landing (candidate's contact
-   one tick later), the ~3 uu/s lateral offset from the 4.142 s press
-   tick's tire grip, and braking per wheel.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.9 5.6` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-094`: the candidate's
+   spin should stay clamped at ~5.44 through 4.975 s and drop at 4.983 s
+   like the recording, orientation error should stay near 0.04 rad past
+   5.0 s, and the post-boost vertical gap (vz -311 recorded vs -288 at
+   5.567 s) should shrink. Then the 5.575 s landing, the ~3 uu/s lateral
+   offset from the 4.142 s press tick's tire grip, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -128,7 +131,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (437 tests: 27 `rb_domain`, 371
+- `cargo test --workspace`: pass (438 tests: 27 `rb_domain`, 372
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
