@@ -28,6 +28,11 @@ bincode = "1"
 # The memory-mapped slot files.
 memmap2 = "0.9"
 
+[[bench]]
+# Design review Tranche 5: the prefix-query (search-as-you-type) cost.
+name = "fulltext_prefix"
+harness = false
+
 [dev-dependencies]
 # The reference the full-text index is differentially tested against
 # (tests/fulltext_vs_fts5.rs): the same bundled SQLite, with FTS5, that
