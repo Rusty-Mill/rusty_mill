@@ -251,6 +251,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "futures",
+ "rmcp 3.1.4",
  "serde",
  "serde_json",
  "tokio",

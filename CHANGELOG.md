@@ -59,6 +59,11 @@ Removed / Fixed / Security, newest first.
   - `rusty-croc` receives through `rusty_confined_fs`:
     - Files and folders, including the empty-folder list and ZIP directories, which `create_dir_all` previously created through symlinks.
     - A received file's mode is now set through its handle.
+  - `adk-mcp` moves onto `rmcp`, the workspace's shared MCP stack. About 950 lines of hand-written JSON-RPC, handshake and transport code are gone.
+    - A new wire-level conformance suite (`tests/conformance.rs`, 17 cases over stdio, HTTP and the client) passed before and after the move, unchanged.
+    - Still pinned to MCP `2025-06-18` for other-language ADK clients. The 16 MiB line cap and the client request deadline are kept.
+    - **Breaking:** `McpServer::handle`/`handle_raw`, the `JsonRpcRequest`/`JsonRpcResponse`/`JsonRpcError` types, and the `protocol` helpers other than `PROTOCOL_VERSION` are removed; nothing in the workspace used them. `serve_stream` now needs a `Send + 'static` reader and writer.
+    - Behavior changes from `rmcp`: a malformed stdio line is ignored rather than answered with a parse error; a request before `initialize` ends the session; the client follows `tools/list` pagination.
   - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
