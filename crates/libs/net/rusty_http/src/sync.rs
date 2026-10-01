@@ -227,6 +227,28 @@ impl<T: Read + Write> SyncTransport<T> {
     /// each framing line (chunk-size line, terminator, trailer line) by
     /// `max_line_len` -- see [`ChunkedDecoder::advance`].
     pub fn read_chunked_body(&mut self, max_line_len: usize) -> Result<Vec<u8>> {
+        self.read_chunked_capped(max_line_len, u64::MAX)
+    }
+
+    /// Reads a request body, refusing more than `max_body_len` bytes
+    /// however it is framed: a declared `Content-Length` over the cap
+    /// before reading anything, a chunked body once its decoded total
+    /// crosses it. For a server, where every request body is untrusted
+    /// and [`Self::read_body`]'s chunked path has no total bound.
+    ///
+    /// # Errors
+    /// [`Error::BodyTooLarge`] past the cap; framing errors as the other
+    /// `read_*` methods.
+    pub fn read_request_body(&mut self, framing: Framing, max_body_len: u64) -> Result<Vec<u8>> {
+        match framing {
+            Framing::None => Ok(Vec::new()),
+            Framing::ContentLength(len) => self.read_content_length_body(len, max_body_len),
+            Framing::Close => self.read_close_delimited_body(max_body_len),
+            Framing::Chunked => self.read_chunked_capped(DEFAULT_MAX_LINE_LEN, max_body_len),
+        }
+    }
+
+    fn read_chunked_capped(&mut self, max_line_len: usize, max_body_len: u64) -> Result<Vec<u8>> {
         let mut decoder = ChunkedDecoder::new();
         let mut out = Vec::new();
         loop {
@@ -240,6 +262,9 @@ impl<T: Read + Write> SyncTransport<T> {
                 }
                 Progress::Framing { consumed } => self.start += consumed,
                 Progress::Data { len } => {
+                    if (out.len() + len) as u64 > max_body_len {
+                        return Err(Error::BodyTooLarge.into());
+                    }
                     out.extend_from_slice(&self.buf[self.start..self.start + len]);
                     self.start += len;
                 }
@@ -681,5 +706,43 @@ mod tests {
                 headers,
             }
         }
+    }
+
+    fn request(wire: &str) -> SyncTransport<std::io::Cursor<Vec<u8>>> {
+        SyncTransport::new(std::io::Cursor::new(wire.as_bytes().to_vec()))
+    }
+
+    fn too_large(result: Result<Vec<u8>>) -> bool {
+        matches!(
+            result,
+            Err(crate::transport::Error::Http(Error::BodyTooLarge))
+        )
+    }
+
+    #[test]
+    fn read_request_body_caps_every_framing() {
+        let chunked = "3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n";
+        assert_eq!(
+            request(chunked)
+                .read_request_body(Framing::Chunked, 6)
+                .unwrap(),
+            b"abcdef"
+        );
+        assert!(too_large(
+            request(chunked).read_request_body(Framing::Chunked, 5)
+        ));
+        assert!(too_large(
+            request("abcdef").read_request_body(Framing::ContentLength(6), 5)
+        ));
+        assert_eq!(
+            request("abc")
+                .read_request_body(Framing::ContentLength(3), 3)
+                .unwrap(),
+            b"abc"
+        );
+        assert!(request("ignored")
+            .read_request_body(Framing::None, 0)
+            .unwrap()
+            .is_empty());
     }
 }
