@@ -14081,6 +14081,7 @@ dependencies = [
  "minijinja",
  "pollster 0.4.0",
  "rayon",
+ "rusty_http",
  "rusty_simd",
  "rusty_std",
  "serde",
