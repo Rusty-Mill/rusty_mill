@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **Design review Tranche 5, per-product baseline: `rusty_baseline`** (`crates/tools`). For each product in its `products.txt` (15 CLIs, 6 servers) it measures binary size, dependency closure, clean and incremental release build, startup, and idle and peak RSS, and prints one Markdown table. Each product builds clean into its own target directory, deleted once measured. A manual `Baseline` workflow runs it on Linux and Windows. Peak RSS uses `wait4` on Linux and the new `rusty_win32::process::memory` (`GetProcessMemoryInfo`) on Windows. No new third-party dependencies. The first Linux table is on issue #428: `nexus` leads every build and size column (94 MiB, 688 packages, 8 min clean, 33 s incremental), every product starts in 2–5 ms, and every server idles under 12 MiB.
 - **`rusty_multimodal_db`: ADR-0136**, a proposal for chunked snapshots that lift the 8 MiB cap (docs only).
 - **`rusty_multimodal_db`: `change_log_bench`**, a write benchmark that measures the change log's cost under concurrent writers (ADR-0131).
 - **`rusty_tick`: type-ahead search** on the engine's `any_of_prefix`.
