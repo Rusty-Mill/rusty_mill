@@ -16,11 +16,12 @@ pub const MAX_ENTRIES: usize = 8;
 pub const MAX_BODY_CHARS: usize = 500;
 
 /// Entry kinds a card of `role` may write. Empty means the adapter does
-/// not serve that role.
+/// not serve that role. Never `decision`: agents propose decisions as
+/// findings and the board refuses unreviewed ones (ADR-0005).
 pub fn allowed_kinds(role: Role) -> &'static [&'static str] {
     match role {
         Role::Research | Role::Triage => &["finding", "question", "assumption"],
-        Role::Design => &["finding", "question", "assumption", "decision"],
+        Role::Design => &["finding", "question", "assumption"],
         Role::Implement | Role::Review { .. } => &[],
     }
 }
@@ -74,7 +75,6 @@ fn entry(v: &Value, allowed: &[&str]) -> Result<Output, String> {
         },
         "question" => EntryKind::Question,
         "assumption" => EntryKind::Assumption,
-        "decision" => EntryKind::Decision,
         other => return Err(format!("kind {other:?} is unknown")),
     };
     let body = string(v, "body")?;

@@ -33,5 +33,7 @@ fn render_ends_with_the_format_spec_for_the_role() {
 
     assert!(prompt.contains("OUTPUT FORMAT"));
     assert!(prompt.contains("kind is one of: finding, question, assumption."));
+    assert!(prompt.contains("Never settle a decision"));
+    assert!(!prompt.contains("decision,") && !prompt.contains(", decision"));
     assert!(prompt.trim_end().ends_with("At least one."));
 }

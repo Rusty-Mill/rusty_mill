@@ -21,7 +21,7 @@ Modular monolith inside the `rusty_mill` workspace. `orch-dispatch` is the appli
 
 - `goal` — `GoalDraft` → `Goal` via `TryFrom`; rejects drafts missing DONE WHEN, out-of-scope, or budget, reporting every problem at once.
 - `task` — `TaskSpec`, `Task`, and `Plan`, the only mutation point for task state. Dependencies must pre-exist (acyclic by construction); review targets are implicit prerequisites; no agent reviews its own output; completion must return ≥1 board entry.
-- `board` — append-only `Board`. Changes are same-kind supersessions (linear, no forks); entry refs, answers, and artifacts are validated on append; `live()` and `open_questions()` are what agents read.
+- `board` — append-only `Board`. Changes are same-kind supersessions (linear, no forks); entry refs, answers, and artifacts are validated on append; `live()` and `open_questions()` are what agents read. Agents never settle decisions alone: an agent-authored `Decision`, new or superseding, must reference a live approving `Review`, else `DecisionNeedsApproval` ([ADR-0005](./docs/adr/0005-agents-never-settle-decisions-alone.md)).
 
 ## Data flow
 1. Goal intake parses input into `GoalDraft`; `Goal::try_from` validates it.

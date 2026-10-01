@@ -3,7 +3,9 @@
 //! Entries are never edited. To change one, append a new entry of the same
 //! kind that `supersedes` it; [`Board::live`] hides the old one. Every
 //! entry-to-entry pointer is checked on append, so the board has no
-//! dangling references.
+//! dangling references. Agents never settle decisions alone: an
+//! agent-authored `Decision` must reference a live approving `Review`
+//! (ADR-0005).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -92,6 +94,8 @@ pub enum BoardError {
     KindMismatch(EntryId),
     AlreadySuperseded(EntryId),
     ArtifactWithoutRefs,
+    /// An agent may only settle a decision that a live approving review backs.
+    DecisionNeedsApproval,
 }
 
 impl fmt::Display for BoardError {
@@ -105,6 +109,9 @@ impl fmt::Display for BoardError {
             ),
             Self::AlreadySuperseded(id) => write!(f, "{id} is already superseded"),
             Self::ArtifactWithoutRefs => f.write_str("an artifact must point at something"),
+            Self::DecisionNeedsApproval => {
+                f.write_str("an agent's decision must reference a live approving review")
+            }
         }
     }
 }
@@ -191,6 +198,12 @@ impl Board {
                 self.entry(*id)?;
             }
         }
+        if new.kind == EntryKind::Decision
+            && matches!(new.author, Author::Agent(_))
+            && !self.backed_by_live_approval(&new.refs)
+        {
+            return Err(BoardError::DecisionNeedsApproval);
+        }
         if let EntryKind::Answer { to } = new.kind {
             if self.entry(to)?.content.kind != EntryKind::Question {
                 return Err(BoardError::NotAQuestion(to));
@@ -214,6 +227,25 @@ impl Board {
 
     fn entry(&self, id: EntryId) -> Result<&Entry, BoardError> {
         self.get(id).ok_or(BoardError::UnknownEntry(id))
+    }
+
+    /// True if any ref points at a live `Review` with `Verdict::Approve`.
+    fn backed_by_live_approval(&self, refs: &[Ref]) -> bool {
+        refs.iter().any(|r| match r {
+            Ref::Entry(id) => {
+                let approving = self.get(*id).is_some_and(|e| {
+                    matches!(
+                        e.content.kind,
+                        EntryKind::Review {
+                            verdict: Verdict::Approve,
+                            ..
+                        }
+                    )
+                });
+                approving && !self.is_superseded(*id)
+            }
+            _ => false,
+        })
     }
 }
 
@@ -240,11 +272,11 @@ mod tests {
     fn append_assigns_sequential_ids() {
         let mut b = board();
         assert_eq!(
-            b.append(entry(EntryKind::Decision)),
+            b.append(entry(EntryKind::Assumption)),
             Ok(EntryId::from_raw(1))
         );
         assert_eq!(
-            b.append(entry(EntryKind::Assumption)),
+            b.append(entry(EntryKind::Question)),
             Ok(EntryId::from_raw(2))
         );
     }
@@ -252,10 +284,10 @@ mod tests {
     #[test]
     fn answer_must_target_a_question() {
         let mut b = board();
-        let decision = b.append(entry(EntryKind::Decision)).expect("append");
+        let assumption = b.append(entry(EntryKind::Assumption)).expect("append");
         assert_eq!(
-            b.append(entry(EntryKind::Answer { to: decision })),
-            Err(BoardError::NotAQuestion(decision))
+            b.append(entry(EntryKind::Answer { to: assumption })),
+            Err(BoardError::NotAQuestion(assumption))
         );
         let ghost = EntryId::from_raw(9);
         assert_eq!(
@@ -267,11 +299,11 @@ mod tests {
     #[test]
     fn supersede_hides_old_entry_from_live_view() {
         let mut b = board();
-        let old = b.append(entry(EntryKind::Decision)).expect("append");
+        let old = b.append(entry(EntryKind::Assumption)).expect("append");
         let new = b
             .append(NewEntry {
                 supersedes: Some(old),
-                ..entry(EntryKind::Decision)
+                ..entry(EntryKind::Assumption)
             })
             .expect("append");
         assert_eq!(b.live().map(Entry::id).collect::<Vec<_>>(), vec![new]);
@@ -281,23 +313,23 @@ mod tests {
     #[test]
     fn supersede_rejects_kind_change_and_forks() {
         let mut b = board();
-        let old = b.append(entry(EntryKind::Decision)).expect("append");
+        let old = b.append(entry(EntryKind::Assumption)).expect("append");
         assert_eq!(
             b.append(NewEntry {
                 supersedes: Some(old),
-                ..entry(EntryKind::Assumption)
+                ..entry(EntryKind::Question)
             }),
             Err(BoardError::KindMismatch(old))
         );
         b.append(NewEntry {
             supersedes: Some(old),
-            ..entry(EntryKind::Decision)
+            ..entry(EntryKind::Assumption)
         })
         .expect("append");
         assert_eq!(
             b.append(NewEntry {
                 supersedes: Some(old),
-                ..entry(EntryKind::Decision)
+                ..entry(EntryKind::Assumption)
             }),
             Err(BoardError::AlreadySuperseded(old))
         );
@@ -325,7 +357,7 @@ mod tests {
         let ghost = EntryId::from_raw(3);
         let new = NewEntry {
             refs: vec![Ref::Entry(ghost)],
-            ..entry(EntryKind::Decision)
+            ..entry(EntryKind::Assumption)
         };
         assert_eq!(board().append(new), Err(BoardError::UnknownEntry(ghost)));
     }
@@ -360,5 +392,105 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![q2]
         );
+    }
+
+    fn human(kind: EntryKind) -> NewEntry {
+        NewEntry {
+            author: Author::Human,
+            ..entry(kind)
+        }
+    }
+
+    fn review(verdict: Verdict) -> NewEntry {
+        entry(EntryKind::Review {
+            of: TaskId::from_raw(1),
+            verdict,
+        })
+    }
+
+    fn decision_backed_by(id: EntryId) -> NewEntry {
+        NewEntry {
+            refs: vec![Ref::Entry(id)],
+            ..entry(EntryKind::Decision)
+        }
+    }
+
+    #[test]
+    fn human_decision_needs_no_refs() {
+        assert!(board().append(human(EntryKind::Decision)).is_ok());
+    }
+
+    #[test]
+    fn agent_decision_without_refs_rejected() {
+        assert_eq!(
+            board().append(entry(EntryKind::Decision)),
+            Err(BoardError::DecisionNeedsApproval)
+        );
+    }
+
+    #[test]
+    fn agent_decision_backed_by_approving_review_accepted() {
+        let mut b = board();
+        let approve = b.append(review(Verdict::Approve)).expect("append");
+        assert!(b.append(decision_backed_by(approve)).is_ok());
+    }
+
+    #[test]
+    fn agent_decision_backed_by_changes_requested_rejected() {
+        let mut b = board();
+        let changes = b.append(review(Verdict::ChangesRequested)).expect("append");
+        assert_eq!(
+            b.append(decision_backed_by(changes)),
+            Err(BoardError::DecisionNeedsApproval)
+        );
+    }
+
+    #[test]
+    fn agent_decision_backed_by_superseded_approval_rejected() {
+        let mut b = board();
+        let approve = b.append(review(Verdict::Approve)).expect("append");
+        b.append(NewEntry {
+            supersedes: Some(approve),
+            ..review(Verdict::ChangesRequested)
+        })
+        .expect("append");
+        assert_eq!(
+            b.append(decision_backed_by(approve)),
+            Err(BoardError::DecisionNeedsApproval)
+        );
+    }
+
+    #[test]
+    fn agent_decision_backed_by_non_review_rejected() {
+        let mut b = board();
+        let finding = b
+            .append(entry(EntryKind::Finding {
+                confidence: Confidence::High,
+            }))
+            .expect("append");
+        assert_eq!(
+            b.append(decision_backed_by(finding)),
+            Err(BoardError::DecisionNeedsApproval)
+        );
+    }
+
+    #[test]
+    fn agent_superseding_human_decision_needs_approval() {
+        let mut b = board();
+        let settled = b.append(human(EntryKind::Decision)).expect("append");
+        assert_eq!(
+            b.append(NewEntry {
+                supersedes: Some(settled),
+                ..entry(EntryKind::Decision)
+            }),
+            Err(BoardError::DecisionNeedsApproval)
+        );
+        let approve = b.append(review(Verdict::Approve)).expect("append");
+        assert!(b
+            .append(NewEntry {
+                supersedes: Some(settled),
+                ..decision_backed_by(approve)
+            })
+            .is_ok());
     }
 }
