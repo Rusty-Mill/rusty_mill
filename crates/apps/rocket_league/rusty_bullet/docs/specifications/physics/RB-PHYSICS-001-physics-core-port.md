@@ -5416,6 +5416,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     tick, 1.1 after 6, 1.7 after 11, the recorded ramp's shape.
   - **Not done here**: suspension and per-wheel load; engine force along
     the steered wheels; cornering roll.
+  - **Real-capture result** (owner's machine): yaw spin ramps with the
+    recording after the 3.742 s and 4.05 s steer changes; orientation error
+    at the 4.317 s dodge 0.04 rad (was 0.22); `--self-growth` 4-5 s 16 uu /
+    0.48 rad / 35 uu/s (was 30 / 0.55 / 95), 5-6 s 157 uu (was 219).
+    Steady yaw rate is ~5% low (2.28 vs 2.40 rad/s).
 
 ## Architecture and interfaces
 
