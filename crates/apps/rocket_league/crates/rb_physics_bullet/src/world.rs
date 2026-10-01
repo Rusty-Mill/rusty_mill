@@ -1961,7 +1961,7 @@ mod tests {
         world.set_car_input(
             0,
             rb_domain::ControllerInput {
-                pitch: Some(1.0),
+                pitch: Some(-1.0),
                 yaw: Some(1.0),
                 roll: Some(1.0),
                 ..Default::default()
@@ -2392,7 +2392,7 @@ mod tests {
             0,
             rb_domain::ControllerInput {
                 jump: true,
-                pitch: Some(1.0),
+                pitch: Some(-1.0),
                 ..Default::default()
             },
         );
@@ -2429,7 +2429,7 @@ mod tests {
             0,
             rb_domain::ControllerInput {
                 jump: true,
-                pitch: Some(1.0),
+                pitch: Some(-1.0),
                 ..Default::default()
             },
         );
@@ -2583,7 +2583,7 @@ mod tests {
             0,
             rb_domain::ControllerInput {
                 jump: true,
-                pitch: Some(1.0),
+                pitch: Some(-1.0),
                 ..Default::default()
             },
         );
@@ -2647,7 +2647,7 @@ mod tests {
             0,
             rb_domain::ControllerInput {
                 jump: true,
-                pitch: Some(1.0),
+                pitch: Some(-1.0),
                 ..Default::default()
             },
         );
@@ -2734,7 +2734,7 @@ mod tests {
             0,
             rb_domain::ControllerInput {
                 jump: true,
-                pitch: Some(1.0),
+                pitch: Some(-1.0),
                 ..Default::default()
             },
         );

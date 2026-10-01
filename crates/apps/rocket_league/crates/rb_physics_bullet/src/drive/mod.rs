@@ -73,10 +73,9 @@
 //! `DODGE_DEADZONE`, a dodge fires instead — a purely horizontal
 //! `DODGE_SPEED` impulse (along `forward_axis` for pitch, `right_axis` for
 //! roll) plus an instantaneous `DODGE_ANGULAR_SPEED` spin about the
-//! perpendicular axis (`right_axis` for pitch, `forward_axis` for roll) —
-//! the same axis/sign conventions air control's own pitch/roll torque
-//! already uses, so a forward dodge looks like a fast version of a forward
-//! air-control pitch. Since `RB-PHYSICS-001-FR-073`, the roll axis's own
+//! perpendicular axis (`right_axis` for pitch, `forward_axis` for roll),
+//! with RocketSim's signs: stick forward (pitch -1) dodges forward and
+//! noses down, like a fast air-control pitch (`RB-PHYSICS-001-FR-082`). Since `RB-PHYSICS-001-FR-073`, the roll axis's own
 //! stick value also includes `yaw` input (`roll + yaw`, each clamped to
 //! `[-1.0, 1.0]` individually first) — matching RocketSim's own confirmed
 //! `dodgeDir = (-pitch, yaw + roll, 0)`, so a yaw-only press (no roll held)

@@ -185,7 +185,7 @@ fn full_jump() -> ControllerInput {
 
 fn full_pitch() -> ControllerInput {
     ControllerInput {
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     }
 }
@@ -998,7 +998,7 @@ fn dodge_gives_forward_velocity_and_spin_when_pitched_in_the_air() {
     let mut double_jump_available = true;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1050,9 +1050,11 @@ fn dodge_gives_lateral_velocity_and_spin_when_rolled_in_the_air() {
         "expected roughly DODGE_SPEED lateral velocity, got {}",
         c.linear_velocity.y
     );
+    // A dodge toward +right rolls the right side down: negative spin about
+    // forward (RocketSim's `-dodgeDir.y`, RB-PHYSICS-001-FR-082).
     assert!(
-        (c.angular_velocity.x - DODGE_ANGULAR_SPEED).abs() < 1.0,
-        "expected roughly DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
+        (c.angular_velocity.x + DODGE_ANGULAR_SPEED).abs() < 1.0,
+        "expected roughly -DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
         c.angular_velocity.x
     );
 }
@@ -1096,7 +1098,7 @@ fn dodge_consumes_the_double_jump_same_as_a_plain_one() {
     let mut double_jump_available = true;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1122,7 +1124,7 @@ fn opposite_pitch_dodges_the_opposite_direction() {
     let mut left_double_jump_available = true;
     let forward_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1141,7 +1143,7 @@ fn opposite_pitch_dodges_the_opposite_direction() {
     let mut right_double_jump_available = true;
     let backward_input = ControllerInput {
         jump: true,
-        pitch: Some(-1.0),
+        pitch: Some(1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1166,7 +1168,7 @@ fn a_diagonal_dodge_combines_pitch_and_roll() {
     let mut double_jump_available = true;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         roll: Some(1.0),
         ..Default::default()
     };
@@ -1233,9 +1235,11 @@ fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
         "expected roughly DODGE_SPEED lateral velocity from yaw alone, got {}",
         c.linear_velocity.y
     );
+    // A dodge toward +right rolls the right side down: negative spin about
+    // forward (RocketSim's `-dodgeDir.y`, RB-PHYSICS-001-FR-082).
     assert!(
-        (c.angular_velocity.x - DODGE_ANGULAR_SPEED).abs() < 1.0,
-        "expected roughly DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
+        (c.angular_velocity.x + DODGE_ANGULAR_SPEED).abs() < 1.0,
+        "expected roughly -DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
         c.angular_velocity.x
     );
 }
@@ -1393,7 +1397,7 @@ fn a_backward_dodge_scales_up_with_current_forward_speed() {
     let before = c.linear_velocity.x;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(-1.0),
+        pitch: Some(1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1407,9 +1411,9 @@ fn a_backward_dodge_scales_up_with_current_forward_speed() {
     );
     let delta = c.linear_velocity.x - before;
     assert!(
-        (delta - (-DODGE_SPEED * DODGE_BACKWARD_SPEED_SCALE)).abs() < 1.0,
+        (delta - (-DODGE_SPEED * DODGE_BACKWARD_SPEED_SCALE * DODGE_BACKWARD_SCALE_X)).abs() < 1.0,
         "expected a backward dodge at max speed to scale to DODGE_SPEED \
-         * DODGE_BACKWARD_SPEED_SCALE, got delta {}",
+         * DODGE_BACKWARD_SPEED_SCALE * DODGE_BACKWARD_SCALE_X, got delta {}",
         delta
     );
 }
@@ -1428,7 +1432,7 @@ fn a_forward_dodge_does_not_scale_with_current_forward_speed() {
     let before = c.linear_velocity.x;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1490,7 +1494,7 @@ fn dodge_has_no_effect_while_grounded() {
     let mut double_jump_available = true;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_double_jump_state(
@@ -1526,7 +1530,7 @@ fn a_wall_jump_dodges_outward_and_upward_with_a_flip_when_touching_a_wall_with_s
     let mut double_jump_available = true;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_wall(
@@ -1566,7 +1570,7 @@ fn a_wall_jump_dodge_consumes_the_double_jump_unlike_a_plain_wall_jump() {
     let mut dodging_double_jump_available = true;
     let dodge_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_wall(
@@ -1616,7 +1620,7 @@ fn a_wall_jump_dodges_spin_can_be_flip_cancelled() {
 
     let dodge_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_dodge_flip(
@@ -1722,7 +1726,7 @@ fn opposite_pitch_wall_jump_dodges_the_opposite_direction() {
     let mut left_double_jump_available = true;
     let forward_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_wall(
@@ -1742,7 +1746,7 @@ fn opposite_pitch_wall_jump_dodges_the_opposite_direction() {
     let mut right_double_jump_available = true;
     let backward_input = ControllerInput {
         jump: true,
-        pitch: Some(-1.0),
+        pitch: Some(1.0),
         ..Default::default()
     };
     step_with_input_and_wall(
@@ -1775,7 +1779,7 @@ fn a_diagonal_wall_jump_dodge_combines_pitch_and_roll() {
     let mut double_jump_available = true;
     let input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         roll: Some(1.0),
         ..Default::default()
     };
@@ -1842,7 +1846,7 @@ fn air_control_has_no_effect_while_grounded() {
     let mut c = car();
     let mut boost = MAX_BOOST;
     let input = ControllerInput {
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         yaw: Some(1.0),
         roll: Some(1.0),
         ..Default::default()
@@ -1938,7 +1942,8 @@ fn roll_air_control_is_scaled_up_from_pitch_by_the_confirmed_real_ratio() {
     let mut roll_car = car();
     let mut roll_boost = MAX_BOOST;
     step_with_input(&mut roll_car, &full_roll(), false, &mut roll_boost, dt);
-    let expected_roll = AIR_CONTROL_TORQUE
+    // Positive roll torques about -forward (RocketSim's `dirRoll_forward`).
+    let expected_roll = -AIR_CONTROL_TORQUE
         * AIR_CONTROL_ROLL_SCALE
         * inv_inertia.mul_vec3(&Vec3::new(1.0, 0.0, 0.0)).x
         * dt;
@@ -2414,7 +2419,7 @@ fn a_second_jump_press_cancels_a_dodges_spin() {
 
     let dodge_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_dodge_flip(
@@ -2489,7 +2494,7 @@ fn flip_cancel_does_not_touch_linear_velocity_or_the_double_jump_resource() {
 
     let dodge_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_dodge_flip(
@@ -2562,7 +2567,7 @@ fn a_plain_double_jump_clears_a_stale_dodge_flip_flag_from_an_earlier_dodge() {
 
     let dodge_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_dodge_flip(
@@ -2656,7 +2661,7 @@ fn wall_jump_still_takes_priority_over_flip_cancel_when_touching_a_wall() {
 
     let dodge_input = ControllerInput {
         jump: true,
-        pitch: Some(1.0),
+        pitch: Some(-1.0),
         ..Default::default()
     };
     step_with_input_and_dodge_flip(
@@ -3001,4 +3006,50 @@ fn steer_does_not_yaw_an_airborne_car() {
         "expected no yaw from steer while airborne, got {:?}",
         c.angular_velocity
     );
+}
+
+#[test]
+fn stick_forward_and_left_dodges_forward_and_left_with_rocketsims_impulse() {
+    // RB-PHYSICS-001-FR-082, from the owner's capture at 4.317 s: pitch -1
+    // (stick forward) and roll -1 at ~1200 uu/s dodged forward-left, not
+    // backward. RocketSim: dodgeDir = (-pitch, yaw + roll) normalized, times
+    // 500, side scaled by 1 + 0.9 * speed / 2300; forward unscaled.
+    let mut c = car();
+    c.linear_velocity = Vec3::new(1200.0, 0.0, 0.0);
+    let mut boost = MAX_BOOST;
+    let mut jump_held = false;
+    let mut double_jump_available = true;
+    let input = ControllerInput {
+        jump: true,
+        pitch: Some(-1.0),
+        roll: Some(-1.0),
+        ..Default::default()
+    };
+    step_with_input_and_double_jump_state(
+        &mut c,
+        &input,
+        false,
+        &mut boost,
+        &mut jump_held,
+        &mut double_jump_available,
+        1.0 / 120.0,
+    );
+    let component = 500.0 * std::f32::consts::FRAC_1_SQRT_2;
+    let side_scale = 1.0 + 0.9 * 1200.0 / MAX_CAR_SPEED;
+    assert_close(c.linear_velocity.x - 1200.0, component, "forward delta");
+    assert_close(c.linear_velocity.y, -component * side_scale, "side delta");
+}
+
+#[test]
+fn stick_forward_noses_a_car_down_in_the_air() {
+    // RocketSim pitch torque is about -right: pitch -1 (stick forward)
+    // rotates the nose down, a positive spin about the car's +Y axis.
+    let mut c = car();
+    let mut boost = MAX_BOOST;
+    let input = ControllerInput {
+        pitch: Some(-1.0),
+        ..Default::default()
+    };
+    step_with_input(&mut c, &input, false, &mut boost, 1.0 / 120.0);
+    assert!(c.angular_velocity.y > 0.0, "spin {:?}", c.angular_velocity);
 }

@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Dodges go the way the stick points
+**2026-10-01** · `RB-PHYSICS-001-FR-082` · ADR-0013
+
+- The real capture's forward-left dodge at 4.317 s went backward at
+  ~2,175 uu/s in the candidate. Pitch and roll were read with the opposite
+  signs from Rocket League's (RocketSim's `-controls.pitch`, -right and
+  -forward air axes). They now match, and the dodge impulse is RocketSim's
+  500 uu/s (was a 1400 placeholder): its formula predicts ~628 uu/s for
+  that dodge, 621 was recorded. 2 new tests (421 total).
+
 ## Tire grip: cars roll, grip sideways, and drift on the handbrake
 **2026-10-01** · `RB-PHYSICS-001-FR-081` · ADR-0012
 

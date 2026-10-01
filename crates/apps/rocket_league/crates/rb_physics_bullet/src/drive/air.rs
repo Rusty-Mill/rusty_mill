@@ -100,7 +100,9 @@ pub(super) fn apply_air_control(
     // momentum for.
     let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
     if pitch != 0.0 {
-        car.apply_torque(right_axis(car) * (pitch * AIR_CONTROL_TORQUE));
+        // RocketSim's `dirPitch_right = -GetRightDir()`: positive pitch
+        // raises the nose (RB-PHYSICS-001-FR-082).
+        car.apply_torque(right_axis(car) * (-pitch * AIR_CONTROL_TORQUE));
     }
 
     let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
@@ -110,7 +112,8 @@ pub(super) fn apply_air_control(
 
     let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
     if roll != 0.0 {
-        car.apply_torque(forward * (roll * AIR_CONTROL_TORQUE * AIR_CONTROL_ROLL_SCALE));
+        // RocketSim's `dirRoll_forward = -GetForwardDir()`.
+        car.apply_torque(forward * (-roll * AIR_CONTROL_TORQUE * AIR_CONTROL_ROLL_SCALE));
     }
 
     // Landing auto-orientation assistance: with no active pitch/roll

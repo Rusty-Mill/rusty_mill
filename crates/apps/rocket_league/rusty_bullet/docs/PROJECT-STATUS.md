@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#173](https://github.com/baileyrd/rusty_bullet/pull/173) —
+  `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012); real-capture
+  velocity error at 4.0 s ~250 to 9.9 uu/s.
 - [#172](https://github.com/baileyrd/rusty_bullet/pull/172) —
   `RB-PHYSICS-001-FR-080`, curve-based steering (ADR-0011); real-capture
   heading error at 4.0 s 0.46 to 0.06 rad.
@@ -58,8 +61,9 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012): implemented
-  and verified on the real capture (see Validation); in review.
+- `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
+  (ADR-0013): implemented and unit-tested; awaiting the owner's re-trace
+  of 4.3-5.0 s.
 
 ## Blocked
 
@@ -86,11 +90,13 @@ version: `a245d35`).
 
 ## Next
 
-1. Trace the next window where `--self-growth` error jumps (4.3-5.0 s;
-   the 4-5 s window is still 532 uu). Known small gap: for ~0.05 s after
-   the 4.142 s jump the recorded car's horizontal velocity keeps turning
-   (its wheels likely still touch via suspension) while the box leaves
-   the floor at once. Later: the real hitbox sits
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.0` to confirm
+   `RB-PHYSICS-001-FR-082`: the 4.317 s dodge should add ~(+620, -27)
+   uu/s, not (-220, -2163). Then flip vertical damping (`FLIP_Z_DAMP_*`,
+   recorded vz falls 211 to 24 uu/s ~0.15 s after the dodge). Known small
+   gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
+   velocity keeps turning (wheels likely still touch via suspension).
+   Later: the real hitbox sits
    20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu above the
    floor at rest, while the port's box rests on the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -101,7 +107,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (419 tests: 27 `rb_domain`, 355
+- `cargo test --workspace`: pass (421 tests: 27 `rb_domain`, 357
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

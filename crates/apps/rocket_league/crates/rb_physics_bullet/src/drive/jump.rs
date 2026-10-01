@@ -113,19 +113,15 @@ pub(super) const DODGE_DEADZONE: f32 = 0.1;
 /// reasoning.
 pub(super) const DODGE_DIRECTION_SNAP_THRESHOLD: f32 = 0.1;
 
-/// Uncalibrated placeholder dodge horizontal impulse speed (uu/s), applied
-/// along `forward_axis` (scaled by `pitch`) and/or `right_axis` (scaled by
-/// `roll`) as an instantaneous velocity change (like `JUMP_SPEED`, not a
-/// continuous force) — chosen only to produce a visibly fast, distinct
-/// dodge in tests, not derived from any measured or documented Rocket
-/// League value. `pub` so `world.rs`'s end-to-end tests can assert against
-/// it directly, the same way `JUMP_SPEED` already is. This is the
-/// standing-start (and forward-dodge) magnitude specifically — since
-/// `RB-PHYSICS-001-FR-059`, a backward or side dodge made at speed scales
-/// above this via `dodge_speed_scale`, matching RocketSim's own confirmed
-/// per-direction speed dependence, even though this base value itself
-/// remains unconfirmed.
-pub const DODGE_SPEED: f32 = 1400.0;
+/// Dodge horizontal impulse speed (uu/s), applied along `forward_axis`
+/// and/or `right_axis` by the normalized dodge direction as an
+/// instantaneous velocity change: RocketSim's `FLIP_INITIAL_VEL_SCALE`.
+/// Long an uncalibrated `1400`; `RB-PHYSICS-001-FR-082` adopted the real
+/// value after the owner's capture recorded a ~621 uu/s dodge where
+/// RocketSim's formula with `500` predicts ~628. `pub` so `world.rs`'s
+/// end-to-end tests can assert against it. Backward and side dodges at
+/// speed scale above this via `dodge_speed_scale`.
+pub const DODGE_SPEED: f32 = 500.0;
 
 /// Confirmed real ratio: a *backward* pitch-dodge (one opposing the car's
 /// own current forward-velocity direction, per `dodge_pitch_is_backward`)
@@ -141,6 +137,10 @@ pub const DODGE_SPEED: f32 = 1400.0;
 /// substituted for `DODGE_SPEED` itself — see this constant's own Non-goals
 /// in `RB-PHYSICS-001-FR-059`'s own Requirements entry for why.
 pub(super) const DODGE_BACKWARD_SPEED_SCALE: f32 = 2.5;
+
+/// Extra forward/backward scale on a backward dodge: RocketSim's
+/// `FLIP_BACKWARD_IMPULSE_SCALE_X = 16 / 15`.
+pub(super) const DODGE_BACKWARD_SCALE_X: f32 = 16.0 / 15.0;
 
 /// Confirmed real ratio: a side (`roll`) dodge grows up to this multiple of
 /// `DODGE_SPEED` as current speed rises toward `MAX_CAR_SPEED`, regardless
@@ -179,11 +179,9 @@ pub(super) fn dodge_speed_scale(forward_speed: f32, scale_at_max_speed: f32) -> 
 /// current motion); below it, classification falls back to `dodge_pitch`'s
 /// own sign alone, since comparing against a near-zero velocity direction
 /// would be noise. Confirmed against RocketSim's own `Car.cpp`
-/// (`shouldDodgeBackwards`), re-derived in this port's own sign convention
-/// (positive `dodge_pitch` means forward, matching `apply_driven_forces`'s
-/// own `dodge_impulse += forward * (dodge_pitch * DODGE_SPEED)`) rather
-/// than translated symbol-for-symbol from the reference's own stick-sign
-/// convention.
+/// (`shouldDodgeBackwards`): `dodge_pitch` is the dodge's forward
+/// component, RocketSim's `dodgeDir.x` (`-controls.pitch`, see
+/// `dodge_stick`).
 pub(super) fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> bool {
     if forward_speed.abs() < DODGE_BACKWARD_CLASSIFICATION_SPEED_THRESHOLD {
         dodge_pitch < 0.0
@@ -216,10 +214,10 @@ pub(super) fn dodge_pitch_is_backward(dodge_pitch: f32, forward_speed: f32) -> b
 /// of `DODGE_SPEED`'s own uncalibrated base value, the same way
 /// `FR-058`/`FR-059`/`FR-068`'s own adopted ratios do.
 ///
-/// One thing is deliberately *not* adopted here, already documented
-/// elsewhere: this port's own sign convention is kept (`dodge_pitch`
-/// positive means forward, matching `dodge_pitch_is_backward`'s own doc
-/// comment) rather than the reference's own negated `-controls.pitch`.
+/// Its `pitch` argument is the dodge's *forward* component, already
+/// negated from the stick by `dodge_stick` (RocketSim's `-controls.pitch`,
+/// `RB-PHYSICS-001-FR-082`); before FR-082 the raw stick pitch was used, so
+/// a stick-forward dodge went backward.
 ///
 /// Real yaw input's own contribution to `dodgeDir` (`controls.yaw +
 /// controls.roll`) *is* folded in, though not by this function itself:
@@ -411,13 +409,16 @@ pub(super) fn ground_jump(car: &mut RigidBody, jump_hold_time_remaining: &mut f3
     *jump_hold_time_remaining = JUMP_HOLD_MAX_DURATION;
 }
 
-/// Clamped dodge stick direction `(pitch, roll)`: roll folds in yaw, the
-/// same way for a ground dodge and a wall-jump dodge.
+/// Clamped dodge direction `(forward, side)` from the stick, the same way
+/// for a ground dodge and a wall-jump dodge: RocketSim's
+/// `dodgeDir = (-controls.pitch, controls.yaw + controls.roll)`. Rocket
+/// League's pitch is negative with the stick pushed forward (nose down), so
+/// a forward dodge is `-pitch` (`RB-PHYSICS-001-FR-082`).
 fn dodge_stick(input: &ControllerInput) -> (f32, f32) {
-    let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
-    let roll =
+    let forward = -input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
+    let side =
         input.roll.unwrap_or(0.0).clamp(-1.0, 1.0) + input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
-    (pitch, roll)
+    (forward, side)
 }
 
 fn stick_past_deadzone(pitch: f32, roll: f32) -> bool {
@@ -426,9 +427,11 @@ fn stick_past_deadzone(pitch: f32, roll: f32) -> bool {
 
 /// Applies a directional dodge on top of `base_impulse` (a velocity change,
 /// scaled by mass here): translate along `forward_axis` and spin about
-/// `right_axis` from pitch, translate along `right_axis` and spin about
-/// `forward_axis` from roll — the same axis/sign conventions air control's
-/// own pitch/roll torque uses. Leaves a cancelable flip behind.
+/// `right_axis` from the forward component, translate along `right_axis`
+/// and spin about `forward_axis` from the side component, with RocketSim's
+/// signs (`flipRelTorque = (-dodgeDir.y, dodgeDir.x)`): a forward dodge
+/// noses down, a dodge to the right rolls the right side down. Leaves a
+/// cancelable flip behind.
 fn apply_dodge(
     car: &mut RigidBody,
     forward: Vec3,
@@ -442,7 +445,7 @@ fn apply_dodge(
     let mut dodge_spin = Vec3::ZERO;
     if pitch.abs() > DODGE_DEADZONE {
         let scale = if dodge_pitch_is_backward(pitch, forward_speed) {
-            dodge_speed_scale(forward_speed, DODGE_BACKWARD_SPEED_SCALE)
+            dodge_speed_scale(forward_speed, DODGE_BACKWARD_SPEED_SCALE) * DODGE_BACKWARD_SCALE_X
         } else {
             1.0
         };
@@ -452,7 +455,9 @@ fn apply_dodge(
     if roll.abs() > DODGE_DEADZONE {
         let scale = dodge_speed_scale(forward_speed, DODGE_SIDE_SPEED_SCALE);
         dodge_impulse += right_axis(car) * (norm_roll * DODGE_SPEED * scale);
-        dodge_spin += forward * (norm_roll * DODGE_ANGULAR_SPEED);
+        // RocketSim's flip torque about forward is `-dodgeDir.y`: a dodge
+        // toward the right rolls the right side down.
+        dodge_spin -= forward * (norm_roll * DODGE_ANGULAR_SPEED);
     }
     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
     // A single instantaneous spin kick, not a continuous torque — mirrors
