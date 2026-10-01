@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.88.0
+- Version: 0.89.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5372,6 +5372,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     5.0 s 1.36 rad (was 1.41): it grows ~1.75 rad/s through the flip
     independently of air control, so its cause is still open.
 
+- `RB-PHYSICS-001-FR-085` (flip torque on the press tick, implemented,
+  verified): `rb-verify --self-trace` with spin columns (`RB-VERIFY-003`
+  0.12.0) showed the recorded angular velocity jumping by 2.18 rad/s on
+  the 4.317 s dodge's press tick, one tick of flip torque (2.02 rad/s
+  predicted), while the candidate's flip started a tick later, as in
+  RocketSim's order. The airborne step now handles the jump press before
+  the flip torque and air control. The same trace located the flip's
+  orientation error: both cars spin at the 5.5 rad/s cap, but the
+  candidate's flip axis is tilted ~10 deg because its heading was ~0.2 rad
+  off at the dodge, from ground steering snapping the yaw rate to its
+  target (-2.17 rad/s) where the recorded yaw rate ramps (-1.0 to -1.7
+  rad/s). The recorded flip axis matches the port's flip torque given the
+  recorded heading. That steering lag is the next unit.
+  - **Verification**: the three dodge-spin tests now check one tick of
+    flip torque on the press tick, with air control already off.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6853,6 +6869,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.89.0 (2026-10-01): `RB-PHYSICS-001-FR-085` — a dodge's flip torque acts
+  on the press tick, per the real capture (amends ADR-0014).
 - 0.88.0 (2026-10-01): `RB-PHYSICS-001-FR-084` — RocketSim's air control,
   damping and air throttle (ADR-0015); placeholder air torque and the
   airborne auto-upright removed. 354 tests in `rb_physics_bullet`.

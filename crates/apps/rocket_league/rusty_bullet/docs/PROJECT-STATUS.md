@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#176](https://github.com/baileyrd/rusty_bullet/pull/176) —
+  `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015).
 - [#175](https://github.com/baileyrd/rusty_bullet/pull/175) —
   `RB-PHYSICS-001-FR-083`, the flip as RocketSim has it (ADR-0014); flip
   vz stall matches the recording.
@@ -67,8 +69,9 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015): re-traced
-  on the real capture; in review.
+- `RB-VERIFY-003` 0.12.0 (spin in `--self-trace`) and
+  `RB-PHYSICS-001-FR-085` (flip torque on the press tick): done, awaiting
+  PR.
 
 ## Blocked
 
@@ -95,11 +98,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Add recorded vs simulated angular velocity to `rb-verify --self-trace`:
-   orientation error grows a steady ~1.75 rad/s through the 4.325-4.975 s
-   flip and stops when it ends, and air control barely changed it
-   (1.41 to 1.36 rad at 5.0 s). Spin data will show whether pre-dodge
-   spin, the flip axis, or the rotation comparison is responsible. Known small
+1. Dynamic steering: ground steering sets the yaw rate to its target at
+   once (ADR-0011), while the recorded yaw rate ramps (-1.0 to -1.7 rad/s
+   over 4.10-4.14 s against a -2.17 target). The resulting ~0.2 rad
+   heading error at the 4.317 s dodge tilts the flip axis ~10 deg, which
+   is the flip's remaining orientation error. Replace the kinematic yaw
+   with per-wheel lateral tire forces that produce it. Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits

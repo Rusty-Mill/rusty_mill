@@ -511,17 +511,15 @@ fn boost_still_drains_at_max_speed_even_though_it_stops_accelerating() {
 
 const TICK: f32 = 1.0 / 120.0;
 
-/// Angular velocity after a dodge press tick and one more airborne tick at
-/// 120 Hz with the same stick: the flip torque starts on the tick after
-/// the press, as in RocketSim.
-fn flip_spin_after_one_tick(input: &ControllerInput) -> Vec3 {
+/// Angular velocity after a dodge press tick at 120 Hz: the flip torque
+/// acts on the press tick itself, with air control already off
+/// (RB-PHYSICS-001-FR-085).
+fn flip_spin_after_press_tick(input: &ControllerInput) -> Vec3 {
     let mut c = car();
     let mut state = DriveState::new();
-    for _ in 0..2 {
-        c.clear_forces();
-        apply_driven_forces(&mut c, input, false, None, &mut state, TICK);
-        integrate::integrate_velocities(&mut c, TICK);
-    }
+    c.clear_forces();
+    apply_driven_forces(&mut c, input, false, None, &mut state, TICK);
+    integrate::integrate_velocities(&mut c, TICK);
     c.angular_velocity
 }
 
@@ -1016,12 +1014,10 @@ fn dodge_gives_forward_velocity_and_spin_when_pitched_in_the_air() {
         "expected roughly DODGE_SPEED forward velocity, got {}",
         c.linear_velocity.x
     );
-    // The flip spins the car from the next tick: nose down (RB-PHYSICS-001-FR-083).
-    // Air-control pitch -1 noses down on the press tick too, then the flip
-    // torque takes over.
-    let spin = flip_spin_after_one_tick(&input);
-    let expected = (AIR_CONTROL_TORQUE.x * CAR_TORQUE_SCALE + FLIP_TORQUE_FORWARD) / 120.0;
-    assert_close(spin.y, expected, "pitch spin");
+    // The flip spins the car nose down from the press tick (RB-PHYSICS-001-FR-085).
+    // The flip noses the car down on the press tick.
+    let spin = flip_spin_after_press_tick(&input);
+    assert_close(spin.y, FLIP_TORQUE_FORWARD / 120.0, "pitch spin");
 }
 
 #[test]
@@ -1049,13 +1045,9 @@ fn dodge_gives_lateral_velocity_and_spin_when_rolled_in_the_air() {
         "expected roughly DODGE_SPEED lateral velocity, got {}",
         c.linear_velocity.y
     );
-    // A dodge toward +right rolls the right side down from the next tick:
-    // negative spin about forward (RocketSim's `-dodgeDir.y`).
-    // Air-control roll acts on the press tick (same direction), then the
-    // flip torque takes over.
-    let spin = flip_spin_after_one_tick(&input);
-    let expected = -(AIR_CONTROL_TORQUE.z * CAR_TORQUE_SCALE + FLIP_TORQUE_SIDE) / 120.0;
-    assert_close(spin.x, expected, "roll spin");
+    // A dodge to the right rolls the right side down on the press tick.
+    let spin = flip_spin_after_press_tick(&input);
+    assert_close(spin.x, -FLIP_TORQUE_SIDE / 120.0, "roll spin");
 }
 
 #[test]
@@ -1234,11 +1226,8 @@ fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
         "expected roughly DODGE_SPEED lateral velocity from yaw alone, got {}",
         c.linear_velocity.y
     );
-    // A dodge toward +right rolls the right side down from the next tick:
-    // negative spin about forward (RocketSim's `-dodgeDir.y`).
-    // Yaw air control spins about up, not forward: the roll spin is the
-    // flip torque alone.
-    let spin = flip_spin_after_one_tick(&input);
+    // Yaw folds into the dodge's side direction: the same roll spin.
+    let spin = flip_spin_after_press_tick(&input);
     assert_close(spin.x, -FLIP_TORQUE_SIDE / 120.0, "roll spin");
 }
 

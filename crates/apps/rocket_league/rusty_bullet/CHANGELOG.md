@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace` prints recorded and simulated angular velocity
+  and a spin error per row (`TraceRow::spin_error`, `RB-VERIFY-003` 0.12.0).
 - ADR-0015: RocketSim's air control and damping; no airborne auto-upright.
 - ADR-0014: a dodge's flip as a timed torque with vertical damping and
   pitch-stick cancel.
@@ -932,6 +934,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- A dodge's flip torque now acts on the press tick, as the real capture
+  shows (`RB-PHYSICS-001-FR-085`), one tick earlier than RocketSim's order.
 - Air control (`RB-PHYSICS-001-FR-084`, ADR-0015): RocketSim's torque,
   damping and `CAR_TORQUE_SCALE` replace the placeholder air torque, and
   air throttle is added. The invented airborne auto-upright
