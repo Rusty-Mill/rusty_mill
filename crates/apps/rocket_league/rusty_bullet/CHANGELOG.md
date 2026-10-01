@@ -862,6 +862,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   matched real Rocket League exactly. No new tests; all 322 pre-existing
   tests pass unchanged.
 ### Changed
+- `docs/traceability/TRACEABILITY.md` slimmed from 239 KB to 46 KB: every
+  requirement row is kept, but long cells now point to the spec (named
+  interfaces, a one-clause verification summary, a status plus its first
+  qualifier) instead of repeating its narrative. Stale `src/drive.rs`
+  paths now read `src/drive/`.
 - `docs/PROJECT-STATUS.md` trimmed to current state only (162 KB → 7 KB):
   the long-form "Completed" log is replaced by a phase table and the last
   five merges, with pointers to RELEASE_NOTES/CHANGELOG/ROADMAP for history.

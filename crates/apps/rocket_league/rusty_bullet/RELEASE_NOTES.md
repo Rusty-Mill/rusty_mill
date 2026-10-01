@@ -6,6 +6,25 @@ keyed by the commit/PR that shipped them.
 
 ---
 
+## Slimmed `TRACEABILITY.md` to pointers
+**2026-10-01** · docs only
+
+- `docs/traceability/TRACEABILITY.md` went from 239 KB to 46 KB. All 91
+  requirement rows and all 7 columns stay; only cells over ~220 characters
+  changed (76 rows):
+  - Decision/interface: the interfaces the row names that also appear in
+    its Implementation cell, then other qualified (`module::name`)
+    interfaces (up to 4), plus any ADRs.
+  - Verification: the first clause.
+  - State: the status plus its first qualifier.
+  - PR/release: commit lists over 100 characters point to this file.
+- The full narrative for each requirement already lives in its spec
+  section. The previous long-form matrix is in git history at `8160c97`.
+- Stale `crates/rb_physics_bullet/src/drive.rs` paths now read
+  `src/drive/` (split in #164).
+
+---
+
 ## ADRs for Phase 1 physics modeling choices
 **2026-09-30** · docs only
 
