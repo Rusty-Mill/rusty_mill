@@ -36,7 +36,8 @@
 //! `NET_FRICTION` are all uncalibrated placeholders, the same
 //! "no public reference exists for this, tuned empirically for stable,
 //! plausible behavior" category `RB-PHYSICS-001-FR-031`'s audit already
-//! flagged several other constants under (e.g. `drive::AIR_CONTROL_TORQUE`)
+//! flagged several other constants under (e.g. the former
+//! `drive::AIR_CONTROL_TORQUE` placeholder)
 //! — real Rocket League's actual net material properties have never been
 //! published, and even if they had, this port's own point-mass/spring
 //! topology is already a simplification of a real net's continuum cloth

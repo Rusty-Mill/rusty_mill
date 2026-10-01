@@ -237,19 +237,6 @@ fn throttle_accelerates_a_grounded_car_forward() {
 }
 
 #[test]
-fn throttle_has_no_effect_while_airborne() {
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    for _ in 0..60 {
-        step_with_input(&mut c, &full_throttle(), false, &mut boost, 1.0 / 60.0);
-    }
-    assert_eq!(
-        c.linear_velocity.x, 0.0,
-        "airborne throttle shouldn't add forward speed"
-    );
-}
-
-#[test]
 fn throttle_stops_accelerating_at_unboosted_max_speed() {
     // RB-PHYSICS-001-FR-031: throttle's own cap is UNBOOSTED_MAX_CAR_SPEED
     // (1410 uu/s), not the boosted MAX_CAR_SPEED (2300) — see
@@ -1030,10 +1017,11 @@ fn dodge_gives_forward_velocity_and_spin_when_pitched_in_the_air() {
         c.linear_velocity.x
     );
     // The flip spins the car from the next tick: nose down (RB-PHYSICS-001-FR-083).
-    // Air control still acts on the press tick, adding a little.
+    // Air-control pitch -1 noses down on the press tick too, then the flip
+    // torque takes over.
     let spin = flip_spin_after_one_tick(&input);
-    let flip_part = FLIP_TORQUE_FORWARD / 120.0;
-    assert!((spin.y - flip_part).abs() < 0.25, "pitch spin {}", spin.y);
+    let expected = (AIR_CONTROL_TORQUE.x * CAR_TORQUE_SCALE + FLIP_TORQUE_FORWARD) / 120.0;
+    assert_close(spin.y, expected, "pitch spin");
 }
 
 #[test]
@@ -1063,10 +1051,11 @@ fn dodge_gives_lateral_velocity_and_spin_when_rolled_in_the_air() {
     );
     // A dodge toward +right rolls the right side down from the next tick:
     // negative spin about forward (RocketSim's `-dodgeDir.y`).
-    // Air control still acts on the press tick, adding a little.
+    // Air-control roll acts on the press tick (same direction), then the
+    // flip torque takes over.
     let spin = flip_spin_after_one_tick(&input);
-    let flip_part = -FLIP_TORQUE_SIDE / 120.0;
-    assert!((spin.x - flip_part).abs() < 0.25, "roll spin {}", spin.x);
+    let expected = -(AIR_CONTROL_TORQUE.z * CAR_TORQUE_SCALE + FLIP_TORQUE_SIDE) / 120.0;
+    assert_close(spin.x, expected, "roll spin");
 }
 
 #[test]
@@ -1247,10 +1236,10 @@ fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
     );
     // A dodge toward +right rolls the right side down from the next tick:
     // negative spin about forward (RocketSim's `-dodgeDir.y`).
-    // Air control still acts on the press tick, adding a little.
+    // Yaw air control spins about up, not forward: the roll spin is the
+    // flip torque alone.
     let spin = flip_spin_after_one_tick(&input);
-    let flip_part = -FLIP_TORQUE_SIDE / 120.0;
-    assert!((spin.x - flip_part).abs() < 0.25, "roll spin {}", spin.x);
+    assert_close(spin.x, -FLIP_TORQUE_SIDE / 120.0, "roll spin");
 }
 
 #[test]
@@ -1832,73 +1821,6 @@ fn a_stationary_airborne_car_can_pitch_yaw_and_roll() {
 }
 
 #[test]
-fn yaw_air_control_is_scaled_down_from_pitch_by_the_confirmed_real_ratio() {
-    // RB-PHYSICS-001-FR-068: RocketSim's real CAR_AIR_CONTROL_TORQUE =
-    // Vec(130, 95, 400) (pitch-yaw-roll order) confirms yaw's real
-    // torque is 95/130 of pitch's — this test would see yaw and pitch
-    // produce the same angular speed (scaled only by this car's own
-    // differing moments of inertia about each axis) without that ratio
-    // applied.
-    let dt = 1.0 / 60.0;
-    let inv_inertia = car().inv_inertia_world();
-
-    let mut pitch_car = car();
-    let mut pitch_boost = MAX_BOOST;
-    step_with_input(&mut pitch_car, &full_pitch(), false, &mut pitch_boost, dt);
-    let expected_pitch =
-        AIR_CONTROL_TORQUE * inv_inertia.mul_vec3(&Vec3::new(0.0, 1.0, 0.0)).y * dt;
-    assert!(
-        (pitch_car.angular_velocity.y - expected_pitch).abs() < 1e-3,
-        "expected pitch's own angular velocity to match AIR_CONTROL_TORQUE directly, got {} \
-         (expected {})",
-        pitch_car.angular_velocity.y,
-        expected_pitch
-    );
-
-    let mut yaw_car = car();
-    let mut yaw_boost = MAX_BOOST;
-    step_with_input(&mut yaw_car, &full_yaw(), false, &mut yaw_boost, dt);
-    let expected_yaw = AIR_CONTROL_TORQUE
-        * AIR_CONTROL_YAW_SCALE
-        * inv_inertia.mul_vec3(&Vec3::new(0.0, 0.0, 1.0)).z
-        * dt;
-    assert!(
-        (yaw_car.angular_velocity.z - expected_yaw).abs() < 1e-3,
-        "expected yaw's own angular velocity to be scaled by AIR_CONTROL_YAW_SCALE, got {} \
-         (expected {})",
-        yaw_car.angular_velocity.z,
-        expected_yaw
-    );
-}
-
-#[test]
-fn roll_air_control_is_scaled_up_from_pitch_by_the_confirmed_real_ratio() {
-    // RB-PHYSICS-001-FR-068: RocketSim's real CAR_AIR_CONTROL_TORQUE
-    // confirms roll's real torque is 400/130 (~3.08x) of pitch's — this
-    // test would see roll and pitch produce the same angular speed
-    // (scaled only by this car's own differing moments of inertia)
-    // without that ratio applied.
-    let dt = 1.0 / 60.0;
-    let inv_inertia = car().inv_inertia_world();
-
-    let mut roll_car = car();
-    let mut roll_boost = MAX_BOOST;
-    step_with_input(&mut roll_car, &full_roll(), false, &mut roll_boost, dt);
-    // Positive roll torques about -forward (RocketSim's `dirRoll_forward`).
-    let expected_roll = -AIR_CONTROL_TORQUE
-        * AIR_CONTROL_ROLL_SCALE
-        * inv_inertia.mul_vec3(&Vec3::new(1.0, 0.0, 0.0)).x
-        * dt;
-    assert!(
-        (roll_car.angular_velocity.x - expected_roll).abs() < 1e-3,
-        "expected roll's own angular velocity to be scaled by AIR_CONTROL_ROLL_SCALE, got {} \
-         (expected {})",
-        roll_car.angular_velocity.x,
-        expected_roll
-    );
-}
-
-#[test]
 fn no_analog_value_is_treated_as_neutral_air_control() {
     let mut c = car();
     let mut boost = MAX_BOOST;
@@ -2350,44 +2272,6 @@ fn double_jump_after_a_held_ground_jump_is_not_boosted_by_the_hold_window() {
 }
 
 #[test]
-fn a_tilted_airborne_car_gets_a_corrective_torque_from_landing_assistance() {
-    let mut c = tilted_car();
-    let mut boost = MAX_BOOST;
-    step_with_input(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        &mut boost,
-        1.0 / 60.0,
-    );
-    assert!(
-        c.angular_velocity.length() > 0.0,
-        "expected a tilted airborne car with neutral input to gain a corrective angular \
-         velocity from landing-orientation assistance, got {:?}",
-        c.angular_velocity
-    );
-}
-
-#[test]
-fn an_already_upright_airborne_car_gets_no_corrective_torque() {
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    step_with_input(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        &mut boost,
-        1.0 / 60.0,
-    );
-    assert_eq!(
-        c.angular_velocity,
-        Vec3::ZERO,
-        "expected an already-level car to get no correction, got {:?}",
-        c.angular_velocity
-    );
-}
-
-#[test]
 fn landing_assistance_does_not_apply_while_grounded() {
     let mut c = tilted_car();
     let mut boost = MAX_BOOST;
@@ -2401,44 +2285,8 @@ fn landing_assistance_does_not_apply_while_grounded() {
     assert_eq!(
         c.angular_velocity,
         Vec3::ZERO,
-        "expected no landing-orientation assistance while grounded, got {:?}",
+        "expected no air control while grounded, got {:?}",
         c.angular_velocity
-    );
-}
-
-#[test]
-fn landing_assistance_does_not_apply_while_actively_air_controlling() {
-    let mut without_input = tilted_car();
-    let mut without_input_boost = MAX_BOOST;
-    step_with_input(
-        &mut without_input,
-        &ControllerInput::default(),
-        false,
-        &mut without_input_boost,
-        1.0 / 60.0,
-    );
-    let assisted_angular_velocity = without_input.angular_velocity;
-    assert!(assisted_angular_velocity.length() > 0.0);
-
-    let mut with_pitch = tilted_car();
-    let mut with_pitch_boost = MAX_BOOST;
-    step_with_input(
-        &mut with_pitch,
-        &full_pitch(),
-        false,
-        &mut with_pitch_boost,
-        1.0 / 60.0,
-    );
-    // Full pitch input drives its own AIR_CONTROL_TORQUE-scale
-    // rotation about the right axis (y); the landing assist's own
-    // much smaller contribution must not additionally appear (it
-    // would only ever add to x/z here, since the assist's correction
-    // axis for this tilt is purely along x — see tilted_car).
-    assert_eq!(
-        with_pitch.angular_velocity.x, 0.0,
-        "expected active pitch input to suppress landing-orientation assistance entirely, \
-         got {:?}",
-        with_pitch.angular_velocity
     );
 }
 
@@ -2838,4 +2686,99 @@ fn a_dodge_starts_a_flip_and_landing_clears_it() {
         TICK,
     );
     assert_eq!(state.flip, None);
+}
+
+#[test]
+fn full_stick_air_control_accelerates_each_axis_at_rocketsims_rate() {
+    // From rest there is no damping: one tick adds torque * CAR_TORQUE_SCALE
+    // * dt about RocketSim's axes (pitch -right, yaw up, roll -forward).
+    let step = CAR_TORQUE_SCALE * TICK;
+    for (input, expected) in [
+        (
+            ControllerInput {
+                pitch: Some(1.0),
+                ..Default::default()
+            },
+            Vec3::new(0.0, -AIR_CONTROL_TORQUE.x * step, 0.0),
+        ),
+        (
+            ControllerInput {
+                yaw: Some(1.0),
+                ..Default::default()
+            },
+            Vec3::new(0.0, 0.0, AIR_CONTROL_TORQUE.y * step),
+        ),
+        (
+            ControllerInput {
+                roll: Some(1.0),
+                ..Default::default()
+            },
+            Vec3::new(-AIR_CONTROL_TORQUE.z * step, 0.0, 0.0),
+        ),
+    ] {
+        let mut c = car();
+        apply_air_control(&mut c, &input, 1.0, TICK);
+        assert!(
+            (c.angular_velocity - expected).length() < 1e-5,
+            "got {:?}, expected {expected:?}",
+            c.angular_velocity
+        );
+    }
+}
+
+#[test]
+fn air_control_damps_free_spin_and_held_pitch_turns_its_damping_off() {
+    let step = CAR_TORQUE_SCALE * TICK;
+    // Rolling at 1 rad/s with the stick centered: roll damping slows it.
+    let mut c = car();
+    c.angular_velocity = Vec3::new(1.0, 0.0, 0.0);
+    apply_air_control(&mut c, &ControllerInput::default(), 1.0, TICK);
+    assert_close(
+        c.angular_velocity.x,
+        1.0 - AIR_CONTROL_DAMPING.z * step,
+        "roll damping",
+    );
+    // Pitching at 1 rad/s about -right (-Y) with full pitch held: the
+    // stick's torque adds and its damping is off.
+    let mut c = car();
+    c.angular_velocity = Vec3::new(0.0, -1.0, 0.0);
+    let input = ControllerInput {
+        pitch: Some(1.0),
+        ..Default::default()
+    };
+    apply_air_control(&mut c, &input, 1.0, TICK);
+    assert_close(
+        c.angular_velocity.y,
+        -1.0 - AIR_CONTROL_TORQUE.x * step,
+        "pitch held, no damping",
+    );
+}
+
+#[test]
+fn a_locked_pitch_gives_no_pitch_torque_but_full_pitch_damping() {
+    let step = CAR_TORQUE_SCALE * TICK;
+    let mut c = car();
+    c.angular_velocity = Vec3::new(0.0, -1.0, 0.0);
+    let input = ControllerInput {
+        pitch: Some(1.0),
+        ..Default::default()
+    };
+    apply_air_control(&mut c, &input, 0.0, TICK);
+    assert_close(
+        c.angular_velocity.y,
+        -1.0 + AIR_CONTROL_DAMPING.x * step,
+        "locked pitch",
+    );
+}
+
+#[test]
+fn throttle_pushes_an_airborne_car_forward_gently() {
+    let mut c = car();
+    let mut boost = MAX_BOOST;
+    step_with_input(&mut c, &full_throttle(), false, &mut boost, TICK);
+    assert_close(
+        c.linear_velocity.x,
+        THROTTLE_AIR_ACCELERATION * TICK,
+        "air throttle",
+    );
 }

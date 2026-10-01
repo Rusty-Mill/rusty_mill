@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0015: RocketSim's air control and damping; no airborne auto-upright.
 - ADR-0014: a dodge's flip as a timed torque with vertical damping and
   pitch-stick cancel.
 - ADR-0013: RocketSim stick sign convention and real dodge impulse.
@@ -931,6 +932,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Air control (`RB-PHYSICS-001-FR-084`, ADR-0015): RocketSim's torque,
+  damping and `CAR_TORQUE_SCALE` replace the placeholder air torque, and
+  air throttle is added. The invented airborne auto-upright
+  (`LANDING_AUTO_UPRIGHT_TORQUE`) is removed.
 - Flips (`RB-PHYSICS-001-FR-083`, ADR-0014): a dodge now spins the car
   with RocketSim's flip torque over 0.65 s, damps its fall, locks air
   pitch, and is cancelled by holding pitch against it. The instant spin

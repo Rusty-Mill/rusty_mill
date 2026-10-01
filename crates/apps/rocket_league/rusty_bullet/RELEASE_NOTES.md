@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Air control is Rocket League's
+**2026-10-01** · `RB-PHYSICS-001-FR-084` · ADR-0015
+
+- Pitch, yaw and roll in the air now use RocketSim's torque (130, 95, 400)
+  and damping (30, 20, 50) with its torque scale, so a car's spin also
+  decays when the stick is released. Throttle gives the small air push
+  RocketSim has. The port's placeholder air torque and its invented
+  airborne auto-upright are gone. 418 tests.
+
 ## Flips spin, stall and cancel like Rocket League's
 **2026-10-01** · `RB-PHYSICS-001-FR-083` · ADR-0014
 

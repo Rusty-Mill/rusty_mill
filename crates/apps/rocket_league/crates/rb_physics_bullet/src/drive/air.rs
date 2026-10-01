@@ -1,143 +1,66 @@
-//! Airborne rotation: pitch/yaw/roll air control and the landing
-//! auto-orientation assist. Only runs while the car is airborne; see
-//! `super::apply_driven_forces`.
+//! Airborne control: pitch/yaw/roll air control with its damping, and air
+//! throttle, ported from RocketSim's `Car::_UpdateAirTorque`
+//! (`RB-PHYSICS-001-FR-084`). The dodge's flip (in `jump`) decides whether
+//! air control acts at all and whether pitch is locked.
 
-use super::{right_axis, up_axis};
+use super::{forward_axis, right_axis, up_axis};
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
 
-/// Uncalibrated placeholder air-control torque magnitude for *pitch*
-/// specifically (about the car's local right axis) at full analog input —
-/// chosen only so a full-stick pitch is visibly responsive for this car's
-/// mass/inertia in tests, not derived from any measured or documented
-/// Rocket League value. Since `RB-PHYSICS-001-FR-068`, yaw and roll no
-/// longer share this same magnitude: they're scaled from it by
-/// `AIR_CONTROL_YAW_SCALE`/`AIR_CONTROL_ROLL_SCALE`, RocketSim's own
-/// confirmed real per-axis ratios — see that constant's own doc comment
-/// for the full finding. Real Rocket League's pitch/yaw/roll rates still
-/// differ in absolute magnitude too, not just this ratio, from this port's
-/// own uncalibrated pitch baseline; only the *ratio* between axes is
-/// adopted here.
-pub(super) const AIR_CONTROL_TORQUE: f32 = 1_000_000.0;
+/// Air-control torque per unit stick for pitch, yaw and roll: RocketSim's
+/// `CAR_AIR_CONTROL_TORQUE = (130, 95, 400)`.
+pub(super) const AIR_CONTROL_TORQUE: Vec3 = Vec3::new(130.0, 95.0, 400.0);
 
-/// Confirmed real ratio: yaw's real air-control torque is this fraction of
-/// pitch's. `RB-PHYSICS-001-FR-068` fetched RocketSim's real `Car.cpp`
-/// (`_UpdateAirTorque`) and found real Rocket League's air control is the
-/// same *kind* of mechanism this port already models — a torque about each
-/// local axis, scaled directly by analog stick input, not a wheel/tire
-/// model like steering (`RB-PHYSICS-001-FR-065`) or a friction split like
-/// handbrake (`FR-066`) turned out to need — computed as
-/// `pitch * dirPitch_right * CAR_AIR_CONTROL_TORQUE.x + yaw * dirYaw_up *
-/// CAR_AIR_CONTROL_TORQUE.y + roll * dirRoll_forward *
-/// CAR_AIR_CONTROL_TORQUE.z`. RocketSim's own `RLConst.h` confirms
-/// `CAR_AIR_CONTROL_TORQUE = Vec(130, 95, 400)` ("Angle order is PYR"),
-/// giving `95.0 / 130.0` for yaw relative to pitch. Because the real
-/// mechanism matches this port's own structurally (a direct per-axis
-/// torque, not a value requiring a transfer function this port's
-/// architecture can't represent), this per-axis *ratio* is adoptable the
-/// same way `RB-PHYSICS-001-FR-058`'s throttle taper and `FR-059`'s dodge
-/// scale are — a direct multiplier on a torque this port already applies
-/// the same way real Rocket League does, transferring cleanly regardless
-/// of this port's own uncalibrated `AIR_CONTROL_TORQUE` magnitude (unlike
-/// the real curve's own *absolute* torque values, which `RB-PHYSICS-001-FR-031`'s
-/// "false precision" finding already ruled out for this port's
-/// differently-calibrated car body).
-pub(super) const AIR_CONTROL_YAW_SCALE: f32 = 95.0 / 130.0;
+/// Air-control damping per unit angular velocity for pitch, yaw and roll:
+/// RocketSim's `CAR_AIR_CONTROL_DAMPING = (30, 20, 50)`. Pitch and yaw
+/// damping fade out as their stick is held; roll damping always applies.
+pub(super) const AIR_CONTROL_DAMPING: Vec3 = Vec3::new(30.0, 20.0, 50.0);
 
-/// Confirmed real ratio: roll's real air-control torque is this multiple of
-/// pitch's — see `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full
-/// finding and reasoning. Same source: `CAR_AIR_CONTROL_TORQUE.z /
-/// CAR_AIR_CONTROL_TORQUE.x` = `400.0 / 130.0`.
-///
-/// `RB-PHYSICS-001-FR-071` closes a thread `RB-PHYSICS-001-FR-068`'s own
-/// Non-goals left open — RocketSim's `CAR_AIR_CONTROL_DAMPING = Vec(30, 20,
-/// 50)`, which that requirement's own fetch of `_UpdateAirTorque` found but
-/// didn't examine. The full mechanism: for each axis, real air control
-/// subtracts a damping torque `(angular velocity along that axis) *
-/// CAR_AIR_CONTROL_DAMPING[axis] * (1 - abs(analog input on that axis))`
-/// from the applied torque *before* scaling by inertia — pitch's own input
-/// term additionally multiplies by `pitchTorqueScale`
-/// (`RB-PHYSICS-001-FR-070`). Releasing the stick on an axis (input `0`)
-/// gives full damping strength on that axis, continuously bleeding off any
-/// existing spin; holding it fully (input `±1`) zeroes the damping,
-/// granting full torque authority with no resistance. Not adopted: unlike
-/// the pitch/yaw/roll *ratio* above, this port has no existing damping
-/// quantity to apply a ratio to — this is a wholly new torque contribution,
-/// not a multiplier on one this port already computes the same way, so it
-/// doesn't transfer the way `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-068`'s own
-/// ratios did. Its real absolute coefficients are also calibrated against
-/// real Rocket League's own specific inertia tensor, the same "false
-/// precision" reasoning that already keeps `AIR_CONTROL_TORQUE` itself a
-/// placeholder. Introducing this mechanism for real remains a candidate for
-/// a future, dedicated requirement, exactly as `FR-068`'s own Non-goals
-/// already flagged.
-pub(super) const AIR_CONTROL_ROLL_SCALE: f32 = 400.0 / 130.0;
+/// Scale from air-control torque units to angular acceleration (rad/s^2):
+/// RocketSim's `CAR_TORQUE_SCALE = 2 * pi / 2^16 * 1000`. RocketSim applies
+/// `(torque - damping) * CAR_TORQUE_SCALE` through the car's own inertia, so
+/// the result is an angular acceleration independent of the car's mass
+/// distribution.
+pub(super) const CAR_TORQUE_SCALE: f32 = 2.0 * std::f32::consts::PI / 65_536.0 * 1000.0;
 
-/// Uncalibrated placeholder landing-auto-orientation restoring-torque
-/// magnitude — applied while airborne with no active `pitch`/`roll` air
-/// control input, scaled by `up_axis(car).cross(&world_up)` (already
-/// proportional to the sine of the car's tilt off level, since both
-/// vectors are unit length, so a bigger tilt earns a stronger nudge and an
-/// already-level car earns none). Chosen only to be a visibly gentler
-/// correction than full active air control (`AIR_CONTROL_TORQUE`) for this
-/// car's mass/inertia in tests — a full order of magnitude smaller — not
-/// derived from any measured or documented Rocket League value; this port
-/// has no public reference for the real assist's actual strength or
-/// trigger condition either (see the module doc comment).
-pub(super) const LANDING_AUTO_UPRIGHT_TORQUE: f32 = 100_000.0;
+/// Forward acceleration (uu/s^2) from throttle while airborne: RocketSim's
+/// `THROTTLE_AIR_ACCEL = 200 / 3`.
+pub(super) const THROTTLE_AIR_ACCELERATION: f32 = 200.0 / 3.0;
 
-/// Pitch/yaw/roll air-control torque about the car's local right/up/forward
-/// axes, followed by the landing auto-orientation assist when no pitch/roll
-/// is held and `jump_pressed` is false.
+/// Air control and air throttle for one airborne tick. `pitch_scale` is the
+/// flip's pitch lock (`0` while locked, see `jump::apply_flip_torque`).
+/// Axes and signs are RocketSim's: pitch about -right (positive raises the
+/// nose), yaw about up, roll about -forward (`RB-PHYSICS-001-FR-082`).
+/// Damping acts even with the stick centered, so a free-spinning car slows
+/// its rotation in the air, as in Rocket League.
 pub(super) fn apply_air_control(
     car: &mut RigidBody,
     input: &ControllerInput,
-    forward: Vec3,
-    jump_pressed: bool,
     pitch_scale: f32,
+    dt: f32,
 ) {
-    // Unlike ground steering, not scaled by speed — a car can spin from a
-    // standing start in the air, since there's no wheel grip to require
-    // momentum for.
-    let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
-    if pitch != 0.0 {
-        // RocketSim's `dirPitch_right = -GetRightDir()`: positive pitch
-        // raises the nose (RB-PHYSICS-001-FR-082). `pitch_scale` is zero
-        // while a flip locks pitch (RB-PHYSICS-001-FR-083).
-        car.apply_torque(right_axis(car) * (-pitch * pitch_scale * AIR_CONTROL_TORQUE));
-    }
-
+    let pitch_axis = -right_axis(car);
+    let yaw_axis = up_axis(car);
+    let roll_axis = -forward_axis(car);
+    let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0) * pitch_scale;
     let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
-    if yaw != 0.0 {
-        car.apply_torque(up_axis(car) * (yaw * AIR_CONTROL_TORQUE * AIR_CONTROL_YAW_SCALE));
-    }
-
     let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
-    if roll != 0.0 {
-        // RocketSim's `dirRoll_forward = -GetForwardDir()`.
-        car.apply_torque(forward * (-roll * AIR_CONTROL_TORQUE * AIR_CONTROL_ROLL_SCALE));
-    }
 
-    // Landing auto-orientation assistance: with no active pitch/roll
-    // air control this step (so the assist never fights the player's
-    // own input) and no fresh jump press this step (so it never
-    // interacts, within the same integrate_velocities call, with a
-    // dodge/wall-jump-dodge/double-jump/flip-cancel's own direct
-    // velocity or angular-velocity change — those already dominate the
-    // car's rotation for that instant anyway), gently nudge the car's
-    // local up axis toward world up. `up.cross(&world_up)` gives both
-    // the correction axis and, since both are unit vectors, a
-    // magnitude already proportional to the sine of the tilt angle —
-    // a level car (or one resting exactly upside-down, an unlikely
-    // singularity this simple scheme doesn't resolve) gets no
-    // correction, a heavily tilted one gets a stronger nudge. See the
-    // parent module doc comment for why this applies continuously
-    // whenever airborne rather than only near the ground.
-    if pitch == 0.0 && roll == 0.0 && !jump_pressed {
-        let world_up = Vec3::new(0.0, 0.0, 1.0);
-        let correction_axis = up_axis(car).cross(&world_up);
-        if correction_axis.length() > 0.0 {
-            car.apply_torque(correction_axis * LANDING_AUTO_UPRIGHT_TORQUE);
-        }
+    let torque = pitch_axis * (pitch * AIR_CONTROL_TORQUE.x)
+        + yaw_axis * (yaw * AIR_CONTROL_TORQUE.y)
+        + roll_axis * (roll * AIR_CONTROL_TORQUE.z);
+    let spin = car.angular_velocity;
+    let damping = pitch_axis
+        * (pitch_axis.dot(&spin) * AIR_CONTROL_DAMPING.x * (1.0 - pitch.abs()))
+        + yaw_axis * (yaw_axis.dot(&spin) * AIR_CONTROL_DAMPING.y * (1.0 - yaw.abs()))
+        + roll_axis * (roll_axis.dot(&spin) * AIR_CONTROL_DAMPING.z);
+    car.angular_velocity += (torque - damping) * (CAR_TORQUE_SCALE * dt);
+}
+
+/// RocketSim's air throttle: a small forward push from throttle while
+/// airborne, whether or not air control is allowed.
+pub(super) fn apply_air_throttle(car: &mut RigidBody, throttle: f32, forward: Vec3) {
+    if throttle != 0.0 {
+        car.apply_central_force(forward * (throttle * THROTTLE_AIR_ACCELERATION * car.mass()));
     }
 }
