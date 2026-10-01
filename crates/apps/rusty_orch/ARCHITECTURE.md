@@ -10,17 +10,18 @@ Ports-and-adapters. `orch-core` holds all invariants and does no I/O; everything
 
 | Port | Adapter(s) | Notes |
 | ---- | ---------- | ----- |
-| Agent runner | `orch-dispatch::AgentRunner`; `FakeAgent` today, `claude -p`, `codex exec`, `gemini -p`, Ollama HTTP planned | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
+| Agent runner | `orch-dispatch::AgentRunner`; `orch-ollama::OllamaAgent` (`ollama run --format json`, prompt on stdin) and `FakeAgent` today; `claude -p`, `codex exec`, `gemini -p` planned | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
 | Board store | remind-me MCP (`board:<project>`) or SQLite | Planned. Persists `Board`/`Plan`; the domain assigns ids. |
 | Goal intake | CLI / JSON → `GoalDraft` | Planned. Parsing and serde live here, not in the core. |
 | Call meter | `orch-dispatch::Ledger` | Caller-owned; counts calls against `Budget::max_calls` and each card's `TaskSpec::max_calls`, checked before every call. Wall-clock is still planned (needs a clock adapter). |
+| Process | `orch-ollama::CommandRunner` | Fixed argv, stdin bytes, deadline. `StdCommand` is real; tests use a fake. Own seam because `contract::ProcessRunner` lacks stdin and timeout ([ADR-0004](./docs/adr/0004-ollama-output-protocol.md)). |
 
 ## Structure
 Modular monolith inside the `rusty_mill` workspace. `orch-dispatch` is the application layer over `orch-core` and depends on nothing else ([ADR-0003](./docs/adr/0003-dispatcher-reuse-boundary.md)). It runs ready cards one at a time in `TaskId` order; parallel fan-out is the trigger for an async dispatcher later. `orch-core` is one crate with three aggregates that share `Text`, `Ref`, and the id types:
 
 - `goal` — `GoalDraft` → `Goal` via `TryFrom`; rejects drafts missing DONE WHEN, out-of-scope, or budget, reporting every problem at once.
 - `task` — `TaskSpec`, `Task`, and `Plan`, the only mutation point for task state. Dependencies must pre-exist (acyclic by construction); review targets are implicit prerequisites; no agent reviews its own output; completion must return ≥1 board entry.
-- `board` — append-only `Board`. Changes are same-kind supersessions (linear, no forks); entry refs, answers, and artifacts are validated on append; `live()` and `open_questions()` are what agents read.
+- `board` — append-only `Board`. Changes are same-kind supersessions (linear, no forks); entry refs, answers, and artifacts are validated on append; `live()` and `open_questions()` are what agents read. Agents never settle decisions alone: an agent-authored `Decision`, new or superseding, must reference a live approving `Review`, else `DecisionNeedsApproval` ([ADR-0005](./docs/adr/0005-agents-never-settle-decisions-alone.md)).
 
 ## Data flow
 1. Goal intake parses input into `GoalDraft`; `Goal::try_from` validates it.
