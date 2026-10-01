@@ -299,9 +299,9 @@ pub mod process;
 #[cfg(windows)]
 pub use process::{
     MAXIMUM_WAIT_OBJECTS, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, ProcessEntry,
-    ProcessTimes, SYNCHRONIZE, SpawnedProcess, current_pid, environment_block,
-    environment_snapshot, list_processes, open_by_pid, resume, spawn_suspended, terminate, times,
-    wait, wait_any,
+    ProcessMemory, ProcessTimes, SYNCHRONIZE, SpawnedProcess, current_pid, environment_block,
+    environment_snapshot, list_processes, memory, open_by_pid, resume, spawn_suspended, terminate,
+    times, wait, wait_any,
 };
 
 // `job`'s six-item surface (`create`/`assign`/`set_kill_on_close`/

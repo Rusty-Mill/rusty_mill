@@ -13852,6 +13852,15 @@ name = "rusty_base64"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_baseline"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_libc",
+ "rusty_win32",
+]
+
+[[package]]
 name = "rusty_boot"
 version = "0.1.0"
 dependencies = [
