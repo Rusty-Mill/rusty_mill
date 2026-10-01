@@ -527,7 +527,12 @@ pub fn apply_driven_forces(
         // tick itself: the owner's capture shows the real game's spin jump
         // by one tick of flip torque on that tick (RB-PHYSICS-001-FR-085),
         // one tick earlier than RocketSim's order. Then flip torque and air
-        // control, then the flip clock and damping.
+        // control, then the flip clock and damping. The press tick's torque
+        // is extra: the clock starts on the tick after it, as RocketSim's
+        // does, so the torque, damping and pitch lock end on RocketSim's
+        // ticks (RB-PHYSICS-001-FR-094: the capture's 4.317 s flip torque
+        // lasts 79 ticks, one past the press-tick clock's 78).
+        let flip_before_press = state.flip;
         if jump_pressed {
             jump::airborne_jump_press(
                 car,
@@ -541,7 +546,9 @@ pub fn apply_driven_forces(
         let pitch_scale = jump::apply_flip_torque(car, input, state.flip);
         air::apply_air_control(car, input, pitch_scale, dt);
         air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
-        jump::advance_flip(car, &mut state.flip, dt);
+        if state.flip == flip_before_press {
+            jump::advance_flip(car, &mut state.flip, dt);
+        }
     }
 
     boost::apply_boost(

@@ -289,6 +289,18 @@ pub(super) const FLIP_Z_DAMP_END: f32 = 0.21;
 /// tick at this rate and scaled to other step sizes.
 const TICK_120: f32 = 1.0 / 120.0;
 
+/// Tolerance (s) when comparing the flip clock with its limits, far below a
+/// tick: summed step times land a hair either side of a limit (78 ticks of
+/// `1/120` sum to `0.6499999`, a capture's recorded steps slightly over), so
+/// a clock reaching a limit within it counts as reaching it
+/// (`RB-PHYSICS-001-FR-094`).
+const FLIP_CLOCK_TOLERANCE: f32 = 1e-4;
+
+/// Whether the flip clock `time` is still before `limit`.
+fn before(time: f32, limit: f32) -> bool {
+    time < limit - FLIP_CLOCK_TOLERANCE
+}
+
 /// A dodge's flip since it was pressed, until landing: RocketSim's
 /// `flipTime` and `flipRelTorque` (`RB-PHYSICS-001-FR-083`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -304,7 +316,7 @@ pub struct FlipState {
 impl FlipState {
     /// Whether the flip torque still acts.
     pub fn is_flipping(&self) -> bool {
-        self.time < FLIP_TORQUE_TIME
+        before(self.time, FLIP_TORQUE_TIME)
     }
 }
 
@@ -331,7 +343,7 @@ pub(super) fn apply_flip_torque(
         return 1.0;
     };
     if !flip.is_flipping() {
-        let locked = flip.time < FLIP_TORQUE_TIME + FLIP_PITCHLOCK_EXTRA_TIME;
+        let locked = before(flip.time, FLIP_TORQUE_TIME + FLIP_PITCHLOCK_EXTRA_TIME);
         return if locked { 0.0 } else { 1.0 };
     }
     let (mut forward_part, side_part) = flip.direction;
@@ -359,10 +371,11 @@ pub(super) fn advance_flip(car: &mut RigidBody, flip: &mut Option<FlipState>, dt
     };
     let was_flipping = flip.is_flipping();
     flip.time += dt;
-    if !was_flipping || flip.time > FLIP_TORQUE_TIME || flip.time < FLIP_Z_DAMP_START {
+    let past_torque = flip.time > FLIP_TORQUE_TIME + FLIP_CLOCK_TOLERANCE;
+    if !was_flipping || past_torque || before(flip.time, FLIP_Z_DAMP_START) {
         return;
     }
-    if car.linear_velocity.z < 0.0 || flip.time < FLIP_Z_DAMP_END {
+    if car.linear_velocity.z < 0.0 || before(flip.time, FLIP_Z_DAMP_END) {
         car.linear_velocity.z *= (1.0 - FLIP_Z_DAMP_120).powf(dt / TICK_120);
     }
 }

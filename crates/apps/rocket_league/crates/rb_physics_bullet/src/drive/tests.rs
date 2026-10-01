@@ -2697,10 +2697,12 @@ fn a_dodge_starts_a_flip_and_landing_clears_it() {
         ..Default::default()
     };
     apply_driven_forces(&mut c, &dodge, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+    // The press tick's torque is extra; the clock starts on the next tick
+    // (RB-PHYSICS-001-FR-094).
     assert_eq!(
         state.flip,
         Some(FlipState {
-            time: TICK,
+            time: 0.0,
             direction: (1.0, 0.0),
         }),
         "a dodge starts a flip"
@@ -3113,4 +3115,36 @@ fn air_control_shapes_a_diagonal_flip_as_the_real_capture_does() {
         (roll - 4.10).abs() < 0.1 && (pitch - 3.66).abs() < 0.1,
         "released: {roll}, {pitch}"
     );
+}
+
+#[test]
+fn a_flips_torque_lasts_the_press_tick_plus_rocketsims_78_ticks() {
+    // RB-PHYSICS-001-FR-094: the owner's capture's 4.317 s flip torque acts
+    // for 79 ticks at 120 Hz: the press tick (FR-085) and RocketSim's 78.
+    let mut c = car();
+    let mut state = DriveState::new();
+    let dodge = ControllerInput {
+        jump: true,
+        pitch: Some(-1.0),
+        ..Default::default()
+    };
+    let dt = 1.0 / 120.0;
+    apply_driven_forces(&mut c, &dodge, &NO_WHEEL_CONTACTS, None, &mut state, dt);
+    let mut torque_ticks = 1;
+    for _ in 0..200 {
+        let flipping = state.flip.is_some_and(|flip| flip.is_flipping());
+        if !flipping {
+            break;
+        }
+        torque_ticks += 1;
+        apply_driven_forces(
+            &mut c,
+            &ControllerInput::default(),
+            &NO_WHEEL_CONTACTS,
+            None,
+            &mut state,
+            dt,
+        );
+    }
+    assert_eq!(torque_ticks, 79);
 }

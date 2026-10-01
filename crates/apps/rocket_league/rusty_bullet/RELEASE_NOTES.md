@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Flips end on the right tick
+**2026-10-01** · `RB-PHYSICS-001-FR-094`
+
+- The flip clock now starts on the tick after the dodge press, so the
+  press tick's torque is extra and the flip's torque, damping and pitch
+  lock end on RocketSim's ticks: 79 torque ticks, as in the owner's
+  capture (the port's ended one early). 438 tests.
+
 ## Air control works through a flip
 **2026-10-01** · `RB-PHYSICS-001-FR-093` · ADR-0015 amendment
 
