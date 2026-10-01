@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.90.0
+- Version: 0.91.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5422,6 +5422,28 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     0.48 rad / 35 uu/s (was 30 / 0.55 / 95), 5-6 s 157 uu (was 219).
     Steady yaw rate is ~5% low (2.28 vs 2.40 rad/s).
 
+- `RB-PHYSICS-001-FR-087` (car spin clamped after the transform
+  integrates, implemented, verified): the 4.6-5.6 s trace showed the real
+  divergence there is orientation (~1.3 rad by 4.95 s, so boost from 4.94 s
+  pushes the candidate partly upward). Through the flip, spin error was
+  only ~0.27 rad/s while orientation error grew ~2 rad/s. `--self-trace`'s
+  `q-rate` (`RB-VERIFY-003` 0.13.0) explained it:
+  - the recorded car turns at ~7.6 rad/s (0.78, 7.55, 0.15) while reporting
+    the 5.5 rad/s cap (0.56, 5.47, 0.11), about the same axis;
+  - before the flip the two match exactly;
+  - 7.6 is the cap plus one tick of flip torque (2.02 rad/s), so the game
+    moves the orientation with the unclamped spin and clamps afterwards;
+  - RocketSim does the same: it clamps in `Car::_PostTickUpdate`, after
+    Bullet's step.
+
+  `PhysicsWorld::step` now calls `drive::clamp_angular_speed` after each
+  car's transform integrates, instead of right after its velocities
+  integrate (FR-057's placement).
+  - **Verification**: new `world` test
+    `a_flipping_cars_orientation_turns_faster_than_its_clamped_spin`. A
+    saturated flip turns more than 1 rad/s faster than its 5.5 rad/s
+    reported spin; the old ordering turns exactly 5.5.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6903,6 +6925,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.91.0 (2026-10-01): `RB-PHYSICS-001-FR-087` — car angular speed clamped
+  after the transform integrates, per RocketSim and the real capture. 354
+  tests in `rb_physics_bullet`.
 - 0.90.0 (2026-10-01): `RB-PHYSICS-001-FR-086` — steering by per-wheel side
   impulses at the contact points (ADR-0016, supersedes ADR-0011). 353
   tests in `rb_physics_bullet`.

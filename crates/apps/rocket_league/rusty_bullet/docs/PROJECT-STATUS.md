@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#178](https://github.com/baileyrd/rusty_bullet/pull/178) —
+  `RB-PHYSICS-001-FR-086`, steering by per-wheel side impulses (ADR-0016).
 - [#177](https://github.com/baileyrd/rusty_bullet/pull/177) — spin in
   `--self-trace` (`RB-VERIFY-003` 0.12.0) and `RB-PHYSICS-001-FR-085`,
   flip torque on the press tick.
@@ -72,9 +74,9 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-086`, steering by per-wheel side impulses
-  (ADR-0016): verified on the real capture (orientation error at the
-  4.317 s dodge 0.22 to 0.04 rad); in review.
+- `RB-PHYSICS-001-FR-087` (car spin clamped after the transform) and
+  `RB-VERIFY-003` 0.13.0 (`q-rate`): implemented; awaiting the owner's
+  re-trace.
 
 ## Blocked
 
@@ -101,14 +103,10 @@ version: `a245d35`).
 
 ## Next
 
-1. Trace 4.3-4.7 s with `q-rate` (`RB-VERIFY-003` 0.13.0). The 4.6-5.6 s
-   trace showed the divergence is orientation: by 4.95 s orientation
-   error is ~1.3 rad, so boost from 4.94 s pushes the candidate partly
-   upward (it holds z ~97 while the recorded car falls to z 33). But
-   through the flip the spin error is only ~0.27 rad/s while orientation
-   error grows ~2 rad/s, which two bodies spinning at the same rate about
-   ~3 deg apart cannot produce. `q-rate` tests whether the recorded
-   orientations agree with the recorded angular velocity. Smaller leftovers:
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.6` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-087`: the simulated
+   `q-rate` during the flip should reach ~7.5 rad/s like the recording, and
+   orientation error through 4.3-4.95 s should stay small. Smaller leftovers:
    steady yaw rate ~5% low (2.28 vs 2.40 rad/s near 4.0 s), and a ~3 deg
    flip-axis offset (orientation error 0.04 to 0.58 rad over 4.32-4.6 s). Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
@@ -124,9 +122,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (417 tests: 27 `rb_domain`, 353
+- `cargo test --workspace`: pass (419 tests: 27 `rb_domain`, 354
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`

@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Flips turn as fast as the real ones
+**2026-10-01** · `RB-PHYSICS-001-FR-087` · `RB-VERIFY-003` 0.13.0
+
+- `--self-trace` now shows the spin each car's orientation change implies
+  (`q-rate`). The recorded flip turns at ~7.6 rad/s while reporting the
+  5.5 rad/s cap: the game clamps spin after moving the car. The port
+  clamped before, so its flips lagged ~2 rad/s, the orientation error that
+  made boost push the wrong way at 4.94 s. Now clamped after, as in
+  RocketSim. 419 tests.
+
 ## Steering through the wheels
 **2026-10-01** · `RB-PHYSICS-001-FR-086` · ADR-0016
 
