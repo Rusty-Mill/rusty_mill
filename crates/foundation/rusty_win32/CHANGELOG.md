@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `process::memory` (`K32GetProcessMemoryInfo`) returning `ProcessMemory`
+  (current and peak working set). The peak stays readable after the process
+  exits, while its handle is open, which is how `rusty_baseline` gets a
+  Windows analog of `wait4`'s `ru_maxrss`.
 - `net::peer_addr_unix` — `getpeername` for `AF_UNIX` sockets, the peer
   counterpart to `net::local_addr_unix` (which had no peer half despite
   the IP side having both `local_addr`/`peer_addr`). Closes #271, filed
