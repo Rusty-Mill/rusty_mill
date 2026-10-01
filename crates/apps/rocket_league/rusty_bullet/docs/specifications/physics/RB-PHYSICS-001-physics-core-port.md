@@ -5443,6 +5443,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `a_flipping_cars_orientation_turns_faster_than_its_clamped_spin`. A
     saturated flip turns more than 1 rad/s faster than its 5.5 rad/s
     reported spin; the old ordering turns exactly 5.5.
+  - **Real capture** (`--self-trace test2.jsonl 4.3 5.6`): flip `q-rate`
+    7.49 rad/s simulated vs 7.55 recorded; orientation error <= 0.15 rad
+    through 5.6 s (was ~1.3 by 4.95 s); `--self-growth` 5-6 s 64 uu
+    (was 157), ball 30 uu (was 82).
 
 ## Architecture and interfaces
 

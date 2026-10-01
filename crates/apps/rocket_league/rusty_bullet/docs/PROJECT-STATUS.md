@@ -74,9 +74,7 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-087` (car spin clamped after the transform) and
-  `RB-VERIFY-003` 0.13.0 (`q-rate`): implemented; awaiting the owner's
-  re-trace.
+- None.
 
 ## Blocked
 
@@ -103,17 +101,16 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.6` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-087`: the simulated
-   `q-rate` during the flip should reach ~7.5 rad/s like the recording, and
-   orientation error through 4.3-4.95 s should stay small. Smaller leftovers:
-   steady yaw rate ~5% low (2.28 vs 2.40 rad/s near 4.0 s), and a ~3 deg
-   flip-axis offset (orientation error 0.04 to 0.58 rad over 4.32-4.6 s). Known small
-   gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
-   velocity keeps turning (wheels likely still touch via suspension).
-   Later: the real hitbox sits
-   20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu above the
-   floor at rest, while the port's box rests on the floor.
+1. Trace `rb-verify --self-trace <test2.jsonl> 5.5 6.5`: the 6-7 s
+   `--self-growth` window now dominates (442 uu / 1.70 rad / 923 uu/s,
+   ball 470 uu). Leads from the 4.3-5.6 s trace: after boost starts
+   (4.94 s) the recorded car falls faster (vz -311 vs -248 uu/s at
+   5.567 s) and velocity error grows 35 to 88 uu/s; at 5.575 s the
+   recorded spin jumps from (-0.17, 0.88, 0.71) to (1.10, 0.16, 0.10),
+   a contact near z 33-41 the candidate (z 46.7) does not have. Smaller
+   leftovers: steady yaw rate ~5% low; the real hitbox sits 20.755 uu
+   above the car origin (`hitboxPosOffset`) while the port's box rests on
+   the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -133,6 +130,13 @@ version: `a245d35`).
   car pairs compared: 6, mean car position/rotation/velocity distance:
   2816.42 uu / 2.36 rad / 1307.87 uu/s` against the real replay fixture +
   (now time-aligned) synthetic capture fixture.
+- `rb-verify --self-trace test2.jsonl 4.3 5.6` and `--self-growth`
+  (owner's machine, 2026-10-01, after `RB-PHYSICS-001-FR-087`): flip
+  `q-rate` simulated (0.59, 7.49, 0.32) vs recorded (0.78, 7.55, 0.15);
+  orientation error <= 0.15 rad through 5.6 s (was ~1.3 rad by 4.95 s);
+  growth 4-5 s 15.7 uu / 0.07 rad / 35 uu/s, 5-6 s 64 uu / 0.24 rad /
+  212 uu/s (was 157 uu), ball 30 uu / 191 uu/s (was 82 / 660), 6-7 s
+  442 uu / 1.70 rad / 923 uu/s.
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames
