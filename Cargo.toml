@@ -145,6 +145,7 @@ members = [
     "crates/apps/rusty_skillopt/crates/skillopt-model",
     "crates/apps/rusty_skillopt/crates/skillopt-envs",
     "crates/apps/rusty_skillopt/crates/skillopt-cli",
+    "crates/apps/rusty_orch/crates/orch-core",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
     "crates/apps/rusty_key/crates/constrain",
@@ -491,6 +492,11 @@ rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 skillopt-core = { path = "crates/apps/rusty_skillopt/crates/skillopt-core" }
 skillopt-model = { path = "crates/apps/rusty_skillopt/crates/skillopt-model" }
 skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
+
+# rusty_orch was a single-crate workspace with no `[workspace.package]` or
+# dependencies; orch-core keeps its literal `[package]` fields ("MIT",
+# rust-version 1.75) -- rusty_db treatment.
+orch-core = { path = "crates/apps/rusty_orch/crates/orch-core" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [
