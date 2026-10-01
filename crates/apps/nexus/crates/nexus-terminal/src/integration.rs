@@ -148,10 +148,7 @@ mod tests {
         );
         // No emitter for plain sh or the bundled rush.
         assert_eq!(IntegrationShell::detect(&PathBuf::from("/bin/sh")), None);
-        assert_eq!(
-            IntegrationShell::detect(&PathBuf::from("/opt/rush")),
-            None
-        );
+        assert_eq!(IntegrationShell::detect(&PathBuf::from("/opt/rush")), None);
     }
 
     #[test]
