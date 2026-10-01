@@ -5,6 +5,14 @@ instead, reverse chronological, each linking to its PR.
 
 ---
 
+## Design review 3.6: webhook SSRF protection without gaps
+
+- **Security:** with `with_webhook_ssrf_protection` enabled, two gaps are closed:
+  - IPv6 unique-local and other non-global addresses are rejected.
+  - Webhook deliveries no longer follow redirects to hosts that were never checked.
+
+---
+
 ## PR #30 — Fix stale doc comments describing the crate as JSON-RPC-only
 **2026-08-08** · [#30](https://github.com/baileyrd/rusty_a2a/pull/30)
 

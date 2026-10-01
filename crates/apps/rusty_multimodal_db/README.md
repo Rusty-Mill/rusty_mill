@@ -4,18 +4,30 @@ A durable, concurrency-safe key-value record store for Rust: mmap-backed
 persistence and a `RwLock` for safe multi-threaded access, either as a
 fixed `Dog`-shaped store (`ProductionStore`) or generically, for your own
 record type (`GenericProductionStore`). Internal use only — not published
-to crates.io.
+to crates.io (`publish = false`).
+
+This crate lives in the `rusty_mill` monorepo at
+`crates/apps/rusty_multimodal_db`. Its generic storage core (the record,
+schema and query layers, the mmap slot files and blobs, the redo journal,
+the full-text index, and the data-directory lock) was extracted into a
+libs crate, `crates/libs/storage/rusty_multimodal_db_engine`
+(`ADR-0124`), so another product can embed the store without this app
+crate; this crate re-exports all of it under the original
+`rusty_multimodal_db::generic::*` paths. The server, the domain adapters
+(`Memory`, `Entity`, `Relation`, `Reminder`, and the reference domains),
+the clients and the benchmark harness stay here.
 
 ## Getting started
 
-This repo isn't on crates.io, so depend on it by git (or by local path if
-you already have it checked out):
+This crate isn't on crates.io. From another crate in the workspace, depend
+on it by path; to embed only the generic store, depend on the engine crate
+instead:
 
 ```toml
 [dependencies]
-rusty_multimodal_db = { git = "https://github.com/baileyrd/rusty_multimodal_db" }
-# or, from a local checkout:
-# rusty_multimodal_db = { path = "../rusty_multimodal_db" }
+rusty_multimodal_db = { path = "../rusty_multimodal_db" }
+# or, only the embedded store (no server, no Dog/Reminder/Entity/Memory adapters):
+# rusty_multimodal_db_engine = { workspace = true }
 ```
 
 A complete, minimal example — create a store, read a record, update it:
@@ -54,7 +66,7 @@ trait (plus `IndexedField`/`ScannableField` for whichever fields need
 equality lookup or scan/update access). See
 [`GenericProductionStore`'s own rustdoc](#rustdoc) for a complete, minimal
 worked example implementing a custom domain from scratch, and
-`src/generic/order_customer.rs` (behind the `research` feature, see below)
+`crates/libs/storage/rusty_multimodal_db_engine/src/generic/order_customer.rs` (behind the `research` feature, see below)
 for a larger real reference domain with a directed relation
 (`Order belongs_to Customer`).
 
@@ -87,7 +99,7 @@ justified each pick.
 
 `server::serve` puts a thin, real TCP listener in front of
 `ProductionStore`/`GenericProductionStore` — a versioned
-`Request`/`Response` wire protocol (currently version 30) over
+`Request`/`Response` wire protocol (currently version 35) over
 length-prefixed `bincode` framing, thread-per-connection, reusing whichever
 `RwLock` the wrapped store already manages (no new lock at this layer).
 Off by default, distinct from `research` (this is new, additive
@@ -142,14 +154,26 @@ with group commit; a protocol version negotiated by an optional first
 replacement**, **deletion** with cascading edge cleanup, **more than one
 table on one connection** (`Use`, `ListTables`, cross-table `JOIN`), and
 an operator's **compaction** request. Every runtime write is append-only
-to a log beside the file and folded at the next open or compaction.
+to a log beside the file and folded at the next open or compaction. Later
+rounds added, each with its own ADR: ordered keyset pages (`Page`,
+`FilteredPage`, and their `DESC` forms), an atomic `WriteBatch`, Prometheus
+metrics (`Metrics`, and a `GET /metrics` listener), a server-side `Backup`
+and a replication `FetchSnapshot`, real MVCC for `Memory`/`Entity`/`Relation`,
+a query planner over the declared equality and range indexes (`ADR-0073`
+onward; `ADR-0132` records why it keeps exact counts and no statistics),
+nullable columns as a wire view over sentinels (`ADR-0128`), sessions that
+stage record writes (`ADR-0130`) and commit strictly, all or nothing
+(`ADR-0133`), and a per-table change log a standby tails (`FetchSince`,
+`ADR-0131`; `examples/replica_refresh.rs --follow`, with a documented
+manual promotion).
 
-Six domain adapters validate the protocol. Three are front-door, built as
+Seven domain adapters validate the protocol. Four are front-door, built as
 a real backend for the owner's `rusty_remind_me` memory service:
 `Reminder` (a fixed-schema record), `Entity` (a labeled graph with
-name lookup, aliases, and relation labels created at runtime), and
+name lookup, aliases, and relation labels created at runtime),
 `Memory` (the consumer's `memories` table, with a `mentions` relation
-whose far end lives in the `entity` table). Three are reference material:
+whose far end lives in the `entity` table), and `Relation` (the hub's
+directed, open-label edges as a record table, `ADR-0058`). Three are reference material:
 `Dog` (`Neighbors` only), `Order`/`Customer` (`Parent`/`Children` only),
 and `Employee` (both relation kinds on one self-referential record).
 
@@ -157,7 +181,7 @@ and `Employee` (both relation kinds on one self-referential record).
 `rusty_tls` (`ADR-0014`), mutual TLS with class-from-certificate, rate
 limiting and lockout, and audit and access logs are all implemented and
 all opt-in through one `ServeOptions` value (`ADR-0032`), as are the
-idle timeout and connection cap (`ADR-0093`), and row cap (`ADR-0102`);
+idle timeout and connection cap (`ADR-0093`), row cap (`ADR-0102`), scan budget (`ADR-0126`), and graceful drain (`ADR-0127`);
 `ServeOptions::default()` reproduces the original unauthenticated,
 plaintext behavior exactly. **Do not expose a server built from this
 module beyond a trusted, localhost/development network unless both
@@ -255,6 +279,16 @@ at the right file:
     group commit, read-your-writes, class-from-certificate, audit and
     access logs, rate limiting, stage-time validation, snapshot
     isolation, `ServeOptions`, and the SQL `SELECT`/`GROUP BY` subset
+  - `ADR-0053`–`ADR-0133` — everything after: the durable data directory,
+    guarded replace, ordered pages, `WriteBatch` and its crash atomicity,
+    metrics, backup, restore and replication, real MVCC, the query
+    planner steps, connection limits and exposure guards, the crash-safety
+    and power-loss trials, the review-fix rounds, the engine extraction
+    (`ADR-0124`), and the latest growth line: scan budget (`ADR-0126`),
+    graceful drain (`ADR-0127`), nullable columns (`ADR-0128`), equality
+    intersection (`ADR-0129`), sessions over record writes (`ADR-0130`),
+    continuous replication (`ADR-0131`), the planner cost-model decision
+    (`ADR-0132`), and strict commit (`ADR-0133`)
   - `ADR-0036`–`ADR-0052` — the `rusty_remind_me` line: the `Reminder`,
     `Entity`, and `Memory` domains; aliases and name lookup; the wire
     specification and Python client (`ADR-0043`); relation `JOIN`
@@ -264,6 +298,8 @@ at the right file:
     every one proposed and implemented in one cycle, then accepted
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
+- **`../../libs/storage/rusty_multimodal_db_engine/README.md`** — the
+  extracted storage engine: what it contains and who embeds it.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
 - **`docs/FUTURE-GROWTH.md`** — what was once unplanned growth (a
   server/query layer, now built — the document records what of it

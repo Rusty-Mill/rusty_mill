@@ -14,6 +14,12 @@
 //! wrapper layers sit on top — [`GenericProductionStore`](super::production::GenericProductionStore)
 //! is generic over the whole composed stack and has no other way to reach
 //! in. Every wrapper below forwards it, same as every other capability.
+//!
+//! [`GroupCommit`] lets a caller apply a batch of writes under one sync of
+//! the core's insert log. Only the layers that keep no file of their own
+//! forward it (`Indexed`, `Scanned`, `NameIndex`, `Ordered`); a relation
+//! layer's edge log would need its sync ordered against the record log's,
+//! which nothing needs yet.
 
 use super::edge_blob::{self, EdgeBlob};
 use super::insert_log;
@@ -118,6 +124,29 @@ impl<R: Record + Clone> Flush for BaseStore<R> {
 /// durable inside it.
 pub trait Flush {
     fn flush(&self) -> Result<(), DurabilityError>;
+}
+
+/// Apply a batch of writes under one sync: after [`Self::defer_sync`], a
+/// write returns once its insert-log entry is written but not yet synced,
+/// and [`Self::commit`] syncs them all and restores sync-per-write.
+///
+/// Nothing written while deferred is durable until `commit` returns `Ok`,
+/// though reads see it at once. A caller that lets others read between
+/// the two (the hub does not: it holds its write lock across both) may
+/// show them writes a crash then loses. If `commit` fails, the writes stay
+/// applied in memory with no promise about the disk; `commit` may be
+/// retried, and reopening the store yields what did land.
+pub trait GroupCommit {
+    /// Stop syncing each write's insert-log entry until [`Self::commit`].
+    fn defer_sync(&mut self);
+
+    /// Sync every entry written since [`Self::defer_sync`] and go back to
+    /// syncing each write. `Ok` means every write so far is durable.
+    ///
+    /// # Errors
+    ///
+    /// [`DurabilityError::Io`] if the insert log can't be synced.
+    fn commit(&mut self) -> Result<(), DurabilityError>;
 }
 
 /// Adds one `FilterEq` capability over an inner store — the generic
@@ -259,6 +288,20 @@ where
 {
     fn flush(&self) -> Result<(), DurabilityError> {
         self.inner.flush()
+    }
+}
+
+impl<S, R, Marker> GroupCommit for Indexed<S, R, Marker>
+where
+    R: IndexedField<Marker>,
+    S: GroupCommit,
+{
+    fn defer_sync(&mut self) {
+        self.inner.defer_sync();
+    }
+
+    fn commit(&mut self) -> Result<(), DurabilityError> {
+        self.inner.commit()
     }
 }
 
@@ -445,6 +488,20 @@ where
 {
     fn flush(&self) -> Result<(), DurabilityError> {
         self.inner.flush()
+    }
+}
+
+impl<S, R, Marker> GroupCommit for Scanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    S: GroupCommit,
+{
+    fn defer_sync(&mut self) {
+        self.inner.defer_sync();
+    }
+
+    fn commit(&mut self) -> Result<(), DurabilityError> {
+        self.inner.commit()
     }
 }
 
@@ -1023,6 +1080,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, R, Marker> Flush for Symmetric<S, R, Marker>
@@ -1567,6 +1628,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, R: Record> Flush for MultiSymmetric<S, R>
@@ -1827,6 +1892,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, R: super::query::NameIndexed> Flush for NameIndex<S, R>
@@ -1835,6 +1904,19 @@ where
 {
     fn flush(&self) -> Result<(), DurabilityError> {
         self.inner.flush()
+    }
+}
+
+impl<S, R: super::query::NameIndexed> GroupCommit for NameIndex<S, R>
+where
+    S: GroupCommit,
+{
+    fn defer_sync(&mut self) {
+        self.inner.defer_sync();
+    }
+
+    fn commit(&mut self) -> Result<(), DurabilityError> {
+        self.inner.commit()
     }
 }
 
@@ -2144,6 +2226,10 @@ where
     fn all_ids(&self) -> Vec<C::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, P, C, Marker> Flush for Reversed<S, P, C, Marker>
@@ -2244,8 +2330,16 @@ where
 /// scannable and ordered must use one marker for both (`Relation`'s
 /// `UpdatedAtField`); two markers for one field would leave the index
 /// stale after an `update`. Compaction never moves an
-/// id, so the index survives it as is. Answers [`PageBy`]: a page costs
-/// the page, not the table. Every other trait is forwarded.
+/// id, so the index survives it as is. Answers [`PageBy`] and [`RangeBy`]:
+/// a page costs the page, not the table. Every other trait is forwarded.
+///
+/// **Stacked orders.** A layer answers `PageBy`/`RangeBy` for its own
+/// marker only, so with several orders only the outermost is queried
+/// through the stack and each inner one through [`Ordered::inner`]
+/// (`tests/stacked_ordered.rs`, `tests/task_manager_recipes.rs`). Forwarding
+/// the inner markers from the outer layer is not possible: that impl
+/// overlaps the layer's own (E0119), as `MultiNeighbors`' docs explain for
+/// relations. Writes through the outermost layer keep every index exact.
 pub struct Ordered<S, R, Marker>
 where
     R: OrderedField<Marker>,
@@ -2562,6 +2656,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, R, Marker> Flush for Ordered<S, R, Marker>
@@ -2571,6 +2669,20 @@ where
 {
     fn flush(&self) -> Result<(), DurabilityError> {
         self.inner.flush()
+    }
+}
+
+impl<S, R, Marker> GroupCommit for Ordered<S, R, Marker>
+where
+    R: OrderedField<Marker>,
+    S: GroupCommit,
+{
+    fn defer_sync(&mut self) {
+        self.inner.defer_sync();
+    }
+
+    fn commit(&mut self) -> Result<(), DurabilityError> {
+        self.inner.commit()
     }
 }
 

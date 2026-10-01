@@ -25,6 +25,10 @@ sha2 = "0.10"
 rand = "0.8"
 rand_chacha = "0.3"
 tempfile = "3"
+# Cross-process lock around a seal (review 2.9): `flock`/`LockFileEx`; std's
+# `File::lock` needs Rust 1.89, above this crate's rust-version. Already in
+# the workspace (nexus-storage).
+fs4 = "1"
 
 # The keychain backend is per-platform.
 [target.'cfg(target_os = "macos")'.dependencies]

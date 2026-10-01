@@ -227,7 +227,7 @@ impl CorePlugin for AiRuntimeCorePlugin {
             *g = Some(Arc::clone(&ctx));
         }
         // Spin up the worker pool now that we're past `on_init`.
-        // Failure is logged + leaves the OnceLock empty so subsequent
+        // Failure is logged + leaves the pool unset so subsequent
         // `submit` calls surface a clear "pool not running" error
         // rather than silently dropping work.
         if self.supervisor.pool().is_none() {
@@ -240,11 +240,11 @@ impl CorePlugin for AiRuntimeCorePlugin {
                     // so a misordering on a future bootstrap reorder
                     // is observable; the daemon falls back to its own
                     // runtime if the handle isn't published yet.
-                    let installed = pool.publish_shared_handle();
+                    let replaced_live_pool = pool.publish_shared_handle();
                     self.supervisor.set_pool(pool);
                     tracing::info!(
                         plugin_id = PLUGIN_ID,
-                        shared_handle_installed = installed,
+                        replaced_live_pool,
                         "BL-134 Phase 1+4: ai-runtime worker pool started",
                     );
                 }

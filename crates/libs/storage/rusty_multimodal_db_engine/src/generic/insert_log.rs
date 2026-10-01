@@ -42,6 +42,15 @@
 //! The header and the first entry are written in one `write_all` so a
 //! crash can never leave a header-only or half-header file that a later
 //! `append` would misread.
+//!
+//! # Deferred sync
+//!
+//! An append normally returns only after `sync_data`. A caller applying a
+//! batch can append with [`LogSync::Deferred`] instead and call [`sync`]
+//! once at the end, so N writes cost one sync rather than N. Until that
+//! sync returns, none of the batch is acknowledged: a crash may keep any
+//! prefix of it (a torn tail is dropped as above), which is the state a
+//! crash mid-way through N synced appends could leave too.
 
 use super::record_blob::{encode_tagged_image, parse_tagged_header, TAGGED_HEADER_LEN};
 use super::traits::SchemaTag;
@@ -49,8 +58,8 @@ use crate::durability::sync_parent_dir;
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: [u8; 8] = *b"GENINSL\0";
@@ -77,6 +86,16 @@ pub enum LogEntry<T, K> {
 }
 const LOG_SUFFIX: &str = ".inserts";
 
+/// When an appended entry has to be on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogSync {
+    /// Before the append returns (`sync_data`): the default.
+    #[default]
+    Now,
+    /// At the caller's next [`sync`] of the log (see the module docs).
+    Deferred,
+}
+
 /// Where a `GenericMmapStore` whose mmap file lives at `path` keeps its
 /// insert log — `<path>.inserts`, the `<path>.records` derivation with
 /// a different suffix.
@@ -99,7 +118,25 @@ pub fn append<R>(log: &Path, record: &R) -> Result<(), DurabilityError>
 where
     R: Serialize + SchemaTag,
 {
-    append_item(log, R::SCHEMA_TAG, record)
+    append_record(log, record, LogSync::Now)
+}
+
+/// [`append`], synced as `when` says.
+///
+/// # Errors
+///
+/// As [`append`].
+pub fn append_record<R>(log: &Path, record: &R, when: LogSync) -> Result<(), DurabilityError>
+where
+    R: Serialize + SchemaTag,
+{
+    append_entry(
+        log,
+        R::SCHEMA_TAG,
+        KIND_ITEM,
+        &crate::codec::encode(record)?,
+        when,
+    )
 }
 
 /// [`append`] over any serializable item under an explicit `tag` —
@@ -111,7 +148,13 @@ pub fn append_item<T>(log: &Path, tag: &str, item: &T) -> Result<(), DurabilityE
 where
     T: Serialize + ?Sized,
 {
-    append_entry(log, tag, KIND_ITEM, &crate::codec::encode(item)?)
+    append_entry(
+        log,
+        tag,
+        KIND_ITEM,
+        &crate::codec::encode(item)?,
+        LogSync::Now,
+    )
 }
 
 /// `DEL-FR-003` (ADR-0051): append a tombstone for `key` — the id of a
@@ -121,23 +164,104 @@ pub fn append_tombstone<K>(log: &Path, tag: &str, key: &K) -> Result<(), Durabil
 where
     K: Serialize + ?Sized,
 {
-    append_entry(log, tag, KIND_TOMBSTONE, &crate::codec::encode(key)?)
+    append_tombstone_as(log, tag, key, LogSync::Now)
+}
+
+/// [`append_tombstone`], synced as `when` says.
+///
+/// # Errors
+///
+/// As [`append_tombstone`].
+pub fn append_tombstone_as<K>(
+    log: &Path,
+    tag: &str,
+    key: &K,
+    when: LogSync,
+) -> Result<(), DurabilityError>
+where
+    K: Serialize + ?Sized,
+{
+    append_entry(log, tag, KIND_TOMBSTONE, &crate::codec::encode(key)?, when)
+}
+
+/// Sync every entry appended to the log at `log` with
+/// [`LogSync::Deferred`]. A missing log has nothing to sync.
+///
+/// # Errors
+///
+/// Returns [`DurabilityError::Io`] if the file exists and can't be opened
+/// or synced.
+pub fn sync(log: &Path) -> Result<(), DurabilityError> {
+    // Opened for writing: on Windows `sync_data` (`FlushFileBuffers`)
+    // needs a handle with write access.
+    let file = match OpenOptions::new().append(true).open(log) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    file.sync_data()?;
+    Ok(())
 }
 
 /// One `kind` + `u32` length + payload entry, after the header on a new
 /// file. A version-1 log found here (written before `DEL-FR-003`, never
 /// reopened since) is rewritten as version 2 first — its entries are all
 /// items — so a file is never a mix of the two layouts.
-fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), DurabilityError> {
+fn append_entry(
+    log: &Path,
+    tag: &str,
+    kind: u8,
+    payload: &[u8],
+    when: LogSync,
+) -> Result<(), DurabilityError> {
+    write_entry(&mut None, log, tag, kind, payload, when)
+}
+
+/// [`append_entry`] through `handle`: opened (upgrade check, header on a
+/// new file) when `None`, then left open for the next entry. Any failure
+/// closes it, so the next entry starts from the file as it is on disk.
+fn write_entry(
+    handle: &mut Option<File>,
+    log: &Path,
+    tag: &str,
+    kind: u8,
+    payload: &[u8],
+    when: LogSync,
+) -> Result<(), DurabilityError> {
+    let result = try_write_entry(handle, log, tag, kind, payload, when);
+    if result.is_err() {
+        *handle = None;
+    }
+    result
+}
+
+fn try_write_entry(
+    handle: &mut Option<File>,
+    log: &Path,
+    tag: &str,
+    kind: u8,
+    payload: &[u8],
+    when: LogSync,
+) -> Result<(), DurabilityError> {
     let len = u32::try_from(payload.len()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "encoded record too large for the insert log's u32 length prefix",
         )
     })?;
-    upgrade_if_version_1(log, tag)?;
-    let mut file = OpenOptions::new().append(true).create(true).open(log)?;
-    let created = file.metadata()?.len() == 0;
+    let created = match handle {
+        Some(_) => false,
+        None => {
+            upgrade_if_version_1(log, tag)?;
+            let file = OpenOptions::new().append(true).create(true).open(log)?;
+            let created = file.metadata()?.len() == 0;
+            *handle = Some(file);
+            created
+        }
+    };
+    let Some(file) = handle.as_mut() else {
+        return Err(io::Error::other("insert log handle missing after open").into());
+    };
     let mut image = if created {
         encode_tagged_image(&MAGIC, LOG_VERSION, 0, tag, &[])
     } else {
@@ -147,26 +271,131 @@ fn append_entry(log: &Path, tag: &str, kind: u8, payload: &[u8]) -> Result<(), D
     image.extend_from_slice(&len.to_le_bytes());
     image.extend_from_slice(payload);
     file.write_all(&image)?;
-    file.sync_data()?;
+    if when == LogSync::Now {
+        file.sync_data()?;
+    }
     if created {
         // `RVL-FR-003` (ADR-0112): a log created by this append needs its
-        // directory entry durable too, as every other creation does.
+        // directory entry durable too, as every other creation does. Done
+        // even for a deferred append: it happens once per log, and a later
+        // `sync` then needs only the file's data.
         sync_parent_dir(log)?;
     }
     Ok(())
 }
 
+/// One store's insert log, kept open between appends.
+///
+/// The path-based functions above open the log, check its version and
+/// close it again on every entry: several system calls per write, which
+/// dominated an unsynced insert (design review Tranche 5, `vs_sqlite`).
+/// An `Appender` does that once, on its first entry, then only writes. It
+/// assumes it is the log's only writer while open, which the store's
+/// directory lock guarantees; [`Self::close`] it before anything removes
+/// or rewrites the file (on Windows a removed file that is still open
+/// lingers until its last handle closes).
+#[derive(Debug)]
+pub struct Appender {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl Appender {
+    /// An appender for the log at `path`. Opens nothing until the first
+    /// entry, so a store that never writes never creates a log.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, file: None }
+    }
+
+    /// [`append_record`] through this appender's handle.
+    ///
+    /// # Errors
+    ///
+    /// As [`append`].
+    pub fn append_record<R>(&mut self, record: &R, when: LogSync) -> Result<(), DurabilityError>
+    where
+        R: Serialize + SchemaTag,
+    {
+        let payload = crate::codec::encode(record)?;
+        write_entry(
+            &mut self.file,
+            &self.path,
+            R::SCHEMA_TAG,
+            KIND_ITEM,
+            &payload,
+            when,
+        )
+    }
+
+    /// [`append_tombstone_as`] through this appender's handle.
+    ///
+    /// # Errors
+    ///
+    /// As [`append_tombstone`].
+    pub fn append_tombstone<K>(
+        &mut self,
+        tag: &str,
+        key: &K,
+        when: LogSync,
+    ) -> Result<(), DurabilityError>
+    where
+        K: Serialize + ?Sized,
+    {
+        let payload = crate::codec::encode(key)?;
+        write_entry(
+            &mut self.file,
+            &self.path,
+            tag,
+            KIND_TOMBSTONE,
+            &payload,
+            when,
+        )
+    }
+
+    /// [`sync`]: every entry appended so far is on disk.
+    ///
+    /// # Errors
+    ///
+    /// As [`sync`].
+    pub fn sync(&mut self) -> Result<(), DurabilityError> {
+        match &self.file {
+            Some(file) => file.sync_data().map_err(|e| {
+                self.file = None;
+                e.into()
+            }),
+            None => sync(&self.path),
+        }
+    }
+
+    /// Close the handle; the next entry reopens the file.
+    pub fn close(&mut self) {
+        self.file = None;
+    }
+}
+
 /// The version a log file on disk declares, or `None` when there is no
 /// file (or too little of one to carry a header).
+///
+/// Reads the header only. Every append calls this, and it once read the
+/// whole log to get at four bytes, so each insert cost time in proportion
+/// to the log and filling a store was quadratic until the next fold
+/// (found by `rusty_remind_me`'s hub pull-latency benchmark: 20 000 inserts
+/// spent 22 s of 30 s in `read`).
 fn on_disk_version(log: &Path) -> Result<Option<u32>, DurabilityError> {
-    let bytes = match std::fs::read(log) {
-        Ok(bytes) => bytes,
+    let mut file = match File::open(log) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    Ok(bytes
-        .get(VERSION_OFFSET..VERSION_OFFSET + 4)
-        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]])))
+    let mut header = [0u8; VERSION_OFFSET + 4];
+    match file.read_exact(&mut header) {
+        Ok(()) => {
+            let [.., a, b, c, d] = header;
+            Ok(Some(u32::from_le_bytes([a, b, c, d])))
+        }
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Rewrite a version-1 log as version 2 in place (every entry an item),
@@ -396,6 +625,23 @@ mod tests {
     }
 
     #[test]
+    fn the_on_disk_version_comes_from_the_header_alone() {
+        let dir = fresh_temp_dir("insert_log_version").unwrap();
+        let log = log_path(&dir.join("store.mmap"));
+        assert_eq!(on_disk_version(&log).unwrap(), None, "no file");
+        std::fs::write(&log, [0u8; VERSION_OFFSET + 3]).unwrap();
+        assert_eq!(
+            on_disk_version(&log).unwrap(),
+            None,
+            "too short for a header"
+        );
+        std::fs::remove_file(&log).unwrap();
+        append(&log, &item(1)).unwrap();
+        append(&log, &item(2)).unwrap();
+        assert_eq!(on_disk_version(&log).unwrap(), Some(LOG_VERSION));
+    }
+
+    #[test]
     fn log_path_appends_a_fixed_suffix() {
         assert_eq!(
             log_path(Path::new("/x/store.mmap")),
@@ -526,6 +772,48 @@ mod tests {
     /// tombstones in order; `read_items` drops the tombstones, `read_entries`
     /// keeps them; a tombstone under a foreign tag is refused by name.
     #[test]
+    fn an_appender_writes_what_the_path_functions_write_and_recreates_a_removed_log() {
+        let dir = fresh_temp_dir("insert_log_appender").unwrap();
+        let log = log_path(&dir.join("store.mmap"));
+        let mut appender = Appender::new(log.clone());
+        assert!(!log.exists(), "nothing is created before the first entry");
+        appender.append_record(&item(1), LogSync::Now).unwrap();
+        appender
+            .append_tombstone(Item::SCHEMA_TAG, &1u32, LogSync::Deferred)
+            .unwrap();
+        appender.append_record(&item(2), LogSync::Deferred).unwrap();
+        appender.sync().unwrap();
+        let expected = vec![
+            LogEntry::Item(item(1)),
+            LogEntry::Tombstone(1),
+            LogEntry::Item(item(2)),
+        ];
+        assert_eq!(
+            read_entries::<Item, u32>(&log, Item::SCHEMA_TAG).unwrap(),
+            expected
+        );
+        let reference = log_path(&dir.join("reference.mmap"));
+        append(&reference, &item(1)).unwrap();
+        append_tombstone(&reference, Item::SCHEMA_TAG, &1u32).unwrap();
+        append(&reference, &item(2)).unwrap();
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            std::fs::read(&reference).unwrap(),
+            "byte for byte the layout the path functions write"
+        );
+
+        // What `compact` does: close, remove, write again.
+        appender.close();
+        clear(&log).unwrap();
+        appender.append_record(&item(3), LogSync::Now).unwrap();
+        assert_eq!(
+            read_entries::<Item, u32>(&log, Item::SCHEMA_TAG).unwrap(),
+            vec![LogEntry::Item(item(3))],
+            "a fresh log, header included"
+        );
+    }
+
+    #[test]
     fn tombstones_interleave_with_items_in_order() {
         let dir = fresh_temp_dir("insert_log_tombstones").unwrap();
         let log = log_path(&dir.join("store.mmap"));
@@ -549,6 +837,26 @@ mod tests {
             }
             other => panic!("expected a tag mismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deferred_appends_read_back_and_sync_is_a_no_op_without_a_log() {
+        let dir = fresh_temp_dir("insert_log_deferred").unwrap();
+        let log = log_path(&dir.join("store.mmap"));
+        sync(&log).unwrap();
+        assert!(!log.exists(), "sync must not create a log");
+        append_record(&log, &item(1), LogSync::Deferred).unwrap();
+        append_tombstone_as(&log, Item::SCHEMA_TAG, &1u32, LogSync::Deferred).unwrap();
+        append_record(&log, &item(2), LogSync::Deferred).unwrap();
+        sync(&log).unwrap();
+        assert_eq!(
+            read_entries::<Item, u32>(&log, Item::SCHEMA_TAG).unwrap(),
+            vec![
+                LogEntry::Item(item(1)),
+                LogEntry::Tombstone(1),
+                LogEntry::Item(item(2)),
+            ]
+        );
     }
 
     /// `DEL-FR-003`: a version-1 log (no kind bytes) still reads, every

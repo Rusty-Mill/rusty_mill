@@ -15,8 +15,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@stable
+    # The calling workflow's pinned toolchain (`RUST_TOOLCHAIN`, ci.yml).
+    - uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: ${{ env.RUST_TOOLCHAIN }}
         components: ${{ inputs.components }}
 
     # rusty_term's gui/gui-gpu features and rusty_gui's Linux X11 backend

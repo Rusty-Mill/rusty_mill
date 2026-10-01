@@ -56,6 +56,9 @@ pub enum HubError {
     /// Underlying `SQLite` error.
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A pull cursor that is not an RFC 3339 timestamp.
+    #[error("bad cursor: {0}")]
+    BadCursor(String),
     /// Connection-pool error.
     #[error("pool: {0}")]
     Pool(#[from] r2d2::Error),
@@ -73,7 +76,17 @@ CREATE TABLE IF NOT EXISTS records (
     origin_node TEXT,
     payload     TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_records_cursor ON records(updated_at, id);";
+CREATE INDEX IF NOT EXISTS idx_records_cursor ON records(updated_at, id);
+CREATE TABLE IF NOT EXISTS records_rejected (
+    id          TEXT,
+    updated_at  TEXT,
+    payload     TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    moved_at    TEXT NOT NULL
+);";
+
+/// `PRAGMA user_version` once every stored `updated_at` is canonical.
+const CANONICAL_KEYS_VERSION: i64 = 1;
 
 /// Durable convergence store backing the hub.
 #[derive(Clone)]
@@ -91,16 +104,85 @@ fn init_conn(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;\nPRAGMA busy_timeout=5000;")
 }
 
-/// True if `updated_at` parses as an RFC 3339 timestamp further in the
-/// future than [`MAX_FUTURE_SKEW_MINUTES`] beyond the hub's own clock.
-/// Unparseable strings fall through untouched — the hub is schema-agnostic
-/// and does not otherwise enforce timestamp format, only guards against the
-/// specific LWW-poisoning shape of an implausible future timestamp.
-fn is_implausibly_future(updated_at: &str) -> bool {
-    let Ok(ts) = DateTime::parse_from_rfc3339(updated_at) else {
-        return false;
+/// The ordering key for an RFC 3339 `updated_at`: UTC, fixed nanosecond
+/// precision, `Z` — so string order is time order, whatever offset or
+/// precision the pushing node wrote (design review 2.8 / N3). `None` when
+/// `updated_at` is not RFC 3339. The payload keeps the node's own string;
+/// only the stored key and the pull cursor use this form.
+fn canonical_ts(updated_at: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(updated_at).ok().map(|t| {
+        t.with_timezone(&Utc)
+            .format("%Y-%m-%dT%H:%M:%S%.9fZ")
+            .to_string()
+    })
+}
+
+/// True if a canonical key is further in the future than
+/// [`MAX_FUTURE_SKEW_MINUTES`] beyond the hub's own clock.
+fn is_implausibly_future(canonical: &str) -> bool {
+    let limit = Utc::now() + Duration::minutes(MAX_FUTURE_SKEW_MINUTES);
+    canonical_ts(&limit.to_rfc3339()).is_some_and(|limit| canonical > limit.as_str())
+}
+
+/// Rewrite every stored `updated_at` into [`canonical_ts`] form, once
+/// (gated on `PRAGMA user_version`). A row whose key never parsed — which
+/// an older hub accepted and which then outranked every real timestamp —
+/// moves to `records_rejected` with its payload, instead of being deleted.
+fn canonicalize_stored_keys(conn: &mut rusqlite::Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version >= CANONICAL_KEYS_VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    let rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare("SELECT id, updated_at FROM records")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        rows
     };
-    ts.with_timezone(&Utc) > Utc::now() + Duration::minutes(MAX_FUTURE_SKEW_MINUTES)
+    let now = Utc::now().to_rfc3339();
+    for (id, updated_at) in rows {
+        match canonical_ts(&updated_at) {
+            Some(key) if key == updated_at => {}
+            Some(key) => {
+                tx.execute(
+                    "UPDATE records SET updated_at = ?2 WHERE id = ?1",
+                    params![id, key],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO records_rejected (id, updated_at, payload, reason, moved_at) \
+                     SELECT id, updated_at, payload, 'updated_at is not RFC 3339', ?2 \
+                     FROM records WHERE id = ?1",
+                    params![id, now],
+                )?;
+                tx.execute("DELETE FROM records WHERE id = ?1", params![id])?;
+            }
+        }
+    }
+    tx.pragma_update(None, "user_version", CANONICAL_KEYS_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// What [`HubStore::push`] did with a batch.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PushOutcome {
+    /// Ids accepted — valid and handled.
+    pub processed: Vec<String>,
+    /// Records refused, each with why.
+    pub rejected: Vec<Rejected>,
+}
+
+/// A pushed record the hub refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rejected {
+    /// Its `id`, when it has one.
+    pub id: Option<String>,
+    /// Why it was refused.
+    pub reason: String,
 }
 
 impl HubStore {
@@ -113,7 +195,10 @@ impl HubStore {
         let store = Self {
             pool: Pool::new(manager)?,
         };
-        store.pool.get()?.execute_batch(SCHEMA)?;
+        let mut conn = store.pool.get()?;
+        conn.execute_batch(SCHEMA)?;
+        canonicalize_stored_keys(&mut conn)?;
+        drop(conn);
         Ok(store)
     }
 
@@ -126,23 +211,27 @@ impl HubStore {
         let store = Self {
             pool: Pool::builder().max_size(1).build(manager)?,
         };
-        store.pool.get()?.execute_batch(SCHEMA)?;
+        let mut conn = store.pool.get()?;
+        conn.execute_batch(SCHEMA)?;
+        canonicalize_stored_keys(&mut conn)?;
+        drop(conn);
         Ok(store)
     }
 
-    /// Upsert a batch of records, last-write-wins on `updated_at`. `origin_node`
-    /// is the pushing node (recorded for `exclude_node` filtering, never
-    /// returned on pull). Returns the ids that were valid and handled — records
-    /// lacking a string `id` or `updated_at`, or carrying an `updated_at` more
-    /// than [`MAX_FUTURE_SKEW_MINUTES`] ahead of the hub's clock, are skipped
-    /// (reported as failed) rather than persisted.
+    /// Upsert a batch of records, last-write-wins on `updated_at` compared as
+    /// time (its [`canonical_ts`] key), not as text. `origin_node` is the
+    /// pushing node (recorded for `exclude_node` filtering, never returned on
+    /// pull). A record lacking a string `id` or `updated_at`, with an
+    /// `updated_at` that is not RFC 3339, or one more than
+    /// [`MAX_FUTURE_SKEW_MINUTES`] ahead of the hub's clock, is refused with
+    /// its reason rather than persisted.
     ///
     /// # Errors
     /// Returns an error on a write failure.
-    pub fn push(&self, origin_node: &str, records: &[Value]) -> Result<Vec<String>> {
+    pub fn push(&self, origin_node: &str, records: &[Value]) -> Result<PushOutcome> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
-        let mut processed = Vec::new();
+        let mut outcome = PushOutcome::default();
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO records (id, updated_at, node_id, origin_node, payload)
@@ -155,32 +244,51 @@ impl HubStore {
                  WHERE excluded.updated_at > records.updated_at;",
             )?;
             for record in records {
-                let (Some(id), Some(updated_at)) = (
-                    record.get("id").and_then(Value::as_str),
-                    record.get("updated_at").and_then(Value::as_str),
-                ) else {
-                    continue; // not a valid syncable record
+                let id = record.get("id").and_then(Value::as_str);
+                let refuse = |reason: &str| Rejected {
+                    id: id.map(str::to_string),
+                    reason: reason.to_string(),
                 };
-                if is_implausibly_future(updated_at) {
-                    continue; // reject: would permanently win every future LWW comparison
+                let (Some(id), Some(updated_at)) =
+                    (id, record.get("updated_at").and_then(Value::as_str))
+                else {
+                    outcome
+                        .rejected
+                        .push(refuse("missing string id or updated_at"));
+                    continue;
+                };
+                let Some(key) = canonical_ts(updated_at) else {
+                    // Compared as text it would outrank every real timestamp.
+                    outcome.rejected.push(refuse("updated_at is not RFC 3339"));
+                    continue;
+                };
+                if is_implausibly_future(&key) {
+                    // Would permanently win every future LWW comparison.
+                    outcome
+                        .rejected
+                        .push(refuse("updated_at is too far in the future"));
+                    continue;
                 }
                 let node_id = record.get("node_id").and_then(Value::as_str);
                 let payload = record.to_string();
-                stmt.execute(params![id, updated_at, node_id, origin_node, payload])?;
-                processed.push(id.to_string());
+                stmt.execute(params![id, key, node_id, origin_node, payload])?;
+                outcome.processed.push(id.to_string());
             }
         }
         tx.commit()?;
-        Ok(processed)
+        Ok(outcome)
     }
 
     /// Pull a keyset page of records strictly after the `(since, since_id)`
     /// cursor, newest-cursor-last, optionally excluding records pushed by
     /// `exclude_node`. When `since_id` is `None`, a strict `updated_at > since`
-    /// is used (first-page / legacy). Returns the opaque record payloads.
+    /// is used (first-page / legacy). `since` is any RFC 3339 form (a client
+    /// echoes a payload's own string) and is compared as time. Returns the
+    /// opaque record payloads.
     ///
     /// # Errors
-    /// Returns an error on a query or decode failure.
+    /// [`HubError::BadCursor`] when `since` is not RFC 3339; otherwise a query
+    /// or decode failure.
     pub fn pull(
         &self,
         since: &str,
@@ -191,6 +299,7 @@ impl HubStore {
         use std::fmt::Write as _;
 
         let limit = limit.clamp(1, MAX_PULL_LIMIT);
+        let since = canonical_ts(since).ok_or_else(|| HubError::BadCursor(since.to_string()))?;
         let conn = self.pool.get()?;
 
         // Build the WHERE incrementally with positional params.
@@ -198,11 +307,11 @@ impl HubStore {
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(sid) = since_id {
             sql.push_str("(updated_at > ?1 OR (updated_at = ?1 AND id > ?2))");
-            args.push(Box::new(since.to_string()));
+            args.push(Box::new(since.clone()));
             args.push(Box::new(sid.to_string()));
         } else {
             sql.push_str("updated_at > ?1");
-            args.push(Box::new(since.to_string()));
+            args.push(Box::new(since));
         }
         if let Some(node) = exclude_node {
             let _ = write!(
@@ -260,8 +369,10 @@ pub struct PushResponse {
     pub accepted: usize,
     /// Ids accepted — the client marks exactly these sent.
     pub processed_ids: Vec<String>,
-    /// Number of records skipped for missing `id`/`updated_at`.
+    /// Number of records refused.
     pub failed: usize,
+    /// Each refused record's id (if any) and reason.
+    pub rejected: Vec<Rejected>,
 }
 
 /// Query params for `GET /sync/pull`.
@@ -358,16 +469,15 @@ async fn push(
     Json(req): Json<PushRequest>,
 ) -> std::result::Result<Json<PushResponse>, (StatusCode, String)> {
     authorize(&headers, &state.secret)?;
-    let total = req.records.len();
-    let processed = state
+    let outcome = state
         .store
         .push(&req.node_id, &req.records)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("push: {e}")))?;
-    let accepted = processed.len();
     Ok(Json(PushResponse {
-        accepted,
-        processed_ids: processed,
-        failed: total - accepted,
+        accepted: outcome.processed.len(),
+        failed: outcome.rejected.len(),
+        processed_ids: outcome.processed,
+        rejected: outcome.rejected,
     }))
 }
 
@@ -386,7 +496,10 @@ async fn pull(
             q.exclude_node.as_deref(),
             q.limit.unwrap_or(DEFAULT_PULL_LIMIT),
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("pull: {e}")))?;
+        .map_err(|e| match e {
+            HubError::BadCursor(_) => (StatusCode::BAD_REQUEST, format!("pull: {e}")),
+            other => (StatusCode::INTERNAL_SERVER_ERROR, format!("pull: {other}")),
+        })?;
     let count = records.len();
     Ok(Json(PullResponse { records, count }))
 }
@@ -408,7 +521,8 @@ mod tests {
                 "node-a",
                 &[rec("m1", "2026-01-01T00:00:00+00:00", "node-a")],
             )
-            .unwrap();
+            .unwrap()
+            .processed;
         assert_eq!(processed, vec!["m1"]);
         let out = store.pull(EPOCH, None, None, 100).unwrap();
         assert_eq!(out.len(), 1);
@@ -426,7 +540,8 @@ mod tests {
                     json!({ "content": "no id/ts" }),
                 ],
             )
-            .unwrap();
+            .unwrap()
+            .processed;
         assert_eq!(processed, vec!["m1"]); // the invalid one is skipped
         assert_eq!(store.count().unwrap(), 1);
     }
@@ -503,9 +618,9 @@ mod tests {
 
     #[test]
     fn is_implausibly_future_flags_far_future_only() {
-        assert!(!is_implausibly_future("2020-01-01T00:00:00+00:00"));
-        assert!(!is_implausibly_future("not-a-timestamp"));
-        assert!(is_implausibly_future("9999-01-01T00:00:00+00:00"));
+        let key = |s: &str| canonical_ts(s).unwrap();
+        assert!(!is_implausibly_future(&key("2020-01-01T00:00:00+00:00")));
+        assert!(is_implausibly_future(&key("9999-01-01T00:00:00+00:00")));
     }
 
     #[test]
@@ -518,7 +633,8 @@ mod tests {
                 "attacker",
                 &[rec("m1", "9999-01-01T00:00:00+00:00", "attacker")],
             )
-            .unwrap();
+            .unwrap()
+            .processed;
         assert!(
             processed.is_empty(),
             "far-future timestamp must be rejected"
@@ -531,10 +647,122 @@ mod tests {
                 "node-a",
                 &[rec("m1", "2026-06-01T00:00:00+00:00", "node-a")],
             )
-            .unwrap();
+            .unwrap()
+            .processed;
         assert_eq!(processed, vec!["m1"]);
         let out = store.pull(EPOCH, None, None, 100).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["content"], "c-m1");
+    }
+
+    /// Review 2.8 (N3): a malformed `updated_at` such as `"zzzz"` is refused
+    /// with a reason; compared as text it would have outranked every real
+    /// timestamp and frozen the record.
+    #[test]
+    fn a_malformed_updated_at_is_refused_with_a_reason() {
+        let store = HubStore::open_in_memory().unwrap();
+        let out = store.push("peer", &[rec("m1", "zzzz", "peer")]).unwrap();
+        assert!(out.processed.is_empty());
+        assert_eq!(
+            out.rejected,
+            vec![Rejected {
+                id: Some("m1".into()),
+                reason: "updated_at is not RFC 3339".into()
+            }]
+        );
+        store
+            .push("a", &[rec("m1", "2026-01-01T00:00:00Z", "a")])
+            .unwrap();
+        assert_eq!(
+            store.pull(EPOCH, None, None, 10).unwrap()[0]["content"],
+            "c-m1"
+        );
+    }
+
+    /// Review 2.8: LWW compares instants, not strings — offsets and
+    /// fractional precision do not change which write is newer.
+    #[test]
+    fn last_write_wins_compares_instants_across_offsets_and_precision() {
+        let store = HubStore::open_in_memory().unwrap();
+        // 10:00:00.5 UTC, written with a +02:00 offset.
+        store
+            .push("a", &[json!({"id": "m1", "updated_at": "2026-01-01T12:00:00.5+02:00", "content": "later"})])
+            .unwrap();
+        // 10:00:00 UTC exactly: earlier, although it sorts after as text.
+        store
+            .push(
+                "b",
+                &[json!({"id": "m1", "updated_at": "2026-01-01T10:00:00Z", "content": "earlier"})],
+            )
+            .unwrap();
+        assert_eq!(
+            store.pull(EPOCH, None, None, 10).unwrap()[0]["content"],
+            "later"
+        );
+        // The same instant in another form is not newer.
+        store
+            .push("b", &[json!({"id": "m1", "updated_at": "2026-01-01T10:00:00.500000000+00:00", "content": "same"})])
+            .unwrap();
+        assert_eq!(
+            store.pull(EPOCH, None, None, 10).unwrap()[0]["content"],
+            "later"
+        );
+        // A cursor in any offset resumes at the right instant.
+        let after = store
+            .pull("2026-01-01T11:00:00+02:00", None, None, 10)
+            .unwrap();
+        assert_eq!(after.len(), 1, "09:00Z < 10:00:00.5Z");
+    }
+
+    /// Review 2.8: a pull cursor that is not RFC 3339 is refused.
+    #[test]
+    fn a_malformed_pull_cursor_is_refused() {
+        let store = HubStore::open_in_memory().unwrap();
+        assert!(matches!(
+            store.pull("zzzz", None, None, 10),
+            Err(HubError::BadCursor(_))
+        ));
+    }
+
+    /// Review 2.8: a hub written before canonical keys reopens with its
+    /// keys canonicalized, and a row whose key never parsed moves to
+    /// `records_rejected` instead of outranking every real write.
+    #[test]
+    fn an_older_hub_is_canonicalized_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hub.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            for (id, ts) in [("ok", "2026-01-01T12:00:00+02:00"), ("poison", "zzzz")] {
+                conn.execute(
+                    "INSERT INTO records (id, updated_at, payload) VALUES (?1, ?2, ?3)",
+                    params![id, ts, rec(id, ts, "old").to_string()],
+                )
+                .unwrap();
+            }
+        }
+        let store = HubStore::open(&path).unwrap();
+        let conn = store.pool.get().unwrap();
+        let key: String = conn
+            .query_row("SELECT updated_at FROM records WHERE id = 'ok'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(key, "2026-01-01T10:00:00.000000000Z");
+        let moved: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM records_rejected WHERE id = 'poison'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((store.count().unwrap(), moved), (1, 1));
+        drop(conn);
+        store
+            .push("a", &[rec("poison", "2026-02-01T00:00:00Z", "a")])
+            .unwrap();
+        let out = store.pull(EPOCH, None, None, 10).unwrap();
+        assert_eq!(out.len(), 2, "the poisoned id takes genuine writes again");
     }
 }

@@ -16,8 +16,8 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
-    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, TransactionOp, MAX_STAGED_BYTES,
+    MAX_STAGED_OPS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
     SESSION_VALIDATE_ON_STAGE,
 };
 use rusty_multimodal_db::server::{serve, ConnectionStore, ServeOptions};
@@ -410,16 +410,22 @@ fn concurrent_transactions_and_updates_match_a_sequential_replay() {
 /// A client that negotiated protocol version 3 — the session requests are
 /// `Malformed` on anything older (`SESS-FR-006`).
 fn connect_v3(addr: std::net::SocketAddr) -> TcpStream {
+    connect_at(addr, PROTOCOL_VERSION)
+}
+
+/// A connection negotiated at exactly `version` — how a client from before
+/// a wire change sees the same server (rule 3).
+fn connect_at(addr: std::net::SocketAddr, version: u32) -> TcpStream {
     let mut stream = connect(addr);
     assert_eq!(
         roundtrip(
             &mut stream,
             Request::Hello {
-                protocol_version: PROTOCOL_VERSION
+                protocol_version: version
             }
         ),
         Response::Hello {
-            protocol_version: PROTOCOL_VERSION
+            protocol_version: version
         }
     );
     stream
@@ -521,7 +527,10 @@ fn a_commit_failure_names_the_staged_index_and_applies_nothing() {
 #[test]
 fn session_state_errors_leave_the_connection_open() {
     let addr = start_server(sample_records(), ServeOptions::default());
-    let mut c = connect_v3(addr);
+    // At 32: from 33 a session may stage a record write (`ADR-0130`,
+    // exercised below in `a_session_stages_record_writes_beside_updates...`),
+    // so the "never staged" rules are the pre-33 view.
+    let mut c = connect_at(addr, 32);
 
     assert_err(roundtrip(&mut c, Request::Commit), ErrorCode::NoSession);
     assert_err(roundtrip(&mut c, Request::Rollback), ErrorCode::NoSession);
@@ -1048,9 +1057,9 @@ fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
 
     let mut c = connect_v3(addr);
     assert_err(
-        // Bit 4 (value 16) is still unknown to this build — every bit
-        // through `SESSION_MVCC_ISOLATION` (value 8) is taken.
-        roundtrip(&mut c, Request::BeginWith { flags: 16 }),
+        // Bit 5 (value 32) is still unknown to this build — every bit
+        // through `SESSION_STRICT_COMMIT` (value 16) is taken.
+        roundtrip(&mut c, Request::BeginWith { flags: 32 }),
         ErrorCode::Malformed,
     );
     assert_eq!(stage(&mut c, id, 9), Response::Ok, "no session was opened");
@@ -1417,4 +1426,40 @@ fn the_snapshot_isolation_bit_is_unknown_below_protocol_7() {
         Response::Ok
     );
     assert_eq!(roundtrip(&mut v7, Request::Rollback), Response::Ok);
+}
+
+/// Design review 3.7: a session is bounded by staged bytes, not only by
+/// op count -- large legal updates hit `SessionFull` long before
+/// `MAX_STAGED_OPS`, the session stays open, and `Rollback` frees the
+/// budget for the next one.
+#[test]
+fn a_session_is_bounded_by_staged_bytes() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut c = connect(addr);
+    roundtrip(
+        &mut c,
+        Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    );
+    let big = |c: &mut TcpStream| {
+        roundtrip(
+            c,
+            Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_BREED,
+                value: ScanValue::Str("b".repeat(1 << 20)),
+            },
+        )
+    };
+    let fits = MAX_STAGED_BYTES / ((1 << 20) + 96);
+    assert_eq!(roundtrip(&mut c, Request::Begin), Response::Ok);
+    for i in 0..fits {
+        assert_eq!(big(&mut c), Response::Staged { index: i as u32 }, "op {i}");
+    }
+    assert_err(big(&mut c), ErrorCode::SessionFull);
+    assert!(fits < MAX_STAGED_OPS);
+    assert_eq!(roundtrip(&mut c, Request::Rollback), Response::Ok);
+    assert_eq!(roundtrip(&mut c, Request::Begin), Response::Ok);
+    assert_eq!(big(&mut c), Response::Staged { index: 0 });
 }

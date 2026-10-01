@@ -87,11 +87,8 @@ pub fn merge_driver(base: &Path, ours: &Path, theirs: &Path) -> Result<()> {
     }
 
     let bytes = serde_json::to_vec(&merged).context("encode merged crdt envelope")?;
-    let tmp = ours.with_extension("json.merge-tmp");
-    fs::write(&tmp, &bytes).with_context(|| format!("write merged tmp file: {}", tmp.display()))?;
-    fs::rename(&tmp, ours)
-        .with_context(|| format!("rename {} → {}", tmp.display(), ours.display()))?;
-    Ok(())
+    rusty_atomic_file::write(ours, &bytes)
+        .with_context(|| format!("write merged envelope: {}", ours.display()))
 }
 
 fn read_envelope(path: &Path) -> Result<Option<PersistedCrdt>> {

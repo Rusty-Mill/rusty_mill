@@ -56,7 +56,7 @@ impl Connection {
         self.requests.send(request)?;
         let frames = self.requests.take_frames(stream_id).unwrap_or_default();
         for frame in &frames {
-            self.inner.apply_frame(frame.clone())?;
+            self.inner.send_frame(frame)?;
         }
         Ok(frames)
     }

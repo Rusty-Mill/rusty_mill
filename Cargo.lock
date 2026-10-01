@@ -251,6 +251,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "futures",
+ "rmcp 3.1.4",
  "serde",
  "serde_json",
  "tokio",
@@ -6858,6 +6859,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "directories",
+ "fs4 1.1.0",
  "keyring",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
@@ -8547,6 +8549,7 @@ dependencies = [
  "nexus-types",
  "nexus-workflow",
  "rusqlite",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -8586,6 +8589,7 @@ dependencies = [
  "nexus-terminal",
  "nexus-tui",
  "nexus-types",
+ "rusty_atomic_file",
  "rustyline",
  "serde_json",
  "tempfile",
@@ -8623,6 +8627,7 @@ dependencies = [
  "nexus-kernel",
  "nexus-plugins",
  "regex-lite",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -8708,6 +8713,7 @@ dependencies = [
  "nexus-kernel",
  "nexus-plugins",
  "nexus-types",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -9026,16 +9032,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nexus-rush"
-version = "0.1.0"
-dependencies = [
- "libc 0.2.189",
- "platform",
- "platform-linux",
- "rustyline",
-]
-
-[[package]]
 name = "nexus-security"
 version = "0.1.0"
 dependencies = [
@@ -9071,6 +9067,7 @@ dependencies = [
  "nexus-kernel",
  "nexus-plugins",
  "nexus-types",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -10207,6 +10204,27 @@ checksum = "5df339f526ea9a60e371768d50efc2f2508c7203290731565d1f7a6f71d21747"
 dependencies = [
  "libc 0.2.189",
  "libredox",
+]
+
+[[package]]
+name = "orch-core"
+version = "0.1.0"
+
+[[package]]
+name = "orch-dispatch"
+version = "0.1.0"
+dependencies = [
+ "orch-core",
+ "orch-dispatch",
+]
+
+[[package]]
+name = "orch-ollama"
+version = "0.1.0"
+dependencies = [
+ "orch-core",
+ "orch-dispatch",
+ "rusty_json",
 ]
 
 [[package]]
@@ -12186,6 +12204,8 @@ dependencies = [
  "rten",
  "rten-tensor",
  "rusqlite",
+ "rusty_atomic_file",
+ "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
  "sha256",
@@ -13251,6 +13271,7 @@ dependencies = [
  "qrcode",
  "rand 0.8.8",
  "rusty_base64",
+ "rusty_confined_fs",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -13769,6 +13790,7 @@ name = "rusty-whisper"
 version = "0.8.0"
 dependencies = [
  "cpal",
+ "rusty_http",
  "rusty_simd",
  "rusty_std",
  "rusty_wire",
@@ -13822,6 +13844,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_atomic_file"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_audio"
 version = "0.1.0"
 dependencies = [
@@ -13833,6 +13859,15 @@ dependencies = [
 [[package]]
 name = "rusty_base64"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_baseline"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_libc",
+ "rusty_win32",
+]
 
 [[package]]
 name = "rusty_boot"
@@ -13879,8 +13914,18 @@ name = "rusty_config"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_confined_fs"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+]
+
+[[package]]
 name = "rusty_crypto_key"
 version = "0.1.0"
+dependencies = [
+ "rusty_atomic_file",
+]
 
 [[package]]
 name = "rusty_diff"
@@ -13922,6 +13967,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-mock",
+ "rusty_confined_fs",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -14056,6 +14102,7 @@ dependencies = [
  "minijinja",
  "pollster 0.4.0",
  "rayon",
+ "rusty_http",
  "rusty_simd",
  "rusty_std",
  "serde",
@@ -14093,6 +14140,7 @@ dependencies = [
  "redb",
  "rusqlite",
  "rusty_http",
+ "rusty_libc",
  "rusty_multimodal_db_engine",
  "rusty_tls",
  "serde",
@@ -14108,6 +14156,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "memmap2",
+ "rusqlite",
  "serde",
  "thiserror 1.0.69",
  "uuid",
@@ -14203,10 +14252,6 @@ name = "rusty_rsa"
 version = "0.1.0"
 
 [[package]]
-name = "rusty_rusqlite"
-version = "0.0.1"
-
-[[package]]
 name = "rusty_serde"
 version = "0.1.0"
 dependencies = [
@@ -14272,6 +14317,7 @@ dependencies = [
  "libc 0.2.189",
  "parking_lot",
  "pollster 0.3.0",
+ "rusty_atomic_file",
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
@@ -14303,6 +14349,24 @@ version = "0.1.0"
 dependencies = [
  "rpath",
  "rusty_regx",
+]
+
+[[package]]
+name = "rusty_tick"
+version = "0.0.1"
+dependencies = [
+ "rusty_atomic_file",
+ "rusty_base64",
+ "rusty_http",
+ "rusty_json",
+ "rusty_multimodal_db_engine",
+ "rusty_rand",
+ "rusty_rsa",
+ "rusty_url",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]
@@ -14403,11 +14467,6 @@ version = "0.1.0"
 [[package]]
 name = "rusty_wiremock"
 version = "0.1.0"
-dependencies = [
- "rusty_http",
- "rusty_json",
- "rusty_std",
-]
 
 [[package]]
 name = "rustyline"
@@ -15026,6 +15085,7 @@ name = "sessionmgr-daemon"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "rusty_atomic_file",
  "rusty_tokio",
  "serde",
  "serde_json",

@@ -416,14 +416,14 @@
 //! fails now.
 
 use super::insert_log;
-use super::insert_log::LogEntry;
+use super::insert_log::{LogEntry, LogSync};
 use super::mmap_field::MmapFieldValue;
 use super::query::{
     AllIds, Compact, Delete, FilterEq, GetById, Insert, Replace, ScanField, UpdateField,
 };
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
-use super::store::Flush;
+use super::store::{Flush, GroupCommit};
 use super::traits::{IndexedField, ScannableField, SchemaTag};
 use super::{CompactionReport, DeleteError, InsertError, NotFound, ReplaceError};
 use crate::durability::DurabilityError;
@@ -455,7 +455,12 @@ where
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
-    records: HashMap<R::Id, R>,
+    /// Boxed, so the map's own entries stay small: a `HashMap` regrows in
+    /// one step, moving every entry under whatever lock the caller holds,
+    /// and with records inline that was every record's bytes (a 0.2–0.4 s
+    /// write pause at 115 000 `rusty_remind_me` hub memories of ~800 bytes
+    /// each). Boxed, a regrow moves a key and a pointer per record.
+    records: HashMap<R::Id, Box<R>>,
     index: HashMap<R::IndexValue, Vec<R::Id>>,
     /// `id` -> that id's *current* slot position in `file` — built by
     /// matching persisted ids against `records`, not by array index. See
@@ -468,6 +473,13 @@ where
     /// per-field `MmapScanned` layer. This store keeps the policy: which
     /// slots to reuse, which records to append, and the index above.
     file: SlotFile<R::Id, R::ScanValue>,
+    /// When a write's insert-log entry is synced: [`LogSync::Now`] unless
+    /// a [`GroupCommit`] is open.
+    log_sync: LogSync,
+    /// Whether the insert log holds deferred entries not yet synced.
+    unsynced: bool,
+    /// The insert log at `<path>.inserts`, kept open between writes.
+    log: insert_log::Appender,
     _marker: PhantomData<(IndexMarker, ScanMarker)>,
 }
 
@@ -484,7 +496,7 @@ struct Indexes<R, IndexMarker>
 where
     R: IndexedField<IndexMarker>,
 {
-    records: HashMap<R::Id, R>,
+    records: HashMap<R::Id, Box<R>>,
     index: HashMap<R::IndexValue, Vec<R::Id>>,
 }
 
@@ -523,7 +535,10 @@ where
                 .or_default()
                 .push(record.id());
         }
-        let records_map = records.iter().cloned().map(|r| (r.id(), r)).collect();
+        let records_map = records
+            .iter()
+            .map(|r| (r.id(), Box::new(r.clone())))
+            .collect();
         Indexes {
             records: records_map,
             index,
@@ -592,6 +607,9 @@ where
             index: indexes.index,
             position_index,
             file,
+            log_sync: LogSync::Now,
+            unsynced: false,
+            log: insert_log::Appender::new(insert_log::log_path(path)),
             _marker: PhantomData,
         })
     }
@@ -718,6 +736,9 @@ where
             index: indexes.index,
             position_index,
             file,
+            log_sync: LogSync::Now,
+            unsynced: false,
+            log: insert_log::Appender::new(insert_log::log_path(path)),
             _marker: PhantomData,
         })
     }
@@ -765,6 +786,29 @@ where
         records
     }
 
+    /// Whether [`Self::compact`] would reclaim anything: the insert log
+    /// holds entries not yet folded, or the slot file holds slots of
+    /// deleted records. Cheap, unlike `compact`, which always rewrites the
+    /// blob and the slot file; a caller compacting on a timer checks this
+    /// first.
+    pub fn needs_compaction(&self) -> bool {
+        !self.is_gapless() || insert_log::log_path(self.file.path()).exists()
+    }
+
+    /// Whether a [`GroupCommit`] is open: writes are not synced until its
+    /// `commit`.
+    pub fn is_sync_deferred(&self) -> bool {
+        self.log_sync == LogSync::Deferred
+    }
+
+    /// Append `record` to the insert log, synced as the open
+    /// [`GroupCommit`] (if any) says.
+    fn log_record(&mut self, record: &R) -> Result<(), DurabilityError> {
+        self.log.append_record(record, self.log_sync)?;
+        self.unsynced |= self.log_sync == LogSync::Deferred;
+        Ok(())
+    }
+
     /// Add one record at runtime (`INS-FR-002`, ADR-0046): refuse a
     /// duplicate id with nothing written; append the record to the
     /// insert log at `<path>.inserts` and `sync_data` it; append one
@@ -791,7 +835,7 @@ where
         if self.records.contains_key(&id) {
             return Err(InsertError::Duplicate(id));
         }
-        insert_log::append(&insert_log::log_path(self.file.path()), &record)?;
+        self.log_record(&record)?;
         let positions = self
             .file
             .append_committed_slots([(id, record.scannable_value())])?;
@@ -803,7 +847,7 @@ where
             .or_default()
             .push(id);
         self.position_index.insert(id, position);
-        self.records.insert(id, record);
+        self.records.insert(id, Box::new(record));
         Ok(())
     }
 
@@ -839,7 +883,7 @@ where
             .position_index
             .get(&id)
             .ok_or(ReplaceError::NotFound(id))?;
-        insert_log::append(&insert_log::log_path(self.file.path()), &record)?;
+        self.log_record(&record)?;
         self.file.write_value(position, record.scannable_value());
         let new_value = record.indexed_value().clone();
         if old_value != new_value {
@@ -851,7 +895,7 @@ where
             }
             self.index.entry(new_value).or_default().push(id);
         }
-        self.records.insert(id, record);
+        self.records.insert(id, Box::new(record));
         Ok(())
     }
 
@@ -878,7 +922,9 @@ where
             .position_index
             .get(&id)
             .ok_or(DeleteError::NotFound(id))?;
-        insert_log::append_tombstone(&insert_log::log_path(self.file.path()), R::SCHEMA_TAG, &id)?;
+        self.log
+            .append_tombstone(R::SCHEMA_TAG, &id, self.log_sync)?;
+        self.unsynced |= self.log_sync == LogSync::Deferred;
         self.file.clear_marker(position);
         if let Some(bucket) = self.index.get_mut(&indexed) {
             bucket.retain(|other| *other != id);
@@ -921,7 +967,7 @@ where
         let records: Vec<R> = ordered
             .iter()
             .map(|(position, id)| {
-                let mut record = self.records[id].clone();
+                let mut record = R::clone(&self.records[id]);
                 record.set_scannable_value(self.file.read_value(*position));
                 record
             })
@@ -935,7 +981,10 @@ where
                 .iter()
                 .map(|record| (record.id(), record.scannable_value())),
         )?;
+        self.log.close();
         insert_log::clear(&log)?;
+        // Every deferred entry is in the blob now, which the rewrite synced.
+        self.unsynced = false;
         self.position_index = records
             .iter()
             .enumerate()
@@ -1002,7 +1051,7 @@ where
     /// whatever `records` held at construction time — see this module's
     /// doc comment on why `set_scannable_value` exists.
     fn get(&self, id: R::Id) -> Option<R> {
-        let mut record = self.records.get(&id)?.clone();
+        let mut record = R::clone(self.records.get(&id)?);
         let position = *self.position_index.get(&id)?;
         record.set_scannable_value(self.file.read_value(position));
         Some(record)
@@ -1020,6 +1069,10 @@ where
     /// source `get`'s own lookup already reads.
     fn all_ids(&self) -> Vec<R::Id> {
         self.records.keys().copied().collect()
+    }
+
+    fn id_count(&self) -> usize {
+        self.records.len()
     }
 }
 
@@ -1191,6 +1244,29 @@ where
     /// mirrors `MmapAgeStore::flush` exactly.
     fn flush(&self) -> Result<(), DurabilityError> {
         self.file.flush()
+    }
+}
+
+/// The insert log is the only file a write syncs: slot appends and
+/// in-place slot writes go through the mapping unsynced (see [`Flush`]).
+/// Deferring the log's sync therefore defers every sync a write makes.
+impl<R, IndexMarker, ScanMarker> GroupCommit for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker> + ScannableField<ScanMarker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+{
+    fn defer_sync(&mut self) {
+        self.log_sync = LogSync::Deferred;
+    }
+
+    fn commit(&mut self) -> Result<(), DurabilityError> {
+        self.log_sync = LogSync::Now;
+        if self.unsynced {
+            self.log.sync()?;
+            self.unsynced = false;
+        }
+        Ok(())
     }
 }
 
@@ -1934,6 +2010,29 @@ mod tests {
     /// swaps the record, and — through the log — survives a portable
     /// reopen, after which the log is gone and a second reopen writes
     /// nothing; an unknown id is refused with nothing written.
+    /// `needs_compaction` is false for a freshly created store, true after
+    /// a write (the log holds it) or a delete (the log and a retired
+    /// slot), and false again once `compact` has folded both.
+    #[test]
+    fn needs_compaction_tracks_the_log_and_retired_slots() {
+        let dir = crate::test_support::fresh_temp_dir("mmap_needs_compaction").unwrap();
+        let path = dir.join("orders.mmap");
+        let mut store = OrderCore::create(sample(), &path).unwrap();
+        assert!(!store.needs_compaction(), "nothing written since create");
+
+        let mut replaced = order(2);
+        replaced.amount_cents = 1;
+        store.replace(replaced).unwrap();
+        assert!(store.needs_compaction(), "a replace is logged");
+        store.compact().unwrap();
+        assert!(!store.needs_compaction(), "compact folded the log");
+
+        store.delete(uuid::Uuid::from_u128(1)).unwrap();
+        assert!(store.needs_compaction(), "a delete is logged");
+        store.compact().unwrap();
+        assert!(!store.needs_compaction(), "and its slot reclaimed");
+    }
+
     #[test]
     fn replace_moves_the_index_rewrites_the_slot_and_survives_reopen() {
         let dir = crate::test_support::fresh_temp_dir("mmap_replace").unwrap();

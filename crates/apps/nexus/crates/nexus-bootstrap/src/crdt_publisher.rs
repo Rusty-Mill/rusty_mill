@@ -281,22 +281,10 @@ impl CrdtPublisher {
                 return false;
             }
         };
-        // Atomic write: temp + rename on the same filesystem so a
-        // crash mid-write can't leave a half-written file.
-        let tmp = path.with_extension("json.tmp");
-        if let Err(err) = std::fs::write(&tmp, &bytes) {
-            tracing::warn!(%err, path = %tmp.display(), "BL-074: tmp write failed");
-            return false;
-        }
-        if let Err(err) = std::fs::rename(&tmp, &path) {
-            tracing::warn!(%err, path = %path.display(), "BL-074: rename failed");
-            if let Err(cleanup_err) = std::fs::remove_file(&tmp) {
-                tracing::warn!(
-                    %cleanup_err,
-                    tmp = %tmp.display(),
-                    "BL-074: failed to remove orphan tmp file after rename failure",
-                );
-            }
+        // Crash-atomic: a reader sees the old state or the new, never a
+        // half-written file.
+        if let Err(err) = rusty_atomic_file::write(&path, &bytes) {
+            tracing::warn!(%err, path = %path.display(), "BL-074: persist crdt state failed");
             return false;
         }
         true

@@ -356,11 +356,21 @@ impl TransactionalStore for ProductionStore {
 pub trait AllIds {
     /// Every id this store currently holds, unspecified order.
     fn all_ids(&self) -> Vec<Uuid>;
+
+    /// How many ids [`Self::all_ids`] would return, without building the
+    /// list (Tranche 5, D3).
+    fn id_count(&self) -> usize {
+        self.all_ids().len()
+    }
 }
 
 impl AllIds for ProductionStore {
     fn all_ids(&self) -> Vec<Uuid> {
         self.inner.read().expect(LOCK_POISONED).ids()
+    }
+
+    fn id_count(&self) -> usize {
+        self.inner.read().expect(LOCK_POISONED).id_count()
     }
 }
 

@@ -67,9 +67,13 @@ use crate::util::wide::to_wide_nul;
 fn create_pipe_pair() -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     let (read, write) =
         rusty_win32::handle::create_pipe().map_err(|e| errmap::trackw_err("CreatePipe", e))?;
-    let read = OwnedWinHandle::from_raw(read)
+    // SAFETY: `read` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let read = unsafe { OwnedWinHandle::from_raw(read) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
-    let write = OwnedWinHandle::from_raw(write)
+    // SAFETY: `write` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let write = unsafe { OwnedWinHandle::from_raw(write) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
     Ok((read, write))
 }
@@ -89,9 +93,13 @@ fn create_pipe_pair() -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     if ok == 0 {
         return Err(errmap::last_win32_err("CreatePipe", OsStr::new("")));
     }
-    let read = OwnedWinHandle::from_raw(read)
+    // SAFETY: `read` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let read = unsafe { OwnedWinHandle::from_raw(read) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
-    let write = OwnedWinHandle::from_raw(write)
+    // SAFETY: `write` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let write = unsafe { OwnedWinHandle::from_raw(write) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
     Ok((read, write))
 }
@@ -407,12 +415,16 @@ pub fn spawn_attached(
             return Err(errmap::last_win32_err("CreateProcessW", cwd));
         }
 
-        let process = OwnedWinHandle::from_raw(pi.hProcess)
+        // SAFETY: `pi.hProcess` is a failure sentinel or a fresh handle from the call
+        // above that nothing else owns.
+        let process = unsafe { OwnedWinHandle::from_raw(pi.hProcess) }
             .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreateProcessW"))?;
         // The main thread runs immediately (not suspended, see above) —
         // its handle is not retained, mirroring `sys::proc::spawn`'s own
         // non-grouped path.
-        drop(OwnedWinHandle::from_raw(pi.hThread));
+        // SAFETY: `pi.hThread` is a failure sentinel or a fresh handle from the call
+        // above that nothing else owns.
+        drop(unsafe { OwnedWinHandle::from_raw(pi.hThread) });
 
         // No Job Object creation/assignment here — see this function's
         // own doc comment and the `CREATE_SUSPENDED` comment above: this

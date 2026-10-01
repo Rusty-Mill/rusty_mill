@@ -32,6 +32,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Rust toolchain every job builds with (except the MSRV check, which
+  # pins its own). Pinned rather than `stable`: Rust 1.99 deprecated
+  # `fetch_update` and added the default `clippy::assert_is_empty` lint
+  # (~1,300 hits), so a stable bump broke every warnings-as-errors job at
+  # once. Moving to a newer Rust is now a deliberate change here.
+  RUST_TOOLCHAIN: "1.98.1"
   # A one-shot CI build gets little benefit from incremental compilation
   # (there's no prior local state to reuse) and it adds bookkeeping
   # overhead and cache size for no payoff; disabling it is the standard
@@ -68,8 +74,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -95,7 +102,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: dependency-policy
@@ -118,7 +127,9 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: plan
@@ -523,6 +534,60 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build
 
+  # rusty_tick's web UI (Vite/React). Typecheck, unit tests (jsdom over the
+  # in-memory adapter) and the production build; the Playwright run against
+  # the real binary is the rusty-tick-e2e job below.
+  rusty-tick-web:
+    name: rusty_tick web (typecheck, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_tick/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_tick/web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # rusty_tick end to end: Playwright drives the built UI in Chromium against
+  # the real rusty_tick binary (single-user and per-user-token servers).
+  rusty-tick-e2e:
+    name: rusty_tick e2e (Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_tick/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-tick-e2e
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_tick/web/package-lock.json
+      - run: cargo build -p rusty_tick
+        working-directory: .
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rusty-tick-e2e-results
+          path: crates/apps/rusty_tick/web/test-results
+
   # rusty_key's desktop front end: a vendored Vite/Solid app inside a
   # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build
   # only -- `npm run build` bundles the web assets without needing the
@@ -557,8 +622,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -604,8 +670,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -667,7 +734,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rusty-config-no-std
@@ -678,9 +747,8 @@ jobs:
   # rusty_remind_me (crates/apps/rusty_remind_me). Ported from that product's
   # own pre-merge CI (its crates/apps/rusty_remind_me/.github/workflows/ci.yml,
   # dead now that it is not at a repository root -- the full rationale for
-  # each leg is in its comments there). Its toolchain-independent checks
-  # (schema drift against baileyrd/remind_me, plugin.json version) live in
-  # remind-me-checks.yml, which also needs a daily schedule this file lacks.
+  # each leg is in its comments there). Its toolchain-independent check
+  # (plugin.json version) lives in remind-me-checks.yml.
   # `fmt` is covered by the workspace-wide job above.
   # ---------------------------------------------------------------------------
 
@@ -693,8 +761,9 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -736,10 +805,15 @@ jobs:
           # rstack-self links libunwind's ptrace API; liblzma-dev is required
           # too (remind_me_core's build.rs asks for -llzma -- its docs/adr/0014).
           - { feature: stack-dumps, test: true, clippy: true, apt: libunwind-dev liblzma-dev }
+          # ADR-0023: the engine is the default store (phase 5.4b), so every
+          # other leg runs on it. This one keeps the SQLite store covered:
+          # `store: sqlite` runs the whole suite with REMIND_ME_STORE=sqlite.
+          - { feature: engine-store, test: true, clippy: true, store: sqlite }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -749,6 +823,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
       - name: cargo test --features ${{ matrix.feature }}
         if: matrix.test
+        env:
+          REMIND_ME_STORE: ${{ matrix.store }}
         run: cargo test --locked -p remind_me_core --features ${{ matrix.feature }}
       - name: cargo clippy --features ${{ matrix.feature }}
         if: matrix.clippy
@@ -765,8 +841,9 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -779,7 +856,7 @@ jobs:
         run: cargo clippy --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets -- -D warnings
 
   remind-me-hub:
-    name: rusty_remind_me hub (sqlite + postgres + embedded engine)
+    name: rusty_remind_me hub (engine + copy tool, with Postgres)
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
     runs-on: ubuntu-latest
@@ -800,31 +877,26 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: remind-me-hub
       - name: cargo clippy -p remind_me_hub
         run: cargo clippy --locked -p remind_me_hub --all-targets -- -D warnings
-      # The embedded-engine backend (docs/adr/0021) is off by default; this
-      # is the only place its code and tests compile.
-      - name: cargo clippy -p remind_me_hub --features multimodal-store
-        run: cargo clippy --locked -p remind_me_hub --features multimodal-store --all-targets -- -D warnings
-      - name: cargo test -p remind_me_hub (sqlite only)
-        run: cargo test --locked -p remind_me_hub
-      - name: cargo test -p remind_me_hub (all three backends)
+      - name: cargo clippy -p remind_me_hub --no-default-features
+        run: cargo clippy --locked -p remind_me_hub --no-default-features --all-targets -- -D warnings
+      - name: cargo test -p remind_me_hub (with the Postgres copy tests)
         env:
           REMIND_ME_HUB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/hubtest
           # A skipped Postgres test reports as passed; make losing the
           # service container a hard failure instead.
           REMIND_ME_HUB_REQUIRE_POSTGRES: "1"
-        run: cargo test --locked -p remind_me_hub --features multimodal-store -- --test-threads=1
+        run: cargo test --locked -p remind_me_hub -- --test-threads=1
       - name: cargo test -p remind_me_hub --no-default-features
         run: cargo test --locked -p remind_me_hub --no-default-features
-      - name: cargo test -p remind_me_hub --no-default-features --features multimodal-store
-        run: cargo test --locked -p remind_me_hub --no-default-features --features multimodal-store
 
   # remind_me_core's cfg(windows) FFI (sidecar job objects, `\\?\` stripping)
   # compiles on no Linux leg above.
@@ -837,8 +909,9 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:

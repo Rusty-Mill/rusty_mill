@@ -468,7 +468,8 @@ fn insert_over_the_wire_is_validated_durable_and_served_after_a_restart() {
         Err(ClientError::UnknownField(_))
     ));
 
-    // Inside a session: refused, and the session is unaffected.
+    // Inside a session: refused (at 32; from 33 it is staged, `ADR-0130`),
+    // and the session is unaffected.
     let mut session = client.begin().unwrap();
     session
         .update(Uuid::from_u128(1), "status", ScanValue::U32(1))
@@ -479,7 +480,7 @@ fn insert_over_the_wire_is_validated_durable_and_served_after_a_restart() {
         write_message(
             raw,
             &Request::Hello {
-                protocol_version: rusty_multimodal_db::server::protocol::PROTOCOL_VERSION,
+                protocol_version: 32,
             },
         )
         .unwrap();

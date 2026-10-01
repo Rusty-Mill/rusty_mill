@@ -75,6 +75,27 @@
 //! ADR-0102), and refuses a `Query` or page whose `limit` is above `n`
 //! with `TooLarge` before any read. A value that is not a non-negative
 //! integer is a startup error.
+//! `SERVER_MAX_SCAN_ROWS=<n>` (ADR-0126, unset by default) refuses with
+//! `TooLarge` an `Aggregate` or `Join` whose candidate step would full-scan
+//! a table of more than `n` records; an indexed or walked plan is never
+//! refused.
+//!
+//! # Graceful drain — SIGTERM / SIGINT, `SERVER_DRAIN_TIMEOUT_SECS` (ADR-0127)
+//!
+//! On Linux the first SIGTERM or SIGINT stops accepting, lets every
+//! connection finish the request it is in and then closes it, and exits 0
+//! once they have — or after `SERVER_DRAIN_TIMEOUT_SECS` (default 30).
+//!
+//! # Change log for a standby — `SERVER_CHANGE_LOG_DIR` (ADR-0131)
+//!
+//! With `SERVER_DATA_DIR` set, `SERVER_CHANGE_LOG_DIR=<dir>` records each
+//! table's committed writes in `<dir>/<table>.changes`, in commit order, so a
+//! standby with the replication token (`SERVER_AUTH_REPLICATION_TOKEN`) can
+//! tail them (`Request::FetchSince`) after restoring a `FetchSnapshot`. The
+//! log keeps `SERVER_CHANGE_LOG_RETAIN_MB` (default 64) per table; a standby
+//! behind that, or across an epoch, is told `Gone` and resyncs. A clean drain
+//! (SIGTERM) continues the epoch at the next start; any other end starts a
+//! new one.
 //!
 //! # Durable acknowledgements — `SERVER_SYNC_UPDATES` (ADR-0097)
 //!
@@ -183,6 +204,8 @@ use rusty_multimodal_db::generic::relation::{
 };
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
+use rusty_multimodal_db::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
+use rusty_multimodal_db::server::changelogged::ChangeLogged;
 use rusty_multimodal_db::server::data_lock::DataDirLock;
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::exposure::{
@@ -191,7 +214,7 @@ use rusty_multimodal_db::server::exposure::{
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{
-    serve_tables, ConnectionStore, RateLimit, ServeOptions, TlsConfig, TokenClass,
+    serve_tables, ConnectionStore, DrainOutcome, RateLimit, ServeOptions, TlsConfig, TokenClass,
 };
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -335,6 +358,44 @@ const DEFAULT_MAX_QUERY_ROWS: u64 = 10_000;
 /// many appended entries without waiting for a `Compact` — a bound on
 /// the version index a deployment gets without asking.
 const DEFAULT_MVCC_RECLAIM_EVERY: u64 = 10_000;
+
+/// `DRN-FR-005` (ADR-0127): SIGTERM and SIGINT ask the server to drain. The
+/// handler only stores to an atomic (async-signal-safe); a watcher thread
+/// turns the flag into `Shutdown::request`. Linux only; elsewhere the server
+/// runs until it is killed, as before.
+#[cfg(target_os = "linux")]
+mod signals {
+    use rusty_libc::signal::{signal, SIGINT, SIGTERM};
+    use rusty_multimodal_db::server::Shutdown;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    static SIGNALLED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_signal(_: i32) {
+        SIGNALLED.store(true, Ordering::SeqCst);
+    }
+
+    /// Route SIGTERM and SIGINT to `shutdown`. `false` if either handler
+    /// could not be installed, in which case the server is left as it was.
+    pub fn drain_on_signal(shutdown: Shutdown) -> bool {
+        let handler = on_signal as extern "C" fn(i32) as usize;
+        // SAFETY: `on_signal` is an `extern "C" fn(i32)` that lives for the
+        // whole process and performs one atomic store, which is
+        // async-signal-safe.
+        let installed =
+            unsafe { signal(SIGTERM, handler).is_ok() && signal(SIGINT, handler).is_ok() };
+        if installed {
+            std::thread::spawn(move || {
+                while !SIGNALLED.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                shutdown.request();
+            });
+        }
+        installed
+    }
+}
 
 fn main() {
     let addr = std::env::args()
@@ -653,6 +714,30 @@ fn main() {
         Some(max) => options.with_max_query_rows(usize::try_from(max).unwrap_or(usize::MAX)),
         None => options,
     };
+    // `SERVER_MAX_SCAN_ROWS` (ADR-0126, `SCB-FR-005`): opt-in, no default
+    // — turning it on changes what a running deployment's `Aggregate` and
+    // `Join` answer, which is the owner's call, as it was for ADR-0093.
+    let options = match bounded_env("SERVER_MAX_SCAN_ROWS", None) {
+        Some(max) => options.with_max_scan_rows(usize::try_from(max).unwrap_or(usize::MAX)),
+        None => options,
+    };
+    // `DRN-FR-005` (ADR-0127): on Linux, SIGTERM/SIGINT drain the server —
+    // the listener closes, each connection finishes its current request, and
+    // the process exits when they have (or after `SERVER_DRAIN_TIMEOUT_SECS`,
+    // default 30). If the handlers cannot be installed the server runs as it
+    // always did.
+    #[cfg(target_os = "linux")]
+    let options = {
+        let shutdown = rusty_multimodal_db::server::Shutdown::new();
+        if signals::drain_on_signal(shutdown.clone()) {
+            let secs = bounded_env("SERVER_DRAIN_TIMEOUT_SECS", Some(30)).unwrap_or(30);
+            options
+                .with_shutdown(shutdown)
+                .with_drain_timeout(std::time::Duration::from_secs(secs))
+        } else {
+            options
+        }
+    };
     // `SERVER_METRICS_HTTP_ADDR` (ADR-0069, `MHTTP-FR-001`/`006`):
     // a separate, opt-in scrape listener; a bind failure is fatal at startup.
     // `RGL-FR-005` (ADR-0122): exported but empty is unset, as for every
@@ -711,16 +796,69 @@ fn main() {
     // — `Use entity` reaches the second; `JOIN entity e ON mentions`
     // crosses between them; `Use relation` (ADR-0058) reaches the third.
     let memory_connection_store: Arc<dyn ConnectionStore> = connection_store;
-    serve_tables(
-        listener,
-        vec![
-            ("memory".to_string(), memory_connection_store),
-            ("entity".to_string(), entity_connection_store),
-            ("relation".to_string(), relation_connection_store),
-        ],
-        0,
-        options,
-    );
+    let mut tables: Vec<(String, Arc<dyn ConnectionStore>)> = vec![
+        ("memory".to_string(), memory_connection_store),
+        ("entity".to_string(), entity_connection_store),
+        ("relation".to_string(), relation_connection_store),
+    ];
+    // `SERVER_CHANGE_LOG_DIR` (ADR-0131, `CHL-FR-006`): opt-in, durable data
+    // only. Each table's writes are recorded in `<dir>/<table>.changes` so a
+    // standby can tail them; a clean drain says goodbye, and any other end
+    // starts a new epoch at the next open (a standby then resyncs).
+    let change_logs = match std::env::var_os("SERVER_CHANGE_LOG_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            assert!(
+                durable,
+                "SERVER_CHANGE_LOG_DIR needs SERVER_DATA_DIR: a scratch dataset is recreated every start"
+            );
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("SERVER_CHANGE_LOG_DIR {dir:?}: {e}"));
+            let retain = bounded_env("SERVER_CHANGE_LOG_RETAIN_MB", None)
+                .map_or(DEFAULT_RETAIN_BYTES, |mb| mb.saturating_mul(1 << 20));
+            let mut logs = Vec::new();
+            for (name, store) in tables.iter_mut() {
+                let path = dir.join(format!("{name}.changes"));
+                let log = Arc::new(
+                    ChangeLog::open(&path, retain)
+                        .unwrap_or_else(|e| panic!("change log {path:?}: {e}")),
+                );
+                let at = log.position();
+                eprintln!(
+                    "memory_server change log for {name}: {path:?} (epoch {}, head {})",
+                    at.epoch, at.head
+                );
+                *store = Arc::new(ChangeLogged::new(Arc::clone(store), Arc::clone(&log)));
+                logs.push(log);
+            }
+            logs
+        }
+        None => Vec::new(),
+    };
+    let outcome = serve_tables(listener, tables, 0, options);
+    if !close_change_logs(outcome, &change_logs) {
+        std::process::exit(1);
+    }
+}
+
+/// Design review D5: mark each change log clean only after a completed
+/// drain. A drain cut short by its deadline leaves handlers that may still
+/// write, so the logs stay unclean and the next open starts a new epoch (a
+/// standby resyncs). Returns whether the server stopped cleanly; every
+/// reason it did not is printed.
+fn close_change_logs(outcome: DrainOutcome, logs: &[Arc<ChangeLog>]) -> bool {
+    if outcome != DrainOutcome::Drained {
+        eprintln!("memory_server: stopped with {outcome:?}; change logs left unclean");
+        return false;
+    }
+    let mut clean = true;
+    for log in logs {
+        if let Err(e) = log.close_clean() {
+            eprintln!("memory_server: change log did not close clean: {e}");
+            clean = false;
+        }
+    }
+    clean
 }
 
 /// Where this process keeps its three tables (`DDR-FR-002`).
@@ -940,5 +1078,49 @@ fn rate_limit_from_env_value(
         Some(value) => RateLimit::parse(value)
             .map(|limit| auth.with_rate_limit(limit))
             .map_err(|e| format!("SERVER_AUTH_RATE_LIMIT configured but invalid: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh change log in its own temp directory, and its epoch.
+    fn fresh_log(label: &str) -> (PathBuf, Arc<ChangeLog>, u64) {
+        let dir = std::env::temp_dir().join(format!("{label}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("memory.changes");
+        let log = Arc::new(ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).expect("open"));
+        let epoch = log.position().epoch;
+        (path, log, epoch)
+    }
+
+    fn reopened_epoch(path: &Path) -> u64 {
+        ChangeLog::open(path, DEFAULT_RETAIN_BYTES)
+            .expect("reopen")
+            .position()
+            .epoch
+    }
+
+    /// Design review D5: a completed drain closes the log clean, so the
+    /// next open continues its epoch.
+    #[test]
+    fn a_completed_drain_closes_change_logs_clean() {
+        let (path, log, epoch) = fresh_log("d5_drained");
+        assert!(close_change_logs(DrainOutcome::Drained, &[log]));
+        assert_eq!(reopened_epoch(&path), epoch);
+    }
+
+    /// Design review D5: a drain its deadline cut short is not clean, so
+    /// the next open starts a new epoch and a standby resyncs.
+    #[test]
+    fn a_timed_out_drain_leaves_change_logs_unclean() {
+        let (path, log, epoch) = fresh_log("d5_timed_out");
+        assert!(!close_change_logs(
+            DrainOutcome::TimedOut { open: 1 },
+            &[log]
+        ));
+        assert_ne!(reopened_epoch(&path), epoch);
     }
 }

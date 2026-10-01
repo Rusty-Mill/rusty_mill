@@ -14,6 +14,7 @@ anything prior to v0.2.0.
 
 ### Added
 
+- `task::JoinSet::try_join_next`: removes and returns an already-finished member without waiting, or `None`. It lets a long-lived owner such as an accept loop drop finished tasks as it goes (design review 3.7).
 - Windows support for `process::Command`/`Child`, `signal`, and
   `io::UnixStream`/`UnixListener` -- previously `#[cfg(unix)]`-gated out
   of the crate entirely on Windows. `process`: spawn/wait/kill match the

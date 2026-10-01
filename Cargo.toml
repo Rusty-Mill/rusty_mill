@@ -29,7 +29,6 @@ members = [
     "crates/apps/rusty_text",
     "crates/libs/async/rusty_tokio",
     "crates/libs/async/rusty_tokio/rusty_tokio-macros",
-    "crates/libs/storage/rusty_rusqlite",
     "crates/foundation/rusty_libc",
     "crates/libs/protocol/rusty_acp",
     "crates/libs/net/rusty_tls",
@@ -52,6 +51,7 @@ members = [
     "crates/apps/rusty_homelab_mcp",
     "crates/apps/rusty_fedora_agent",
     "crates/apps/rusty_multimodal_db",
+    "crates/apps/rusty_tick",
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_remind_me/crates/remind_me_core",
     "crates/apps/rusty_remind_me/crates/remind_me_mcp",
@@ -80,6 +80,8 @@ members = [
     "crates/libs/net/rusty_request",
     "crates/foundation/rusty_base64",
     "crates/foundation/rusty_rand",
+    "crates/foundation/rusty_atomic_file",
+    "crates/foundation/rusty_confined_fs",
     "crates/foundation/rusty_retry",
     "crates/foundation/rusty_rsa",
     "crates/libs/storage/rusty_sqlite",
@@ -117,6 +119,7 @@ members = [
     "crates/foundation/rusty_ansder",
     "crates/libs/ai/rusty_rag",
     "crates/tools/rusty_boot",
+    "crates/tools/rusty_baseline",
     "crates/libs/ai/rusty_whisper",
     "crates/libs/net/rusty_rdp",
     "crates/apps/rusty_voice",
@@ -142,6 +145,9 @@ members = [
     "crates/apps/rusty_skillopt/crates/skillopt-model",
     "crates/apps/rusty_skillopt/crates/skillopt-envs",
     "crates/apps/rusty_skillopt/crates/skillopt-cli",
+    "crates/apps/rusty_orch/crates/orch-core",
+    "crates/apps/rusty_orch/crates/orch-dispatch",
+    "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
     "crates/apps/rusty_key/crates/constrain",
@@ -228,7 +234,6 @@ members = [
     "crates/apps/nexus/crates/nexus-theme",
     "crates/apps/nexus/crates/nexus-bootstrap",
     "crates/apps/nexus/crates/nexus-editor",
-    "crates/apps/nexus/crates/nexus-rush",
     "crates/apps/nexus/crates/nexus-vt",
     "crates/apps/nexus/crates/nexus-terminal",
     "crates/apps/nexus/crates/nexus-agent",
@@ -331,6 +336,8 @@ rusty_proxmox = { path = "crates/libs/homelab/rusty_proxmox" }
 rusty_rand = { path = "crates/foundation/rusty_rand" }
 rusty_regx = { path = "crates/foundation/rusty_regx", version = "0.5.0" }
 rusty_request = { path = "crates/libs/net/rusty_request" }
+rusty_atomic_file = { path = "crates/foundation/rusty_atomic_file" }
+rusty_confined_fs = { path = "crates/foundation/rusty_confined_fs" }
 rusty_retry = { path = "crates/foundation/rusty_retry" }
 rusty_rsa = { path = "crates/foundation/rusty_rsa" }
 rusty_sha1 = { path = "crates/foundation/rusty_sha1", version = "0.1.0" }
@@ -487,6 +494,12 @@ rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 skillopt-core = { path = "crates/apps/rusty_skillopt/crates/skillopt-core" }
 skillopt-model = { path = "crates/apps/rusty_skillopt/crates/skillopt-model" }
 skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
+
+# rusty_orch was a single-crate workspace with no `[workspace.package]` or
+# dependencies; orch-core keeps its literal `[package]` fields ("MIT",
+# rust-version 1.75) -- rusty_db treatment.
+orch-core = { path = "crates/apps/rusty_orch/crates/orch-core" }
+orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [
@@ -710,7 +723,8 @@ windows-sys = { version = "0.59", features = [
 # matched this root's on every field it set (version 0.1.0, edition 2021,
 # license "MIT OR Apache-2.0", publish = false), so -- like rusty_test and
 # unlike rusty_db -- its crates keep inheriting via `field.workspace = true`;
-# nexus-rush and nexus-vt already carried a literal `edition = "2024"`.
+# nexus-vt already carried a literal `edition = "2024"` (as did nexus-rush,
+# since replaced by crates/apps/rush).
 #
 # Seven of its entries collided with this root's on something a member
 # cannot override by inheriting, and stay literal in the nexus crates that
@@ -728,7 +742,8 @@ windows-sys = { version = "0.59", features = [
 # `tracing-subscriber` gained `fmt`, `futures-util` gained `sink`).
 #
 # Its two `rustils` git pins (`platform`/`platform-linux` at rev 3772d60f,
-# used by nexus-rush's Linux job control) retire to this root's existing
+# used by nexus-rush's Linux job control, before nexus-rush was replaced by
+# crates/apps/rush) retire to this root's existing
 # path entries -- the ADR-0002 rule, and the same swap rusty_yirp's
 # sessionmgr-pty made.
 nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
@@ -814,7 +829,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 clap_complete = "4.5"
 comfy-table = "7"
 ctrlc = "3.5"
-# REPL line editing for `nexus ai chat` and nexus-rush's interactive mode.
+# REPL line editing for `nexus ai chat`.
 rustyline = "18"
 petgraph = "0.7"
 # SMTP client (nexus-notifications email transport). `rustls-tls` keeps the

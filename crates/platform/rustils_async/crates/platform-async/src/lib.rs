@@ -21,5 +21,6 @@
 #![forbid(unsafe_code)]
 
 pub mod process;
+pub mod waker_slot;
 
 pub use platform::error::{ErrorKind, OsCode, PlatformError, Result};

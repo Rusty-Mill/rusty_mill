@@ -34,6 +34,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Rust toolchain every job builds with (except the MSRV check, which
+  # pins its own). Pinned rather than `stable`: Rust 1.99 deprecated
+  # `fetch_update` and added the default `clippy::assert_is_empty` lint
+  # (~1,300 hits), so a stable bump broke every warnings-as-errors job at
+  # once. Moving to a newer Rust is now a deliberate change here.
+  RUST_TOOLCHAIN: "1.98.1"
   PRODUCT_DIR: crates/apps/rusty_remind_me
   TAG_PREFIX: rusty-remind-me-v
 
@@ -89,8 +95,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -98,9 +105,11 @@ jobs:
           shared-key: remind-me-release-${{ matrix.target }}
 
       # Default features only, matching what README tells a from-source user
-      # to build. `-p` keeps this to the two shipped binaries -- a bare build
-      # here would compile the whole monorepo.
-      - name: Build rusty-remind-me and rusty-remind-me-hub (release)
+      # to build. `-p` keeps this to the shipped binaries -- a bare build here
+      # would compile the whole monorepo. remind_me_hub builds two: the hub,
+      # and rusty-remind-me-hub-copy, which moves a SQLite or Postgres hub onto
+      # the embedded engine (docs/adr/0021).
+      - name: Build rusty-remind-me, rusty-remind-me-hub and the hub copy tool (release)
         run: cargo build --release --locked --target ${{ matrix.target }} -p rusty-remind-me -p remind_me_hub
 
       - name: Package the archive (Linux / macOS)
@@ -113,6 +122,7 @@ jobs:
           mkdir "$stage"
           cp "target/${{ matrix.target }}/release/rusty-remind-me" "$stage/"
           cp "target/${{ matrix.target }}/release/rusty-remind-me-hub" "$stage/"
+          cp "target/${{ matrix.target }}/release/rusty-remind-me-hub-copy" "$stage/"
           cp "$PRODUCT_DIR/README.md" "$stage/"
           tar czf "${stage}.tar.gz" "$stage"
           echo "ASSET_PATH=${stage}.tar.gz" >> "$GITHUB_ENV"
@@ -126,6 +136,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me.exe" "$stage/"
           Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me-hub.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/rusty-remind-me-hub-copy.exe" "$stage/"
           Copy-Item "$env:PRODUCT_DIR/README.md" "$stage/"
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
           echo "ASSET_PATH=$stage.zip" >> $env:GITHUB_ENV

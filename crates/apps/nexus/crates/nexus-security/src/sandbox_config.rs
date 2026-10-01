@@ -29,7 +29,7 @@ pub struct SandboxConfig {
     /// `downloads` since `http_request` returns response bytes to the caller
     /// rather than writing GET-only fetches to a sandboxed file.
     pub http: HttpPolicy,
-    /// When true, *sandboxed* terminal sessions launch the bundled `nexus-rush`
+    /// When true, *sandboxed* terminal sessions launch the bundled `rush`
     /// shell instead of the detected system shell (RFC 0002). Off by default —
     /// the system shell stays the default everywhere until rush hardens (RFC
     /// 0002 Stage 1). Non-sandboxed sessions are unaffected regardless. The
