@@ -83,4 +83,5 @@ floor plane from its front side. Walls keep box contact for wall jumps.
   (5 recorded), so the candidate's existing ~45 uu/s steering error carries
   forward differently; the candidate rides 2.3 uu high and leaves the
   floor 2 ticks early, which option 2 addresses.
-- Revisit when suspension forces or surface driving are added.
+- Revisit when suspension forces or surface driving are added. Option 2
+  was adopted by ADR-0018 (FR-090).

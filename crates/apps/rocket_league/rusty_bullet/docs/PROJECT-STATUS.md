@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#181](https://github.com/baileyrd/rusty_bullet/pull/181) —
+  `RB-PHYSICS-001-FR-089`, engine force at each wheel along its heading.
 - [#180](https://github.com/baileyrd/rusty_bullet/pull/180) —
   `RB-PHYSICS-001-FR-088`, ground contact from wheel rays (ADR-0017).
 - [#179](https://github.com/baileyrd/rusty_bullet/pull/179) —
@@ -106,12 +108,15 @@ version: `a245d35`).
 
 ## Next
 
-1. Raycast suspension and the 20.755 uu hitbox offset (ADR-0017 option
-   2), now the earliest real-capture error: the candidate rides 2.3 uu high
-   (19.3 vs 17.0), so after the 4.142 s jump its wheels leave the floor 2
-   ticks early (velocity error 0.5 to 28 uu/s by 4.183 s); its box also
-   bounces on landing (5.575 s), and the 5.758 s car-ball hit lands late.
-   Smaller: brake still acts at the centre of mass, not per wheel.
+1. Jump vertical speed, now the earliest real-capture error: after the
+   4.142 s press the recorded car gains 4.0 uu/s per tick for 7 ticks, then
+   6.7; the candidate loses 0.6 per tick for 5 ticks, then gains 6.7, so it
+   is ~17 uu/s slower upward by 4.2 s. 6.7 is the full jump acceleration
+   less gravity and 4.0 is that less the sticky force, which suggests the
+   real game has no `JUMP_PRE_MIN_ACCEL_SCALE` (0.62, a RocketSim TODO)
+   and keeps wheel contact 2 ticks longer. Then: the post-boost vertical
+   divergence (4.94-5.5 s; at 5.575 s the recording falls at 312 uu/s, the
+   candidate at 260, so it lands ~6 ticks late), and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -120,7 +125,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (427 tests: 27 `rb_domain`, 362
+- `cargo test --workspace`: pass (432 tests: 27 `rb_domain`, 367
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -153,6 +158,11 @@ version: `a245d35`).
   4-5 s 7.9 uu / 24 uu/s (was 23 / 40), 6-7 s 329 uu / 2.02 rad (was 517 /
   2.27); 5-6 s 63 uu / 152 uu/s (was 49 / 115) — past the 5.758 s car-ball
   hit the windows follow a different chaotic path.
+- Same, after `RB-PHYSICS-001-FR-090` (suspension and hitbox offset),
+  2026-10-01: rest height 17.0 simulated and recorded; 0-3 s growth 0.02 uu
+  (was 2.2, the old 2.3 uu ride-height offset); at 4.1-4.133 s error 0.1 uu
+  / 0.3 uu/s; 4-5 s 7.0 uu / 17 uu/s (was 7.9 / 24); 5-6 s 54 uu / 164
+  uu/s (was 63 / 152); 6-7 s 430 uu / 1.25 rad (was 329 / 2.02).
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames

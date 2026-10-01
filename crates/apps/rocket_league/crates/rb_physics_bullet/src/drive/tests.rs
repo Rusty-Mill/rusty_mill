@@ -2,10 +2,19 @@ use super::air::*;
 use super::boost::*;
 use super::ground::*;
 use super::jump::*;
+use super::wheels::resting_contacts;
 use super::*;
 use crate::body::{StaticPlane, CAR_HALF_EXTENTS};
 use crate::integrate;
 use rb_domain::Quat;
+
+fn wheels_for(car: &RigidBody, on_ground: bool) -> WheelContacts {
+    if on_ground {
+        resting_contacts(car)
+    } else {
+        NO_WHEEL_CONTACTS
+    }
+}
 
 fn car() -> RigidBody {
     RigidBody::standard_car(Vec3::ZERO)
@@ -140,7 +149,14 @@ fn step_with_input_and_dodge_flip(
         handbrake_amount: 0.0,
     };
     car.clear_forces();
-    apply_driven_forces(car, input, on_ground, wall_normal, &mut state, dt);
+    apply_driven_forces(
+        car,
+        input,
+        &wheels_for(car, on_ground),
+        wall_normal,
+        &mut state,
+        dt,
+    );
     *boost_amount = state.boost_amount;
     *jump_held = state.jump_held;
     *double_jump_available = state.double_jump_available;
@@ -520,7 +536,7 @@ fn flip_spin_after_press_tick(input: &ControllerInput) -> Vec3 {
     let mut c = car();
     let mut state = DriveState::new();
     c.clear_forces();
-    apply_driven_forces(&mut c, input, false, None, &mut state, TICK);
+    apply_driven_forces(&mut c, input, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
     integrate::integrate_velocities(&mut c, TICK);
     c.angular_velocity
 }
@@ -535,8 +551,10 @@ fn ground_tick(velocity: Vec3, throttle: f32, handbrake_amount: f32) -> Vec3 {
         handbrake: handbrake_amount > 0.0,
         ..Default::default()
     };
+    let wheels = resting_contacts(&c);
     apply_ground_control(
         &mut c,
+        &wheels,
         &input,
         throttle,
         Vec3::new(1.0, 0.0, 0.0),
@@ -2383,7 +2401,8 @@ fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
         ..Default::default()
     };
     let dt = 1.0 / 120.0;
-    apply_driven_forces(&mut car, &input, true, None, &mut state, dt);
+    let wheels = resting_contacts(&car);
+    apply_driven_forces(&mut car, &input, &wheels, None, &mut state, dt);
     assert!(state.jump_held);
     assert!(state.double_jump_available);
     assert_eq!(state.jump_hold_time_remaining, JUMP_HOLD_MAX_DURATION);
@@ -2660,7 +2679,7 @@ fn a_dodge_starts_a_flip_and_landing_clears_it() {
         pitch: Some(-1.0),
         ..Default::default()
     };
-    apply_driven_forces(&mut c, &dodge, false, None, &mut state, TICK);
+    apply_driven_forces(&mut c, &dodge, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
     assert_eq!(
         state.flip,
         Some(FlipState {
@@ -2669,10 +2688,11 @@ fn a_dodge_starts_a_flip_and_landing_clears_it() {
         }),
         "a dodge starts a flip"
     );
+    let wheels = resting_contacts(&c);
     apply_driven_forces(
         &mut c,
         &ControllerInput::default(),
-        true,
+        &wheels,
         None,
         &mut state,
         TICK,
@@ -2779,6 +2799,10 @@ fn floor() -> StaticPlane {
     StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
 }
 
+fn wheels_on_ground(car: &RigidBody, plane: &StaticPlane) -> bool {
+    is_on_ground(&cast_wheels(car, plane, TICK))
+}
+
 fn level_car_at_height(z: f32) -> RigidBody {
     RigidBody::standard_car(Vec3::new(0.0, 0.0, z))
 }
@@ -2828,7 +2852,8 @@ fn held_speed_turn_yaw_rate(speed: f32, throttle: f32) -> f32 {
     };
     let dt = 1.0 / 120.0;
     for _ in 0..60 {
-        apply_driven_forces(&mut car, &input, true, None, &mut state, dt);
+        let wheels = resting_contacts(&car);
+        apply_driven_forces(&mut car, &input, &wheels, None, &mut state, dt);
         integrate::integrate_velocities(&mut car, dt);
         car.clear_forces();
         car.linear_velocity = car.linear_velocity * (speed / car.linear_velocity.length());
@@ -2891,4 +2916,67 @@ fn straight_throttle_from_rest_does_not_yaw() {
         c.angular_velocity
     );
     assert!(c.linear_velocity.x > 0.0);
+}
+
+#[test]
+fn a_resting_car_on_flat_ground_gets_half_gravity_of_sticky_force() {
+    // RB-PHYSICS-001-FR-090: RocketSim's `_UpdateWheels` pushes a car whose
+    // wheels touch into the surface at half of default gravity; the slope
+    // share is zero on flat ground.
+    let mut c = car();
+    let wheels = resting_contacts(&c);
+    let state = DriveState::new();
+    let before = c.linear_velocity;
+    apply_wheel_forces(&mut c, &ControllerInput::default(), &wheels, &state, TICK);
+    assert_eq!(
+        c.linear_velocity, before,
+        "a suspension at rest gives no impulse"
+    );
+    integrate::integrate_velocities(&mut c, TICK);
+    assert_close(c.linear_velocity.z, -0.5 * 650.0 * TICK, "sticky force");
+}
+
+#[test]
+fn an_airborne_car_gets_no_wheel_forces() {
+    let mut c = car();
+    let state = DriveState::new();
+    apply_wheel_forces(&mut c, &full_throttle(), &NO_WHEEL_CONTACTS, &state, TICK);
+    integrate::integrate_velocities(&mut c, TICK);
+    assert_eq!(c.linear_velocity, Vec3::ZERO);
+    assert_eq!(c.angular_velocity, Vec3::ZERO);
+}
+
+#[test]
+fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
+    let floor = floor();
+    let mut low = level_car_at_height(14.0);
+    let low_wheels = cast_wheels(&low, &floor, TICK);
+    apply_wheel_forces(
+        &mut low,
+        &ControllerInput::default(),
+        &low_wheels,
+        &DriveState::new(),
+        TICK,
+    );
+    assert!(
+        low.linear_velocity.z > 0.0,
+        "compressed: {:?}",
+        low.linear_velocity
+    );
+
+    let mut high = level_car_at_height(27.0);
+    let high_wheels = cast_wheels(&high, &floor, TICK);
+    assert!(is_on_ground(&high_wheels));
+    apply_wheel_forces(
+        &mut high,
+        &ControllerInput::default(),
+        &high_wheels,
+        &DriveState::new(),
+        TICK,
+    );
+    assert_eq!(
+        high.linear_velocity,
+        Vec3::ZERO,
+        "extended past rest: no pull"
+    );
 }

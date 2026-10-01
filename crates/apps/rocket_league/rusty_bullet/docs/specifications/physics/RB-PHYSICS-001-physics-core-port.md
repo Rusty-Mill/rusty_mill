@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.93.0
+- Version: 0.94.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5495,6 +5495,33 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     rad/s simulated and recorded (was 2.27); velocity error at 4.05 s 9.4
     uu/s (was 47.8); `--self-growth` 4-5 s 7.9 uu (was 23).
 
+- `RB-PHYSICS-001-FR-090` (raycast suspension and the Octane hitbox offset,
+  implemented, verified by unit tests, ADR-0018): a standard car rides on
+  four suspended wheel rays, with its box offset as in RocketSim.
+  - `RigidBody::shape_offset` / `CAR_HITBOX_OFFSET` = (13.8757, 0, 20.755)
+    uu: every box collision uses `shape_center`; inertia and lever arms stay
+    about the origin (`Car::_BulletSetup`'s compound child).
+  - `drive::wheels::cast_wheels` (`btVehicleRL::rayCast`): per wheel, the
+    hit, normal, suspension length clamped to rest ± 12 uu, its velocity
+    along the normal, and the `resolveSingleCollision` pushback (ERP 0.2)
+    when a wheel sinks past `rest + radius - 2.5`.
+  - `apply_wheel_forces` (`updateSuspension`, `_UpdateWheels`): spring
+    `(rest - length) * 500`, damping 25 compressing / 40 relaxing, scale
+    35.75 front / 54.265 back, never pulling; sticky force 0.5 of default
+    gravity into the surface, plus `1 - |normal.z|` while driving.
+  - Tire grip and engine force act at the wheel hits, with slip from each
+    wheel's hard point.
+  - Why: the candidate rested 2.3 uu high, left the floor 2 ticks early
+    after the 4.142 s jump, bounced on the 5.575 s landing, and hit the
+    ball late at 5.758 s.
+  - **Verification**: a standard car dropped from 60 uu settles at 17.0 uu
+    (the recording's rest height) with its box clear of the floor; full
+    throttle reaches ~414 uu/s in 0.3 s; sticky-force, airborne and
+    never-pulling spring tests; a ball-vs-offset-box contact test.
+  - **Real capture**: rest height 17.0 simulated and recorded; 0-3 s growth
+    0.02 uu (was 2.2); error 0.1 uu / 0.3 uu/s at 4.1-4.133 s; 4-5 s growth
+    7.0 uu (was 7.9).
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6976,6 +7003,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.94.0 (2026-10-01): `RB-PHYSICS-001-FR-090` — raycast suspension and
+  the Octane hitbox offset (ADR-0018). 367 tests in `rb_physics_bullet`.
 - 0.93.0 (2026-10-01): `RB-PHYSICS-001-FR-089` — engine force at each
   wheel along its heading, per RocketSim. 362 tests in `rb_physics_bullet`.
 - 0.92.0 (2026-10-01): `RB-PHYSICS-001-FR-088` — ground contact from
