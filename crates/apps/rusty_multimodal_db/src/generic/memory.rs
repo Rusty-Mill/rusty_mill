@@ -323,6 +323,7 @@ mod tests {
             Insert::<Memory>::insert(&mut store, new.clone()).unwrap();
             assert_eq!(GetById::<Memory>::get(&store, new.id), Some(new));
             assert_eq!(AllIds::<Memory>::all_ids(&store).len(), 4);
+            assert_eq!(AllIds::<Memory>::id_count(&store), 4, "O(1) count agrees");
         }
         let reopened = open_memory_production_stack_portable(&path).unwrap();
         let got = GetById::<Memory>::get(&reopened, Uuid::from_u128(4)).unwrap();
@@ -506,6 +507,7 @@ mod tests {
                 Some(vec![three])
             );
             assert_eq!(AllIds::<Memory>::all_ids(&store).len(), 2);
+            assert_eq!(AllIds::<Memory>::id_count(&store), 2, "O(1) count agrees");
         }
         let reopened = open_memory_production_stack_portable(&path).unwrap();
         assert!(GetById::<Memory>::get(&reopened, one).is_none());

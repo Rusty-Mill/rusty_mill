@@ -34,6 +34,7 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **Design review Tranche 5, `rusty_multimodal_db` equality count (D3):** every indexed equality query asked for the table size before checking whether it needed it, and every adapter answered by building the full id list (100K ids for a 100K table) under the store's read lock. The size is now asked for only when a second `Eq` bucket could be intersected, and `AllIds::id_count` answers it in O(1) (its default still builds the list, so other implementors are unaffected). On the planner bench (100K `Memory` rows, two runs each, µs per request): equality plus range, 417–774 → 120–171; 1% equality, 1,314–1,609 → 994–1,437, where what remains is decoding the 1,000 matched records.
 - **Design review Tranche 4, lifecycle:**
   - `nexus-kernel`: an IPC deadline or a dropped caller cancels the dispatch token (N4).
   - `nexus-ai-runtime`: the shared pool handle follows the live pool across a forge switch, never a torn-down runtime (N5).
