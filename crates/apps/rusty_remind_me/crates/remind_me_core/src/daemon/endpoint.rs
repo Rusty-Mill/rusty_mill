@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Where one database's daemon files live.
@@ -72,6 +72,14 @@ impl Endpoint {
         self.file("log")
     }
 
+    /// Whether the store is being copied onto the engine: the copy's partial
+    /// directory exists and the engine directory does not yet. The daemon
+    /// runs that one-time copy before it listens.
+    pub fn copying_onto_engine(&self) -> bool {
+        let engine = crate::db::engine_dir(&self.dir.join(&self.stem));
+        !engine.exists() && crate::db::partial_dir(&engine).exists()
+    }
+
     /// Take the daemon lock, or `None` when another daemon holds it.
     ///
     /// The returned file must be kept open for as long as the daemon runs.
@@ -122,19 +130,7 @@ impl Endpoint {
 /// Written to a sibling and renamed, so a reader sees the old file or the
 /// new one, never half of either.
 fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut options = OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path)
+    rusty_atomic_file::write_private(path, contents)
 }
 
 #[cfg(test)]
@@ -224,5 +220,25 @@ mod tests {
         assert!(endpoint.read_info().is_some());
         endpoint.withdraw(1);
         assert!(endpoint.read_info().is_none());
+    }
+
+    #[test]
+    fn a_copy_is_under_way_while_only_its_partial_directory_exists() {
+        let endpoint = temp_endpoint("copying");
+        let engine = endpoint.dir.join("memory.engine");
+        let partial = endpoint.dir.join("memory.engine.partial");
+        fs::create_dir_all(&endpoint.dir).unwrap();
+        assert!(!endpoint.copying_onto_engine(), "nothing copied yet");
+        fs::create_dir_all(&partial).unwrap();
+        assert!(endpoint.copying_onto_engine());
+        // The copy renames the partial directory into place when it is done.
+        fs::rename(&partial, &engine).unwrap();
+        assert!(!endpoint.copying_onto_engine(), "the copy finished");
+        fs::create_dir_all(&partial).unwrap();
+        assert!(
+            !endpoint.copying_onto_engine(),
+            "a store already on the engine is never copied again"
+        );
+        fs::remove_dir_all(&endpoint.dir).unwrap();
     }
 }

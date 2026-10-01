@@ -121,19 +121,9 @@ pub fn write_index(
         skills: entries,
     };
 
-    let tmp = path.with_extension("json.tmp");
-    let write_result: Result<(), RegistryIndexError> = (|| {
-        let json = serde_json::to_vec_pretty(&index)?;
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        // Best-effort cleanup; ignore secondary failures.
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write_result
+    let json = serde_json::to_vec_pretty(&index)?;
+    rusty_atomic_file::write(path, &json)?;
+    Ok(())
 }
 
 /// Read and decode the JSON index at `path`.

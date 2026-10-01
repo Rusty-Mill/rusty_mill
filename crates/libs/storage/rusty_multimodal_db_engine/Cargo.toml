@@ -28,11 +28,21 @@ bincode = "1"
 # The memory-mapped slot files.
 memmap2 = "0.9"
 
+[[bench]]
+# Design review Tranche 5: the prefix-query (search-as-you-type) cost.
+name = "fulltext_prefix"
+harness = false
+
+[[bench]]
+# Design review Tranche 5: the engine against SQLite at matched durability.
+name = "vs_sqlite"
+harness = false
+
 [dev-dependencies]
 # The reference the full-text index is differentially tested against
 # (tests/fulltext_vs_fts5.rs): the same bundled SQLite, with FTS5, that
 # rusty_remind_me's node runs and whose unicode61 tables src/fulltext ports.
-# Tests only; the engine itself never links SQLite.
+# Tests and the vs_sqlite bench only; the engine itself never links SQLite.
 rusqlite = { version = "0.39", features = ["bundled"] }
 
 [features]

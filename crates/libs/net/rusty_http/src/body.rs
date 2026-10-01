@@ -60,9 +60,28 @@ pub enum Framing {
 /// no body at all. Unlike a response, a bodyless request is never
 /// close-delimited -- the connection doesn't need to close to signal
 /// "no body here".
+///
+/// Fails closed on the framing ambiguities that let two parsers disagree
+/// about where a request ends (design review 3.4, request smuggling): any
+/// `Transfer-Encoding` together with `Content-Length`, and a
+/// `Transfer-Encoding` whose codings (every field combined) do not end in
+/// a single `chunked` -- a request has no close-delimited fallback. These
+/// used to frame by `Content-Length` (or as bodyless) instead.
 pub fn request_framing(headers: &HeaderMap) -> Result<Framing> {
-    if is_chunked(headers) {
-        return Ok(Framing::Chunked);
+    let coding = transfer_coding(headers)?;
+    if coding.is_some() && headers.get("content-length").is_some() {
+        return Err(Error::InvalidHeader(
+            "request Transfer-Encoding together with Content-Length".into(),
+        ));
+    }
+    match coding {
+        Some(TransferCoding::Chunked) => return Ok(Framing::Chunked),
+        Some(TransferCoding::NotChunked) => {
+            return Err(Error::InvalidHeader(
+                "request Transfer-Encoding does not end in chunked".into(),
+            ))
+        }
+        None => {}
     }
     if let Some(len) = content_length(headers)? {
         return Ok(Framing::ContentLength(len));
@@ -74,6 +93,12 @@ pub fn request_framing(headers: &HeaderMap) -> Result<Framing> {
 /// and 204/304/1xx responses never carry a body regardless of headers;
 /// otherwise chunked wins over `Content-Length`, and a response with
 /// neither is read to EOF (legal for HTTP/1.0-flavored servers).
+///
+/// A malformed coding list is refused as for requests (design review 3.4).
+/// `Transfer-Encoding` overrides a `Content-Length` also present (RFC 9112
+/// §6.3, a client reading one response cannot be desynchronized by it the
+/// way a server reading pipelined requests can), and codings that do not
+/// end in `chunked` are read to EOF, never framed by that `Content-Length`.
 pub fn response_framing(
     headers: &HeaderMap,
     method: &Method,
@@ -86,8 +111,10 @@ pub fn response_framing(
     {
         return Ok(Framing::None);
     }
-    if is_chunked(headers) {
-        return Ok(Framing::Chunked);
+    match transfer_coding(headers)? {
+        Some(TransferCoding::Chunked) => return Ok(Framing::Chunked),
+        Some(TransferCoding::NotChunked) => return Ok(Framing::Close),
+        None => {}
     }
     if let Some(len) = content_length(headers)? {
         return Ok(Framing::ContentLength(len));
@@ -95,20 +122,41 @@ pub fn response_framing(
     Ok(Framing::Close)
 }
 
-/// A `Transfer-Encoding` header can list multiple tokens; `chunked` only
-/// counts as the wire's actual framing when it's the last one (RFC 7230
-/// §3.3.1).
-fn is_chunked(headers: &HeaderMap) -> bool {
-    headers
-        .get("transfer-encoding")
-        .map(|v| {
-            v.split(',')
-                .next_back()
-                .unwrap_or("")
-                .trim()
-                .eq_ignore_ascii_case("chunked")
-        })
-        .unwrap_or(false)
+/// What a message's `Transfer-Encoding` says about its framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferCoding {
+    /// The codings end in `chunked`.
+    Chunked,
+    /// Codings are present but do not end in `chunked`.
+    NotChunked,
+}
+
+/// Every `Transfer-Encoding` field, combined in order into one coding list
+/// (RFC 9110 §5.3) -- not just the first field, which let
+/// `gzip` + `chunked` in two fields read as "not chunked". `None` when the
+/// header is absent. Refused (design review 3.4): an empty element, and
+/// `chunked` anywhere but once, last (RFC 9112 §6.1).
+fn transfer_coding(headers: &HeaderMap) -> Result<Option<TransferCoding>> {
+    let codings: Vec<&str> = headers
+        .get_all("transfer-encoding")
+        .flat_map(|field| field.split(','))
+        .map(str::trim)
+        .collect();
+    if codings.is_empty() {
+        return Ok(None);
+    }
+    let bad = |why: &str| Err(Error::InvalidHeader(format!("Transfer-Encoding {why}")));
+    if codings.iter().any(|c| c.is_empty()) {
+        return bad("has an empty coding");
+    }
+    let chunked = |c: &str| c.eq_ignore_ascii_case("chunked");
+    let last_is_chunked = codings.last().is_some_and(|c| chunked(c));
+    let chunked_count = codings.iter().filter(|c| chunked(c)).count();
+    match (last_is_chunked, chunked_count) {
+        (true, 1) => Ok(Some(TransferCoding::Chunked)),
+        (false, 0) => Ok(Some(TransferCoding::NotChunked)),
+        _ => bad("applies chunked other than once, last"),
+    }
 }
 
 /// The message's `Content-Length` framing, per RFC 7230 §3.3.3: multiple
@@ -553,5 +601,51 @@ mod tests {
         write_chunk(&mut wire, b"");
         write_chunked_end(&mut wire);
         assert_eq!(decode_all(&wire), b"hello");
+    }
+
+    /// Design review 3.4: the malformed/repeated `Transfer-Encoding` and
+    /// TE+CL table, for requests (refused) and responses (never framed by
+    /// `Content-Length` when TE is present).
+    #[test]
+    fn transfer_encoding_ambiguities_fail_closed() {
+        let ok = StatusCode::from_u16(200);
+        let refused_requests: &[&[(&str, &str)]] = &[
+            &[("Transfer-Encoding", "chunked"), ("Content-Length", "5")],
+            &[("Transfer-Encoding", "gzip"), ("Content-Length", "5")],
+            &[
+                ("Transfer-Encoding", "gzip"),
+                ("Transfer-Encoding", "chunked"),
+                ("Content-Length", "5"),
+            ],
+            &[("Transfer-Encoding", "gzip")],
+            &[("Transfer-Encoding", "chunked, gzip")],
+            &[
+                ("Transfer-Encoding", "chunked"),
+                ("Transfer-Encoding", "chunked"),
+            ],
+            &[("Transfer-Encoding", "chunked,,")],
+            &[("Transfer-Encoding", "")],
+        ];
+        for h in refused_requests {
+            assert!(request_framing(&headers(h)).is_err(), "{h:?}");
+        }
+        // Two fields combine: gzip then chunked is chunked.
+        let split = headers(&[
+            ("Transfer-Encoding", "gzip"),
+            ("Transfer-Encoding", "chunked"),
+        ]);
+        assert_eq!(request_framing(&split).unwrap(), Framing::Chunked);
+        assert_eq!(
+            response_framing(&split, &Method::Get, ok).unwrap(),
+            Framing::Chunked
+        );
+
+        let gzip_cl = headers(&[("Transfer-Encoding", "gzip"), ("Content-Length", "5")]);
+        assert_eq!(
+            response_framing(&gzip_cl, &Method::Get, ok).unwrap(),
+            Framing::Close
+        );
+        let twice = headers(&[("Transfer-Encoding", "chunked, chunked")]);
+        assert!(response_framing(&twice, &Method::Get, ok).is_err());
     }
 }

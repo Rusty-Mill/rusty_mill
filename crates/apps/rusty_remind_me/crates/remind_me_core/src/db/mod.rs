@@ -199,6 +199,49 @@ pub fn engine_dir(path: &Path) -> PathBuf {
     path.with_extension("engine")
 }
 
+/// Where a copy into the engine directory `dir` is built before it is
+/// renamed to `dir`: `memory.engine` has `memory.engine.partial`. While it
+/// exists without `dir`, a copy is under way, or one failed and was left
+/// for inspection.
+pub fn partial_dir(dir: &Path) -> PathBuf {
+    let mut partial = dir.as_os_str().to_owned();
+    partial.push(".partial");
+    PathBuf::from(partial)
+}
+
+/// Copy the SQLite file `file` into the engine directory `dir` on a store's
+/// first open, saying on stderr what it is doing. The copy runs once, on the
+/// first start with an engine build, and takes minutes on a large store (two
+/// for a real 15,000-memory node), so a node that went quiet for that long
+/// would look hung. A daemon's stderr is its `.daemon.log`.
+#[cfg(feature = "engine-store")]
+fn copy_logging_progress(file: &Path, dir: &Path) -> Result<()> {
+    let started = std::time::Instant::now();
+    eprintln!(
+        "rusty-remind-me: copying {} onto the engine at {}. This happens once, on the \
+         first start with this build, and can take a few minutes on a large store; \
+         clients wait for it.",
+        file.display(),
+        dir.display()
+    );
+    let mut log_table = |done: engine::copy::TableDone| {
+        if done.rows > 0 {
+            eprintln!(
+                "rusty-remind-me: copied {} rows of {} in {:.1}s",
+                done.rows,
+                done.table,
+                done.elapsed.as_secs_f64()
+            );
+        }
+    };
+    engine::copy::copy_into_place(file, dir, &mut log_table)?;
+    eprintln!(
+        "rusty-remind-me: copy finished in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
     /// The engine tables for the groups moved so far (ADR-0023, phase 4),
@@ -237,6 +280,7 @@ impl Database {
         // engine holds its own `sync_flags` now, so align that one too, as
         // every open does, before anything touches the outbox.
         crate::sync::reconcile_sync_enabled_flag(&db.store())?;
+        queries::empty_tombstones(&db.store())?;
         Ok(db)
     }
 
@@ -296,7 +340,11 @@ impl Database {
                 dir.display()
             )));
         }
-        Self::open_sqlite_file(path)
+        let db = Self::open_sqlite_file(path)?;
+        // Only when SQLite is the store: on the engine the file stopped
+        // changing at the copy, and the engine open empties its own.
+        queries::empty_tombstones(&db.store())?;
+        Ok(db)
     }
 
     /// The database at `path` with its store on the engine, whatever
@@ -316,6 +364,7 @@ impl Database {
         let tables = engine::EngineTables::open(&dir)?;
         db.engine = Some(std::sync::Arc::new(engine::EngineLock::new(tables)));
         crate::sync::reconcile_sync_enabled_flag(&db.store())?;
+        queries::empty_tombstones(&db.store())?;
         Ok(db)
     }
 
@@ -332,7 +381,7 @@ impl Database {
         let conn = self.conn.lock();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let copied = match self.path.as_deref() {
-            Some(file) if !dir.exists() => engine::copy::copy_into_place(file, dir).map(drop),
+            Some(file) if !dir.exists() => copy_logging_progress(file, dir),
             _ => Ok(()),
         };
         conn.execute_batch("ROLLBACK")?;
@@ -349,6 +398,17 @@ impl Database {
             engine: None,
             path: Some(path.to_path_buf()),
         })
+    }
+
+    /// Compact the engine tables that have something to reclaim (see
+    /// [`engine::EngineTables::compact_needed`]). How many were compacted;
+    /// always 0 on SQLite, which reclaims space on its own terms.
+    pub fn compact_store(&self) -> Result<usize> {
+        #[cfg(feature = "engine-store")]
+        if let Some(engine) = &self.engine {
+            return engine.lock().compact_needed();
+        }
+        Ok(0)
     }
 
     /// The store, locked for as long as the handle lives.

@@ -13,6 +13,176 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db: chunked snapshots proposed (ADR-0136)
+**2026-09-30** · [ADR-0136](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0136-chunked-snapshots.md)
+
+- **Docs:** a proposal to lift the 8 MiB snapshot cap: stage a consistent copy under the write lock, then stream it in chunks (protocol 36), with per-file SHA-256. No code.
+- **Measured:** a locked local copy stalls writers about 6 s per GiB on the test host, which is why the lock covers the copy and never the transfer.
+
+---
+
+## rusty_multimodal_db: a grouped change-log sync, spiked on Memory
+**2026-09-30** · [ADR-0134](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0134-grouped-change-log-sync.md)
+
+- **Added:** `ChangeLog::append_deferred` and `sync_through` (append without `fsync`, then one leader syncs for the group), `MemoryConnectionStore::with_change_log`, and `sink` rows in `change_log_bench`. Proposal only: the server does not use it, and `ChangeLogged` is unchanged.
+- **Measured:** journaled updates at 16 writers, 10.1k ops/s with the sink against 2.5k with the decorator (14.9k with no log). Insert-dominated tables lose nothing to the log.
+- Known limitation: only `Memory`'s atomic `write_batch` is wired; `Entity`, `Relation` and the single-shot write paths are not, so a table served this way must not use the sink yet.
+
+---
+
+## rusty_multimodal_db: what the change log costs under load
+**2026-09-30** · [ADR-0131](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0131-continuous-replication.md)
+
+- **Added:** `examples/change_log_bench.rs`, a multi-threaded write benchmark with and without the change log, journaled or not (`--example change_log_bench`, release build).
+- **Measured:** the log adds one `fsync` per write (about −40%) and, on an update-heavy journaled table, removes group commit: 17.2k against 3.1k ops/s at 16 writers on one 4-core ext4 host. Recorded in ADR-0131 with a proposed cheaper design.
+- Known limitation: one host, one disk; the ratios are the result, not the absolute numbers. Nothing in the log was changed.
+
+---
+
+## Design review Tranche 1: soundness and safe-API contracts
+**2026-09-30** · [#409](https://github.com/Rusty-Mill/rusty_mill/pull/409)
+
+- **Fixed:** `rusty_std` `MutexGuard<Cell<_>>` was `Sync`; it now requires `T: Sync`, and compile-fail doctests cover both guards.
+- **Fixed:** `rusty_sync` channels could report `Disconnected` with the final value still queued.
+- **Fixed:** `rusty_rand` on Windows reported success after a truncated fill of a buffer over 4 GiB.
+- **Fixed:** `kill_single` (Linux, async Linux, Windows) no longer signals a reaped child; it returns `Ok`, like `std`.
+- **Changed (breaking):** `OwnedWinHandle::from_raw` and `rusty_libc::process::process_vm_writev` are now `unsafe fn`.
+- **Docs:** remediation plan at `docs/Monorepo_Reviews/DESIGN-REVIEW-2026-09-30-PLAN.md`.
+
+---
+
+## rusty_multimodal_db: documentation brought up to date
+**2026-09-30**
+
+- **Docs:** `README.md`, `AGENTS.md`, `WORKFLOW.md`, `clients/python/README.md`, `docs/architecture/SYSTEM-ARCHITECTURE.md`, `docs/PROJECT-STATUS.md`, the specs and the traceability matrix now describe the crate as it is: a monorepo member whose storage core lives in `rusty_multimodal_db_engine`, wire protocol 35, seven adapters, the commands CI actually runs. About 170 file paths in the specs, `TRACEABILITY.md` and the registry that still named the pre-extraction `src/generic/*` locations now point at the engine crate; three ADR titles that still said "(Proposal)" were corrected.
+- Known limitation: about 270 stale paths remain in `ROADMAP.md`, `PROJECT-STATUS.md`'s dated entries, `RESULTS.md`, the design docs and older ADRs. Those are records of what was true when written and were left as written. The audit is `crates/apps/rusty_multimodal_db/docs/reports/DOCS-AUDIT-2026-09-30.md`.
+
+---
+
+## rusty_tick: type-ahead search
+**2026-09-30**
+
+- **Changed:** `GET /api/v1/search?q=` treats each term as a prefix (`grocer` finds `groceries`), using the engine's `Query::any_of_prefix`. Terms are still alternatives; a prefix, not a substring.
+- **Docs:** README no longer lists moving a task between lists or accounts as missing (both exist); `docs/FUTURE-GROWTH.md` records what the `rusty_tick` spike (#382) changed in the engine.
+- Known limitation: finding prefix terms scans the index vocabulary, fine for a task corpus and a cost to weigh for a very large one.
+
+---
+
+## rusty_tick: `user adopt`, and `user` commands no longer race
+**2026-09-30** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** `rusty_tick user adopt KEY [--data-dir DIR]` moves a single-user store into `users/KEY/`, creates the user and prints a token, so existing data keeps working under a per-user token. It needs the server stopped and refuses if there is nothing to adopt or the user's directory exists.
+- **Fixed:** two `user` commands at the same moment could lose one write. Commands that edit `users.json` now hold `users.lock`; a second one refuses instead of merging.
+
+---
+
+## rusty_tick: the `user` commands (ADR-0002 step 4)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** `rusty_tick user add KEY [LABEL] | list | revoke KEY TOKEN_ID | disable KEY | enable KEY [--data-dir DIR]`, which edit `users.json` and exit. A running multi-user server sees the change within a second.
+  - `add` creates `users.json` in a fresh directory, or gives an existing user another token. It prints the token alone on stdout, once, so `TOKEN=$(rusty_tick user add alice phone)` works.
+  - Failures go to stderr with a non-zero exit and print nothing on stdout.
+  - `add` refuses a directory that holds a single-user store (`tasks.mmap`), which a new `users.json` would stop serving. `user adopt` (below) moves it.
+- **Added:** `rusty_tick::admin::run`, the command layer, over `users::Registry`. No new dependencies.
+- Known limitations: a running server is not told, it re-reads the file.
+
+---
+
+## rusty_tick: several users on one server (ADR-0002 step 3)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** multi-user mode. If `<data-dir>/users.json` exists, `rusty_tick` serves several users.
+  - A token is `<user key>.<secret>`; each user's data is `<data-dir>/users/<key>/`, at most 32 open at once.
+  - `users.json` is re-read as it changes, so a revoked token stops working without a restart; a file that stops parsing keeps the last good one and is reported once.
+  - Every refusal is the same bare `401`: a missing header, another scheme, an unknown or disabled user, a revoked token and a wrong secret. The server logs the user key a refused token claimed, never the secret.
+  - `503` if another process holds a user's directory. `/health` needs no token and opens no store.
+  - `RUSTY_TICK_TOKEN` must not be set in this mode.
+- **Added:** `rusty_tick::backend::Backend` (authentication, then the caller's data; no sockets) and `rusty_tick::auth::Authenticator`.
+- **Changed:** `Server::bind` takes a `Backend` instead of an `Api` and a `Service`. `Api` is now three steps (`public`, `authenticate`, `serve`) that `Backend` runs, and `Api::handle` is gone. `UserKey` moved from `pool` to `users`, with its own error instead of `PoolError::InvalidUser`, so `users` no longer reaches into `pool`.
+- **Fixed:** single-user startup took no lock on the data directory, so two servers on one directory overwrote each other. Both modes now hold a `DirLock` and a second server refuses to start.
+- Single-user mode is otherwise unchanged: `RUSTY_TICK_TOKEN`, the data directory itself.
+- Known limitations: nothing creates `users.json` yet (the `rusty_tick user ...` commands are step 4); no rate limiting (left to the TLS front end); opening an evicted user's store happens under the server's one lock.
+
+---
+
+## rusty_tick: user registry and token check (ADR-0002 step 2)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Added:** `rusty_tick::users`, not yet wired to the API.
+  - `Token::parse` reads `<user key>.<secret>`; a secret is 32 `rusty_rand` bytes as unpadded URL-safe base64.
+  - `Registry` holds users and the SHA-256 digests of their tokens, never the secrets: `add_user`, `add_token` (returns the full token once), `revoke`, `set_disabled`, and `authenticate`.
+  - `authenticate` returns `None`, and does the same work, for a malformed token, an unknown or disabled user, a revoked token and a wrong secret.
+  - `users.json` is versioned and refused if it has an unknown field, a bad key, a duplicate user or token id, or a digest that is not 64 hex characters. `save` writes a temporary file, syncs and renames it, `0600` on Unix.
+  - `RegistryFile` re-reads the file when its modification time or length changes (at most once a second by default), and keeps the last good registry if a later edit does not parse, reporting why through `last_error`.
+- **Added dependencies:** `rusty_rand`, `rusty_base64` and `rusty_rsa` (for its SHA-256), all first-party. No external dependency and no new package in the lockfile.
+- Known limitations: no rate limiting (ADR-0002 leaves it to the TLS front end); the CLI that edits the file is step 4.
+
+---
+
+## rusty_tick: `ServicePool` (ADR-0002 step 1)
+**2026-09-29** · [ADR-0002](crates/apps/rusty_tick/docs/decisions/ADR-0002-per-user-tokens.md)
+
+- **Changed:** `pool::StorePool` is now `pool::ServicePool`, and pools a user's whole `Service` (tasks and lists) instead of only a `TaskStore`. `StorePool` could not serve the API, since a user's data is both.
+  - `ServicePool::new(root, capacity, clock)` takes a factory for the clock each opened service reads.
+  - `DEFAULT_MAX_OPEN_USERS` is 32, a constant (ADR-0002).
+- No behaviour change: nothing calls the pool yet. The binary and API are untouched.
+- Known limitation: single-user startup still takes no `DirLock` (ADR-0002 proposes fixing it with the authenticator step).
+
+---
+
+## rusty_multimodal_db_engine and rusty_tick: growth follow-ups (issue #382)
+**2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** `Query::except_columns`, FTS5's `- {c1 c2} : (query)` (every column but those). Held to FTS5 by `tests/fulltext_vs_fts5.rs`; nests with `in_columns` by intersection.
+- **Added:** `rusty_tick::pool::StorePool`, a bounded pool of per-user stores.
+  - Keeps at most `capacity` stores open and closes the least recently used first, before opening the next, so the bound holds while opening.
+  - Locks each user's directory with `DirLock`, since the store does not lock by itself.
+  - User keys are validated (1 to 64 of `A-Z a-z 0-9 _ -`), so a key cannot leave the pool's root.
+- **Known limitation:** nothing calls the pool yet. The HTTP API has one bearer token and no user identity, so wiring it in needs per-user tokens first.
+
+---
+
+## rusty_multimodal_db_engine: column filters and store lifecycle (issue #382)
+**2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** `Query::in_columns` and `Query::in_column`, FTS5's `{c1 c2} : (query)`.
+  - The filter applies to phrases, so `all_of` under it needs each phrase in a chosen column; a column the index lacks matches nothing; nested filters intersect.
+  - Held to FTS5 by `tests/fulltext_vs_fts5.rs` (ranking and snippets), including prefix, `AND` and `NOT` inside a filter.
+- **Added:** `tests/store_lifecycle.rs` for one store directory per user.
+  - Closing loses nothing and a reopen sees every write.
+  - `DirLock` refuses a second handle in the same process, which is what makes closing an idle store safe; the store itself does not lock.
+  - An ignored probe measures open, close and idle memory: about 1.5 µs and 260 bytes per record (2.3 ms and 257 KiB at 1,000 records). Numbers are in `rusty_tick`'s `SPIKE-FINDINGS.md`.
+  - No engine API added: the pool of open stores stays app-side.
+- Known limits: the measurements are one machine, one run; column filters cover inclusion only, not FTS5's `- col :` exclusion.
+
+---
+
+## rusty_multimodal_db_engine: task-manager gaps (issue #382)
+**2026-09-29** · [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** additive `fulltext::Query` forms, leaving `Query::any_of` and its results unchanged.
+  - `Query::any_of_prefix` matches the last token of each phrase as a prefix (`"quick br"` finds `quick brown`).
+  - `Query::all_of` is `AND`; `Query::except` is `NOT`; `Query::leaves` numbers the phrases `Instance::phrase` refers to.
+  - Held to FTS5 by `tests/fulltext_vs_fts5.rs`: prefix, `AND` and `(a OR b) NOT c` match FTS5 document for document, order for order and score for score.
+- **Added:** `tests/task_manager_recipes.rs` and `tests/change_feed_recipe.rs`, which pin the supported recipes for several filters (index the list, filter the rest), `(list, due)` range keys, single-record drag-and-drop reorder, and a `seq`-stamped change feed with tombstones.
+- **Added:** `rusty_multimodal_db` ADR-0125 (accepted): the change feed stays app-side.
+- **Changed:** `Ordered`'s docs state that only the outermost layer answers `PageBy`/`RangeBy` and that inner orders go through `inner()`. Forwarding them is a trait-coherence error (E0119), so this is a documented limit, not a fix.
+- Known limits:
+  - Prefix matching scans the vocabulary (fine for tasks and notes).
+  - FTS5 drops some phrase instances when scoring `(a AND b) NOT c`, so that nesting is pinned for matching documents only, not scores.
+  - Per-column filters are not added.
+
+---
+
+## rusty_tick: storage spike and HTTP API
+**2026-09-29** · Issue [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)
+
+- **Added:** `crates/apps/rusty_tick` (`layer = "apps"`): a `TaskStore` over `rusty_multimodal_db_engine` and probes for the gaps #382 lists. Findings are in its `SPIKE-FINDINGS.md`.
+- **Added:** a JSON HTTP API (`rusty_tick` binary): lists, tasks, subtasks, tags, manual ordering, search and Today/Next 7 Days/Overdue smart lists. Built on `rusty_http`, `rusty_json` and `rusty_url` with a sans-IO router and blocking std sockets (ADR-0001); bearer-token auth, bounded head/body/idle/connection limits, loopback-only unless `--allow-remote`.
+- **Known limitations:** no web UI, sync, multi-user, recurrence or reminders; plain HTTP only; search is whole-word (engine has no prefix query, #382). Scale numbers are one run on one machine.
+
+---
+
 ## rusty_multimodal_db_engine: group commit
 **2026-09-25** · `rusty_remind_me` ADR-0021 phase 3
 

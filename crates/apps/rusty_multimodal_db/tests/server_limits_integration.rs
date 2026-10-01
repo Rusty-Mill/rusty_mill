@@ -8,9 +8,12 @@ use rusty_multimodal_db::generic::memory::{create_memory_production_stack, Memor
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::server::client::{ClientError, QueryResult, SchemaDrivenClient};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::memory::{MemoryConnectionStore, FIELD_UPDATED_AT};
+use rusty_multimodal_db::server::memory::{
+    MemoryConnectionStore, FIELD_CATEGORY, FIELD_UPDATED_AT,
+};
 use rusty_multimodal_db::server::protocol::{
-    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, Selection, PROTOCOL_VERSION,
+    AggregateFn, AggregateSpec, CompareOp, ErrorCode, Predicate, Request, Response, ScanValue,
+    Selection, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -322,5 +325,70 @@ fn a_read_asking_for_more_rows_than_the_cap_is_too_large_before_any_read() {
     match client.query("SELECT * FROM memory LIMIT 3") {
         Err(ClientError::Server(code, _)) => assert_eq!(code, ErrorCode::TooLarge),
         other => panic!("expected TooLarge through the client, got {other:?}"),
+    }
+}
+
+/// `SCB-FR-001`..`004` (ADR-0126): under a scan budget below the table's
+/// size, an `Aggregate` that would full-scan it is `TooLarge` before any
+/// read (`Malformed` below protocol 25); one the sorted index answers, an
+/// indexed read, and an explicit-limit `Query` are untouched; a budget at
+/// or above the table's size refuses nothing.
+#[test]
+fn a_full_scan_aggregate_over_the_budget_is_too_large_and_a_walk_is_not() {
+    // The table holds 5 records.
+    let grouped_by_category = Request::Aggregate {
+        group_by: vec![FIELD_CATEGORY],
+        filter: vec![],
+        aggregates: vec![AggregateSpec {
+            func: AggregateFn::Count,
+            field: None,
+        }],
+        limit: None,
+    };
+    let counted_range = Request::Aggregate {
+        group_by: vec![],
+        filter: vec![Predicate {
+            field: FIELD_UPDATED_AT,
+            op: CompareOp::Ge,
+            value: ScanValue::I64(0),
+        }],
+        aggregates: vec![AggregateSpec {
+            func: AggregateFn::Count,
+            field: None,
+        }],
+        limit: None,
+    };
+    let addr = start_server(ServeOptions::new(None, None).with_max_scan_rows(4));
+    let (mut reader, mut writer) = raw_connection(addr);
+    assert_eq!(
+        error_code(round_trip(&mut reader, &mut writer, &grouped_by_category)),
+        ErrorCode::TooLarge
+    );
+    let (mut old_reader, mut old_writer) = raw_connection_at(addr, 24);
+    assert_eq!(
+        error_code(round_trip(
+            &mut old_reader,
+            &mut old_writer,
+            &grouped_by_category
+        )),
+        ErrorCode::Malformed,
+        "rule 3: below protocol 25 the same refusal is Malformed"
+    );
+    match round_trip(&mut reader, &mut writer, &counted_range) {
+        Response::Groups { groups } => {
+            assert_eq!(groups[0].values, vec![ScanValue::I64(5)]);
+        }
+        other => panic!("the sorted index counts a range without a scan, got {other:?}"),
+    }
+    match round_trip(&mut reader, &mut writer, &query(Some(2))) {
+        Response::Rows { rows } => assert_eq!(rows.len(), 2, "Query is the row cap's, not this"),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    let addr = start_server(ServeOptions::new(None, None).with_max_scan_rows(5));
+    let (mut reader, mut writer) = raw_connection(addr);
+    match round_trip(&mut reader, &mut writer, &grouped_by_category) {
+        Response::Groups { groups } => assert_eq!(groups.len(), 1),
+        other => panic!("a budget equal to the table refuses nothing, got {other:?}"),
     }
 }

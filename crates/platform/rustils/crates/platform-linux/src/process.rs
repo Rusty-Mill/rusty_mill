@@ -75,6 +75,12 @@ impl Child for LinuxChild {
     }
 
     fn kill_single(&self, sig: Signal) -> Result<()> {
+        // Once reaped, `pid` no longer names this child and may already be
+        // recycled: signalling it could hit an unrelated process. The child
+        // is terminated, so the request is satisfied (as `std`'s `kill`).
+        if self.reaped.is_some() {
+            return Ok(());
+        }
         spawn::kill_single(self.pid, sig)
     }
 

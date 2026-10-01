@@ -2,6 +2,110 @@
 
 Dated entries, newest first. One entry per merged pull request.
 
+## 2026-09-29 — Sync status reports tombstones still holding text
+
+### Changed
+- `remind_me_sync_status`'s `tombstones.compactable_now` is replaced by `tombstones.holding_text`. The old field counted tombstones older than the 30-day outbox retention, from when compaction was expected to purge them. Tombstones are never purged now (ADR-0024), so it measured nothing.
+- `holding_text` counts tombstones that still hold their text. Every open, delete and sync apply empties them, so it should read 0. Any other number means a tombstone was written some other way.
+
+### Tests
+- `sync_status_test.rs`: a delete leaves a tombstone that is not counted; one stamped directly, keeping its text, is.
+
+## 2026-09-29 — The store daemon compacts its tables every hour
+
+### Added
+- The store daemon compacts the engine tables every hour (`REMIND_ME_COMPACT_INTERVAL_SECS`, default `3600`, `0` for off), as the hub already does. Only tables with something to reclaim are rewritten: an insert log holding entries, or slots left by deleted rows. Each pass that compacts anything logs how many tables it did.
+- Opening the store already folds each table's log into a fresh file, so this matters for a daemon that runs a long time between restarts. On a real node the pruned outbox left `sync_outbox.mmap.records` at 102.7 MB until the next restart or compaction.
+- The engine gains `GenericMmapStore::needs_compaction`, a cheap check, since `compact` always rewrites a table whole.
+- `REMIND_ME_COMPACT_INTERVAL_SECS` is left out of the settings clients compare with the daemon's, since only the daemon reads it.
+
+### Tests
+- On an on-disk store, compaction after writes and a delete compacts some tables, a second pass compacts none, and a reopen reads every row as before. An engine test covers `needs_compaction` before and after a replace, a delete and a compaction.
+
+## 2026-09-29 — Hub compaction empties every tombstone that holds text (ADR-0024)
+
+### Changed
+- `POST /admin/compact_tombstones` empties every tombstone that still holds its text, whatever its age, and answers `{"emptied": n}`; the `retention_days` key is gone. `REMIND_ME_HUB_TOMBSTONE_RETENTION_DAYS` is removed, and a hub that still sets it ignores it.
+- On the real hub the 90-day default emptied nothing: the 47,008 tombstones copied from Postgres were all younger than that, so they kept their text. Emptying never changes which write wins, so there was nothing to wait for.
+
+### Tests
+- Compaction empties a recent tombstone as well as an old one.
+
+## 2026-09-29 — The outbox drops what the hub has taken
+
+### Fixed
+- Since sends became per remote, a sent outbox row was only pruned once it was 30 days old: the prune dropped rows with `sent_at` set, and per-remote sends never set it. On a real node the outbox was the largest thing in the store, 102.7 MB of 185 MB for 66,678 rows, every one already at the hub. Each row is a full copy of a memory as it was when queued, so it also kept the text of memories deleted since (ADR-0024).
+- A row the hub has taken is now pruned on the next sync cycle or open. Every node pulls it from the hub, and a peer can also pull it from this node's feed, which reads the memories themselves, not the outbox. A row not yet taken by the hub is kept for the retention window as before, whatever peers have taken, and a node without a hub is unaffected.
+
+### Tests
+- A row the hub has taken is pruned at once, with its send marker; a row only a peer has taken waits for the window.
+
+## 2026-09-29 — A node keeps no text of a deleted memory (ADR-0024)
+
+### Changed
+- A delete now keeps the tombstone without its text: `content` becomes `(deleted)`, `tags` becomes `[]`, and `subject`, `predicate` and `object` become null. The id, timestamps, `deleted_at`, `category`, `source` and `metadata` stay, so last-write-wins and re-import checks work as before. The copy queued for sync carries no text either.
+- A deleted memory's revision history is deleted with it, whether the delete tombstones or removes the row.
+- A tombstone arriving by sync is stored the same way, whatever the sender kept. A live copy that loses to a local tombstone no longer adds its tags to it.
+- The first open after the upgrade empties every tombstone that still holds text and deletes the revisions of every deleted memory, on whichever store the node runs. It logs what it dropped. It is storage, not an edit: nothing is queued and `updated_at` stays, since every node empties its own copy. Later opens find nothing to do.
+- `remind_me_export_memories` with `include_deleted` exports tombstones with the placeholder text, not their old text.
+
+### Tests
+- `tombstone_empty_test.rs`, on both stores: a delete drops the text, the history and the queued text; a hard delete drops the history; a tombstone arriving by sync is stored empty, a losing live copy adds no tags, and a newer edit still wins; an open empties tombstones an earlier build left, queues nothing and is idempotent; an open drops the history of deleted memories only.
+
+## 2026-09-29 — The hub stores tombstones without their text and never deletes them (ADR-0024)
+
+### Changed
+- A pushed tombstone is stored emptied: `content` becomes `(deleted)`, `tags` becomes `[]`, and `subject`, `predicate` and `object` become null. Its id, timestamps, `deleted_at`, `category`, `source` and `metadata` stay. Last-write-wins compares `updated_at` only, so no push applies or loses differently.
+- `POST /admin/compact_tombstones` no longer deletes anything. It empties tombstones older than `REMIND_ME_HUB_TOMBSTONE_RETENTION_DAYS` that still hold text, such as those a copy brought over from an older hub, leaving each row's `updated_at` and `hub_seq` as they were. It answers `{"emptied": n, "retention_days": d}`; the `purged` key is gone. Links to deleted memories are kept.
+
+### Fixed
+- Compaction could bring a deleted memory back. It hard-deleted tombstones by age, so a node offline for longer than the retention never saw the delete, and its next push of the memory found no row on the hub, was inserted as live, and reached every node. The tombstone now stays to lose against.
+
+### Tests
+- A pushed tombstone pulls back emptied, with its `source` and `metadata`; a stale live push loses to it after compaction, and a newer edit still wins; compaction deletes no tombstone and no link, and renumbers nothing; a copied hub's text-holding tombstone is emptied in place by compaction.
+
+## 2026-09-29 — The hub's Quadlet unit keeps retrying until its address exists
+
+### Fixed
+- `deploy/remind-me-hub.container` publishes the hub on one address. At boot the unit can start before that address is assigned: `network-online.target` does not wait for it unless the host enables a wait-online service. Every attempt failed with `bind: cannot assign requested address`, and systemd's default start limit marked the unit failed after five tries in about a second. A real hub stayed down for six days that way. The unit now sets `StartLimitIntervalSec=0` and `RestartSec=5`, so it retries every 5 s until the address exists. `setup.sh install` and `setup.sh migrate` install the fixed unit. An already-installed hub picks it up on the next `setup.sh update`, or by adding the two lines by hand.
+
+## 2026-09-29 — A process without the sync settings no longer switches sync off (ADR-0007)
+
+### Fixed
+- Every open aligned the store's sync switch with the opening process's own settings. On a node whose processes differ (a claude.ai connector with `REMIND_ME_NODE_ID`, `REMIND_ME_HUB_URL` and `REMIND_ME_SYNC_SECRET`, a dashboard without), each dashboard open switched sync off and emptied the outbox, and each connector open switched it on and queued the whole store again. Edits made in between were never queued, and the dashboard's deletes were hard deletes no other node saw. A real node's sync was broken this way for six days.
+- A process without the settings now leaves a syncing store syncing, and warns on stderr. Its edits are queued, and its deletes are tombstones.
+- Whether a delete (including `undo_import`) leaves a tombstone now follows the store's sync switch, not the process's settings.
+
+### Changed
+- Turning sync off takes `REMIND_ME_SYNC_DISABLE=1` (or `true`, `yes`, `on`). It empties the outbox and wins over the sync settings. Unsetting the settings in one process no longer turns sync off.
+
+### Tests
+- `sync_gate_test.rs` reopens one store under changing settings. Against the previous behaviour it fails as the node did: the switch off and the outbox empty.
+
+## 2026-09-28 — The engine's search index holds live memories only (ADR-0023)
+
+### Changed
+- A node keeps deleted and superseded memories as sync tombstones: on a real node, 47,008 of 62,060 rows. The engine indexed all of them for full-text search, though every search keeps live memories only. Now only live memories are indexed. On 60,000 synthetic memories with three quarters deleted, the steady open went from 5.2–5.5 s and 419 MB resident to 2.1–2.2 s and 275 MB.
+- Keyword search finds the same memories as before. Its BM25 scores now count live memories only, where SQLite's FTS5 counted tombstones too, so scores and near-tie ordering can differ slightly from a node on SQLite.
+
+### Tests
+- A superseded or deleted memory leaves the index, and one brought back is searchable again, including after a rebuild.
+- The comparison with FTS5 runs twice: with no tombstones, the scores must match exactly; with tombstones, the matches and totals must.
+
+## 2026-09-28 — The first start on the engine says what it is doing, and clients wait for it (ADR-0023)
+
+### Changed
+- The first start with an engine build copies `memory.db` into `memory.engine`, once. On a real 15,000-memory node that took about two minutes, and the node printed nothing while it ran. It now logs each table as it finishes and the total time, to stderr: in `memory.db.daemon.log` when a client started the daemon.
+- A client waiting for the daemon it started now waits up to 30 minutes, not 60 seconds, once it sees that copy under way (`memory.engine.partial` exists), including the open that follows it. It says once on stderr why it is waiting and where the progress is. Before, the first client after the upgrade gave up after a minute and then failed, because the daemon held the store.
+- `rusty-remind-me copy-store` prints each table as it finishes, with its time.
+
+### Upgrading
+- Expect the first start after upgrading to take a while on a large store: minutes, not seconds. Leave it running; the copy verifies every row and happens once. Don't run `copy-store` into `memory.engine` while the node is still running on SQLite. Rows written after the copy would be missing, because the new build finds `memory.engine` and does not copy again.
+
+### Tests
+- The copy reports every table it copied, once each and with the report's counts.
+- Whether a copy is under way follows the partial and engine directories.
+
 ## 2026-09-28 — The engine opens faster in a fifth of the memory (ADR-0023)
 
 ### Changed

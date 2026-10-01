@@ -478,6 +478,8 @@ where
     log_sync: LogSync,
     /// Whether the insert log holds deferred entries not yet synced.
     unsynced: bool,
+    /// The insert log at `<path>.inserts`, kept open between writes.
+    log: insert_log::Appender,
     _marker: PhantomData<(IndexMarker, ScanMarker)>,
 }
 
@@ -607,6 +609,7 @@ where
             file,
             log_sync: LogSync::Now,
             unsynced: false,
+            log: insert_log::Appender::new(insert_log::log_path(path)),
             _marker: PhantomData,
         })
     }
@@ -735,6 +738,7 @@ where
             file,
             log_sync: LogSync::Now,
             unsynced: false,
+            log: insert_log::Appender::new(insert_log::log_path(path)),
             _marker: PhantomData,
         })
     }
@@ -782,6 +786,15 @@ where
         records
     }
 
+    /// Whether [`Self::compact`] would reclaim anything: the insert log
+    /// holds entries not yet folded, or the slot file holds slots of
+    /// deleted records. Cheap, unlike `compact`, which always rewrites the
+    /// blob and the slot file; a caller compacting on a timer checks this
+    /// first.
+    pub fn needs_compaction(&self) -> bool {
+        !self.is_gapless() || insert_log::log_path(self.file.path()).exists()
+    }
+
     /// Whether a [`GroupCommit`] is open: writes are not synced until its
     /// `commit`.
     pub fn is_sync_deferred(&self) -> bool {
@@ -791,11 +804,7 @@ where
     /// Append `record` to the insert log, synced as the open
     /// [`GroupCommit`] (if any) says.
     fn log_record(&mut self, record: &R) -> Result<(), DurabilityError> {
-        insert_log::append_record(
-            &insert_log::log_path(self.file.path()),
-            record,
-            self.log_sync,
-        )?;
+        self.log.append_record(record, self.log_sync)?;
         self.unsynced |= self.log_sync == LogSync::Deferred;
         Ok(())
     }
@@ -913,12 +922,8 @@ where
             .position_index
             .get(&id)
             .ok_or(DeleteError::NotFound(id))?;
-        insert_log::append_tombstone_as(
-            &insert_log::log_path(self.file.path()),
-            R::SCHEMA_TAG,
-            &id,
-            self.log_sync,
-        )?;
+        self.log
+            .append_tombstone(R::SCHEMA_TAG, &id, self.log_sync)?;
         self.unsynced |= self.log_sync == LogSync::Deferred;
         self.file.clear_marker(position);
         if let Some(bucket) = self.index.get_mut(&indexed) {
@@ -976,6 +981,7 @@ where
                 .iter()
                 .map(|record| (record.id(), record.scannable_value())),
         )?;
+        self.log.close();
         insert_log::clear(&log)?;
         // Every deferred entry is in the blob now, which the rewrite synced.
         self.unsynced = false;
@@ -1063,6 +1069,10 @@ where
     /// source `get`'s own lookup already reads.
     fn all_ids(&self) -> Vec<R::Id> {
         self.records.keys().copied().collect()
+    }
+
+    fn id_count(&self) -> usize {
+        self.records.len()
     }
 }
 
@@ -1253,7 +1263,7 @@ where
     fn commit(&mut self) -> Result<(), DurabilityError> {
         self.log_sync = LogSync::Now;
         if self.unsynced {
-            insert_log::sync(&insert_log::log_path(self.file.path()))?;
+            self.log.sync()?;
             self.unsynced = false;
         }
         Ok(())
@@ -2000,6 +2010,29 @@ mod tests {
     /// swaps the record, and — through the log — survives a portable
     /// reopen, after which the log is gone and a second reopen writes
     /// nothing; an unknown id is refused with nothing written.
+    /// `needs_compaction` is false for a freshly created store, true after
+    /// a write (the log holds it) or a delete (the log and a retired
+    /// slot), and false again once `compact` has folded both.
+    #[test]
+    fn needs_compaction_tracks_the_log_and_retired_slots() {
+        let dir = crate::test_support::fresh_temp_dir("mmap_needs_compaction").unwrap();
+        let path = dir.join("orders.mmap");
+        let mut store = OrderCore::create(sample(), &path).unwrap();
+        assert!(!store.needs_compaction(), "nothing written since create");
+
+        let mut replaced = order(2);
+        replaced.amount_cents = 1;
+        store.replace(replaced).unwrap();
+        assert!(store.needs_compaction(), "a replace is logged");
+        store.compact().unwrap();
+        assert!(!store.needs_compaction(), "compact folded the log");
+
+        store.delete(uuid::Uuid::from_u128(1)).unwrap();
+        assert!(store.needs_compaction(), "a delete is logged");
+        store.compact().unwrap();
+        assert!(!store.needs_compaction(), "and its slot reclaimed");
+    }
+
     #[test]
     fn replace_moves_the_index_rewrites_the_slot_and_survives_reopen() {
         let dir = crate::test_support::fresh_temp_dir("mmap_replace").unwrap();

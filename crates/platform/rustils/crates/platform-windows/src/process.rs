@@ -105,6 +105,11 @@ impl Child for WindowsChild {
                 "kill_single",
             ));
         }
+        // Already exited: satisfied, matching the Unix backend
+        // (TerminateProcess would otherwise fail with ACCESS_DENIED).
+        if self.reaped.is_some() {
+            return Ok(());
+        }
         proc::terminate_process(&self.process)
     }
 

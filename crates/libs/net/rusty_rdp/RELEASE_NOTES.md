@@ -4,6 +4,17 @@ The story of `rusty_rdp`, one wire format at a time. Newest first.
 
 ---
 
+## TLS connectors verify the server certificate
+**2026-09-30**
+
+- **Security / breaking:** the client connectors now take a `&rusty_tls::TrustPolicy` (design review 3.6).
+  - Covers `connect_tls`, `connect_tls_with_csprng`, `connect_tls_kerberos` and `connect_tls_kerberos_with_csprng`.
+  - They used to force `DangerNoVerification`, so an active man-in-the-middle received the NTLM or Kerberos credentials.
+  - Pin a self-signed server with `PinnedAnchors`.
+- **Added:** `connect_tls_unverified` and `connect_tls_kerberos_unverified` keep the old behaviour, now under a name that says so.
+
+---
+
 ## Client-side TLS now runs on `rusty_tls`
 **2026-07-21**
 

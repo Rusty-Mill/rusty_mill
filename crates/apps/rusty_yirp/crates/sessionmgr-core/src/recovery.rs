@@ -101,11 +101,15 @@ pub fn decide_recovery(session: &Session, liveness: Option<Liveness>) -> Recover
 /// dying and react (writing an exit record, restarting nothing but
 /// logging noisily). Killing it first makes the child's death quiet and
 /// expected rather than something a half-dead worker misreports.
-pub fn teardown_pids(session: &Session) -> Vec<u32> {
+///
+/// Returns each recorded process *with its start fingerprint* (design
+/// review 4): a bare pid list let the teardown signal whatever process now
+/// holds a recycled pid. Callers must verify identity before signalling.
+pub fn teardown_targets(session: &Session) -> Vec<WorkerRef> {
     [session.worker.as_ref(), session.child.as_ref()]
         .into_iter()
         .flatten()
-        .map(|w: &WorkerRef| w.pid)
+        .cloned()
         .collect()
 }
 
@@ -217,7 +221,10 @@ mod tests {
             start_fingerprint: None,
         });
         assert_eq!(
-            teardown_pids(&s),
+            teardown_targets(&s)
+                .iter()
+                .map(|w| w.pid)
+                .collect::<Vec<_>>(),
             vec![4321, 9999],
             "worker first, then the child it spawned"
         );
@@ -226,9 +233,12 @@ mod tests {
     #[test]
     fn teardown_skips_pids_that_were_never_recorded() {
         let s = session_with(SessionStatus::Created, None);
-        assert!(teardown_pids(&s).is_empty());
+        assert!(teardown_targets(&s).is_empty());
 
         let s = session_with(SessionStatus::Running, worker());
-        assert_eq!(teardown_pids(&s), vec![4321]);
+        assert_eq!(
+            teardown_targets(&s),
+            worker().into_iter().collect::<Vec<_>>()
+        );
     }
 }

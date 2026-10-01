@@ -1,0 +1,15 @@
+[package]
+name = "rusty_atomic_file"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -104,6 +104,7 @@ unsafe extern "system" {
         lp_param: *mut c_void,
     ) -> HWND;
     pub fn ShowWindow(h_wnd: HWND, n_cmd_show: i32) -> i32;
+    pub fn DestroyWindow(h_wnd: HWND) -> i32;
     pub fn UpdateWindow(h_wnd: HWND) -> i32;
     /// Converts a desired *client*-area `RECT` (top-left usually `(0,0)`) in
     /// place into the *window* `RECT` `CreateWindowExW` needs to produce

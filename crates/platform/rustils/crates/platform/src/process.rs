@@ -307,7 +307,9 @@ pub trait Child {
 
     /// Deliver `sig` to the child process only — descendants survive.
     /// Same `Signal::Kill`-only guarantee on Windows as [`kill_tree`](
-    /// Child::kill_tree) (divergence 008).
+    /// Child::kill_tree) (divergence 008). Once a status has been
+    /// observed (`try_wait`/`try_wait_job`), this is `Ok(())` and sends
+    /// nothing: a reaped pid may already name an unrelated process.
     fn kill_single(&self, sig: Signal) -> Result<()>;
 
     /// Non-blocking poll: `Some(status)` if the child has terminated,

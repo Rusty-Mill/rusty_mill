@@ -120,22 +120,26 @@ mod imp {
     }
 
     pub fn fill(buf: &mut [u8]) -> Result<(), Error> {
-        // SAFETY: `BCryptGenRandom` with a null algorithm handle and
-        // `BCRYPT_USE_SYSTEM_PREFERRED_RNG` writes exactly `cb_buffer`
-        // bytes into `pb_buffer`, which is the caller's live, mutable,
-        // `buf.len()`-byte slice.
-        let status = unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                buf.as_mut_ptr(),
-                buf.len() as ULONG,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        };
-        if status != 0 {
-            return Err(Error(format!(
-                "BCryptGenRandom failed with NTSTATUS 0x{status:08x}"
-            )));
+        // `cb_buffer` is a ULONG: fill in ULONG-sized chunks rather than
+        // truncating `buf.len()` and reporting the unfilled tail as random.
+        for chunk in buf.chunks_mut(ULONG::MAX as usize) {
+            // SAFETY: `BCryptGenRandom` with a null algorithm handle and
+            // `BCRYPT_USE_SYSTEM_PREFERRED_RNG` writes exactly `cb_buffer`
+            // bytes into `pb_buffer`, which is the live, mutable `chunk`,
+            // whose length fits ULONG by construction.
+            let status = unsafe {
+                BCryptGenRandom(
+                    std::ptr::null_mut(),
+                    chunk.as_mut_ptr(),
+                    chunk.len() as ULONG,
+                    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+                )
+            };
+            if status != 0 {
+                return Err(Error(format!(
+                    "BCryptGenRandom failed with NTSTATUS 0x{status:08x}"
+                )));
+            }
         }
         Ok(())
     }

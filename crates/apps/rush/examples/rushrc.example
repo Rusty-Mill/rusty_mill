@@ -45,6 +45,29 @@ shopt -s dotglob      # Include hidden dotfiles in glob matches
 # ------------------------------------------------------------------------------
 # 4. Aliases
 # ------------------------------------------------------------------------------
+# Opt in to the Rusty Mill tools by aliasing the standard commands to them.
+# rush used to set these by default; it no longer does, because a command
+# aliased to a tool that isn't installed fails (and `rls` is also the name of
+# rustup's Rust Language Server proxy). Uncomment the ones you have installed.
+# alias ls='rls'
+# alias cat='rcat'
+# alias grep='rgrep'
+# alias find='rfind'
+# alias cp='rcp'
+# alias mv='rmv'
+# alias rm='rrm'
+# alias mkdir='rmkdir'
+# alias touch='rtouch'
+# alias head='rhead'
+# alias sort='rsort'
+# alias uniq='runiq'
+# alias cut='rcut'
+# alias tr='rtr'
+# alias git='rgit'
+# alias ssh='shh'
+# alias sed='rsed'
+# alias awk='rawk'
+
 alias ls='ls --color=auto'
 alias ll='ls -la'
 alias la='ls -A'

@@ -94,9 +94,11 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   downgrades to a bodyless GET, 307/308 always preserve the original
   method and body, and 301/302 downgrade to a bodyless GET for any
   method other than GET/HEAD -- the same rules browsers and `requests`
-  use, since the spec itself is looser. `Authorization` is stripped on
-  any hop that changes host or port, so credentials never leak to a
-  different origin.
+  use, since the spec itself is looser. Caller-set `Authorization`,
+  `Proxy-Authorization` and `Cookie` headers are stripped on any hop that
+  changes host or port or downgrades off `https`, so credentials never
+  leak to a different origin (the cookie jar's own cookies are scoped
+  per hop).
 - **Cookies**: every `Client` stores `Set-Cookie` responses and attaches
   matching cookies to later requests (RFC 6265 domain/path scoping,
   `Expires`/`Max-Age` expiry, `Secure`), including across redirect hops

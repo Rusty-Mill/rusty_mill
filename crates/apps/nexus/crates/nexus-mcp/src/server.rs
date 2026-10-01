@@ -1542,7 +1542,8 @@ struct MemorySyncInput {
 /// Result of `nexus_memory_sync`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct MemorySyncOutput {
-    /// The engine's reply (`{ "pushed": n, "pulled": n }`, or `{ "error": … }`).
+    /// The engine's reply (`{ "pushed", "pulled", "applied", "unchanged",
+    /// "rejected", "replayed", "dead_letters" }` counts, or `{ "error": … }`).
     result: serde_json::Value,
 }
 

@@ -30,7 +30,11 @@ into `lib.rs` produced 23 compile errors. All of that is now real:
 - **`connect`** — the real connection driver, built on the types above
   (not duplicates of them): `ServerSettings` negotiation (RFC 9113
   §6.5.2, with an ACK response), connection- and per-stream-level flow
-  control (`WINDOW_UPDATE` application, `DATA` receive accounting),
+  control (`WINDOW_UPDATE` application; `DATA` beyond a receive window
+  is refused, and `Connection::release_capacity` returns consumed bytes
+  as WINDOW_UPDATE frames; `Connection::send_frame` records outgoing
+  frames against the send windows), bounded header blocks (CONTINUATION
+  count and size capped, no other frame may interleave one),
   `PING`/ACK, `HEADERS` decode via the real HPACK `Decoder` driving the
   real per-stream state machine, `RST_STREAM`, `GOAWAY`, and a
   minimally-scoped `PUSH_PROMISE` (reserves the promised stream; doesn't

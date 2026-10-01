@@ -49,5 +49,6 @@ their tradeoffs.
 - No connection driver, async I/O integration, or client/server API (see
   README roadmap) — this is the next major body of work, not an oversight.
 - No HTTP/1.1-to-HTTP/2 upgrade or ALPN negotiation handling.
-- No flow-control window accounting yet: `WINDOW_UPDATE` frames parse and
-  validate, but nothing enforces send/receive windows.
+- Flow control is enforced by `connect::Connection` alone: receive windows
+  refuse overruns and are replenished by `release_capacity`; outgoing
+  frames go through `send_frame`, never the receive path.

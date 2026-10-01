@@ -88,7 +88,7 @@ and a rewrite on `open`.
   uses for a record the `.mmap` file has no slot for yet.
 - **Schema tag**: `R::SCHEMA_TAG`, the stable, domain-chosen `&'static
   str` naming a record type through the new `SchemaTag` trait
-  (`src/generic/traits.rs`; `Order` = `"order_customer::Order"`,
+  (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/traits.rs`; `Order` = `"order_customer::Order"`,
   `Employee` = `"employee::Employee"`). Never `type_name`, never written
   in full — the header holds its FNV-1a 64 hash (the same `Fnv1a64`
   as the fingerprint, over the tag's UTF-8 bytes), so the tag costs 8
@@ -173,7 +173,7 @@ and a rewrite on `open`.
   or `Record`. `Order`, `Employee`, and `Widget` implement `SchemaTag`
   (three impls, one line of body each); every other in-crate record type
   is untouched.
-- `STORAGE-015-FR-007` (design `GPORT-FR-007`): `src/generic/mmap_store.rs`'s
+- `STORAGE-015-FR-007` (design `GPORT-FR-007`): `crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`'s
   slot layout, header, `write_slot_into`/`append_committed_slot`/
   `is_committed`, and the reconciliation loop are unchanged in
   behavior; the only edits to `create`/`open` are the added blob
@@ -200,10 +200,10 @@ and a rewrite on `open`.
   is the shared machinery's second real call site — the project's own
   threshold for sharing over duplicating. `RecordBlob`'s 12 tests pass
   unmodified.
-- `src/generic/traits.rs` (v0.2.0): `pub trait SchemaTag { const
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/traits.rs` (v0.2.0): `pub trait SchemaTag { const
   SCHEMA_TAG: &'static str; }` — public, not a supertrait of `Record`,
   documented as part of the on-disk format.
-- `src/generic/record_blob.rs` (new, `pub(crate)`, unconditional — not
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/record_blob.rs` (new, `pub(crate)`, unconditional — not
   `research`-gated, since `GenericMmapStore` uses it): `MAGIC =
   GENBLOB\0`, `BLOB_VERSION = 2` (was `1` in v0.1.0); the tagged-header
   helpers `TAG_OFFSET` (= `HEADER_LEN`, 20), `TAGGED_HEADER_LEN` (28),
@@ -220,7 +220,7 @@ and a rewrite on `open`.
   body hashed and verified against the header, then decode) and
   `blob_path(&Path)` (= `companion_path`). 14 tests (9 from v0.1.0, 5
   for the tag).
-- `src/generic/mmap_store.rs`: `create` = encode → existing create →
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`: `create` = encode → existing create →
   blob write; `open` = `is_current_at` → (encode only if stale) →
   existing open → write if stale; `read_portable_records(path)` =
   `record_blob::read`; `open_portable(path)` = `open(read…?, path)`.
@@ -229,9 +229,9 @@ and a rewrite on `open`.
   "companion record blob" section. 6 new `research`-gated tests in
   v0.1.0, 2 more (`Employee` blob read as `Order`; version-1 companion)
   in v0.2.0.
-- `src/generic/order_customer.rs`: `open_order_production_stack_portable`
+- `crates/libs/storage/rusty_multimodal_db_engine/src/generic/order_customer.rs`: `open_order_production_stack_portable`
   and 1 new test; `src/generic/mod.rs` declares `record_blob` and
-  re-exports the helper. `src/generic/production.rs`'s doctest reopens
+  re-exports the helper. `crates/libs/storage/rusty_multimodal_db_engine/src/generic/production.rs`'s doctest reopens
   via `open_portable` and re-checks both updated values. v0.2.0 adds
   `impl SchemaTag for Order` there, `impl SchemaTag for Employee` in
   `src/generic_spike/employee_impl.rs`, and `impl SchemaTag for Widget`
@@ -345,7 +345,7 @@ and a rewrite on `open`.
   `InvalidMagic` from both `open` and `open_portable`, and the failed
   `open` leaves the current blob untouched.
 - `tests/mmap_record_identity_keying.rs` and `mmap_store.rs`'s 8
-  pre-existing tests pass unmodified; `git diff src/generic/mmap_store.rs`
+  pre-existing tests pass unmodified; `git diff crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`
   removes only the six bound lines. `RecordBlob`'s 12 tests and
   `production.rs`'s 6 portability tests pass unmodified.
 - The generic blob's own unit tests cover: round trip; the streamed
@@ -483,8 +483,8 @@ purpose:
   "Context and terminology", FR-001/-004/-005/-006, "Architecture",
   "Data/state and invariants", "Security, privacy, and compatibility",
   "Acceptance criteria", "Verification plan", "Traceability" updated;
-  the last open question resolved. Code: `src/generic/traits.rs`,
-  `src/generic/record_blob.rs`, `src/generic/mmap_store.rs`, the three
+  the last open question resolved. Code: `crates/libs/storage/rusty_multimodal_db_engine/src/generic/traits.rs`,
+  `crates/libs/storage/rusty_multimodal_db_engine/src/generic/record_blob.rs`, `crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`, the three
   `SchemaTag` impls; 7 new tests in this spec's scope.
 - 0.1.0 (2026-09-02, later the same day; no version bump — no
   requirement changed): the `Symmetric`-companion open question resolved
@@ -498,9 +498,9 @@ purpose:
   a whole-record trait walk) and closed as not warranted by the owner.
   "Acceptance criteria" and "Open questions" updated; no code change.
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
-  implementation (`src/generic/record_blob.rs`, the `pub(crate)` sharing
-  refactor of `src/durability/record_blob.rs`, `src/generic/mmap_store.rs`,
-  `src/generic/order_customer.rs`, derives on the in-crate record types,
+  implementation (`crates/libs/storage/rusty_multimodal_db_engine/src/generic/record_blob.rs`, the `pub(crate)` sharing
+  refactor of `src/durability/record_blob.rs`, `crates/libs/storage/rusty_multimodal_db_engine/src/generic/mmap_store.rs`,
+  `crates/libs/storage/rusty_multimodal_db_engine/src/generic/order_customer.rs`, derives on the in-crate record types,
   the `production.rs` doctest), 16 new tests, and the measured
   `create`/`open`/`open_portable` cost in `RESULTS.md`. Registers the
   design ADR-0017 accepted on 2026-09-02 as requirements; records the
