@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_orch` merged** into `crates/apps/rusty_orch/` with its history: `orch-core`, the multi-model orchestrator domain crate (goals, task cards, blackboard). Its root `Cargo.toml`/`Cargo.lock`/`.gitignore` are dropped; `orch-core` joins the workspace members and `[workspace.dependencies]`.
 - **`rusty_multimodal_db`: ADR-0136**, a proposal for chunked snapshots that lift the 8 MiB cap (docs only).
 - **`rusty_multimodal_db`: `change_log_bench`**, a write benchmark that measures the change log's cost under concurrent writers (ADR-0131).
 - **`rusty_tick`: type-ahead search** on the engine's `any_of_prefix`.
