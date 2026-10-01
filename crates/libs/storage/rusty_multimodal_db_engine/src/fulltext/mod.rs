@@ -31,6 +31,7 @@ pub use unicode61::{for_each_token, tokenize, Token};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
+use std::ops::Bound;
 
 /// BM25's `k1`, as FTS5 fixes it.
 const K1: f64 = 1.2;
@@ -279,8 +280,9 @@ pub struct FullTextIndex<K, const C: usize> {
     /// Slots [`remove`](Self::remove) freed, reused before new ones.
     free: Vec<u32>,
     /// Each term's id. Ids are never reused, so the vocabulary only grows,
-    /// by the distinct terms ever indexed.
-    term_ids: HashMap<Box<str>, u32>,
+    /// by the distinct terms ever indexed. Sorted, so a prefix query reads
+    /// the range of terms it covers rather than every term.
+    term_ids: BTreeMap<Box<str>, u32>,
     /// Term id to the slots of the documents holding it, ascending.
     postings: Vec<Vec<u32>>,
     total_tokens: u64,
@@ -298,7 +300,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
             slots: HashMap::new(),
             docs: Vec::new(),
             free: Vec::new(),
-            term_ids: HashMap::new(),
+            term_ids: BTreeMap::new(),
             postings: Vec::new(),
             total_tokens: 0,
         }
@@ -513,22 +515,24 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
     }
 
     /// [`Self::phrase_matches`] with the last token taken as a prefix: the
-    /// union over every term it is a prefix of.
+    /// union over every term it is a prefix of. The terms are one range of
+    /// the sorted vocabulary, and the phrase's other tokens are resolved once.
     fn prefix_matches(&self, phrase: &[String]) -> HashMap<u32, Vec<(u32, u32)>> {
         let mut found: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
         let Some((last, head)) = phrase.split_last() else {
             return found;
         };
+        let Some(mut ids) = self.term_ids_of(head) else {
+            return found;
+        };
         let terms = self
             .term_ids
-            .keys()
-            .filter(|term| term.starts_with(last.as_str()));
-        for term in terms {
-            let mut concrete = head.to_vec();
-            concrete.push(term.to_string());
-            for (slot, mut at) in self.phrase_matches(&concrete) {
-                found.entry(slot).or_default().append(&mut at);
-            }
+            .range::<str, _>((Bound::Included(last.as_str()), Bound::Unbounded))
+            .take_while(|(term, _)| term.starts_with(last.as_str()));
+        for (_, &id) in terms {
+            ids.push(id);
+            self.collect_phrase(&ids, &mut found);
+            ids.pop();
         }
         for at in found.values_mut() {
             at.sort_unstable();
@@ -539,15 +543,28 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
     /// Where `phrase` occurs, per document slot: the position of its first
     /// token.
     fn phrase_matches(&self, phrase: &[String]) -> HashMap<u32, Vec<(u32, u32)>> {
-        let ids: Option<Vec<u32>> = phrase
+        let mut found = HashMap::new();
+        if let Some(ids) = self.term_ids_of(phrase) {
+            self.collect_phrase(&ids, &mut found);
+        }
+        found
+    }
+
+    /// Each term's id, or `None` if any is in no document (the phrase then
+    /// matches nothing).
+    fn term_ids_of(&self, terms: &[String]) -> Option<Vec<u32>> {
+        terms
             .iter()
             .map(|term| self.term_ids.get(term.as_str()).copied())
-            .collect();
-        // A term no document holds: the phrase matches nothing.
-        let Some((&first, rest)) = ids.as_deref().and_then(<[u32]>::split_first) else {
-            return HashMap::new();
+            .collect()
+    }
+
+    /// Adds to `found` where the term-id phrase `ids` occurs: per document
+    /// slot, the position of its first token.
+    fn collect_phrase(&self, ids: &[u32], found: &mut HashMap<u32, Vec<(u32, u32)>>) {
+        let Some((&first, rest)) = ids.split_first() else {
+            return;
         };
-        let mut found = HashMap::new();
         'docs: for &slot in &self.postings[first as usize] {
             let Some((_, doc)) = self.doc(slot) else {
                 continue;
@@ -562,7 +579,7 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
                     None => continue 'docs,
                 }
             }
-            let hits: Vec<(u32, u32)> = at
+            let mut hits = at
                 .iter()
                 .copied()
                 .filter(|&(column, offset)| {
@@ -572,12 +589,11 @@ impl<K: Clone + Eq + Hash + Ord, const C: usize> FullTextIndex<K, C> {
                             .is_ok()
                     })
                 })
-                .collect();
-            if !hits.is_empty() {
-                found.insert(slot, hits);
+                .peekable();
+            if hits.peek().is_some() {
+                found.entry(slot).or_default().extend(hits);
             }
         }
-        found
     }
 
     /// FTS5's `snippet()`: an excerpt of at most `style.tokens` tokens from
@@ -945,6 +961,25 @@ mod tests {
         assert_eq!(keys(&index, &Query::any_of_prefix(["quic br"])), []);
         // Without the prefix form the same text is whole tokens.
         assert_eq!(keys(&index, &Query::any_of(["quick"])), [1, 3]);
+    }
+
+    /// A prefix reads one range of the sorted vocabulary: every term that
+    /// starts with it, including the prefix itself, and none either side.
+    #[test]
+    fn a_prefix_reads_exactly_its_range_of_the_vocabulary() {
+        let index = index(&[
+            (1, ["gq", ""]),
+            (2, ["gr", ""]),
+            (3, ["gra grz", ""]),
+            (4, ["gs", ""]),
+            (5, ["g", "h"]),
+            (6, ["über ubiquitous", ""]),
+        ]);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["gr"])), [2, 3]);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["g"])), [1, 2, 3, 4, 5]);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["grzz"])), []);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["ü"])), [6]);
+        assert_eq!(keys(&index, &Query::any_of_prefix(["gra g"])), [3]);
     }
 
     #[test]

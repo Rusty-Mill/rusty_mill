@@ -62,7 +62,12 @@ pub const JOURNAL_MAGIC: &[u8; 8] = b"TXNJRNL\0";
 /// before this round — a version-1 journal left over from an older
 /// build is refused, not silently upgraded; the journal is expected to
 /// be small and frequently checkpointed, unlike a long-lived blob.
-pub const JOURNAL_FORMAT_VERSION: u32 = 2;
+/// Version 3 (ADR-0135) adds the strict-accepted marker (kind `3`); a
+/// version-2 journal still opens (see `JournaledBatch::StrictWrite`),
+/// and the truncate that follows every replay rewrites its header.
+pub const JOURNAL_FORMAT_VERSION: u32 = 3;
+/// The previous format, still read: no strict-accepted markers.
+const JOURNAL_FORMAT_V2: u32 = 2;
 /// After an append leaves the journal larger than this, the adapter
 /// checkpoints: flushes the store, then truncates the journal
 /// (`JRN-FR-004`). A constant chosen without measurement; the journaled
@@ -74,9 +79,13 @@ const HEADER_LEN: u64 = 12;
 /// Version-2 entry kind bytes (`WBJ-FR-001`, ADR-0063).
 const KIND_TRANSACTION: u8 = 0;
 const KIND_WRITE: u8 = 1;
-/// `STC-FR-002` (ADR-0133): a `WriteOp` batch committed strictly — replay
-/// re-runs the strict check first and skips the batch if it failed live.
+/// `STC-FR-002` (ADR-0133): a `WriteOp` batch committed strictly. It
+/// replays only if a [`KIND_STRICT_ACCEPTED`] marker names it.
 const KIND_STRICT_WRITE: u8 = 2;
+/// ADR-0135: the strict check passed for the strict entry at the byte
+/// offset this entry's `u64 LE` payload names. Synced before the batch's
+/// first write, so an entry without one never touched the store.
+const KIND_STRICT_ACCEPTED: u8 = 3;
 
 /// One journal entry about to be appended — borrowed, chosen by the
 /// caller's own typed [`CommitGroup::commit`]/[`CommitGroup::
@@ -95,7 +104,17 @@ pub(crate) enum JournalEntry<'a> {
 pub(crate) enum JournaledBatch {
     Transaction(Vec<TransactionOp>),
     Write(Vec<WriteOp>),
-    StrictWrite(Vec<WriteOp>),
+    /// ADR-0135: `accepted` is `Some(true)` when a strict-accepted marker
+    /// names the entry — replay redoes it whole, from whatever prefix of it
+    /// reached the store — and `Some(false)` when none does: the live check
+    /// refused it, or the process died before deciding, and either way
+    /// nothing of it was applied. `None` for a version-2 journal, which
+    /// has no markers: replay falls back to that build's rule, re-running
+    /// the strict check.
+    StrictWrite {
+        ops: Vec<WriteOp>,
+        accepted: Option<bool>,
+    },
 }
 
 /// `JMC-FR-001` (ADR-0114): what an adapter's `with_journal` replay
@@ -300,13 +319,15 @@ impl BatchJournal {
             return Err(JournalError::Format("not a batch journal".into()));
         }
         let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        if version != JOURNAL_FORMAT_VERSION {
+        if version != JOURNAL_FORMAT_VERSION && version != JOURNAL_FORMAT_V2 {
             return Err(JournalError::Format(format!(
                 "format version {version}, this build reads {JOURNAL_FORMAT_VERSION}"
             )));
         }
 
         let mut entries = Vec::new();
+        // ADR-0135: each strict entry's byte offset -> its index in `entries`.
+        let mut strict_at: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
         let mut pos = HEADER_LEN as usize;
         // Stops at the first incomplete entry — a torn tail, or exactly the
         // end of the file. Each entry: `[kind: u8][len: u32 LE][payload]`.
@@ -336,7 +357,26 @@ impl BatchJournal {
                     let ops: Vec<WriteOp> = crate::codec::decode(payload).map_err(|e| {
                         JournalError::Format(format!("entry at byte {pos} does not decode: {e}"))
                     })?;
-                    JournaledBatch::StrictWrite(ops)
+                    strict_at.insert(pos as u64, entries.len());
+                    let accepted = (version != JOURNAL_FORMAT_V2).then_some(false);
+                    JournaledBatch::StrictWrite { ops, accepted }
+                }
+                KIND_STRICT_ACCEPTED if version != JOURNAL_FORMAT_V2 => {
+                    let offset = <[u8; 8]>::try_from(payload)
+                        .map(u64::from_le_bytes)
+                        .map_err(|_| {
+                            JournalError::Format(format!("marker at byte {pos} is not a u64"))
+                        })?;
+                    let Some(&index) = strict_at.get(&offset) else {
+                        return Err(JournalError::Format(format!(
+                            "marker at byte {pos} names no strict entry (offset {offset})"
+                        )));
+                    };
+                    if let JournaledBatch::StrictWrite { accepted, .. } = &mut entries[index] {
+                        *accepted = Some(true);
+                    }
+                    pos += 5 + len;
+                    continue;
                 }
                 other => {
                     return Err(JournalError::Format(format!(
@@ -383,23 +423,46 @@ impl BatchJournal {
         Ok(())
     }
 
+    /// A strict entry and, when `accepted`, its marker, synced — the
+    /// journal a crash leaves after that batch's check (tests only).
+    #[cfg(test)]
+    pub(crate) fn append_strict(
+        &mut self,
+        batch: &[WriteOp],
+        accepted: bool,
+    ) -> Result<(), JournalError> {
+        let offset = self.append_unsynced(JournalEntry::StrictWrite(batch))?;
+        if accepted {
+            self.append_raw(KIND_STRICT_ACCEPTED, &offset.to_le_bytes())?;
+        }
+        self.file.sync_data()?;
+        Ok(())
+    }
+
     /// Write one entry without syncing (`GRP-FR-001`): the caller owns
     /// the `fsync` — see [`CommitGroup`]. `len` advances only if the
     /// whole entry was written. The kind byte is `entry`'s own variant
     /// (`WBJ-FR-001`).
-    pub(crate) fn append_unsynced(&mut self, entry: JournalEntry<'_>) -> Result<(), JournalError> {
+    /// Returns the entry's byte offset, its identity until the next
+    /// truncate (ADR-0135).
+    pub(crate) fn append_unsynced(&mut self, entry: JournalEntry<'_>) -> Result<u64, JournalError> {
         let (kind, payload) = match entry {
             JournalEntry::Transaction(batch) => (KIND_TRANSACTION, crate::codec::encode(batch)?),
             JournalEntry::Write(batch) => (KIND_WRITE, crate::codec::encode(batch)?),
             JournalEntry::StrictWrite(batch) => (KIND_STRICT_WRITE, crate::codec::encode(batch)?),
         };
+        self.append_raw(kind, &payload)
+    }
+
+    fn append_raw(&mut self, kind: u8, payload: &[u8]) -> Result<u64, JournalError> {
+        let offset = self.len;
         let len = u32::try_from(payload.len())
             .map_err(|_| JournalError::Format("batch too large to journal".into()))?;
         self.file.write_all(&[kind])?;
         self.file.write_all(&len.to_le_bytes())?;
-        self.file.write_all(&payload)?;
+        self.file.write_all(payload)?;
         self.len += 5 + payload.len() as u64;
-        Ok(())
+        Ok(offset)
     }
 
     /// A second handle on the same open file description, so a
@@ -416,9 +479,12 @@ impl BatchJournal {
 
     /// Drop every entry — only after the store's own files are known
     /// durable (see [`CheckpointFlush`]).
+    /// The header is rewritten too, so a version-2 journal becomes the
+    /// current version once its entries are replayed and dropped.
     pub(crate) fn truncate(&mut self) -> Result<(), JournalError> {
         self.file.set_len(HEADER_LEN)?;
-        self.file.seek(SeekFrom::Start(HEADER_LEN))?;
+        self.file.seek(SeekFrom::Start(8))?;
+        self.file.write_all(&JOURNAL_FORMAT_VERSION.to_le_bytes())?;
         self.file.sync_all()?;
         self.len = HEADER_LEN;
         Ok(())
@@ -448,6 +514,9 @@ pub(crate) struct Turn {
     /// leading replayed entries the flush already covers, whether or not
     /// the truncate that was meant to follow actually completed.
     pub(crate) journal_entries: u64,
+    /// ADR-0135: this batch's entry offset, for
+    /// [`CommitGroup::accept_strict`].
+    pub(crate) entry_offset: u64,
 }
 
 /// Why [`CommitGroup::commit`] failed: the journal (the batch was never
@@ -655,13 +724,25 @@ impl CommitGroup {
         self.commit_entry(JournalEntry::StrictWrite(ops), apply)
     }
 
+    /// ADR-0135: record, durably, that the strict check passed for the
+    /// entry at `turn.entry_offset` — called from that batch's own apply,
+    /// after the check and before its first write. Replay redoes a strict
+    /// entry only when this marker names it. The batch's own turn keeps a
+    /// checkpoint from truncating the entry before its marker lands.
+    pub(crate) fn accept_strict(&self, turn: Turn) -> Result<(), JournalError> {
+        self.lock()?
+            .journal
+            .append_raw(KIND_STRICT_ACCEPTED, &turn.entry_offset.to_le_bytes())?;
+        Ok(self.sync_handle.sync_data()?)
+    }
+
     fn commit_entry<E>(
         &self,
         entry: JournalEntry<'_>,
         apply: impl FnOnce(Turn) -> Result<bool, E>,
     ) -> Result<(), CommitError<E>> {
         let mut state = self.lock().map_err(CommitError::Journal)?;
-        state
+        let entry_offset = state
             .journal
             .append_unsynced(entry)
             .map_err(CommitError::Journal)?;
@@ -727,6 +808,7 @@ impl CommitGroup {
         let flushed = apply(Turn {
             checkpoint_due,
             journal_entries,
+            entry_offset,
         })
         .map_err(CommitError::Apply)?;
         if flushed {
@@ -890,7 +972,7 @@ mod tests {
         ));
         let future = dir.join("future.journal");
         let mut bytes = JOURNAL_MAGIC.to_vec();
-        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&(JOURNAL_FORMAT_VERSION + 1).to_le_bytes());
         std::fs::write(&future, bytes).unwrap();
         assert!(matches!(
             BatchJournal::open(&future).map(|_| ()),
@@ -1201,5 +1283,68 @@ mod tests {
         assert_eq!(journal.len_bytes(), HEADER_LEN);
         let (_, entries) = BatchJournal::open(&path).unwrap();
         assert!(entries.is_empty());
+    }
+
+    /// ADR-0135: a marker accepts exactly the strict entry it names; one
+    /// naming no strict entry is corruption.
+    #[test]
+    fn a_strict_entry_is_accepted_only_by_its_own_marker() {
+        let dir = fresh_temp_dir("journal_strict_marker").unwrap();
+        let path = dir.join("txn.journal");
+        let write = |n: u128| WriteOp::Delete {
+            id: uuid::Uuid::from_u128(n),
+        };
+        {
+            let (mut journal, _) = BatchJournal::open(&path).unwrap();
+            journal.append_strict(&[write(1)], false).unwrap();
+            journal.append_strict(&[write(2)], true).unwrap();
+        }
+        let (mut journal, entries) = BatchJournal::open(&path).unwrap();
+        let accepted: Vec<Option<bool>> = entries
+            .iter()
+            .map(|e| match e {
+                JournaledBatch::StrictWrite { accepted, .. } => *accepted,
+                _ => panic!("only strict entries were written"),
+            })
+            .collect();
+        assert_eq!(accepted, vec![Some(false), Some(true)]);
+
+        journal
+            .append_raw(KIND_STRICT_ACCEPTED, &7u64.to_le_bytes())
+            .unwrap();
+        drop(journal);
+        assert!(matches!(
+            BatchJournal::open(&path),
+            Err(JournalError::Format(_))
+        ));
+    }
+
+    /// ADR-0135: a version-2 journal still opens, its strict entries
+    /// undecided (replay re-runs the check), and its truncate upgrades the
+    /// header.
+    #[test]
+    fn a_version_2_journal_opens_undecided_and_truncate_upgrades_it() {
+        let dir = fresh_temp_dir("journal_v2").unwrap();
+        let path = dir.join("txn.journal");
+        let payload = crate::codec::encode(&vec![WriteOp::Delete {
+            id: uuid::Uuid::from_u128(1),
+        }])
+        .unwrap();
+        let mut bytes = JOURNAL_MAGIC.to_vec();
+        bytes.extend_from_slice(&JOURNAL_FORMAT_V2.to_le_bytes());
+        bytes.push(KIND_STRICT_WRITE);
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (mut journal, entries) = BatchJournal::open(&path).unwrap();
+        assert!(matches!(
+            &entries[..],
+            [JournaledBatch::StrictWrite { accepted: None, .. }]
+        ));
+        journal.truncate().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[8..12], &JOURNAL_FORMAT_VERSION.to_le_bytes());
+        assert_eq!(bytes.len(), HEADER_LEN as usize);
     }
 }

@@ -1080,6 +1080,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, R, Marker> Flush for Symmetric<S, R, Marker>
@@ -1624,6 +1628,10 @@ where
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
     }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
+    }
 }
 
 impl<S, R: Record> Flush for MultiSymmetric<S, R>
@@ -1883,6 +1891,10 @@ where
 {
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
+    }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
     }
 }
 
@@ -2213,6 +2225,10 @@ where
 {
     fn all_ids(&self) -> Vec<C::Id> {
         self.inner.all_ids()
+    }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
     }
 }
 
@@ -2639,6 +2655,10 @@ where
 {
     fn all_ids(&self) -> Vec<R::Id> {
         self.inner.all_ids()
+    }
+
+    fn id_count(&self) -> usize {
+        self.inner.id_count()
     }
 }
 

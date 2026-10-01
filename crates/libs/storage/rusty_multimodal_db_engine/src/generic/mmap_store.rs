@@ -478,6 +478,8 @@ where
     log_sync: LogSync,
     /// Whether the insert log holds deferred entries not yet synced.
     unsynced: bool,
+    /// The insert log at `<path>.inserts`, kept open between writes.
+    log: insert_log::Appender,
     _marker: PhantomData<(IndexMarker, ScanMarker)>,
 }
 
@@ -607,6 +609,7 @@ where
             file,
             log_sync: LogSync::Now,
             unsynced: false,
+            log: insert_log::Appender::new(insert_log::log_path(path)),
             _marker: PhantomData,
         })
     }
@@ -735,6 +738,7 @@ where
             file,
             log_sync: LogSync::Now,
             unsynced: false,
+            log: insert_log::Appender::new(insert_log::log_path(path)),
             _marker: PhantomData,
         })
     }
@@ -800,11 +804,7 @@ where
     /// Append `record` to the insert log, synced as the open
     /// [`GroupCommit`] (if any) says.
     fn log_record(&mut self, record: &R) -> Result<(), DurabilityError> {
-        insert_log::append_record(
-            &insert_log::log_path(self.file.path()),
-            record,
-            self.log_sync,
-        )?;
+        self.log.append_record(record, self.log_sync)?;
         self.unsynced |= self.log_sync == LogSync::Deferred;
         Ok(())
     }
@@ -922,12 +922,8 @@ where
             .position_index
             .get(&id)
             .ok_or(DeleteError::NotFound(id))?;
-        insert_log::append_tombstone_as(
-            &insert_log::log_path(self.file.path()),
-            R::SCHEMA_TAG,
-            &id,
-            self.log_sync,
-        )?;
+        self.log
+            .append_tombstone(R::SCHEMA_TAG, &id, self.log_sync)?;
         self.unsynced |= self.log_sync == LogSync::Deferred;
         self.file.clear_marker(position);
         if let Some(bucket) = self.index.get_mut(&indexed) {
@@ -985,6 +981,7 @@ where
                 .iter()
                 .map(|record| (record.id(), record.scannable_value())),
         )?;
+        self.log.close();
         insert_log::clear(&log)?;
         // Every deferred entry is in the blob now, which the rewrite synced.
         self.unsynced = false;
@@ -1072,6 +1069,10 @@ where
     /// source `get`'s own lookup already reads.
     fn all_ids(&self) -> Vec<R::Id> {
         self.records.keys().copied().collect()
+    }
+
+    fn id_count(&self) -> usize {
+        self.records.len()
     }
 }
 
@@ -1262,7 +1263,7 @@ where
     fn commit(&mut self) -> Result<(), DurabilityError> {
         self.log_sync = LogSync::Now;
         if self.unsynced {
-            insert_log::sync(&insert_log::log_path(self.file.path()))?;
+            self.log.sync()?;
             self.unsynced = false;
         }
         Ok(())

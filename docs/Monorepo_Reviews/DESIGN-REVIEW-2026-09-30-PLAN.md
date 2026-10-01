@@ -49,6 +49,12 @@ re-export it from `rusty_sync`, and delete the duplicate copy.
 
 2.9 uses one small shared `atomic_write` in the platform/fs layer. That makes
 three real call sites, so the shared helper is justified.
+*Landed in Tranche 4 as `crates/foundation/rusty_atomic_file`, a std
+crate, not rustils: rustils has no filesystem backend on macOS, where Nexus
+ships, and a foundation crate is usable by every layer. 16 call sites moved;
+the multimodal engine keeps its own `durability` helper. The 3.2 rooted open
+landed alongside it as `crates/foundation/rusty_confined_fs` (an
+`openat`/`O_NOFOLLOW` walk on Linux), used by croc and the Fedora agent.*
 
 ## Tranche 3 — Fail-closed and bounded I/O (P1/P2)
 
@@ -77,11 +83,18 @@ rusty_gui clipboard (`Unsupported`), `rusty_std` stub I/O/process
 `Session::commit` doc/contract, coreutils `rtail`/`rwc`/`rxargs`.
 
 **Consolidation (only after conformance tests exist):**
-- `adk-mcp` onto the shared MCP stack
-- one stream reducer shared by adk-agent and adk-models
-- HTTP parsing for llama and whisper onto `rusty_http`
+- `adk-mcp` onto the shared MCP stack *(done: conformance suite first, then
+  `rmcp`; see `crates/libs/rusty_adk/crates/adk-mcp/tests/conformance.rs`)*
+- one stream reducer shared by adk-agent and adk-models *(done:
+  `adk_models::StreamAggregator`; it also fixed `LlmAgent` swallowing a
+  streamed error chunk)*
+- HTTP parsing for llama and whisper onto `rusty_http` *(done: both
+  servers read requests through `rusty_http::sync::SyncTransport`, which
+  gained a capped `read_request_body`)*
 - shared `atomic_write` and rooted-fs helpers (from 2.9 / 3.2)
-- rush / nexus-rush shared fixtures only
+- rush / nexus-rush shared fixtures only *(done:
+  `crates/apps/rush/tests/conformance/{glob,arith}.tsv`, run by both
+  crates; they found two nexus-rush bugs, fixed)*
 
 ## Tranche 5 — Measurement
 
@@ -107,10 +120,15 @@ settings. The results decide any later simplification.
 2. **`rusty_rusqlite` (2.4):** fix full transactional durability
    (recommended), or declare file-backed transactions `Unsupported` until
    later?
+   *2026-10-01: removed. It had no users in the workspace (Tranche 5's
+   storage survey); the engine and bundled SQLite are the two stacks in use.*
 3. **coreutils daily-driver utilities:** fund conformance, or retire the
    overlapping incomplete binaries and keep only the reference consumers
    (`cat`/`ls`/`rrun`/`rpar`)?
+   *Decided 2026-09-30: retire. `rtail`/`rwc`/`rxargs` removed in Tranche 4;
+   the other overlapping binaries await the same call.*
 4. **Public API breaks** in 1.2, 3.6 renames and the `MockServer` removal: OK
    to break now (pre-1.0), or deprecate first?
+   *Decided 2026-09-30 for `MockServer`: removed now (no callers).*
 5. **Tracking:** one GitHub issue per table row (≈40), or one issue per
    tranche with checklists (recommended — less noise)?

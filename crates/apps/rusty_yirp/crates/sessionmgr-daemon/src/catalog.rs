@@ -42,33 +42,22 @@ use crate::paths;
 /// Writes a session record, atomically enough that a reader never sees a
 /// half-written file.
 ///
-/// Write-to-temp-then-rename: `rename` is atomic on both platforms
-/// (Windows' `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`, which
-/// `std::fs::rename` uses). Writing in place would leave a truncated
-/// `state.json` if the process died mid-write -- and a supervisor that
-/// cannot parse a session's record is exactly the situation this whole
-/// module exists to survive.
+/// Crash-atomic (`rusty_atomic_file`): writing in place would leave a
+/// truncated `state.json` if the process died mid-write -- and a
+/// supervisor that cannot parse a session's record is exactly the
+/// situation this whole module exists to survive.
+///
+/// The record's body -- launch `command: Vec<String>` and all -- is what
+/// `sessionmgr-daemon/src/hooks/dispatch.rs` already treats as sensitive,
+/// so it is created `0600` and never readable by others, not even
+/// between a create and a chmod.
 pub fn write_session(root: &Path, session: &Session) -> Result<()> {
     let dir = paths::session_dir(root, &session.id);
     paths::ensure_dir("creating a session directory", &dir)?;
     let final_path = paths::session_state(root, &session.id);
-    let temp_path = dir.join("state.json.tmp");
     let encoded = serde_json::to_string_pretty(session)?;
-    std::fs::write(&temp_path, encoded)
-        .map_err(|e| Error::io("writing a session record", temp_path.clone(), e))?;
-    std::fs::rename(&temp_path, &final_path)
-        .map_err(|e| Error::io("replacing a session record", final_path.clone(), e))?;
-    // The record's own body -- launch `command: Vec<String>` and all --
-    // is exactly what `sessionmgr-daemon/src/hooks/dispatch.rs` already
-    // treats as sensitive, so it must not be world-readable regardless
-    // of the ambient umask.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| Error::io("restricting a session record's permissions", final_path, e))?;
-    }
-    Ok(())
+    rusty_atomic_file::write_private(&final_path, encoded.as_bytes())
+        .map_err(|e| Error::io("replacing a session record", final_path, e))
 }
 
 /// Reads one session record.

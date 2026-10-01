@@ -55,6 +55,7 @@ nexus-plugins    = { path = "../../crates/nexus-plugins" }
 nexus-panic-log  = { path = "../../crates/nexus-panic-log" }
 # BL-140 Phase 3 — `boot_remote` / `kernel_invoke` over `ssh://` URIs.
 nexus-remote     = { path = "../../crates/nexus-remote" }
+rusty_atomic_file = { path = "../../../../foundation/rusty_atomic_file" }
 
 [dev-dependencies]
 tempfile            = "3"

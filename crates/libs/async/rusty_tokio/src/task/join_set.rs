@@ -89,6 +89,18 @@ impl<T> JoinSet<T> {
         Poll::Pending
     }
 
+    /// Removes and returns one task that has *already* finished, without
+    /// waiting -- `None` when none has. For a long-lived owner (an accept
+    /// loop) to drop finished members as it goes, so the set holds only
+    /// running tasks rather than every task it ever spawned.
+    pub fn try_join_next(&mut self) -> Option<Result<T, JoinError>> {
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        match self.poll_join_next(&mut cx) {
+            Poll::Ready(done) => done,
+            Poll::Pending => None,
+        }
+    }
+
     /// Requests cancellation of every task still in the set -- the same
     /// best-effort, asynchronous semantics as [`JoinHandle::abort`], not
     /// a guarantee they've actually stopped by the time this returns.

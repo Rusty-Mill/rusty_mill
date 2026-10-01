@@ -157,6 +157,24 @@ impl EpollReactor {
         Ok(())
     }
 
+    /// Replaces the waker of `fd`'s pending registration, if it is still
+    /// pending, so the fire path wakes the task polling *now* rather than
+    /// the one that first registered (design review 4). A no-op once the
+    /// fire path has claimed the entry -- the caller then re-checks its
+    /// `ready` flag, which the fire path sets before waking.
+    pub fn update_waker(&self, fd: RawFd, waker: &Waker) {
+        if let Some((_, stored)) = self
+            .registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&fd)
+        {
+            if !stored.will_wake(waker) {
+                *stored = waker.clone();
+            }
+        }
+    }
+
     /// Removes `fd`'s pending registration without waiting for the
     /// fire path in [`Self::run`] to observe it — used by a future
     /// that is being dropped before ever seeing readiness (e.g. the

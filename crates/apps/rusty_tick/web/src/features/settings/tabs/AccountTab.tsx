@@ -4,7 +4,7 @@ import { useActions, useServices } from '@/app/services'
 import { downloadFile } from '@/features/summary/download'
 import { dayKey } from '@/lib/date'
 import { Confirm } from '@/components/Confirm'
-import { restoreBackup, wipeData } from '../backup'
+import { makeBackup, restoreBackup, wipeData } from '../backup'
 import { page, resetDemoData, signOut } from '../session'
 import { APP_NAME, APP_VERSION } from './AboutTab'
 import { PaneTitle, Row } from './controls'
@@ -26,9 +26,8 @@ export function AccountTab() {
   const { notify, refresh } = useActions()
   const who = mode === 'server' ? identity(getToken()) || 'Tick Local' : 'Demo'
   const backup = (): void => {
-    api
-      .snapshot()
-      .then((snap) => downloadFile(`tick-backup-${dayKey(Date.now())}.json`, 'application/json', JSON.stringify(snap, null, 2)))
+    makeBackup(api)
+      .then((backup) => downloadFile(`tick-backup-${dayKey(Date.now())}.json`, 'application/json', JSON.stringify(backup, null, 2)))
       .catch(() => notify('error', 'Could not create a backup'))
   }
   const [confirming, setConfirming] = useState(false)
@@ -40,7 +39,7 @@ export function AccountTab() {
       .text()
       .then((text) => restoreBackup(api, text))
       .then((n) => {
-        notify('info', `Imported ${n.tasks} tasks, ${n.lists} lists and ${n.tags} tags`)
+        notify('info', `Imported ${n.tasks} tasks, ${n.lists} lists, ${n.tags} tags and ${n.docs} other items`)
         void refresh()
       })
       .catch((e: unknown) => notify('error', e instanceof Error ? e.message : 'Could not import that backup'))

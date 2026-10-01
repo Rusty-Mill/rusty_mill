@@ -4,6 +4,16 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Security
+- Startup fails closed on unresolved credentials (design review 3.1). A
+  configured `server.api_key_env`, `[[clients]].api_key_env` or `[jwt]`
+  whose secret does not resolve now stops `rp-server` with the list of
+  what is missing, instead of warning and serving with less or no auth.
+- With no auth method configured, `/v1` answers `401` unless the new
+  `server.allow_unauthenticated = true` opts in. This also applies at
+  runtime, after the admin API removes the last client.
+- **Breaking:** the default `server.host` is `127.0.0.1` (was `0.0.0.0`).
+  Set `host = "0.0.0.0"` explicitly in a container.
 ### Added
 - `server.cors_allowed_origins` — restricts CORS to an explicit browser-
   origin allowlist. Unset preserves the existing any-origin behavior.

@@ -16,8 +16,8 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
-    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    CompareOp, ErrorCode, Predicate, Request, Response, ScanValue, TransactionOp, MAX_STAGED_BYTES,
+    MAX_STAGED_OPS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
     SESSION_VALIDATE_ON_STAGE,
 };
 use rusty_multimodal_db::server::{serve, ConnectionStore, ServeOptions};
@@ -1426,4 +1426,40 @@ fn the_snapshot_isolation_bit_is_unknown_below_protocol_7() {
         Response::Ok
     );
     assert_eq!(roundtrip(&mut v7, Request::Rollback), Response::Ok);
+}
+
+/// Design review 3.7: a session is bounded by staged bytes, not only by
+/// op count -- large legal updates hit `SessionFull` long before
+/// `MAX_STAGED_OPS`, the session stays open, and `Rollback` frees the
+/// budget for the next one.
+#[test]
+fn a_session_is_bounded_by_staged_bytes() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut c = connect(addr);
+    roundtrip(
+        &mut c,
+        Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    );
+    let big = |c: &mut TcpStream| {
+        roundtrip(
+            c,
+            Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_BREED,
+                value: ScanValue::Str("b".repeat(1 << 20)),
+            },
+        )
+    };
+    let fits = MAX_STAGED_BYTES / ((1 << 20) + 96);
+    assert_eq!(roundtrip(&mut c, Request::Begin), Response::Ok);
+    for i in 0..fits {
+        assert_eq!(big(&mut c), Response::Staged { index: i as u32 }, "op {i}");
+    }
+    assert_err(big(&mut c), ErrorCode::SessionFull);
+    assert!(fits < MAX_STAGED_OPS);
+    assert_eq!(roundtrip(&mut c, Request::Rollback), Response::Ok);
+    assert_eq!(roundtrip(&mut c, Request::Begin), Response::Ok);
+    assert_eq!(big(&mut c), Response::Staged { index: 0 });
 }

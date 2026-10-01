@@ -4,7 +4,7 @@ use adk_core::{
     AdkError, Args, Content, Event, FunctionResponse, InvocationContext, Part, Result, Role,
     Schema, State, StreamingMode,
 };
-use adk_models::{GenerateContentConfig, LlmRequest, LlmResponse, SharedModel};
+use adk_models::{GenerateContentConfig, LlmRequest, LlmResponse, SharedModel, StreamAggregator};
 use adk_tools::{invoke_tool, resolve_tools, SharedTool, ToolContext, ToolSource};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -352,29 +352,17 @@ impl Agent for LlmAgent {
                     if ctx.run_config.streaming_mode == StreamingMode::Sse
                         && self.model.supports_streaming()
                     {
-                        // Forward chunks as partial events, then aggregate.
-                        let mut text = String::new();
+                        // Forward chunks as partial events while folding them
+                        // into the final response (the shared reducer, which
+                        // also stops at an error chunk instead of folding it
+                        // into a truncated answer).
                         let mut stream = self.model.generate_content_stream(request.clone());
-                        let mut aggregated = LlmResponse {
-                            turn_complete: true,
-                            ..Default::default()
-                        };
-                        let mut other_parts: Vec<Part> = Vec::new();
+                        let mut aggregator = StreamAggregator::new();
                         while let Some(chunk) = stream.next().await {
                             let chunk = chunk?;
-                            if let Some(content) = &chunk.content {
-                                for part in &content.parts {
-                                    match part {
-                                        Part::Text(t) => text.push_str(t),
-                                        other => other_parts.push(other.clone()),
-                                    }
-                                }
-                            }
-                            if chunk.finish_reason.is_some() {
-                                aggregated.finish_reason = chunk.finish_reason.clone();
-                            }
-                            if chunk.usage.is_some() {
-                                aggregated.usage = chunk.usage.clone();
+                            aggregator.push(&chunk);
+                            if aggregator.failed() {
+                                break;
                             }
                             if chunk.partial {
                                 yield Self::stamp(&ctx, Event::new(&ctx.invocation_id, &self.name)
@@ -386,15 +374,7 @@ impl Agent for LlmAgent {
                                     .as_partial());
                             }
                         }
-                        let mut parts = Vec::new();
-                        if !text.is_empty() {
-                            parts.push(Part::Text(text));
-                        }
-                        parts.extend(other_parts);
-                        if !parts.is_empty() {
-                            aggregated.content = Some(Content::new(Role::Model, parts));
-                        }
-                        response = Some(aggregated);
+                        response = Some(aggregator.finish());
                     } else {
                         response = Some(self.model.generate_content(request).await?);
                     }

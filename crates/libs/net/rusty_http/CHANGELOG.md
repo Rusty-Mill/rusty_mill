@@ -7,6 +7,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ### Added
 ### Changed
 ### Fixed
+- Transfer-Encoding framing no longer reads only the first field (design review 3.4).
+  - Every `Transfer-Encoding` field is combined into one coding list.
+  - `chunked` anywhere but once and last is refused, as is an empty element.
+  - A request with both `Transfer-Encoding` and `Content-Length`, or whose coding does not end in `chunked`, is refused. These used to fall back to `Content-Length` framing, a request-smuggling ambiguity.
+  - A response's non-chunked coding is read to EOF.
+  - Errors are `Error::InvalidHeader`.
 - `request_framing`/`response_framing` now reject conflicting repeated
   `Content-Length` headers instead of silently framing on only the first
   occurrence (a request-smuggling-adjacent risk); identical repeats are

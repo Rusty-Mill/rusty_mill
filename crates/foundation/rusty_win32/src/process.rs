@@ -150,6 +150,11 @@ unsafe extern "system" {
         kernel_time: *mut FileTime,
         user_time: *mut FileTime,
     ) -> i32;
+    fn K32GetProcessMemoryInfo(
+        process: RawHandle,
+        counters: *mut ProcessMemoryCountersRaw,
+        cb: u32,
+    ) -> i32;
     fn GetEnvironmentStringsW() -> *mut u16;
     fn FreeEnvironmentStringsW(penv: *mut u16) -> i32;
     fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
@@ -1211,6 +1216,62 @@ pub unsafe fn times(process: RawHandle) -> Result<ProcessTimes, Win32Error> {
     })
 }
 
+// PROCESS_MEMORY_COUNTERS: `cb` and `PageFaultCount` (u32), then eight
+// `SIZE_T`s. 72 bytes on x86_64.
+#[repr(C)]
+#[derive(Default)]
+struct ProcessMemoryCountersRaw {
+    cb: u32,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<ProcessMemoryCountersRaw>() == 72);
+
+/// [`memory`]'s result — the working-set half of `GetProcessMemoryInfo`,
+/// the Windows analog of Linux `VmRSS`/`VmHWM` (a `wait4` `ru_maxrss`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessMemory {
+    /// Bytes currently resident.
+    pub working_set: usize,
+    /// The most bytes ever resident at once. Still readable after the
+    /// process exits, while the handle stays open.
+    pub peak_working_set: usize,
+}
+
+/// Working-set sizes for `process` — `K32GetProcessMemoryInfo`. Like
+/// [`times`], `process` needs only [`PROCESS_QUERY_LIMITED_INFORMATION`].
+///
+/// # Safety
+///
+/// `process` must be a currently-open, valid process handle.
+pub unsafe fn memory(process: RawHandle) -> Result<ProcessMemory, Win32Error> {
+    let size = core::mem::size_of::<ProcessMemoryCountersRaw>() as u32;
+    let mut raw = ProcessMemoryCountersRaw {
+        cb: size,
+        ..Default::default()
+    };
+    // SAFETY: `process` is caller-supplied per this function's own safety
+    // contract; `raw` is a valid, correctly-sized out parameter whose `cb`
+    // matches `size`.
+    let ok = unsafe { K32GetProcessMemoryInfo(process, &mut raw, size) };
+    if ok == 0 {
+        return Err(Win32Error::last());
+    }
+    Ok(ProcessMemory {
+        working_set: raw.working_set_size,
+        peak_working_set: raw.peak_working_set_size,
+    })
+}
+
 /// The full executable path for `process` — `QueryFullProcessImageNameW`,
 /// completing [`list_processes`]'s `ProcessEntry::exe_file` (issue #21,
 /// `PROCESSENTRY32W.szExeFile`), which is only ever a bare filename, not a
@@ -2228,6 +2289,34 @@ mod tests {
             after.exit.secs >= after.creation.secs,
             "exit must not precede creation"
         );
+
+        // SAFETY: both handles are valid and each closed exactly once.
+        unsafe {
+            crate::handle::close(spawned.process).unwrap();
+            crate::handle::close(spawned.thread).unwrap();
+        }
+    }
+
+    #[test]
+    fn memory_reports_a_peak_that_survives_exit() {
+        // SAFETY: a hand-built, correctly quoted command line for a
+        // well-known system binary.
+        let spawned = unsafe { spawn_suspended("cmd.exe /c exit 0", false, false, None) }
+            .expect("CreateProcessW should succeed");
+        // SAFETY: `spawned.thread` is freshly created, valid, not yet
+        // resumed.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        // SAFETY: `spawned.process` stays valid until closed below.
+        unsafe { wait(spawned.process, None) }.unwrap();
+
+        // SAFETY: same valid handle, now exited.
+        let after =
+            unsafe { memory(spawned.process) }.expect("GetProcessMemoryInfo should succeed");
+        assert!(
+            after.peak_working_set > 0,
+            "an exited process keeps its peak"
+        );
+        assert!(after.peak_working_set >= after.working_set);
 
         // SAFETY: both handles are valid and each closed exactly once.
         unsafe {

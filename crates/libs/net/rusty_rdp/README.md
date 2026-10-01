@@ -104,13 +104,13 @@ the exact `(ap_req_bytes, session_key)` pair `connect_tls_kerberos` takes.
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to
 > speak RDP *standard security*. They are not for general use; modern
-> deployments should negotiate TLS/CredSSP. The `tls` feature's `connect_tls()`
-> uses `rusty_tls::TrustPolicy::DangerNoVerification` — it does **not** verify
-> the server certificate (RDP servers are typically self-signed with
-> out-of-band trust), so it does not defend against an active
-> man-in-the-middle — bring your own verified TLS stream (e.g. `rusty_tls`
-> with `TrustPolicy::System`/`PinnedAnchors`) and use `establish_enhanced()`
-> if you need that.
+> deployments should negotiate TLS/CredSSP. The `tls` feature's connectors
+> (`connect_tls()`, `connect_tls_kerberos()` and their `_with_csprng` forms)
+> take a `rusty_tls::TrustPolicy`: pin a self-signed server's certificate
+> with `PinnedAnchors`, or use `System` for a CA-issued one. Skipping
+> verification takes the explicitly named `connect_tls_unverified()` /
+> `connect_tls_kerberos_unverified()`, which do not defend against an active
+> man-in-the-middle.
 
 ## Roadmap
 
@@ -185,8 +185,8 @@ the order they'd add the most value:
   counterpart: it negotiates `SecurityProtocols::SSL` on the raw TCP stream
   (rejecting, with an `RDP_NEG_FAILURE`, a client that didn't offer it),
   upgrades using a caller-supplied `rustls::ServerConfig` (certificate +
-  private key — this crate doesn't generate X.509 certificates, matching how
-  `connect_tls` doesn't verify them), and then shares `accept`'s
+  private key — this crate doesn't generate X.509 certificates; verifying
+  them is the connecting side's `TrustPolicy`), and then shares `accept`'s
   post-negotiation logic unchanged: every session-conditional framing helper
   already does the right thing under TLS, since `RdpTransport::session` stays
   `None` there (TLS supplies confidentiality instead of RC4). Tested end to

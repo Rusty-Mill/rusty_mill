@@ -7,30 +7,34 @@
 use adk_core::{AdkError, Args, FunctionDeclaration, InvocationContext, Result, Schema};
 use adk_tools::{SharedTool, Tool, ToolContext, Toolset};
 use async_trait::async_trait;
+use rmcp::model::{
+    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, Tool as McpToolEntry,
+};
+use rmcp::service::{Peer, RunningService, ServiceError};
+use rmcp::{RoleClient, ServiceExt};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::future::Future;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::line_read::read_capped_line;
-use crate::protocol::PROTOCOL_VERSION;
+use crate::line_cap::{cap_error, LineCapped};
+use crate::protocol::{protocol_version, uppercase_types};
 
 /// Default deadline for one MCP request/response round trip — including
 /// the `initialize` handshake, `tools/list`, and every `tools/call` —
-/// measured from the moment the request is written until a matching
-/// response line arrives.
+/// measured from the moment the request is sent until its response arrives.
 ///
-/// A stalled or hostile subprocess would otherwise leave
-/// [`StdioConnection::request`] waiting forever, wedging the toolset's
-/// single connection [`Mutex`] and blocking every later call. 60s
-/// matches this workspace's other MCP-call timeout convention
-/// (`nexus_ai::tools::mcp_bridge::MCP_CALL_TIMEOUT`): real MCP tools
-/// (web fetches, code execution, …) routinely take tens of seconds, so
+/// A stalled or hostile subprocess would otherwise leave a request waiting
+/// forever, wedging the toolset's single connection [`Mutex`] and blocking
+/// every later call. 60s matches this workspace's other MCP-call timeout
+/// convention (`nexus_ai::tools::mcp_bridge::MCP_CALL_TIMEOUT`): real MCP
+/// tools (web fetches, code execution, …) routinely take tens of seconds, so
 /// this exists to recover from a wedge rather than police tool latency.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -70,16 +74,42 @@ impl ConnectionParams {
     }
 }
 
-/// A live JSON-RPC connection to an MCP server subprocess.
+/// A live MCP session with a server subprocess, run by `rmcp`.
 struct StdioConnection {
+    service: RunningService<RoleClient, ClientInfo>,
+    /// Killed when the connection is dropped (`kill_on_drop`).
     child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: i64,
+    handle: Handle,
+}
+
+/// What a request needs from its connection, owned so a request future
+/// does not borrow the connection slot.
+#[derive(Clone)]
+struct Handle {
+    peer: Peer<RoleClient>,
     timeout: Duration,
+    /// Set when the server sent a line past the 16 MiB cap.
+    exceeded: Arc<AtomicBool>,
+}
+
+impl Handle {
+    /// Runs one request under the connection's deadline.
+    async fn request<T>(
+        &self,
+        method: &str,
+        request: impl Future<Output = std::result::Result<T, ServiceError>>,
+    ) -> Result<T> {
+        deadline(method, self.timeout, &self.exceeded, async {
+            request.await.map_err(|e| request_error(method, e))
+        })
+        .await
+    }
 }
 
 impl StdioConnection {
+    /// Launches the server and completes the MCP handshake, all within
+    /// `timeout`. A server that stalls or fails the handshake is killed
+    /// rather than leaked.
     async fn spawn(params: &ConnectionParams, timeout: Duration) -> Result<Self> {
         let ConnectionParams::Stdio { command, args, env } = params;
 
@@ -107,95 +137,72 @@ impl StdioConnection {
             .take()
             .ok_or_else(|| AdkError::Other("MCP server stdout unavailable".into()))?;
 
-        Ok(Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let stdout = LineCapped::new(stdout, Arc::clone(&exceeded));
+        let info = ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("rusty-adk", env!("CARGO_PKG_VERSION")),
+        )
+        .with_protocol_version(protocol_version());
+
+        let service = match deadline("initialize", timeout, &exceeded, async {
+            info.serve((stdout, stdin))
+                .await
+                .map_err(|e| AdkError::Other(format!("MCP handshake with '{command}' failed: {e}")))
+        })
+        .await
+        {
+            Ok(service) => service,
+            Err(err) => {
+                let _ = child.kill().await;
+                return Err(err);
+            }
+        };
+
+        let handle = Handle {
+            peer: service.peer().clone(),
             timeout,
+            exceeded,
+        };
+        Ok(Self {
+            service,
+            child,
+            handle,
         })
     }
 
-    /// Sends a request and waits for its response, bounded by `self.timeout`.
-    ///
-    /// A subprocess that never answers must not wedge this connection's
-    /// [`Mutex`] forever — see [`DEFAULT_REQUEST_TIMEOUT`].
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let payload = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        self.write(&payload).await?;
-
-        wait_for_response(&mut self.stdout, id, method, self.timeout).await
-    }
-
-    /// Sends a notification, which expects no response.
-    async fn notify(&mut self, method: &str) -> Result<()> {
-        self.write(&json!({"jsonrpc": "2.0", "method": method}))
-            .await
-    }
-
-    async fn write(&mut self, payload: &Value) -> Result<()> {
-        let text = serde_json::to_string(payload)?;
-        self.stdin.write_all(text.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
+    async fn shutdown(mut self) {
+        let _ = self.service.cancel().await;
         let _ = self.child.kill().await;
-        Ok(())
     }
 }
 
-/// Waits for the JSON-RPC response matching `id` on `stdout`, bounded by
-/// `deadline`.
-///
-/// Extracted from [`StdioConnection::request`] so the timeout behaviour
-/// can be exercised directly against an in-memory pipe in tests, without
-/// spawning a real subprocess.
-async fn wait_for_response<R>(
-    stdout: &mut BufReader<R>,
-    id: i64,
+/// Bounds `work` by `limit` (design review 3.7, N16), and reports a capped
+/// line from the server as the cause when that is what ended it.
+async fn deadline<T>(
     method: &str,
-    deadline: Duration,
-) -> Result<Value>
-where
-    R: AsyncRead + Unpin,
-{
-    let wait = async {
-        loop {
-            let line = read_capped_line(stdout)
-                .await?
-                .ok_or_else(|| AdkError::Other("MCP server closed the connection".into()))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            let message: Value = serde_json::from_str(&line)?;
-            // Skip anything that is not the response we are waiting for:
-            // servers may interleave notifications on the same stream.
-            if message.get("id").and_then(Value::as_i64) != Some(id) {
-                continue;
-            }
-            if let Some(error) = message.get("error") {
-                let text = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error");
-                return Err(AdkError::Other(format!("MCP error on {method}: {text}")));
-            }
-            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-        }
-    };
-
-    match timeout(deadline, wait).await {
+    limit: Duration,
+    exceeded: &AtomicBool,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let outcome = match timeout(limit, work).await {
         Ok(result) => result,
         Err(_) => Err(AdkError::Other(format!(
-            "MCP server did not respond to '{method}' within {deadline:?}"
+            "MCP server did not respond to '{method}' within {limit:?}"
         ))),
+    };
+    match outcome {
+        Err(_) if exceeded.load(Ordering::Acquire) => Err(AdkError::Other(cap_error())),
+        other => other,
+    }
+}
+
+fn request_error(method: &str, err: ServiceError) -> AdkError {
+    match err {
+        ServiceError::McpError(data) => {
+            AdkError::Other(format!("MCP error on {method}: {}", data.message))
+        }
+        other => AdkError::Other(format!("MCP request '{method}' failed: {other}")),
     }
 }
 
@@ -246,123 +253,62 @@ impl McpToolset {
         Arc::new(self)
     }
 
-    /// Opens the connection and completes the MCP handshake if needed.
-    async fn ensure_connected(&self) -> Result<()> {
+    /// Runs `op` against the connection, opening it first if needed.
+    ///
+    /// Any failure clears the slot: a wedged or dead connection must not
+    /// linger, so the next call respawns instead of failing again against
+    /// the same broken one.
+    async fn with_connection<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: FnOnce(Handle) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
         let mut guard = self.connection.lock().await;
-        if guard.is_some() {
-            return Ok(());
+        if guard.is_none() {
+            *guard = Some(StdioConnection::spawn(&self.params, self.timeout).await?);
         }
-
-        let mut connection = StdioConnection::spawn(&self.params, self.timeout).await?;
-        if let Err(err) = connection
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "rusty-adk", "version": env!("CARGO_PKG_VERSION")},
-                }),
-            )
-            .await
-        {
-            // The handshake stalled or failed: tear the subprocess down
-            // rather than leaking it. Nothing was ever stored in `guard`,
-            // so the next call simply respawns a fresh one.
-            let _ = connection.shutdown().await;
-            return Err(err);
+        let handle = guard
+            .as_ref()
+            .map(|c| c.handle.clone())
+            .ok_or_else(|| AdkError::Other("MCP connection unavailable".into()))?;
+        let result = op(handle).await;
+        if result.is_err() {
+            if let Some(broken) = guard.take() {
+                broken.shutdown().await;
+            }
         }
-        connection.notify("notifications/initialized").await?;
-
-        *guard = Some(connection);
-        Ok(())
+        result
     }
 
     /// Lists the server's tools, adapting each into an ADK tool.
     async fn discover(&self) -> Result<Vec<SharedTool>> {
-        self.ensure_connected().await?;
-
-        let result = {
-            let mut guard = self.connection.lock().await;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| AdkError::Other("MCP connection unavailable".into()))?;
-            match connection.request("tools/list", json!({})).await {
-                Ok(result) => result,
-                Err(err) => {
-                    // A wedged or dead connection must not linger in the
-                    // slot: drop it so the next call respawns instead of
-                    // repeatedly failing against the same broken one.
-                    *guard = None;
-                    return Err(err);
-                }
-            }
-        };
-
-        let entries = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut tools: Vec<SharedTool> = Vec::new();
-        for entry in entries {
-            let name = entry
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
-            if let Some(filter) = &self.filter {
-                if !filter.contains(&name) {
-                    continue;
-                }
-            }
-            let description = entry
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let parameters = entry
-                .get("inputSchema")
-                .map(uppercase_types)
-                .and_then(|schema| serde_json::from_value::<Schema>(schema).ok());
-
-            tools.push(Arc::new(McpTool {
-                name,
-                description,
-                parameters,
-            }) as SharedTool);
-        }
-        Ok(tools)
+        let entries = self
+            .with_connection(
+                |h| async move { h.request("tools/list", h.peer.list_all_tools()).await },
+            )
+            .await?;
+        Ok(entries
+            .into_iter()
+            .filter(|entry| {
+                !entry.name.is_empty()
+                    && self
+                        .filter
+                        .as_ref()
+                        .is_none_or(|names| names.contains(entry.name.as_ref()))
+            })
+            .map(|entry| Arc::new(McpTool::from_entry(entry)) as SharedTool)
+            .collect())
     }
 
     /// Calls a tool on the connected server.
     async fn call(&self, name: &str, args: Args) -> Result<Value> {
-        self.ensure_connected().await?;
-        let mut guard = self.connection.lock().await;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| AdkError::Other("MCP connection unavailable".into()))?;
-
-        let result = match connection
-            .request(
-                "tools/call",
-                json!({"name": name, "arguments": Value::Object(args)}),
+        let params = CallToolRequestParams::new(name.to_string()).with_arguments(args);
+        let result = self
+            .with_connection(
+                |h| async move { h.request("tools/call", h.peer.call_tool(params)).await },
             )
-            .await
-        {
-            Ok(result) => result,
-            Err(err) => {
-                // Same reasoning as `discover`: a stuck connection must not
-                // survive to wedge every subsequent call.
-                *guard = None;
-                return Err(err);
-            }
-        };
-
-        Ok(decode_tool_result(&result))
+            .await?;
+        Ok(decode_tool_result(&serde_json::to_value(result)?))
     }
 }
 
@@ -400,26 +346,6 @@ pub fn decode_tool_result(result: &Value) -> Value {
     adk_core::wrap_tool_result(parsed)
 }
 
-/// Restores the upper-case type names ADK's [`Schema`] expects.
-fn uppercase_types(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, val)| {
-                    if key == "type" {
-                        if let Some(name) = val.as_str() {
-                            return (key.clone(), json!(name.to_uppercase()));
-                        }
-                    }
-                    (key.clone(), uppercase_types(val))
-                })
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(uppercase_types).collect()),
-        other => other.clone(),
-    }
-}
-
 /// A single tool proxied from an MCP server.
 ///
 /// Holds only the declaration: the call is dispatched by the owning
@@ -428,6 +354,20 @@ struct McpTool {
     name: String,
     description: String,
     parameters: Option<Schema>,
+}
+
+impl McpTool {
+    fn from_entry(entry: McpToolEntry) -> Self {
+        let schema = Value::Object(entry.input_schema.as_ref().clone());
+        Self {
+            name: entry.name.into_owned(),
+            description: entry
+                .description
+                .map(|d| d.into_owned())
+                .unwrap_or_default(),
+            parameters: serde_json::from_value::<Schema>(uppercase_types(&schema)).ok(),
+        }
+    }
 }
 
 #[async_trait]
@@ -494,11 +434,9 @@ impl Toolset for McpToolset {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut guard = self.connection.lock().await;
-        if let Some(connection) = guard.as_mut() {
-            connection.shutdown().await?;
+        if let Some(connection) = self.connection.lock().await.take() {
+            connection.shutdown().await;
         }
-        *guard = None;
         Ok(())
     }
 }
@@ -607,56 +545,5 @@ mod tests {
         assert_eq!(command, "npx");
         assert_eq!(args, vec!["-y", "server"]);
         assert_eq!(env, vec![("KEY".to_string(), "v".to_string())]);
-    }
-
-    #[tokio::test]
-    async fn a_stdout_line_past_the_cap_with_no_newline_errors_instead_of_growing_unboundedly() {
-        // Regression test for the same read `StdioConnection::request` performs
-        // on `self.stdout`: a misbehaving MCP subprocess that never terminates
-        // a line must not be allowed to grow the client's read buffer forever.
-        use crate::line_read::{read_capped_line, MAX_LINE_BYTES};
-        use tokio::io::AsyncWriteExt;
-
-        let payload_len = MAX_LINE_BYTES as usize + 1;
-        let (mut writer, reader_half) = tokio::io::duplex(payload_len + 4096);
-        writer.write_all(&vec![b'a'; payload_len]).await.unwrap();
-        drop(writer);
-
-        let mut stdout = BufReader::new(reader_half);
-        let result = read_capped_line(&mut stdout).await;
-        assert!(
-            result.is_err(),
-            "expected the unterminated oversized line to be rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn wait_for_response_times_out_instead_of_hanging_on_a_stalled_subprocess() {
-        // Regression test for the request/response wait `StdioConnection::request`
-        // performs on `self.stdout`: pre-fix this loop had no deadline at all, so a
-        // stalled or malicious MCP subprocess that writes nothing back would hang
-        // the call -- and the toolset's single connection `Mutex` -- forever.
-        // `wait_for_response` is `StdioConnection::request`'s exact wait loop,
-        // extracted so it can be exercised against a subprocess stand-in (an
-        // in-memory duplex pipe that never writes anything back) instead of a
-        // real hung child process.
-        let (_writer, reader_half) = tokio::io::duplex(4096);
-        let mut stdout = BufReader::new(reader_half);
-
-        let start = std::time::Instant::now();
-        let result =
-            wait_for_response(&mut stdout, 1, "tools/call", Duration::from_millis(200)).await;
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "wait_for_response should have timed out quickly instead of hanging, took {elapsed:?}"
-        );
-        let err =
-            result.expect_err("expected a timeout error from a subprocess that never responds");
-        assert!(
-            err.to_string().contains("did not respond"),
-            "expected a timeout error message, got: {err}"
-        );
     }
 }

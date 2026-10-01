@@ -3,8 +3,11 @@ use std::collections::HashMap;
 use rp_core::ProviderPreferences;
 use serde::{Deserialize, Serialize};
 
+/// Loopback by default: a router that holds provider keys should not be
+/// reachable from every interface unless the operator says so (a container
+/// sets `host = "0.0.0.0"` explicitly). Design review 3.1.
 fn default_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_port() -> u16 {
@@ -43,6 +46,13 @@ pub struct ServerConfig {
     /// independent of this field.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Serve `/v1/*` with no caller authentication when no auth method
+    /// (`api_key_env`, `[[clients]]`, `[jwt]`) is configured. Off by
+    /// default: without it such requests get `401` rather than falling
+    /// open, including after the admin API removes the last client.
+    /// Meant for local development or behind a gateway that authenticates.
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
     /// Requests-per-minute limit applied to any caller not matched to a
     /// `[[clients]]` entry, bucketed by source IP address. Unset means no
     /// limit for such callers.
@@ -101,6 +111,7 @@ impl Default for ServerConfig {
             port: default_port(),
             max_body_bytes: default_max_body_bytes(),
             api_key_env: None,
+            allow_unauthenticated: false,
             admin_key_env: None,
             default_rate_limit_rpm: None,
             max_concurrent_requests: None,
@@ -952,7 +963,7 @@ mod tests {
     #[test]
     fn server_section_defaults_when_absent() {
         let config = Config::from_toml_str("providers = {}").unwrap();
-        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.server.api_key_env, None);
         assert_eq!(config.server.default_rate_limit_rpm, None);

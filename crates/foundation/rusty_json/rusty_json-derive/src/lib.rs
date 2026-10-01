@@ -1,40 +1,47 @@
-//! Derive proc-macro for sovereign `RustyJson` serialization and deserialization.
+//! Derive proc-macro reserved for sovereign `RustyJson` serialization.
+//!
+//! Not implemented: `#[derive(RustyJson)]` fails to compile, naming the
+//! working path, rather than generating methods that serialize nothing and
+//! never deserialize.
+//!
+//! ```compile_fail
+//! extern crate alloc;
+//! use rusty_json_derive::RustyJson;
+//!
+//! #[derive(RustyJson)]
+//! struct Point {
+//!     x: i32,
+//! }
+//! ```
 
 extern crate proc_macro;
-use proc_macro::TokenStream;
+use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
-/// Derive macro for `RustyJson` trait providing native `to_json_string` and `from_json_str`.
+const NOT_IMPLEMENTED: &str = "#[derive(RustyJson)] is not implemented yet; derive \
+     serde::Serialize/Deserialize and use rusty_json's `serde` feature \
+     (rusty_json::to_string / rusty_json::from_str) instead";
+
+/// Reserved derive for `RustyJson`. Always expands to a `compile_error!`
+/// explaining that it is not implemented and what to use instead.
 #[proc_macro_derive(RustyJson)]
-pub fn derive_rusty_json(input: TokenStream) -> TokenStream {
-    let input_str = input.to_string();
-    let struct_name = extract_struct_name(&input_str).unwrap_or("UnknownStruct");
-
-    let expanded = format!(
-        r#"
-        impl {name} {{
-            /// Serializes this struct into a JSON string using sovereign rusty_json.
-            pub fn to_json_string(&self) -> String {{
-                alloc::format!("{{{{ \"_type\": \"{{}}\" }}}}", "{name}")
-            }}
-
-            /// Deserializes a struct from a JSON string using sovereign rusty_json.
-            pub fn from_json_str(_s: &str) -> core::result::Result<Self, String> {{
-                Err(String::from("Deserialization not implemented for fallback"))
-            }}
-        }}
-        "#,
-        name = struct_name
-    );
-
-    expanded.parse().unwrap()
+pub fn derive_rusty_json(_input: TokenStream) -> TokenStream {
+    compile_error(NOT_IMPLEMENTED)
 }
 
-fn extract_struct_name(input: &str) -> Option<&str> {
-    let mut parts = input.split_whitespace();
-    while let Some(part) = parts.next() {
-        if part == "struct" || part == "enum" {
-            return parts.next().map(|name| name.trim_matches('{'));
-        }
-    }
-    None
+/// `compile_error!("<message>");`, built token by token.
+fn compile_error(message: &str) -> TokenStream {
+    let span = Span::call_site();
+    let mut args = TokenTree::Group(Group::new(
+        Delimiter::Parenthesis,
+        TokenTree::Literal(Literal::string(message)).into(),
+    ));
+    args.set_span(span);
+    [
+        TokenTree::Ident(Ident::new("compile_error", span)),
+        TokenTree::Punct(Punct::new('!', Spacing::Alone)),
+        args,
+        TokenTree::Punct(Punct::new(';', Spacing::Alone)),
+    ]
+    .into_iter()
+    .collect()
 }

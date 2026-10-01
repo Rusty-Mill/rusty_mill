@@ -75,16 +75,8 @@ name = "rtouch"
 path = "src/bin/rtouch.rs"
 
 [[bin]]
-name = "rwc"
-path = "src/bin/rwc.rs"
-
-[[bin]]
 name = "rhead"
 path = "src/bin/rhead.rs"
-
-[[bin]]
-name = "rtail"
-path = "src/bin/rtail.rs"
 
 [[bin]]
 name = "rsort"
@@ -109,10 +101,6 @@ path = "src/bin/rgrep.rs"
 [[bin]]
 name = "rfind"
 path = "src/bin/rfind.rs"
-
-[[bin]]
-name = "rxargs"
-path = "src/bin/rxargs.rs"
 
 [lints]
 workspace = true

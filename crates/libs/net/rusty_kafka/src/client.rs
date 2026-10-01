@@ -49,6 +49,13 @@ pub struct KafkaClient<S> {
     next_correlation_id: AtomicI32,
     max_frame_len: usize,
     call_timeout: Duration,
+    /// Set while a request's I/O is in progress and left set if it never
+    /// completes -- a timeout, an I/O error, a desynced response, or the
+    /// caller dropping the future mid-call. A connection that stopped
+    /// part-way through a frame cannot be resynchronized, so a poisoned
+    /// client refuses every later call (design review 3.7, N07); reconnect
+    /// with a new client.
+    poisoned: bool,
 }
 
 impl KafkaClient<TcpStream> {
@@ -89,6 +96,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
             next_correlation_id: AtomicI32::new(0),
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             call_timeout: DEFAULT_CALL_TIMEOUT,
+            poisoned: false,
         }
     }
 
@@ -106,6 +114,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         self
     }
 
+    /// Whether an interrupted request left this connection unusable; see
+    /// [`ClientError::Io`] with kind `NotConnected` from every later call.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     fn next_correlation_id(&self) -> i32 {
         self.next_correlation_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -116,6 +130,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         api_version: i16,
         encode_body: impl FnOnce(&mut Writer) -> Result<(), crate::error::CodecError>,
     ) -> Result<Vec<u8>, ClientError> {
+        if self.poisoned {
+            return Err(ClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "an earlier request on this connection was interrupted mid-frame; reconnect",
+            )));
+        }
         let correlation_id = self.next_correlation_id();
         let header = RequestHeader {
             api_key,
@@ -129,6 +149,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
         encode_body(&mut writer)?;
         let call_timeout = self.call_timeout;
         let max_frame_len = self.max_frame_len;
+        // Cleared only once a whole response frame has been read and matched.
+        self.poisoned = true;
         let response_bytes = rusty_tokio::time::timeout(call_timeout, async {
             crate::frame::write_frame(&mut self.io, writer.as_slice()).await?;
             crate::frame::read_frame(&mut self.io, max_frame_len).await
@@ -143,6 +165,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
                 correlation_id,
             ));
         }
+        self.poisoned = false;
         Ok(reader.peek_remaining().to_vec())
     }
 
@@ -943,5 +966,24 @@ mod tests {
         // that the client's own configured deadline fires, not that the
         // peer connection was dropped out from under it.
         drop(peer);
+    }
+
+    /// Design review 3.7 (N07): a call that times out may have left a
+    /// partial frame on the stream. The client used to reuse it; it is
+    /// poisoned now, and even a broker reply arriving later is not read.
+    #[rusty_tokio::test]
+    async fn a_timed_out_call_poisons_the_connection() {
+        let (client_io, _peer) = duplex(1024);
+        let mut client =
+            KafkaClient::new(client_io, None).with_call_timeout(Duration::from_millis(20));
+        assert!(!client.is_poisoned());
+        let err = client.api_versions().await.unwrap_err();
+        assert!(matches!(err, ClientError::CallTimeout(_)));
+        assert!(client.is_poisoned());
+        let again = client.api_versions().await.unwrap_err();
+        assert!(
+            matches!(&again, ClientError::Io(e) if e.kind() == std::io::ErrorKind::NotConnected),
+            "{again:?}"
+        );
     }
 }

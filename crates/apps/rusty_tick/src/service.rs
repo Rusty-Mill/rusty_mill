@@ -164,7 +164,47 @@ impl Service {
             clock,
         };
         service.ensure_inbox()?;
+        service.realign_subtasks()?;
+        service.sweep_orphan_comments()?;
         Ok(service)
+    }
+
+    /// A subtask always lives in its parent's list (`patch_task` refuses to
+    /// move one alone). A move saves the children, then the parent, one
+    /// record at a time, so a crash between them leaves some children in the
+    /// new list and the parent in the old. Put every such child back in its
+    /// parent's list: the parent is the record of truth, and an interrupted
+    /// move was never acknowledged (design review 2.9).
+    fn realign_subtasks(&mut self) -> Result<()> {
+        let stray: Vec<Task> = self
+            .tasks
+            .all()
+            .into_iter()
+            .filter(|child| {
+                child
+                    .parent_id
+                    .and_then(|p| self.tasks.get(p))
+                    .is_some_and(|parent| parent.list_id != child.list_id)
+            })
+            .collect();
+        for mut child in stray {
+            if let Some(parent) = child.parent_id.and_then(|p| self.tasks.get(p)) {
+                child.list_id = parent.list_id;
+                self.save_task(child)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop comments whose task is gone for good (a trashed task still counts:
+    /// it can come back). Purging cleans up after itself; this catches comments
+    /// left by versions that did not, and is a no-op otherwise.
+    fn sweep_orphan_comments(&mut self) -> Result<usize> {
+        let live: std::collections::HashSet<Uuid> =
+            self.tasks.all().into_iter().map(|t| t.id).collect();
+        Ok(self
+            .docs
+            .delete_comments_where(|owner| !owner.is_some_and(|id| live.contains(&id)))?)
     }
 
     fn now(&self) -> i64 {
@@ -897,6 +937,34 @@ mod tests {
     }
 
     #[test]
+    fn opening_sweeps_comments_whose_task_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = || Box::new(|| 1_000_i64) as Clock;
+        let mut service = Service::open(dir.path(), clock()).unwrap();
+        let task = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                title: "alive".into(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        let comment = |service: &mut Service, owner: &str| {
+            let body = format!(r#"{{"v":1,"taskId":"{owner}","text":"x","createdMs":1}}"#);
+            service.put_doc("comment", Uuid::now_v7(), &body).unwrap();
+        };
+        comment(&mut service, &task.id.to_string());
+        comment(&mut service, &Uuid::now_v7().to_string()); // its task was purged long ago
+        comment(&mut service, "not-a-task-id");
+        assert_eq!(service.docs("comment").unwrap().len(), 3);
+        drop(service);
+
+        let service = Service::open(dir.path(), clock()).unwrap();
+        let left = service.docs("comment").unwrap();
+        assert_eq!(left.len(), 1, "only the live task's comment survives");
+        assert!(left[0].body.contains(&task.id.to_string()));
+    }
+
+    #[test]
     fn every_client_document_kind_is_accepted() {
         for kind in KINDS {
             assert!(check_kind(kind).is_ok(), "{kind}");
@@ -929,5 +997,51 @@ mod tests {
         );
         apply_status(&mut task, Status::Open, 100);
         assert_eq!(task.completed_ms, None);
+    }
+
+    /// Review 2.9: a move interrupted after some of its subtasks were saved
+    /// (the parent still in its old list) is repaired on the next open:
+    /// every subtask is back in its parent's list.
+    #[test]
+    fn an_interrupted_move_is_realigned_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = || -> Clock { Box::new(|| 1_000) };
+        let (parent, child, other) = {
+            let mut svc = Service::open(dir.path(), clock()).unwrap();
+            let other = svc
+                .create_list(NewList {
+                    name: "Other".into(),
+                    ..NewList::default()
+                })
+                .unwrap();
+            let parent = svc
+                .create_task(NewTask {
+                    list_id: INBOX_ID,
+                    title: "parent".into(),
+                    ..NewTask::default()
+                })
+                .unwrap();
+            let child = svc
+                .create_task(NewTask {
+                    list_id: INBOX_ID,
+                    parent_id: Some(parent.id),
+                    title: "child".into(),
+                    ..NewTask::default()
+                })
+                .unwrap();
+            // The crash: the child's save landed, the parent's did not.
+            let mut moved = svc.task(child.id).unwrap();
+            moved.list_id = other.id;
+            svc.save_task(moved).unwrap();
+            (parent.id, child.id, other.id)
+        };
+        let svc = Service::open(dir.path(), clock()).unwrap();
+        assert_eq!(svc.task(parent).unwrap().list_id, INBOX_ID);
+        assert_eq!(
+            svc.task(child).unwrap().list_id,
+            INBOX_ID,
+            "back with its parent"
+        );
+        assert_ne!(other, INBOX_ID);
     }
 }
