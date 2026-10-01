@@ -1,8 +1,8 @@
 //! End to end over a real socket: framing, keep-alive, limits, shutdown.
 
-use rusty_tick::api::Api;
+use rusty_tick::backend::Backend;
 use rusty_tick::server::{Server, ShutdownHandle, MAX_BODY_BYTES};
-use rusty_tick::service::{system_clock, Service};
+use rusty_tick::service::system_clock;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::thread::JoinHandle;
@@ -24,13 +24,8 @@ impl Running {
 
     fn start_with(web_dir: Option<std::path::PathBuf>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let service = Service::open(dir.path(), system_clock()).unwrap();
-        let mut server = Server::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Api::new(TOKEN.into()).unwrap(),
-            service,
-        )
-        .unwrap();
+        let backend = Backend::single(dir.path(), TOKEN.into(), system_clock()).unwrap();
+        let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
         if let Some(web) = web_dir {
             server = server.with_web_dir(web);
         }

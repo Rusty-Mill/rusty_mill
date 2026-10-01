@@ -5,6 +5,10 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## PR #412 — atomic delete in `rusty-search-sqlite-fts5`
+
+- **Fixed:** `delete` removes the `idx_fts` row and the `content` row in one transaction. A failure between them no longer leaves the content row without its full-text entry. A failure-injection test (a trigger that aborts the content delete) covers it.
+
 ## Issue #27 — Swap reqwest for rusty_request across the HTTP-backed backends
 **2026-08-12** · [#27](https://github.com/baileyrd/rusty_search/issues/27)
 

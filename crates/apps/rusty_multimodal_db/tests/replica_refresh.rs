@@ -8,15 +8,21 @@
 mod replica_refresh;
 
 use replica_refresh::{
-    is_plain_file_name, prune, refresh, refresh_loop, snapshots, Domain, RefreshError, Target,
+    first_real_failure, follow, is_plain_file_name, prune, read_position, refresh, refresh_at,
+    refresh_loop, snapshots, write_position, Domain, FollowError, Position, RefreshError, Target,
 };
 use rusty_multimodal_db::generic::memory::{
     create_memory_production_stack, open_memory_production_stack_portable, Memory,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::generic::query::AllIds;
+use rusty_multimodal_db::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
+use rusty_multimodal_db::server::changelogged::ChangeLogged;
+use rusty_multimodal_db::server::client::{BatchOp, SchemaDrivenClient};
 use rusty_multimodal_db::server::client::{ClientTlsConfig, ConnectOptions, TrustPolicy};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
-use rusty_multimodal_db::server::{serve, ServeOptions, TlsConfig};
+use rusty_multimodal_db::server::protocol::{ErrorCode, ScanValue, WriteOp};
+use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions, TlsConfig};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -257,4 +263,147 @@ fn the_refresh_loop_refreshes_prunes_and_stops_when_told() {
         "each round after the first pruned the previous snapshot"
     );
     assert_eq!(snapshots(&root).unwrap().len(), 1);
+}
+
+/// A `Memory` primary with a change log, on a real socket.
+fn start_logged_server() -> SocketAddr {
+    let dir = unique_dir("replica_follow_source");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("memories.mmap");
+    let stack =
+        create_memory_production_stack(vec![memory(1, "first"), memory(2, "second")], &[], &path)
+            .unwrap();
+    let store = Arc::new(
+        MemoryConnectionStore::new(GenericProductionStore::new(stack)).with_backup_source(path),
+    );
+    let log = ChangeLog::open(&dir.join("memory.changes"), DEFAULT_RETAIN_BYTES).unwrap();
+    let served: Arc<dyn ConnectionStore> = Arc::new(ChangeLogged::new(store, Arc::new(log)));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        serve_tables(
+            listener,
+            vec![("memory".to_string(), served)],
+            0,
+            ServeOptions::new(Some("ro".to_string()), Some("rw".to_string()))
+                .with_replication_token("repl-secret".to_string()),
+        )
+    });
+    addr
+}
+
+/// `ADR-0131` phase 2: a refresh records the log position, `follow`
+/// applies what the primary wrote afterwards, and the standby directory
+/// reopens with the primary's records; a stale epoch is `Resync`.
+#[test]
+fn follow_applies_the_primarys_later_writes_to_a_refreshed_directory() {
+    let addr = start_logged_server();
+    let root = unique_dir("replica_follow_root");
+    let target = Target::new(addr.to_string(), "repl-secret");
+    let report = refresh_at(&target, &root, Domain::Memory).unwrap();
+    let start = report.position.expect("a logged table gives a position");
+    assert_eq!(read_position(&report.directory).unwrap(), start);
+
+    let mut writer = SchemaDrivenClient::connect_authenticated(addr, "rw").unwrap();
+    let mut fields: Vec<(String, ScanValue)> = writer.get(Uuid::from_u128(1)).unwrap().unwrap();
+    for (name, value) in fields.iter_mut() {
+        if name == "content" {
+            *value = ScanValue::Str("first, edited".into());
+        }
+    }
+    let borrowed: Vec<(&str, ScanValue)> = fields
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
+    writer
+        .write_batch(
+            &[
+                BatchOp::Delete {
+                    id: Uuid::from_u128(2),
+                },
+                BatchOp::Replace {
+                    id: Uuid::from_u128(1),
+                    fields: &borrowed,
+                },
+            ],
+            true,
+        )
+        .unwrap();
+
+    let mut seen = (0, 0);
+    follow(
+        &target,
+        &report.directory,
+        Domain::Memory,
+        std::time::Duration::from_millis(10),
+        |applied, head| {
+            seen = (applied, head);
+            applied < head || applied == start.seq
+        },
+    )
+    .unwrap();
+    assert!(seen.0 > start.seq && seen.0 == seen.1, "{seen:?}");
+    assert_eq!(read_position(&report.directory).unwrap().seq, seen.0);
+
+    let standby =
+        open_memory_production_stack_portable(&report.directory.join("memories.mmap")).unwrap();
+    assert_eq!(standby.all_ids(), vec![Uuid::from_u128(1)]);
+
+    write_position(
+        &report.directory,
+        Position {
+            epoch: start.epoch + 1,
+            seq: start.seq,
+        },
+    )
+    .unwrap();
+    let stale = follow(
+        &target,
+        &report.directory,
+        Domain::Memory,
+        std::time::Duration::from_millis(10),
+        |_, _| false,
+    );
+    assert!(matches!(stale, Err(FollowError::Resync)), "{stale:?}");
+}
+
+/// Review 2.3 (R2): a logged `[Link(A, B), Delete(A)]` applied, then applied
+/// again after a crash ahead of the position write, is not divergence: the
+/// replayed link fails `RecordNotFound` because the batch itself deletes A.
+/// A link to a missing record that nothing deletes still is.
+#[test]
+fn a_replayed_link_then_delete_batch_is_not_divergence() {
+    let dir = unique_dir("replica_follow_link_delete");
+    std::fs::create_dir_all(&dir).unwrap();
+    let stack = create_memory_production_stack(
+        vec![memory(1, "a"), memory(2, "b")],
+        &[],
+        &dir.join("memories"),
+    )
+    .unwrap();
+    let standby = MemoryConnectionStore::new(GenericProductionStore::new(stack));
+    let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+    let entry = vec![
+        WriteOp::Link {
+            left: a,
+            right: b,
+            relation: "mentions".into(),
+        },
+        WriteOp::Delete { id: a },
+    ];
+    let first = standby.write_batch(&entry, false).unwrap();
+    assert_eq!(first_real_failure(&entry, &first), None);
+    let replayed = standby.write_batch(&entry, false).unwrap();
+    assert_eq!(first_real_failure(&entry, &replayed), None);
+
+    let dangling = vec![WriteOp::Link {
+        left: a,
+        right: b,
+        relation: "mentions".into(),
+    }];
+    let results = standby.write_batch(&dangling, false).unwrap();
+    assert_eq!(
+        first_real_failure(&dangling, &results),
+        Some((0, ErrorCode::RecordNotFound))
+    );
 }

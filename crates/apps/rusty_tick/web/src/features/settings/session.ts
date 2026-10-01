@@ -3,7 +3,7 @@
  * a page reload so the app boots into whichever gate now applies.
  */
 import { STORAGE_KEY } from '@/api/memory'
-import { clearToken } from '@/app/env'
+import { clearToken, forgetUserData } from '@/app/env'
 
 const MODE_KEY = 'tick-local:mode' // env.ts keeps this private and offers no way to unset it
 
@@ -16,6 +16,7 @@ export const page = {
 
 export function signOut(): void {
   clearToken()
+  forgetUserData() // a shared browser must not keep the last user's tasks
   page.reload()
 }
 

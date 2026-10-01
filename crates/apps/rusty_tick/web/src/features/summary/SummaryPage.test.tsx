@@ -29,7 +29,7 @@ const editor = (): HTMLElement => screen.getByRole('textbox', { name: 'Summary' 
 
 /** Choose "Today" and generate, so the result does not depend on which day of the week the suite runs. */
 async function generateToday(user: ReturnType<typeof userEvent.setup>) {
-  await user.selectOptions(screen.getByLabelText('Date range'), 'today')
+  await user.selectOptions(screen.getByLabelText('Date'), 'today')
   await user.click(screen.getByRole('button', { name: /generate/i }))
 }
 
@@ -62,7 +62,7 @@ describe('SummaryPage', () => {
     expect(within(bar).getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'false')
     expect(within(bar).getByRole('button', { name: 'Undo' })).not.toHaveAttribute('aria-pressed')
     expect(screen.getByRole('radiogroup', { name: 'Template' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Date range')).toBeInTheDocument()
+    expect(screen.getByLabelText('Date')).toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'Show list name' })).toBeChecked()
   })
 
@@ -80,7 +80,7 @@ describe('SummaryPage', () => {
   it('reflects the chosen template and status', async () => {
     const user = await setup()
     await user.click(screen.getByRole('radio', { name: 'Daily report' }))
-    await user.click(screen.getByRole('radio', { name: 'Completed' }))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'completed')
     await generateToday(user)
     expect(within(editor()).getByRole('heading', { level: 1 })).toHaveTextContent('Daily report')
     expect(editor()).toHaveTextContent('No tasks match these filters.')
@@ -89,7 +89,7 @@ describe('SummaryPage', () => {
   it('shows two date inputs for a custom range', async () => {
     const user = await setup()
     expect(screen.queryByLabelText('From date')).toBeNull()
-    await user.selectOptions(screen.getByLabelText('Date range'), 'custom')
+    await user.selectOptions(screen.getByLabelText('Date'), 'custom')
     expect(screen.getByLabelText('From date')).toBeInTheDocument()
     expect(screen.getByLabelText('To date')).toBeInTheDocument()
   })
@@ -191,7 +191,7 @@ describe('SummaryPage', () => {
 
   it('restores saved options on the next visit', async () => {
     const user = await setup()
-    await user.selectOptions(screen.getByLabelText('Date range'), 'lastMonth')
+    await user.selectOptions(screen.getByLabelText('Date'), 'lastMonth')
     await waitFor(async () => expect(await services.api.listDocs('summary_template')).toHaveLength(1), { timeout: 3000 })
     render(
       <ServicesProvider services={services}>
@@ -200,7 +200,7 @@ describe('SummaryPage', () => {
         </MemoryRouter>
       </ServicesProvider>,
     )
-    await waitFor(() => expect(screen.getAllByLabelText('Date range')[1]).toHaveValue('lastMonth'))
+    await waitFor(() => expect(screen.getAllByLabelText('Date')[1]).toHaveValue('lastMonth'))
     await waitFor(() => expect(screen.getAllByRole('textbox', { name: 'Summary' })[1]).toHaveTextContent('Weekly report'))
   })
 })

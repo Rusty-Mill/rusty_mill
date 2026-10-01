@@ -1,12 +1,11 @@
 import { createHashRouter, Navigate, type RouteObject } from 'react-router-dom'
-import { CalendarPage } from '@/features/calendar/CalendarPage'
-import { FocusPage } from '@/features/focus/FocusPage'
-import { HabitsPage } from '@/features/habits/HabitsPage'
-import { SummaryPage } from '@/features/summary/SummaryPage'
 import { CompletedPage, TrashPage } from '@/features/tasks/HistoryPage'
 import { TasksPage } from '@/features/tasks/TasksPage'
 import { HOME } from './paths'
 import { Shell, WithSidebar } from './Shell'
+
+/** A route whose page is fetched on first visit, so the task list ships without calendar, summary, etc. */
+const page = <M,>(load: () => Promise<M>, name: keyof M) => async () => ({ Component: (await load())[name] as React.ComponentType })
 
 const home = <Navigate to={HOME} replace />
 
@@ -23,12 +22,12 @@ export const routes: RouteObject[] = [
             { path: 't/:tag/tasks/:taskId?', element: <TasksPage /> },
             { path: 'q/all/completed/:taskId?', element: <CompletedPage /> },
             { path: 'q/all/trash/:taskId?', element: <TrashPage /> },
-            { path: 'q/all/summary', element: <SummaryPage /> },
+            { path: 'q/all/summary', lazy: page(() => import('@/features/summary/SummaryPage'), 'SummaryPage') },
           ],
         },
-        { path: 'c/all/calendar/:mode?', element: <CalendarPage /> },
-        { path: 'focus', element: <FocusPage /> },
-        { path: 'q/all/habit', element: <HabitsPage /> },
+        { path: 'c/all/calendar/:mode?', lazy: page(() => import('@/features/calendar/CalendarPage'), 'CalendarPage') },
+        { path: 'focus', lazy: page(() => import('@/features/focus/FocusPage'), 'FocusPage') },
+        { path: 'q/all/habit', lazy: page(() => import('@/features/habits/HabitsPage'), 'HabitsPage') },
         { path: '*', element: home },
       ],
     },

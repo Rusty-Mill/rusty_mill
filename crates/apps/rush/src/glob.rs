@@ -575,6 +575,39 @@ fn parse_class(p: &[char], start: usize) -> Option<(Class, usize)> {
 mod tests {
     use super::*;
 
+    /// Every case in the bash-conformance fixture file must hold.
+    #[test]
+    fn shared_conformance_fixtures() {
+        let fixtures = include_str!("../tests/conformance/glob.tsv");
+        let mut failures = Vec::new();
+        let mut cases = 0;
+        for (index, line) in fixtures.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            cases += 1;
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [pattern, name, expected] = fields[..] else {
+                panic!("glob.tsv:{}: expected 3 tab-separated fields", index + 1);
+            };
+            let expected = match expected {
+                "match" => true,
+                "nomatch" => false,
+                other => panic!("glob.tsv:{}: unknown expectation {other:?}", index + 1),
+            };
+            if match_component(pattern, name) != expected {
+                failures.push(format!(
+                    "glob.tsv:{}: {pattern:?} against {name:?} should be {}",
+                    index + 1,
+                    if expected { "a match" } else { "no match" }
+                ));
+            }
+        }
+        assert!(cases > 0, "no fixture cases were read");
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
     #[test]
     fn star_matches_within_component() {
         assert!(match_component("*.rs", "lexer.rs"));

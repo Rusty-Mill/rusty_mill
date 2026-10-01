@@ -600,24 +600,34 @@ fn zip_directory(dest: &Path, src_dir: &Path) -> Result<()> {
 fn unzip_directory(dest: &Path, zip_path: &Path) -> Result<()> {
     let f = File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(f)?;
+    std::fs::create_dir_all(dest)?;
+    let root = dest.canonicalize()?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let Some(rel) = entry.enclosed_name() else {
             return Err(format!("unsafe zip entry: {}", entry.name()).into());
         };
-        let out = dest.join(rel);
+        let out = dest.join(&rel);
+        // `enclosed_name` is lexical only; existing (or earlier-extracted)
+        // symlinks must not carry an entry outside `dest` (design review 3.2).
+        // Every directory and file is made beneath `root` without following
+        // a symlink at any component.
+        let refused = |e: std::io::Error| format!("refusing to extract '{}': {e}", out.display());
         if entry.is_dir() {
-            std::fs::create_dir_all(&out)?;
+            rusty_confined_fs::create_dir_all(&root, &rel).map_err(refused)?;
             continue;
         }
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)?;
+        if let Some(parent) = rel.parent() {
+            rusty_confined_fs::create_dir_all(&root, parent).map_err(refused)?;
         }
-        let mut of = File::create(&out)?;
+        let mut of = rusty_confined_fs::open_for_write(&root, &rel)
+            .map_err(refused)?
+            .file;
+        of.set_len(0)?;
         std::io::copy(&mut entry, &mut of)?;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
-            set_perm(&out, mode);
+            set_perm(&of, mode);
         }
         eprintln!("{}", out.display());
     }
@@ -1788,7 +1798,7 @@ impl Client {
         for fi in &empty_folders {
             let folder = normalize_receive_folder(&fi.folder_remote)?;
             if !Path::new(&folder).exists() {
-                std::fs::create_dir_all(&folder)?;
+                create_receive_dir(&std::env::current_dir()?, &folder)?;
                 eprintln!("{folder}/");
             }
         }
@@ -1891,20 +1901,21 @@ impl Client {
                     validate_symlink_target(&fi.symlink)?;
                 }
                 let root = std::env::current_dir()?;
-                if ancestor_escapes_root(&dest, &root)? {
-                    return Err(format!(
-                        "refusing to write '{}': an ancestor directory escapes the receive root via a symlink",
-                        dest.display()
-                    )
-                    .into());
-                }
-                if folder != "." {
-                    std::fs::create_dir_all(&folder)?;
-                }
+                create_receive_dir(&root, &folder)?;
                 if !fi.symlink.is_empty() {
+                    if ancestor_escapes_root(&dest, &root)? {
+                        return Err(format!(
+                            "refusing to write '{}': an ancestor directory escapes the receive root via a symlink",
+                            dest.display()
+                        )
+                        .into());
+                    }
                     make_symlink(&fi.symlink, &dest)?;
                 } else {
-                    File::create(&dest)?;
+                    // Through the same confinement as every other write
+                    // (design review 3.2): `File::create` followed a symlink
+                    // already at `dest` and truncated its target.
+                    open_receive_dest(&root, &dest)?.file.set_len(0)?;
                 }
                 self.files_finished.insert(i);
                 self.transferred_files += 1;
@@ -1947,10 +1958,9 @@ impl Client {
             finished = false;
             self.current_num = i;
             self.transferred_files += 1;
-            if folder != "." {
-                std::fs::create_dir_all(&folder)?;
-            }
-            let file = open_receive_file(&dest, &fi)?;
+            let root = std::env::current_dir()?;
+            create_receive_dir(&root, &folder)?;
+            let file = open_receive_file(&root, &dest, &fi)?;
             {
                 let mut st = self.recv.lock().unwrap();
                 st.file = Some(file);
@@ -2103,56 +2113,47 @@ fn make_symlink(target: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_receive_file(dest: &Path, fi: &FileInfo) -> Result<File> {
-    // Refuse to write through a symlink, mirroring rejectSymlinkDestination.
-    if let Ok(meta) = std::fs::symlink_metadata(dest) {
-        if meta.file_type().is_symlink() {
-            return Err(
-                format!("refusing to open symlink destination: '{}'", dest.display()).into(),
-            );
-        }
+/// Creates a received folder (relative to the receive root, the working
+/// directory in production) without following a symlink at any component (design review
+/// 3.2): a sender can plant symlinks through earlier entries.
+fn create_receive_dir(root: &Path, folder: &str) -> Result<()> {
+    rusty_confined_fs::create_dir_all(root, Path::new(folder))
+        .map_err(|e| format!("refusing to create '{folder}': {e}").into())
+}
+
+/// Opens a received file for writing beneath the receive root without
+/// following a symlink at any component, creating it if absent and never
+/// truncating it (design review 3.2). Every receive path, regular and
+/// zero-byte, goes through here.
+fn open_receive_dest(root: &Path, dest: &Path) -> Result<rusty_confined_fs::Opened> {
+    rusty_confined_fs::open_for_write(root, dest)
+        .map_err(|e| format!("refusing to write '{}': {e}", dest.display()).into())
+}
+
+fn open_receive_file(root: &Path, dest: &Path, fi: &FileInfo) -> Result<File> {
+    let rusty_confined_fs::Opened { file, created } = open_receive_dest(root, dest)?;
+    let need_resize = created || file.metadata().map_or(true, |m| m.len() as i64 != fi.size);
+    if need_resize {
+        file.set_len(fi.size as u64)?;
     }
-    // Refuse to write if a prior entry in this batch — or a pre-existing
-    // symlink — redirected an ancestor of `dest` outside the receive root.
-    let root = std::env::current_dir()?;
-    if ancestor_escapes_root(dest, &root)? {
-        return Err(format!(
-            "refusing to write '{}': an ancestor directory escapes the receive root via a symlink",
-            dest.display()
-        )
-        .into());
+    if created {
+        set_perm(&file, fi.mode);
     }
-    let file = match std::fs::OpenOptions::new().write(true).open(dest) {
-        Ok(f) => {
-            let need_truncate = f
-                .metadata()
-                .map(|m| m.len() as i64 != fi.size)
-                .unwrap_or(true);
-            if need_truncate {
-                f.set_len(fi.size as u64)?;
-            }
-            f
-        }
-        Err(_) => {
-            let f = File::create(dest)?;
-            f.set_len(fi.size as u64)?;
-            set_perm(dest, fi.mode);
-            f
-        }
-    };
     Ok(file)
 }
 
+/// Sets a received file's mode through its handle, not its path, so a
+/// symlink swapped in after the open cannot redirect the `chmod`.
 #[cfg(unix)]
-fn set_perm(path: &Path, mode: u32) {
+fn set_perm(file: &File, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     if mode & 0o777 != 0 {
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777));
     }
 }
 
 #[cfg(not(unix))]
-fn set_perm(_path: &Path, _mode: u32) {}
+fn set_perm(_file: &File, _mode: u32) {}
 
 /// Recipient data-connection reader — mirrors croc.Client.receiveData.
 fn receive_data_loop(
@@ -2497,5 +2498,81 @@ mod tests {
         drop(st);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn scratch(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "rusty-croc-{label}-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        (base, root.canonicalize().unwrap(), outside)
+    }
+
+    /// Design review 3.2: the zero-byte branch used `File::create`, which
+    /// followed a symlink at the destination and truncated its target. Every
+    /// receive path now goes through `open_receive_dest` and
+    /// `create_receive_dir` (`rusty_confined_fs`), which refuse it.
+    #[cfg(unix)]
+    #[test]
+    fn confined_open_refuses_a_symlinked_destination() {
+        let (base, root, outside) = scratch("confined");
+        let victim = outside.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, root.join("empty.txt")).unwrap();
+        assert!(open_receive_dest(&root, Path::new("empty.txt")).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+
+        // Through a symlinked ancestor, too, for files and folders.
+        std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
+        assert!(open_receive_dest(&root, Path::new("dir/new.txt")).is_err());
+        assert!(create_receive_dir(&root, "dir/sub").is_err());
+        assert!(!outside.join("new.txt").exists());
+        assert!(!outside.join("sub").exists());
+
+        // An ordinary new or existing file inside the root opens.
+        let first = open_receive_dest(&root, Path::new("fresh")).unwrap();
+        assert!(first.created);
+        let again = open_receive_dest(&root, Path::new("fresh")).unwrap();
+        assert!(!again.created);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Design review 3.2: ZIP extraction checked only `enclosed_name`
+    /// (lexical), then created through existing symlinks.
+    #[cfg(unix)]
+    #[test]
+    fn zip_extraction_does_not_write_through_symlinks() {
+        let (base, root, outside) = scratch("unzip");
+        let zip_path = base.join("in.zip");
+        let make_zip = |name: &str| {
+            let mut zw = zip::ZipWriter::new(File::create(&zip_path).unwrap());
+            zw.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(b"payload").unwrap();
+            zw.finish().unwrap();
+        };
+        std::fs::write(outside.join("victim"), b"keep").unwrap();
+        std::os::unix::fs::symlink(outside.join("victim"), root.join("file")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
+
+        make_zip("file");
+        assert!(unzip_directory(&root, &zip_path).is_err());
+        make_zip("dir/planted");
+        assert!(unzip_directory(&root, &zip_path).is_err());
+        assert_eq!(std::fs::read(outside.join("victim")).unwrap(), b"keep");
+        assert!(!outside.join("planted").exists());
+
+        make_zip("ok/inside.txt");
+        unzip_directory(&root, &zip_path).unwrap();
+        assert_eq!(
+            std::fs::read(root.join("ok/inside.txt")).unwrap(),
+            b"payload"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

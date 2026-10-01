@@ -499,14 +499,25 @@ class Client:
             return reply.count
         raise ProtocolError(type(reply).__name__)
 
+    def describe_nullable(self) -> List[str]:
+        """The names of the selected table's nullable fields (NLC-FR-005,
+        protocol 32): read and written as ``None`` on a connection at 32 or
+        above while stored as a sentinel. One round trip; ``UnsupportedError``
+        below 32 with no frame sent."""
+        reply = self._roundtrip(p.DescribeNullable())
+        if isinstance(reply, p.NullableFields):
+            return [self._name(tag) for tag in reply.tags]
+        raise ProtocolError(type(reply).__name__)
+
     def write_batch(self, ops: Sequence[Tuple], atomic: bool) -> List[str]:
         """Apply a batch of runtime writes in one request (WBT-FR-004,
         protocol 22). Each op is a tuple: ``("insert", id, fields)``,
         ``("replace", id, fields)``, ``("replace_if", id, fields, guard)``,
-        ``("delete", id)``, or ``("link", left, right, relation)`` — field
+        ``("delete", id)``, ``("link", left, right, relation)``, or (protocol
+        33) ``("update", id, field, value)`` — field
         names resolved to tags here. Returns one outcome string per op, in
         order (``"inserted"``/``"duplicate"``/``"replaced"``/``"notfound"``/
-        ``"guardfailed"``/``"linked"``/``"alreadylinked"``/``"deleted"``, or
+        ``"guardfailed"``/``"linked"``/``"alreadylinked"``/``"deleted"``/``"updated"``, or
         ``"failed:<CODE>"``). ``atomic=False`` is pipelined (each op stands
         on its own); ``atomic=True`` is precondition- and isolation-atomic
         (nothing applies unless every op validates), an abort raised as
@@ -546,6 +557,15 @@ class Client:
         if kind == "link":
             _, left, right, relation = op
             return p.WoLink(left, right, relation)
+        if kind == "update":
+            # TXS-FR-002 (ADR-0130, protocol 33): ("update", id, field, value)
+            if self.server_protocol_version < 33:
+                raise UnsupportedError("a WriteBatch update needs protocol 33")
+            _, rid, name, value = op
+            d = self.field(name)
+            if not d.capabilities.update:
+                raise UnsupportedError(f"update on {name}")
+            return p.WoUpdateField(rid, d.tag, _to_scan_value(d.value_kind, value))
         raise ValueError(f"unknown write-batch op kind {kind!r}")
 
     def _tag_fields(self, fields: Sequence[Tuple[str, Any]]):
@@ -608,8 +628,28 @@ class Client:
         server's configured ceiling. Below 25, ``UnsupportedError`` with
         no frame sent."""
         reply = self._roundtrip(p.FetchSnapshot())
-        if isinstance(reply, p.Snapshot):
+        if isinstance(reply, (p.Snapshot, p.SnapshotAt)):
             return list(reply.files)
+        raise ProtocolError(type(reply).__name__)
+
+    def fetch_snapshot_at(self) -> Tuple[List[Tuple[str, bytes]], int, int]:
+        """``fetch_snapshot`` plus the change-log position ``(epoch, seq)``
+        the files are consistent with (ADR-0131, protocol 34). Raises
+        ``ProtocolError`` when the table keeps no change log."""
+        reply = self._roundtrip(p.FetchSnapshot())
+        if isinstance(reply, p.SnapshotAt):
+            return list(reply.files), reply.epoch, reply.seq
+        raise ProtocolError(type(reply).__name__)
+
+    def fetch_since(self, epoch: int, after: int, limit: int = 1000) -> p.Changes:
+        """Change-log entries after ``after`` in ``epoch`` (RPL-FR-002,
+        ADR-0131, protocol 34). Replication token only;
+        ``ErrorCode.Gone`` when the epoch changed or the log was trimmed
+        past ``after`` — re-fetch a snapshot. Below 34,
+        ``UnsupportedError`` with no frame sent."""
+        reply = self._roundtrip(p.FetchSince(epoch, after, limit))
+        if isinstance(reply, p.Changes):
+            return reply
         raise ProtocolError(type(reply).__name__)
 
     def link(self, left: uuid.UUID, right: uuid.UUID, relation: str) -> None:
@@ -789,6 +829,7 @@ def _write_result_str(r) -> str:
         p.WrLinked: "linked",
         p.WrAlreadyLinked: "alreadylinked",
         p.WrDeleted: "deleted",
+        p.WrUpdated: "updated",
     }
     if isinstance(r, p.WrFailed):
         return f"failed:{r.code.name}"

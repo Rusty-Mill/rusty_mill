@@ -2,16 +2,13 @@
 //!
 //! This is what an ADK agent's `StreamableHTTPConnectionParams` connects to:
 //! JSON-RPC requests are POSTed to a single endpoint, and the response comes
-//! back as JSON.
+//! back as JSON. Served by `rmcp`'s Streamable HTTP service, stateless (no
+//! `Mcp-Session-Id`), so it scales behind a plain load balancer.
 
 use adk_core::{AdkError, Result};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::post,
-    Router,
-};
+use axum::Router;
+use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use std::sync::Arc;
 
 use crate::server::McpServer;
@@ -20,21 +17,22 @@ use crate::server::McpServer;
 ///
 /// Mounting a router rather than owning the listener lets the MCP endpoint sit
 /// alongside an application's own routes.
+///
+/// Any `Host` header is accepted, as before this crate moved onto `rmcp`:
+/// the router cannot tell whether it is mounted on a loopback-only listener,
+/// and `rmcp`'s loopback-only default would reject every remote client of a
+/// server bound to a public address.
 pub fn router(server: Arc<McpServer>, path: &str) -> Router {
-    Router::new().route(path, post(handle)).with_state(server)
-}
-
-async fn handle(State(server): State<Arc<McpServer>>, body: String) -> Response {
-    match server.handle_raw(&body).await {
-        Some(response) => (
-            StatusCode::OK,
-            [("content-type", "application/json")],
-            response,
-        )
-            .into_response(),
-        // A notification is answered with 202 and no body, per JSON-RPC.
-        None => StatusCode::ACCEPTED.into_response(),
-    }
+    let config = StreamableHttpServerConfig::default()
+        .with_legacy_session_mode(false)
+        .with_json_response(true)
+        .disable_allowed_hosts();
+    let service = StreamableHttpService::new(
+        move || Ok(McpServer::clone(&server)),
+        Arc::new(NeverSessionManager::default()),
+        config,
+    );
+    Router::new().route_service(path, service)
 }
 
 /// Serves `server` over HTTP on `addr` at `path`, until the process ends.

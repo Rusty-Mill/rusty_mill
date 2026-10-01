@@ -32,6 +32,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Rust toolchain every job builds with (except the MSRV check, which
+  # pins its own). Pinned rather than `stable`: Rust 1.99 deprecated
+  # `fetch_update` and added the default `clippy::assert_is_empty` lint
+  # (~1,300 hits), so a stable bump broke every warnings-as-errors job at
+  # once. Moving to a newer Rust is now a deliberate change here.
+  RUST_TOOLCHAIN: "1.98.1"
   # A one-shot CI build gets little benefit from incremental compilation
   # (there's no prior local state to reuse) and it adds bookkeeping
   # overhead and cache size for no payoff; disabling it is the standard
@@ -68,8 +74,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -95,7 +102,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: dependency-policy
@@ -118,7 +127,9 @@ jobs:
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: plan
@@ -523,10 +534,9 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build
 
-  # rusty_tick's web UI (Vite/React). Typecheck, unit + integration tests
-  # (jsdom over the in-memory adapter) and the production build. The
-  # Playwright run (`npm run e2e`) needs the compiled rusty_tick binary and a
-  # browser, so it stays a local check.
+  # rusty_tick's web UI (Vite/React). Typecheck, unit tests (jsdom over the
+  # in-memory adapter) and the production build; the Playwright run against
+  # the real binary is the rusty-tick-e2e job below.
   rusty-tick-web:
     name: rusty_tick web (typecheck, test, build)
     runs-on: ubuntu-latest
@@ -544,6 +554,39 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # rusty_tick end to end: Playwright drives the built UI in Chromium against
+  # the real rusty_tick binary (single-user and per-user-token servers).
+  rusty-tick-e2e:
+    name: rusty_tick e2e (Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_tick/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-tick-e2e
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_tick/web/package-lock.json
+      - run: cargo build -p rusty_tick
+        working-directory: .
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rusty-tick-e2e-results
+          path: crates/apps/rusty_tick/web/test-results
 
   # rusty_key's desktop front end: a vendored Vite/Solid app inside a
   # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build
@@ -579,8 +622,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -626,8 +670,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -689,7 +734,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rusty-config-no-std
@@ -714,8 +761,9 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -763,8 +811,9 @@ jobs:
           - { feature: engine-store, test: true, clippy: true, store: sqlite }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -792,8 +841,9 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -827,8 +877,9 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -858,8 +909,9 @@ jobs:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:

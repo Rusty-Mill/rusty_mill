@@ -32,7 +32,7 @@ pub mod anthropic;
 pub mod gemini;
 
 pub use mock::MockModel;
-pub use model::{aggregate_stream, Model, ModelRegistry, SharedModel};
+pub use model::{aggregate_stream, Model, ModelRegistry, SharedModel, StreamAggregator};
 pub use request::{GenerateContentConfig, LlmRequest, LlmResponse, UsageMetadata};
 
 #[cfg(feature = "anthropic")]

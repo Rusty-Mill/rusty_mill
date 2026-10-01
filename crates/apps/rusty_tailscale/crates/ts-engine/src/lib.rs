@@ -218,6 +218,78 @@ struct PeerMeta {
     online: bool,
 }
 
+/// The netmap-derived state the engine keys by peer, kept together so a
+/// peer's removal clears all of it (design review 4): the netmap handler
+/// used to only add, so a revoked peer kept its address ownership,
+/// metadata and disco key.
+#[derive(Default)]
+struct PeerIndex {
+    /// Which peer owns each tailnet address (cryptokey routing).
+    ip_to_key: HashMap<Ipv4Addr, NodePublic>,
+    /// Per-peer netmap metadata; membership here is netmap membership.
+    meta: HashMap<NodePublic, PeerMeta>,
+    /// Which key each netmap node currently holds, so `PeersRemoved`
+    /// (node IDs) and rekeys resolve to keys.
+    node_keys: HashMap<ts_types::tailcfg::NodeID, NodePublic>,
+    /// The disco key registered per peer, to detect changes (Headscale
+    /// may send a zero disco key until the peer reports endpoints).
+    disco: HashMap<NodePublic, ts_types::DiscoPublic>,
+}
+
+impl PeerIndex {
+    /// The peers `resp` removes, among the index's and `known`: every peer
+    /// missing from a full `Peers` snapshot, and every `PeersRemoved` node.
+    fn removals(&self, resp: &MapResponse, known: &[NodePublic]) -> Vec<NodePublic> {
+        let mut out: Vec<NodePublic> = Vec::new();
+        if let Some(peers) = &resp.peers {
+            let keep: std::collections::HashSet<NodePublic> =
+                peers.iter().filter_map(|p| p.key).collect();
+            out.extend(
+                self.meta
+                    .keys()
+                    .chain(known)
+                    .filter(|k| !keep.contains(k))
+                    .copied(),
+            );
+        }
+        for id in resp.peers_removed.iter().flatten() {
+            out.extend(self.node_keys.get(id).copied());
+        }
+        out.sort_by_key(|k| k.0);
+        out.dedup();
+        out
+    }
+
+    /// The old key when node `id` now presents a different `key` (a rekey).
+    fn rekeyed(&self, id: ts_types::tailcfg::NodeID, key: NodePublic) -> Option<NodePublic> {
+        self.node_keys.get(&id).copied().filter(|old| *old != key)
+    }
+
+    /// Makes `ips` exactly the addresses `key` owns: replaced, not
+    /// accumulated, so an address the peer gave up stops routing to it.
+    fn set_addresses(&mut self, key: NodePublic, ips: &[Ipv4Addr]) {
+        self.ip_to_key.retain(|_, k| *k != key);
+        for ip in ips {
+            self.ip_to_key.insert(*ip, key);
+        }
+    }
+
+    /// Forgets `key` everywhere; returns the addresses it owned.
+    fn remove(&mut self, key: NodePublic) -> Vec<Ipv4Addr> {
+        let owned: Vec<Ipv4Addr> = self
+            .ip_to_key
+            .iter()
+            .filter(|(_, k)| **k == key)
+            .map(|(ip, _)| *ip)
+            .collect();
+        self.ip_to_key.retain(|_, k| *k != key);
+        self.meta.remove(&key);
+        self.node_keys.retain(|_, k| *k != key);
+        self.disco.remove(&key);
+        owned
+    }
+}
+
 /// The engine's owned state, driven by a single event-loop task.
 pub struct Engine {
     state: NodeState,
@@ -225,7 +297,8 @@ pub struct Engine {
     derp: DerpClient,
     derp_tx: DerpSender,
     sessions: HashMap<NodePublic, BoringWgPeer>,
-    ip_to_key: HashMap<Ipv4Addr, NodePublic>,
+    /// Everything netmap-derived that is keyed by peer (design review 4).
+    index: PeerIndex,
     next_index: u32,
     ping_counter: u16,
     pending: HashMap<u16, PendingPing>,
@@ -241,17 +314,12 @@ pub struct Engine {
     /// Direct-path multiplexer (Phase 5). When present, WireGuard datagrams
     /// go through it (direct or DERP); when absent, straight to DERP.
     magicsock: Option<MagicSock>,
-    /// The disco key we've registered per peer, to detect changes (Headscale
-    /// may send a zero disco key until the peer reports endpoints).
-    peer_disco: HashMap<NodePublic, ts_types::DiscoPublic>,
     /// Our own hostname, for status.
     hostname: String,
     /// Our own DNS name (from the netmap self node).
     self_dns_name: String,
     /// Our own stable node ID (from the netmap self node).
     self_stable_id: ts_types::StableNodeID,
-    /// Per-peer netmap metadata, for status.
-    peers_meta: HashMap<NodePublic, PeerMeta>,
     /// User profiles by ID (from the netmap), for status ownership column.
     users: HashMap<ts_types::UserID, ts_types::UserProfile>,
     /// Whether the data plane is active (`tailscale up`/`down`). When false,
@@ -363,7 +431,7 @@ impl Engine {
             derp,
             derp_tx,
             sessions: HashMap::new(),
-            ip_to_key: HashMap::new(),
+            index: PeerIndex::default(),
             next_index: 1,
             ping_counter: 0,
             pending: HashMap::new(),
@@ -374,11 +442,9 @@ impl Engine {
             magic_dns_hosts: config.magic_dns_hosts,
             dns_entries: std::collections::BTreeMap::new(),
             magicsock,
-            peer_disco: HashMap::new(),
             hostname: config.hostname,
             self_dns_name: String::new(),
             self_stable_id: ts_types::StableNodeID::default(),
-            peers_meta: HashMap::new(),
             users: HashMap::new(),
             want_running: true,
             filter: Filter::allow_all(),
@@ -456,7 +522,7 @@ impl Engine {
         let Some(ip) = icmp::parse_ipv4(&packet) else {
             return; // IPv6 / non-IP: not handled
         };
-        let Some(&key) = self.ip_to_key.get(&ip.dst) else {
+        let Some(&key) = self.index.ip_to_key.get(&ip.dst) else {
             tracing::trace!(dst = %ip.dst, "engine: no peer for outbound packet, dropping");
             return;
         };
@@ -527,6 +593,15 @@ impl Engine {
             );
         }
 
+        // Removal semantics (design review 4): `Peers` is a full
+        // replacement and `PeersRemoved` incremental. Both used to be
+        // ignored, so a revoked peer kept its WireGuard session, address
+        // ownership, DNS name and path state.
+        let known: Vec<NodePublic> = self.sessions.keys().copied().collect();
+        for key in self.index.removals(&resp, &known) {
+            dns_changed |= self.remove_peer(key);
+        }
+
         let mut incoming = Vec::new();
         if let Some(peers) = resp.peers {
             incoming.extend(peers);
@@ -537,16 +612,19 @@ impl Engine {
         let mut new_disco: Vec<(NodePublic, ts_types::DiscoPublic)> = Vec::new();
         for peer in incoming {
             let Some(key) = peer.key else { continue };
+            // A rekeyed node: everything held under its old key goes.
+            if let Some(old) = self.index.rekeyed(peer.id, key) {
+                dns_changed |= self.remove_peer(old);
+            }
+            self.index.node_keys.insert(peer.id, key);
             if !self.sessions.contains_key(&key) {
                 new_peers.push(key);
             }
             self.ensure_session(key);
             let peer_ips = ipv4_addrs(&peer.addresses);
-            for ip in &peer_ips {
-                self.ip_to_key.insert(*ip, key);
-            }
+            self.index.set_addresses(key, &peer_ips);
             // Capture netmap metadata for status reporting.
-            let meta = self.peers_meta.entry(key).or_default();
+            let meta = self.index.meta.entry(key).or_default();
             if !peer.stable_id.0.is_empty() {
                 meta.stable_id = peer.stable_id.clone();
             }
@@ -572,9 +650,9 @@ impl Engine {
             // endpoints).
             if let Some(disco) = peer.disco_key
                 && disco != ts_types::DiscoPublic([0u8; 32])
-                && self.peer_disco.get(&key) != Some(&disco)
+                && self.index.disco.get(&key) != Some(&disco)
             {
-                self.peer_disco.insert(key, disco);
+                self.index.disco.insert(key, disco);
                 new_disco.push((key, disco));
             }
             if let (Some(ip), false) = (peer_ips.first().copied(), peer.name.is_empty())
@@ -671,6 +749,22 @@ impl Engine {
         }
     }
 
+    /// Forgets every piece of state derived from peer `key`: its WireGuard
+    /// session, address ownership, metadata, node-ID mapping, disco key,
+    /// MagicDNS names and magicsock paths (design review 4). Returns whether
+    /// the MagicDNS entries changed.
+    fn remove_peer(&mut self, key: NodePublic) -> bool {
+        self.sessions.remove(&key);
+        let owned = self.index.remove(key);
+        if let Some(ms) = &mut self.magicsock {
+            ms.remove_peer(&key);
+        }
+        let before = self.dns_entries.len();
+        self.dns_entries.retain(|ip, _| !owned.contains(ip));
+        tracing::info!(peer = %key, "engine: peer removed from the netmap");
+        self.dns_entries.len() != before
+    }
+
     fn ensure_session(&mut self, key: NodePublic) -> &mut BoringWgPeer {
         if !self.sessions.contains_key(&key) {
             let index = self.next_index;
@@ -698,6 +792,13 @@ impl Engine {
     /// direct UDP path) and dispatches its output: reply datagrams back to the
     /// peer, decrypted IP packets to the TUN (or userspace ICMP).
     async fn deliver_wg(&mut self, peer: NodePublic, payload: &[u8]) {
+        // Only netmap members get a session (design review 4): inbound
+        // traffic used to allocate one for any key -- including a peer the
+        // netmap had just removed.
+        if !self.index.meta.contains_key(&peer) {
+            tracing::debug!(%peer, "engine: dropping WireGuard from a key outside the netmap");
+            return;
+        }
         let actions = self.ensure_session(peer).decapsulate(payload);
         for action in actions {
             match action {
@@ -749,7 +850,7 @@ impl Engine {
     /// metadata, or a spoofed source — is denied rather than defaulted to
     /// allowed.
     fn filter_allows_inbound(&self, peer: NodePublic, ip_pkt: &[u8]) -> bool {
-        packet_allowed(&self.filter, self.peers_meta.get(&peer), ip_pkt)
+        packet_allowed(&self.filter, self.index.meta.get(&peer), ip_pkt)
     }
 
     /// Handles a decrypted inbound IP packet: answer ICMP echo requests,
@@ -789,7 +890,7 @@ impl Engine {
         match cmd {
             Command::Ping { target, reply } => self.start_ping(target, reply).await,
             Command::PeerIps { reply } => {
-                let _ = reply.send(self.ip_to_key.keys().copied().collect());
+                let _ = reply.send(self.index.ip_to_key.keys().copied().collect());
             }
             Command::Status { reply } => {
                 let _ = reply.send(self.build_status());
@@ -833,7 +934,7 @@ impl Engine {
         };
 
         let mut peer_map = std::collections::BTreeMap::new();
-        for (key, meta) in &self.peers_meta {
+        for (key, meta) in &self.index.meta {
             let path = self.path_for(key);
             let (cur_addr, relay) = match path {
                 PathKind::Direct(addr) => (addr.to_string(), String::new()),
@@ -854,7 +955,7 @@ impl Engine {
                 online: meta.online,
                 active: active && meta.online,
                 in_network_map: true,
-                in_magic_sock: self.peer_disco.contains_key(key),
+                in_magic_sock: self.index.disco.contains_key(key),
                 in_engine: active,
                 ..Default::default()
             };
@@ -879,7 +980,7 @@ impl Engine {
         target: Ipv4Addr,
         reply: oneshot::Sender<Result<Duration, PingError>>,
     ) {
-        let Some(&key) = self.ip_to_key.get(&target) else {
+        let Some(&key) = self.index.ip_to_key.get(&target) else {
             let _ = reply.send(Err(PingError::UnknownPeer(target)));
             return;
         };
@@ -1092,6 +1193,92 @@ fn bits_match(a: &[u8], b: &[u8], bits: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(b: u8) -> NodePublic {
+        NodePublic([b; 32])
+    }
+
+    fn node(id: i64, k: u8) -> ts_types::tailcfg::Node {
+        ts_types::tailcfg::Node {
+            id: ts_types::tailcfg::NodeID(id),
+            key: Some(key(k)),
+            ..Default::default()
+        }
+    }
+
+    /// An index holding peers `1..=n`, node ID `i` with key `[i; 32]`.
+    fn index_of(n: u8) -> PeerIndex {
+        let mut idx = PeerIndex::default();
+        for i in 1..=n {
+            idx.meta.insert(key(i), PeerMeta::default());
+            idx.node_keys
+                .insert(ts_types::tailcfg::NodeID(i64::from(i)), key(i));
+            idx.set_addresses(key(i), &[Ipv4Addr::new(100, 64, 0, i)]);
+        }
+        idx
+    }
+
+    /// Design review 4: `Peers` is a full replacement, so a peer absent
+    /// from it — including one only a WireGuard session knows — is removed.
+    #[test]
+    fn a_full_peer_snapshot_removes_every_absent_peer() {
+        let idx = index_of(3);
+        let resp = MapResponse {
+            peers: Some(vec![node(2, 2)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            idx.removals(&resp, &[key(2), key(9)]),
+            vec![key(1), key(3), key(9)]
+        );
+    }
+
+    /// Design review 4: without `Peers` only `PeersRemoved` removes, by
+    /// node ID; unknown IDs are ignored.
+    #[test]
+    fn peers_removed_resolves_node_ids_to_keys() {
+        let idx = index_of(3);
+        let resp = MapResponse {
+            peers_removed: Some(vec![
+                ts_types::tailcfg::NodeID(3),
+                ts_types::tailcfg::NodeID(42),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(idx.removals(&resp, &[key(1)]), vec![key(3)]);
+        assert!(idx.removals(&MapResponse::default(), &[key(1)]).is_empty());
+    }
+
+    #[test]
+    fn a_rekey_reports_the_old_key_only_when_it_changed() {
+        let idx = index_of(1);
+        let id = ts_types::tailcfg::NodeID(1);
+        assert_eq!(idx.rekeyed(id, key(7)), Some(key(1)));
+        assert_eq!(idx.rekeyed(id, key(1)), None);
+        assert_eq!(idx.rekeyed(ts_types::tailcfg::NodeID(5), key(5)), None);
+    }
+
+    /// Design review 4: an address a peer gave up stops routing to it.
+    #[test]
+    fn set_addresses_replaces_rather_than_accumulates() {
+        let mut idx = index_of(1);
+        let new = Ipv4Addr::new(100, 64, 1, 1);
+        idx.set_addresses(key(1), &[new]);
+        assert_eq!(idx.ip_to_key.get(&new), Some(&key(1)));
+        assert!(!idx.ip_to_key.contains_key(&Ipv4Addr::new(100, 64, 0, 1)));
+    }
+
+    #[test]
+    fn remove_clears_every_map_and_returns_owned_addresses() {
+        let mut idx = index_of(2);
+        idx.disco.insert(key(1), ts_types::DiscoPublic([1; 32]));
+        assert_eq!(idx.remove(key(1)), vec![Ipv4Addr::new(100, 64, 0, 1)]);
+        assert!(!idx.meta.contains_key(&key(1)));
+        assert!(!idx.disco.contains_key(&key(1)));
+        assert!(!idx.node_keys.values().any(|k| *k == key(1)));
+        assert!(!idx.ip_to_key.values().any(|k| *k == key(1)));
+        assert_eq!(idx.ip_to_key.len(), 1, "the other peer keeps its address");
+    }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()

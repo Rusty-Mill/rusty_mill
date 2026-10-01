@@ -3,10 +3,11 @@
 //! [`crate::ports::PackageController`] -- it's plain `std::fs` with an
 //! allowlist check in front, nothing to mock a Fedora box away from.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::allowlist::Allowlist;
+use crate::allowlist::{Allowlist, ConfigTarget};
 use crate::error::AgentError;
 
 pub struct ConfigStore {
@@ -19,10 +20,15 @@ impl ConfigStore {
     }
 
     /// Reads `path`'s contents. Refuses any path outside the config-path
-    /// allowlist before touching the filesystem.
+    /// allowlist before touching the filesystem, and opens it beneath its
+    /// allowed prefix without following a symlink at any component.
     pub fn read(&self, path: &str) -> Result<String, AgentError> {
-        let path = self.allowlist.check_config_path(Path::new(path))?;
-        Ok(std::fs::read_to_string(&path)?)
+        let target = self.allowlist.resolve_config_path(Path::new(path))?;
+        let mut file = rusty_confined_fs::open_for_read(&target.root, &target.rel)
+            .map_err(|e| refused(&target, e))?;
+        let mut out = String::new();
+        file.read_to_string(&mut out)?;
+        Ok(out)
     }
 
     /// Writes `content` to `path`, replacing whatever was there. Refuses
@@ -31,12 +37,36 @@ impl ConfigStore {
     /// `.bak` copy of the *previous* contents is written first -- best-
     /// effort undo for a bad edit, not a version history.
     pub fn write(&self, path: &str, content: &str, backup: bool) -> Result<(), AgentError> {
-        let path = self.allowlist.check_config_path(Path::new(path))?;
-        if backup && path.exists() {
-            std::fs::copy(&path, backup_path(&path))?;
+        let target = self.allowlist.resolve_config_path(Path::new(path))?;
+        let full = target.path();
+        if backup && full.exists() {
+            let previous = self.read(&full.to_string_lossy())?;
+            let bak = self.allowlist.resolve_config_path(&backup_path(&full))?;
+            write_confined(&bak, previous.as_bytes())?;
         }
-        std::fs::write(&path, content)?;
-        Ok(())
+        write_confined(&target, content.as_bytes())
+    }
+}
+
+/// Writes `content` to `target` beneath its allowed prefix, never following
+/// a symlink at any component (`rusty_confined_fs`), so one swapped in
+/// after the allowlist check is refused rather than written through.
+fn write_confined(target: &ConfigTarget, content: &[u8]) -> Result<(), AgentError> {
+    let mut file = rusty_confined_fs::open_for_write(&target.root, &target.rel)
+        .map_err(|e| refused(target, e))?
+        .file;
+    file.set_len(0)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// A confined open that failed: a symlink or non-regular file is a refusal,
+/// anything else an I/O error.
+fn refused(target: &ConfigTarget, e: std::io::Error) -> AgentError {
+    match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => e.into(),
+        _ => AgentError::PathNotAllowed(target.path().display().to_string()),
     }
 }
 
@@ -142,5 +172,67 @@ mod tests {
             .expect_err("outside the allowlist");
         assert!(matches!(err, AgentError::PathNotAllowed(_)));
         assert!(!Path::new("/etc/shadow.bak").exists());
+    }
+
+    /// Design review 3.2: the allowlist was lexical, so a symlink inside an
+    /// allowed prefix reached any file. A symlinked file and a symlinked
+    /// directory are both refused now, for read and write.
+    #[test]
+    fn a_symlink_inside_an_allowed_prefix_is_refused() {
+        let (allowlist, dir) = sandbox();
+        let store = ConfigStore::new(allowlist);
+        let outside = dir.with_extension("outside");
+        std::fs::create_dir_all(&outside).expect("test setup");
+        let victim = outside.join("shadow");
+        std::fs::write(&victim, "secret").expect("test setup");
+        std::os::unix::fs::symlink(&victim, dir.join("file.conf")).expect("test setup");
+        std::os::unix::fs::symlink(&outside, dir.join("sub")).expect("test setup");
+
+        for p in [dir.join("file.conf"), dir.join("sub/shadow")] {
+            let p = p.to_str().expect("test setup").to_string();
+            assert!(
+                matches!(store.read(&p), Err(AgentError::PathNotAllowed(_))),
+                "{p}"
+            );
+            assert!(
+                matches!(
+                    store.write(&p, "pwned", true),
+                    Err(AgentError::PathNotAllowed(_))
+                ),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("test setup"),
+            "secret"
+        );
+        assert!(!outside.join("shadow.bak").exists());
+    }
+
+    /// The allowlist check and the open are separate steps. A directory
+    /// swapped for a symlink after the check (simulated by building the
+    /// checked target directly) is refused at the open, not written
+    /// through.
+    #[test]
+    fn a_symlink_swapped_in_after_the_check_is_refused_at_the_open() {
+        let (_, dir) = sandbox();
+        let root = dir.canonicalize().expect("test setup");
+        let outside = dir.with_extension("swapped");
+        std::fs::create_dir_all(&outside).expect("test setup");
+        std::fs::write(outside.join("unit.conf"), "secret").expect("test setup");
+        std::os::unix::fs::symlink(&outside, root.join("sub")).expect("test setup");
+
+        let target = ConfigTarget {
+            root,
+            rel: PathBuf::from("sub/unit.conf"),
+        };
+        assert!(matches!(
+            write_confined(&target, b"pwned"),
+            Err(AgentError::PathNotAllowed(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.join("unit.conf")).expect("test setup"),
+            "secret"
+        );
     }
 }

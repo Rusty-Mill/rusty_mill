@@ -83,6 +83,7 @@ pub struct Server<R, W> {
     reader: R,
     writer: W,
     max_concurrent_requests: Option<usize>,
+    pending_limits: PendingLimits,
     outbound_queue_limit: Option<usize>,
     teardown_grace: std::time::Duration,
     shutdown_signal: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -163,6 +164,7 @@ where
             reader,
             writer,
             max_concurrent_requests: None,
+            pending_limits: PendingLimits::default(),
             outbound_queue_limit: None,
             teardown_grace: DEFAULT_TEARDOWN_GRACE,
             shutdown_signal: None,
@@ -208,6 +210,31 @@ where
         self
     }
 
+    /// Cap how many requests may be pending at once -- received but not yet
+    /// answered, whether running or waiting for a
+    /// [`with_max_concurrent_requests`](Self::with_max_concurrent_requests)
+    /// permit (default: [`DEFAULT_MAX_PENDING_REQUESTS`]). A request past
+    /// the cap is answered `RequestFailed` at once instead of getting a
+    /// task: the concurrency cap alone bounded execution, not how much work
+    /// a fast client could queue (design review 3.7, N11).
+    #[must_use]
+    pub fn with_max_pending_requests(mut self, limit: usize) -> Self {
+        self.pending_limits.requests = limit;
+        self
+    }
+
+    /// Cap how many notifications may wait for the (serialized)
+    /// notification worker (default: [`DEFAULT_MAX_PENDING_NOTIFICATIONS`]).
+    /// Past it the connection is torn down with an error: document
+    /// notifications cannot be dropped without desynchronizing the
+    /// server's view, and pausing the reader could deadlock handlers
+    /// awaiting the client's replies (design review 3.7, N11).
+    #[must_use]
+    pub fn with_max_pending_notifications(mut self, limit: usize) -> Self {
+        self.pending_limits.notifications = limit;
+        self
+    }
+
     /// Cap how many outbound messages may sit unwritten in the output queue
     /// (default: unlimited). The cap applies to [`Client`]-originated
     /// traffic (notifications and server→client requests), which fails with
@@ -238,6 +265,7 @@ where
             reader,
             mut writer,
             max_concurrent_requests,
+            pending_limits,
             outbound_queue_limit,
             teardown_grace,
             shutdown_signal,
@@ -295,6 +323,7 @@ where
             client,
             outbound,
             request_permits,
+            pending_limits,
             teardown_grace,
             shutdown_signal,
             writer_dead,
@@ -316,6 +345,27 @@ where
     }
 }
 
+/// Default for [`Server::with_max_pending_requests`].
+pub const DEFAULT_MAX_PENDING_REQUESTS: usize = 1024;
+/// Default for [`Server::with_max_pending_notifications`].
+pub const DEFAULT_MAX_PENDING_NOTIFICATIONS: usize = 4096;
+
+/// Bounds on work received but not yet done (design review 3.7, N11).
+#[derive(Debug, Clone, Copy)]
+struct PendingLimits {
+    requests: usize,
+    notifications: usize,
+}
+
+impl Default for PendingLimits {
+    fn default() -> Self {
+        PendingLimits {
+            requests: DEFAULT_MAX_PENDING_REQUESTS,
+            notifications: DEFAULT_MAX_PENDING_NOTIFICATIONS,
+        }
+    }
+}
+
 /// The message loop. Owns the loop-side handles so they drop on return.
 #[allow(clippy::too_many_arguments)]
 async fn run_loop<R, B>(
@@ -323,6 +373,7 @@ async fn run_loop<R, B>(
     client: Client,
     out_tx: Outbound,
     request_permits: Option<Arc<Semaphore>>,
+    pending_limits: PendingLimits,
     teardown_grace: std::time::Duration,
     mut shutdown_signal: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     mut writer_dead: watch::Receiver<bool>,
@@ -462,6 +513,13 @@ where
                     // `initialized` rides the same queue so it stays ordered
                     // with respect to the document notifications after it.
                     if initialized {
+                        let backlog = notes_enqueued.saturating_sub(*notes_done.borrow());
+                        if backlog >= pending_limits.notifications as u64 {
+                            break Err(Error::protocol(format!(
+                                "more than {} notifications pending; tearing down",
+                                pending_limits.notifications
+                            )));
+                        }
                         notes_enqueued += 1;
                         let _ = note_tx.send(QueuedNotification {
                             seq: notes_enqueued,
@@ -521,6 +579,15 @@ where
                             &out_tx,
                             req.id,
                             Error::invalid_request("server is shutting down"),
+                        );
+                    } else if lock(&in_flight).len() >= pending_limits.requests {
+                        send_error(
+                            &out_tx,
+                            req.id,
+                            Error::request_failed(format!(
+                                "server overloaded: {} requests already pending",
+                                pending_limits.requests
+                            )),
                         );
                     } else {
                         spawn_request(

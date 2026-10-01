@@ -17,7 +17,7 @@ const PRIORITIES: { value: Priority; label: string }[] = [
   { value: 0, label: 'None' },
 ]
 const STATUSES: { value: StatusFilter; label: string }[] = [
-  { value: 'all', label: 'All' },
+  { value: 'all', label: 'All Status' },
   { value: 'completed', label: 'Completed' },
   { value: 'open', label: 'Not completed' },
 ]
@@ -25,13 +25,21 @@ const STATUSES: { value: StatusFilter; label: string }[] = [
 /** Full names do not fit three abreast; the accessible name stays the full one. */
 const TEMPLATE_SHORT: Record<(typeof TEMPLATES)[number], string> = { daily: 'Daily', weekly: 'Weekly', simple: 'Simple list' }
 
+const FIELDS = [
+  { key: 'showList', label: 'Show list name' },
+  { key: 'showDue', label: 'Show due date' },
+  { key: 'showPriority', label: 'Show priority' },
+  { key: 'showTags', label: 'Show tags' },
+  { key: 'showCompletedTime', label: 'Show completed time' },
+] as const
+
 const toggle = <T,>(xs: T[], x: T): T[] => (xs.includes(x) ? xs.filter((y) => y !== x) : [...xs, x])
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-2 border-b border-line px-5 py-4 last:border-b-0">
+    <section className="flex flex-col gap-2 px-5 py-3">
       <h3 className="text-base font-semibold">{title}</h3>
-      {children}
+      <div className="flex flex-col rounded-[10px] bg-side px-4 py-1">{children}</div>
     </section>
   )
 }
@@ -45,12 +53,31 @@ function Check({ label, checked, onChange }: { label: string; checked: boolean; 
   )
 }
 
-function Radio({ name, label, checked, onChange }: { name: string; label: string; checked: boolean; onChange: () => void }) {
+const rowClass = 'flex min-h-10 items-center justify-between gap-3 text-base'
+const valueClass = 'h-8 min-w-0 max-w-[190px] cursor-pointer bg-transparent text-right text-grey outline-none'
+
+/** A label on the left and a select on the right, as the real app lays out its filters. */
+function SelectRow({ label, value, onChange, children }: { label: string; value: string; onChange: (v: string) => void; children: ReactNode }) {
   return (
-    <label className="flex min-h-7 cursor-pointer items-center gap-2 text-base">
-      <input type="radio" name={name} checked={checked} onChange={onChange} className="h-4 w-4 accent-primary" />
+    <label className={rowClass}>
       {label}
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={valueClass}>
+        {children}
+      </select>
     </label>
+  )
+}
+
+/** A row whose value ("All Lists", "3 selected") opens its choices underneath. */
+function OpenRow({ label, value, children }: { label: string; value: string; children: ReactNode }) {
+  return (
+    <details className="group">
+      <summary className={`${rowClass} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
+        {label}
+        <span className="truncate text-grey">{value} ▾</span>
+      </summary>
+      <div className="mb-2 flex flex-col">{children}</div>
+    </details>
   )
 }
 
@@ -80,18 +107,15 @@ export function SummaryFilters({ options: o, onChange, lists, tags }: Props) {
       </Section>
 
       <Section title="Filter">
-        <label className="flex flex-col gap-1 text-s text-grey">
-          Date range
-          <select value={o.range} onChange={(e) => onChange({ range: e.target.value as SummaryOptions['range'] })} className={`${field} text-text`}>
-            {RANGE_KEYS.map((k) => (
-              <option key={k} value={k}>
-                {RANGE_LABELS[k]}
-              </option>
-            ))}
-          </select>
-        </label>
+        <SelectRow label="Date" value={o.range} onChange={(v) => onChange({ range: v as SummaryOptions['range'] })}>
+          {RANGE_KEYS.map((k) => (
+            <option key={k} value={k}>
+              {RANGE_LABELS[k]}
+            </option>
+          ))}
+        </SelectRow>
         {o.range === 'custom' && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 pb-2">
             <input type="date" aria-label="From date" value={o.custom.from} onChange={(e) => onChange({ custom: { ...o.custom, from: e.target.value } })} className={field} />
             <span className="text-grey" aria-hidden>
               –
@@ -100,58 +124,52 @@ export function SummaryFilters({ options: o, onChange, lists, tags }: Props) {
           </div>
         )}
 
-        <fieldset className="mt-1 flex flex-col">
-          <legend className="mb-1 text-s text-grey">Lists</legend>
-          <div className="max-h-[132px] overflow-y-auto rounded-row border border-line px-2 py-1">
+        <OpenRow label="Lists" value={o.listIds.length === 0 ? 'All Lists' : `${o.listIds.length} selected`}>
+          <div className="max-h-[132px] overflow-y-auto">
             <Check label="All lists" checked={o.listIds.length === 0} onChange={() => onChange({ listIds: [] })} />
             {shownLists.map((l) => (
               <Check key={l.id} label={l.name} checked={o.listIds.includes(l.id)} onChange={() => onChange({ listIds: toggle(o.listIds, l.id) })} />
             ))}
           </div>
-        </fieldset>
+        </OpenRow>
 
-        <fieldset className="mt-1 flex flex-col">
-          <legend className="mb-1 text-s text-grey">Status</legend>
+        <SelectRow label="Status" value={o.status} onChange={(v) => onChange({ status: v as StatusFilter })}>
           {STATUSES.map((s) => (
-            <Radio key={s.value} name="summary-status" label={s.label} checked={o.status === s.value} onChange={() => onChange({ status: s.value })} />
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
           ))}
-        </fieldset>
+        </SelectRow>
 
-        <details className="mt-1">
-          <summary className="cursor-pointer select-none text-s text-grey hover:text-text">More</summary>
-          <div className="mt-2 flex flex-col gap-2">
-            <fieldset className="flex flex-col">
-              <legend className="mb-1 text-s text-grey">Priority</legend>
-              {PRIORITIES.map((p) => (
-                <Check key={p.value} label={p.label} checked={o.priorities.includes(p.value)} onChange={() => onChange({ priorities: toggle(o.priorities, p.value) })} />
+        <OpenRow label="More" value={o.priorities.length + o.tags.length === 0 ? 'None' : `${o.priorities.length + o.tags.length} selected`}>
+          <fieldset className="flex flex-col">
+            <legend className="mb-1 text-s text-grey">Priority</legend>
+            {PRIORITIES.map((p) => (
+              <Check key={p.value} label={p.label} checked={o.priorities.includes(p.value)} onChange={() => onChange({ priorities: toggle(o.priorities, p.value) })} />
+            ))}
+          </fieldset>
+          <fieldset className="mt-2 flex flex-col">
+            <legend className="mb-1 text-s text-grey">Tags</legend>
+            {tags.length === 0 && <p className="text-s text-grey">No tags yet.</p>}
+            <div className="max-h-[110px] overflow-y-auto">
+              {tags.map((g) => (
+                <Check key={g.name} label={`#${g.label}`} checked={o.tags.includes(g.name)} onChange={() => onChange({ tags: toggle(o.tags, g.name) })} />
               ))}
-            </fieldset>
-            <fieldset className="flex flex-col">
-              <legend className="mb-1 text-s text-grey">Tags</legend>
-              {tags.length === 0 && <p className="text-s text-grey">No tags yet.</p>}
-              <div className="max-h-[110px] overflow-y-auto">
-                {tags.map((g) => (
-                  <Check key={g.name} label={`#${g.label}`} checked={o.tags.includes(g.name)} onChange={() => onChange({ tags: toggle(o.tags, g.name) })} />
-                ))}
-              </div>
-            </fieldset>
-          </div>
-        </details>
+            </div>
+          </fieldset>
+        </OpenRow>
       </Section>
 
       <Section title="Display Options">
-        <Check label="Show list name" checked={o.showList} onChange={(v) => onChange({ showList: v })} />
-        <Check label="Show due date" checked={o.showDue} onChange={(v) => onChange({ showDue: v })} />
-        <Check label="Show priority" checked={o.showPriority} onChange={(v) => onChange({ showPriority: v })} />
-        <Check label="Show tags" checked={o.showTags} onChange={(v) => onChange({ showTags: v })} />
-        <Check label="Show completed time" checked={o.showCompletedTime} onChange={(v) => onChange({ showCompletedTime: v })} />
-        <fieldset className="mt-1 flex flex-col">
-          <legend className="mb-1 text-s text-grey">Group by</legend>
-          <div className="flex gap-4">
-            <Radio name="summary-group" label="None" checked={o.groupBy === 'none'} onChange={() => onChange({ groupBy: 'none' })} />
-            <Radio name="summary-group" label="List" checked={o.groupBy === 'list'} onChange={() => onChange({ groupBy: 'list' })} />
-          </div>
-        </fieldset>
+        <SelectRow label="Grouping" value={o.groupBy} onChange={(v) => onChange({ groupBy: v as SummaryOptions['groupBy'] })}>
+          <option value="none">No Grouping</option>
+          <option value="list">By List</option>
+        </SelectRow>
+        <OpenRow label="Fields" value={`${FIELDS.filter((f) => o[f.key]).length} selected`}>
+          {FIELDS.map((f) => (
+            <Check key={f.key} label={f.label} checked={o[f.key]} onChange={(v) => onChange({ [f.key]: v })} />
+          ))}
+        </OpenRow>
       </Section>
     </div>
   )

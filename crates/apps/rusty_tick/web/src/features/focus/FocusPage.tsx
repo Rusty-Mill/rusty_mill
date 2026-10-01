@@ -1,3 +1,4 @@
+import { ChevronRight, MoreHorizontal, Plus } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useActions, useData, useServices } from '@/app/services'
 import { Confirm } from '@/components/Confirm'
@@ -60,8 +61,10 @@ export function FocusPage() {
 
   return (
     <main className="flex min-w-0 flex-1">
-      <section aria-label="Timer" className="flex min-w-0 flex-1 flex-col items-center overflow-y-auto px-6 py-8">
-        <div role="tablist" aria-label="Timer mode" className="flex rounded-row bg-side p-0.5">
+      <section aria-label="Timer" className="flex min-w-0 flex-1 flex-col items-center overflow-y-auto px-6 py-4">
+        <header className="grid w-full grid-cols-[1fr_auto_1fr] items-center">
+          <h1 className="text-title font-semibold">Pomodoro</h1>
+        <div role="tablist" aria-label="Timer mode" className="flex rounded-full bg-side p-0.5">
           {(['pomo', 'stopwatch'] as const).map((m) => (
             <button
               key={m}
@@ -70,30 +73,31 @@ export function FocusPage() {
               aria-selected={shownMode === m}
               disabled={session !== null}
               onClick={() => f().setMode(m)}
-              className={`h-7 rounded-[6px] px-5 disabled:cursor-default ${shownMode === m ? 'bg-surface font-semibold shadow-sm' : 'text-grey hover:text-text'}`}
+              className={`h-7 rounded-full px-5 disabled:cursor-default ${shownMode === m ? 'bg-surface font-semibold shadow-sm' : 'text-grey hover:text-text'}`}
             >
               {m === 'pomo' ? 'Pomo' : 'Stopwatch'}
             </button>
           ))}
         </div>
+          <div className="flex justify-end gap-1 text-grey">
+            <button type="button" disabled aria-label="Add a focus record" title="Adding records by hand is not available yet" className="flex h-8 w-8 items-center justify-center rounded-row opacity-50">
+              <Plus size={20} />
+            </button>
+            <button type="button" disabled aria-label="More" className="flex h-8 w-8 items-center justify-center rounded-row opacity-50">
+              <MoreHorizontal size={20} />
+            </button>
+          </div>
+        </header>
 
-        <div className="mt-8">
-          <TimerRing
-            progress={offer ? 0 : ringProgress(session, shownMode, now)}
-            seconds={offer ? offer.sec : secs}
-            caption={offer ? `${offer.kind === 'long' ? 'Long' : 'Short'} break` : caption}
-            tone={isBreak || offer ? 'break' : 'focus'}
-          />
-        </div>
-        <p className="sr-only" aria-live="polite">{live}</p>
-
-        <label className="mt-6 flex items-center gap-2 text-grey">
-          Task
+        <label className="relative mt-10 flex cursor-pointer items-center gap-1 text-grey">
+          <span>{tasks[taskId]?.title ?? (isBreak ? 'Break' : shownMode === 'pomo' ? 'Focus' : 'Stopwatch')}</span>
+          <ChevronRight size={14} aria-hidden />
           <select
+            aria-label="Task"
             value={taskId}
             disabled={session !== null}
             onChange={(e) => setTaskId(e.target.value)}
-            className="h-8 w-56 rounded-row border border-line bg-surface px-2 text-text outline-none focus:border-primary"
+            className="absolute inset-0 cursor-pointer opacity-0"
           >
             <option value="">No task linked</option>
             {openTasks.map((t) => (
@@ -103,6 +107,17 @@ export function FocusPage() {
             ))}
           </select>
         </label>
+
+        <div className="mt-6">
+          <TimerRing
+            progress={offer ? 0 : ringProgress(session, shownMode, now)}
+            seconds={offer ? offer.sec : secs}
+            caption={offer ? `${offer.kind === 'long' ? 'Long' : 'Short'} break` : caption}
+            tone={isBreak || offer ? 'break' : 'focus'}
+          />
+        </div>
+        <p className="sr-only" aria-live="polite">{live}</p>
+
         {session?.taskTitle && <p className="mt-2 text-s text-grey">Focusing on {session.taskTitle}</p>}
 
         <div className="mt-6 flex gap-3">
@@ -148,7 +163,10 @@ export function FocusPage() {
 
       <aside aria-label="Focus overview" className="flex w-[340px] shrink-0 flex-col border-l border-line max-[1000px]:w-[280px]">
         <Overview stats={stats} />
-        <h3 className="px-5 pb-1 pt-5 font-semibold">Focus Record</h3>
+        <div className="flex items-center justify-between px-5 pb-1 pt-5">
+          <h3 className="font-semibold">Focus Record</h3>
+          <Plus size={18} aria-hidden className="text-grey opacity-50" />
+        </div>
         <FocusRecords records={records} now={now} hour12={hour12} onDelete={(id) => f().deleteRecord(id)} />
       </aside>
 
@@ -168,5 +186,5 @@ export function FocusPage() {
   )
 }
 
-const primary = 'h-10 min-w-[120px] rounded-row bg-primary px-6 text-white outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface'
-const secondary = 'h-10 min-w-[120px] rounded-row border border-line px-6 hover:bg-hover'
+const primary = 'h-12 min-w-[170px] rounded-full bg-primary px-8 font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface'
+const secondary = 'h-12 min-w-[120px] rounded-full border border-line px-6 hover:bg-hover'

@@ -258,6 +258,11 @@ impl ConnectionStore for EmployeeConnectionStore {
             .collect()
     }
 
+    /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
+    fn record_count(&self) -> Option<usize> {
+        Some(self.store.id_count::<Employee>())
+    }
+
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
         match (field, value) {
             (FIELD_DEPARTMENT, ScanValue::U32(raw)) => match department_from_u32(*raw) {

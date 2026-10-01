@@ -103,15 +103,15 @@ Failures are logged with the user key and never the secret.
   brute-forced; a leaked token exposes one user until it is revoked.
 - Single-user mode should also take the `DirLock` at startup, a one-line fix
   worth doing with this work.
-- Moving an existing single-user directory into a user is manual (stop the
-  server, move the store files into `users/<key>/`). A `user adopt` command
-  is left until someone needs it.
+- `user adopt KEY` moves an existing single-user store into `users/<key>/`
+  (server stopped, checked by the directory lock). Commands that edit
+  `users.json` hold `users.lock`, so two at once cannot lose a write.
 - Clients change only in what they send as the token.
 
 ## Plan
 
 Each step is a PR that leaves the tree green; steps 1 and 2 change no
-behaviour.
+behaviour. *Status: 1 to 3 are merged (#387, #389); 4 is built as described below.*
 
 1. `ServicePool` in place of `StorePool` (with the tests it has, run
    against `Service`).
@@ -119,10 +119,16 @@ behaviour.
    reload. Pure and unit-tested, including the uniform-failure cases.
 3. `Api` takes an authenticator that returns a `UserKey`; the server holds
    the pool. Single-user mode is one fixed key over the root directory.
-4. The `user` subcommands.
-5. README and this ADR set to Accepted; an end-to-end test with two users
-   proving neither sees the other's lists, a revoked token failing, and
-   eviction under a capacity of one.
+   *Built:* `auth::Authenticator` (single or multi), `Api::{public,
+   authenticate, serve}`, and `backend::Backend`, which the server now holds
+   behind its one lock. Both modes take a `DirLock`, which also fixes
+   single-user startup. The two-user end-to-end test planned for step 5
+   landed here (`tests/multiuser.rs`), since it is how this step is proved.
+4. The `user` subcommands. *Built:* `admin::run` over `Registry`, dispatched
+   from the binary (`user add KEY [LABEL]`, `list`, `revoke KEY TOKEN_ID`,
+   `disable KEY`, `enable KEY`). `add` prints the token alone on stdout so it
+   can be captured, and refuses a directory holding a single-user store.
+5. README and this ADR's remaining loose ends.
 
 ## Open questions, answered
 

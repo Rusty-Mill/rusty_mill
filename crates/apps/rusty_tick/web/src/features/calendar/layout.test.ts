@@ -3,7 +3,7 @@ import type { Task } from '@/api/types'
 import { addDays, monthGrid, startOfDay } from '@/lib/date'
 import {
   agendaGroups, buildEvents, cellLabel, chunkWeeks, eventWhen, eventsOnDay, hiddenPerColumn, layoutTimed, minutesOfDay, moveByDays, moveToAllDay, moveToSlot,
-  parseMode, rangeTitle, slotTime, stepAnchor, toEvent, visibleRange, weekSegments,
+  overdueEvents, parseMode, rangeTitle, slotTime, stepAnchor, toEvent, visibleRange, weekSegments,
 } from './layout'
 
 const at = (y: number, mo: number, d: number, h = 0, mi = 0): number => new Date(y, mo - 1, d, h, mi).getTime()
@@ -308,5 +308,32 @@ describe('agendaGroups', () => {
     const events = buildEvents([allDay(2026, 9, 29), task({ dueMs: at(2026, 10, 2, 9) }), allDay(2026, 10, 2), allDay(2026, 9, 28), allDay(2026, 12, 1)])
     const groups = agendaGroups(events, range)
     expect(groups.map((g) => [new Date(g.day).getDate(), g.events.length])).toEqual([[29, 1], [2, 2]])
+  })
+})
+
+describe('repeating tasks', () => {
+  const daily = (over: Partial<Task> = {}) => allDay(2026, 9, 29, { repeatFlag: 'RRULE:FREQ=DAILY', ...over })
+
+  it('shows later occurrences up to the end of the range, marked as projected', () => {
+    const events = buildEvents([daily()], false, at(2026, 10, 2))
+    expect(events.map((e) => [e.startDay, e.projected])).toEqual([[at(2026, 9, 29), false], [at(2026, 9, 30), true], [at(2026, 10, 1), true]])
+  })
+  it('keeps the time of day and skips excluded days', () => {
+    const t = task({ dueMs: at(2026, 9, 29, 9, 30), repeatFlag: 'RRULE:FREQ=DAILY', exDates: [at(2026, 9, 30)] })
+    const events = buildEvents([t], false, at(2026, 10, 2))
+    expect(events.map((e) => e.startMs)).toEqual([at(2026, 9, 29, 9, 30), at(2026, 10, 1, 9, 30)])
+  })
+  it('draws only the task itself when no end is given, and nothing extra for done or non-repeating tasks', () => {
+    expect(buildEvents([daily()])).toHaveLength(1)
+    expect(buildEvents([daily({ status: 'done' })], true, at(2026, 10, 9))).toHaveLength(1)
+    expect(buildEvents([allDay(2026, 9, 29)], false, at(2026, 10, 9))).toHaveLength(1)
+  })
+})
+
+describe('overdueEvents', () => {
+  it('lists open, non-projected events from before today, oldest first', () => {
+    const today = at(2026, 9, 29)
+    const events = buildEvents([allDay(2026, 9, 27, { title: 'b' }), allDay(2026, 9, 25, { title: 'a' }), allDay(2026, 9, 29), allDay(2026, 9, 20, { status: 'done' })], true, at(2026, 10, 5))
+    expect(overdueEvents(events, today).map((e) => e.task.title)).toEqual(['a', 'b'])
   })
 })

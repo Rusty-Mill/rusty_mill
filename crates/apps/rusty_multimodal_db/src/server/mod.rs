@@ -154,6 +154,12 @@
 pub mod access;
 #[cfg(feature = "server")]
 pub mod audit;
+/// The change log behind continuous replication (`ADR-0131`, protocol 34).
+#[cfg(feature = "server")]
+pub mod changelog;
+/// A store whose writes are recorded in a change log (`ADR-0131`).
+#[cfg(feature = "server")]
+pub mod changelogged;
 pub mod client;
 pub mod data_lock;
 #[cfg(feature = "server")]
@@ -185,6 +191,9 @@ mod metrics_http;
 /// only; see the module's own docs.
 #[cfg(feature = "server")]
 pub mod mvcc;
+/// Nullable columns as a wire view over stored sentinels (`ADR-0128`, protocol 32).
+#[cfg(feature = "server")]
+pub mod nullable;
 #[cfg(all(feature = "server", feature = "research"))]
 pub mod order;
 mod pem;
@@ -197,6 +206,9 @@ pub mod relation;
 #[cfg(feature = "server")]
 pub mod reminder;
 mod sql;
+/// The strict-commit check (`ADR-0133`).
+#[cfg(feature = "server")]
+pub(crate) mod strict;
 
 /// The server body — [`crate::server::ConnectionStore`], [`crate::server::dispatch`], [`crate::server::serve`],
 /// [`crate::server::ServeOptions`], [`crate::server::TlsConfig`], and every evaluator — behind the

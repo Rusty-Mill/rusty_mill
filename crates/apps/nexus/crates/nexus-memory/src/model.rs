@@ -15,6 +15,104 @@ use schemars::JsonSchema;
 #[cfg(feature = "ts-export")]
 use ts_rs::TS;
 
+/// A memory's identity: an opaque token, compared and stored verbatim.
+///
+/// Nexus mints time-ordered UUIDs (`0192…-…`); `remind_me` mints
+/// `mem_<32 hex>`. Neither is parsed or converted: an imported or synced
+/// memory keeps the id its origin gave it, so the same memory has one id
+/// in both stores, and `superseded_by` links survive the trip. Accepted
+/// shape: 1–128 ASCII letters, digits, `-` or `_` — both forms, and safe
+/// in a SQL `TEXT` key, a JSON string and a file-name segment.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+#[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
+#[cfg_attr(feature = "ts-export", ts(type = "string"))]
+pub struct MemoryId(String);
+
+/// Why a string is not a [`MemoryId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidMemoryId(pub String);
+
+impl std::fmt::Display for InvalidMemoryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid memory id {:?}: expected 1-128 of [A-Za-z0-9_-]",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidMemoryId {}
+
+impl MemoryId {
+    /// A fresh, time-ordered id (UUID v7) for a memory created in Nexus.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7().to_string())
+    }
+
+    /// Validate `s` as a memory id, keeping it verbatim.
+    ///
+    /// # Errors
+    /// [`InvalidMemoryId`] when `s` is empty, longer than 128 bytes, or has
+    /// a character outside `[A-Za-z0-9_-]`.
+    pub fn parse(s: &str) -> Result<Self, InvalidMemoryId> {
+        let valid = (1..=128).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if valid {
+            Ok(Self(s.to_string()))
+        } else {
+            Err(InvalidMemoryId(s.to_string()))
+        }
+    }
+
+    /// The id as stored.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for MemoryId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for MemoryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for MemoryId {
+    type Err = InvalidMemoryId;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl TryFrom<String> for MemoryId {
+    type Error = InvalidMemoryId;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
+}
+
+impl From<MemoryId> for String {
+    fn from(id: MemoryId) -> Self {
+        id.0
+    }
+}
+
+impl From<Uuid> for MemoryId {
+    fn from(id: Uuid) -> Self {
+        Self(id.to_string())
+    }
+}
+
 /// Cognitive class of a memory — mirrors the three in-memory stores plus an
 /// `Unclassified` bucket for raw, not-yet-categorised captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -110,7 +208,7 @@ impl MemoryStatus {
 #[cfg_attr(feature = "ts-export", derive(TS, JsonSchema))]
 pub struct Memory {
     /// Stable unique id (UUID v7 for new rows; preserved on import).
-    pub id: Uuid,
+    pub id: MemoryId,
     /// The memory text.
     pub content: String,
     /// Coarse grouping label (default `"general"`).
@@ -138,7 +236,7 @@ pub struct Memory {
     /// Lifecycle status.
     pub status: MemoryStatus,
     /// Id of the memory that supersedes this one, if any.
-    pub superseded_by: Option<Uuid>,
+    pub superseded_by: Option<MemoryId>,
     /// Subject of an SPO entity fact (populated in P2).
     pub subject: Option<String>,
     /// Predicate of an SPO entity fact (populated in P2).
@@ -164,7 +262,7 @@ impl Memory {
     pub fn new(content: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: Uuid::now_v7(),
+            id: MemoryId::new(),
             content: content.into(),
             category: "general".to_string(),
             tags: Vec::new(),

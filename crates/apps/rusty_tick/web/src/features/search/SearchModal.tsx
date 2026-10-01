@@ -123,6 +123,7 @@ function SearchBody({ onDone }: { onDone: () => void }) {
       </div>
 
       <ul ref={box} id={listId} role="listbox" aria-label="Results" className="scroll-thin min-h-[120px] flex-1 overflow-y-auto px-2 pb-3">
+        {count > 0 && <li role="presentation" className="px-3 pb-1 pt-2 text-s font-semibold">{mode === 'task' ? 'Tasks' : 'Lists'}</li>}
         {count === 0 && <li role="presentation" className="px-3 py-8 text-center text-grey">{query.trim() ? 'No results' : mode === 'task' ? 'Nothing here yet' : 'No lists'}</li>}
         {mode === 'task' &&
           taskHits.map(({ task, snippet }, i) => (
@@ -158,6 +159,9 @@ function SearchBody({ onDone }: { onDone: () => void }) {
             </li>
           ))}
       </ul>
+      <p className="shrink-0 pb-3 text-center text-s text-grey">
+        Not found yet? <span className="text-primary/60" title="Cloud search is not available in Tick Local">Try Cloud Search.</span>
+      </p>
     </div>
   )
 }

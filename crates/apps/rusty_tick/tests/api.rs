@@ -2,8 +2,8 @@
 
 use rusty_http::Method;
 use rusty_json::Value;
-use rusty_tick::api::{Api, Request};
-use rusty_tick::service::Service;
+use rusty_tick::api::Request;
+use rusty_tick::backend::Backend;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -15,8 +15,7 @@ const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
 struct Harness {
-    api: Api,
-    service: Service,
+    backend: Backend,
     clock: Arc<AtomicI64>,
 }
 
@@ -24,10 +23,9 @@ impl Harness {
     fn open(dir: &Path) -> Self {
         let clock = Arc::new(AtomicI64::new(NOW));
         let c = Arc::clone(&clock);
-        let service = Service::open(dir, Box::new(move || c.load(Ordering::SeqCst))).unwrap();
+        let clock_fn = Box::new(move || c.load(Ordering::SeqCst));
         Self {
-            api: Api::new(TOKEN.into()).unwrap(),
-            service,
+            backend: Backend::single(dir, TOKEN.into(), clock_fn).unwrap(),
             clock,
         }
     }
@@ -58,7 +56,7 @@ impl Harness {
             if_match,
             body: body.as_bytes(),
         };
-        let response = self.api.handle(&mut self.service, &request);
+        let response = self.backend.handle(&request);
         let value = if response.body.is_empty() {
             Value::Null
         } else {
@@ -130,7 +128,7 @@ fn health_is_open_but_everything_else_needs_the_token() {
     );
     assert_eq!(h.send(Method::Get, "/api/v1/lists", "", Some(TOKEN)).0, 200);
     assert!(
-        Api::new("short".into()).is_err(),
+        Backend::single(Path::new("unused"), "short".into(), Box::new(|| 0)).is_err(),
         "a guessable token is refused"
     );
 }
@@ -327,6 +325,12 @@ fn search_and_tags() {
         v["tasks"].as_array().unwrap().len(),
         2,
         "terms are alternatives; the query is percent-decoded"
+    );
+    let (_, v) = h.call(Method::Get, "/api/v1/search?q=grocer", "");
+    assert_eq!(
+        v["tasks"].as_array().unwrap().len(),
+        2,
+        "a term matches as a prefix: search as you type"
     );
     assert_eq!(h.call(Method::Get, "/api/v1/search", "").0, 400);
     let (_, v) = h.call(Method::Get, "/api/v1/tags/home/tasks", "");
@@ -642,6 +646,62 @@ fn trash_hides_restores_and_purges() {
     );
     let (_, purged) = h.call(Method::Delete, "/api/v1/trash", "");
     assert_eq!(purged["purged"], 1);
+}
+
+#[test]
+fn comments_follow_their_task_to_the_grave_but_not_to_the_trash() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let comment = |h: &mut Harness, task: &str, text: &str| {
+        let id = uuid::Uuid::now_v7();
+        let body = format!(r#"{{"v":1,"taskId":"{task}","text":"{text}","createdMs":1}}"#);
+        assert_eq!(
+            h.call(Method::Put, &format!("/api/v1/docs/comment/{id}"), &body)
+                .0,
+            200
+        );
+    };
+    let count = |h: &mut Harness| {
+        h.call(Method::Get, "/api/v1/docs/comment", "").1["docs"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let kept = h.task(&list, r#""title":"kept""#);
+    let purged = h.task(&list, r#""title":"purged""#);
+    let binned = h.task(&list, r#""title":"binned""#);
+    let (kept, purged, binned) = (
+        kept["id"].as_str().unwrap().to_string(),
+        purged["id"].as_str().unwrap().to_string(),
+        binned["id"].as_str().unwrap().to_string(),
+    );
+    for t in [&kept, &purged, &binned] {
+        comment(&mut h, t, "hello");
+    }
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{purged}"), "");
+    assert_eq!(
+        count(&mut h),
+        3,
+        "the trash keeps comments, so a restore loses nothing"
+    );
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{purged}?permanent=true"),
+        "",
+    );
+    assert_eq!(
+        count(&mut h),
+        2,
+        "a purge takes the task's comments with it"
+    );
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{binned}"), "");
+    h.call(Method::Delete, "/api/v1/trash", "");
+    let (_, docs) = h.call(Method::Get, "/api/v1/docs/comment", "");
+    let docs = docs["docs"].as_array().unwrap();
+    assert_eq!(docs.len(), 1, "emptying the trash does too");
+    assert_eq!(docs[0]["body"]["taskId"], kept.as_str());
 }
 
 #[test]

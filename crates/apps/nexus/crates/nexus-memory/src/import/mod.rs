@@ -8,4 +8,4 @@ pub mod chat_log;
 pub mod remind_me_db;
 
 pub use chat_log::import_chat_log;
-pub use remind_me_db::{import_remind_me_db, ImportReport};
+pub use remind_me_db::{import_remind_me_db, ImportFailure, ImportReport};

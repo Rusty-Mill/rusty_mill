@@ -80,4 +80,7 @@ pub struct AppState {
     /// existed; `Some` (even an empty list) restricts `build_app`'s
     /// `CorsLayer` to exactly these origins.
     pub cors_allowed_origins: Option<Vec<String>>,
+    /// `server.allow_unauthenticated`: whether a router with no auth
+    /// method configured serves callers anyway (otherwise `401`).
+    pub allow_unauthenticated: bool,
 }

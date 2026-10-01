@@ -1,3 +1,4 @@
+pub mod credentials;
 pub mod errors;
 pub mod jwt;
 pub mod routes;

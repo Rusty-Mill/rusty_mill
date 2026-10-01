@@ -7,37 +7,48 @@
 //! without needing to introspect tokio internals (tokio doesn't
 //! expose a stable "active task count" API).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::runtime::{Builder, Handle, Runtime};
 
-/// Process-wide cell holding the runtime's pool handle once the
-/// `com.nexus.ai.runtime` plugin has been wired. Filled exactly once
-/// by [`WorkerPool::publish_shared_handle`] inside the plugin's
-/// `wire_context`; consulted by sibling subsystems (notably
-/// `nexus-ai::indexing_daemon`) via [`shared_pool_handle`] so they
-/// can avoid building a second tokio runtime per ADR 0028.
+/// The handle of the pool most recently published, tagged with the
+/// publishing pool's generation (design review 4, N5).
 ///
-/// `OnceLock` rather than `OnceCell` because the read-side
-/// (`shared_pool_handle`) is hit from a worker thread that needs
-/// `Sync`. Module-private so the only path to set is via
-/// `publish_shared_handle`, which the plugin's `wire_context` owns.
-static SHARED_POOL_HANDLE: OnceLock<Handle> = OnceLock::new();
+/// It used to be a `OnceLock<Handle>`: set by the first forge's pool and
+/// never replaced, so after a forge switch (shutdown, then a new boot in
+/// the same process) sibling subsystems -- notably
+/// `nexus-ai::indexing_daemon` -- got the *first* pool's handle, whose
+/// runtime had been torn down. Now each pool replaces the slot when it
+/// publishes, and clears it when dropped if the slot still holds its own
+/// handle, so a reader gets the live pool's handle or `None` (and its
+/// documented fallback) -- never a dead runtime's.
+static SHARED_POOL_HANDLE: Mutex<Option<(u64, Handle)>> = Mutex::new(None);
 
-/// Read the runtime's shared tokio runtime handle, if the
-/// `com.nexus.ai.runtime` plugin has been wired in this process.
+/// Source of pool generations; each [`WorkerPool`] gets its own.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn shared_slot() -> MutexGuard<'static, Option<(u64, Handle)>> {
+    SHARED_POOL_HANDLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Read the live AI runtime pool's handle, if one is published.
 ///
 /// Returns `None` when (a) the plugin isn't registered (e.g.
-/// `nexus-cli` running without bootstrap) or (b) the plugin is
-/// registered but `wire_context` hasn't run yet. Callers that take
-/// the `None` path should fall back to a process-local Runtime and
-/// log so the misordering is observable; see
+/// `nexus-cli` running without bootstrap), (b) the plugin is
+/// registered but `wire_context` hasn't run yet, or (c) the pool that
+/// published it has since been dropped (a forge switch in progress).
+/// Callers that take the `None` path should fall back to a
+/// process-local Runtime and log so the misordering is observable; see
 /// `nexus-ai::indexing_daemon` for the canonical consumer.
 ///
-/// The handle is `Clone` and cheap to copy across worker tasks.
+/// The handle is `Clone` and cheap to copy across worker tasks; fetch it
+/// when starting work rather than caching it across a forge switch.
 #[must_use]
 pub fn shared_pool_handle() -> Option<Handle> {
-    SHARED_POOL_HANDLE.get().cloned()
+    shared_slot().as_ref().map(|(_, handle)| handle.clone())
 }
 
 /// How many worker threads the pool spawns. Mirrors ADR 0028's
@@ -69,6 +80,8 @@ pub struct WorkerPool {
     /// `Runtime` can be torn down on a non-async thread.
     runtime: Option<Arc<Runtime>>,
     metrics: PoolMetrics,
+    /// Tags this pool's entry in [`SHARED_POOL_HANDLE`].
+    generation: u64,
 }
 
 impl Drop for WorkerPool {
@@ -88,6 +101,14 @@ impl Drop for WorkerPool {
         // the `Arc` out of the field, so the helper thread is the only
         // owner — the last-reference drop (and its blocking join) is
         // therefore guaranteed to run off any tokio worker thread.
+        // Unpublish first (only if the slot is still ours), so no reader
+        // is handed this runtime's handle while it shuts down.
+        {
+            let mut slot = shared_slot();
+            if slot.as_ref().is_some_and(|(g, _)| *g == self.generation) {
+                *slot = None;
+            }
+        }
         let Some(runtime) = self.runtime.take() else {
             return;
         };
@@ -132,6 +153,7 @@ impl WorkerPool {
             metrics: PoolMetrics {
                 workers: u32::try_from(workers).unwrap_or(u32::MAX),
             },
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         })
     }
 
@@ -166,12 +188,17 @@ impl WorkerPool {
     /// runtime per ADR 0028's "the runtime is the only consumer that
     /// constructs a dedicated tokio Runtime" rule.
     ///
-    /// Idempotent: subsequent calls are no-ops because `OnceLock`
-    /// rejects re-sets. Returns `true` when this call installed the
-    /// handle, `false` when a previous call already won — useful for
-    /// the plugin to log a warn if the lifecycle gets confused.
+    /// Replaces whatever handle was published before -- the pool of a
+    /// newer forge wins (design review 4, N5). Returns `true` when this
+    /// call replaced another live pool's handle, `false` when the slot
+    /// was empty or already this pool's -- logged by the plugin, since two
+    /// live pools means a forge switch overlapped.
+    #[must_use = "true means another live pool was replaced; worth logging"]
     pub fn publish_shared_handle(&self) -> bool {
-        SHARED_POOL_HANDLE.set(self.handle()).is_ok()
+        let mut slot = shared_slot();
+        let replaced_other = slot.as_ref().is_some_and(|(g, _)| *g != self.generation);
+        *slot = Some((self.generation, self.handle()));
+        replaced_other
     }
 }
 
@@ -179,32 +206,41 @@ impl WorkerPool {
 mod tests {
     use super::*;
 
+    fn published_generation() -> Option<u64> {
+        shared_slot().as_ref().map(|(g, _)| *g)
+    }
+
+    /// Design review 4 (N5): the shared handle was a `OnceLock`, so after a
+    /// forge switch (pool A dropped, pool B started in the same process)
+    /// readers still got A's dead runtime. The slot now follows the live
+    /// pool: B's publish replaces A's, A's drop does not clear B's, and a
+    /// dropped pool is never handed out. The only test in this binary
+    /// that publishes, since the slot is process-global.
     #[test]
-    fn publish_shared_handle_installs_a_runtime_handle() {
-        // The OnceLock is process-global and shared across the whole
-        // test binary — we can't run two `publish_shared_handle`-
-        // exercising tests in the same process without contaminating
-        // each other. So this test claims the cell; subsequent calls
-        // to `publish_shared_handle` (from other tests, or from the
-        // plugin's wire_context if it runs in the same process) are
-        // expected to be no-ops, which is the documented contract.
-        // The test asserts both branches: the installed branch
-        // returns true, and `shared_pool_handle()` returns Some after
-        // the install.
-        let pool = WorkerPool::start(Some(2)).expect("pool starts");
-        let installed_first_time = pool.publish_shared_handle();
-        // If the OnceLock was already filled by a previously-run test
-        // in this binary, `installed_first_time` is false — that's
-        // still a valid "shared handle is reachable" outcome.
-        assert!(super::shared_pool_handle().is_some());
-        if installed_first_time {
-            // A subsequent publish must be rejected; the OnceLock
-            // can only be set once.
-            assert!(
-                !pool.publish_shared_handle(),
-                "second publish must be a no-op",
-            );
-        }
+    fn the_shared_handle_follows_the_live_pool_across_a_forge_switch() {
+        let a = WorkerPool::start(Some(2)).expect("pool A starts");
+        assert!(!a.publish_shared_handle(), "nothing live to replace");
+        assert_eq!(published_generation(), Some(a.generation));
+        assert!(shared_pool_handle().is_some());
+
+        // Forge switch with overlap: B publishes while A is still alive.
+        let b = WorkerPool::start(Some(2)).expect("pool B starts");
+        assert!(b.publish_shared_handle(), "B replaced a live pool");
+        let b_generation = b.generation;
+        drop(a);
+        assert_eq!(
+            published_generation(),
+            Some(b_generation),
+            "A's drop kept B's"
+        );
+
+        // Forge switch without overlap: the dropped pool is unpublished.
+        drop(b);
+        assert_eq!(published_generation(), None);
+        assert!(
+            shared_pool_handle().is_none(),
+            "never a dead runtime's handle"
+        );
     }
 
     #[test]

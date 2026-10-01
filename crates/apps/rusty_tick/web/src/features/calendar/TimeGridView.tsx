@@ -183,7 +183,7 @@ export function TimeGridView({ range, events, ctx }: Props) {
                     <button
                       key={b.event.task.id}
                       type="button"
-                      draggable
+                      draggable={!b.event.projected}
                       data-task-id={b.event.task.id}
                       aria-label={`${b.event.task.title}, ${eventWhen(b.event, ctx.hour12)}`}
                       onClick={(e) => {
@@ -200,14 +200,16 @@ export function TimeGridView({ range, events, ctx }: Props) {
                         left: `${(b.col / b.cols) * 100}%`,
                         width: `${100 / b.cols}%`,
                         minHeight: 18,
-                        backgroundColor: wash(color, b.event.done ? 8 : 22),
-                        borderLeftColor: color,
+                        backgroundColor: wash(color, b.event.done ? 14 : 40),
                         opacity: b.event.done ? 0.7 : 1,
                       }}
-                      className={`absolute z-10 flex flex-col overflow-hidden rounded-[4px] border-l-[3px] px-1.5 py-0.5 text-left text-s leading-4 outline-none ring-1 ring-surface focus-visible:ring-2 focus-visible:ring-primary ${b.event.done ? 'text-grey line-through' : 'text-text'}`}
+                      className={`absolute z-10 flex flex-col overflow-hidden rounded-[6px] px-1.5 py-1 text-left text-s leading-4 outline-none ring-1 ring-surface focus-visible:ring-2 focus-visible:ring-primary ${b.event.done ? 'text-grey line-through' : 'text-text'}`}
                     >
-                      <span className="truncate font-semibold">{b.event.task.title}</span>
-                      {tall && <span className="truncate text-grey">{formatTime(b.event.startMs, ctx.hour12)}</span>}
+                      <span className="flex items-center gap-1.5">
+                        <span aria-hidden className="h-3 w-3 shrink-0 rounded-[3px] border-[1.5px]" style={{ borderColor: color, backgroundColor: b.event.done ? color : 'transparent' }} />
+                        <span className="truncate font-semibold">{b.event.task.title}</span>
+                      </span>
+                      {tall && <span className="truncate pl-[18px] text-grey">{formatTime(b.event.startMs, ctx.hour12)}-{formatTime(b.event.endMs, ctx.hour12)}</span>}
                     </button>
                   )
                 })}

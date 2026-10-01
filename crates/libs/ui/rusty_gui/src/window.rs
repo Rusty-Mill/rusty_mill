@@ -203,6 +203,8 @@ mod x11 {
             count: c_int,
         ) -> c_int;
         pub fn XMapWindow(display: *mut Display, w: XWindow) -> c_int;
+        pub fn XDestroyWindow(display: *mut Display, w: XWindow) -> c_int;
+        pub fn XCloseDisplay(display: *mut Display) -> c_int;
         pub fn XFlush(display: *mut Display) -> c_int;
         pub fn XPending(display: *mut Display) -> c_int;
         pub fn XNextEvent(display: *mut Display, event_return: *mut XEvent) -> c_int;
@@ -614,6 +616,31 @@ impl Window {
         #[cfg(target_os = "linux")]
         unsafe {
             x11::XClearArea(self.display, self.x11_window, 0, 0, 0, 0, 1);
+        }
+    }
+}
+
+/// Releases the native window and, on Linux, the display connection this
+/// `Window` opened for itself. `Window` holds raw handles and so is not
+/// `Send`: this runs on the creating thread, which both Win32 and Xlib
+/// require.
+impl Drop for Window {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if !self.hwnd.is_null() {
+            // SAFETY: `hwnd` was created by this `Window` on this thread and
+            // is destroyed exactly once, here.
+            unsafe {
+                rusty_win32::windowing::DestroyWindow(self.hwnd);
+            }
+        }
+        // SAFETY: `display` is non-null (checked in `new`) and owned by this
+        // `Window` alone; the window is destroyed before its connection is
+        // closed, and neither is used again.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            x11::XDestroyWindow(self.display, self.x11_window);
+            x11::XCloseDisplay(self.display);
         }
     }
 }

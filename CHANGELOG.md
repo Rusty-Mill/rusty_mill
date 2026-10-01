@@ -9,6 +9,15 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **Design review Tranche 5, storage comparison: `vs_sqlite` bench** (`rusty_multimodal_db_engine`). The workspace's two storage stacks, the engine (`rusty_tick`, `remind_me`) and bundled SQLite in WAL mode (nexus, meshed, inventory, ...), run the same task-shaped workload at three matched durability levels: fsync per write, one fsync per 100 writes, and no fsync. At 10K and 100K records, two runs each: durable writes tie (170–200 µs, the fsync); with group commit SQLite inserts are about 1.7× faster (11–12 µs against 18–22 µs), and with no fsync they tie (11–14 µs); the engine's replaces are 2–4× faster at both (5–14 µs against 12–53 µs); the engine's gets are about 10× faster (0.3–0.6 µs, all in memory); disk use is equal. The engine's reopen is O(n): 450–550 ms at 100K the first time after writes (it folds its log), about 100 ms after that, against 0.3 ms for SQLite. Found along the way: each engine insert opens the insert log twice and the slot file twice and re-maps it. Results are on issue #428.
+- **Design review Tranche 5, per-product baseline: `rusty_baseline`** (`crates/tools`). For each product in its `products.txt` (15 CLIs, 6 servers) it measures binary size, dependency closure, clean and incremental release build, startup, and idle and peak RSS, and prints one Markdown table. Each product builds clean into its own target directory, deleted once measured. A manual `Baseline` workflow runs it on Linux and Windows. Peak RSS uses `wait4` on Linux and the new `rusty_win32::process::memory` (`GetProcessMemoryInfo`) on Windows. No new third-party dependencies. The first Linux table is on issue #428: `nexus` leads every build and size column (94 MiB, 688 packages, 8 min clean, 33 s incremental), every product starts in 2–5 ms, and every server idles under 12 MiB.
+- **`rusty_orch` merged** into `crates/apps/rusty_orch/` with its history: `orch-core`, the multi-model orchestrator domain crate (goals, task cards, blackboard). Its root `Cargo.toml`/`Cargo.lock`/`.gitignore` are dropped; `orch-core` joins the workspace members and `[workspace.dependencies]`.
+- **`rusty_multimodal_db`: ADR-0136**, a proposal for chunked snapshots that lift the 8 MiB cap (docs only).
+- **`rusty_multimodal_db`: `change_log_bench`**, a write benchmark that measures the change log's cost under concurrent writers (ADR-0131).
+- **`rusty_tick`: type-ahead search** on the engine's `any_of_prefix`.
+- **`rusty_tick user ...`**: add, list, revoke, disable and enable users in `users.json` from the command line (ADR-0002 step 4).
+- **`rusty_tick`: `user adopt`** moves a single-user store into a user; `user` commands are serialised by `users.lock`.
+- **`rusty_tick`: several users on one server**, chosen by `<data-dir>/users.json`: per-user tokens, a store per user, live revocation, uniform `401`s (ADR-0002 step 3).
 - **`rusty_tick`: `users`**, the per-user token registry and check (`Token`, `Registry`, `RegistryFile`); not yet wired to the API (ADR-0002 step 2).
 - **`rusty_multimodal_db_engine`: `Query::except_columns`** (FTS5 column exclusion) and **`rusty_tick`: `StorePool`**, a bounded per-user store pool (not yet wired to the API). Issue #382.
 - **`rusty_multimodal_db_engine`: full-text column filters** (`Query::in_columns`), FTS5-differentially tested; store open/close lifecycle tests and idle-cost measurements for one-store-per-user (issue #382 gaps 3 and 6).
@@ -22,9 +31,105 @@ Removed / Fixed / Security, newest first.
   - `rusty_remind_me`'s hub applies each push through it.
 
 ### Changed
+- **`rusty_multimodal_db_engine`: inserts and replaces no longer reopen their files.** The Tranche 5 storage comparison (#428) found every insert opening the insert log twice and the slot file twice. The store now keeps the log open through `insert_log::Appender`, which `compact` closes before removing the log; the slot file keeps its append and mapping handles. On `vs_sqlite` (two runs, µs per write): unsynced inserts 11.6–13.3 → 4.8–7.6, now about 2× faster than SQLite's; unsynced replaces 5.4–5.6 → 1.1–1.6; group-commit inserts 18.7–20.0 → 8.5–11.0, now level with SQLite; group-commit replaces 10.3–15.8 → 3.6–5.0. Durable writes are unchanged (the fsync). On-disk bytes are unchanged. The per-insert re-map of the slot file remains; avoiding it means growing the file ahead of its slots, a format change.
+- **Nexus's bundled shell is now the workspace's own `rush`; the vendored `nexus-rush` copy is removed** (about 3,000 lines). The copy had drifted behind rush. `nexus-terminal` launches the `rush` binary for sandboxed sessions (RFC 0002) and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell its own session leader, so rush's normal job control applies, where nexus-rush had switched it off. Nexus also drops nexus-rush's `rustyline` dependency for the shell (rush uses `rusty_lines`).
+- rush: an interactive shell no longer aliases 21 standard commands (`ls`, `git`, `ssh`, ...) to Rusty Mill tools that may not be installed; `ls` ran rustup's `rls` proxy wherever rustup was installed. The aliases are an opt-in block in `crates/apps/rush/examples/rushrc.example`.
+- **`rusty_multimodal_db`: documentation brought up to date** (README, AGENTS, WORKFLOW, architecture, specs, traceability, status, Python client README).
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
+### Removed
+- **`rusty_rusqlite`**, the pure-Rust SQLite reimplementation (`crates/libs/storage/rusty_rusqlite`). Nothing in the workspace depended on it; the Tranche 5 storage survey (#428) found the engine and bundled SQLite (`rusqlite`/`rusty_sqlite`) are the two stacks in use. Its history stays in git and in the original `baileyrd/rusty_rusqlite` repository.
+
 ### Fixed
+- **Design review Tranche 5, the flaky Windows `rusty_tls` async handshake test:** a lost wakeup, not a slow runner. The async client drove its handshake by reading until `wants_read()` went false, which an established connection never does: when the server's TLS 1.3 session tickets arrived before the client's next read, the client consumed them, read again, and returned `Pending` from a write it could already complete, with nothing left to wake it. A server that speaks first, and `flush`/`shutdown` on both sides, hit the same loop. Both adapters now stop driving I/O when the handshake completes, and only `poll_read` waits for input. New `tests/async_lost_wakeup.rs` runs each adapter against an in-process rustls peer that never wakes, so the race is deterministic; two of its three tests failed before the fix.
+- **Design review Tranche 5, `rusty_multimodal_db` equality count (D3):** every indexed equality query asked for the table size before checking whether it needed it, and every adapter answered by building the full id list (100K ids for a 100K table) under the store's read lock. The size is now asked for only when a second `Eq` bucket could be intersected, and `AllIds::id_count` answers it in O(1) (its default still builds the list, so other implementors are unaffected). On the planner bench (100K `Memory` rows, two runs each, µs per request): equality plus range, 417–774 → 120–171; 1% equality, 1,314–1,609 → 994–1,437, where what remains is decoding the 1,000 matched records.
+- **Design review Tranche 5, full-text prefix search** (`rusty_tick` tasks, `remind_me` memories and wiki): a search-as-you-type query scanned the whole vocabulary for terms starting with the prefix, then rebuilt the phrase and re-resolved its other tokens for each match. The vocabulary is now sorted, so a prefix reads only its own range of terms, and the phrase's other tokens are resolved once. On the new `fulltext_prefix` bench (20,000 documents, 30,000-word vocabulary, µs per search, two runs each): a prefix with no matching term 283 → 0.3; `gr` 958–1,178 → 380–525; a two-word phrase prefix 1,383–1,544 → 657–784; `g` (12,845 hits, mostly ranking) 15.8–16.1 ms → 12.6–13.9 ms. Cost: indexing is about 25% slower (186–242 → 271–315 ms for the 20,000 documents), since each token's term lookup is now a sorted-map lookup. Memory is unchanged.
+- **Design review Tranche 4, lifecycle:**
+  - `nexus-kernel`: an IPC deadline or a dropped caller cancels the dispatch token (N4).
+  - `nexus-ai-runtime`: the shared pool handle follows the live pool across a forge switch, never a torn-down runtime (N5).
+  - `platform-async(-linux)`: `Timeout`, `WaitJob` and `PidfdReady` wake the latest poller, not the first.
+  - `rusty_yirp` (sessionmgr):
+    - Teardown signals a recorded pid only when its start fingerprint still matches, and `terminate` refuses pid 0 and out-of-range values.
+    - Processes still alive after termination block a destructive close. A timeout is no longer treated as proof that nothing is running.
+  - `rusty_tailscale` (`ts-engine`, `ts-magicsock`): a peer the netmap drops — absent from a full `Peers` snapshot, listed in `PeersRemoved`, or replaced by a rekey — loses its WireGuard session, address ownership, metadata, DNS names and disco state. Traffic from a non-member peer is dropped.
+  - `rusty_multimodal_db` drain:
+    - A request pipelined behind the one in flight is no longer executed after a shutdown (D4).
+    - `serve`/`serve_tables` return a `DrainOutcome`, and `memory_server` marks change logs clean only after a completed drain. It exits non-zero otherwise (D5).
+  - `rusty_gui::Window` now destroys its native window on drop, and on Linux closes the X display connection it opened. Previously each window leaked its X socket, or its `HWND` on Windows.
+  - `rusty_gui::Clipboard::get_text`/`set_text` now return `Err(UNSUPPORTED)` instead of an empty string and a write that never happened.
+  - `rusty_multimodal_db`: `Session::commit` docs now say that `Ok(())` means the batch applied, not every write. Per-op outcomes such as `Duplicate` are discarded; use `commit_results` or a strict session to see them.
+  - `#[derive(RustyJson)]` is now a compile error pointing to serde derives, instead of generating a `to_json_string` that serialized no fields and a `from_json_str` that always failed.
+  - **Breaking:** removed `rusty_wiremock::{MockServer, RequestMatcher, ResponseTemplate}`. They were a scaffold: `start` bound nothing and `register` did nothing. No crate used them. `canned` is unchanged, and the scaffold's unused dependencies (`rusty_http`, `rusty_json`, `rusty_std`) are gone with it.
+  - **Breaking:** `rusty_std::Error` gains `Unsupported(&'static str)` and is now `#[non_exhaustive]`. On targets with no backend (wasm32 and others), `File::open`/`create`/`read`/`write`, `TcpStream::connect`/`read`/`write` and `Command::status` return it. Before, reads returned EOF, writes reported every byte written, `connect` returned a stream with no socket behind it, and `status` reported success without spawning. The wasm32 fake `File` is gone.
+  - **Breaking:** retired the coreutils `rtail`, `rwc` and `rxargs` binaries (incomplete, e.g. `rxargs` ignored every flag). `rush` no longer aliases `tail`, `wc` or `xargs`, so they resolve through `PATH`.
+  - New `rusty_atomic_file` (foundation, no dependencies): `write` and `write_private` (0600) replace a file crash-atomically, with a unique temp name, fsync, rename and directory fsync. 16 hand-rolled writers now use it:
+    - Nexus: comments, editor save and journal, CRDT publisher, CLI merge driver, skills index, and the shell's state and granted capabilities.
+    - `rusty_rusqlite`, `rusty_term`'s config, `remind_me_core`'s API keys, endpoint and OAuth state, `rusty_tick`'s users, sessionmgr's session catalog, and `rusty_crypto_key`.
+    - 9 of them never fsynced. sessionmgr's records were briefly readable at the default mode before their `chmod`. `rusty_crypto_key` on Windows wrote in place.
+  - New `rusty_confined_fs` (foundation): `create_dir_all`, `open_for_write` and `open_for_read` beneath a root. They refuse `..`, absolute paths and a symlink at any component.
+    - On Linux they walk descriptors with `openat(O_NOFOLLOW)`, so there is no window between check and open. Elsewhere a checked `lstat` walk is used; it is also tested on Linux.
+    - `rusty_libc` gains `O_NOFOLLOW`.
+  - `rusty-croc` receives through `rusty_confined_fs`:
+    - Files and folders, including the empty-folder list and ZIP directories, which `create_dir_all` previously created through symlinks.
+    - A received file's mode is now set through its handle.
+  - `adk-mcp` moves onto `rmcp`, the workspace's shared MCP stack. About 950 lines of hand-written JSON-RPC, handshake and transport code are gone.
+    - A new wire-level conformance suite (`tests/conformance.rs`, 17 cases over stdio, HTTP and the client) passed before and after the move, unchanged.
+    - Still pinned to MCP `2025-06-18` for other-language ADK clients. The 16 MiB line cap and the client request deadline are kept.
+    - **Breaking:** `McpServer::handle`/`handle_raw`, the `JsonRpcRequest`/`JsonRpcResponse`/`JsonRpcError` types, and the `protocol` helpers other than `PROTOCOL_VERSION` are removed; nothing in the workspace used them. `serve_stream` now needs a `Send + 'static` reader and writer.
+    - Behavior changes from `rmcp`: a malformed stdio line is ignored rather than answered with a parse error; a request before `initialize` ends the session; the client follows `tools/list` pagination.
+  - `adk-models::StreamAggregator` is the one reducer for streamed model output. `aggregate_stream` and `LlmAgent`'s streaming path, which each had their own copy of the loop, both use it.
+    - Fixed along the way: `LlmAgent` in SSE mode folded an error chunk into the answer as if it were text. A model error mid-stream (for example `RESOURCE_EXHAUSTED`) became an empty, apparently successful reply. It is now reported as an error event, as in non-streaming mode.
+  - The `rusty_llama` server (`server` feature) and `whisper-server` parse requests with `rusty_http` instead of their own hand-written parsers. Both now refuse ambiguous framing with a 400, as review 3.4 did for `rusty_http`: `Transfer-Encoding` with `Content-Length`, `Transfer-Encoding` not ending in `chunked`, and a bad or conflicting `Content-Length`.
+    - Previously both ignored `Transfer-Encoding` and read an unparsable `Content-Length` as no body.
+    - Chunked request bodies are now read, within the same body caps (llama 16 MiB, whisper 256 MiB); llama answers an oversized one with 413.
+    - whisper's head limit is now 64 KiB for the whole head, in place of 8 KiB per line, and still at most 100 headers.
+  - `rusty_http`: `SyncTransport::read_request_body(framing, max_body_len)` caps a request body whatever its framing; `read_body`'s chunked path has no total cap. `SyncTransport`'s read methods now need only `Read`, and its write methods only `Write`.
+  - rush has bash-conformance fixtures for glob matching and `$(( ))` in `crates/apps/rush/tests/conformance/`. They were written for rush and nexus-rush to share; nexus-rush has since been removed in favour of rush.
+  - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
+- **Design review Tranche 3 (#419), receive and config confinement (3.2):**
+  - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
+  - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.
+  - Neither can write through a symlink out of its allowed folder.
+- **Design review Tranche 3 (#419), redirect credentials (3.3):** `rusty_request` now drops a caller-set `Cookie` and `Proxy-Authorization`, as well as `Authorization`, when a redirect leaves the origin. Buffered and streaming sends share one redirect policy.
+- **Design review Tranche 3 (#419), HTTP/1 framing (3.4):** `rusty_http` reads every `Transfer-Encoding` field as one coding list. It refuses `chunked` anywhere but once and last, and a request carrying `Transfer-Encoding` together with `Content-Length`. These are request-smuggling ambiguities that used to fall back to `Content-Length`.
+- **Design review Tranche 3 (#419), HTTP/2 hardening (3.5):** `rusty_h2` changes:
+  - Header blocks cap CONTINUATION frames by count and size, and refuse interleaved frames.
+  - Receive windows are enforced, and `release_capacity` replenishes them.
+  - Outgoing frames go through a new `send_frame` instead of the receive path.
+  - The dead duplicate `flow.rs` is removed.
+- **Design review Tranche 3 (#419), RDP trust (3.6):** `rusty_rdp`'s TLS connectors take a `TrustPolicy` (breaking). They used to force no certificate verification. Skipping verification now takes the explicitly named `connect_tls_unverified` / `connect_tls_kerberos_unverified`.
+- **Design review Tranche 3 (#419), A2A webhooks (3.6):** `rusty_a2a`'s webhook SSRF filter blocks IPv6 unique-local and other non-global address classes. Its DNS-pinned delivery client no longer follows redirects.
+- **Design review Tranche 3 (#419), admission and deadlines (3.7):**
+  - `adk-mcp`: a request's deadline now covers writing it to the subprocess, so a child that stops reading stdin can no longer hold the connection lock forever.
+  - `rusty-whisper` server:
+    - Request and header lines are capped at 8 KiB, with at most 100 headers.
+    - Sockets have 30-second read and write deadlines.
+    - At most 64 connections at once; the rest get `503`.
+    - One model load at a time; a second `POST /load` gets `409`.
+  - `rusty_multimodal_db`: a session is also capped at 64 MiB of staged data (`MAX_STAGED_BYTES`), answered `SessionFull` like the op-count cap. The byte budget is released at commit, rollback and disconnect.
+  - `rusty_stream`: the accept loop drops finished connection tasks as it goes, using the new `rusty_tokio` `JoinSet::try_join_next`. Graceful shutdown now aborts connections still open after `DEFAULT_DRAIN_TIMEOUT` (30 s); set it with `serve_with_drain_timeout`.
+  - `rusty_kafka`: a call interrupted mid-frame (timeout, I/O error, correlation mismatch, or a dropped future) poisons the connection, and later calls fail `NotConnected`. It used to be reused with a partial frame on the stream. `KafkaClient::is_poisoned` reports it.
+  - `rusty_lsp`: pending requests are capped (1,024 by default; excess requests are answered `RequestFailed` immediately). A notification backlog over 4,096 ends the connection with an error. Before, only handler execution was bounded.
+  - `rusty_llama` server: the job queue is bounded (`RUSTY_LLAMA_QUEUE`, 64) and connections are capped (`RUSTY_LLAMA_MAX_CONNECTIONS`, 128). Over either limit a request gets `503` at once, instead of the queue and thread count growing without limit.
+- **Design review Tranche 3 (#419), input budgets (3.8):**
+  - `rush`: numeric brace ranges stop at their endpoint without overflow. Brace expansion is capped at 1 Mi words and 8 Mi characters.
+  - `nexus-templates`: a four-byte `{{ab` no longer panics, and literal non-ASCII text is no longer garbled.
+  - `rusty_diff`: the Myers trace keeps only each step's live band. It is capped at `MAX_TRACE_CELLS` (128 MiB); over that it returns the linear fallback, instead of up to about 6.4 GB for two dissimilar inputs at `MAX_DIFF_INPUT_LEN`.
+- **Design review Tranche 2 (#412), persisted invariants:**
+  - `rusty_multimodal_db`: strict commits recover via a durable acceptance marker (ADR-0135), and the change log poisons itself on any failed append or group sync.
+  - `rusty_rusqlite`: rollback no longer reaches the file, and flushes are atomic.
+  - FTS5 delete runs in one transaction.
+  - Nexus memory: opaque ids, dead-lettered sync pages, and hub last-write-wins compared as time.
+  - Nexus comment sidecars are written atomically.
+  - `rusty_inventory`: a stale process copy cannot overwrite another's seal, and the tray reports unsaved changes.
+  - `rusty_tick`: an interrupted parent/child move is realigned on open.
+- **Design review Tranche 1 (soundness):**
+  - `rusty_std` `MutexGuard` is `Sync` only for `T: Sync`.
+  - `rusty_sync` `try_recv` no longer returns `Disconnected` while a value is queued.
+  - `rusty_rand` fills Windows entropy in ULONG chunks.
+  - `kill_single` no longer signals a reaped (possibly recycled) pid.
+  - **Breaking:** `OwnedWinHandle::from_raw` and `rusty_libc::process::process_vm_writev` are now `unsafe fn`.
+- **`rusty_tick`: single-user startup took no lock on its data directory**, so two servers on one directory overwrote each other; a second now refuses to start.
 - **`rusty_multimodal_db_engine`: a long write pause each time the row count doubled.**
   - `GenericMmapStore` kept its records inline in a `HashMap`, so a regrow copied every record under the caller's lock: 170–370 ms at 115 000 of `rusty_remind_me`'s ~800-byte hub memories.
   - Records are now boxed, so a regrow moves a key and a pointer each. The pause is now under 10 ms at that size, and 37 ms at 229 000.

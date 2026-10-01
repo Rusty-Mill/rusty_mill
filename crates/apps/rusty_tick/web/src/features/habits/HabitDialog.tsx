@@ -18,7 +18,7 @@ interface Props {
 
 export function HabitDialog({ open, onClose, habit, onSubmit }: Props) {
   return (
-    <Dialog open={open} onClose={onClose} title={habit ? 'Edit Habit' : 'Add Habit'} width={440}>
+    <Dialog open={open} onClose={onClose} title={habit ? 'Edit Habit' : 'Create Habit'} width={440}>
       {/* Remount per open so the fields start from the habit being edited. */}
       {open && <HabitForm key={habit?.id ?? 'new'} habit={habit} onCancel={onClose} onSubmit={onSubmit} />}
     </Dialog>
@@ -54,80 +54,91 @@ function HabitForm({ habit, onCancel, onSubmit }: { habit: Habit | null; onCance
   const toggleDay = (d: number): void => setDays((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]))
   const input = 'h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary'
 
+  const field = 'grid grid-cols-[104px_1fr] items-center gap-x-3'
+  const label = 'text-base'
+  const disabledSelect = `${input} w-full appearance-none bg-surface text-text opacity-70`
+  const today = new Date()
+
   return (
-    <form onSubmit={submit} className="flex flex-col gap-4 overflow-y-auto px-6 pb-6 pt-2">
-      <label className="flex flex-col gap-1.5">
-        <span className="text-s text-grey">Name</span>
-        <input data-autofocus value={name} maxLength={100} onChange={(e) => setName(e.target.value)} placeholder="Habit name" className={input} />
+    <form onSubmit={submit} className="flex flex-col gap-3 overflow-y-auto px-6 pb-6 pt-2">
+      <div className={field}>
+        <span aria-hidden className="flex h-10 w-10 items-center justify-center rounded-full text-base font-semibold text-white" style={{ backgroundColor: color }}>
+          {name.trim().charAt(0).toUpperCase() || '☺'}
+        </span>
+        <input data-autofocus aria-label="Name" value={name} maxLength={100} onChange={(e) => setName(e.target.value)} placeholder="Habit name" className={input} />
+      </div>
+
+      <label className={field}>
+        <span className={label}>Frequency</span>
+        <select value={kind} onChange={(e) => setKind(e.target.value as Kind)} className={`${input} w-full`}>
+          <option value="daily">Daily</option>
+          <option value="weekdays">Specific days</option>
+          <option value="perWeek">Times per week</option>
+        </select>
       </label>
-
-      <fieldset className="flex flex-col gap-1.5">
-        <legend className="mb-1.5 text-s text-grey">Goal</legend>
-        <div className="flex items-center gap-2">
-          <input type="number" min={1} max={9999} aria-label="Goal amount" value={count} onChange={(e) => setCount(e.target.value)} className={`${input} w-20`} />
-          <input aria-label="Goal unit" value={unit} maxLength={30} onChange={(e) => setUnit(e.target.value)} placeholder="time" className={`${input} min-w-0 flex-1`} />
-          <span className="text-grey">per day</span>
-        </div>
-      </fieldset>
-
-      <fieldset className="flex flex-col gap-2">
-        <legend className="mb-1.5 text-s text-grey">Frequency</legend>
-        <div role="radiogroup" aria-label="Frequency" className="flex gap-2">
-          {(
-            [
-              ['daily', 'Daily'],
-              ['weekdays', 'Specific days'],
-              ['perWeek', 'Times per week'],
-            ] as const
-          ).map(([k, label]) => (
+      {kind === 'weekdays' && (
+        <div className="flex gap-1.5 pl-[116px]" role="group" aria-label="Days of the week">
+          {weekdayOrder(weekStart).map((d) => (
             <button
-              key={k}
+              key={d}
               type="button"
-              role="radio"
-              aria-checked={kind === k}
-              onClick={() => setKind(k)}
-              className={`h-8 rounded-row border px-3 ${kind === k ? 'border-primary bg-primary/10 text-primary' : 'border-line hover:bg-hover'}`}
+              aria-pressed={days.includes(d)}
+              onClick={() => toggleDay(d)}
+              className={`h-8 w-9 rounded-row border text-s ${days.includes(d) ? 'border-primary bg-primary text-white' : 'border-line hover:bg-hover'}`}
             >
-              {label}
+              {DAY_NAMES[d]}
             </button>
           ))}
         </div>
-        {kind === 'weekdays' && (
-          <div className="flex gap-1.5" role="group" aria-label="Days of the week">
-            {weekdayOrder(weekStart).map((d) => (
-              <button
-                key={d}
-                type="button"
-                aria-pressed={days.includes(d)}
-                onClick={() => toggleDay(d)}
-                className={`h-8 w-11 rounded-row border text-s ${days.includes(d) ? 'border-primary bg-primary text-white' : 'border-line hover:bg-hover'}`}
-              >
-                {DAY_NAMES[d]}
-              </button>
-            ))}
-          </div>
-        )}
-        {kind === 'perWeek' && (
-          <label className="flex items-center gap-2">
-            <input type="number" min={1} max={7} aria-label="Times per week" value={times} onChange={(e) => setTimes(e.target.value)} className={`${input} w-20`} />
-            <span className="text-grey">times per week</span>
-          </label>
-        )}
-      </fieldset>
+      )}
+      {kind === 'perWeek' && (
+        <label className="flex items-center gap-2 pl-[116px]">
+          <input type="number" min={1} max={7} aria-label="Times per week" value={times} onChange={(e) => setTimes(e.target.value)} className={`${input} w-20`} />
+          <span className="text-grey">times per week</span>
+        </label>
+      )}
 
-      <fieldset className="flex flex-col gap-1.5">
-        <legend className="mb-1.5 text-s text-grey">Colour</legend>
-        <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Colour">
+      <div className={field} role="group" aria-label="Goal">
+        <span className={label}>Goal</span>
+        <div className="flex items-center gap-2">
+          <input type="number" min={1} max={9999} aria-label="Goal amount" value={count} onChange={(e) => setCount(e.target.value)} className={`${input} w-20`} />
+          <input aria-label="Goal unit" value={unit} maxLength={30} onChange={(e) => setUnit(e.target.value)} placeholder="time" className={`${input} w-24 min-w-0`} />
+          <span className="text-grey">per day</span>
+        </div>
+      </div>
+
+      <div className={field}>
+        <span className={label}>Start Date</span>
+        <select disabled aria-label="Start Date" className={disabledSelect}>
+          <option>{today.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}</option>
+        </select>
+      </div>
+      <div className={field}>
+        <span className={label}>Goal Days</span>
+        <select disabled aria-label="Goal Days" className={disabledSelect}>
+          <option>Forever</option>
+        </select>
+      </div>
+      <div className={field}>
+        <span className={label}>Section</span>
+        <select disabled aria-label="Section" className={disabledSelect}>
+          <option>Others</option>
+        </select>
+      </div>
+
+      <div className={field} role="radiogroup" aria-label="Colour">
+        <span className={label}>Colour</span>
+        <div className="flex flex-wrap gap-2">
           {SWATCHES.map((c) => (
             <Swatch key={c} label={c} selected={color === c} color={c} onSelect={() => setColor(c)} />
           ))}
         </div>
-      </fieldset>
+      </div>
 
-      <label className="flex flex-col gap-1.5">
-        <span className="text-s text-grey">Reminder (optional)</span>
+      <label className={field}>
+        <span className={label}>Reminder</span>
         <div className="flex items-center gap-2">
-          <input type="time" value={reminder} onChange={(e) => setReminder(e.target.value)} className={`${input} w-32`} />
+          <input type="time" aria-label="Reminder" value={reminder} onChange={(e) => setReminder(e.target.value)} className={`${input} w-32`} />
           {reminder && (
             <button type="button" onClick={() => setReminder('')} className="h-8 rounded-row px-3 text-grey hover:bg-hover">
               Clear
@@ -136,12 +147,16 @@ function HabitForm({ habit, onCancel, onSubmit }: { habit: Habit | null; onCance
         </div>
       </label>
 
+      <label className="flex items-center gap-2 border-t border-line pt-3 text-grey">
+        <input type="checkbox" disabled /> Auto pop-up of habit log
+      </label>
+
       <div className="flex justify-end gap-2 pt-1">
-        <button type="button" onClick={onCancel} className="h-8 rounded-row px-4 hover:bg-hover">
+        <button type="button" onClick={onCancel} className="h-9 rounded-row border border-line px-5 hover:bg-hover">
           Cancel
         </button>
-        <button type="submit" disabled={!valid} className="h-8 rounded-row bg-primary px-4 text-white disabled:opacity-40">
-          {habit ? 'Save' : 'Add'}
+        <button type="submit" disabled={!valid} className="h-9 rounded-row bg-primary px-6 text-white disabled:opacity-40">
+          Save
         </button>
       </div>
     </form>

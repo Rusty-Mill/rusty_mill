@@ -4,3 +4,4 @@ playwright-report/
 test-results/
 *.tsbuildinfo
 .e2e-data
+.e2e-users

@@ -13,12 +13,13 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// The document kinds the API accepts.
-pub const KINDS: [&str; 5] = [
+pub const KINDS: [&str; 6] = [
     "habit",
     "habit_checkin",
     "focus",
     "prefs",
     "summary_template",
+    "comment",
 ];
 /// Largest accepted body, in bytes.
 pub const MAX_DOC_BYTES: usize = 64 * 1024;
@@ -89,6 +90,39 @@ impl DocStore {
 
     pub fn delete(&mut self, id: Uuid) -> Result<(), TickError> {
         self.table.delete(id)
+    }
+
+    /// Delete every comment for which `doomed` says so, given the task it names
+    /// (`None` when its body names no readable task); returns how many went.
+    pub fn delete_comments_where(
+        &mut self,
+        doomed: impl Fn(Option<Uuid>) -> bool,
+    ) -> Result<usize, TickError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Owner {
+            task_id: String,
+        }
+        let gone: Vec<Uuid> = self
+            .of_kind("comment")
+            .into_iter()
+            .filter(|d| {
+                let owner = rusty_json::from_str::<Owner>(&d.body)
+                    .ok()
+                    .and_then(|o| Uuid::parse_str(&o.task_id).ok());
+                doomed(owner)
+            })
+            .map(|d| d.id)
+            .collect();
+        for id in &gone {
+            self.table.delete(*id)?;
+        }
+        Ok(gone.len())
+    }
+
+    /// Delete every comment that belongs to one of `tasks`.
+    pub fn delete_comments_of(&mut self, tasks: &[Uuid]) -> Result<usize, TickError> {
+        self.delete_comments_where(|owner| owner.is_some_and(|id| tasks.contains(&id)))
     }
 
     /// Documents of `kind`, oldest first.

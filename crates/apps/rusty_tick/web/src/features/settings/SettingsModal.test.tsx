@@ -14,10 +14,13 @@ import { SettingsModal } from './SettingsModal'
 
 const Where = () => <output data-testid="where">{useLocation().search}</output>
 
+let services = createServices('demo')
+
 function setup(entry = '/?modalType=settings&tabs=account', mode: Mode = 'demo') {
   const user = userEvent.setup()
+  services = createServices(mode)
   render(
-    <ServicesProvider services={createServices(mode)}>
+    <ServicesProvider services={services}>
       <MemoryRouter initialEntries={[entry]}>
         <SettingsModal />
         <Where />
@@ -94,12 +97,29 @@ describe('SettingsModal', () => {
     expect(search()).toBe('?x=1')
   })
 
-  it.each(['premium', 'features', 'smart-list', 'notifications', 'ai', 'more', 'integrations', 'collaborate'])('%s is an honest placeholder', (tab) => {
+  it.each(['premium', 'features', 'smart-list', 'ai', 'more', 'integrations', 'collaborate'])('%s is an honest placeholder', (tab) => {
     setup(`/?modalType=settings&tabs=${tab}`)
     const panel = screen.getByRole('tabpanel')
     expect(within(panel).getByRole('heading')).toBeInTheDocument()
     expect(panel).toHaveTextContent('is not available in Tick Local.')
     expect(within(panel).queryByRole('button')).toBeNull() // nothing to click, nothing to buy
+  })
+
+  it('Notifications turns task reminders on once the browser allows them', async () => {
+    vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'default', requestPermission: async () => ((Notification as unknown as { permission: string }).permission = 'granted') }))
+    setup('/?modalType=settings&tabs=notifications')
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Reminders' }))
+    expect(usePrefs.getState().prefs.notifications).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
+  it('Notifications stays off and says why when the browser refuses', async () => {
+    vi.stubGlobal('Notification', Object.assign(function () {}, { permission: 'denied' }))
+    setup('/?modalType=settings&tabs=notifications')
+    await userEvent.setup().click(screen.getByRole('switch', { name: 'Reminders' }))
+    expect(usePrefs.getState().prefs.notifications).toBe(false)
+    expect(within(screen.getByRole('tabpanel')).getByRole('status')).toHaveTextContent('blocked')
+    vi.unstubAllGlobals()
   })
 
   it('About shows the app name, a description and the version', () => {
@@ -162,6 +182,39 @@ describe('SettingsModal', () => {
   })
 
   describe('Account', () => {
+    it('Generate Backup downloads every task, list and tag as JSON', async () => {
+      const blobs: Blob[] = []
+      URL.createObjectURL = vi.fn((b: Blob | MediaSource) => (blobs.push(b as Blob), 'blob:x'))
+      URL.revokeObjectURL = vi.fn()
+      const names: string[] = []
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+        names.push(this.download)
+      })
+      const user = setup()
+      await user.click(screen.getByRole('button', { name: 'Generate Backup' }))
+      await waitFor(() => expect(names).toHaveLength(1))
+      expect(names[0]).toMatch(/^tick-backup-\d{4}-\d{2}-\d{2}\.json$/)
+      const snap = JSON.parse(await new Promise<string>((ok) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.readAsText(blobs[0]!) })) as { lists: unknown[]; tasks: unknown[] }
+      expect(snap.lists.length).toBeGreaterThan(0)
+      expect(snap.tasks.length).toBeGreaterThan(0)
+    })
+
+    it('Delete All Data asks first, then empties the account and reloads', async () => {
+      const reload = vi.spyOn(page, 'reload').mockImplementation(() => undefined)
+      const user = setup()
+      await user.click(screen.getByRole('button', { name: 'Delete All Data' }))
+      expect(reload).not.toHaveBeenCalled()
+      await user.click(within(screen.getByRole('dialog', { name: 'Delete all data?' })).getByRole('button', { name: 'Delete' }))
+      await waitFor(() => expect(reload).toHaveBeenCalled())
+    })
+
+    it('Import Backups refuses a file that is not a backup', async () => {
+      const user = setup()
+      Object.defineProperty(File.prototype, 'text', { configurable: true, value: () => Promise.resolve('nope') }) // jsdom's File has no text()
+      await user.upload(screen.getByLabelText('Backup file'), new File(['nope'], 'x.json', { type: 'application/json' }))
+      await waitFor(() => expect(services.store.getState().toasts.map((t) => t.message)).toContain('That file is not a Tick Local backup'))
+    })
+
     it('server mode: shows the masked token and signs out', async () => {
       setToken('secret-token-abcd1234', false)
       const reload = vi.spyOn(page, 'reload').mockImplementation(() => undefined)

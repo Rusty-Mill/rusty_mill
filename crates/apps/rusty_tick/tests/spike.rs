@@ -69,7 +69,7 @@ fn gap5_reorder_moves_one_task_and_survives_reopen() {
 }
 
 #[test]
-fn gap3_fulltext_phrase_and_missing_prefix() {
+fn gap3_fulltext_phrase_and_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = TaskStore::open(dir.path()).unwrap();
     let list = Uuid::now_v7();
@@ -78,8 +78,13 @@ fn gap3_fulltext_phrase_and_missing_prefix() {
     s.insert(t).unwrap();
     assert_eq!(s.search(&["groceries"]), vec![id]);
     assert_eq!(s.search(&["buy groceries"]), vec![id]);
-    // Type-ahead prefix: the engine has no prefix query, so this finds nothing.
-    assert!(s.search(&["grocer"]).is_empty(), "F3: no prefix matching");
+    // Type-ahead: the last word of a phrase matches as a prefix (engine `any_of_prefix`).
+    assert_eq!(s.search(&["grocer"]), vec![id]);
+    assert_eq!(s.search(&["buy groc"]), vec![id]);
+    assert!(
+        s.search(&["roceries"]).is_empty(),
+        "a prefix, not a substring"
+    );
 }
 
 #[test]

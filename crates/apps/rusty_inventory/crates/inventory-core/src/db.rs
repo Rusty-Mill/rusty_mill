@@ -26,6 +26,11 @@ pub const SCHEMA_VERSION: i32 = 2;
 /// for one of ours.
 const MAGIC: &[u8; 8] = b"INVSEAL1";
 const NONCE_LEN: usize = 12;
+const HEADER_LEN: usize = MAGIC.len() + NONCE_LEN;
+
+/// Which sealed image a process's working copy came from: the file's header,
+/// whose nonce is fresh for every seal. `None` when there was no file.
+pub type SealedAs = Option<[u8; HEADER_LEN]>;
 
 /// A live connection over a private, unencrypted working copy, plus what
 /// `Inventory` needs to keep resealing it.
@@ -35,6 +40,8 @@ pub struct Opened {
     pub key: [u8; 32],
     pub plain_path: PathBuf,
     pub tempdir: tempfile::TempDir,
+    /// The sealed image this working copy was decrypted from.
+    pub sealed_as: SealedAs,
 }
 
 /// Open (creating if needed) the encrypted index at `path`.
@@ -72,10 +79,12 @@ pub fn open(path: &Path, key: &dyn KeyProvider) -> Result<Opened> {
         .tempdir()?;
     let plain_path = tempdir.path().join("index.sqlite3");
 
+    let mut sealed_as = None;
     if existed {
         let sealed = std::fs::read(path)?;
         let plaintext = unseal(&sealed, &key_bytes, path)?;
         std::fs::write(&plain_path, plaintext)?;
+        sealed_as = sealed[..HEADER_LEN].try_into().ok();
     }
 
     let conn = Connection::open(&plain_path)?;
@@ -89,6 +98,7 @@ pub fn open(path: &Path, key: &dyn KeyProvider) -> Result<Opened> {
         key: key_bytes,
         plain_path,
         tempdir,
+        sealed_as,
     })
 }
 
@@ -127,9 +137,11 @@ fn unseal(sealed: &[u8], key: &[u8; 32], path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Encrypt `plaintext` with a fresh random nonce and write it over `dest`.
-/// Written to a staging file and renamed into place, so an interruption
-/// mid-write never corrupts the existing sealed file.
-pub fn seal_to(dest: &Path, plaintext: &[u8], key: &[u8; 32]) -> Result<()> {
+/// Written to a staging file unique to this process and seal, synced, and
+/// renamed into place (then the directory synced), so an interruption never
+/// corrupts the existing sealed file and two sealers never share a staging
+/// file. Returns the header written — the new image's [`SealedAs`].
+pub fn seal_to(dest: &Path, plaintext: &[u8], key: &[u8; 32]) -> Result<[u8; HEADER_LEN]> {
     let key: &Key<Aes256Gcm> = (&key[..]).into();
     let cipher = Aes256Gcm::new(key);
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -137,15 +149,40 @@ pub fn seal_to(dest: &Path, plaintext: &[u8], key: &[u8; 32]) -> Result<()> {
         .encrypt(&nonce, plaintext)
         .map_err(|e| Error::other(format!("failed to seal the index: {e}")))?;
 
-    let staging = dest.with_extension("sealing");
-    {
+    static SEALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = dest.with_extension(format!("sealing.{}.{n}", std::process::id()));
+    let mut header = [0u8; HEADER_LEN];
+    header[..MAGIC.len()].copy_from_slice(MAGIC);
+    header[MAGIC.len()..].copy_from_slice(&nonce);
+    let written = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&staging)?;
-        f.write_all(MAGIC)?;
-        f.write_all(&nonce)?;
+        f.write_all(&header)?;
         f.write_all(&ciphertext)?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e.into());
     }
     std::fs::rename(&staging, dest)?;
+    sync_parent_dir(dest)?;
+    Ok(header)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => std::fs::File::open(dir)?.sync_all(),
+        _ => Ok(()),
+    }
+}
+
+/// Windows cannot open a directory to sync it; the rename is the
+/// durability point there.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -153,10 +190,38 @@ pub fn seal_to(dest: &Path, plaintext: &[u8], key: &[u8; 32]) -> Result<()> {
 /// `dest`. The only correct way to persist a live connection: reading
 /// `plain_path` directly, without checkpointing first, can silently miss
 /// whatever is still sitting in the WAL.
-pub fn seal(conn: &Connection, plain_path: &Path, dest: &Path, key: &[u8; 32]) -> Result<()> {
+///
+/// Every process holds a whole private copy, so sealing one over an image
+/// another process wrote since would silently discard that process's
+/// writes (the tray and `inv` racing). Under a cross-process lock on
+/// `<dest>.lock`, the on-disk image must still be `sealed_as` — the one
+/// this copy came from or last sealed — or the seal is refused with
+/// [`Error::ConcurrentWriter`] and nothing is written (design review 2.9).
+/// Returns the new image's [`SealedAs`].
+pub fn seal(
+    conn: &Connection,
+    plain_path: &Path,
+    dest: &Path,
+    key: &[u8; 32],
+    sealed_as: SealedAs,
+) -> Result<SealedAs> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dest.with_extension("lock"))?;
+    fs4::FileExt::lock(&lock)?;
+    if read_header::<HEADER_LEN>(dest)? != sealed_as {
+        return Err(Error::ConcurrentWriter {
+            path: dest.to_path_buf(),
+        });
+    }
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     let plaintext = std::fs::read(plain_path)?;
-    seal_to(dest, &plaintext, key)
+    let header = seal_to(dest, &plaintext, key)?;
+    // The lock is released when `lock` closes, after the rename.
+    drop(lock);
+    Ok(Some(header))
 }
 
 /// Does this file look like one of our sealed indexes? Reported in `Stats`
@@ -398,7 +463,14 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            seal(&opened.conn, &opened.plain_path, &path, &opened.key).unwrap();
+            seal(
+                &opened.conn,
+                &opened.plain_path,
+                &path,
+                &opened.key,
+                opened.sealed_as,
+            )
+            .unwrap();
         }
 
         assert!(
@@ -423,7 +495,14 @@ mod tests {
         let path = dir.path().join("inventory.sqlite3");
         {
             let opened = open(&path, &StaticKey::new("a".repeat(64))).unwrap();
-            seal(&opened.conn, &opened.plain_path, &path, &opened.key).unwrap();
+            seal(
+                &opened.conn,
+                &opened.plain_path,
+                &path,
+                &opened.key,
+                opened.sealed_as,
+            )
+            .unwrap();
         }
         let err = open(&path, &StaticKey::new("b".repeat(64))).unwrap_err();
         assert!(matches!(err, Error::KeyMismatch(_)), "got {err:?}");
@@ -438,7 +517,14 @@ mod tests {
         let path = dir.path().join("inventory.sqlite3");
         {
             let opened = open(&path, &StaticKey::new("d".repeat(64))).unwrap();
-            seal(&opened.conn, &opened.plain_path, &path, &opened.key).unwrap();
+            seal(
+                &opened.conn,
+                &opened.plain_path,
+                &path,
+                &opened.key,
+                opened.sealed_as,
+            )
+            .unwrap();
         }
 
         // A provider holding nothing — the keychain came back empty.
@@ -495,5 +581,97 @@ mod tests {
             Err(Error::LegacyIndexFormat { .. }) => {}
             other => panic!("expected LegacyIndexFormat, got {other:?}"),
         }
+    }
+
+    fn setting(path: &Path, key: &StaticKey, name: &str) -> Option<String> {
+        let opened = open(path, key).unwrap();
+        opened
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [name], |r| {
+                r.get(0)
+            })
+            .ok()
+    }
+
+    /// Review 2.9: the tray and `inv` each hold a whole private copy. The
+    /// one that seals second used to overwrite the first's writes; it is
+    /// now refused, nothing is written, and the first's write survives.
+    #[test]
+    fn a_stale_copy_cannot_overwrite_another_process_s_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory.sqlite3");
+        let key = StaticKey::new("a".repeat(64));
+        {
+            let first = open(&path, &key).unwrap();
+            seal(
+                &first.conn,
+                &first.plain_path,
+                &path,
+                &first.key,
+                first.sealed_as,
+            )
+            .unwrap();
+        }
+        let tray = open(&path, &key).unwrap();
+        let cli = open(&path, &key).unwrap();
+
+        cli.conn
+            .execute("INSERT INTO settings(key,value) VALUES ('cli','kept')", [])
+            .unwrap();
+        let cli_sealed = seal(&cli.conn, &cli.plain_path, &path, &cli.key, cli.sealed_as).unwrap();
+
+        tray.conn
+            .execute(
+                "INSERT INTO settings(key,value) VALUES ('tray','stale')",
+                [],
+            )
+            .unwrap();
+        let refused = seal(
+            &tray.conn,
+            &tray.plain_path,
+            &path,
+            &tray.key,
+            tray.sealed_as,
+        );
+        assert!(
+            matches!(refused, Err(Error::ConcurrentWriter { .. })),
+            "{refused:?}"
+        );
+
+        assert_eq!(setting(&path, &key, "cli").as_deref(), Some("kept"));
+        assert_eq!(setting(&path, &key, "tray"), None);
+        // The writer that sealed last may keep sealing from its own image.
+        cli.conn
+            .execute("INSERT INTO settings(key,value) VALUES ('cli2','also')", [])
+            .unwrap();
+        seal(&cli.conn, &cli.plain_path, &path, &cli.key, cli_sealed).unwrap();
+        assert_eq!(setting(&path, &key, "cli2").as_deref(), Some("also"));
+    }
+
+    /// Review 2.9: each seal stages through its own file, left nowhere.
+    #[test]
+    fn sealing_leaves_no_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory.sqlite3");
+        let key = StaticKey::new("a".repeat(64));
+        let opened = open(&path, &key).unwrap();
+        let mut sealed_as = opened.sealed_as;
+        for _ in 0..3 {
+            sealed_as = seal(
+                &opened.conn,
+                &opened.plain_path,
+                &path,
+                &opened.key,
+                sealed_as,
+            )
+            .unwrap();
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("sealing"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

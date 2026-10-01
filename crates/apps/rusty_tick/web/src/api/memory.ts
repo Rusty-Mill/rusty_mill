@@ -29,7 +29,7 @@ import type {
 export const INBOX_ID = '00000000-0000-7000-8000-000000000001'
 export const STORAGE_KEY = 'tick-local:memory:v1'
 const STEP = 1024
-const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template']
+const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment']
 const MAX_DOC_BYTES = 64 * 1024
 
 interface State {
@@ -61,7 +61,15 @@ export class MemoryAdapter implements ApiClient {
     this.storage = options.storage ?? null
     this.state = this.load() ?? this.fresh(options.seed)
     this.ensureInbox()
+    this.sweepOrphanComments()
     this.save()
+  }
+
+  /** Drop comments whose task is gone for good (a trashed one can still come back), left by versions that did not clean up on purge. */
+  private sweepOrphanComments(): void {
+    if (!Array.isArray(this.state.tasks) || !Array.isArray(this.state.docs)) return // a save from an older version may lack either
+    const live = new Set(this.state.tasks.map((t) => t.id))
+    this.state.docs = this.state.docs.filter((d) => d.kind !== 'comment' || live.has((d.body as { taskId?: string } | null)?.taskId ?? ''))
   }
 
   /** A store holding a copy of `snapshot`, for replaying pending operations over server truth. */
@@ -309,11 +317,18 @@ export class MemoryAdapter implements ApiClient {
     const task = this.task(id)
     const gone = new Set([task.id, ...this.children(task).map((c) => c.id)])
     this.state.tasks = this.state.tasks.filter((t) => !gone.has(t.id))
+    this.dropComments(gone)
     this.save()
+  }
+
+  /** A task's comments go with it for good (but not to the trash, so a restore loses nothing). */
+  private dropComments(taskIds: ReadonlySet<string>): void {
+    this.state.docs = this.state.docs.filter((d) => !(d.kind === 'comment' && taskIds.has((d.body as { taskId?: string } | null)?.taskId ?? '')))
   }
 
   async emptyTrash(): Promise<number> {
     const before = this.state.tasks.length
+    this.dropComments(new Set(this.state.tasks.filter((t) => t.deletedMs !== null).map((t) => t.id)))
     this.state.tasks = this.state.tasks.filter((t) => t.deletedMs === null)
     this.save()
     return before - this.state.tasks.length

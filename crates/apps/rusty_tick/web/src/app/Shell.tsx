@@ -1,15 +1,19 @@
-import { useEffect } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { lazy, Suspense, useEffect } from 'react'
+import { Outlet, useLocation, useSearchParams } from 'react-router-dom'
 import { useMedia } from '@/lib/hooks'
 import { useUi } from '@/store/ui'
 import { IconRail } from '@/components/IconRail'
 import { Toasts } from '@/components/Toasts'
+import { Reminders } from '@/features/reminders/Reminders'
 import { SearchModal } from '@/features/search/SearchModal'
-import { SettingsModal } from '@/features/settings/SettingsModal'
 import { Sidebar } from '@/features/lists/Sidebar'
+
+// Settings is fetched the first time it is opened.
+const SettingsModal = lazy(() => import('@/features/settings/SettingsModal').then((m) => ({ default: m.SettingsModal })))
 
 /** Rail + whatever the route shows, with the app-wide overlays. */
 export function Shell() {
+  const settingsOpen = useSearchParams()[0].get('modalType') === 'settings'
   // Search is available everywhere, not just on task pages.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -26,7 +30,12 @@ export function Shell() {
       <IconRail />
       <Outlet />
       <SearchModal />
-      <SettingsModal />
+      {settingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal />
+        </Suspense>
+      )}
+      <Reminders />
       <Toasts />
     </div>
   )

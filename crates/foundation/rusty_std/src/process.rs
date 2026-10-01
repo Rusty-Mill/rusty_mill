@@ -22,9 +22,7 @@ fn map_win32(op: &str, err: rusty_win32::Win32Error) -> Error {
 /// (`rusty_win32::process::spawn_suspended`/`resume`/`wait`) on Windows --
 /// `status` genuinely spawns `program` with `args` and waits for its real
 /// exit status. On any other target (e.g. `wasm32`) there is no wired
-/// spawn primitive yet, and `status` falls back to a stub that always
-/// reports success without spawning anything -- callers on those targets
-/// must not rely on `status` for real process execution.
+/// spawn primitive yet, and `status` fails with [`Error::Unsupported`].
 pub struct Command {
     program: String,
     args: Vec<String>,
@@ -57,7 +55,8 @@ impl Command {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
-            Ok(ExitStatus { code: 0 })
+            let _ = (&self.program, &self.args);
+            Err(Error::Unsupported("process::Command::status"))
         }
     }
 
@@ -201,6 +200,7 @@ impl ExitStatus {
 mod tests {
     use super::*;
 
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn status_reflects_a_real_nonzero_exit_not_a_hardcoded_success() {
         #[cfg(target_os = "linux")]
@@ -226,5 +226,14 @@ mod tests {
             "a command that exits 1 must not report success"
         );
         assert_eq!(status.code(), Some(1));
+    }
+
+    #[cfg(not(any(target_os = "linux", windows)))]
+    #[test]
+    fn status_is_unsupported_where_no_spawn_primitive_is_wired() {
+        assert_eq!(
+            Command::new("anything").status(),
+            Err(Error::Unsupported("process::Command::status"))
+        );
     }
 }

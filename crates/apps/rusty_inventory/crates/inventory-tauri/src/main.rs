@@ -30,9 +30,22 @@ fn stringify(e: impl std::fmt::Display) -> String {
 /// Reseal the on-disk index after a command that may have changed it.
 /// `checkpoint` is a no-op when nothing changed, so calling it liberally
 /// costs nothing on the read-only commands that never do.
-fn checkpoint(inv: &Inventory) {
-    if let Err(e) = inv.checkpoint() {
-        eprintln!("failed to seal the index: {e}");
+///
+/// A failure is returned, not just logged: a command whose change could not
+/// be sealed must not report success, or the change silently disappears on
+/// the next start (design review 2.9). That includes another Inventory
+/// process having saved first.
+fn checkpoint(inv: &Inventory) -> CmdResult<()> {
+    inv.checkpoint()
+        .map(|_| ())
+        .map_err(|e| format!("your change was not saved: {e}"))
+}
+
+/// [`checkpoint`] from a background loop or shutdown, where there is no
+/// caller to hand the error to.
+fn checkpoint_or_log(inv: &Inventory) {
+    if let Err(e) = checkpoint(inv) {
+        eprintln!("{e}");
     }
 }
 
@@ -138,7 +151,7 @@ struct CapturePayload {
 fn capture(state: tauri::State<'_, AppState>, text: String) -> CmdResult<CapturePayload> {
     let inv = state.inventory.lock().map_err(stringify)?;
     let result = inv.capture(&text).map_err(stringify)?;
-    checkpoint(&inv);
+    checkpoint(&inv)?;
     Ok(CapturePayload {
         hits: result.related.hits,
         semantic_available: result.related.semantic_available,
@@ -159,7 +172,7 @@ fn clips(state: tauri::State<'_, AppState>, limit: usize) -> CmdResult<Vec<inven
 fn set_scratchpad(state: tauri::State<'_, AppState>, enabled: bool) -> CmdResult<()> {
     let inv = state.inventory.lock().map_err(stringify)?;
     inv.set_scratchpad_enabled(enabled).map_err(stringify)?;
-    checkpoint(&inv);
+    checkpoint(&inv)?;
     Ok(())
 }
 
@@ -167,7 +180,7 @@ fn set_scratchpad(state: tauri::State<'_, AppState>, enabled: bool) -> CmdResult
 fn clear_clips(state: tauri::State<'_, AppState>) -> CmdResult<usize> {
     let inv = state.inventory.lock().map_err(stringify)?;
     let n = inv.clear_clips().map_err(stringify)?;
-    checkpoint(&inv);
+    checkpoint(&inv)?;
     Ok(n)
 }
 
@@ -246,7 +259,7 @@ fn set_retention(state: tauri::State<'_, AppState>, window: String) -> CmdResult
     let retention: Retention = window.parse().map_err(stringify)?;
     let inv = state.inventory.lock().map_err(stringify)?;
     let n = inv.set_retention(retention).map_err(stringify)?;
-    checkpoint(&inv);
+    checkpoint(&inv)?;
     Ok(n)
 }
 
@@ -262,7 +275,7 @@ struct IndexPayload {
 fn index_now(state: tauri::State<'_, AppState>, full: bool) -> CmdResult<IndexPayload> {
     let mut inv = state.inventory.lock().map_err(stringify)?;
     let report = inv.index(full).map_err(stringify)?;
-    checkpoint(&inv);
+    checkpoint(&inv)?;
     Ok(IndexPayload {
         added: report.total_added(),
         updated: report.total_updated(),
@@ -377,7 +390,7 @@ fn background_index_loop(app: tauri::AppHandle) {
         };
         match inv.index(false) {
             Ok(_) => {
-                checkpoint(&inv);
+                checkpoint_or_log(&inv);
                 true
             }
             Err(e) => {
@@ -395,7 +408,7 @@ fn background_index_loop(app: tauri::AppHandle) {
         };
         let locked = state.inventory.lock();
         if let Ok(inv) = locked {
-            checkpoint(&inv);
+            checkpoint_or_log(&inv);
         }
     };
 
@@ -539,7 +552,7 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Ok(inv) = state.inventory.lock() {
-                        checkpoint(&inv);
+                        checkpoint_or_log(&inv);
                     }
                 }
             }
