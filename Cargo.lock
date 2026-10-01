@@ -13259,6 +13259,7 @@ dependencies = [
  "qrcode",
  "rand 0.8.8",
  "rusty_base64",
+ "rusty_confined_fs",
  "serde",
  "serde_json",
  "sha2 0.10.9",
