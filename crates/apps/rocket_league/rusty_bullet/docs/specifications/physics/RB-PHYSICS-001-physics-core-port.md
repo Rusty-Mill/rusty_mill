@@ -5274,16 +5274,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - handbrake: `DriveState::handbrake_amount` ramps at 5/s up and 2/s down
     and blends in lateral x0.1 and longitudinal x0.5-0.9 (resolving
     FR-066) and the powerslide steer curve.
+  Steering's yaw-rate target now also applies with no steer input
+  (target zero), so a released turn stops instead of spinning on.
   `HANDBRAKE_FRICTION_MULTIPLIER` and `DriveState::base_friction` are
   removed. `THROTTLE_ACCELERATION` (1600 uu/s^2) is confirmed against
   RocketSim's engine force over four wheels. ADR-0012.
-  - **Verification**: 12 new `drive` tests (slip ratio, pedal rules, grip
+  - **Verification**: 13 new `drive` tests (releasing steer stops the
+    turn, slip ratio, pedal rules, grip
     factors and handbrake blend, handbrake ramp, grip rate bound and
     orientation independence, lateral cancellation rolling and sliding,
     coasting both ways, braking, stopping without reversing, no coasting
     brake under handbrake, half-handbrake steer blend) and 1 `world` test
     (a coasting car loses 525 uu/s^2, not box friction). The grounded boost
-    test now subtracts the forced-throttle share.
+    test now subtracts the forced-throttle share. Real capture (owner's
+    machine): velocity error at 4.0 s 9.9 uu/s, simulated (325, 968) vs
+    recorded (318, 961); `--self-growth` 3-4 s window 2.8 uu / 5.7 uu/s
+    (was 10 uu / 67 uu/s).
   - **Not done here**: per-wheel slip and torque from tire impulses (grip
     acts on the centre of mass); tire grip on walls, curves and ceiling;
     sticky force; the hitbox offset.
@@ -6771,7 +6777,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 - 0.85.0 (2026-10-01): `RB-PHYSICS-001-FR-081` — per-axis tire grip on a
   frictionless box floor contact (ADR-0012), resolving FR-066; FR-080's
-  real-capture result recorded. 10 net new tests (354 in
+  real-capture result recorded. 11 net new tests (355 in
   `rb_physics_bullet`).
 - 0.84.0 (2026-10-01): `RB-PHYSICS-001-FR-080` — steering sets yaw rate
   from the real steer-angle curves via the bicycle model (ADR-0011),

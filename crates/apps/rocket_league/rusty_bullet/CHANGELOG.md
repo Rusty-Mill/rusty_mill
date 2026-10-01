@@ -12,6 +12,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   brake/coast pedal rules, and handbrake ramp with its anisotropic
   factors. Removes `HANDBRAKE_FRICTION_MULTIPLIER` and
   `DriveState::base_friction`; `DriveState::new` takes no arguments.
+  Grounded steering now targets zero yaw rate with no steer input.
 - ADR-0011: curve-based yaw-rate steering (partially supersedes ADR-0009).
 - `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`
   (`RB-VERIFY-003-FR-005`, `rb_verify_cli::trace_capture`): per-frame

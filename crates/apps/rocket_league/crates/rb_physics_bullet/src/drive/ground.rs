@@ -301,15 +301,14 @@ pub(super) fn apply_ground_control(
 
     // RB-PHYSICS-001-FR-080: steering sets the car's yaw rate about its
     // own up axis directly (see `steer_yaw_rate`), replacing the old
-    // speed-scaled torque. With no steer input the yaw rate is left alone,
-    // so contacts and momentum still govern a car that isn't steering.
-    let steer = input.steer.clamp(-1.0, 1.0);
-    if steer != 0.0 {
-        let up = up_axis(car);
-        let target = steer_yaw_rate(forward_speed, steer, handbrake_amount);
-        let current = car.angular_velocity.dot(&up);
-        car.angular_velocity += up * (target - current);
-    }
+    // speed-scaled torque. Since FR-081 this holds with no steer input too
+    // (target zero): straight front wheels with tire grip stop the turn,
+    // where leaving the yaw rate alone kept a released turn spinning
+    // (real-capture trace, 4.008 s).
+    let up = up_axis(car);
+    let target = steer_yaw_rate(forward_speed, input.steer, handbrake_amount);
+    let current = car.angular_velocity.dot(&up);
+    car.angular_velocity += up * (target - current);
 
     let lateral_share = (lateral_grip_rate(car, right) * lateral_grip * dt).min(1.0);
     car.linear_velocity -= right * (lateral_speed * lateral_share);

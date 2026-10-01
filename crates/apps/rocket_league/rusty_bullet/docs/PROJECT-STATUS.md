@@ -58,8 +58,9 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012): implemented and
-  unit-tested; awaiting the owner's real-capture re-trace.
+- `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012): implemented,
+  verified on the real capture (see Validation); zero-steer yaw fix
+  awaiting a re-trace.
 
 ## Blocked
 
@@ -86,11 +87,11 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.3` and
-   `--self-growth` on the owner's machine to confirm
-   `RB-PHYSICS-001-FR-081` (tire grip, ADR-0012): the simulated velocity
-   direction at 4.0 s should approach the recorded ~72 deg (was ~53) and
-   speed the recorded ~1012 uu/s (was ~906). Later: the real hitbox sits
+1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.3` on the owner's
+   machine to confirm the zero-steer yaw fix: velocity error at
+   4.05-4.10 s should fall from ~46-97 uu/s. Then trace the airborne
+   stretch after the 4.142 s jump, where simulated horizontal velocity
+   stays flat while the recorded one turns. Later: the real hitbox sits
    20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu above the
    floor at rest, while the port's box rests on the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -101,7 +102,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (418 tests: 27 `rb_domain`, 354
+- `cargo test --workspace`: pass (419 tests: 27 `rb_domain`, 355
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -142,6 +143,12 @@ version: `a245d35`).
   at 4.0 s 0.06 rad (was 0.46), at most 0.09 rad through 4.13 s; velocity
   error at 4.10 s 364 uu/s (was 563); jump still correct (vz 286 vs 296).
   Remaining: velocity direction ~53 deg vs 72 deg recorded, speed ~10% low.
+- `rb-verify --self-trace test2.jsonl 3.7 4.3` after
+  `RB-PHYSICS-001-FR-081` (owner's machine, 2026-10-01): velocity error at
+  4.0 s 9.9 uu/s (was ~250), simulated (325, 968) vs recorded (318, 961).
+  `--self-growth`: 3-4 s window 2.8 uu / 0.03 rad / 5.7 uu/s (was 10 uu /
+  67 uu/s); 4-5 s 532 uu / 1.15 rad / 1,574 uu/s (was 751 / 1.21 /
+  1,902).
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate

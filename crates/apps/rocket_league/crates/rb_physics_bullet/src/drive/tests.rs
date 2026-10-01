@@ -659,6 +659,21 @@ fn a_handbraking_car_does_not_coast_brake() {
 }
 
 #[test]
+fn releasing_steer_stops_a_grounded_cars_turn() {
+    // Straight wheels with grip end the yaw a released turn left behind.
+    let mut c = car();
+    c.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+    c.angular_velocity = Vec3::new(0.0, 0.0, 2.0);
+    let mut boost = MAX_BOOST;
+    step_with_input(&mut c, &full_throttle(), true, &mut boost, TICK);
+    assert!(
+        c.angular_velocity.z.abs() < 1e-4,
+        "yaw {}",
+        c.angular_velocity.z
+    );
+}
+
+#[test]
 fn steer_yaw_rate_blends_halfway_at_half_handbrake() {
     let normal = steer_yaw_rate(1000.0, 1.0, 0.0);
     let powerslide = steer_yaw_rate(1000.0, 1.0, 1.0);

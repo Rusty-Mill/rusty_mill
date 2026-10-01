@@ -16,8 +16,9 @@ in git history, and each requirement's spec section holds its detail.
   lateral friction curve, coast-braking at 525 uu/s², braking at
   3500 uu/s² against opposing throttle. The handbrake ramps in and cuts
   sideways grip to a tenth while keeping most forward grip. Targets the
-  real capture's velocity-direction lag and ~10% speed gap after FR-080.
-  10 net new tests (418 total).
+  real capture's velocity-direction lag and ~10% speed gap after FR-080:
+  velocity error at 4.0 s is now 9.9 uu/s. A released turn now stops
+  instead of spinning on. 11 net new tests (419 total).
 
 ## Steering from Rocket League's real steer-angle curve
 **2026-10-01** · `RB-PHYSICS-001-FR-080` · ADR-0011

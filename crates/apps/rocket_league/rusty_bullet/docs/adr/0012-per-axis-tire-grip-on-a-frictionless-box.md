@@ -79,6 +79,10 @@ Option 1:
     about 19.5/s for the standard car;
   - `ramp_handbrake`, held in the new `DriveState::handbrake_amount`.
 - Boosting counts as full throttle for the pedals, as in RocketSim.
+- Steering's target yaw rate (ADR-0011) now applies while grounded with
+  no steer input too, targeting zero: straight wheels with grip stop the
+  turn. Before, a released turn kept spinning; this amends ADR-0011's
+  "left to contacts and momentum".
 - `HANDBRAKE_FRICTION_MULTIPLIER` and `DriveState::base_friction` are
   removed.
 
@@ -112,8 +116,11 @@ Option 1:
 
 ## Validation and revisit triggers
 
-- Re-run `rb-verify --self-trace test2.jsonl 3.7 4.3` and `--self-growth`.
-  The velocity direction at 4.0 s should approach the recorded 72°, and
-  speed should approach 1012 uu/s.
+- Real capture (owner's machine, `--self-trace test2.jsonl 3.7 4.3`):
+  velocity error at 4.0 s 9.9 uu/s (was ~250): simulated (325, 968)
+  against recorded (318, 961). `--self-growth` 3-4 s window: 2.8 uu /
+  5.7 uu/s (was 10 uu / 67 uu/s). The same trace showed a released turn
+  still spinning (velocity error 46 to 97 uu/s, 4.05-4.10 s), which the
+  zero-steer yaw target above fixes.
 - Revisit when wall or curve driving matters (tire grip on non-floor
   surfaces, sticky force), or if a raycast vehicle is adopted.

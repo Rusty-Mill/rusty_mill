@@ -6,7 +6,8 @@
 - Related: RB-PHYSICS-001-FR-080, FR-065, FR-079; RB-VERIFY-003-FR-005;
   ADR-0009
 - Supersedes/Superseded by: partially supersedes ADR-0009 (the steering
-  part only; throttle, boost and handbrake stay as ADR-0009 describes)
+  part only; throttle, boost and handbrake stay as ADR-0009 describes);
+  amended by ADR-0012 (zero steer targets zero yaw rate while grounded)
 
 ## Context
 
