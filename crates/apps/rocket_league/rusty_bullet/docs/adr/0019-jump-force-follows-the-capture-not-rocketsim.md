@@ -128,3 +128,6 @@ holds at -2.02 rad/s through it and only then changes by the yaw stick's
 early, leaving a 0.07 rad/s yaw offset going into the 4.317 s flip. So the
 real game keeps the car "grounded" for one step after its wheels let go,
 for both the sticky force and air control (`DriveState::was_on_ground`).
+The 4.15-4.35 s re-trace confirms it: the candidate's yaw rate now holds at
+-2.03 rad/s through 4.192 s and the rotation error stays 0.00 through the
+4.317 s flip.

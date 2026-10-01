@@ -91,7 +91,9 @@ version: `a245d35`).
 ## In progress
 
 - `RB-PHYSICS-001-FR-095` (air control waits one step after the wheels let
-  go): implemented; awaiting the owner's re-trace.
+  go): implemented; the 4.15-4.35 s re-trace confirms it (yaw rate holds
+  at -2.03 vs -2.02 rad/s through 4.192 s, rotation error 0.00 into and
+  through the 4.317 s flip); the 4.9-5.6 s re-trace is pending.
 
 ## Blocked
 
@@ -118,12 +120,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.15 4.35` and
-   `4.9 5.6`, and `--self-growth`, to confirm `RB-PHYSICS-001-FR-095`: the
-   candidate's yaw rate should hold at ~-2.02 rad/s through 4.192 s like
-   the recording (car-frame yaw -2.21 vs -2.28 at 4.3 s before), and the
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.9 5.6` and
+   `--self-growth` to finish confirming `RB-PHYSICS-001-FR-095`: the
    ~0.04 rad orientation offset after the flip should shrink, with it the
-   9 to 27 uu/s velocity error growth over 4.95-5.5 s. Then the 5.575 s
+   9 to 27 uu/s velocity error growth over 4.95-5.5 s. Still open from the
+   4.15-4.35 s re-trace: the flip's first tick spins 4.68 vs 4.75 rad/s
+   in pitch (1.5% short). Then the 5.575 s
    landing, the ~3 uu/s lateral offset from the 4.142 s press tick's tire
    grip, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay

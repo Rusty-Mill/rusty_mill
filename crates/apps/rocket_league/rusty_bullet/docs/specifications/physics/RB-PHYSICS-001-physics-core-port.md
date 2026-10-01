@@ -5604,7 +5604,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the 4.317 s flip and the ~0.04 rad orientation offset that tilts the
     boost from 4.94 s.
   - **Verification**: `drive` test
-    `air_control_waits_one_step_after_the_wheels_let_go`.
+    `air_control_waits_one_step_after_the_wheels_let_go`; real capture
+    `--self-trace 4.15 4.35`: yaw rate -2.03 vs recorded -2.02 rad/s
+    through 4.192 s (was applying air-control yaw a step early), rotation
+    error 0.00 through the 4.317 s flip.
 
 ## Architecture and interfaces
 
