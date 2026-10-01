@@ -862,6 +862,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   matched real Rocket League exactly. No new tests; all 322 pre-existing
   tests pass unchanged.
 ### Changed
+- `RELEASE_NOTES.md` slimmed from 222 KB to 44 KB: all 95 entries keep
+  their heading and date/PR/commit line; entries over ~900 characters are
+  trimmed to their first (summary) bullet. Full text up to `72494f4` stays
+  in git history.
 - `docs/traceability/TRACEABILITY.md` slimmed from 239 KB to 46 KB: every
   requirement row is kept, but long cells now point to the spec (named
   interfaces, a one-clause verification summary, a status plus its first
