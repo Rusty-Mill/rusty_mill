@@ -19,11 +19,17 @@
 //!   `window-secs`-wide time window instead of one whole-run number, so
 //!   whether the divergence grows gradually or abruptly can be read
 //!   directly from the output.
+//! - `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`: the
+//!   per-frame trace (`trace_capture`, `RB-VERIFY-003-FR-005`) — every car
+//!   at every frame in that window, with the recorded input and the
+//!   recorded vs. simulated state side by side, on the same time axis
+//!   `--self-growth` prints.
 
 use rb_domain::divergence::DivergenceScore;
+use rb_domain::{ControllerInput, Vec3};
 use rb_verify_cli::{
     score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::process::ExitCode;
@@ -61,6 +67,54 @@ fn print_growth(windows: &[(f32, DivergenceScore)]) {
     }
 }
 
+fn fmt_vec(v: &Vec3) -> String {
+    format!("({:>8.1},{:>8.1},{:>7.1})", v.x, v.y, v.z)
+}
+
+/// Compact input: throttle, steer, pitch/yaw/roll (`-` when unrecovered),
+/// then J/B/H for jump/boost/handbrake held (`.` when not).
+fn fmt_input(input: Option<ControllerInput>) -> String {
+    let Some(i) = input else {
+        return "no input".to_string();
+    };
+    let axis = |a: Option<f32>| a.map_or_else(|| "    -".to_string(), |v| format!("{v:>5.2}"));
+    format!(
+        "thr {:>5.2} str {:>5.2} p {} y {} r {} {}{}{}",
+        i.throttle,
+        i.steer,
+        axis(i.pitch),
+        axis(i.yaw),
+        axis(i.roll),
+        if i.jump { 'J' } else { '.' },
+        if i.boost { 'B' } else { '.' },
+        if i.handbrake { 'H' } else { '.' },
+    )
+}
+
+fn print_trace(rows: &[TraceRow]) {
+    for row in rows {
+        println!(
+            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2}",
+            t = row.t_secs,
+            id = row.recorded.player_id,
+            input = fmt_input(row.input),
+            rp = fmt_vec(&row.recorded.position),
+            rv = fmt_vec(&row.recorded.velocity),
+            cp = fmt_vec(&row.candidate.position),
+            cv = fmt_vec(&row.candidate.velocity),
+            ep = row.position_error(),
+            ev = row.velocity_error(),
+            er = row.rotation_error(),
+        );
+    }
+}
+
+fn parse_secs(name: &str, raw: Option<String>) -> Result<f32, String> {
+    let raw = raw.ok_or_else(|| format!("missing {name}"))?;
+    raw.parse::<f32>()
+        .map_err(|_| format!("invalid {name}: {raw:?}"))
+}
+
 fn parse_max_timestamp_delta_secs(raw: Option<String>) -> Result<f32, String> {
     match raw {
         Some(raw) => raw
@@ -80,7 +134,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]"
+    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>"
 }
 
 fn main() -> ExitCode {
@@ -89,6 +143,32 @@ fn main() -> ExitCode {
         eprintln!("{}", usage());
         return ExitCode::FAILURE;
     };
+
+    if first == "--self-trace" {
+        let Some(capture_path) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let window = parse_secs("from-secs", args.next())
+            .and_then(|from| parse_secs("to-secs", args.next()).map(|to| (from, to)));
+        let (from_secs, to_secs) = match window {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}\n{}", usage());
+                return ExitCode::FAILURE;
+            }
+        };
+        return match trace_capture(capture_path, from_secs, to_secs) {
+            Err(e) => {
+                eprintln!("ingestion failed: {e}");
+                ExitCode::FAILURE
+            }
+            Ok(rows) => {
+                print_trace(&rows);
+                ExitCode::SUCCESS
+            }
+        };
+    }
 
     if first == "--self-growth" {
         let Some(capture_path) = args.next() else {
