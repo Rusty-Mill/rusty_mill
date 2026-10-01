@@ -9,6 +9,10 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **Every whole-file write is now crash-atomic and synced** (design review 4, consolidation).
+  - Comment sidecars, editor saves and journal, CRDT state, the CLI's CRDT merge driver, the skills registry index, and the shell's persisted state and granted capabilities now share `rusty_atomic_file::write`.
+  - Six of these renamed an unsynced temp file, so a power loss could leave an empty or partial file.
+  - A temp file left by a crash no longer blocks later saves, since each write uses a unique temp name.
 - **A forge switch no longer hands out the old AI runtime** (`nexus-ai-runtime`, design review 4 / N5).
   - The shared pool handle was a `OnceLock`, set by the first forge and never replaced. After shutdown and a new boot in the same process, the indexing daemon got the torn-down runtime.
   - Each pool now replaces the published handle, and clears it on drop if it is still its own. Readers get the live pool's handle or `None` (their existing fallback).

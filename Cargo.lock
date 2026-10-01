@@ -8548,6 +8548,7 @@ dependencies = [
  "nexus-types",
  "nexus-workflow",
  "rusqlite",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -8587,6 +8588,7 @@ dependencies = [
  "nexus-terminal",
  "nexus-tui",
  "nexus-types",
+ "rusty_atomic_file",
  "rustyline",
  "serde_json",
  "tempfile",
@@ -8624,6 +8626,7 @@ dependencies = [
  "nexus-kernel",
  "nexus-plugins",
  "regex-lite",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -8709,6 +8712,7 @@ dependencies = [
  "nexus-kernel",
  "nexus-plugins",
  "nexus-types",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -9072,6 +9076,7 @@ dependencies = [
  "nexus-kernel",
  "nexus-plugins",
  "nexus-types",
+ "rusty_atomic_file",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -12187,6 +12192,7 @@ dependencies = [
  "rten",
  "rten-tensor",
  "rusqlite",
+ "rusty_atomic_file",
  "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
@@ -13887,6 +13893,9 @@ version = "0.1.0"
 [[package]]
 name = "rusty_crypto_key"
 version = "0.1.0"
+dependencies = [
+ "rusty_atomic_file",
+]
 
 [[package]]
 name = "rusty_diff"
@@ -14213,6 +14222,9 @@ version = "0.1.0"
 [[package]]
 name = "rusty_rusqlite"
 version = "0.0.1"
+dependencies = [
+ "rusty_atomic_file",
+]
 
 [[package]]
 name = "rusty_serde"
@@ -14280,6 +14292,7 @@ dependencies = [
  "libc 0.2.189",
  "parking_lot",
  "pollster 0.3.0",
+ "rusty_atomic_file",
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
@@ -14317,6 +14330,7 @@ dependencies = [
 name = "rusty_tick"
 version = "0.0.1"
 dependencies = [
+ "rusty_atomic_file",
  "rusty_base64",
  "rusty_http",
  "rusty_json",
@@ -15046,6 +15060,7 @@ name = "sessionmgr-daemon"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "rusty_atomic_file",
  "rusty_tokio",
  "serde",
  "serde_json",

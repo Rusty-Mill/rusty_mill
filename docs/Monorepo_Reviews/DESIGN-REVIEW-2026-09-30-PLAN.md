@@ -49,6 +49,10 @@ re-export it from `rusty_sync`, and delete the duplicate copy.
 
 2.9 uses one small shared `atomic_write` in the platform/fs layer. That makes
 three real call sites, so the shared helper is justified.
+*Landed in Tranche 4 as `crates/foundation/rusty_atomic_file`, a std
+crate, not rustils: rustils has no filesystem backend on macOS, where Nexus
+ships, and a foundation crate is usable by every layer. 16 call sites moved;
+the multimodal engine keeps its own `durability` helper.*
 
 ## Tranche 3 — Fail-closed and bounded I/O (P1/P2)
 

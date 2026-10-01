@@ -49,6 +49,10 @@ Removed / Fixed / Security, newest first.
   - **Breaking:** removed `rusty_wiremock::{MockServer, RequestMatcher, ResponseTemplate}`. They were a scaffold: `start` bound nothing and `register` did nothing. No crate used them. `canned` is unchanged, and the scaffold's unused dependencies (`rusty_http`, `rusty_json`, `rusty_std`) are gone with it.
   - **Breaking:** `rusty_std::Error` gains `Unsupported(&'static str)` and is now `#[non_exhaustive]`. On targets with no backend (wasm32 and others), `File::open`/`create`/`read`/`write`, `TcpStream::connect`/`read`/`write` and `Command::status` return it. Before, reads returned EOF, writes reported every byte written, `connect` returned a stream with no socket behind it, and `status` reported success without spawning. The wasm32 fake `File` is gone.
   - **Breaking:** retired the coreutils `rtail`, `rwc` and `rxargs` binaries (incomplete, e.g. `rxargs` ignored every flag). `rush` no longer aliases `tail`, `wc` or `xargs`, so they resolve through `PATH`.
+  - New `rusty_atomic_file` (foundation, no dependencies): `write` and `write_private` (0600) replace a file crash-atomically, with a unique temp name, fsync, rename and directory fsync. 16 hand-rolled writers now use it:
+    - Nexus: comments, editor save and journal, CRDT publisher, CLI merge driver, skills index, and the shell's state and granted capabilities.
+    - `rusty_rusqlite`, `rusty_term`'s config, `remind_me_core`'s API keys, endpoint and OAuth state, `rusty_tick`'s users, sessionmgr's session catalog, and `rusty_crypto_key`.
+    - 9 of them never fsynced. sessionmgr's records were briefly readable at the default mode before their `chmod`. `rusty_crypto_key` on Windows wrote in place.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.

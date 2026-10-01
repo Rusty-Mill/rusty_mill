@@ -473,52 +473,14 @@ pub(crate) async fn read_source_for_excerpts(
     }
 }
 
-/// Write `contents` to `path` via a sibling `.tmp` + fsync + rename.
+/// Replace `path` with `contents` crash-atomically.
 ///
 /// Only used when the plugin is driven without a [`KernelPluginContext`]
 /// (unit tests); production saves route through `com.nexus.storage` via
-/// [`save_async`] and get its fuller atomic-write guarantees.
-/// Even here we fsync the temp file (so a crash between write and
-/// rename never leaves a half-flushed file visible via the rename) —
-/// the pre-refactor version skipped the fsync entirely.
-///
-/// Parent-directory fsync is best-effort: `File::sync_all` on a
-/// directory is a no-op on Windows but persists the rename on POSIX.
+/// [`save_async`].
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
-    use std::io::Write as _;
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("no parent dir for '{}'", path.display()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("no filename in '{}'", path.display()))?;
-    let tmp = parent.join(format!(".{}.tmp", file_name.to_string_lossy()));
-
-    // Write + flush + fsync the temp file.
-    {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(|e| e.to_string())?;
-        f.write_all(contents.as_bytes())
-            .map_err(|e| e.to_string())?;
-        f.sync_all().map_err(|e| e.to_string())?;
-    }
-
-    // Atomic rename into place.
-    fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-
-    // Best-effort directory fsync so the rename itself is durable.
-    // Silently ignore failures — Windows returns an error when opening
-    // a directory for writing, and on POSIX the worst case is that the
-    // rename is replayed by the filesystem journal anyway.
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    rusty_atomic_file::write(path, contents.as_bytes())
+        .map_err(|e| format!("write '{}': {e}", path.display()))
 }
 
 #[cfg(test)]
