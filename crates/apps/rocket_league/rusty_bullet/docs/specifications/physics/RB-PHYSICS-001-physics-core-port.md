@@ -5552,6 +5552,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the full recorded pattern (295.7, six ticks of +4.0, then +6.7);
     `drive` tests `wheel_rays_reach_the_fully_extended_wheel` and
     `the_sticky_force_acts_the_step_after_the_wheels_touch`.
+  - **Real capture** (`--self-trace test2.jsonl 4.1 4.3`): every jump tick
+    matches; velocity error 2.6-3.3 uu/s over 4.19-4.3 s (was 13);
+    `--self-growth` 4-5 s 2.7 uu (was 5.1), 5-6 s 41 uu (was 54).
 
 ## Architecture and interfaces
 

@@ -111,6 +111,10 @@ Two changes fit every recorded tick:
 The `world` test `a_held_ground_jump_gains_speed_as_the_real_capture_does`
 now checks the full pattern: 295.7, six ticks of +4.0, then +6.7.
 
+Real capture, 2026-10-01: confirmed. Every jump tick matches (vx 384.4 vs
+385.1 at 4.183 s; vz within 0.1 uu/s); velocity error at 4.2 s 13 to 2.7
+uu/s; 4-5 s growth 5.1 to 2.7 uu.
+
 Tradeoff: both are fitted to one jump in one capture. The step delay could
 equally be a recording offset; revisit with a second capture that shows a
 landing or a jump from a slope.

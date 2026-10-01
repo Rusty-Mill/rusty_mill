@@ -85,8 +85,7 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-092` (wheel reach and sticky-force timing, ADR-0019
-  amendment): implemented; awaiting the owner's re-trace.
+- None.
 
 ## Blocked
 
@@ -113,13 +112,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.1 4.3` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-092`: the candidate's vx
-   should keep turning until 4.183 s and vz gain +4.0 through 4.192 s as
-   recorded (velocity error at 4.2 s was 13 uu/s). Then: the post-boost
-   vertical divergence (4.94-5.5 s; the recording falls at 312 uu/s at
-   5.575 s, the candidate at 260, so it lands ~6 ticks late), and braking
-   per wheel.
+1. Post-boost vertical divergence, now the earliest sizeable real-capture
+   error: trace `--self-trace <test2.jsonl> 4.9 5.6`. From the 4.94 s boost
+   the recorded car falls faster (vz -312 vs -260 uu/s at 5.575 s), so the
+   candidate lands ~6 ticks late. Smaller: ~3 uu/s lateral offset from the
+   4.142 s press tick's tire grip (recorded vy +2.9, candidate +0.1);
+   braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -171,6 +169,12 @@ version: `a245d35`).
   press through 4.175 s (295.9 / 299.9 / 304.0 / 308.0 / 312.0 both); the
   candidate's wheels then leave 1-2 ticks early (vz 5 uu/s high, vx 12 low
   by 4.2 s). Growth 4-5 s 5.1 uu / 15 uu/s (was 7.0 / 17).
+- Same, after `RB-PHYSICS-001-FR-092` (wheel reach, sticky timing),
+  2026-10-01: every jump tick matches (vx 384.4 vs 385.1 recorded at
+  4.183 s; vz within 0.1 uu/s through 4.3 s); velocity error 2.6-3.3 uu/s
+  over 4.19-4.3 s (was 13). Growth 4-5 s 2.7 uu / 8.5 uu/s (was 5.1 / 15),
+  5-6 s 41 uu / 147 uu/s (was 54 / 170), ball 15 uu (was 25), 7-8 s 853 uu
+  (was 1251).
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames
