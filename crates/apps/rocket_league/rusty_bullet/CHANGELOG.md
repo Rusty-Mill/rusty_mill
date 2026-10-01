@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0014: a dodge's flip as a timed torque with vertical damping and
+  pitch-stick cancel.
 - ADR-0013: RocketSim stick sign convention and real dodge impulse.
 - ADR-0012: per-axis tire grip on a box with no floor friction (partially
   supersedes ADR-0009).
@@ -929,6 +931,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Flips (`RB-PHYSICS-001-FR-083`, ADR-0014): a dodge now spins the car
+  with RocketSim's flip torque over 0.65 s, damps its fall, locks air
+  pitch, and is cancelled by holding pitch against it. The instant spin
+  kick (`DODGE_ANGULAR_SPEED`) and the jump-press-again cancel, which
+  Rocket League does not have, are removed; `DriveState::dodge_flip_active`
+  is replaced by `DriveState::flip`.
 - Dodges and air control (`RB-PHYSICS-001-FR-082`, ADR-0013): pitch and
   roll now follow RocketSim's signs, so stick forward dodges forward (it
   dodged backward) and air pitch/roll spin the right way; `DODGE_SPEED`

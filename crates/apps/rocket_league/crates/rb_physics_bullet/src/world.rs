@@ -282,7 +282,7 @@ impl PhysicsWorld {
     /// value via `set_car_boost`. Every other `DriveState` field a
     /// `PhysicsFrame` doesn't carry at all (`jump_held`,
     /// `double_jump_available`, `jump_hold_time_remaining`,
-    /// `dodge_flip_active`) is left at
+    /// `flip`) is left at
     /// `with_car`'s own fixed defaults (not held, double-jump available,
     /// zero hold time, no dodge in progress) — accurate only if `frame`
     /// captures a genuinely neutral, grounded moment. Choosing such a
@@ -445,8 +445,8 @@ impl PhysicsWorld {
     /// gated on `wall_normal` — also computed up front from the car's
     /// position at the start of this step, like `on_ground`; the ground
     /// jump's variable height, driven by `jump_hold_time_remaining`; a
-    /// dodge's spin flip-canceled by a further press, driven by
-    /// `dodge_flip_active`) alongside gravity, so `input`'s forces/impulses
+    /// dodge's flip torque and vertical damping, driven by `flip`)
+    /// alongside gravity, so `input`'s forces/impulses
     /// (and tire grip) are part of the same velocity-prediction
     /// phase. Since `RB-PHYSICS-001-FR-057`, also calls
     /// `drive::clamp_angular_speed` right after `integrate_velocities`, so
@@ -2552,73 +2552,9 @@ mod tests {
     }
 
     #[test]
-    fn a_second_jump_press_cancels_a_dodges_spin_in_a_live_world() {
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
-        car.restitution = 0.0;
-        let ground = StaticPlane {
-            restitution: 0.0,
-            ..flat_ground()
-        };
-        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
-        world.gravity = Vec3::ZERO; // isolate the jump/dodge/flip-cancel from falling back down
-        let dt = 1.0 / 120.0;
-
-        // Ground jump, then leave the ground before dodging.
-        world.set_car_input(
-            0,
-            rb_domain::ControllerInput {
-                jump: true,
-                ..Default::default()
-            },
-        );
-        world.step(dt);
-        world.set_car_input(0, rb_domain::ControllerInput::default());
-        for _ in 0..12 {
-            world.step(dt);
-        }
-
-        // Dodge.
-        world.set_car_input(
-            0,
-            rb_domain::ControllerInput {
-                jump: true,
-                pitch: Some(-1.0),
-                ..Default::default()
-            },
-        );
-        world.step(dt);
-        assert!(
-            world.cars[0].angular_velocity.length() > 0.0,
-            "expected the dodge to leave the car spinning, got {:?}",
-            world.cars[0].angular_velocity
-        );
-
-        // Release, then press again — flip-cancel.
-        world.set_car_input(0, rb_domain::ControllerInput::default());
-        world.step(dt);
-        world.set_car_input(
-            0,
-            rb_domain::ControllerInput {
-                jump: true,
-                ..Default::default()
-            },
-        );
-        world.step(dt);
-
-        assert_eq!(
-            world.cars[0].angular_velocity,
-            Vec3::ZERO,
-            "expected the second jump press to cancel the dodge's spin outright, got {:?}",
-            world.cars[0].angular_velocity
-        );
-    }
-
-    #[test]
-    fn landing_and_a_new_double_jump_clears_a_stale_dodge_flip_flag_in_a_live_world() {
-        // Regression guard: the real end-to-end proof that a dodge's
-        // cancelable-flip flag doesn't leak past landing and a later,
-        // unrelated plain double jump into a spurious flip-cancel.
+    fn landing_clears_a_dodges_flip_before_a_later_double_jump_in_a_live_world() {
+        // Regression guard: a dodge's flip state doesn't leak past landing
+        // into a later, unrelated plain double jump.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
         let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
         car.restitution = 0.0;
@@ -2658,10 +2594,8 @@ mod tests {
         // press), then land: zero out the spin and velocity by hand and
         // put the car back at its resting height, as if it had settled
         // flat — this test only cares about the *later* double jump, not
-        // about actually simulating the fall back down. dodge_flip_active
-        // is deliberately left stale (`true`) here: landing alone doesn't
-        // clear it — see the module doc comment — only a later
-        // double-jump-or-dodge press does.
+        // about actually simulating the fall back down. Landing clears the
+        // flip (`DriveState::flip`, RB-PHYSICS-001-FR-083).
         world.set_car_input(0, rb_domain::ControllerInput::default());
         world.step(dt);
         world.cars[0].angular_velocity = Vec3::ZERO;
@@ -2693,7 +2627,7 @@ mod tests {
         world.step(dt);
         let angular_velocity_after_plain_double_jump = world.cars[0].angular_velocity;
 
-        // Release, then press again — must NOT fire a spurious flip-cancel.
+        // Release, then press again: no flip is left to change the spin.
         world.set_car_input(0, rb_domain::ControllerInput::default());
         world.step(dt);
         world.set_car_input(
@@ -2708,60 +2642,12 @@ mod tests {
         // A tolerance rather than exact equality: the landing
         // auto-orientation assist (RB-PHYSICS-001-FR-018) now applies a
         // tiny continuous corrective torque on the neutral release step in
-        // between, which a real spurious flip-cancel (zeroing the whole
-        // angular velocity) would dwarf.
+        // between, which a leftover flip torque would dwarf.
         assert!(
             (world.cars[0].angular_velocity - angular_velocity_after_plain_double_jump).length()
                 < 0.01,
-            "expected no spurious flip-cancel after an unrelated plain double jump, before \
+            "expected no leftover flip spin after an unrelated plain double jump, before \
              release/re-press={angular_velocity_after_plain_double_jump:?}, after={:?}",
-            world.cars[0].angular_velocity
-        );
-    }
-
-    #[test]
-    fn a_wall_jump_dodges_spin_can_be_flip_cancelled_in_a_live_world() {
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(-1000.0, 0.0, 1000.0));
-        let wall = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 100.0);
-        let car = some_car(Vec3::new(160.0, 0.0, 1000.0));
-        let mut world = PhysicsWorld::new(ball, flat_ground())
-            .with_car(car)
-            .with_wall(wall);
-        world.gravity = Vec3::ZERO;
-        let dt = 1.0 / 120.0;
-
-        world.set_car_input(
-            0,
-            rb_domain::ControllerInput {
-                jump: true,
-                pitch: Some(-1.0),
-                ..Default::default()
-            },
-        );
-        world.step(dt);
-        assert!(
-            world.cars[0].angular_velocity.length() > 0.0,
-            "expected the wall-jump dodge to leave the car spinning, got {:?}",
-            world.cars[0].angular_velocity
-        );
-
-        // Release, then move off the wall and press again — flip-cancel.
-        world.set_car_input(0, rb_domain::ControllerInput::default());
-        world.cars[0].position = Vec3::new(5000.0, 0.0, 1000.0);
-        world.step(dt);
-        world.set_car_input(
-            0,
-            rb_domain::ControllerInput {
-                jump: true,
-                ..Default::default()
-            },
-        );
-        world.step(dt);
-
-        assert_eq!(
-            world.cars[0].angular_velocity,
-            Vec3::ZERO,
-            "expected the second jump press to cancel the wall-jump dodge's spin outright, got {:?}",
             world.cars[0].angular_velocity
         );
     }

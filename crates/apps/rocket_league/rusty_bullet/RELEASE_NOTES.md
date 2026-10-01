@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Flips spin, stall and cancel like Rocket League's
+**2026-10-01** · `RB-PHYSICS-001-FR-083` · ADR-0014
+
+- A dodge's flip is now RocketSim's: a torque over 0.65 s (starting the
+  tick after the press), air control off meanwhile, pitch locked to
+  0.95 s, the fall damped from 0.15 s (the recorded vz stall at
+  about -15 uu/s), and cancelled by holding pitch against the flip. The
+  old instant spin and the jump-press-again cancel are gone. 421 tests.
+
 ## Dodges go the way the stick points
 **2026-10-01** · `RB-PHYSICS-001-FR-082` · ADR-0013
 

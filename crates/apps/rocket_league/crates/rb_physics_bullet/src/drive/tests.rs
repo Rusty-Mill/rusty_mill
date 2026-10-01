@@ -98,7 +98,7 @@ fn step_with_input_and_hold(
     jump_hold_time_remaining: &mut f32,
     dt: f32,
 ) {
-    let mut dodge_flip_active = false;
+    let mut flip = None;
     step_with_input_and_dodge_flip(
         car,
         input,
@@ -108,7 +108,7 @@ fn step_with_input_and_hold(
         jump_held,
         double_jump_available,
         jump_hold_time_remaining,
-        &mut dodge_flip_active,
+        &mut flip,
         dt,
     );
 }
@@ -123,7 +123,7 @@ fn step_with_input_and_dodge_flip(
     jump_held: &mut bool,
     double_jump_available: &mut bool,
     jump_hold_time_remaining: &mut f32,
-    dodge_flip_active: &mut bool,
+    flip: &mut Option<FlipState>,
     dt: f32,
 ) {
     // The helper chain above threads each field separately so older tests
@@ -134,7 +134,7 @@ fn step_with_input_and_dodge_flip(
         jump_held: *jump_held,
         double_jump_available: *double_jump_available,
         jump_hold_time_remaining: *jump_hold_time_remaining,
-        dodge_flip_active: *dodge_flip_active,
+        flip: *flip,
         handbrake_amount: 0.0,
     };
     car.clear_forces();
@@ -143,7 +143,7 @@ fn step_with_input_and_dodge_flip(
     *jump_held = state.jump_held;
     *double_jump_available = state.double_jump_available;
     *jump_hold_time_remaining = state.jump_hold_time_remaining;
-    *dodge_flip_active = state.dodge_flip_active;
+    *flip = state.flip;
     integrate::integrate_velocities(car, dt);
     clamp_angular_speed(car);
 }
@@ -523,6 +523,20 @@ fn boost_still_drains_at_max_speed_even_though_it_stops_accelerating() {
 }
 
 const TICK: f32 = 1.0 / 120.0;
+
+/// Angular velocity after a dodge press tick and one more airborne tick at
+/// 120 Hz with the same stick: the flip torque starts on the tick after
+/// the press, as in RocketSim.
+fn flip_spin_after_one_tick(input: &ControllerInput) -> Vec3 {
+    let mut c = car();
+    let mut state = DriveState::new();
+    for _ in 0..2 {
+        c.clear_forces();
+        apply_driven_forces(&mut c, input, false, None, &mut state, TICK);
+        integrate::integrate_velocities(&mut c, TICK);
+    }
+    c.angular_velocity
+}
 
 /// One grounded `apply_ground_control` tick on a car facing +X (right is
 /// +Y), with `throttle` as the effective throttle.
@@ -1015,14 +1029,11 @@ fn dodge_gives_forward_velocity_and_spin_when_pitched_in_the_air() {
         "expected roughly DODGE_SPEED forward velocity, got {}",
         c.linear_velocity.x
     );
-    // A small additional contribution from air control's own
-    // continuous pitch torque (applied unconditionally, same as
-    // ever) is expected and tolerated here.
-    assert!(
-        (c.angular_velocity.y - DODGE_ANGULAR_SPEED).abs() < 1.0,
-        "expected roughly DODGE_ANGULAR_SPEED spin about the right axis, got {}",
-        c.angular_velocity.y
-    );
+    // The flip spins the car from the next tick: nose down (RB-PHYSICS-001-FR-083).
+    // Air control still acts on the press tick, adding a little.
+    let spin = flip_spin_after_one_tick(&input);
+    let flip_part = FLIP_TORQUE_FORWARD / 120.0;
+    assert!((spin.y - flip_part).abs() < 0.25, "pitch spin {}", spin.y);
 }
 
 #[test]
@@ -1050,13 +1061,12 @@ fn dodge_gives_lateral_velocity_and_spin_when_rolled_in_the_air() {
         "expected roughly DODGE_SPEED lateral velocity, got {}",
         c.linear_velocity.y
     );
-    // A dodge toward +right rolls the right side down: negative spin about
-    // forward (RocketSim's `-dodgeDir.y`, RB-PHYSICS-001-FR-082).
-    assert!(
-        (c.angular_velocity.x + DODGE_ANGULAR_SPEED).abs() < 1.0,
-        "expected roughly -DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
-        c.angular_velocity.x
-    );
+    // A dodge toward +right rolls the right side down from the next tick:
+    // negative spin about forward (RocketSim's `-dodgeDir.y`).
+    // Air control still acts on the press tick, adding a little.
+    let spin = flip_spin_after_one_tick(&input);
+    let flip_part = -FLIP_TORQUE_SIDE / 120.0;
+    assert!((spin.x - flip_part).abs() < 0.25, "roll spin {}", spin.x);
 }
 
 #[test]
@@ -1235,13 +1245,12 @@ fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
         "expected roughly DODGE_SPEED lateral velocity from yaw alone, got {}",
         c.linear_velocity.y
     );
-    // A dodge toward +right rolls the right side down: negative spin about
-    // forward (RocketSim's `-dodgeDir.y`, RB-PHYSICS-001-FR-082).
-    assert!(
-        (c.angular_velocity.x + DODGE_ANGULAR_SPEED).abs() < 1.0,
-        "expected roughly -DODGE_ANGULAR_SPEED spin about the forward axis, got {}",
-        c.angular_velocity.x
-    );
+    // A dodge toward +right rolls the right side down from the next tick:
+    // negative spin about forward (RocketSim's `-dodgeDir.y`).
+    // Air control still acts on the press tick, adding a little.
+    let spin = flip_spin_after_one_tick(&input);
+    let flip_part = -FLIP_TORQUE_SIDE / 120.0;
+    assert!((spin.x - flip_part).abs() < 0.25, "roll spin {}", spin.x);
 }
 
 #[test]
@@ -1609,73 +1618,6 @@ fn a_wall_jump_dodge_consumes_the_double_jump_unlike_a_plain_wall_jump() {
 }
 
 #[test]
-fn a_wall_jump_dodges_spin_can_be_flip_cancelled() {
-    let dt = 1.0 / 60.0;
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    let mut jump_held = false;
-    let mut double_jump_available = true;
-    let mut hold_remaining = 0.0;
-    let mut dodge_flip_active = false;
-
-    let dodge_input = ControllerInput {
-        jump: true,
-        pitch: Some(-1.0),
-        ..Default::default()
-    };
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &dodge_input,
-        false,
-        Some(Vec3::new(1.0, 0.0, 0.0)),
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    assert!(
-        dodge_flip_active,
-        "expected the wall-jump dodge to set the flag"
-    );
-
-    // Release, then press again while no longer touching a wall —
-    // flip-cancel.
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &full_jump(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-
-    assert_eq!(
-        c.angular_velocity,
-        Vec3::ZERO,
-        "expected the second jump press to cancel the wall-jump dodge's spin outright"
-    );
-    assert!(!dodge_flip_active);
-}
-
-#[test]
 fn below_deadzone_stick_input_at_a_wall_still_gives_a_plain_wall_jump() {
     let mut c = car();
     let mut boost = MAX_BOOST;
@@ -1703,8 +1645,8 @@ fn below_deadzone_stick_input_at_a_wall_still_gives_a_plain_wall_jump() {
     );
     // A small additional contribution from air control's own
     // continuous pitch torque (applied unconditionally while airborne,
-    // same as ever) is expected and tolerated here — only the flip's
-    // own DODGE_ANGULAR_SPEED-scale kick must be absent.
+    // same as ever) is expected and tolerated here — only a flip's own
+    // spin must be absent.
     assert!(
         c.angular_velocity.length() < 1.0,
         "expected no dodge-scale flip from a below-deadzone stick deflection, got {:?}",
@@ -2408,340 +2350,6 @@ fn double_jump_after_a_held_ground_jump_is_not_boosted_by_the_hold_window() {
 }
 
 #[test]
-fn a_second_jump_press_cancels_a_dodges_spin() {
-    let dt = 1.0 / 60.0;
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    let mut jump_held = false;
-    let mut double_jump_available = true;
-    let mut hold_remaining = 0.0;
-    let mut dodge_flip_active = false;
-
-    let dodge_input = ControllerInput {
-        jump: true,
-        pitch: Some(-1.0),
-        ..Default::default()
-    };
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &dodge_input,
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    assert!(
-        c.angular_velocity.length() > 0.0,
-        "expected the dodge to leave the car spinning, got {:?}",
-        c.angular_velocity
-    );
-    assert!(
-        dodge_flip_active,
-        "expected the dodge to leave a cancelable flip active"
-    );
-
-    // Release, then press again — no directional intent needed for a
-    // flip-cancel, unlike a fresh dodge.
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &full_jump(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-
-    assert_eq!(
-        c.angular_velocity,
-        Vec3::ZERO,
-        "expected the second jump press to cancel the dodge's spin outright"
-    );
-    assert!(
-        !dodge_flip_active,
-        "expected flip-cancel to spend the cancelable-flip flag"
-    );
-}
-
-#[test]
-fn flip_cancel_does_not_touch_linear_velocity_or_the_double_jump_resource() {
-    let dt = 1.0 / 60.0;
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    let mut jump_held = false;
-    let mut double_jump_available = true;
-    let mut hold_remaining = 0.0;
-    let mut dodge_flip_active = false;
-
-    let dodge_input = ControllerInput {
-        jump: true,
-        pitch: Some(-1.0),
-        ..Default::default()
-    };
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &dodge_input,
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    let linear_velocity_after_dodge = c.linear_velocity;
-    assert!(
-        !double_jump_available,
-        "expected the dodge to have already spent the double jump"
-    );
-
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &full_jump(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-
-    assert_eq!(
-        c.linear_velocity, linear_velocity_after_dodge,
-        "expected flip-cancel to leave the dodge's own translation untouched"
-    );
-    assert!(
-        !double_jump_available,
-        "expected flip-cancel to neither consume nor restore the double jump"
-    );
-}
-
-#[test]
-fn a_plain_double_jump_clears_a_stale_dodge_flip_flag_from_an_earlier_dodge() {
-    // Regression guard: a dodge sets dodge_flip_active, and if nothing
-    // ever explicitly cleared it, a much later, completely unrelated
-    // plain double jump (after landing from the dodge and taking off
-    // again) would incorrectly let a further press fire a flip-cancel
-    // that stops nothing real.
-    let dt = 1.0 / 60.0;
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    let mut jump_held = false;
-    let mut double_jump_available = true;
-    let mut hold_remaining = 0.0;
-    let mut dodge_flip_active = false;
-
-    let dodge_input = ControllerInput {
-        jump: true,
-        pitch: Some(-1.0),
-        ..Default::default()
-    };
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &dodge_input,
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    assert!(dodge_flip_active, "expected the dodge to set the flag");
-
-    // Land (restores double_jump_available), then take off again and
-    // fire a plain double jump (no stick input) — this must clear the
-    // stale flag from the earlier dodge.
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &ControllerInput::default(),
-        true,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &full_jump(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    assert!(
-        !dodge_flip_active,
-        "expected a plain double jump to clear any stale dodge_flip_active"
-    );
-    let angular_velocity_after_plain_double_jump = c.angular_velocity;
-
-    // Release, then press again — must NOT fire a flip-cancel, since
-    // there's no real flip active anymore.
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &full_jump(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    assert_eq!(
-        c.angular_velocity, angular_velocity_after_plain_double_jump,
-        "expected no spurious flip-cancel after an unrelated plain double jump"
-    );
-}
-
-#[test]
-fn wall_jump_still_takes_priority_over_flip_cancel_when_touching_a_wall() {
-    let dt = 1.0 / 60.0;
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    let mut jump_held = false;
-    let mut double_jump_available = true;
-    let mut hold_remaining = 0.0;
-    let mut dodge_flip_active = false;
-
-    let dodge_input = ControllerInput {
-        jump: true,
-        pitch: Some(-1.0),
-        ..Default::default()
-    };
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &dodge_input,
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    assert!(dodge_flip_active);
-
-    // Release, then press again while touching a wall — must fire a
-    // wall jump, not a flip-cancel.
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &ControllerInput::default(),
-        false,
-        None,
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-    step_with_input_and_dodge_flip(
-        &mut c,
-        &full_jump(),
-        false,
-        Some(Vec3::new(1.0, 0.0, 0.0)),
-        &mut boost,
-        &mut jump_held,
-        &mut double_jump_available,
-        &mut hold_remaining,
-        &mut dodge_flip_active,
-        dt,
-    );
-
-    assert!(
-        c.linear_velocity.x > 0.0,
-        "expected the wall jump's outward push-off, got {:?}",
-        c.linear_velocity
-    );
-    assert!(
-        c.angular_velocity.length() > 0.0,
-        "expected the wall jump to leave the dodge's spin untouched (not flip-canceled), \
-         got {:?}",
-        c.angular_velocity
-    );
-    assert!(
-        dodge_flip_active,
-        "expected the wall jump to leave the cancelable flip flag untouched"
-    );
-}
-
-/// A car tilted 90 degrees about its local forward axis — up_axis
-/// becomes (0, -1, 0) instead of world up (0, 0, 1). Drive.rs's test
-/// helpers only call `integrate::integrate_velocities`, never
-/// `integrate::integrate_transform`, so a car's `orientation` never
-/// actually changes step to step here — the only way to exercise the
-/// landing-assistance torque's dependence on orientation in isolation
-/// is to set it directly like this.
-fn tilted_car() -> RigidBody {
-    let mut c = car();
-    c.orientation = rb_domain::Quat::new(
-        std::f32::consts::FRAC_1_SQRT_2,
-        0.0,
-        0.0,
-        std::f32::consts::FRAC_1_SQRT_2,
-    );
-    c.update_inertia_tensor();
-    c
-}
-
-#[test]
 fn a_tilted_airborne_car_gets_a_corrective_torque_from_landing_assistance() {
     let mut c = tilted_car();
     let mut boost = MAX_BOOST;
@@ -2916,7 +2524,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
-            dodge_flip_active: false,
+            flip: None,
             handbrake_amount: 0.0,
         }
     );
@@ -3087,4 +2695,147 @@ fn a_tilted_cars_dodge_stays_horizontal() {
         "vz {}",
         c.linear_velocity.z
     );
+}
+
+/// A car tilted 90 degrees about its local forward axis — up_axis
+/// becomes (0, -1, 0) instead of world up (0, 0, 1). Drive.rs's test
+/// helpers only call `integrate::integrate_velocities`, never
+/// `integrate::integrate_transform`, so a car's `orientation` never
+/// actually changes step to step here — the only way to exercise the
+/// landing-assistance torque's dependence on orientation in isolation
+/// is to set it directly like this.
+fn tilted_car() -> RigidBody {
+    let mut c = car();
+    c.orientation = rb_domain::Quat::new(
+        std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_1_SQRT_2,
+    );
+    c.update_inertia_tensor();
+    c
+}
+
+fn flip_at(time: f32, direction: (f32, f32)) -> Option<FlipState> {
+    Some(FlipState { time, direction })
+}
+
+#[test]
+fn a_flip_disables_air_control_and_spins_the_car_while_its_torque_lasts() {
+    let mut c = car();
+    let gate = apply_flip_torque(
+        &mut c,
+        &ControllerInput::default(),
+        flip_at(0.1, (1.0, 0.0)),
+    );
+    assert!(!gate.enabled, "air control during a flip");
+    assert_close(
+        c.angular_velocity.y,
+        FLIP_TORQUE_FORWARD / 120.0,
+        "pitch spin",
+    );
+}
+
+#[test]
+fn a_flips_torque_ends_at_flip_torque_time_and_pitch_unlocks_after_the_extra_time() {
+    let mut c = car();
+    let locked = apply_flip_torque(
+        &mut c,
+        &ControllerInput::default(),
+        flip_at(0.7, (1.0, 0.0)),
+    );
+    assert_eq!(c.angular_velocity, Vec3::ZERO, "no torque after 0.65 s");
+    assert!(locked.enabled);
+    assert_eq!(locked.pitch_scale, 0.0, "pitch locked until 0.95 s");
+    let open = apply_flip_torque(
+        &mut c,
+        &ControllerInput::default(),
+        flip_at(1.0, (1.0, 0.0)),
+    );
+    assert_eq!(open.pitch_scale, 1.0);
+}
+
+#[test]
+fn holding_pitch_against_a_flip_cancels_its_pitch_spin_and_frees_air_control() {
+    // A forward flip (forward component +1) is cancelled by pitch +1
+    // (stick back), RocketSim's flip cancel.
+    let mut c = car();
+    let input = ControllerInput {
+        pitch: Some(1.0),
+        ..Default::default()
+    };
+    let gate = apply_flip_torque(&mut c, &input, flip_at(0.1, (1.0, 0.0)));
+    assert!(gate.enabled, "cancel re-enables air control");
+    assert_eq!(
+        gate.pitch_scale, 0.0,
+        "but pitch stays locked while flipping"
+    );
+    assert_eq!(
+        c.angular_velocity.y, 0.0,
+        "full cancel removes the pitch spin"
+    );
+}
+
+#[test]
+fn a_stall_applies_no_flip_torque() {
+    let mut c = car();
+    let gate = apply_flip_torque(
+        &mut c,
+        &ControllerInput::default(),
+        flip_at(0.1, (0.0, 0.0)),
+    );
+    assert!(gate.enabled);
+    assert_eq!(c.angular_velocity, Vec3::ZERO);
+}
+
+#[test]
+fn a_flip_damps_vertical_speed_inside_its_window_only() {
+    let damp = 1.0 - FLIP_Z_DAMP_120;
+    // Falling at 0.2 s: damped.
+    let mut c = car();
+    c.linear_velocity.z = -100.0;
+    let mut flip = flip_at(0.2, (1.0, 0.0));
+    advance_flip(&mut c, &mut flip, TICK);
+    assert_close(c.linear_velocity.z, -100.0 * damp, "falling, in window");
+    // Rising at 0.18 s (before FLIP_Z_DAMP_END): damped too.
+    c.linear_velocity.z = 100.0;
+    let mut flip = flip_at(0.18, (1.0, 0.0));
+    advance_flip(&mut c, &mut flip, TICK);
+    assert_close(c.linear_velocity.z, 100.0 * damp, "rising, early window");
+    // Rising at 0.3 s: untouched. Before 0.15 s: untouched.
+    for start in [0.3, 0.05] {
+        c.linear_velocity.z = 100.0;
+        let mut flip = flip_at(start, (1.0, 0.0));
+        advance_flip(&mut c, &mut flip, TICK);
+        assert_eq!(c.linear_velocity.z, 100.0, "start {start}");
+    }
+}
+
+#[test]
+fn a_dodge_starts_a_flip_and_landing_clears_it() {
+    let mut c = car();
+    let mut state = DriveState::new();
+    let dodge = ControllerInput {
+        jump: true,
+        pitch: Some(-1.0),
+        ..Default::default()
+    };
+    apply_driven_forces(&mut c, &dodge, false, None, &mut state, TICK);
+    assert_eq!(
+        state.flip,
+        Some(FlipState {
+            time: TICK,
+            direction: (1.0, 0.0),
+        }),
+        "a dodge starts a flip"
+    );
+    apply_driven_forces(
+        &mut c,
+        &ControllerInput::default(),
+        true,
+        None,
+        &mut state,
+        TICK,
+    );
+    assert_eq!(state.flip, None);
 }

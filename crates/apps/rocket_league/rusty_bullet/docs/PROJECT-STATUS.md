@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#174](https://github.com/baileyrd/rusty_bullet/pull/174) —
+  `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
+  (ADR-0013); real-capture position error at 5.0 s 1,590 to 79 uu.
 - [#173](https://github.com/baileyrd/rusty_bullet/pull/173) —
   `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012); real-capture
   velocity error at 4.0 s ~250 to 9.9 uu/s.
@@ -61,9 +64,9 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
-  (ADR-0013): verified on the real capture (position error at 5.0 s 1,590
-  to 79 uu); ground-plane push fix awaiting a re-trace.
+- `RB-PHYSICS-001-FR-083`, the flip as RocketSim has it (ADR-0014):
+  verified on the real capture (flip vz stall -15.5 uu/s, as recorded); in
+  review.
 
 ## Blocked
 
@@ -90,10 +93,11 @@ version: `a245d35`).
 
 ## Next
 
-1. Flip vertical damping (`FLIP_Z_DAMP_*`: recorded vz falls 211 to
-   ~-15 uu/s from ~0.15 s after the 4.317 s dodge and stalls there) and
-   the continuous flip torque (FR-069; orientation error grows to ~1.6 rad
-   through the flip). Known small
+1. Air-control magnitudes and damping (`CAR_AIR_CONTROL_TORQUE`,
+   `CAR_AIR_CONTROL_DAMPING`, `CAR_TORQUE_SCALE`): the port's air torque
+   is still a placeholder, and orientation error grows 0.15 to ~1.4 rad
+   through 4.3-4.97 s, most likely from pre-flip roll/pitch spin carried
+   through the flip. Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -107,7 +111,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (422 tests: 27 `rb_domain`, 358
+- `cargo test --workspace`: pass (421 tests: 27 `rb_domain`, 357
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -156,6 +160,13 @@ version: `a245d35`).
   1,902). With the zero-steer yaw fix: velocity error at 4.10 s 22 uu/s
   (was 96), at 4.30 s 38 uu/s (was 132); position error at most 6 uu
   through 3.7-4.3 s.
+- `rb-verify --self-trace test2.jsonl 4.3 5.0` after
+  `RB-PHYSICS-001-FR-083` (owner's machine, 2026-10-01): flip vz stall
+  -15.5 uu/s from 4.55 s, matching the recording (was falling to -211);
+  vz at 5.0 s -23 (recorded -4, was -211); position error at 5.0 s 79 uu;
+  orientation error at 5.0 s 1.41 rad (was 1.63). Damping starts one tick
+  early, likely because the trace's per-pair dt differs from RocketSim's
+  fixed 1/120.
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate
