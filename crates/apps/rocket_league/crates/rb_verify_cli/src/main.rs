@@ -71,6 +71,11 @@ fn fmt_vec(v: &Vec3) -> String {
     format!("({:>8.1},{:>8.1},{:>7.1})", v.x, v.y, v.z)
 }
 
+/// Angular velocity (rad/s), world frame.
+fn fmt_spin(v: &Vec3) -> String {
+    format!("({:>5.2},{:>5.2},{:>5.2})", v.x, v.y, v.z)
+}
+
 /// Compact input: throttle, steer, pitch/yaw/roll (`-` when unrecovered),
 /// then J/B/H for jump/boost/handbrake held (`.` when not).
 fn fmt_input(input: Option<ControllerInput>) -> String {
@@ -94,7 +99,7 @@ fn fmt_input(input: Option<ControllerInput>) -> String {
 fn print_trace(rows: &[TraceRow]) {
     for row in rows {
         println!(
-            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2}",
+            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2} | spin rec {rs} sim {cs} err {es:.2}",
             t = row.t_secs,
             id = row.recorded.player_id,
             input = fmt_input(row.input),
@@ -105,6 +110,9 @@ fn print_trace(rows: &[TraceRow]) {
             ep = row.position_error(),
             ev = row.velocity_error(),
             er = row.rotation_error(),
+            rs = fmt_spin(&row.recorded.angular_velocity),
+            cs = fmt_spin(&row.candidate.angular_velocity),
+            es = row.spin_error(),
         );
     }
 }

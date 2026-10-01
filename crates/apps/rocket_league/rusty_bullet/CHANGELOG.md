@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace` prints recorded and simulated angular velocity
+  and a spin error per row (`TraceRow::spin_error`, `RB-VERIFY-003` 0.12.0).
 - ADR-0015: RocketSim's air control and damping; no airborne auto-upright.
 - ADR-0014: a dodge's flip as a timed torque with vertical damping and
   pitch-stick cancel.

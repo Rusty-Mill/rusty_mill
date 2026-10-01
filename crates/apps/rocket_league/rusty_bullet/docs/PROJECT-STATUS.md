@@ -67,8 +67,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015): re-traced
-  on the real capture; in review.
+- `RB-VERIFY-003` 0.12.0: `--self-trace` spin columns, awaiting the
+  owner's 4.1-4.6 s trace to locate the flip orientation error.
 
 ## Blocked
 

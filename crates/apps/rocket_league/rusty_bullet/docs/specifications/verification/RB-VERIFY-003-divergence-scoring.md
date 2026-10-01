@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.11.0
+- Version: 0.12.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -136,7 +136,10 @@ them.
     the time since the seed frame (the same axis `--self-growth` prints),
     the recorded input, and the recorded and candidate `CarState`, with
     position/velocity/rotation error helpers. Exposed as `rb-verify
-    --self-trace <capture-file> <from-secs> <to-secs>`.
+    --self-trace <capture-file> <from-secs> <to-secs>`. Since 0.12.0 each
+    row also prints recorded and simulated angular velocity (world frame,
+    rad/s) and `TraceRow::spin_error`, to locate where spin diverges
+    (`RB-PHYSICS-001-FR-084`'s open flip orientation error).
   - **Non-goals**: no on-ground flag (a `PhysicsFrame` carries none;
     z height is printed instead), no ball rows, no scoring.
 
@@ -357,6 +360,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.12.0 (2026-10-01): `--self-trace` prints recorded and simulated
+  angular velocity and `TraceRow::spin_error`.
 - 0.11.0 (2026-10-01): `RB-VERIFY-003-FR-005` implemented — a per-frame
   trace (`rb_verify_cli::trace_capture`, `rb-verify --self-trace`) of a
   capture against its candidate, printing each car's recorded input and

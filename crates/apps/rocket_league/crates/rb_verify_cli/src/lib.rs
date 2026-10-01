@@ -183,6 +183,13 @@ impl TraceRow {
     pub fn rotation_error(&self) -> f32 {
         self.recorded.rotation.angle_to(&self.candidate.rotation)
     }
+
+    /// Distance (rad/s) between recorded and simulated angular velocities.
+    pub fn spin_error(&self) -> f32 {
+        self.recorded
+            .angular_velocity
+            .distance(&self.candidate.angular_velocity)
+    }
 }
 
 /// A per-frame trace of a capture against the candidate simulated from it
@@ -372,6 +379,7 @@ mod tests {
         // The candidate world is seeded from this exact recorded frame.
         assert_eq!(first.position_error(), 0.0);
         assert_eq!(first.velocity_error(), 0.0);
+        assert_eq!(first.spin_error(), 0.0);
         assert!(first.input.is_some());
     }
 
