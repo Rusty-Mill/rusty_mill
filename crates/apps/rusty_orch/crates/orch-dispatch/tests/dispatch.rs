@@ -2,12 +2,12 @@
 
 use std::num::NonZeroU32;
 
-use orch_core::board::{Author, Board, Confidence, EntryKind, NewEntry, Verdict};
+use orch_core::board::{Author, Board, BoardError, Confidence, EntryKind, NewEntry, Verdict};
 use orch_core::goal::{Goal, GoalDraft, StopRule};
 use orch_core::task::{Agent, Plan, PlanError, Role, Status, TaskSpec, TaskState};
 use orch_core::{GoalId, TaskId, Text};
 use orch_dispatch::fake::{FakeAgent, Reply};
-use orch_dispatch::{Ceiling, DispatchError, Dispatcher, Outcome, Routing, RoutingConfig};
+use orch_dispatch::{Ceiling, DispatchError, Dispatcher, Ledger, Outcome, Routing, RoutingConfig};
 
 fn text(s: &str) -> Text {
     Text::new(s).expect("non-blank")
@@ -94,8 +94,11 @@ fn pipeline_finishes_with_reviewer_distinct_from_author() {
         routing(Agent::Codex, vec![Agent::Gemini, Agent::Codex]),
         fake,
     );
+    let mut ledger = Ledger::new();
 
-    let outcome = d.run(&goal(10), &mut plan, &mut board).expect("runs");
+    let outcome = d
+        .run(&goal(10), &mut plan, &mut board, &mut ledger)
+        .expect("runs");
 
     assert_eq!(outcome, Outcome::Finished);
     assert!(plan.is_finished());
@@ -110,7 +113,7 @@ fn pipeline_finishes_with_reviewer_distinct_from_author() {
             (Agent::Gemini, review)
         ]
     );
-    assert_eq!(d.calls(), 3);
+    assert_eq!(ledger.calls(), 3);
     assert_eq!(board.entries().len(), 3);
     assert!(board
         .entries()
@@ -135,8 +138,10 @@ fn review_falls_back_when_primary_reviewer_is_the_author() {
         routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
         fake,
     );
+    let mut ledger = Ledger::new();
 
-    d.run(&goal(10), &mut plan, &mut board).expect("runs");
+    d.run(&goal(10), &mut plan, &mut board, &mut ledger)
+        .expect("runs");
 
     assert_eq!(agent_of(&plan, implement), Agent::Codex);
     assert_eq!(agent_of(&plan, review), Agent::Gemini);
@@ -171,9 +176,12 @@ fn question_blocks_and_answer_resumes() {
         routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
         fake,
     );
+    let mut ledger = Ledger::new();
     let goal = goal(10);
 
-    let first = d.run(&goal, &mut plan, &mut board).expect("blocks");
+    let first = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect("blocks");
     assert_eq!(first, Outcome::Blocked(vec![task]));
     assert_eq!(
         plan.get(task).expect("task").state().status(),
@@ -183,10 +191,11 @@ fn question_blocks_and_answer_resumes() {
 
     // Running again without an answer makes no call and stays blocked.
     assert_eq!(
-        d.run(&goal, &mut plan, &mut board).expect("still blocked"),
+        d.run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect("still blocked"),
         Outcome::Blocked(vec![task])
     );
-    assert_eq!(d.calls(), 1);
+    assert_eq!(ledger.calls(), 1);
 
     board
         .append(NewEntry {
@@ -199,9 +208,11 @@ fn question_blocks_and_answer_resumes() {
         })
         .expect("answer");
 
-    let second = d.run(&goal, &mut plan, &mut board).expect("finishes");
+    let second = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect("finishes");
     assert_eq!(second, Outcome::Finished);
-    assert_eq!(d.calls(), 2);
+    assert_eq!(ledger.calls(), 2);
     assert_eq!(
         d.runner().calls(),
         &[(Agent::Claude, task), (Agent::Claude, task)]
@@ -217,8 +228,11 @@ fn goal_ceiling_stops_the_loop_with_typed_error() {
         routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
         fake,
     );
+    let mut ledger = Ledger::new();
 
-    let err = d.run(&goal(1), &mut plan, &mut board).expect_err("ceiling");
+    let err = d
+        .run(&goal(1), &mut plan, &mut board, &mut ledger)
+        .expect_err("ceiling");
 
     assert_eq!(
         err,
@@ -228,7 +242,7 @@ fn goal_ceiling_stops_the_loop_with_typed_error() {
             limit: nz(1),
         }
     );
-    assert_eq!(d.calls(), 1);
+    assert_eq!(ledger.calls(), 1);
     // The refused card was never started.
     assert_eq!(
         plan.get(implement).expect("task").state(),
@@ -249,22 +263,16 @@ fn task_ceiling_stops_the_loop_with_typed_error() {
         routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
         fake,
     );
+    let mut ledger = Ledger::new();
     let goal = goal(10);
 
-    d.run(&goal, &mut plan, &mut board).expect("blocks");
-    let question = board.open_questions()[0].id();
-    board
-        .append(NewEntry {
-            task: Some(task),
-            author: Author::Human,
-            kind: EntryKind::Answer { to: question },
-            body: text("yes"),
-            refs: vec![],
-            supersedes: None,
-        })
-        .expect("answer");
+    d.run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect("blocks");
+    answer(&mut board, task);
 
-    let err = d.run(&goal, &mut plan, &mut board).expect_err("ceiling");
+    let err = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("ceiling");
 
     assert_eq!(
         err,
@@ -274,7 +282,11 @@ fn task_ceiling_stops_the_loop_with_typed_error() {
             limit: nz(1),
         }
     );
-    assert_eq!(d.calls(), 1);
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(
+        plan.get(task).expect("task").state().status(),
+        Status::Failed
+    );
 }
 
 #[test]
@@ -287,9 +299,10 @@ fn zero_entries_surfaces_no_outputs() {
         routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
         fake,
     );
+    let mut ledger = Ledger::new();
 
     let err = d
-        .run(&goal(10), &mut plan, &mut board)
+        .run(&goal(10), &mut plan, &mut board, &mut ledger)
         .expect_err("no outputs");
 
     assert_eq!(err, DispatchError::Plan(PlanError::NoOutputs(task)));
@@ -305,10 +318,11 @@ fn agent_failure_is_typed_and_leaves_the_card_running() {
         routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
         fake,
     );
+    let mut ledger = Ledger::new();
     let goal = goal(10);
 
     let err = d
-        .run(&goal, &mut plan, &mut board)
+        .run(&goal, &mut plan, &mut board, &mut ledger)
         .expect_err("agent error");
     assert!(matches!(err, DispatchError::Agent { task: t, agent: Agent::Claude, .. } if t == task));
     assert_eq!(
@@ -318,8 +332,150 @@ fn agent_failure_is_typed_and_leaves_the_card_running() {
 
     // A second run retries the card under the same ceilings.
     assert_eq!(
-        d.run(&goal, &mut plan, &mut board).expect("retries"),
+        d.run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect("retries"),
         Outcome::Finished
     );
-    assert_eq!(d.calls(), 2);
+    assert_eq!(ledger.calls(), 2);
+}
+
+fn answer(board: &mut Board, task: TaskId) {
+    let question = board.open_questions()[0].id();
+    board
+        .append(NewEntry {
+            task: Some(task),
+            author: Author::Human,
+            kind: EntryKind::Answer { to: question },
+            body: text("yes"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("answer");
+}
+
+#[test]
+fn invalid_output_leaves_board_unchanged_and_card_running() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 2)).expect("add");
+    let mut board = Board::new(plan.goal());
+    // Second output is an artifact with no refs, which the board rejects.
+    let fake = FakeAgent::new([Reply::Write(vec![finding(), EntryKind::Artifact])]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        fake,
+    );
+    let mut ledger = Ledger::new();
+    let before = board.clone();
+
+    let err = d
+        .run(&goal(10), &mut plan, &mut board, &mut ledger)
+        .expect_err("rejected");
+
+    assert_eq!(err, DispatchError::Board(BoardError::ArtifactWithoutRefs));
+    assert_eq!(board, before);
+    assert_eq!(
+        plan.get(task).expect("task").state().status(),
+        Status::Running
+    );
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(ledger.task_calls(task), 1);
+}
+
+#[test]
+fn fresh_dispatcher_with_same_ledger_still_hits_goal_ceiling() {
+    let (mut plan, research, implement, _) = pipeline();
+    let mut board = Board::new(plan.goal());
+    let goal = goal(1);
+    let mut ledger = Ledger::new();
+
+    let mut first = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        FakeAgent::new([Reply::Write(vec![finding()])]),
+    );
+    let err = first
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("ceiling");
+    assert!(matches!(
+        err,
+        DispatchError::CeilingReached {
+            ceiling: Ceiling::Goal,
+            ..
+        }
+    ));
+    assert_eq!(
+        plan.get(research).expect("task").state().status(),
+        Status::Done
+    );
+    drop(first);
+
+    let mut second = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        FakeAgent::new([Reply::Write(vec![finding()])]),
+    );
+    let err = second
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("ceiling persists");
+
+    assert_eq!(
+        err,
+        DispatchError::CeilingReached {
+            ceiling: Ceiling::Goal,
+            task: implement,
+            limit: nz(1),
+        }
+    );
+    assert!(second.runner().calls().is_empty());
+    assert_eq!(ledger.calls(), 1);
+}
+
+#[test]
+fn repeated_agent_failure_exhausts_retries_and_strands_dependents() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 2)).expect("add");
+    let dependent = plan.add(spec(Role::Implement, vec![task], 2)).expect("add");
+    let mut board = Board::new(plan.goal());
+    let fake = FakeAgent::new([Reply::Fail("boom".into()), Reply::Fail("boom".into())]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        fake,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(10);
+
+    for _ in 0..2 {
+        let err = d
+            .run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect_err("agent error");
+        assert!(matches!(err, DispatchError::Agent { .. }));
+        assert_eq!(
+            plan.get(task).expect("task").state().status(),
+            Status::Running
+        );
+    }
+
+    let err = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("exhausted");
+    assert_eq!(
+        err,
+        DispatchError::CeilingReached {
+            ceiling: Ceiling::Task,
+            task,
+            limit: nz(2),
+        }
+    );
+    match plan.get(task).expect("task").state() {
+        TaskState::Failed { reason, .. } => assert!(reason.as_str().contains("Task ceiling")),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert_eq!(ledger.calls(), 2);
+
+    let err = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("stuck");
+    assert_eq!(err, DispatchError::Stuck);
+    assert_eq!(
+        plan.get(dependent).expect("task").state(),
+        &TaskState::Pending
+    );
 }

@@ -15,7 +15,7 @@ cargo test -p orch-core -p orch-dispatch --all-features
 | Path | What |
 | ---- | ---- |
 | `crates/orch-core` | Pure domain: goal contracts, task cards + `Plan`, blackboard. No I/O, no dependencies. |
-| `crates/orch-dispatch` | Application layer: `AgentRunner` port, validated role → agent routing, sequential metered loop over `Plan`. Depends only on `orch-core`. `FakeAgent` behind the `fake` feature. |
+| `crates/orch-dispatch` | Application layer: `AgentRunner` port, validated role → agent routing, sequential loop over `Plan` metered by a caller-owned `Ledger`. Depends only on `orch-core`. `FakeAgent` behind the `fake` feature. |
 
 ## Architecture
 See [ARCHITECTURE.md](./ARCHITECTURE.md) and [docs/adr/](./docs/adr/).
