@@ -27,10 +27,8 @@ pub(super) const CAR_TORQUE_SCALE: f32 = 2.0 * std::f32::consts::PI / 65_536.0 *
 /// `THROTTLE_AIR_ACCEL = 200 / 3`.
 pub(super) const THROTTLE_AIR_ACCELERATION: f32 = 200.0 / 3.0;
 
-/// Air control for one airborne tick. `pitch_scale` is the flip's pitch lock
-/// (`0` while locked, see `jump::apply_flip_torque`); with `full` false (a
-/// car mid-flip, `RB-PHYSICS-001-FR-093`) only the yaw torque and yaw
-/// damping act.
+/// Air control and air throttle for one airborne tick. `pitch_scale` is the
+/// flip's pitch lock (`0` while locked, see `jump::apply_flip_torque`).
 /// Axes and signs are RocketSim's: pitch about -right (positive raises the
 /// nose), yaw about up, roll about -forward (`RB-PHYSICS-001-FR-082`).
 /// Damping acts even with the stick centered, so a free-spinning car slows
@@ -38,7 +36,6 @@ pub(super) const THROTTLE_AIR_ACCELERATION: f32 = 200.0 / 3.0;
 pub(super) fn apply_air_control(
     car: &mut RigidBody,
     input: &ControllerInput,
-    full: bool,
     pitch_scale: f32,
     dt: f32,
 ) {
@@ -48,17 +45,11 @@ pub(super) fn apply_air_control(
     let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0) * pitch_scale;
     let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);
     let roll = input.roll.unwrap_or(0.0).clamp(-1.0, 1.0);
-    let spin = car.angular_velocity;
-    if !full {
-        let torque = yaw * AIR_CONTROL_TORQUE.y
-            - yaw_axis.dot(&spin) * AIR_CONTROL_DAMPING.y * (1.0 - yaw.abs());
-        car.angular_velocity += yaw_axis * (torque * CAR_TORQUE_SCALE * dt);
-        return;
-    }
 
     let torque = pitch_axis * (pitch * AIR_CONTROL_TORQUE.x)
         + yaw_axis * (yaw * AIR_CONTROL_TORQUE.y)
         + roll_axis * (roll * AIR_CONTROL_TORQUE.z);
+    let spin = car.angular_velocity;
     let damping = pitch_axis
         * (pitch_axis.dot(&spin) * AIR_CONTROL_DAMPING.x * (1.0 - pitch.abs()))
         + yaw_axis * (yaw_axis.dot(&spin) * AIR_CONTROL_DAMPING.y * (1.0 - yaw.abs()))

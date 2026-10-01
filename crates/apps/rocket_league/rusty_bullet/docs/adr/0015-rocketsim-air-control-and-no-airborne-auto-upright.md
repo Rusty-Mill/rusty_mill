@@ -60,19 +60,3 @@ Port it directly:
 - Re-run `rb-verify --self-trace test2.jsonl 4.3 5.0`. Orientation error
   through the flip should fall from ~1.4 rad at 5.0 s. Also re-run
   `--self-growth`.
-
-## Amendment (FR-093): yaw air control during a flip
-
-RocketSim turns air control off entirely while a flip's torque lasts (except
-the pitch cancel). The owner's capture (`--self-trace test2.jsonl 4.9 5.6`
-and the earlier 4.1-5.0 trace) disagrees for yaw: a 2-tick yaw -1 input at
-4.867 s, 0.55 s into the 4.317 s flip, moves the recorded spin from (0.56,
-5.47, 0.11) to (0.76, 5.45, -0.15) and on to (0.71, 5.44, -0.35), while the
-candidate's stays at (0.29, 5.49, 0.19). The resulting ~0.12 rad orientation
-gap tilts the boost from 4.94 s, which is the ~50 uu/s vertical error at
-5.5 s. The roll stick held through the same flip had no visible effect.
-
-Decision: while flipping, the yaw torque and yaw damping act; pitch and roll
-stay locked (`AirControlGate::full` false). Unverified on the capture: the
-recorded spin change is about twice RocketSim's yaw torque, so the
-mechanism may differ. Revisit after the re-trace.

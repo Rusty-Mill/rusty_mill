@@ -8,14 +8,6 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
-## Yaw works mid-flip (experimental)
-**2026-10-01** · `RB-PHYSICS-001-FR-093` · ADR-0015 amendment
-
-- During a flip, yaw stick input and yaw damping now act; pitch and roll
-  stay locked. RocketSim turns all air control off mid-flip, but the
-  owner's capture changes its spin on a 2-tick yaw input 0.55 s into a
-  flip. Awaiting a re-trace to confirm. 437 tests.
-
 ## Wheels let go when the real ones do
 **2026-10-01** · `RB-PHYSICS-001-FR-092` · ADR-0019 amendment
 

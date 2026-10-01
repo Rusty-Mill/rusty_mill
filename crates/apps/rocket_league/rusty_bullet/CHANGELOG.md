@@ -937,9 +937,6 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
-- Yaw air control acts during a flip (`RB-PHYSICS-001-FR-093`, ADR-0015
-  amendment), as the real capture's mid-flip yaw input suggests; pitch and
-  roll stay locked. Pending real-capture confirmation.
 - Wheel rays reach the fully extended wheel and the sticky force acts the
   step after the wheels touch (`RB-PHYSICS-001-FR-092`, ADR-0019
   amendment), matching every tick of the real capture's 4.142 s jump.
