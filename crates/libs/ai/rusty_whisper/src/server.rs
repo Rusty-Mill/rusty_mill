@@ -344,12 +344,19 @@ impl Slots {
     /// A slot, or `None` if all `max` are held.
     pub fn try_acquire(&self) -> Option<SlotGuard<'_>> {
         use std::sync::atomic::Ordering;
-        self.in_use
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < self.max).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| SlotGuard { slots: self })
+        // A compare-and-swap loop rather than `fetch_update`, deprecated in
+        // Rust 1.99 for a `try_update` newer than this workspace's MSRV.
+        let mut n = self.in_use.load(Ordering::Acquire);
+        while n < self.max {
+            match self
+                .in_use
+                .compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Some(SlotGuard { slots: self }),
+                Err(current) => n = current,
+            }
+        }
+        None
     }
 }
 
