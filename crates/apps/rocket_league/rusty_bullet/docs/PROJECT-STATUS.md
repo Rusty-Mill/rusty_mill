@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#177](https://github.com/baileyrd/rusty_bullet/pull/177) — spin in
+  `--self-trace` (`RB-VERIFY-003` 0.12.0) and `RB-PHYSICS-001-FR-085`,
+  flip torque on the press tick.
 - [#176](https://github.com/baileyrd/rusty_bullet/pull/176) —
   `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015).
 - [#175](https://github.com/baileyrd/rusty_bullet/pull/175) —
@@ -69,9 +72,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-VERIFY-003` 0.12.0 (spin in `--self-trace`) and
-  `RB-PHYSICS-001-FR-085` (flip torque on the press tick): done, awaiting
-  PR.
+- `RB-PHYSICS-001-FR-086`, steering by per-wheel side impulses
+  (ADR-0016): implemented and unit-tested; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -98,12 +100,11 @@ version: `a245d35`).
 
 ## Next
 
-1. Dynamic steering: ground steering sets the yaw rate to its target at
-   once (ADR-0011), while the recorded yaw rate ramps (-1.0 to -1.7 rad/s
-   over 4.10-4.14 s against a -2.17 target). The resulting ~0.2 rad
-   heading error at the 4.317 s dodge tilts the flip axis ~10 deg, which
-   is the flip's remaining orientation error. Replace the kinematic yaw
-   with per-wheel lateral tire forces that produce it. Known small
+1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.6` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-086`: recorded and
+   simulated yaw spin should ramp together after the 3.742 s and 4.05 s
+   steer changes, and orientation error at the 4.317 s dodge should fall
+   from ~0.22 rad. Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -117,7 +118,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (418 tests: 27 `rb_domain`, 354
+- `cargo test --workspace`: pass (417 tests: 27 `rb_domain`, 353
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

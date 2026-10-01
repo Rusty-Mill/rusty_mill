@@ -7,7 +7,8 @@
   ADR-0009
 - Supersedes/Superseded by: partially supersedes ADR-0009 (the steering
   part only; throttle, boost and handbrake stay as ADR-0009 describes);
-  amended by ADR-0012 (zero steer targets zero yaw rate while grounded)
+  amended by ADR-0012 (zero steer targets zero yaw rate while grounded);
+  superseded by ADR-0016 (per-wheel side impulses)
 
 ## Context
 

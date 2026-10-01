@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.89.0
+- Version: 0.90.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5388,6 +5388,35 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - **Verification**: the three dodge-spin tests now check one tick of
     flip torque on the press tick, with air control already off.
 
+- `RB-PHYSICS-001-FR-086` (steering by per-wheel side impulses,
+  implemented, verified): the spin trace showed the recorded yaw rate
+  ramping (-1.0 to -1.7 rad/s over 4.10-4.14 s) where FR-080's kinematic
+  steering snapped to -2.17 rad/s, leaving the heading error that tilts the
+  4.317 s flip. `drive::ground::wheel_side_impulses` ports RocketSim's
+  `calcFrictionImpulses` per wheel:
+  - each wheel's axle (front ones turned by `ground::steer_angle`) gets a
+    side impulse of `-0.2 * rel_vel * jacDiagABInv * latFriction *
+    CAR_MASS_BT / 3 * dt`;
+  - `rel_vel` and the slip ratio come from that wheel's contact velocity,
+    spin included;
+  - impulses are computed from one pre-impulse state and applied at the
+    contact points flattened onto the car's plane.
+
+  This replaces `steer_yaw_rate`'s set yaw rate and ADR-0012's
+  centre-of-mass `lateral_grip_rate`. ADR-0016 (supersedes ADR-0011).
+  - **Verification**: the `world` steering test now also checks the turn
+    builds up (under a quarter of the bicycle rate after one tick) and
+    still reaches it within 10% by 30 ticks. The `drive` tests cover:
+    - a released turn decaying rather than stopping;
+    - the rolling lateral-grip rate bound;
+    - the 0.2 sliding-to-rolling grip ratio.
+
+    The bicycle-rate tests now exercise `steer_angle` through a test-only
+    bicycle helper. From 500 uu/s with full steer: 0.24 rad/s after one
+    tick, 1.1 after 6, 1.7 after 11, the recorded ramp's shape.
+  - **Not done here**: suspension and per-wheel load; engine force along
+    the steered wheels; cornering roll.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6869,6 +6898,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.90.0 (2026-10-01): `RB-PHYSICS-001-FR-086` — steering by per-wheel side
+  impulses at the contact points (ADR-0016, supersedes ADR-0011). 353
+  tests in `rb_physics_bullet`.
 - 0.89.0 (2026-10-01): `RB-PHYSICS-001-FR-085` — a dodge's flip torque acts
   on the press tick, per the real capture (amends ADR-0014).
 - 0.88.0 (2026-10-01): `RB-PHYSICS-001-FR-084` — RocketSim's air control,

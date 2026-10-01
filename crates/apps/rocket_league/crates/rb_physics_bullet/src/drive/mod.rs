@@ -221,10 +221,11 @@
 //! speed rises) matches RocketSim's own confirmed real ratios via
 //! `dodge_speed_scale` — the same "shape confirmed, magnitude not" split
 //! `THROTTLE_ACCELERATION` already has. Steering no longer uses a
-//! placeholder torque: since `RB-PHYSICS-001-FR-080` it sets the yaw rate
-//! from RocketSim's real steer-angle curves through a bicycle model over
-//! the Octane wheelbase (`ground::steer_yaw_rate`, ADR-0011), resolving
-//! the wrong-shape finding `RB-PHYSICS-001-FR-065` recorded.
+//! placeholder torque: since `RB-PHYSICS-001-FR-086` the front wheels turn
+//! by RocketSim's real steer-angle curves (`ground::steer_angle`) and each
+//! wheel's side impulse yaws the car (ADR-0016, superseding FR-080's
+//! kinematic yaw rate), resolving the wrong-shape finding
+//! `RB-PHYSICS-001-FR-065` recorded.
 //! The handbrake no longer uses a placeholder friction multiplier: since
 //! `RB-PHYSICS-001-FR-081` it scales the tire model's per-axis grip by
 //! RocketSim's real factors, resolving `RB-PHYSICS-001-FR-066`'s
@@ -282,14 +283,17 @@ mod tests;
 
 pub use boost::MAX_BOOST;
 
-/// `ground::steer_yaw_rate`, exposed to sibling modules' tests only.
+/// The no-slip bicycle-model yaw rate for `ground::steer_angle` over the
+/// Octane wheelbase: the turn rate grip-limited steering approaches, for
+/// sibling modules' tests only.
 #[cfg(test)]
-pub(crate) fn steer_yaw_rate_for_tests(
+pub(crate) fn bicycle_yaw_rate_for_tests(
     forward_speed: f32,
     steer: f32,
     handbrake_amount: f32,
 ) -> f32 {
-    ground::steer_yaw_rate(forward_speed, steer, handbrake_amount)
+    let wheelbase = ground::FRONT_AXLE_X - ground::REAR_AXLE_X;
+    forward_speed * ground::steer_angle(forward_speed, steer, handbrake_amount).tan() / wheelbase
 }
 pub use jump::{FlipState, DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED};
 
@@ -318,7 +322,8 @@ pub const MAX_CAR_SPEED: f32 = 2300.0;
 ///
 /// Only covers this port's own driven-forces sources (continuous air
 /// control torque integrated this step, plus any single-step direct
-/// `angular_velocity` write like the flip torque or steering) — a same-step contact-solver impulse (e.g. a hard collision
+/// `angular_velocity` write like the flip torque or the wheels' side
+/// impulses) — a same-step contact-solver impulse (e.g. a hard collision
 /// imparting spin) isn't re-clamped until the *next* step's call, so it
 /// could in principle transiently exceed this for one step, unlike
 /// RocketSim's own "can never exceed" phrasing suggests for its engine.
@@ -346,9 +351,8 @@ fn up_axis(car: &RigidBody) -> Vec3 {
 }
 
 /// The car's local "right" axis (local +Y) — completes the right-handed
-/// (forward, right, up) basis `up_axis × forward_axis` gives. Used only for
-/// pitch torque (nose up/down about this axis); throttle/steer/boost/
-/// handbrake/jump never need it.
+/// (forward, right, up) basis `up_axis × forward_axis` gives: the wheels'
+/// axles, air-control pitch, and the flip's pitch torque.
 fn right_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0))
 }
@@ -436,8 +440,8 @@ impl Default for DriveState {
 }
 
 /// Applies throttle, steering, boost, handbrake, jump, double jump, wall
-/// jump, and air control as forces/torques/impulses (or, for steering and
-/// tire grip, direct velocity changes) on `car`, reading and updating `state`
+/// jump, and air control as forces/torques/impulses (or, for tire grip,
+/// direct velocity changes) on `car`, reading and updating `state`
 /// (see each `DriveState` field for its rules). Throttle, steering,
 /// handbrake, and the ground jump are a no-op unless `on_ground`; air
 /// control, double jump, and wall jump are the reverse — a no-op unless

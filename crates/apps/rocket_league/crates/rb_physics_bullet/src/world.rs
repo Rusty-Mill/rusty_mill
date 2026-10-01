@@ -3653,13 +3653,22 @@ mod tests {
             },
         );
         let dt = 1.0 / 120.0;
-        for _ in 0..30 {
+        // RB-PHYSICS-001-FR-086: the turn builds up from the wheels' side
+        // impulses, well short of the target after one tick.
+        world.step(dt);
+        let first_tick = world.cars[0].angular_velocity.z;
+        let target = crate::drive::bicycle_yaw_rate_for_tests(500.0, 1.0, 0.0);
+        assert!(
+            first_tick > 0.0 && first_tick < 0.25 * target,
+            "yaw after one tick {first_tick}, target {target}"
+        );
+        for _ in 1..30 {
             world.step(dt);
         }
         let car = &world.cars[0];
         let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
         let forward_speed = car.linear_velocity.dot(&forward);
-        let expected = crate::drive::steer_yaw_rate_for_tests(forward_speed, 1.0, 0.0);
+        let expected = crate::drive::bicycle_yaw_rate_for_tests(forward_speed, 1.0, 0.0);
         let yaw_rate = car.angular_velocity.z;
         assert!(
             (yaw_rate - expected).abs() <= 0.1 * expected.abs(),

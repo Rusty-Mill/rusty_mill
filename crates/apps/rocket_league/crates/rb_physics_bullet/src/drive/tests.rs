@@ -600,34 +600,26 @@ fn handbrake_ramps_up_at_the_rise_rate_and_down_at_the_fall_rate() {
 }
 
 #[test]
-fn lateral_grip_rate_is_below_the_point_mass_bound_and_orientation_independent() {
-    let level = car();
-    let rate = lateral_grip_rate(&level, Vec3::new(0.0, 1.0, 0.0));
-    // Four wheels at 0.2 * 60 each if every push went through the centre
-    // of mass; spin at the contact points takes some of it.
-    assert!(rate > 0.0 && rate < 48.0, "rate {rate}");
-
-    let mut turned = car();
-    // 1 rad yaw about +Z.
-    turned.orientation = rb_domain::Quat::new(0.0, 0.0, 0.5_f32.sin(), 0.5_f32.cos());
-    turned.update_inertia_tensor();
-    let right = turned.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0));
-    assert_close(lateral_grip_rate(&turned, right), rate, "turned car");
-}
-
-#[test]
-fn rolling_tires_cancel_lateral_velocity_at_the_grip_rate() {
-    // 4 uu/s sideways is at the slip threshold: full grip.
-    let rate = lateral_grip_rate(&car(), Vec3::new(0.0, 1.0, 0.0));
+fn rolling_tires_cancel_lateral_velocity_at_rocketsims_rate() {
+    // 4 uu/s sideways is at the slip threshold: full grip. Four wheels at
+    // 0.2 * CAR_MASS_BT / 3 = 12/s each through the centre of mass would
+    // remove 48/s; spin at the contact points takes some of that.
     let v = ground_tick(Vec3::new(1000.0, 4.0, 0.0), 1.0, 0.0);
-    assert_close(v.y, 4.0 * (1.0 - rate * TICK), "lateral speed");
+    let removed_per_second = (4.0 - v.y) / 4.0 / TICK;
+    assert!(
+        removed_per_second > 10.0 && removed_per_second < 48.0,
+        "rate {removed_per_second}"
+    );
 }
 
 #[test]
-fn a_full_slide_keeps_more_lateral_speed_than_a_rolling_car() {
-    let rate = lateral_grip_rate(&car(), Vec3::new(0.0, 1.0, 0.0));
-    let v = ground_tick(Vec3::new(0.0, 500.0, 0.0), 1.0, 0.0);
-    assert_close(v.y, 500.0 * (1.0 - 0.2 * rate * TICK), "lateral speed");
+fn a_full_slide_loses_a_fifth_of_the_lateral_speed_a_rolling_car_does() {
+    // LAT_FRICTION_CURVE: grip 1 rolling, 0.2 sliding fully sideways.
+    let rolling = ground_tick(Vec3::new(1000.0, 4.0, 0.0), 1.0, 0.0);
+    let sliding = ground_tick(Vec3::new(0.0, 500.0, 0.0), 1.0, 0.0);
+    let rolling_share = (4.0 - rolling.y) / 4.0;
+    let sliding_share = (500.0 - sliding.y) / 500.0;
+    assert_close(sliding_share / rolling_share, 0.2, "grip ratio");
 }
 
 #[test]
@@ -658,25 +650,34 @@ fn a_handbraking_car_does_not_coast_brake() {
 }
 
 #[test]
-fn releasing_steer_stops_a_grounded_cars_turn() {
-    // Straight wheels with grip end the yaw a released turn left behind.
+fn releasing_steer_lets_a_grounded_cars_turn_die_away() {
+    // Straight wheels with grip resist a released turn's yaw: it decays
+    // over ticks rather than stopping at once (RB-PHYSICS-001-FR-086).
     let mut c = car();
     c.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
     c.angular_velocity = Vec3::new(0.0, 0.0, 2.0);
     let mut boost = MAX_BOOST;
     step_with_input(&mut c, &full_throttle(), true, &mut boost, TICK);
+    let after_one = c.angular_velocity.z;
     assert!(
-        c.angular_velocity.z.abs() < 1e-4,
-        "yaw {}",
+        after_one > 0.0 && after_one < 2.0,
+        "yaw after one tick {after_one}"
+    );
+    for _ in 0..60 {
+        step_with_input(&mut c, &full_throttle(), true, &mut boost, TICK);
+    }
+    assert!(
+        c.angular_velocity.z.abs() < 0.2,
+        "yaw after 0.5 s {}",
         c.angular_velocity.z
     );
 }
 
 #[test]
-fn steer_yaw_rate_blends_halfway_at_half_handbrake() {
-    let normal = steer_yaw_rate(1000.0, 1.0, 0.0);
-    let powerslide = steer_yaw_rate(1000.0, 1.0, 1.0);
-    let half = steer_yaw_rate(1000.0, 1.0, 0.5);
+fn bicycle_yaw_rate_blends_halfway_at_half_handbrake() {
+    let normal = bicycle_yaw_rate_for_tests(1000.0, 1.0, 0.0);
+    let powerslide = bicycle_yaw_rate_for_tests(1000.0, 1.0, 1.0);
+    let half = bicycle_yaw_rate_for_tests(1000.0, 1.0, 0.5);
     assert!(
         (half - normal).abs() < (powerslide - normal).abs(),
         "half {half} should sit between {normal} and {powerslide}"
@@ -2388,10 +2389,10 @@ fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
 }
 
 #[test]
-fn steer_yaw_rate_follows_the_bicycle_model_on_the_real_steer_curve() {
+fn bicycle_yaw_rate_follows_the_bicycle_model_on_the_real_steer_curve() {
     // 500 uu/s sits exactly on a curve point (0.31930 rad).
-    let expected = 500.0 * 0.31930_f32.tan() / WHEELBASE;
-    let got = steer_yaw_rate(500.0, 1.0, 0.0);
+    let expected = 500.0 * 0.31930_f32.tan() / (FRONT_AXLE_X - REAR_AXLE_X);
+    let got = bicycle_yaw_rate_for_tests(500.0, 1.0, 0.0);
     assert!(
         (got - expected).abs() < 1e-4,
         "got {got}, expected {expected}"
@@ -2403,10 +2404,10 @@ fn steer_yaw_rate_follows_the_bicycle_model_on_the_real_steer_curve() {
 }
 
 #[test]
-fn steer_yaw_rate_is_zero_at_a_standstill_and_flips_in_reverse() {
-    assert_eq!(steer_yaw_rate(0.0, 1.0, 0.0), 0.0);
-    let forward = steer_yaw_rate(500.0, 1.0, 0.0);
-    let reverse = steer_yaw_rate(-500.0, 1.0, 0.0);
+fn bicycle_yaw_rate_is_zero_at_a_standstill_and_flips_in_reverse() {
+    assert_eq!(bicycle_yaw_rate_for_tests(0.0, 1.0, 0.0), 0.0);
+    let forward = bicycle_yaw_rate_for_tests(500.0, 1.0, 0.0);
+    let reverse = bicycle_yaw_rate_for_tests(-500.0, 1.0, 0.0);
     assert!(forward > 0.0);
     assert!(
         (reverse + forward).abs() < 1e-6,
@@ -2415,12 +2416,12 @@ fn steer_yaw_rate_is_zero_at_a_standstill_and_flips_in_reverse() {
 }
 
 #[test]
-fn steer_yaw_rate_uses_the_powerslide_curve_while_handbraking() {
+fn bicycle_yaw_rate_uses_the_powerslide_curve_while_handbraking() {
     // At 2500 uu/s the powerslide curve (0.12610 rad) steers more than the
     // normal one (interpolated between 1750 and 3000, ~0.0547 rad).
-    let normal = steer_yaw_rate(2500.0, 1.0, 0.0);
-    let powerslide = steer_yaw_rate(2500.0, 1.0, 1.0);
-    let expected = 2500.0 * 0.12610_f32.tan() / WHEELBASE;
+    let normal = bicycle_yaw_rate_for_tests(2500.0, 1.0, 0.0);
+    let powerslide = bicycle_yaw_rate_for_tests(2500.0, 1.0, 1.0);
+    let expected = 2500.0 * 0.12610_f32.tan() / (FRONT_AXLE_X - REAR_AXLE_X);
     assert!((powerslide - expected).abs() < 1e-3);
     assert!(powerslide > normal);
 }

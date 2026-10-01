@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Steering through the wheels
+**2026-10-01** · `RB-PHYSICS-001-FR-086` · ADR-0016
+
+- Each wheel now grips sideways at its own contact point, as in RocketSim,
+  and the steered front wheels turn the car. The turn rate builds up over
+  ~0.25 s instead of snapping to its target, matching the recorded ramp,
+  and a released turn dies away. This targets the heading error that
+  tilted the 4.317 s flip. 417 tests.
+
 ## Spin in the trace; flips start on the press tick
 **2026-10-01** · `RB-PHYSICS-001-FR-085` · `RB-VERIFY-003` 0.12.0
 
