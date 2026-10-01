@@ -19,7 +19,9 @@ use rusty_multimodal_db::generic::query::AllIds;
 use rusty_multimodal_db::server::changelog::{ChangeLog, DEFAULT_RETAIN_BYTES};
 use rusty_multimodal_db::server::changelogged::ChangeLogged;
 use rusty_multimodal_db::server::client::{BatchOp, SchemaDrivenClient};
-use rusty_multimodal_db::server::client::{ClientTlsConfig, ConnectOptions, TrustPolicy};
+use rusty_multimodal_db::server::client::{
+    ClientError, ClientTlsConfig, ConnectOptions, TrustPolicy,
+};
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::protocol::{ErrorCode, ScanValue, WriteOp};
 use rusty_multimodal_db::server::{serve, serve_tables, ConnectionStore, ServeOptions, TlsConfig};
@@ -267,29 +269,79 @@ fn the_refresh_loop_refreshes_prunes_and_stops_when_told() {
 
 /// A `Memory` primary with a change log, on a real socket.
 fn start_logged_server() -> SocketAddr {
+    start_logged_server_with(0, None)
+}
+
+/// [`start_logged_server`] with a companion file of `pad` bytes (a table over
+/// the legacy snapshot ceiling that still reopens) and, if given, chunked
+/// snapshots staged under that directory.
+fn start_logged_server_with(pad: usize, staging: Option<&std::path::Path>) -> SocketAddr {
     let dir = unique_dir("replica_follow_source");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("memories.mmap");
     let stack =
         create_memory_production_stack(vec![memory(1, "first"), memory(2, "second")], &[], &path)
             .unwrap();
+    std::fs::write(dir.join("memories.mmap.pad"), vec![7u8; pad]).unwrap();
     let store = Arc::new(
         MemoryConnectionStore::new(GenericProductionStore::new(stack)).with_backup_source(path),
     );
     let log = ChangeLog::open(&dir.join("memory.changes"), DEFAULT_RETAIN_BYTES).unwrap();
     let served: Arc<dyn ConnectionStore> = Arc::new(ChangeLogged::new(store, Arc::new(log)));
+    let mut options = ServeOptions::new(Some("ro".to_string()), Some("rw".to_string()))
+        .with_replication_token("repl-secret".to_string());
+    if let Some(staging) = staging {
+        options = options
+            .with_snapshot_staging(staging.to_path_buf(), 64)
+            .unwrap();
+    }
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        serve_tables(
-            listener,
-            vec![("memory".to_string(), served)],
-            0,
-            ServeOptions::new(Some("ro".to_string()), Some("rw".to_string()))
-                .with_replication_token("repl-secret".to_string()),
-        )
-    });
+    thread::spawn(move || serve_tables(listener, vec![("memory".to_string(), served)], 0, options));
     addr
+}
+
+/// `ADR-0136`: a table over the frame cap refreshes through chunks, the log
+/// position rides along so `follow` can continue, and the server's staged copy
+/// is gone afterwards; without staging the refusal says so.
+#[test]
+fn a_table_over_the_legacy_ceiling_refreshes_in_chunks_with_its_position() {
+    let staging = unique_dir("replica_chunk_staging");
+    let addr = start_logged_server_with(9 << 20, Some(&staging));
+    let root = unique_dir("replica_chunk_root");
+    let target = Target::new(addr.to_string(), "repl-secret");
+    let report = refresh_at(&target, &root, Domain::Memory).unwrap();
+    assert!(report.bytes > 9 << 20, "{}", report.bytes);
+    assert_eq!(report.records, 2);
+    assert!(report.position.is_some(), "a logged table gives a position");
+    assert_eq!(
+        read_position(&report.directory).unwrap(),
+        report.position.unwrap()
+    );
+    let pad = report.directory.join("memories.mmap.pad");
+    assert_eq!(std::fs::metadata(pad).unwrap().len(), 9 << 20);
+    for _ in 0..100 {
+        if !staging.join("snap-0").exists() {
+            return;
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the server's staged copy was not freed");
+}
+
+#[test]
+fn a_table_over_the_legacy_ceiling_is_refused_where_staging_is_off() {
+    let addr = start_logged_server_with(9 << 20, None);
+    let root = unique_dir("replica_chunk_root");
+    let target = Target::new(addr.to_string(), "repl-secret");
+    match refresh_at(&target, &root, Domain::Memory) {
+        Err(RefreshError::Fetch(ClientError::Server(ErrorCode::TooLarge, _))) => {}
+        other => panic!("expected the legacy TooLarge, got {other:?}"),
+    }
+    assert!(
+        snapshots(&root).unwrap().is_empty(),
+        "nothing was left behind"
+    );
 }
 
 /// `ADR-0131` phase 2: a refresh records the log position, `follow`

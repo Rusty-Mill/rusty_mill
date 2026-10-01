@@ -71,7 +71,7 @@ class WireVectors(unittest.TestCase):
         # rule 4), and the wire shape is BeginWith's existing plain u32
         # flags field, no new codec logic needed.
         self.assertEqual(p.SESSION_MVCC_ISOLATION, 8)
-        self.assertEqual(p.PROTOCOL_VERSION, 35)
+        self.assertEqual(p.PROTOCOL_VERSION, 36)
         req = p.BeginWith(p.SESSION_MVCC_ISOLATION)
         data = p.encode_request(req)
         self.assertEqual(p.decode_request(data), req)
@@ -129,6 +129,37 @@ class WireVectors(unittest.TestCase):
         ):
             self.assertEqual(p.decode_response(p.encode_response(reply)), reply)
         self.assertEqual(p.ErrorCode.Gone, 16)
+
+    def test_chunked_snapshot_requests_are_40_to_42_and_responses_28_29(self):
+        # CSN-FR-001..003, ADR-0136 (protocol 36).
+        self.assertEqual(p.encode_request(p.BeginSnapshot()), bytes.fromhex("28000000"))
+        fetch = p.FetchChunk(7, 1, 4, 8)
+        data = p.encode_request(fetch)
+        self.assertEqual(
+            data,
+            bytes.fromhex("29000000" "0700000000000000" "01000000" "0400000000000000" "08000000"),
+        )
+        self.assertEqual(p.decode_request(data), fetch)
+        self.assertEqual(
+            p.encode_request(p.EndSnapshot(7)), bytes.fromhex("2a000000" "0700000000000000")
+        )
+        manifest = p.SnapshotManifest(7, (2, 5), (("a", 3, b"\xab" * 32),))
+        data = p.encode_response(manifest)
+        self.assertEqual(
+            data,
+            bytes.fromhex(
+                "1c000000" "0700000000000000" "01" "0200000000000000" "0500000000000000"
+                "0100000000000000" "0100000000000000" "61" "0300000000000000"
+            )
+            + b"\xab" * 32,
+        )
+        self.assertEqual(p.decode_response(data), manifest)
+        chunk = p.Chunk(b"\xff")
+        self.assertEqual(p.encode_response(chunk), bytes.fromhex("1d000000" "0100000000000000" "ff"))
+        self.assertEqual(p.decode_response(p.encode_response(chunk)), chunk)
+        for request in (p.BeginSnapshot, p.FetchChunk, p.EndSnapshot):
+            self.assertEqual(p.REQUEST_INTRODUCED_AT[request], 36)
+        self.assertEqual(p.ErrorCode.NoSnapshot, 17)
 
     def test_write_op_update_field_is_5_and_write_result_updated_is_9(self):
         # TXS-FR-001, ADR-0130 (protocol 33).

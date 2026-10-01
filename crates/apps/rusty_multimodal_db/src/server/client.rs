@@ -177,13 +177,14 @@ use super::framing::{self, FrameError};
 use super::protocol::{
     predicate_matches, AggregateFn, AggregateSpec, CompareOp, DomainSchema, ErrorCode,
     FieldDescriptor, FieldRef, JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor,
-    Request, Response, ScanValue, Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION,
-    SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    Request, Response, ScanValue, Selection, ValueKind, WriteOp, WriteResult, MAX_CHUNK_BYTES,
+    PROTOCOL_VERSION, SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
     SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
 use crate::generic::CompactionReport;
+use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
@@ -234,6 +235,11 @@ pub enum ClientError {
     /// against a `Str`/`Bool` field. Never a round trip — the server
     /// never sees invalid SQL (`SQL-FR-001`/`002`, ADR-0034).
     Sql(String),
+    /// A chunked snapshot download failed a local check or write
+    /// (`CSN-FR-005`, ADR-0136): a file name that is not a plain file name,
+    /// a chunk of the wrong size, a SHA-256 or length that does not match
+    /// the manifest, or an I/O error writing it.
+    Snapshot(String),
 }
 
 impl fmt::Display for ClientError {
@@ -260,6 +266,7 @@ impl fmt::Display for ClientError {
                 write!(f, "expected a {expected} response, got a different shape")
             }
             ClientError::Sql(message) => write!(f, "invalid SQL query: {message}"),
+            ClientError::Snapshot(message) => write!(f, "snapshot download failed: {message}"),
         }
     }
 }
@@ -874,6 +881,16 @@ pub enum BatchOp<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotAt {
     pub files: Vec<(String, Vec<u8>)>,
+    pub position: Option<(u64, u64)>,
+}
+
+/// [`SchemaDrivenClient::fetch_snapshot_chunked`]'s answer (`CSN-FR-005`,
+/// ADR-0136): what was written, and the change log's `(epoch, seq)` the copy
+/// agrees with (`None` for a table with no log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotDownload {
+    pub files: u64,
+    pub bytes: u64,
     pub position: Option<(u64, u64)>,
 }
 
@@ -2756,6 +2773,93 @@ impl SchemaDrivenClient {
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Snapshot")),
         }
+    }
+
+    /// [`Self::fetch_snapshot`] for a table of any size (`CSN-FR-005`,
+    /// ADR-0136, protocol 36): the server stages a copy, and each file is
+    /// streamed in chunks of at most [`MAX_CHUNK_BYTES`] straight into the
+    /// existing directory `dir`, checked against the manifest's length and
+    /// SHA-256 and synced. Memory is one chunk. A partial download leaves
+    /// whatever was written for the caller to remove.
+    /// `Server(Unauthorized, _)` without the replication token;
+    /// `Server(Unsupported, _)` when the server has no `SERVER_SNAPSHOT_DIR`;
+    /// `Server(TooLarge | Busy, _)` over the server's ceiling or while the
+    /// table's one staged copy is held; [`ClientError::Snapshot`] for a local
+    /// check or write failure; [`ClientError::Unsupported`] below 36.
+    pub fn fetch_snapshot_chunked(&mut self, dir: &Path) -> Result<SnapshotDownload, ClientError> {
+        if self.server_protocol_version() < 36 {
+            return Err(ClientError::Unsupported("fetch_snapshot_chunked"));
+        }
+        let (snapshot, position, files) = match self.roundtrip(Request::BeginSnapshot)? {
+            Response::SnapshotManifest {
+                snapshot,
+                position,
+                files,
+            } => (snapshot, position, files),
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+            _ => return Err(ClientError::UnexpectedResponse("SnapshotManifest")),
+        };
+        let downloaded = self.download_staged(snapshot, &files, dir);
+        // Best effort: the server frees the copy when the connection closes.
+        let _ = self.roundtrip(Request::EndSnapshot { snapshot });
+        Ok(SnapshotDownload {
+            files: files.len() as u64,
+            bytes: downloaded?,
+            position,
+        })
+    }
+
+    fn download_staged(
+        &mut self,
+        snapshot: u64,
+        files: &[(String, u64, [u8; 32])],
+        dir: &Path,
+    ) -> Result<u64, ClientError> {
+        let local = |e: std::io::Error| ClientError::Snapshot(e.to_string());
+        let mut total = 0u64;
+        for (index, (name, len, digest)) in files.iter().enumerate() {
+            if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+                return Err(ClientError::Snapshot(format!(
+                    "the manifest names {name:?}, which is not a plain file name"
+                )));
+            }
+            let mut file = std::fs::File::create(dir.join(name)).map_err(local)?;
+            let mut hasher = Sha256::new();
+            let mut offset = 0u64;
+            while offset < *len {
+                let want = (*len - offset).min(u64::from(MAX_CHUNK_BYTES)) as u32;
+                let request = Request::FetchChunk {
+                    snapshot,
+                    file: index as u32,
+                    offset,
+                    len: want,
+                };
+                let bytes = match self.roundtrip(request)? {
+                    Response::Chunk { bytes } => bytes,
+                    Response::Err { code, message } => {
+                        return Err(ClientError::Server(code, message))
+                    }
+                    _ => return Err(ClientError::UnexpectedResponse("Chunk")),
+                };
+                if bytes.is_empty() || bytes.len() > want as usize {
+                    return Err(ClientError::Snapshot(format!(
+                        "{name}: a chunk of {} bytes where 1..={want} were due",
+                        bytes.len()
+                    )));
+                }
+                hasher.update(&bytes);
+                file.write_all(&bytes).map_err(local)?;
+                offset += bytes.len() as u64;
+            }
+            if <[u8; 32]>::from(hasher.finalize()) != *digest {
+                return Err(ClientError::Snapshot(format!(
+                    "{name}: the SHA-256 differs from the manifest's"
+                )));
+            }
+            file.sync_all().map_err(local)?;
+            total += len;
+        }
+        Ok(total)
     }
 
     /// The committed writes after sequence number `after` in the change log's

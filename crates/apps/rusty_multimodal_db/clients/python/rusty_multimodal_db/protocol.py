@@ -4,7 +4,7 @@ One class per request/response variant and per struct, each with a
 declarative ``_spec`` (field name, type spec) that ``encode``/``decode``
 walk. Type specs: ``"u16"``, ``"u32"``, ``"u64"``, ``"i64"``, ``"f64"``,
 ``"bool"``, ``"str"``, ``"uuid"``, ``("opt", T)``, ``("vec", T)``,
-``("tuple", T1, T2)``, an ``IntEnum`` subclass (a fieldless enum: its
+``("tuple", T1, T2)``, ``("fixed", N)`` (N raw bytes, no length), an ``IntEnum`` subclass (a fieldless enum: its
 ``u32`` index), a struct class, or an *enum family* (a list of variant
 classes in index order — the variant's index as a ``u32``, then its
 fields). Exactly the layout ``src/server/protocol.rs`` derives.
@@ -20,7 +20,8 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 35
+PROTOCOL_VERSION = 36
+MAX_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -82,6 +83,9 @@ class ErrorCode(IntEnum):
     # cap; this frame is the one a refused connect reads before the close.
     Busy = 15
     Gone = 16
+    # CSN-FR-003, ADR-0136 (protocol 36): the snapshot handle is unknown,
+    # expired, ended, or another connection's.
+    NoSnapshot = 17
 
 
 # ---- ScanValue (enum family) ----
@@ -798,13 +802,42 @@ class FetchSince:
     limit: int
 
 
+@_variant(40, [])
+class BeginSnapshot:
+    """CSN-FR-001, ADR-0136, protocol 36: stage a consistent copy of the
+    selected table's files for chunked download. Replication token only.
+    Answered SnapshotManifest; ``Unsupported`` without SERVER_SNAPSHOT_DIR,
+    ``TooLarge`` over SERVER_SNAPSHOT_MAX_MB, ``Busy`` while the table's
+    staged copy is held."""
+
+
+@_variant(41, [("snapshot", "u64"), ("file", "u32"), ("offset", "u64"), ("len", "u32")])
+class FetchChunk:
+    """CSN-FR-002, ADR-0136, protocol 36: up to ``len`` (at most
+    MAX_CHUNK_BYTES) bytes of staged file ``file`` from ``offset``.
+    Answered Chunk; ``NoSnapshot`` for a bad handle."""
+
+    snapshot: int
+    file: int
+    offset: int
+    len: int
+
+
+@_variant(42, [("snapshot", "u64")])
+class EndSnapshot:
+    """CSN-FR-003, ADR-0136, protocol 36: free the staged copy. Answered
+    Ok."""
+
+    snapshot: int
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
     WriteBatch, Metrics, Backup, FetchSnapshot, FilteredPage, PageDesc, FilteredPageDesc,
-    DescribeNullable, FetchSince,
+    DescribeNullable, FetchSince, BeginSnapshot, FetchChunk, EndSnapshot,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -817,7 +850,7 @@ REQUEST_INTRODUCED_AT = {
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
     ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22, Metrics: 23, Backup: 24,
     FetchSnapshot: 25, FilteredPage: 26, PageDesc: 28, FilteredPageDesc: 28,
-    DescribeNullable: 32, FetchSince: 34,
+    DescribeNullable: 32, FetchSince: 34, BeginSnapshot: 36, FetchChunk: 36, EndSnapshot: 36,
 }
 
 
@@ -1063,10 +1096,44 @@ class SnapshotAt:
         )
 
 
+@_variant(
+    28,
+    [
+        ("snapshot", "u64"),
+        ("position", ("opt", ("tuple", "u64", "u64"))),
+        ("files", ("vec", ("tuple", "str", "u64", ("fixed", 32)))),
+    ],
+)
+class SnapshotManifest:
+    """CSN-FR-001, ADR-0136 (protocol 36). Answers BeginSnapshot: the
+    handle, the change-log position (epoch, seq) the copy agrees with
+    (None without a log), and each staged file's name, length and SHA-256."""
+
+    snapshot: int
+    position: Optional[Tuple[int, int]]
+    files: Tuple[Tuple[str, int, bytes], ...]
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "files", tuple((n, length, bytes(d)) for n, length, d in self.files)
+        )
+
+
+@_variant(29, [("bytes", ("vec", "u8"))])
+class Chunk:
+    """CSN-FR-002, ADR-0136 (protocol 36). Answers FetchChunk."""
+
+    bytes: bytes
+
+    def __post_init__(self):
+        object.__setattr__(self, "bytes", bytes(self.bytes))
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
     BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped, NullableFields, Changes, SnapshotAt,
+    SnapshotManifest, Chunk,
 ]
 
 
@@ -1093,6 +1160,10 @@ def _encode_value(w: Writer, spec, value) -> None:
         elif kind == "tuple":
             for sub, v in zip(spec[1:], value):
                 _encode_value(w, sub, v)
+        elif kind == "fixed":
+            if len(value) != spec[1]:
+                raise TypeError(f"expected {spec[1]} bytes, got {len(value)}")
+            w.raw(bytes(value))
         else:
             raise TypeError(spec)
     elif _is_family(spec):
@@ -1125,6 +1196,8 @@ def _decode_value(r: Reader, spec):
             return r.vec(lambda: _decode_value(r, spec[1]))
         if kind == "tuple":
             return tuple(_decode_value(r, sub) for sub in spec[1:])
+        if kind == "fixed":
+            return r._take(spec[1])
         raise TypeError(spec)
     if _is_family(spec):
         index = r.enum_index()

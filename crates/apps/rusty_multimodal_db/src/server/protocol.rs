@@ -90,6 +90,7 @@
 //! | 33 | `SERVER-001` v0.106.0 | + [`WriteOp::UpdateField`] (5) and [`WriteResult::Updated`] (9) — `TXS-FR-001`, ADR-0130: `UpdateField`'s own three fields as a batch op, so one ordered list can hold an update and a record write. With it a transaction session (`Begin`/`Commit`) may stage `Insert`/`Replace`/`ReplaceIf`/`Delete`/`Link` beside `UpdateField`, on a connection at 33 or above, and commit them as one atomic `WriteBatch`; a session that asked for read-your-writes, snapshot isolation or real MVCC refuses them `Unsupported` (whole-record overlays are phase 2). A `WriteBatch` carrying an `UpdateField` is `Malformed` below 33 (rule 3). ADR-0130 |
 //! | 34 | `SERVER-001` v0.107.0 | + [`Request::FetchSince`] (39), [`Response::Changes`] (26), [`Response::SnapshotAt`] (27) and [`ErrorCode::Gone`] (16) — `CHL-FR-004`/`005`, ADR-0131: continuous replication over a table's change log. `FetchSince { epoch, after, limit }` answers the committed writes after sequence number `after` in the log's `epoch`, as `Changes` (a `Replication` token, like `FetchSnapshot`); `Gone` when the epoch is another or `after` is older than the log holds — the standby resyncs. `FetchSnapshot` answers `SnapshotAt` (the files plus the log's `epoch` and `seq` at that instant) on a table with a log and a connection at 34+, `Snapshot` otherwise. `Unsupported` for a table with no log; `Malformed` below 34 (rule 3). ADR-0131 |
 //! | 35 | `SERVER-001` v0.108.0 | No new variant: `BeginWith` learns a fifth flag bit, [`SESSION_STRICT_COMMIT`] (`STC-FR-003`, `ADR-0133`) — a strict session stages record writes and updates in one list, its `GetById` answers the record as the list would leave it, and `Commit` applies the list all or nothing including soft outcomes (`TransactionFailed { index, code }` for the first op that would be `Duplicate`, `NotFound`, `GuardFailed` or `AlreadyLinked`). Unknown below 35 (rule 3), sent only after negotiating ≥ 35 (rule 4); `Unsupported` combined with another bit or on a table that cannot commit strictly. `ADR-0133` |
+//! | 36 | `SERVER-001` v0.109.0 | + [`Request::BeginSnapshot`] (40), [`Request::FetchChunk`] (41), [`Request::EndSnapshot`] (42), [`Response::SnapshotManifest`] (28), [`Response::Chunk`] (29) and [`ErrorCode::NoSnapshot`] (17) — `CSN-FR-001`–`005`, ADR-0136: a table over [`MAX_SNAPSHOT_BYTES`] gets a standby. `BeginSnapshot` copies the table's files to a staging directory under its write lock (`SERVER_SNAPSHOT_DIR`; unset, `Unsupported`), answers a connection-bound handle, the change-log position and each file's name, length and SHA-256; `FetchChunk` reads at most [`MAX_CHUNK_BYTES`] of one staged file by offset, outside any table lock; `EndSnapshot` frees the copy. `Replication` token only, like `FetchSnapshot`; `Busy` while the table already has a staged snapshot, `TooLarge` past `SERVER_SNAPSHOT_MAX_MB`, `NoSnapshot` for an unknown, expired or foreign handle; `Malformed` below 36 (rule 3). `FetchSnapshot` is unchanged. |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -124,7 +125,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 35;
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -258,6 +259,12 @@ pub const MAX_TRACKED_READS: usize = 4096;
 /// constant, not a config, matching [`MAX_BATCH_OPS`]'s own precedent:
 /// nobody has reported needing a different number yet.
 pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The most bytes one [`Request::FetchChunk`] may ask for and one
+/// [`Response::Chunk`] carries (`CSN-FR-002`, ADR-0136): well under
+/// [`super::framing::MAX_FRAME_BYTES`], so the largest buffer either end holds
+/// for a chunked snapshot is this one.
+pub const MAX_CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 
 /// A record's id — every domain this crate has ever used is `Uuid`-keyed.
 pub type RecordId = Uuid;
@@ -788,6 +795,10 @@ pub enum ErrorCode {
     /// cannot decode it (`Unsupported` on the wire, rule 3), but only a
     /// 34-or-above `FetchSince` can produce it.
     Gone,
+    /// Protocol 36 (`CSN-FR-003`, ADR-0136): the snapshot handle is unknown,
+    /// expired, already ended, or another connection's. Only a 36-or-above
+    /// `FetchChunk`/`EndSnapshot` can produce it.
+    NoSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1289,6 +1300,30 @@ pub enum Request {
         after: u64,
         limit: u32,
     },
+    /// Protocol 36 (`CSN-FR-001`, ADR-0136): stage a consistent copy of this
+    /// table's files and answer [`Response::SnapshotManifest`] — the way to a
+    /// standby for a table over [`MAX_SNAPSHOT_BYTES`]. `TokenClass::Replication`
+    /// only; `Unsupported` unless the server has `SERVER_SNAPSHOT_DIR` (or the
+    /// adapter no data directory); `TooLarge` over `SERVER_SNAPSHOT_MAX_MB`;
+    /// `Busy` while the table's one staged snapshot is held; `Storage` for an
+    /// I/O failure. `Malformed` below 36.
+    BeginSnapshot,
+    /// Protocol 36 (`CSN-FR-002`): up to `len` (at most [`MAX_CHUNK_BYTES`])
+    /// bytes of staged file number `file` from `offset`. Answered
+    /// [`Response::Chunk`], short at the file's end and empty at or past it;
+    /// `NoSnapshot` for a bad handle; `Malformed` for a `file` out of range or
+    /// a `len` over the cap.
+    FetchChunk {
+        snapshot: u64,
+        file: u32,
+        offset: u64,
+        len: u32,
+    },
+    /// Protocol 36 (`CSN-FR-003`): free the staged copy. Answered
+    /// [`Response::Ok`]; `NoSnapshot` for a bad handle.
+    EndSnapshot {
+        snapshot: u64,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
@@ -1469,6 +1504,19 @@ pub enum Response {
         epoch: u64,
         seq: u64,
     },
+    /// Protocol 36 (`CSN-FR-001`, ADR-0136). Answers
+    /// [`Request::BeginSnapshot`]: the `snapshot` handle, the change log's
+    /// `(epoch, seq)` the copy agrees with (`None` for a table with no log),
+    /// and per staged file its name, length and SHA-256.
+    SnapshotManifest {
+        snapshot: u64,
+        position: Option<(u64, u64)>,
+        files: Vec<(String, u64, [u8; 32])>,
+    },
+    /// Protocol 36 (`CSN-FR-002`). Answers [`Request::FetchChunk`].
+    Chunk {
+        bytes: Vec<u8>,
+    },
 }
 
 #[cfg(test)]
@@ -1520,6 +1568,8 @@ mod tests {
             "DescribeNullable" | "NullableFields" => 32,
             "WriteBatch(UpdateField)" | "BatchResults(Updated)" => 33,
             "FetchSince" | "Changes" | "SnapshotAt" | "Err(Gone)" => 34,
+            "BeginSnapshot" | "FetchChunk" | "EndSnapshot" | "SnapshotManifest" | "Chunk"
+            | "Err(NoSnapshot)" => 36,
             other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
         }
     }
@@ -1915,6 +1965,37 @@ mod tests {
                 &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // epoch 2
                 &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // after 5
                 &[0x0a, 0x00, 0x00, 0x00],                         // limit 10
+            ]),
+        );
+        // Protocol 36 (`CSN-FR-001`–`003`, ADR-0136): `BeginSnapshot` at 40
+        // (no fields), `FetchChunk` at 41 and `EndSnapshot` at 42.
+        assert_golden(
+            "BeginSnapshot",
+            &Request::BeginSnapshot,
+            &bytes(&[&[0x28, 0x00, 0x00, 0x00]]),
+        );
+        assert_golden(
+            "FetchChunk",
+            &Request::FetchChunk {
+                snapshot: 7,
+                file: 1,
+                offset: 4,
+                len: 8,
+            },
+            &bytes(&[
+                &[0x29, 0x00, 0x00, 0x00],                         // FetchChunk
+                &[0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // snapshot 7
+                &[0x01, 0x00, 0x00, 0x00],                         // file 1
+                &[0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // offset 4
+                &[0x08, 0x00, 0x00, 0x00],                         // len 8
+            ]),
+        );
+        assert_golden(
+            "EndSnapshot",
+            &Request::EndSnapshot { snapshot: 7 },
+            &bytes(&[
+                &[0x2a, 0x00, 0x00, 0x00],                         // EndSnapshot
+                &[0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // snapshot 7
             ]),
         );
         // Protocol 33 (`TXS-FR-001`, ADR-0130): `WriteOp::UpdateField` at 5 —
@@ -2587,6 +2668,38 @@ mod tests {
                 &ID1,
             ]),
         );
+        // Protocol 36 (`CSN-FR-001`/`002`, ADR-0136): `SnapshotManifest` at 28
+        // — the handle, the position (`Some`: a one-byte tag, epoch, seq) and
+        // each file's name, length and 32 raw SHA-256 bytes — and `Chunk` at 29.
+        assert_golden_eq(
+            "SnapshotManifest",
+            &Response::SnapshotManifest {
+                snapshot: 7,
+                position: Some((2, 5)),
+                files: vec![("a".to_string(), 3, [0xab; 32])],
+            },
+            &bytes(&[
+                &[0x1c, 0x00, 0x00, 0x00],                         // SnapshotManifest
+                &[0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // snapshot 7
+                &[0x01],                                           // Some
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // epoch 2
+                &[0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // seq 5
+                &LEN1,                                             // one file
+                &LEN1,                                             // name length
+                b"a",
+                &[0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // length 3
+                &[0xab; 32],                                       // SHA-256
+            ]),
+        );
+        assert_golden_eq(
+            "Chunk",
+            &Response::Chunk { bytes: vec![0xff] },
+            &bytes(&[
+                &[0x1d, 0x00, 0x00, 0x00], // Chunk
+                &LEN1,
+                &[0xff],
+            ]),
+        );
         // Protocol 34 (`CHL-FR-005`, ADR-0131): `SnapshotAt` at 27 —
         // `Snapshot`'s files, then the epoch and the sequence number.
         assert_golden_eq(
@@ -2685,6 +2798,8 @@ mod tests {
             (ErrorCode::Busy, 0x0f),
             // Protocol 34 (`CHL-FR-005`, ADR-0131): `Gone` at 16.
             (ErrorCode::Gone, 0x10),
+            // Protocol 36 (`CSN-FR-003`, ADR-0136): `NoSnapshot` at 17.
+            (ErrorCode::NoSnapshot, 0x11),
         ] {
             assert_golden_eq(
                 &format!("Err({code:?})"),
@@ -2759,7 +2874,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 35);
+        assert_eq!(PROTOCOL_VERSION, 36);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

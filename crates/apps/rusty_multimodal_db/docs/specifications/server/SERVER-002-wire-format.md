@@ -1,6 +1,6 @@
 # SERVER-002 — Wire Format for Foreign Clients
 
-- Version: 0.24.0 (protocol version 35 — `SERVER-001` v0.108.0, `STC-FR-001`..`005`, `ADR-0133`: `BeginWith` flag bit 16, `SESSION_STRICT_COMMIT`; no new variant; 0.23.0 was protocol version 34 — `SERVER-001` v0.107.0, `RPL-FR-002`..`005`, `ADR-0131`: `Request::FetchSince` (39), `Response::Changes` (26), `Response::SnapshotAt` (27), `ErrorCode::Gone` (16); 0.22.0 was protocol version 33 — `SERVER-001` v0.106.0, `TXS-FR-001`, `ADR-0130`: `WriteOp::UpdateField` (5), `WriteResult::Updated` (9), a session may stage record writes; 0.21.0 was protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
+- Version: 0.25.0 (protocol version 36 — `SERVER-001` v0.109.0, `CSN-FR-001`..`005`, `ADR-0136`: `Request::BeginSnapshot` (40), `FetchChunk` (41), `EndSnapshot` (42), `Response::SnapshotManifest` (28), `Chunk` (29), `ErrorCode::NoSnapshot` (17); 0.24.0 was protocol version 35 — `SERVER-001` v0.108.0, `STC-FR-001`..`005`, `ADR-0133`: `BeginWith` flag bit 16, `SESSION_STRICT_COMMIT`; no new variant; 0.23.0 was protocol version 34 — `SERVER-001` v0.107.0, `RPL-FR-002`..`005`, `ADR-0131`: `Request::FetchSince` (39), `Response::Changes` (26), `Response::SnapshotAt` (27), `ErrorCode::Gone` (16); 0.22.0 was protocol version 33 — `SERVER-001` v0.106.0, `TXS-FR-001`, `ADR-0130`: `WriteOp::UpdateField` (5), `WriteResult::Updated` (9), a session may stage record writes; 0.21.0 was protocol version 32 — `SERVER-001` v0.104.0, `NLC-FR-005`, `ADR-0128`: `Request::DescribeNullable` (38), `Response::NullableFields` (25), and the first nullable columns; 0.20.1 was protocol version 31, unchanged — `SERVER-001` v0.99.0,
   `RGM-FR-004`, `ADR-0121`: the `Null` strip below 31 covers `JoinedRows` too; 0.20.0 was `SERVER-001` v0.96.0,
   `NUL-FR-001`/`002`, `ADR-0117`: `ScanValue::Null` (6), stripped from `Record`/`Rows` below 31; 0.19.2 was protocol 30 — `SERVER-001` v0.90.0,
   `RVM-FR-002`, `ADR-0111`: `RowsClamped` only for an answer cut at the cap; 0.19.1 was `SERVER-001` v0.85.0,
@@ -130,7 +130,7 @@ unmarked is version 1.
 | `ValueKind` | `U32` | `I64` | `Bool` | `Str` | `StrList` (since 11) | | | | | | | | | | | |
 | `CompareOp` (since 8) | `Eq` | `Ne` | `Lt` | `Le` | `Gt` | `Ge` | | | | | | | | | | |
 | `AggregateFn` (since 9) | `Count` | `Sum` | `Avg` | `Min` | `Max` | | | | | | | | | | | |
-| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) | `TooLarge` (25) | `Busy` (30) | `Gone` (34) |
+| `ErrorCode` | `UnknownField` | `Unsupported` | `Malformed` | `Unauthenticated` | `Unauthorized` | `RecordNotFound` | `NoSession` (3) | `SessionOpen` (3) | `SessionFull` (3) | `Journal` (4) | `Conflict` (7) | `Duplicate` (13) | `Storage` (13) | `GuardFailed` (19) | `TooLarge` (25) | `Busy` (30) | `Gone` (34) | `NoSnapshot` (36) |
 
 ### 5.3 `ScanValue` — a field's value
 
@@ -240,6 +240,9 @@ A tuple `(FieldRef, ScanValue)` is its two fields in order, no count.
 | 35 | `FilteredPage` | `order_by: FieldRef`, `after: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `Page`'s three fields plus a `WHERE`-shaped filter | 26 | `Rows` |
 | 36 | `PageDesc` | `order_by: FieldRef`, `before: Option<(ScanValue, RecordId)>`, `limit: u64` — `Page` walked the other way | 28 | `Rows` |
 | 39 | `FetchSince` | `epoch: u64`, `after: u64`, `limit: u32` — change-log entries after `after` in `epoch`; Replication token only | 34 | `Changes` / `Err(Gone)` |
+| 40 | `BeginSnapshot` | — stage a consistent copy of the table's files; Replication token only | 36 | `SnapshotManifest` / `Err(Unsupported \| TooLarge \| Busy \| Storage)` |
+| 41 | `FetchChunk` | `snapshot: u64`, `file: u32`, `offset: u64`, `len: u32` — at most 4 MiB of one staged file | 36 | `Chunk` / `Err(NoSnapshot \| Malformed)` |
+| 42 | `EndSnapshot` | `snapshot: u64` — free the staged copy | 36 | `Ok` / `Err(NoSnapshot)` |
 | 37 | `FilteredPageDesc` | `order_by: FieldRef`, `before: Option<(ScanValue, RecordId)>`, `limit: u64`, `filter: Vec<Predicate>` — `FilteredPage` walked the other way | 28 | `Rows` |
 | 38 | `DescribeNullable` | — — which fields of the connection's table are nullable | 32 | `NullableFields` |
 
@@ -276,6 +279,8 @@ server does not know closes the connection with no reply (§6.3).
 | 23 | `Snapshot` | `files: Vec<(String, Vec<u8>)>` | 25 |
 | 24 | `RowsClamped` | `rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>`, `cap: u64` — `Rows`'s exact payload followed by the row cap the answer was clamped to | 30 |
 | 26 | `Changes` | `epoch: u64`, `first: u64`, `head: u64`, `entries: Vec<Vec<WriteOp>>` — entry `first + i` is one write batch in apply order; `head` is the log's next sequence | 34 |
+| 28 | `SnapshotManifest` | `snapshot: u64`, `position: Option<(u64, u64)>`, `files: Vec<(String, u64, [u8; 32])>` — the handle, the log `(epoch, seq)` the copy agrees with, and each staged file's name, length and SHA-256 (32 raw bytes, no length prefix) | 36 |
+| 29 | `Chunk` | `bytes: Vec<u8>` — answers `FetchChunk` | 36 |
 | 27 | `SnapshotAt` | `files: Vec<(String, Vec<u8>)>`, `epoch: u64`, `seq: u64` — `Snapshot` plus the log position it is consistent with; answers `FetchSnapshot` when the table keeps a log | 34 |
 | 25 | `NullableFields` | `tags: Vec<FieldRef>` — every nullable field of the table, ascending; answers `DescribeNullable` | 32 |
 
@@ -726,6 +731,18 @@ Each item names the `SERVER-001` requirement that owns it.
    position the log dropped, is `Err(Gone)` — the standby re-fetches a
    snapshot. Replication token only; `Malformed` below 34, and a table with
    no log is `Unsupported`. (`FR-120`)
+32. **Chunked snapshots** (36) — `FetchSnapshot` answers a whole table in one
+   frame, so `TooLarge` above 8 MiB. `BeginSnapshot` copies the table's files
+   into a staging directory under the table's write lock and answers
+   `SnapshotManifest`; `FetchChunk` then reads at most 4 MiB of a staged file
+   by `(file index, offset)` — any order, so a client can resume — with no
+   table lock; `EndSnapshot` frees the copy. A client checks each file's
+   length and SHA-256 against the manifest. The handle belongs to the
+   connection that began it; `NoSnapshot` for any other, an ended one, or one
+   idle for 300 s whose slot another `BeginSnapshot` took. One staged copy
+   per table (`Busy`) and per connection. Replication token only; below 36
+   the three requests are `Malformed`; `Unsupported` unless the server was
+   given a staging directory. (`FR-122`)
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows
@@ -786,6 +803,7 @@ An unknown bit for the negotiated version is `Malformed`.
 | 30 | v0.84.0 | `RowsClamped` (24), `ErrorCode::Busy` (15) — `Rows` below 30 for a clamped `Query` (§7 item 27); `Busy` written only before negotiation, never as an answer |
 | 31 | v0.96.0 | `ScanValue::Null` (6) — a unit variant; a `Null` field pair is dropped from `Record`/`Rows` below 31 (§7 item 28); no shipped field is nullable yet |
 | 32 | v0.104.0 | `DescribeNullable` (38), `NullableFields` (25) — the first nullable columns, a sentinel shown as `Null` at 32 and above (§7 item 29) |
+| 36 | v0.109.0 | `BeginSnapshot` (40), `FetchChunk` (41), `EndSnapshot` (42), `SnapshotManifest` (28), `Chunk` (29), `ErrorCode::NoSnapshot` (17) — a staged, chunked snapshot of a table over 8 MiB (§7 item 32) |
 | 35 | v0.108.0 | flag bit 16, `SESSION_STRICT_COMMIT` — no new variant (§7.6) |
 | 34 | v0.107.0 | `FetchSince` (39), `Changes` (26), `SnapshotAt` (27), `ErrorCode::Gone` (16) — a per-table change log a standby tails (§7 item 31) |
 | 33 | v0.106.0 | `WriteOp::UpdateField` (5), `WriteResult::Updated` (9) — a session stages record writes beside updates and commits them as one atomic `WriteBatch` (§7 item 30) |
@@ -840,6 +858,12 @@ whichever is found — see `tests/server_python_client.rs`'s own
 
 ## 10. Change history
 
+- 0.25.0 (`SERVER-001` v0.109.0, `ADR-0136`, `CSN-FR-001`..`005`): protocol
+  version 36 — `BeginSnapshot` (40), `FetchChunk` (41), `EndSnapshot` (42),
+  `SnapshotManifest` (28), `Chunk` (29), `ErrorCode::NoSnapshot` (17). §5.6,
+  §5.7, §7 item 32. Fixture: the three requests, `Response/SnapshotManifest`,
+  `Response/Chunk`, `Response/Err(NoSnapshot)` at 36. Python client: the
+  five, a `("fixed", N)` spec, `fetch_snapshot_chunked`, declares 36.
 - 0.24.0 (`SERVER-001` v0.108.0, `ADR-0133`, `STC-FR-001`..`005`): protocol
   version 35 — no new variant; `BeginWith` learns flag bit 16,
   `SESSION_STRICT_COMMIT` (§7.6). Python client: the constant, declares 35.

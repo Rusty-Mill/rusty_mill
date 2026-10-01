@@ -56,9 +56,9 @@ use super::protocol::{
     RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    copy_table_files, page_key, predicate_matches, read_table_files, validate_predicate,
-    BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome, ReadTableFilesError,
-    ReplaceIfOutcome, ReplaceOutcome,
+    copy_table_files, page_key, predicate_matches, read_table_files, stage_table_files,
+    validate_predicate, BackupReport, ConnectionStore, DeleteOutcome, InsertOutcome, LinkOutcome,
+    ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::entity::{
@@ -1346,6 +1346,14 @@ impl ConnectionStore for EntityConnectionStore {
         self.store
             .with_exclusive(|_| copy_table_files(base, target_dir))
             .map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `CSN-FR-001` (ADR-0136): the staged copy [`ConnectionStore::backup`] makes.
+    fn stage_snapshot(&self, dir: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        self.store
+            .with_exclusive(|_| stage_table_files(base, dir, max_bytes))
+            .map(|()| None)
     }
 
     /// `RPL-FR-003` (ADR-0067): [`ConnectionStore::backup`]'s reading

@@ -12,6 +12,8 @@ implemented (see ADR-0043's Non-goals). No SQL front end: build
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import os
 import socket
 import ssl
 from dataclasses import dataclass
@@ -640,6 +642,53 @@ class Client:
         if isinstance(reply, p.SnapshotAt):
             return list(reply.files), reply.epoch, reply.seq
         raise ProtocolError(type(reply).__name__)
+
+    def fetch_snapshot_chunked(self, directory: str) -> Tuple[int, Optional[Tuple[int, int]]]:
+        """``fetch_snapshot`` for a table of any size (CSN-FR-005, ADR-0136,
+        protocol 36): the server stages a copy and each file is streamed in
+        chunks of at most 4 MiB into the existing ``directory``, each checked
+        against the manifest's length and SHA-256. Returns ``(bytes written,
+        position)`` where position is the change-log ``(epoch, seq)`` or
+        ``None``. Replication token only; ``ErrorCode.Unsupported`` without
+        SERVER_SNAPSHOT_DIR, ``TooLarge`` over its ceiling, ``Busy`` while
+        the table's staged copy is held. Below 36, ``UnsupportedError`` with
+        no frame sent."""
+        manifest = self._roundtrip(p.BeginSnapshot())
+        if not isinstance(manifest, p.SnapshotManifest):
+            raise ProtocolError(type(manifest).__name__)
+        try:
+            written = self._download_staged(manifest, directory)
+        finally:
+            try:
+                self._roundtrip(p.EndSnapshot(manifest.snapshot))
+            except Exception:  # best effort: the server frees it on close
+                pass
+        return written, manifest.position
+
+    def _download_staged(self, manifest: p.SnapshotManifest, directory: str) -> int:
+        total = 0
+        for index, (name, length, digest) in enumerate(manifest.files):
+            if name in ("", ".", "..") or "/" in name or "\\" in name:
+                raise ProtocolError(f"manifest file name {name!r} is not a plain file name")
+            hasher = hashlib.sha256()
+            offset = 0
+            with open(os.path.join(directory, name), "wb") as out:
+                while offset < length:
+                    want = min(length - offset, p.MAX_CHUNK_BYTES)
+                    chunk = self._roundtrip(p.FetchChunk(manifest.snapshot, index, offset, want))
+                    if not isinstance(chunk, p.Chunk):
+                        raise ProtocolError(type(chunk).__name__)
+                    if not 0 < len(chunk.bytes) <= want:
+                        raise ProtocolError(f"{name}: a chunk of {len(chunk.bytes)} bytes, wanted 1..{want}")
+                    hasher.update(chunk.bytes)
+                    out.write(chunk.bytes)
+                    offset += len(chunk.bytes)
+                out.flush()
+                os.fsync(out.fileno())
+            if hasher.digest() != digest:
+                raise ProtocolError(f"{name}: the SHA-256 differs from the manifest's")
+            total += length
+        return total
 
     def fetch_since(self, epoch: int, after: int, limit: int = 1000) -> p.Changes:
         """Change-log entries after ``after`` in ``epoch`` (RPL-FR-002,

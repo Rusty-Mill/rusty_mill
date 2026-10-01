@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_multimodal_db`: chunked snapshots** (ADR-0136, protocol 36): `BeginSnapshot`/`FetchChunk`/`EndSnapshot`, so a table over 8 MiB gets a standby; `SERVER_SNAPSHOT_DIR`, `SERVER_SNAPSHOT_MAX_MB`, `snapshot_stall_bench`.
 - **`rusty_multimodal_db`: ADR-0136**, a proposal for chunked snapshots that lift the 8 MiB cap (docs only).
 - **`rusty_multimodal_db`: `change_log_bench`**, a write benchmark that measures the change log's cost under concurrent writers (ADR-0131).
 - **`rusty_tick`: type-ahead search** on the engine's `any_of_prefix`.
