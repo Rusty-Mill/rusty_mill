@@ -71,6 +71,15 @@ pub const COMMITTED: u8 = 1;
 pub struct SlotFile<Id, V> {
     mmap: MmapMut,
     path: PathBuf,
+    /// The read/write handle the mapping was made from, kept to re-map
+    /// after an append without reopening the file. `None` only while
+    /// [`Self::rewrite`] replaces the file.
+    file: Option<File>,
+    /// The `O_APPEND` handle appends go through, opened on the first
+    /// append and kept: reopening it per append (and the file again to
+    /// re-map) cost an insert several system calls (design review
+    /// Tranche 5, `vs_sqlite`).
+    appender: Option<File>,
     _marker: PhantomData<(Id, V)>,
 }
 
@@ -314,6 +323,8 @@ where
         Ok(Self {
             mmap,
             path: path.to_path_buf(),
+            file: Some(file),
+            appender: None,
             _marker: PhantomData,
         })
     }
@@ -346,16 +357,19 @@ where
         temp.push(".compact");
         let temp = std::path::PathBuf::from(temp);
         drop(Self::create(&temp, slots)?);
-        // Release the old mapping before the rename: a mapped file cannot
-        // be replaced on Windows, and the anonymous page is a placeholder
-        // the field type requires.
+        // Release the old mapping and handles before the rename: a mapped
+        // or open file cannot be replaced on Windows, and the anonymous
+        // page is a placeholder the field type requires.
         self.mmap = MmapMut::map_anon(1)?;
+        self.file = None;
+        self.appender = None;
         std::fs::rename(&temp, &self.path)?;
         sync_parent_dir(&self.path)?;
         let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         // SAFETY: see `create` — the same single-process exclusive-access
         // assumption, over the file this call just put in place.
         self.mmap = unsafe { MmapMut::map_mut(&file)? };
+        self.file = Some(file);
         Ok(())
     }
 
@@ -368,6 +382,8 @@ where
         Ok(Self {
             mmap,
             path: path.to_path_buf(),
+            file: Some(file),
+            appender: None,
             _marker: PhantomData,
         })
     }
@@ -421,18 +437,40 @@ where
     where
         I: IntoIterator<Item = (Id, V)>,
     {
-        let mut appender = OpenOptions::new().append(true).open(&self.path)?;
+        let result = self.try_append_committed_slots(slots);
+        if result.is_err() {
+            // Start the next append from the file as it is on disk.
+            self.appender = None;
+        }
+        result
+    }
+
+    fn try_append_committed_slots<I>(&mut self, slots: I) -> Result<Vec<usize>, DurabilityError>
+    where
+        I: IntoIterator<Item = (Id, V)>,
+    {
+        let appender = match &mut self.appender {
+            Some(appender) => appender,
+            None => self
+                .appender
+                .insert(OpenOptions::new().append(true).open(&self.path)?),
+        };
         let mut positions = Vec::new();
         for (id, value) in slots {
-            positions.push(Self::append_committed_slot(&mut appender, id, value)?);
+            positions.push(Self::append_committed_slot(appender, id, value)?);
         }
         // Re-map at the file's current length — reflecting the appends
         // just made through a *different* handle than the mapping's, but
         // the same underlying file, so its on-disk length is already
         // correct by the time this mapping is established.
-        let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        let file = match &self.file {
+            Some(file) => file,
+            None => self
+                .file
+                .insert(OpenOptions::new().read(true).write(true).open(&self.path)?),
+        };
         // SAFETY: see `create`.
-        self.mmap = unsafe { MmapMut::map_mut(&file)? };
+        self.mmap = unsafe { MmapMut::map_mut(file)? };
         Ok(positions)
     }
 }
