@@ -1,0 +1,96 @@
+//! The I/O shell: render, run `ollama`, parse.
+
+use std::time::Duration;
+
+use orch_core::board::Board;
+use orch_core::task::{Agent, Task};
+use orch_dispatch::{AgentError, AgentRunner, Output};
+
+use crate::exec::{CommandRunner, ExecError, StdCommand};
+use crate::{parse, render};
+
+/// Longest slice of model output or stderr an error message carries.
+const EXCERPT_CHARS: usize = 200;
+
+/// [`Agent::Local`] over `ollama run <model> --format json`, prompt on stdin.
+///
+/// Serves only `Agent::Local`; any other agent is an [`AgentError`]. The
+/// argv is a fixed vector with no shell and no interpolation.
+#[derive(Debug, Clone)]
+pub struct OllamaAgent<C = StdCommand> {
+    model: String,
+    timeout: Duration,
+    runner: C,
+}
+
+impl OllamaAgent<StdCommand> {
+    /// An agent over the real `ollama` binary on `PATH`.
+    pub fn new(model: impl Into<String>, timeout: Duration) -> Self {
+        Self::with_runner(model, timeout, StdCommand)
+    }
+}
+
+impl<C: CommandRunner> OllamaAgent<C> {
+    /// An agent over any [`CommandRunner`], e.g. a fake in tests.
+    pub fn with_runner(model: impl Into<String>, timeout: Duration, runner: C) -> Self {
+        Self {
+            model: model.into(),
+            timeout,
+            runner,
+        }
+    }
+
+    /// The runner, e.g. to inspect a fake in tests.
+    pub fn runner(&self) -> &C {
+        &self.runner
+    }
+
+    /// The argv this agent runs. Public so tests and docs can pin it.
+    pub fn argv(&self) -> Vec<String> {
+        ["ollama", "run", self.model.as_str(), "--format", "json"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
+    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+        if agent != Agent::Local {
+            return Err(AgentError(format!(
+                "ollama adapter serves Local, not {agent:?}"
+            )));
+        }
+        let prompt = render(task, board);
+        let exit = self
+            .runner
+            .run(&self.argv(), prompt.as_bytes(), self.timeout)
+            .map_err(exec_error)?;
+        if exit.status != 0 {
+            return Err(AgentError(format!(
+                "ollama exited with status {}: {}",
+                exit.status,
+                excerpt(&exit.stderr)
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&exit.stdout);
+        if stdout.trim().is_empty() {
+            return Err(AgentError("ollama wrote nothing to stdout".to_owned()));
+        }
+        parse(&stdout, task.spec().role)
+    }
+}
+
+fn exec_error(e: ExecError) -> AgentError {
+    AgentError(format!("ollama: {e}"))
+}
+
+/// A bounded, single-line excerpt for error messages; never the whole output.
+fn excerpt(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out: String = text.chars().take(EXCERPT_CHARS).collect();
+    if text.chars().count() > EXCERPT_CHARS {
+        out.push('…');
+    }
+    out.replace('\n', " ").trim().to_owned()
+}
