@@ -18,6 +18,8 @@ in git history, and each requirement's spec section holds its detail.
   `72494f4` is in git history; requirement detail lives in each spec
   section.
 
+---
+
 ## Slimmed `TRACEABILITY.md` to pointers
 **2026-10-01** · docs only
 
