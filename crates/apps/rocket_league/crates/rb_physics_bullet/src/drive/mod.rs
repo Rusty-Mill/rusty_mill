@@ -151,8 +151,7 @@
 //! held-vs-tapped jump height difference. Since `RB-PHYSICS-001-FR-064`,
 //! that release isn't *always* immediate: for the first `JUMP_MIN_TIME`
 //! seconds after the press, the acceleration keeps applying regardless of
-//! whether `jump` is still held (scaled down by `JUMP_PRE_MIN_ACCEL_SCALE`)
-//! — real Rocket League's own `_UpdateJump` has this same mandatory
+//! whether `jump` is still held — real Rocket League's own `_UpdateJump` has this same mandatory
 //! minimum-hold quirk, so even an instantaneous tap gets a small amount of
 //! extra height. Only past that mandatory window does releasing `jump` end
 //! it right away. This is scoped to the ground jump alone: the double jump,
@@ -203,7 +202,7 @@
 //! actually cite), `JUMP_SPEED`, `JUMP_HOLD_MAX_DURATION`,
 //! `JUMP_HOLD_ACCELERATION`, (since `RB-PHYSICS-001-FR-057`)
 //! `MAX_CAR_ANGULAR_SPEED`, and (since `RB-PHYSICS-001-FR-064`)
-//! `JUMP_MIN_TIME`/`JUMP_PRE_MIN_ACCEL_SCALE` are commonly-cited,
+//! `JUMP_MIN_TIME` are commonly-cited,
 //! multi-source-confirmed community-reverse-engineered approximations (the
 //! same body of public research `PhysicsWorld::new`'s gravity constant
 //! comes from);
@@ -403,12 +402,11 @@ pub struct DriveState {
     pub double_jump_available: bool,
     /// How much longer, in seconds, continuing to hold `jump` keeps adding
     /// extra upward acceleration to a ground jump. Checked and decremented
-    /// *before* this call's own ground-jump press can re-arm it, so a fresh
-    /// press's own step only fires the plain `JUMP_SPEED` impulse; the press
-    /// then re-arms it to `JUMP_HOLD_MAX_DURATION`. Since
-    /// `RB-PHYSICS-001-FR-064`, releasing `jump` inside the first
-    /// `JUMP_MIN_TIME` seconds doesn't zero it: that mandatory window keeps
-    /// decrementing it at a `JUMP_PRE_MIN_ACCEL_SCALE`-scaled acceleration.
+    /// *before* this call's own ground-jump press can re-arm it; the press
+    /// re-arms it to `JUMP_HOLD_MAX_DURATION` and spends its first tick
+    /// (`RB-PHYSICS-001-FR-091`). Since `RB-PHYSICS-001-FR-064`, releasing
+    /// `jump` inside the first `JUMP_MIN_TIME` seconds doesn't zero it: that
+    /// mandatory window keeps applying the full acceleration.
     /// Untouched by the double jump, a dodge, or the wall jump.
     pub jump_hold_time_remaining: f32,
     /// The dodge flip since the last dodge press, until landing
@@ -509,7 +507,7 @@ pub fn apply_driven_forces(
             dt,
         );
         if jump_pressed {
-            jump::ground_jump(car, &mut state.jump_hold_time_remaining);
+            jump::ground_jump(car, &mut state.jump_hold_time_remaining, dt);
         }
     } else {
         if wall_normal.is_some() {

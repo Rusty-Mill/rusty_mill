@@ -937,6 +937,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- The ground jump's hold force applies at full strength from the press
+  tick (`RB-PHYSICS-001-FR-091`, ADR-0019), dropping RocketSim's 0.62
+  pre-min scale, and the suspension damper reads the post-jump velocity, as
+  the real capture shows (press tick 295.7 vs 295.9 recorded, then +4.0 per
+  tick).
 - Cars ride on RocketSim's raycast suspension with the Octane hitbox
   offset (`RB-PHYSICS-001-FR-090`, ADR-0018): a standard car rests at the
   recorded 17.0 uu instead of 19.3 on its box, landings are sprung, and

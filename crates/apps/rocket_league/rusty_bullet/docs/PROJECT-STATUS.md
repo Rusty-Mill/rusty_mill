@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#182](https://github.com/baileyrd/rusty_bullet/pull/182) —
+  `RB-PHYSICS-001-FR-090`, raycast suspension and hitbox offset (ADR-0018).
 - [#181](https://github.com/baileyrd/rusty_bullet/pull/181) —
   `RB-PHYSICS-001-FR-089`, engine force at each wheel along its heading.
 - [#180](https://github.com/baileyrd/rusty_bullet/pull/180) —
@@ -81,7 +83,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-091` (ground-jump force, ADR-0019): implemented;
+  awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -108,15 +111,13 @@ version: `a245d35`).
 
 ## Next
 
-1. Jump vertical speed, now the earliest real-capture error: after the
-   4.142 s press the recorded car gains 4.0 uu/s per tick for 7 ticks, then
-   6.7; the candidate loses 0.6 per tick for 5 ticks, then gains 6.7, so it
-   is ~17 uu/s slower upward by 4.2 s. 6.7 is the full jump acceleration
-   less gravity and 4.0 is that less the sticky force, which suggests the
-   real game has no `JUMP_PRE_MIN_ACCEL_SCALE` (0.62, a RocketSim TODO)
-   and keeps wheel contact 2 ticks longer. Then: the post-boost vertical
-   divergence (4.94-5.5 s; at 5.575 s the recording falls at 312 uu/s, the
-   candidate at 260, so it lands ~6 ticks late), and braking per wheel.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.1 4.3` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-091`: press-tick vz ~295.7
+   (recorded 295.9), then +4.0 per tick; vertical error by 4.2 s well under
+   the previous ~17 uu/s. Known gap: the candidate's wheels leave the floor
+   2 ticks before the recording's. Then: the post-boost vertical divergence
+   (4.94-5.5 s; the recording falls at 312 uu/s at 5.575 s, the candidate
+   at 260, so it lands ~6 ticks late), and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -125,7 +126,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (432 tests: 27 `rb_domain`, 367
+- `cargo test --workspace`: pass (433 tests: 27 `rb_domain`, 368
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

@@ -2040,10 +2040,12 @@ mod tests {
             },
         );
         world.step(dt);
-        // Less one tick of the grounded car's sticky force, half of default
-        // gravity whatever `world.gravity` is (RB-PHYSICS-001-FR-090).
+        // Plus the press tick's own hold force (1458.33 uu/s^2,
+        // RB-PHYSICS-001-FR-091), less one tick of the grounded car's sticky
+        // force, half of default gravity whatever `world.gravity` is
+        // (RB-PHYSICS-001-FR-090).
         let velocity_after_ground_jump = world.cars[0].linear_velocity.z;
-        let expected = crate::drive::JUMP_SPEED - 0.5 * 650.0 * dt;
+        let expected = crate::drive::JUMP_SPEED + (4375.0 / 3.0 - 0.5 * 650.0) * dt;
         assert!(
             (velocity_after_ground_jump - expected).abs() < 1.0,
             "expected the ground jump to give ~JUMP_SPEED upward velocity, got {velocity_after_ground_jump}"
@@ -3708,6 +3710,42 @@ mod tests {
             collision::contacts_vs_plane(car, &world.ground).is_empty(),
             "the box should ride clear of the floor"
         );
+    }
+
+    /// `RB-PHYSICS-001-FR-091`: a ground jump from a car resting on its
+    /// suspension follows the owner's capture tick by tick: the press tick
+    /// gives `JUMP_SPEED` plus 4.0 uu/s, each tick while the wheels still
+    /// touch gives 4.0 (hold force less gravity less the sticky force), and
+    /// each tick after gives 6.7 (hold force less gravity).
+    #[test]
+    fn a_held_ground_jump_gains_speed_as_the_real_capture_does() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        let mut speeds = vec![world.cars[0].linear_velocity.z];
+        for _ in 0..10 {
+            world.step(dt);
+            speeds.push(world.cars[0].linear_velocity.z);
+        }
+        let gains: Vec<f32> = speeds.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            (gains[0] - (crate::drive::JUMP_SPEED + 4.0)).abs() < 0.5,
+            "press tick: {gains:?}"
+        );
+        assert!((gains[1] - 4.0).abs() < 0.2, "wheels touching: {gains:?}");
+        let last = gains[gains.len() - 1];
+        assert!((last - 6.7).abs() < 0.2, "airborne: {gains:?}");
     }
 
     /// `RB-PHYSICS-001-FR-080`: full steer on flat ground turns the car at

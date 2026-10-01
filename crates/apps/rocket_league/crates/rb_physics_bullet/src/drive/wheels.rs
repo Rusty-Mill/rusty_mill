@@ -33,6 +33,9 @@ const SUSPENSION_STIFFNESS: f32 = 500.0;
 const WHEELS_DAMPING_COMPRESSION: f32 = 25.0;
 const WHEELS_DAMPING_RELAXATION: f32 = 40.0;
 
+/// `m_clippedInvContactDotSuspension` on a surface too steep to measure.
+const STEEP_CONTACT_CLIP: f32 = 10.0;
+
 /// Bullet's default `m_erp`, the pushback's positional correction.
 const PUSHBACK_ERP: f32 = 0.2;
 
@@ -89,10 +92,10 @@ pub struct WheelContact {
     front: bool,
     /// Clamped to `rest_length ± MAX_SUSPENSION_TRAVEL`.
     suspension_length: f32,
-    /// Contact point speed along the normal over `inv_contact_dot`;
-    /// negative while compressing.
-    suspension_velocity: f32,
-    inv_contact_dot: f32,
+    /// `1 / (normal · car up)`, or `None` when the surface is too steep
+    /// (`approach <= 0.1`), where Bullet zeroes the suspension velocity and
+    /// clips the spring by 10.
+    inv_contact_dot: Option<f32>,
     /// `m_extraPushback`: a quarter of the impulse that would stop the
     /// wheel sinking past its rest reach.
     pushback: f32,
@@ -137,12 +140,7 @@ fn cast_wheel(
         wheel.rest_length + MAX_SUSPENSION_TRAVEL,
     );
     let rel_pos = point - car.position;
-    let normal_speed = normal.dot(&car.velocity_at_point(&rel_pos));
-    let (suspension_velocity, inv_contact_dot) = if approach > 0.1 {
-        (normal_speed / approach, 1.0 / approach)
-    } else {
-        (0.0, 10.0)
-    };
+    let inv_contact_dot = (approach > 0.1).then(|| 1.0 / approach);
     let pushback_reach = wheel.rest_length + wheel.radius - SUSPENSION_SUBTRACTION;
     let pushback = if trace < pushback_reach {
         stopping_impulse(car, rel_pos, normal, trace - pushback_reach, dt) / WHEELS.len() as f32
@@ -154,7 +152,6 @@ fn cast_wheel(
         normal,
         front,
         suspension_length,
-        suspension_velocity,
         inv_contact_dot,
         pushback,
     })
@@ -220,17 +217,32 @@ pub fn apply_wheel_forces(
     car.apply_central_force(surface_up * (scale * STICKY_GRAVITY_Z * car.mass()));
 }
 
+/// The contact point's speed along the normal over `normal · car up`,
+/// negative while compressing. Read from the car's current velocity, after
+/// this step's drive impulses (`RB-PHYSICS-001-FR-091`): RocketSim reads it
+/// before them, but the owner's capture shows no spring push on a jump's
+/// press tick, the jump's upward speed relaxing the damper as it would if
+/// the game handled the press first (as it does a dodge, FR-085).
+fn suspension_velocity(car: &RigidBody, contact: &WheelContact) -> f32 {
+    let Some(inv_contact_dot) = contact.inv_contact_dot else {
+        return 0.0;
+    };
+    let rel_pos = contact.point - car.position;
+    contact.normal.dot(&car.velocity_at_point(&rel_pos)) * inv_contact_dot
+}
+
 fn apply_suspension(car: &mut RigidBody, contact: &WheelContact, dt: f32) {
     let wheel = spec(contact.front);
     let spring = (wheel.rest_length - contact.suspension_length)
         * SUSPENSION_STIFFNESS
-        * contact.inv_contact_dot;
-    let damping = if contact.suspension_velocity < 0.0 {
+        * contact.inv_contact_dot.unwrap_or(STEEP_CONTACT_CLIP);
+    let velocity = suspension_velocity(car, contact);
+    let damping = if velocity < 0.0 {
         WHEELS_DAMPING_COMPRESSION
     } else {
         WHEELS_DAMPING_RELAXATION
     };
-    let force = ((spring - damping * contact.suspension_velocity) * wheel.force_scale).max(0.0);
+    let force = ((spring - damping * velocity) * wheel.force_scale).max(0.0);
     if force == 0.0 {
         return;
     }
@@ -252,8 +264,7 @@ pub(crate) fn resting_contacts(car: &RigidBody) -> WheelContacts {
             normal: up,
             front,
             suspension_length: wheel.rest_length,
-            suspension_velocity: 0.0,
-            inv_contact_dot: 1.0,
+            inv_contact_dot: Some(1.0),
             pushback: 0.0,
         })
     })
