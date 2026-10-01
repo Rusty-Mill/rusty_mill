@@ -53,6 +53,8 @@ this dodge; ~621 was recorded.
 
 Option 1. `DODGE_SPEED` becomes 500, and RocketSim's
 `FLIP_BACKWARD_IMPULSE_SCALE_X = 16/15` is added for backward dodges.
+The dodge pushes along the heading flattened to the ground plane
+(`forwardDir2D`/`rightDir2D`), so a tilted car's dodge stays horizontal.
 
 ## Consequences
 
@@ -69,6 +71,13 @@ Option 1. `DODGE_SPEED` becomes 500, and RocketSim's
 
 ## Validation
 
+- First re-trace (before the ground-plane flattening): position error at
+  5.0 s was 79 uu (was 1,590). The dodge added (+599, -84) uu/s against
+  (+619, -27) recorded, but dropped vz by 47 uu/s because it pushed along
+  the tilted 3D axis. The flattening fixes that drop.
+- The recorded vz stall at about -15 uu/s from 4.52 s is RocketSim's flip
+  vertical damping (`FLIP_Z_DAMP_120` while falling during the flip). It
+  is physics, not a stale capture.
 - Re-run `rb-verify --self-trace test2.jsonl 4.3 5.0`. The velocity change
   at 4.325 s should be ~(+620, -27), not (-220, -2163), and orientation
   error during 4.3-4.9 s should stay well below 3 rad.

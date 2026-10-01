@@ -441,6 +441,14 @@ fn apply_dodge(
 ) {
     let forward_speed = car.linear_velocity.dot(&forward);
     let (norm_pitch, norm_roll) = normalize_dodge_direction(pitch, roll);
+    // RocketSim pushes along the car's heading flattened to the ground
+    // plane (`forwardDir2D`, `rightDir2D`), so a tilted car's dodge stays
+    // horizontal. A car pointing straight up or down has no heading and
+    // gets no horizontal push.
+    let forward_2d = Vec3::new(forward.x, forward.y, 0.0)
+        .normalize()
+        .unwrap_or(Vec3::ZERO);
+    let right_2d = Vec3::new(-forward_2d.y, forward_2d.x, 0.0);
     let mut dodge_impulse = base_impulse;
     let mut dodge_spin = Vec3::ZERO;
     if pitch.abs() > DODGE_DEADZONE {
@@ -449,12 +457,12 @@ fn apply_dodge(
         } else {
             1.0
         };
-        dodge_impulse += forward * (norm_pitch * DODGE_SPEED * scale);
+        dodge_impulse += forward_2d * (norm_pitch * DODGE_SPEED * scale);
         dodge_spin += right_axis(car) * (norm_pitch * DODGE_ANGULAR_SPEED);
     }
     if roll.abs() > DODGE_DEADZONE {
         let scale = dodge_speed_scale(forward_speed, DODGE_SIDE_SPEED_SCALE);
-        dodge_impulse += right_axis(car) * (norm_roll * DODGE_SPEED * scale);
+        dodge_impulse += right_2d * (norm_roll * DODGE_SPEED * scale);
         // RocketSim's flip torque about forward is `-dodgeDir.y`: a dodge
         // toward the right rolls the right side down.
         dodge_spin -= forward * (norm_roll * DODGE_ANGULAR_SPEED);

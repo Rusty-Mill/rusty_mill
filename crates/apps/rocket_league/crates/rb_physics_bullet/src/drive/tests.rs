@@ -3053,3 +3053,38 @@ fn stick_forward_noses_a_car_down_in_the_air() {
     step_with_input(&mut c, &input, false, &mut boost, 1.0 / 120.0);
     assert!(c.angular_velocity.y > 0.0, "spin {:?}", c.angular_velocity);
 }
+
+#[test]
+fn a_tilted_cars_dodge_stays_horizontal() {
+    // RocketSim dodges along the heading flattened to the ground plane:
+    // a nose-up car's forward dodge adds no vertical speed (owner's capture,
+    // 4.325 s: recorded vz held while a 3D push dropped it ~47 uu/s).
+    let mut c = car();
+    // Pitched nose-up 0.5 rad about +Y (negative rotation raises the nose).
+    c.orientation = rb_domain::Quat::new(0.0, (-0.25_f32).sin(), 0.0, (-0.25_f32).cos());
+    c.update_inertia_tensor();
+    let mut boost = MAX_BOOST;
+    let mut jump_held = false;
+    let mut double_jump_available = true;
+    let input = ControllerInput {
+        jump: true,
+        pitch: Some(-1.0),
+        ..Default::default()
+    };
+    step_with_input_and_double_jump_state(
+        &mut c,
+        &input,
+        false,
+        &mut boost,
+        &mut jump_held,
+        &mut double_jump_available,
+        1.0 / 120.0,
+    );
+    assert_close(c.linear_velocity.x, DODGE_SPEED, "horizontal dodge");
+    // Only gravity (650 uu/s^2 over one tick) changes vz.
+    assert!(
+        c.linear_velocity.z.abs() < 10.0,
+        "vz {}",
+        c.linear_velocity.z
+    );
+}

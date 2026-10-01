@@ -16,7 +16,9 @@ in git history, and each requirement's spec section holds its detail.
   signs from Rocket League's (RocketSim's `-controls.pitch`, -right and
   -forward air axes). They now match, and the dodge impulse is RocketSim's
   500 uu/s (was a 1400 placeholder): its formula predicts ~628 uu/s for
-  that dodge, 621 was recorded. 2 new tests (421 total).
+  that dodge, 621 was recorded. The push is now horizontal even when the
+  car is tilted. Position error at 5.0 s fell from 1,590 to 79 uu on the
+  first re-trace. 3 new tests (422 total).
 
 ## Tire grip: cars roll, grip sideways, and drift on the handbrake
 **2026-10-01** · `RB-PHYSICS-001-FR-081` · ADR-0012

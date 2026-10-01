@@ -62,8 +62,8 @@ version: `a245d35`).
 ## In progress
 
 - `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
-  (ADR-0013): implemented and unit-tested; awaiting the owner's re-trace
-  of 4.3-5.0 s.
+  (ADR-0013): verified on the real capture (position error at 5.0 s 1,590
+  to 79 uu); ground-plane push fix awaiting a re-trace.
 
 ## Blocked
 
@@ -90,10 +90,10 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.0` to confirm
-   `RB-PHYSICS-001-FR-082`: the 4.317 s dodge should add ~(+620, -27)
-   uu/s, not (-220, -2163). Then flip vertical damping (`FLIP_Z_DAMP_*`,
-   recorded vz falls 211 to 24 uu/s ~0.15 s after the dodge). Known small
+1. Flip vertical damping (`FLIP_Z_DAMP_*`: recorded vz falls 211 to
+   ~-15 uu/s from ~0.15 s after the 4.317 s dodge and stalls there) and
+   the continuous flip torque (FR-069; orientation error grows to ~1.6 rad
+   through the flip). Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -107,7 +107,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (421 tests: 27 `rb_domain`, 357
+- `cargo test --workspace`: pass (422 tests: 27 `rb_domain`, 358
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

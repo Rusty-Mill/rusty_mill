@@ -932,7 +932,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - Dodges and air control (`RB-PHYSICS-001-FR-082`, ADR-0013): pitch and
   roll now follow RocketSim's signs, so stick forward dodges forward (it
   dodged backward) and air pitch/roll spin the right way; `DODGE_SPEED`
-  is RocketSim's 500 (was 1400) and backward dodges get the 16/15 scale.
+  is RocketSim's 500 (was 1400), backward dodges get the 16/15 scale, and
+  the push is along the heading flattened to the ground plane.
 - A driving car hopped off the floor and counted as grounded only one
   tick in three (`RB-PHYSICS-001-FR-079`): `solver`'s restitution
   velocity threshold was Bullet's 0.2 m/s copied as 0.2 uu/s; now

@@ -5305,10 +5305,12 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   three are now RocketSim's. `DODGE_SPEED` is 500
   (`FLIP_INITIAL_VEL_SCALE`; RocketSim's formula predicts ~628 uu/s for the
   recorded dodge), and `FLIP_BACKWARD_IMPULSE_SCALE_X = 16/15` is added.
-  ADR-0013.
-  - **Verification**: 2 new `drive` tests (the recorded dodge's impulse
+  The push follows RocketSim's heading flattened to the ground plane, so a
+  tilted car's dodge stays horizontal. Real capture, first re-trace:
+  position error at 5.0 s 79 uu (was 1,590). ADR-0013.
+  - **Verification**: 3 new `drive` tests (the recorded dodge's impulse
     against RocketSim's formula; stick forward noses the car down in the
-    air). The tests that encoded the old convention now use Rocket
+    air; a tilted car's dodge stays horizontal). The tests that encoded the old convention now use Rocket
     League's signs with the same intent. The backward-dodge test includes
     the 16/15 scale.
   - **Not done here**: flip vertical damping (`FLIP_Z_DAMP_*`), the
@@ -6797,7 +6799,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 - 0.86.0 (2026-10-01): `RB-PHYSICS-001-FR-082` — dodge and air-control
   pitch/roll read in RocketSim's sign convention; `DODGE_SPEED` 500 and the
-  16/15 backward scale (ADR-0013). 2 new tests (357 in
+  16/15 backward scale, ground-plane push (ADR-0013). 3 new tests (358 in
   `rb_physics_bullet`).
 - 0.85.0 (2026-10-01): `RB-PHYSICS-001-FR-081` — per-axis tire grip on a
   frictionless box floor contact (ADR-0012), resolving FR-066; FR-080's
