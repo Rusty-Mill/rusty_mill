@@ -391,10 +391,8 @@ pub(super) fn advance_flip(car: &mut RigidBody, flip: &mut Option<FlipState>, dt
 /// `RB-PHYSICS-001-FR-031`'s audit: this port's pre-existing `0.2` already
 /// matches both RocketSim's `RLConst.h` (`JUMP_MAX_TIME = 0.2f`) and
 /// RLUtilities' `Jump::max_duration = 0.2f`. Real Rocket League also has a
-/// `JUMP_MIN_TIME` (0.025s) during which the hold acceleration is scaled
-/// down (`JUMP_PRE_MIN_ACCEL_SCALE`) rather than applied at full strength
-/// immediately — since `RB-PHYSICS-001-FR-064`, that two-phase ramp is
-/// modeled too, see `JUMP_MIN_TIME`'s own doc comment.
+/// `JUMP_MIN_TIME` (0.025s) of mandatory hold, see that constant's doc
+/// comment.
 pub(super) const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
 
 /// Continuous upward acceleration (uu/s^2) applied every step `jump` is
@@ -403,42 +401,25 @@ pub(super) const JUMP_HOLD_MAX_DURATION: f32 = 0.2;
 /// impulse. Refined from an earlier `1400.0` approximation to the precise
 /// value during `RB-PHYSICS-001-FR-031`'s audit: RocketSim's `RLConst.h`
 /// defines `JUMP_ACCEL = 4375.f/3.f`, matched independently by RLUtilities'
-/// `Jump::acceleration = 1458.3333f`. Scaled down by `JUMP_PRE_MIN_ACCEL_SCALE`
-/// during `JUMP_MIN_TIME`'s own mandatory window — see that constant's own
-/// doc comment.
+/// `Jump::acceleration = 1458.3333f`. Applied at full strength from the
+/// press tick on (`RB-PHYSICS-001-FR-091`), see `JUMP_MIN_TIME`.
 pub(super) const JUMP_HOLD_ACCELERATION: f32 = 4375.0 / 3.0;
 
 /// Seconds after a ground-jump press during which `JUMP_HOLD_ACCELERATION`
-/// (scaled by `JUMP_PRE_MIN_ACCEL_SCALE`) keeps applying regardless of
-/// whether `jump` is still held — a mandatory minimum hold real Rocket
-/// League's own engine applies even to an instantaneous tap. Confirmed
-/// exact against RocketSim's real `RLConst.h` (`JUMP_MIN_TIME = 0.025f`)
-/// during `RB-PHYSICS-001-FR-064`; fetching the same reference's actual
-/// `Car.cpp` (`_UpdateJump`) directly confirmed the exact mechanism —
-/// `jumpTime < JUMP_MIN_TIME || (jumpPressed && jumpTime < JUMP_MAX_TIME)`
-/// gates whether the force applies at all, with the pre-`JUMP_MIN_TIME`
-/// branch scaling it down regardless of `jumpPressed` — not merely the
-/// constant's existence. That same source's own inline comment (`// TODO:
-/// Either move to RLConst or preferably don't use this system at all`)
-/// flags this as a stopgap even its own authors consider provisional, not a
-/// deliberate permanent design choice — adopted here anyway since it's
-/// still the real, currently-shipping behavior, and both this and
-/// `JUMP_PRE_MIN_ACCEL_SCALE` are a duration and a dimensionless ratio
-/// respectively, not a torque or force calibrated against real Rocket
-/// League's own specific car mass/inertia, so unlike most of `drive.rs`'s
-/// own torque-shaped placeholders (see the module doc comment's own
-/// "false precision" discussion) they transfer cleanly regardless of this
-/// port's car body not matching that calibration.
+/// keeps applying regardless of whether `jump` is still held — a mandatory
+/// minimum hold real Rocket League applies even to an instantaneous tap.
+/// Confirmed against RocketSim's `RLConst.h` (`JUMP_MIN_TIME = 0.025f`) and
+/// `Car.cpp`'s `_UpdateJump` gate (`jumpTime < JUMP_MIN_TIME || (jumpPressed
+/// && jumpTime < JUMP_MAX_TIME)`) during `RB-PHYSICS-001-FR-064`.
+///
+/// RocketSim also scales the force by `JUMP_PRE_MIN_ACCEL_SCALE = 0.62`
+/// inside this window, a value its own source marks as a TODO. This port
+/// does not (`RB-PHYSICS-001-FR-091`): after the owner's capture's 4.142 s
+/// press, the recorded car gains exactly `JUMP_HOLD_ACCELERATION` less
+/// gravity less the sticky force (4.0 uu/s per tick) while its wheels
+/// touch, then less gravity alone (6.7) once they leave; the scaled force
+/// would lose 0.6 per tick.
 pub(super) const JUMP_MIN_TIME: f32 = 0.025;
-
-/// Multiplier applied to `JUMP_HOLD_ACCELERATION` during `JUMP_MIN_TIME`'s
-/// own mandatory window. Confirmed exact against RocketSim's real
-/// `Car.cpp` (`_UpdateJump`, `constexpr float JUMP_PRE_MIN_ACCEL_SCALE =
-/// 0.62f;`) during `RB-PHYSICS-001-FR-064` — a hard step-scale applied
-/// all-or-nothing for the whole window (`totalJumpForce *=
-/// JUMP_PRE_MIN_ACCEL_SCALE`), not an interpolation ramping from `0.62` up
-/// to `1.0` as `JUMP_MIN_TIME` approaches.
-pub(super) const JUMP_PRE_MIN_ACCEL_SCALE: f32 = 0.62;
 
 /// Variable jump height: applies the continuous hold acceleration using
 /// whatever `jump_hold_time_remaining` the *previous* call left behind, so
@@ -450,11 +431,9 @@ pub(super) fn apply_jump_hold(
     jump_hold_time_remaining: &mut f32,
     dt: f32,
 ) {
-    // A fresh ground-jump press's own step never gets the extra force,
-    // only continued holding (or the mandatory window below) into later
-    // calls does. RB-PHYSICS-001-FR-064: real Rocket League's own
-    // `_UpdateJump` keeps applying this force, scaled by
-    // `JUMP_PRE_MIN_ACCEL_SCALE`, for the first `JUMP_MIN_TIME` seconds
+    // A fresh ground-jump press applies its own tick of this force in
+    // `ground_jump`. RB-PHYSICS-001-FR-064: real Rocket League's own
+    // `_UpdateJump` keeps applying it for the first `JUMP_MIN_TIME` seconds
     // since the press regardless of whether `jump` is still held — derived
     // here as `JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining` rather
     // than tracked as a second, separate elapsed-time field, since at rest
@@ -466,29 +445,33 @@ pub(super) fn apply_jump_hold(
     let in_mandatory_pre_min_window =
         JUMP_HOLD_MAX_DURATION - *jump_hold_time_remaining < JUMP_MIN_TIME;
     if in_mandatory_pre_min_window || (jump_held_now && *jump_hold_time_remaining > 0.0) {
-        let mut hold_acceleration = JUMP_HOLD_ACCELERATION;
-        if in_mandatory_pre_min_window {
-            hold_acceleration *= JUMP_PRE_MIN_ACCEL_SCALE;
-        }
-        car.apply_central_force(Vec3::new(0.0, 0.0, hold_acceleration * car.mass()));
-        *jump_hold_time_remaining = (*jump_hold_time_remaining - dt).max(0.0);
+        push_jump_hold(car, jump_hold_time_remaining, dt);
     } else {
         *jump_hold_time_remaining = 0.0;
     }
 }
 
+/// One tick of `JUMP_HOLD_ACCELERATION`, spending `dt` of the hold window.
+fn push_jump_hold(car: &mut RigidBody, jump_hold_time_remaining: &mut f32, dt: f32) {
+    car.apply_central_force(Vec3::new(0.0, 0.0, JUMP_HOLD_ACCELERATION * car.mass()));
+    *jump_hold_time_remaining = (*jump_hold_time_remaining - dt).max(0.0);
+}
+
 /// Ground jump on a fresh press: a flat `JUMP_SPEED` velocity change, then
-/// arms the hold window for subsequent calls' `apply_jump_hold`.
-pub(super) fn ground_jump(car: &mut RigidBody, jump_hold_time_remaining: &mut f32) {
+/// arms the hold window and applies its first tick of hold force, as
+/// RocketSim's `_UpdateJump` does on the press tick
+/// (`RB-PHYSICS-001-FR-091`).
+pub(super) fn ground_jump(car: &mut RigidBody, jump_hold_time_remaining: &mut f32, dt: f32) {
     // An instantaneous velocity change, not a continuous force —
     // apply_impulse divides by mass internally, so scaling by
     // car.mass() here cancels that out and yields a flat
     // JUMP_SPEED velocity change regardless of the car's mass.
     car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
     // This call's own apply_jump_hold already ran against the *previous*
-    // value (0, since no ground jump was in flight yet), so only the fixed
-    // impulse above fires this step.
+    // value (0, since no ground jump was in flight yet), so the press tick's
+    // hold force comes from here.
     *jump_hold_time_remaining = JUMP_HOLD_MAX_DURATION;
+    push_jump_hold(car, jump_hold_time_remaining, dt);
 }
 
 /// Clamped dodge direction `(forward, side)` from the stick, the same way

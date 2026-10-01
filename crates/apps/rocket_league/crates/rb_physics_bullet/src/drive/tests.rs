@@ -16,6 +16,12 @@ fn wheels_for(car: &RigidBody, on_ground: bool) -> WheelContacts {
     }
 }
 
+/// Vertical speed a ground jump's press tick leaves: the `JUMP_SPEED`
+/// impulse plus its first tick of hold force (`RB-PHYSICS-001-FR-091`).
+fn press_tick_jump_speed(dt: f32) -> f32 {
+    JUMP_SPEED + JUMP_HOLD_ACCELERATION * dt
+}
+
 fn car() -> RigidBody {
     RigidBody::standard_car(Vec3::ZERO)
 }
@@ -720,8 +726,8 @@ fn jump_gives_a_grounded_car_upward_velocity() {
     let mut boost = MAX_BOOST;
     step_with_input(&mut c, &full_jump(), true, &mut boost, 1.0 / 60.0);
     assert!(
-        (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
-        "expected roughly JUMP_SPEED upward velocity, got {}",
+        (c.linear_velocity.z - press_tick_jump_speed(1.0 / 60.0)).abs() < 1.0,
+        "expected roughly JUMP_SPEED plus one tick of hold, got {}",
         c.linear_velocity.z
     );
 }
@@ -950,7 +956,7 @@ fn wall_jump_has_no_effect_while_grounded() {
         1.0 / 60.0,
     );
     assert!(
-        (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+        (c.linear_velocity.z - press_tick_jump_speed(1.0 / 60.0)).abs() < 1.0,
         "expected the ordinary ground jump, not a wall-jump push-off, got {:?}",
         c.linear_velocity
     );
@@ -1519,7 +1525,7 @@ fn dodge_has_no_effect_while_grounded() {
         "expected no dodge push-off from a grounded jump, regardless of stick input"
     );
     assert!(
-        (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
+        (c.linear_velocity.z - press_tick_jump_speed(1.0 / 60.0)).abs() < 1.0,
         "expected the ordinary ground jump instead, got {}",
         c.linear_velocity.z
     );
@@ -1996,11 +2002,11 @@ fn releasing_jump_early_stops_the_extra_acceleration_from_a_held_ground_jump() {
 }
 
 #[test]
-fn jump_hold_acceleration_is_scaled_down_during_the_mandatory_pre_min_time_window() {
-    // RB-PHYSICS-001-FR-064: real Rocket League's own `_UpdateJump`
-    // scales the hold acceleration by `JUMP_PRE_MIN_ACCEL_SCALE` for the
-    // first `JUMP_MIN_TIME` seconds after a ground-jump press, applied
-    // regardless of whether `jump` is still held.
+fn jump_hold_acceleration_applies_at_full_strength_inside_the_mandatory_window() {
+    // RB-PHYSICS-001-FR-064/FR-091: the hold acceleration applies for the
+    // first `JUMP_MIN_TIME` seconds after a ground-jump press regardless of
+    // whether `jump` is still held, at full strength (no RocketSim
+    // `JUMP_PRE_MIN_ACCEL_SCALE`, per the owner's capture).
     let dt = 1.0 / 120.0;
     let mut c = car();
     let mut boost = MAX_BOOST;
@@ -2008,8 +2014,8 @@ fn jump_hold_acceleration_is_scaled_down_during_the_mandatory_pre_min_time_windo
     let mut double_jump_available = true;
     let mut hold_remaining = 0.0;
 
-    // Press: arms the window; only the fixed JUMP_SPEED impulse fires
-    // this step.
+    // Press: arms the window, fires the JUMP_SPEED impulse and the first
+    // tick of hold force.
     step_with_input_and_hold(
         &mut c,
         &full_jump(),
@@ -2037,10 +2043,10 @@ fn jump_hold_acceleration_is_scaled_down_during_the_mandatory_pre_min_time_windo
         dt,
     );
 
-    let expected_gain = JUMP_HOLD_ACCELERATION * JUMP_PRE_MIN_ACCEL_SCALE * dt;
+    let expected_gain = JUMP_HOLD_ACCELERATION * dt;
     assert!(
         (c.linear_velocity.z - (velocity_after_press + expected_gain)).abs() < 1e-2,
-        "expected the mandatory pre-min-time window's own scaled acceleration, \
+        "expected the mandatory window's full acceleration, \
          got a gain of {}, expected {}",
         c.linear_velocity.z - velocity_after_press,
         expected_gain
@@ -2054,7 +2060,7 @@ fn releasing_jump_within_the_mandatory_pre_min_time_window_does_not_immediately_
     // releasing_jump_early_stops_the_extra_acceleration_from_a_held_ground_jump,
     // which releases well past it), releasing within the mandatory
     // window doesn't end it early — real Rocket League's own engine
-    // keeps applying the scaled acceleration regardless of `jump`.
+    // keeps applying the acceleration regardless of `jump`.
     let dt = 1.0 / 120.0;
     let mut c = car();
     let mut boost = MAX_BOOST;
@@ -2088,10 +2094,10 @@ fn releasing_jump_within_the_mandatory_pre_min_time_window_does_not_immediately_
         dt,
     );
 
-    let expected_gain = JUMP_HOLD_ACCELERATION * JUMP_PRE_MIN_ACCEL_SCALE * dt;
+    let expected_gain = JUMP_HOLD_ACCELERATION * dt;
     assert!(
         (c.linear_velocity.z - (velocity_after_press + expected_gain)).abs() < 1e-2,
-        "expected a tap to still gain the mandatory window's own scaled acceleration \
+        "expected a tap to still gain the mandatory window's acceleration \
          despite releasing jump immediately, got a gain of {}, expected {}",
         c.linear_velocity.z - velocity_after_press,
         expected_gain
@@ -2405,7 +2411,8 @@ fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
     apply_driven_forces(&mut car, &input, &wheels, None, &mut state, dt);
     assert!(state.jump_held);
     assert!(state.double_jump_available);
-    assert_eq!(state.jump_hold_time_remaining, JUMP_HOLD_MAX_DURATION);
+    // The press tick spends its own tick of the hold window (FR-091).
+    assert_eq!(state.jump_hold_time_remaining, JUMP_HOLD_MAX_DURATION - dt);
     assert!(state.boost_amount < MAX_BOOST);
 }
 

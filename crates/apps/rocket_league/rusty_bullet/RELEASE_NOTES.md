@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Jumps rise like the real ones
+**2026-10-01** · `RB-PHYSICS-001-FR-091` · ADR-0019
+
+- The ground jump now pushes at full strength from the press tick, without
+  RocketSim's 0.62 early scale-down (a TODO in its source), and the
+  suspension stops pushing once the jump lifts the car. A jump from rest
+  gives 295.7 uu/s on the press tick (recorded 295.9), then +4.0 per tick
+  while the wheels touch and +6.7 after, as in the owner's capture. 433
+  tests.
+
 ## Cars ride on suspension
 **2026-10-01** · `RB-PHYSICS-001-FR-090` · ADR-0018
 

@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#182](https://github.com/baileyrd/rusty_bullet/pull/182) —
+  `RB-PHYSICS-001-FR-090`, raycast suspension and hitbox offset (ADR-0018).
 - [#181](https://github.com/baileyrd/rusty_bullet/pull/181) —
   `RB-PHYSICS-001-FR-089`, engine force at each wheel along its heading.
 - [#180](https://github.com/baileyrd/rusty_bullet/pull/180) —
@@ -108,15 +110,15 @@ version: `a245d35`).
 
 ## Next
 
-1. Jump vertical speed, now the earliest real-capture error: after the
-   4.142 s press the recorded car gains 4.0 uu/s per tick for 7 ticks, then
-   6.7; the candidate loses 0.6 per tick for 5 ticks, then gains 6.7, so it
-   is ~17 uu/s slower upward by 4.2 s. 6.7 is the full jump acceleration
-   less gravity and 4.0 is that less the sticky force, which suggests the
-   real game has no `JUMP_PRE_MIN_ACCEL_SCALE` (0.62, a RocketSim TODO)
-   and keeps wheel contact 2 ticks longer. Then: the post-boost vertical
-   divergence (4.94-5.5 s; at 5.575 s the recording falls at 312 uu/s, the
-   candidate at 260, so it lands ~6 ticks late), and braking per wheel.
+1. Wheel reach after a jump, now the earliest real-capture error: the
+   candidate's wheels stop gripping after the step from z 27.0 (4.175 s);
+   the recording's still grip from z 29.7 (to 4.183 s) and it gains the
+   sticky-limited +4.0 one tick more, leaving 12 uu/s horizontal and 5 uu/s
+   vertical error by 4.2 s. RocketSim's ray reach (48.755 / 49.555 uu, with
+   its own `SUSPENSION_SUBTRACTION` of 2.5) reaches origin height 28.0 /
+   28.8; without the subtraction it would be 30.5 / 31.3, which brackets the
+   recording. Then: the post-boost vertical divergence (4.94-5.5 s) and
+   braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -125,7 +127,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (432 tests: 27 `rb_domain`, 367
+- `cargo test --workspace`: pass (433 tests: 27 `rb_domain`, 368
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -163,6 +165,11 @@ version: `a245d35`).
   (was 2.2, the old 2.3 uu ride-height offset); at 4.1-4.133 s error 0.1 uu
   / 0.3 uu/s; 4-5 s 7.0 uu / 17 uu/s (was 7.9 / 24); 5-6 s 54 uu / 164
   uu/s (was 63 / 152); 6-7 s 430 uu / 1.25 rad (was 329 / 2.02).
+- Same, after `RB-PHYSICS-001-FR-091` (ground-jump force), 2026-10-01:
+  vertical velocity matches the recording to 0.1 uu/s from the 4.142 s
+  press through 4.175 s (295.9 / 299.9 / 304.0 / 308.0 / 312.0 both); the
+  candidate's wheels then leave 1-2 ticks early (vz 5 uu/s high, vx 12 low
+  by 4.2 s). Growth 4-5 s 5.1 uu / 15 uu/s (was 7.0 / 17).
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames

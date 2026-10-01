@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.94.0
+- Version: 0.95.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5522,6 +5522,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     0.02 uu (was 2.2); error 0.1 uu / 0.3 uu/s at 4.1-4.133 s; 4-5 s growth
     7.0 uu (was 7.9).
 
+- `RB-PHYSICS-001-FR-091` (ground-jump force follows the real capture,
+  implemented, verified by unit tests, ADR-0019): the hold force applies at
+  full strength from the press tick on (no RocketSim
+  `JUMP_PRE_MIN_ACCEL_SCALE`), and the suspension damper reads the car's
+  velocity after the drive impulses.
+  - Why: after the 4.142 s press the recorded car gains 291.67 + 4.0, then
+    4.0 per tick while its wheels touch (hold force less gravity less the
+    sticky force), then 6.7; the candidate gained 291.67 + 0.1, then -0.6.
+  - **Verification**: `world` test
+    `a_held_ground_jump_gains_speed_as_the_real_capture_does` (press tick
+    295.7, then +4.0, then +6.7); the FR-064 window tests now expect the
+    full force.
+  - **Real capture** (`--self-trace test2.jsonl 4.1 4.3`): vertical speed
+    matches to 0.1 uu/s from the press through 4.175 s; `--self-growth`
+    4-5 s 5.1 uu (was 7.0).
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7003,6 +7019,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.95.0 (2026-10-01): `RB-PHYSICS-001-FR-091` — ground-jump force from
+  the press tick at full strength, suspension damping after the drive
+  impulses (ADR-0019). 368 tests in `rb_physics_bullet`.
 - 0.94.0 (2026-10-01): `RB-PHYSICS-001-FR-090` — raycast suspension and
   the Octane hitbox offset (ADR-0018). 367 tests in `rb_physics_bullet`.
 - 0.93.0 (2026-10-01): `RB-PHYSICS-001-FR-089` — engine force at each
