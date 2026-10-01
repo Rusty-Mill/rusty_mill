@@ -4,7 +4,7 @@
 
 use rb_capture_ingest::CaptureFileSource;
 use rb_domain::divergence::DivergenceScore;
-use rb_domain::{IngestError, PhysicsFrame, PhysicsStateSource};
+use rb_domain::{CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource};
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
 use rb_physics_bullet::world::simulate_recorded;
 use rb_physics_bullet::PhysicsWorld;
@@ -152,6 +152,85 @@ pub fn score_capture_growth(
     ))
 }
 
+/// One car at one recorded instant of a `rb-verify --self-trace` run
+/// (`RB-VERIFY-003-FR-005`): the input the capture recorded for that car,
+/// and the car's recorded and simulated state at that same instant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TraceRow {
+    /// Seconds since the seed frame — the same time axis
+    /// `rb-verify --self-growth` prints, so a window it flags can be traced
+    /// directly.
+    pub t_secs: f32,
+    /// The input the capture recorded for this car at this frame, which
+    /// `simulate_recorded` applies for the step that follows it.
+    pub input: Option<ControllerInput>,
+    pub recorded: CarState,
+    pub candidate: CarState,
+}
+
+impl TraceRow {
+    /// Distance (uu) between recorded and simulated car positions.
+    pub fn position_error(&self) -> f32 {
+        self.recorded.position.distance(&self.candidate.position)
+    }
+
+    /// Distance (uu/s) between recorded and simulated car velocities.
+    pub fn velocity_error(&self) -> f32 {
+        self.recorded.velocity.distance(&self.candidate.velocity)
+    }
+
+    /// Angle (rad) between recorded and simulated car orientations.
+    pub fn rotation_error(&self) -> f32 {
+        self.recorded.rotation.angle_to(&self.candidate.rotation)
+    }
+}
+
+/// A per-frame trace of a capture against the candidate simulated from it
+/// (`RB-VERIFY-003-FR-005`): the same seed frame and `simulate_recorded`
+/// run [`score_capture_growth`] uses, but returning every car at every
+/// frame whose time since the seed falls in `[from_secs, to_secs]`
+/// instead of a score. Meant for reading exactly which input preceded the
+/// frame where a run `--self-growth` flagged starts to derail.
+///
+/// Recorded and candidate frames are paired by index, which is exact here:
+/// `simulate_recorded` returns one candidate frame per recorded frame,
+/// stepped by the recorded timestamps' own deltas. Cars are paired by
+/// `player_id`; a recorded car with no simulated counterpart is skipped.
+/// An empty or inverted window yields an empty trace, not an error.
+pub fn trace_capture(
+    capture_path: impl AsRef<Path>,
+    from_secs: f32,
+    to_secs: f32,
+) -> Result<Vec<TraceRow>, IngestError> {
+    let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    let Some(origin) = recorded.first().map(|frame| frame.timestamp_secs) else {
+        return Ok(Vec::new());
+    };
+    let mut rows = Vec::new();
+    for (rec, cand) in recorded.iter().zip(candidate.iter()) {
+        let t_secs = rec.timestamp_secs - origin;
+        if t_secs < from_secs || t_secs > to_secs {
+            continue;
+        }
+        for rec_car in &rec.cars {
+            let Some(cand_car) = cand
+                .cars
+                .iter()
+                .find(|car| car.player_id == rec_car.player_id)
+            else {
+                continue;
+            };
+            rows.push(TraceRow {
+                t_secs,
+                input: rec_car.input,
+                recorded: *rec_car,
+                candidate: *cand_car,
+            });
+        }
+    }
+    Ok(rows)
+}
+
 /// Shared plumbing behind [`score_capture_against_candidate`] and
 /// [`score_capture_growth`]: ingest the capture, find its first grounded,
 /// neutral frame (`is_grounded_and_neutral`), and simulate a candidate
@@ -282,6 +361,41 @@ mod tests {
             DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
             DEFAULT_GROWTH_WINDOW_SECS,
         );
+        assert!(matches!(result, Err(IngestError::Io(_))));
+    }
+
+    #[test]
+    fn trace_starts_at_the_seed_frame_with_zero_error() {
+        let rows = trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
+        let first = rows.first().unwrap();
+        assert_eq!(first.t_secs, 0.0);
+        // The candidate world is seeded from this exact recorded frame.
+        assert_eq!(first.position_error(), 0.0);
+        assert_eq!(first.velocity_error(), 0.0);
+        assert!(first.input.is_some());
+    }
+
+    #[test]
+    fn trace_only_returns_frames_inside_the_window() {
+        let all = trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
+        let last_t = all.last().unwrap().t_secs;
+        assert!(last_t > 0.0, "fixture needs more than one traced frame");
+
+        let later = trace_capture(capture_fixture(), last_t, f32::INFINITY).unwrap();
+        assert!(!later.is_empty());
+        assert!(later.iter().all(|row| row.t_secs >= last_t));
+        assert!(later.len() < all.len());
+    }
+
+    #[test]
+    fn trace_with_an_inverted_window_is_empty() {
+        let rows = trace_capture(capture_fixture(), 1.0, 0.0).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn trace_missing_file_reports_io_error() {
+        let result = trace_capture("does-not-exist.capture.jsonl", 0.0, 1.0);
         assert!(matches!(result, Err(IngestError::Io(_))));
     }
 

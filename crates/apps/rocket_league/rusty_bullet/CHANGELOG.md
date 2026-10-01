@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`
+  (`RB-VERIFY-003-FR-005`, `rb_verify_cli::trace_capture`): per-frame
+  trace of a capture against its simulated candidate, printing each car's
+  recorded input and recorded vs. simulated position, velocity and
+  orientation error on the same time axis as `--self-growth`.
 - ADR-0006 to ADR-0010, recorded retroactively for Phase 1's physics
   modeling choices: analytic-primitive arena, corner testing for car vs.
   curved geometry, combined multi-body contact solve, single-rigid-box car

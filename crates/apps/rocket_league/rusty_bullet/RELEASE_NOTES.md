@@ -8,6 +8,18 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Per-frame candidate trace (`rb-verify --self-trace`)
+**2026-10-01** · `RB-VERIFY-003-FR-005`
+
+- New `rb-verify --self-trace <capture> <from-secs> <to-secs>` prints,
+  for every car at every frame in the window, the recorded input and the
+  recorded vs. simulated position, velocity and orientation error, on the
+  same time axis `--self-growth` uses. Built because the first real
+  `--self-growth` run (`test2.jsonl`) showed an abrupt car-only
+  derailment at ~3 s. On the synthetic fixture it already shows a ground
+  jump firing as a dodge; see `docs/PROJECT-STATUS.md` Next for the
+  hitbox-offset hypothesis. 4 new tests (401 total).
+
 ## Slimmed `RELEASE_NOTES.md` to summaries
 **2026-10-01** · docs only
 

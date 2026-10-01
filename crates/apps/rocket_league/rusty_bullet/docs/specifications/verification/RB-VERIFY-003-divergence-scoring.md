@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.10.0
+- Version: 0.11.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -121,6 +121,25 @@ them.
     diagnostics stay out of scope until a multi-car capture exists, the
     same limit `FR-077` already carries.
 
+- `RB-VERIFY-003-FR-005` (implemented): A per-frame trace of a capture
+  against the candidate simulated from it. Needed because FR-004's real
+  run (`test2.jsonl`, 2026-10-01) showed an abrupt derailment: car error
+  stayed ~2 uu for 3 s, then reached 1,315 uu / 1.37 rad / 2,887 uu/s in
+  the 4-5 s window, while the ball stayed within 0.05 uu until a car
+  reached it. Per-second means cannot show which input preceded that.
+  - **Design, as implemented**: `rb_verify_cli::trace_capture(
+    capture_path, from_secs, to_secs) -> Result<Vec<TraceRow>,
+    IngestError>`, reusing FR-004's seed frame and `simulate_recorded`
+    run. Recorded and candidate frames are paired by index (exact, since
+    `simulate_recorded` returns one candidate frame per recorded frame on
+    the recorded timestamps), cars by `player_id`. Each `TraceRow` holds
+    the time since the seed frame (the same axis `--self-growth` prints),
+    the recorded input, and the recorded and candidate `CarState`, with
+    position/velocity/rotation error helpers. Exposed as `rb-verify
+    --self-trace <capture-file> <from-secs> <to-secs>`.
+  - **Non-goals**: no on-ground flag (a `PhysicsFrame` carries none;
+    z height is printed instead), no ball rows, no scoring.
+
 ## Architecture and interfaces
 
 `rb_domain::divergence::score(recorded: &[PhysicsFrame], candidate:
@@ -209,6 +228,14 @@ None beyond what applies to the frame data itself (see
   the synthetic capture fixture end-to-end without erroring (see
   Verification plan); the real capture run itself is still pending the
   owner's own machine.
+
+- Implemented (per-frame trace, FR-005): the first traced row is the
+  seed frame itself, at t=0 with zero position and velocity error; a
+  window starting at the last frame returns only frames at or after it;
+  an inverted window returns no rows; a missing file reports `Io`.
+  `rb-verify --self-trace` was run against the synthetic capture fixture
+  end-to-end. FR-004's real-capture run is now done (see FR-005's
+  context): the divergence is abrupt, not gradual.
 
 ## Verification plan
 
@@ -330,6 +357,13 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.11.0 (2026-10-01): `RB-VERIFY-003-FR-005` implemented — a per-frame
+  trace (`rb_verify_cli::trace_capture`, `rb-verify --self-trace`) of a
+  capture against its candidate, printing each car's recorded input and
+  recorded vs. simulated position, velocity and orientation error. 4 new
+  `rb_verify_cli` tests (13 total). FR-004's real-capture run recorded:
+  near-zero car error for 3 s, then an abrupt car-only derailment in the
+  3-5 s windows, the ball following only once a car reached it.
 - 0.10.0 (2026-09-04): `RB-VERIFY-003-FR-004` implemented — a new
   `rb_domain::divergence::score_windows` partitions the same
   nearest-timestamp-matched pairs `score` uses into consecutive

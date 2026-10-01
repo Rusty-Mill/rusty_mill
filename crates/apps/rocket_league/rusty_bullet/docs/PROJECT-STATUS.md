@@ -77,17 +77,16 @@ version: `a245d35`).
 
 ## Next
 
-1. Running the now-implemented `RB-VERIFY-003-FR-004` divergence-growth
-   diagnostic (`rb-verify --self-growth`) against `FR-077`'s own real
-   capture (`test2.jsonl`) on the owner's machine — the run that would
-   actually show whether that run's divergence grew gradually (many
-   small modeling errors compounding, pointing at broad constant
-   calibration) or abruptly (one specific early mechanic mismatch
-   derailing the whole run, pointing at a targeted fix instead). Only
-   sanity-checked so far against the synthetic capture fixture (see
-   Validation); recommended before `RB-PHYSICS-001-FR-005` (real-data
-   constant calibration) starts, since blind curve-fitting against a
-   fully-decorrelated trajectory isn't sound.
+1. Run `rb-verify --self-trace <test2.jsonl path> 2.5 4.5` on the owner's
+   machine. FR-004's real run (see Validation) localized the derailment
+   to the car at ~3 s; the trace shows which input preceded it.
+   Leading hypothesis, from tracing the synthetic fixture: the seeded car
+   box (half-height 19.33) starts ~2.3 uu inside the floor, because a
+   recorded car position (~z 17 at rest) is the car origin, which rides
+   on wheels, and the port has no hitbox offset (RocketSim's
+   `hitboxPosOffset`). Pushed off the floor, the car briefly counts as
+   airborne, so a ground jump fires as a dodge. Confirm on real data
+   before changing the model (ADR-0009).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -96,9 +95,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (397 tests: 27 `rb_domain`, 337
+- `cargo test --workspace`: pass (401 tests: 27 `rb_domain`, 337
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 9 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`
@@ -119,15 +118,16 @@ version: `a245d35`).
   unrelated match); see FR-077's entry in `RELEASE_NOTES.md` and
   `RB-PHYSICS-001`'s Interpretation note for what this large a divergence
   does and doesn't establish.
-- `cargo run -p rb_verify_cli --bin rb-verify -- --self-growth
-  crates/rb_capture_ingest/fixtures/example.capture.jsonl` (manual,
-  2026-09-04, default `window_secs = 1.0`, `RB-VERIFY-003-FR-004`): `t=
-  11.78s frames= 5 ball mean/max= 0.75/ 2.17 uu car mean pos/rot/vel=
-  58.75 uu / 0.05 rad / 600.40 uu/s` — a single window, since the
-  fixture's own 5 frames all fall within one second; confirms the new
-  `--self-growth` CLI mode runs end-to-end. Not the diagnostic's real
-  purpose — running it against `FR-077`'s own real capture is still
-  pending the owner's own machine (see Next).
+- `rb-verify --self-growth test2.jsonl` (owner's machine, 2026-10-01,
+  `RB-VERIFY-003-FR-004`'s real run, 1 s windows): car error ~2 uu /
+  0.01 rad for 0-3 s; 34 uu at 3 s; 1,315 uu / 1.37 rad / 2,887 uu/s at
+  4 s; ball within 0.05 uu until 5 s, when a car reaches it in one run
+  but not the other. Abrupt, car-only derailment: a targeted mechanic
+  fix, not broad `RB-PHYSICS-001-FR-005` calibration, comes first.
+- `rb-verify --self-trace` against the synthetic capture fixture
+  (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
+  recorded ground jump (t=0.15 s) firing as a dodge in the candidate
+  (see Next).
 
 ## Risks and decisions needed
 
