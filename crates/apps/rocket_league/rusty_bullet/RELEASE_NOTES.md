@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Spin in the trace; flips start on the press tick
+**2026-10-01** · `RB-PHYSICS-001-FR-085` · `RB-VERIFY-003` 0.12.0
+
+- `rb-verify --self-trace` prints recorded and simulated angular velocity.
+  It showed the real game's flip spinning on the press tick (one tick
+  earlier than the port), now fixed, and traced the flip's remaining
+  orientation error to ground steering snapping the yaw rate instead of
+  ramping it. 418 tests.
+
 ## Air control is Rocket League's
 **2026-10-01** · `RB-PHYSICS-001-FR-084` · ADR-0015
 

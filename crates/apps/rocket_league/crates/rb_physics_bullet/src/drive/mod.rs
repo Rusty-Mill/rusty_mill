@@ -166,8 +166,9 @@
 //!
 //! **Flip** (`RB-PHYSICS-001-FR-083`, ported from RocketSim's
 //! `_UpdateAirTorque` and `_UpdateDoubleJumpOrFlip`): a dodge records its
-//! direction and starts a flip clock (`DriveState::flip`). From the next
-//! tick until `FLIP_TORQUE_TIME` (0.65 s) the flip spins the car at
+//! direction and starts a flip clock (`DriveState::flip`). From the press
+//! tick itself (`RB-PHYSICS-001-FR-085`, one tick earlier than RocketSim's
+//! order, per the owner's capture) until `FLIP_TORQUE_TIME` (0.65 s) the flip spins the car at
 //! `FLIP_TORQUE_FORWARD`/`FLIP_TORQUE_SIDE` (nose down for forward, right
 //! side down for right), air control is off, and from 0.15 s the car's fall
 //! is damped (`FLIP_Z_DAMP_*`). Holding pitch against the flip's forward
@@ -504,13 +505,11 @@ pub fn apply_driven_forces(
             // rule landing uses — regardless of whether jump is pressed.
             state.double_jump_available = true;
         }
-        // RocketSim's order: flip torque and air control from the flip as
-        // it stood, then the jump press, then the flip clock and damping.
-        let gate = jump::apply_flip_torque(car, input, state.flip);
-        if gate.enabled {
-            air::apply_air_control(car, input, gate.pitch_scale, dt);
-        }
-        air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
+        // The jump press first, so a dodge's flip torque acts on the press
+        // tick itself: the owner's capture shows the real game's spin jump
+        // by one tick of flip torque on that tick (RB-PHYSICS-001-FR-085),
+        // one tick earlier than RocketSim's order. Then flip torque and air
+        // control, then the flip clock and damping.
         if jump_pressed {
             jump::airborne_jump_press(
                 car,
@@ -521,6 +520,11 @@ pub fn apply_driven_forces(
                 &mut state.flip,
             );
         }
+        let gate = jump::apply_flip_torque(car, input, state.flip);
+        if gate.enabled {
+            air::apply_air_control(car, input, gate.pitch_scale, dt);
+        }
+        air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
         jump::advance_flip(car, &mut state.flip, dt);
     }
 

@@ -38,7 +38,10 @@ RocketSim (`Car.cpp`, `_UpdateAirTorque` and `_UpdateDoubleJumpOrFlip`,
   per 120 Hz tick while falling, or unconditionally before 0.21 s.
 - **Ordering**: torque from the current state comes first, then the jump
   press, then the clock advances and the damping applies. The torque
-  therefore starts on the tick after the press.
+  therefore starts on the tick after the press. (Amended by
+  `RB-PHYSICS-001-FR-085`: the owner's capture shows the real game's spin
+  jumping by one tick of flip torque on the press tick itself, so the port
+  handles the press first.)
 - **Landing** clears the flip.
 
 ## Considered options

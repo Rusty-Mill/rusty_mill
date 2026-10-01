@@ -545,7 +545,7 @@ fn apply_dodge(
         dodge_impulse += right_2d * (norm_roll * DODGE_SPEED * scale);
     }
     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
-    // The spin comes from `apply_flip_torque` on the following ticks.
+    // The spin comes from `apply_flip_torque`, starting this same tick.
     let length = (pitch * pitch + roll * roll).sqrt();
     *flip = Some(FlipState {
         time: 0.0,
