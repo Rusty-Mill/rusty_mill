@@ -67,8 +67,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015): implemented
-  and unit-tested; awaiting the owner's re-trace of 4.3-5.0 s.
+- `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015): re-traced
+  on the real capture; in review.
 
 ## Blocked
 
@@ -95,9 +95,11 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.0` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-084`: orientation error
-   at 5.0 s should fall from ~1.4 rad. Known small
+1. Add recorded vs simulated angular velocity to `rb-verify --self-trace`:
+   orientation error grows a steady ~1.75 rad/s through the 4.325-4.975 s
+   flip and stops when it ends, and air control barely changed it
+   (1.41 to 1.36 rad at 5.0 s). Spin data will show whether pre-dodge
+   spin, the flip axis, or the rotation comparison is responsible. Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -167,6 +169,11 @@ version: `a245d35`).
   orientation error at 5.0 s 1.41 rad (was 1.63). Damping starts one tick
   early, likely because the trace's per-pair dt differs from RocketSim's
   fixed 1/120.
+- After `RB-PHYSICS-001-FR-084` (owner's machine, 2026-10-01):
+  `--self-growth` 4-5 s window 30 uu / 0.55 rad / 95 uu/s (was 1,315 uu /
+  1.37 rad / 2,887 uu/s at the start of the day), 5-6 s 219 uu (was
+  2,660); ball diverges from 5 s. `--self-trace 4.3 5.0`: orientation
+  error at 5.0 s 1.36 rad (was 1.41), at 4.30 s 0.21 (was 0.14).
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate

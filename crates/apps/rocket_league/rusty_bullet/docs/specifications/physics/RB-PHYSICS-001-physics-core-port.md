@@ -5367,6 +5367,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     mechanics they tested: 2 ratio tests, 3 auto-upright tests, 1
     "airborne throttle does nothing" test, and 1 `world` auto-upright test.
   - **Not done here**: grounded auto-roll and auto-flip; the hitbox offset.
+  - **Real-capture result** (owner's machine): `--self-growth` 4-5 s
+    window 30 uu / 0.55 rad / 95 uu/s; 5-6 s 219 uu. Orientation error at
+    5.0 s 1.36 rad (was 1.41): it grows ~1.75 rad/s through the flip
+    independently of air control, so its cause is still open.
 
 ## Architecture and interfaces
 
