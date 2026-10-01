@@ -118,3 +118,28 @@ uu/s; 4-5 s growth 5.1 to 2.7 uu.
 Tradeoff: both are fitted to one jump in one capture. The step delay could
 equally be a recording offset; revisit with a second capture that shows a
 landing or a jump from a slope.
+
+## Amendment (FR-095): air control waits one step too
+
+The same step after the 4.142 s jump (from origin height 32.3, no grip,
+sticky force still on) shows no air control either: the recorded yaw rate
+holds at -2.02 rad/s through it and only then changes by the yaw stick's
+-0.07 to -0.08 per tick; the candidate applied that air control one step
+early, leaving a 0.07 rad/s yaw offset going into the 4.317 s flip.
+
+## Amendment (FR-096): boost already carries the air throttle
+
+`BOOST_ACCEL_AIR` (3175/3) equals the grounded boost (2975/3) plus a full
+`THROTTLE_AIR_ACCEL` (200/3): boost forces throttle to 1, and in the air
+that throttle's push is part of the boost constant. RocketSim nonetheless
+adds the raw stick's air throttle on top. The capture's car, boosting with
+throttle -1 over 4.99-5.18 s, gains the full 3175/3 (about 8.7 uu/s per
+tick against the candidate's 8.2), so the candidate applies no air
+throttle while boost fires (`drive::air_throttle`). The 4.9-5.6 s
+re-trace confirms it: the velocity error at the end of that boost (5.175 s)
+fell from 17.0 to 8.0 uu/s. So the
+real game keeps the car "grounded" for one step after its wheels let go,
+for both the sticky force and air control (`DriveState::was_on_ground`).
+The 4.15-4.35 s re-trace confirms it: the candidate's yaw rate now holds at
+-2.03 rad/s through 4.192 s and the rotation error stays 0.00 through the
+4.317 s flip.

@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#186](https://github.com/baileyrd/rusty_bullet/pull/186) —
+  `RB-PHYSICS-001-FR-094`, flip clock starts after the press tick.
 - [#185](https://github.com/baileyrd/rusty_bullet/pull/185) —
   `RB-PHYSICS-001-FR-093`, air control during a flip; `RB-VERIFY-003`
   0.14.0 car-frame spin.
@@ -88,7 +90,13 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-095` (air control waits one step after the wheels let
+  go): implemented; the 4.15-4.35 s re-trace confirms it (yaw rate holds
+  at -2.03 vs -2.02 rad/s through 4.192 s, rotation error 0.00 into and
+  through the 4.317 s flip).
+- `RB-PHYSICS-001-FR-096` (no air throttle while boosting): implemented;
+  the 4.9-5.6 s re-trace confirms it (velocity error 8.0 vs 17.0 uu/s at
+  5.175 s, the end of the throttle -1 boost).
 
 ## Blocked
 
@@ -115,13 +123,14 @@ version: `a245d35`).
 
 ## Next
 
-1. Flip-start orientation offset, now the earliest real-capture error: a
-   steady ~0.04 rad orientation error from the 4.317 s flip tilts the
-   boost (8.8 uu/s per tick) by ~0.35 uu/s per tick, which accounts for the
-   velocity error growing 9 to 27 uu/s over 4.95-5.5 s. Trace
-   `--self-trace <test2.jsonl> 4.3 4.5` (car-frame spin) to find where in
-   the flip's first ticks it builds. Then the 5.575 s landing (contact
-   response), the ~3 uu/s lateral offset from the 4.142 s press tick's tire
+1. The 0.04 rad orientation offset that builds during the 4.317 s flip
+   (0.00 at 4.35 s, 0.04 by 4.9 s), which tilts the 4.95 s boost and grows
+   the vertical velocity error by ~0.24 uu/s per tick: on every flip tick
+   the real car turns ~0.07 rad/s (~3.5% of the flip torque) more than the
+   candidate (first tick 4.75 vs 4.68 rad/s; mid-flip orientation-derived
+   rate 7.26 vs 7.20), with and without the roll stick held, and the gap
+   vanishes when the flip torque ends. Then the 5.575 s landing. Then the 5.575 s
+   landing, the ~3 uu/s lateral offset from the 4.142 s press tick's tire
    grip, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
@@ -131,7 +140,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (438 tests: 27 `rb_domain`, 372
+- `cargo test --workspace`: pass (440 tests: 27 `rb_domain`, 374
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
