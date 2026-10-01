@@ -5618,7 +5618,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     against the candidate's 8.2), which grew the velocity error from 4 to
     18 uu/s.
   - **Verification**: `drive` test
-    `boosting_in_the_air_ignores_the_throttle_stick`.
+    `boosting_in_the_air_ignores_the_throttle_stick`; real capture
+    `--self-trace 4.9 5.6`: velocity error 8.0 uu/s at 5.175 s, the end of
+    the throttle -1 boost (was 17.0).
 
 ## Architecture and interfaces
 

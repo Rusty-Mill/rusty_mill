@@ -93,9 +93,10 @@ version: `a245d35`).
 - `RB-PHYSICS-001-FR-095` (air control waits one step after the wheels let
   go): implemented; the 4.15-4.35 s re-trace confirms it (yaw rate holds
   at -2.03 vs -2.02 rad/s through 4.192 s, rotation error 0.00 into and
-  through the 4.317 s flip); the 4.9-5.6 s re-trace is pending.
+  through the 4.317 s flip).
 - `RB-PHYSICS-001-FR-096` (no air throttle while boosting): implemented;
-  awaiting the owner's 4.9-5.6 s re-trace.
+  the 4.9-5.6 s re-trace confirms it (velocity error 8.0 vs 17.0 uu/s at
+  5.175 s, the end of the throttle -1 boost).
 
 ## Blocked
 
@@ -122,13 +123,13 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.9 5.6` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-096`: the velocity error
-   should stay near 4 uu/s through the boost with throttle -1 (4.99-5.18
-   s) instead of growing to 18. Still open: a 0.04 rad orientation offset
-   that builds during the flip (0.00 at 4.35 s, 0.04 by 4.9 s; FR-095 did
-   not cause it), the flip's first tick spinning 4.68 vs 4.75 rad/s in
-   pitch, and the 5.575 s landing. Then the 5.575 s
+1. The 0.04 rad orientation offset that builds during the 4.317 s flip
+   (0.00 at 4.35 s, 0.04 by 4.9 s), which tilts the 4.95 s boost and grows
+   the vertical velocity error by ~0.24 uu/s per tick: on every flip tick
+   the real car turns ~0.07 rad/s (~3.5% of the flip torque) more than the
+   candidate (first tick 4.75 vs 4.68 rad/s; mid-flip orientation-derived
+   rate 7.26 vs 7.20), with and without the roll stick held, and the gap
+   vanishes when the flip torque ends. Then the 5.575 s landing. Then the 5.575 s
    landing, the ~3 uu/s lateral offset from the 4.142 s press tick's tire
    grip, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay

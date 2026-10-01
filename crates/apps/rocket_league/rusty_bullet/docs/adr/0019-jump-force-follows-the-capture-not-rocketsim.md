@@ -135,7 +135,9 @@ that throttle's push is part of the boost constant. RocketSim nonetheless
 adds the raw stick's air throttle on top. The capture's car, boosting with
 throttle -1 over 4.99-5.18 s, gains the full 3175/3 (about 8.7 uu/s per
 tick against the candidate's 8.2), so the candidate applies no air
-throttle while boost fires (`drive::air_throttle`). So the
+throttle while boost fires (`drive::air_throttle`). The 4.9-5.6 s
+re-trace confirms it: the velocity error at the end of that boost (5.175 s)
+fell from 17.0 to 8.0 uu/s. So the
 real game keeps the car "grounded" for one step after its wheels let go,
 for both the sticky force and air control (`DriveState::was_on_ground`).
 The 4.15-4.35 s re-trace confirms it: the candidate's yaw rate now holds at
