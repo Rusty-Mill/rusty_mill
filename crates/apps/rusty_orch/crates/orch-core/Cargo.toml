@@ -6,4 +6,7 @@ rust-version = "1.75"
 description = "Orchestrator domain: goals, task cards, blackboard. Pure, no I/O."
 license = "MIT"
 
+[package.metadata.rusty_mill]
+layer = "apps"
+
 [dependencies]
