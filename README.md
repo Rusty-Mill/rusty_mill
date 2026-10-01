@@ -95,7 +95,6 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rusty_text`](crates/apps/rusty_text) | `crates/apps/rusty_text` | Pure-Rust sed (`rsed`) and awk (`rawk`) engines |
 | [`rusty_tokio`](crates/libs/async/rusty_tokio) | `crates/libs/async/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
 | [`rusty_tokio-macros`](crates/libs/async/rusty_tokio/rusty_tokio-macros) | `crates/libs/async/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
-| [`rusty_rusqlite`](crates/libs/storage/rusty_rusqlite) | `crates/libs/storage/rusty_rusqlite` | Pure-Rust, from-scratch SQLite reimplementation aiming for `rusqlite` API parity |
 | [`rusty_libc`](crates/foundation/rusty_libc) | `crates/foundation/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
 | [`rusty_acp`](crates/libs/protocol/rusty_acp) | `crates/libs/protocol/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
 | [`rusty_tls`](crates/libs/net/rusty_tls) | `crates/libs/net/rusty_tls` | A `rustls`-based TLS library, with an optional `rusty_tokio`-backed async stream and an experimental hand-rolled record-layer engine |
