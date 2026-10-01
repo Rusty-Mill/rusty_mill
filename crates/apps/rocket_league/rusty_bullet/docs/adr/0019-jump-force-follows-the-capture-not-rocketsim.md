@@ -78,5 +78,7 @@ Option 1:
 - `world` test `a_held_ground_jump_gains_speed_as_the_real_capture_does`.
 - Re-run `--self-trace test2.jsonl 4.1 4.3`: vertical velocity error by
   4.2 s should fall from ~17 uu/s to a few.
+- Real capture, 2026-10-01: confirmed. Vertical speed matches to 0.1 uu/s
+  from the press through 4.175 s; 4-5 s growth 7.0 to 5.1 uu.
 - Revisit if another capture shows the 0.62 scale, or once the 2-tick
   wheel-contact gap is explained.

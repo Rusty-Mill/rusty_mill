@@ -5534,6 +5534,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `a_held_ground_jump_gains_speed_as_the_real_capture_does` (press tick
     295.7, then +4.0, then +6.7); the FR-064 window tests now expect the
     full force.
+  - **Real capture** (`--self-trace test2.jsonl 4.1 4.3`): vertical speed
+    matches to 0.1 uu/s from the press through 4.175 s; `--self-growth`
+    4-5 s 5.1 uu (was 7.0).
 
 ## Architecture and interfaces
 

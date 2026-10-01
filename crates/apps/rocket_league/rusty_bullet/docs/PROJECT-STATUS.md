@@ -83,8 +83,7 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-091` (ground-jump force, ADR-0019): implemented;
-  awaiting the owner's re-trace.
+- None.
 
 ## Blocked
 
@@ -111,13 +110,15 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.1 4.3` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-091`: press-tick vz ~295.7
-   (recorded 295.9), then +4.0 per tick; vertical error by 4.2 s well under
-   the previous ~17 uu/s. Known gap: the candidate's wheels leave the floor
-   2 ticks before the recording's. Then: the post-boost vertical divergence
-   (4.94-5.5 s; the recording falls at 312 uu/s at 5.575 s, the candidate
-   at 260, so it lands ~6 ticks late), and braking per wheel.
+1. Wheel reach after a jump, now the earliest real-capture error: the
+   candidate's wheels stop gripping after the step from z 27.0 (4.175 s);
+   the recording's still grip from z 29.7 (to 4.183 s) and it gains the
+   sticky-limited +4.0 one tick more, leaving 12 uu/s horizontal and 5 uu/s
+   vertical error by 4.2 s. RocketSim's ray reach (48.755 / 49.555 uu, with
+   its own `SUSPENSION_SUBTRACTION` of 2.5) reaches origin height 28.0 /
+   28.8; without the subtraction it would be 30.5 / 31.3, which brackets the
+   recording. Then: the post-boost vertical divergence (4.94-5.5 s) and
+   braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -164,6 +165,11 @@ version: `a245d35`).
   (was 2.2, the old 2.3 uu ride-height offset); at 4.1-4.133 s error 0.1 uu
   / 0.3 uu/s; 4-5 s 7.0 uu / 17 uu/s (was 7.9 / 24); 5-6 s 54 uu / 164
   uu/s (was 63 / 152); 6-7 s 430 uu / 1.25 rad (was 329 / 2.02).
+- Same, after `RB-PHYSICS-001-FR-091` (ground-jump force), 2026-10-01:
+  vertical velocity matches the recording to 0.1 uu/s from the 4.142 s
+  press through 4.175 s (295.9 / 299.9 / 304.0 / 308.0 / 312.0 both); the
+  candidate's wheels then leave 1-2 ticks early (vz 5 uu/s high, vx 12 low
+  by 4.2 s). Growth 4-5 s 5.1 uu / 15 uu/s (was 7.0 / 17).
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames
