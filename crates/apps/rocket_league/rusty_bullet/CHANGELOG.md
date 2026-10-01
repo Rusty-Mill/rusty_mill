@@ -937,6 +937,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Engine force acts at each wheel along its heading
+  (`RB-PHYSICS-001-FR-089`), as in RocketSim, so throttle through steered
+  front wheels tightens a turn (steady yaw at 950 uu/s 2.33 to 2.45 rad/s;
+  the real capture turns at 2.40).
 - A car is on the ground when three of its four wheel rays reach the
   floor (`RB-PHYSICS-001-FR-088`, ADR-0017), as in RocketSim, not when its
   box touches. A jump press while bouncing just off the floor now jumps

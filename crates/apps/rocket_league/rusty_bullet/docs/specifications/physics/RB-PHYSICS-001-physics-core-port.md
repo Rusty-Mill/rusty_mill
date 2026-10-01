@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.92.0
+- Version: 0.93.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5392,7 +5392,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   implemented, verified): the spin trace showed the recorded yaw rate
   ramping (-1.0 to -1.7 rad/s over 4.10-4.14 s) where FR-080's kinematic
   steering snapped to -2.17 rad/s, leaving the heading error that tilts the
-  4.317 s flip. `drive::ground::wheel_side_impulses` ports RocketSim's
+  4.317 s flip. `drive::ground::wheel_impulses` (then `wheel_side_impulses`) ports RocketSim's
   `calcFrictionImpulses` per wheel:
   - each wheel's axle (front ones turned by `ground::steer_angle`) gets a
     side impulse of `-0.2 * rel_vel * jacDiagABInv * latFriction *
@@ -5470,6 +5470,30 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     4-5 s window moved 16 to 23 uu: tire grip now lasts 3 ticks past the
     4.142 s jump (5 recorded), carrying the existing steering error
     differently.
+
+- `RB-PHYSICS-001-FR-089` (engine force at each wheel along its heading,
+  implemented, verified by unit tests): the engine force is split over the
+  four wheels and applied at each contact point along that wheel's heading,
+  as in RocketSim's `btVehicleRL::calcFrictionImpulses` (each wheel's
+  `rollingFriction = -engineForce / frictionScale` along its `forwardDir`).
+  Before, it acted at the centre of mass along the car's forward axis.
+  - Why: the real capture turns at 2.40 rad/s under throttle with full
+    steer at ~945 uu/s (3.95-4.0 s); the candidate turned at 2.27, so
+    velocity error built from ~5 to 47 uu/s over 3.75-4.05 s. The steered
+    front wheels' push adds a turning force: at a held 950 uu/s the steady
+    yaw rate rises from 2.33 to 2.45 rad/s.
+  - Ruled out first: the contact height below the centre of mass (real
+    17.0 uu vs this port's 19.33) moves the steady rate the other way
+    (2.33 to 2.30).
+  - Brake stays at the centre of mass (RocketSim also brakes per wheel).
+  - **Verification**: `drive` tests
+    `throttle_through_steered_front_wheels_tightens_a_turn` (fails before:
+    2.331 driving vs 2.334 coasting) and
+    `throttle_with_steer_starts_turning_a_car_from_rest`; straight throttle
+    still doesn't yaw.
+  - **Real capture** (`--self-trace test2.jsonl 3.7 4.2`): steady yaw 2.40
+    rad/s simulated and recorded (was 2.27); velocity error at 4.05 s 9.4
+    uu/s (was 47.8); `--self-growth` 4-5 s 7.9 uu (was 23).
 
 ## Architecture and interfaces
 
@@ -6952,6 +6976,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.93.0 (2026-10-01): `RB-PHYSICS-001-FR-089` — engine force at each
+  wheel along its heading, per RocketSim. 362 tests in `rb_physics_bullet`.
 - 0.92.0 (2026-10-01): `RB-PHYSICS-001-FR-088` — ground contact from
   RocketSim's wheel rays, not box contact (ADR-0017). 359 tests in
   `rb_physics_bullet`.

@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Throttle turns the car through its front wheels
+**2026-10-01** · `RB-PHYSICS-001-FR-089`
+
+- The engine now pushes at each wheel along that wheel's heading, as in
+  RocketSim, instead of at the car's centre. Steered front wheels add a
+  turning force under throttle: at 950 uu/s with full steer the steady
+  yaw rate rises from 2.33 to 2.45 rad/s (the real capture: 2.40). This
+  was the earliest real-capture error, 47 uu/s by 4.05 s. 427 tests.
+
 ## Grounded on wheels, not the box
 **2026-10-01** · `RB-PHYSICS-001-FR-088` · ADR-0017
 

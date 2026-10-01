@@ -269,21 +269,26 @@ pub(super) fn tire_grip(slip: f32, handbrake_amount: f32) -> (f32, f32) {
     (lateral, longitudinal)
 }
 
-/// Each wheel's side impulse for one tick, RocketSim's
-/// `btVehicleRL::calcFrictionImpulses` (`RB-PHYSICS-001-FR-086`): along the
+/// Each wheel's impulse for one tick, RocketSim's
+/// `btVehicleRL::calcFrictionImpulses`. The side impulse
+/// (`RB-PHYSICS-001-FR-086`) acts along the
 /// wheel's axle (the front wheels turned by `steer_angle`), cancelling
 /// `SIDE_IMPULSE_DAMPING` of the contact point's sideways velocity through
 /// the car's effective mass there (`jacDiagABInv`), scaled by the tire's
 /// lateral grip and `FRICTION_SCALE * dt`. The slip ratio each wheel's grip
 /// is looked up by uses that wheel's own contact velocity, so a yawing car's
-/// rear wheels slip and resist the yaw. Returns `(impulse, point)` pairs,
+/// rear wheels slip and resist the yaw. Each wheel also carries a quarter of
+/// `engine_acceleration` along its own heading (`RB-PHYSICS-001-FR-089`), so
+/// the steered front wheels' push turns the car as well. Returns
+/// `(impulse, point)` pairs,
 /// all computed from the same pre-impulse state as RocketSim does, with the
 /// point flattened onto the car's floor plane (RocketSim's
 /// `applyFrictionImpulses`), so the impulses yaw the car without rolling it.
-fn wheel_side_impulses(
+fn wheel_impulses(
     car: &RigidBody,
     steer: f32,
     handbrake_amount: f32,
+    engine_acceleration: f32,
     dt: f32,
 ) -> Vec<(Vec3, Vec3)> {
     let Shape::Box { half_extents } = car.shape else {
@@ -314,7 +319,8 @@ fn wheel_side_impulses(
                 * lateral_grip
                 * FRICTION_SCALE
                 * dt;
-            (axle * impulse, flat)
+            let drive = engine_acceleration * car.mass() / WHEELS.len() as f32 * dt;
+            (axle * impulse + rolling * drive, flat)
         })
         .collect()
 }
@@ -327,13 +333,16 @@ fn wheel_side_impulses(
 /// manifolds); its tires grip instead, as in RocketSim's
 /// `Car::_UpdateWheels` and `btVehicleRL::calcFrictionImpulses`:
 ///
-/// - **Forward/backward**: the engine force, scaled by the longitudinal
-///   grip factor, and `pedals`' brake at `BRAKE_DECELERATION`, never
-///   reversing the car. Applied at the centre of mass.
+/// - **Engine**: the engine force, scaled by the longitudinal grip factor,
+///   split over the four wheels along each wheel's heading
+///   (`wheel_impulses`), so throttle through steered front wheels turns
+///   the car too.
+/// - **Brake**: `pedals`' brake at `BRAKE_DECELERATION`, never reversing
+///   the car, applied at the centre of mass.
 /// - **Sideways and steering**: each wheel's side impulse
-///   (`wheel_side_impulses`) at its contact point. The steered front
-///   wheels' impulses yaw the car; the rear wheels' resist it, so the turn
-///   rate builds up and dies away instead of being set.
+///   (`wheel_impulses`) at its contact point. The steered front wheels'
+///   impulses yaw the car; the rear wheels' resist it, so the turn rate
+///   builds up and dies away instead of being set.
 pub(super) fn apply_ground_control(
     car: &mut RigidBody,
     input: &ControllerInput,
@@ -349,17 +358,12 @@ pub(super) fn apply_ground_control(
         tire_grip(slip_ratio(forward_speed, lateral_speed), handbrake_amount);
     let (engine, brake) = pedals(throttle, forward_speed, input.handbrake);
 
-    if engine != 0.0 {
-        let taper = drive_speed_taper(engine.signum() * forward_speed);
-        if taper > 0.0 {
-            let acceleration = engine * THROTTLE_ACCELERATION * taper * longitudinal_grip;
-            car.apply_central_force(forward * (acceleration * car.mass()));
-        }
-    }
+    let taper = drive_speed_taper(engine.signum() * forward_speed);
+    let acceleration = engine * THROTTLE_ACCELERATION * taper * longitudinal_grip;
 
-    // RB-PHYSICS-001-FR-086: steering and sideways grip are the wheels' side
-    // impulses; the steered front wheels' impulses turn the car.
-    for (impulse, point) in wheel_side_impulses(car, input.steer, handbrake_amount, dt) {
+    // RB-PHYSICS-001-FR-086/FR-089: steering, sideways grip and the engine
+    // are per-wheel impulses; the steered front wheels' impulses turn the car.
+    for (impulse, point) in wheel_impulses(car, input.steer, handbrake_amount, acceleration, dt) {
         car.apply_impulse(impulse, point);
     }
 
