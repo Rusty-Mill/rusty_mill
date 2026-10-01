@@ -1,5 +1,10 @@
 //! The real `StdCommand` against small shell-free utilities on PATH.
 //! These exercise the process seam itself; the adapter tests use a fake.
+//!
+//! Unix only: `cat`, `sh`, `sleep`, and `head` are not on a Windows runner.
+//! The seam itself is plain `std::process` and builds everywhere; the
+//! adapter tests over the fake cover it on every OS.
+#![cfg(unix)]
 
 use std::time::Duration;
 
