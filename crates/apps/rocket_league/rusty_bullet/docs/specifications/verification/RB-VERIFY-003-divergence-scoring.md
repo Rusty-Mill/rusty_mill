@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.12.0
+- Version: 0.13.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -139,7 +139,12 @@ them.
     --self-trace <capture-file> <from-secs> <to-secs>`. Since 0.12.0 each
     row also prints recorded and simulated angular velocity (world frame,
     rad/s) and `TraceRow::spin_error`, to locate where spin diverges
-    (`RB-PHYSICS-001-FR-084`'s open flip orientation error).
+    (`RB-PHYSICS-001-FR-084`'s open flip orientation error). Since 0.13.0
+    it also prints a `q-rate` per stream: the spin implied by the change in
+    orientation since the previous row (`rb_verify_cli::rotation_rate`).
+    It checks that a capture's recorded orientations agree with its own
+    recorded angular velocity, because the 4.3-5.0 s flip shows orientation
+    error growing ~2 rad/s while spin error stays ~0.27 rad/s.
   - **Non-goals**: no on-ground flag (a `PhysicsFrame` carries none;
     z height is printed instead), no ball rows, no scoring.
 
@@ -360,6 +365,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.13.0 (2026-10-01): `--self-trace` prints orientation-implied spin
+  (`q-rate`, `rotation_rate`) for the recorded and simulated cars.
 - 0.12.0 (2026-10-01): `--self-trace` prints recorded and simulated
   angular velocity and `TraceRow::spin_error`.
 - 0.11.0 (2026-10-01): `RB-VERIFY-003-FR-005` implemented — a per-frame

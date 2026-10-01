@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace` prints each stream's orientation-implied spin
+  (`q-rate`, `rb_verify_cli::rotation_rate`; `RB-VERIFY-003` 0.13.0).
 - ADR-0016: steer through per-wheel side impulses (supersedes ADR-0011).
 - `rb-verify --self-trace` prints recorded and simulated angular velocity
   and a spin error per row (`TraceRow::spin_error`, `RB-VERIFY-003` 0.12.0).

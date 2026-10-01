@@ -101,8 +101,14 @@ version: `a245d35`).
 
 ## Next
 
-1. Trace 4.6-5.6 s: from 5 s the ball diverges (mean 82 uu, max 660 uu),
-   as a car reaches it in one run and not the other. Smaller leftovers:
+1. Trace 4.3-4.7 s with `q-rate` (`RB-VERIFY-003` 0.13.0). The 4.6-5.6 s
+   trace showed the divergence is orientation: by 4.95 s orientation
+   error is ~1.3 rad, so boost from 4.94 s pushes the candidate partly
+   upward (it holds z ~97 while the recorded car falls to z 33). But
+   through the flip the spin error is only ~0.27 rad/s while orientation
+   error grows ~2 rad/s, which two bodies spinning at the same rate about
+   ~3 deg apart cannot produce. `q-rate` tests whether the recorded
+   orientations agree with the recorded angular velocity. Smaller leftovers:
    steady yaw rate ~5% low (2.28 vs 2.40 rad/s near 4.0 s), and a ~3 deg
    flip-axis offset (orientation error 0.04 to 0.58 rad over 4.32-4.6 s). Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
