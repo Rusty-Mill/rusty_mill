@@ -120,6 +120,8 @@ settings. The results decide any later simplification.
 2. **`rusty_rusqlite` (2.4):** fix full transactional durability
    (recommended), or declare file-backed transactions `Unsupported` until
    later?
+   *2026-10-01: removed. It had no users in the workspace (Tranche 5's
+   storage survey); the engine and bundled SQLite are the two stacks in use.*
 3. **coreutils daily-driver utilities:** fund conformance, or retire the
    overlapping incomplete binaries and keep only the reference consumers
    (`cat`/`ls`/`rrun`/`rpar`)?

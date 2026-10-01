@@ -29,7 +29,6 @@ members = [
     "crates/apps/rusty_text",
     "crates/libs/async/rusty_tokio",
     "crates/libs/async/rusty_tokio/rusty_tokio-macros",
-    "crates/libs/storage/rusty_rusqlite",
     "crates/foundation/rusty_libc",
     "crates/libs/protocol/rusty_acp",
     "crates/libs/net/rusty_tls",

@@ -14252,13 +14252,6 @@ name = "rusty_rsa"
 version = "0.1.0"
 
 [[package]]
-name = "rusty_rusqlite"
-version = "0.0.1"
-dependencies = [
- "rusty_atomic_file",
-]
-
-[[package]]
 name = "rusty_serde"
 version = "0.1.0"
 dependencies = [
