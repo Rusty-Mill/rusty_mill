@@ -3,7 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-01
 - Deciders: baileyrd
-- Related: RB-PHYSICS-001-FR-091, FR-064, FR-085, FR-090; ADR-0014, ADR-0018
+- Related: RB-PHYSICS-001-FR-091, FR-092, FR-064, FR-085, FR-090; ADR-0014,
+  ADR-0018
 - Supersedes/Superseded by: revises FR-064's `JUMP_PRE_MIN_ACCEL_SCALE`;
   amends ADR-0018 (when the suspension damper reads the car's velocity)
 
@@ -82,3 +83,38 @@ Option 1:
   from the press through 4.175 s; 4-5 s growth 7.0 to 5.1 uu.
 - Revisit if another capture shows the 0.62 scale, or once the 2-tick
   wheel-contact gap is explained.
+
+## Amendment (FR-092): wheel reach and sticky-force timing
+
+The FR-091 re-trace left one gap: the candidate's wheels left the floor 2
+ticks before the recording's. Per step after the 4.142 s jump, with the
+origin height at the start of the step:
+
+| start z | recorded grip | recorded vz gain | RocketSim reach |
+|---|---|---|---|
+| 27.1 | yes | +4.0 | touching |
+| 29.7 | yes | +4.1 | beyond (ends 28.0 / 28.8) |
+| 32.3 | no | +4.0 | beyond |
+| 35.0 | no | +6.7 | beyond |
+
+Two changes fit every recorded tick:
+
+- **Reach without `SUSPENSION_SUBTRACTION`**: rays reach the fully
+  extended wheel, `rest + travel + radius` (51.255 / 52.055 uu, origin
+  height 30.5 / 31.3), so grip holds from 29.7 and ends before 32.3. The
+  subtraction still applies to the pushback reach, which the capture does
+  not test.
+- **Sticky force one step late**: it acts along the previous step's
+  contact normal (`DriveState::sticky_surface_up`), giving the extra +4.0
+  in the step from 32.3 with no grip.
+
+The `world` test `a_held_ground_jump_gains_speed_as_the_real_capture_does`
+now checks the full pattern: 295.7, six ticks of +4.0, then +6.7.
+
+Real capture, 2026-10-01: confirmed. Every jump tick matches (vx 384.4 vs
+385.1 at 4.183 s; vz within 0.1 uu/s); velocity error at 4.2 s 13 to 2.7
+uu/s; 4-5 s growth 5.1 to 2.7 uu.
+
+Tradeoff: both are fitted to one jump in one capture. The step delay could
+equally be a recording offset; revisit with a second capture that shows a
+landing or a jump from a slope.

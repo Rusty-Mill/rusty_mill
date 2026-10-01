@@ -937,6 +937,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Wheel rays reach the fully extended wheel and the sticky force acts the
+  step after the wheels touch (`RB-PHYSICS-001-FR-092`, ADR-0019
+  amendment), matching every tick of the real capture's 4.142 s jump.
 - The ground jump's hold force applies at full strength from the press
   tick (`RB-PHYSICS-001-FR-091`, ADR-0019), dropping RocketSim's 0.62
   pre-min scale, and the suspension damper reads the post-jump velocity, as

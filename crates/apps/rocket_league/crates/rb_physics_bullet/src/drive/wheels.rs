@@ -26,7 +26,9 @@ pub(super) const WHEEL_RAY_START_Z: f32 = 20.755;
 /// `RLConst::BTVehicle::MAX_SUSPENSION_TRAVEL` (uu).
 const MAX_SUSPENSION_TRAVEL: f32 = 12.0;
 
-/// `SUSPENSION_SUBTRACTION`, `0.05` Bullet units (uu).
+/// `SUSPENSION_SUBTRACTION`, `0.05` Bullet units (uu). RocketSim takes it
+/// off both the ray length and the pushback reach; this port keeps it on
+/// the pushback only (`RB-PHYSICS-001-FR-092`).
 const SUSPENSION_SUBTRACTION: f32 = 2.5;
 
 const SUSPENSION_STIFFNESS: f32 = 500.0;
@@ -106,8 +108,14 @@ pub type WheelContacts = [Option<WheelContact>; 4];
 
 /// Casts the four wheel rays down the car's own axis against `plane`, from
 /// `car`'s current state (`btVehicleRL::rayCast`). A ray reaches
-/// `rest_length + MAX_SUSPENSION_TRAVEL + radius - SUSPENSION_SUBTRACTION`
-/// (48.755 uu front, 49.555 back) and only hits the plane's front side.
+/// `rest_length + MAX_SUSPENSION_TRAVEL + radius`, the fully extended wheel
+/// (51.255 uu front, 52.055 back, so a level car touches up to an origin
+/// height of 30.5 / 31.3 uu), and only hits the plane's front side.
+///
+/// RocketSim takes `SUSPENSION_SUBTRACTION` (2.5 uu) off that reach; the
+/// owner's capture does not (`RB-PHYSICS-001-FR-092`): after the 4.142 s
+/// jump the recorded wheels still grip in the step from origin height 29.7
+/// and stop in the step from 32.3, where RocketSim's reach ends at 28.0.
 pub fn cast_wheels(car: &RigidBody, plane: &StaticPlane, dt: f32) -> WheelContacts {
     WHEELS
         .map(|(x, y, front)| cast_wheel(car, plane, Vec3::new(x, y, WHEEL_RAY_START_Z), front, dt))
@@ -128,7 +136,7 @@ fn cast_wheel(
     }
     let hard_point = car.position + car.orientation.rotate(&start_local);
     let height = plane.signed_distance(&hard_point);
-    let reach = wheel.rest_length + MAX_SUSPENSION_TRAVEL + wheel.radius - SUSPENSION_SUBTRACTION;
+    let reach = wheel.rest_length + MAX_SUSPENSION_TRAVEL + wheel.radius;
     let trace = height / approach;
     if height < 0.0 || trace > reach {
         return None;
@@ -188,24 +196,35 @@ pub const NO_WHEEL_CONTACTS: WheelContacts = [None; 4];
 ///   compression or relaxation damping times `suspension_velocity`, scaled
 ///   by the wheel's force scale and never pulling, applied as an impulse
 ///   along the normal at the contact point together with the pushback.
-/// - **Sticky force** (`Car::_UpdateWheels`): while any wheel touches, half
-///   of default gravity pushes the car along the average contact normal
-///   into the surface; with throttle engaged or above `STICKY_FULL_SPEED`
-///   it grows by `1 - |normal.z|` on slopes and walls.
+/// - **Sticky force** (`Car::_UpdateWheels`): half of default gravity
+///   pushes the car along the average contact normal into the surface; with
+///   throttle engaged or above `STICKY_FULL_SPEED` it grows by
+///   `1 - |normal.z|` on slopes and walls. It acts on the step after any
+///   wheel touched, along that step's normal (`previous_surface_up`), one
+///   tick later than RocketSim (`RB-PHYSICS-001-FR-092`): the owner's
+///   capture keeps it one tick past the wheels' last grip after a jump.
+///
+/// Returns this step's average contact normal, `None` with no wheel
+/// touching, for the next step's sticky force.
 pub fn apply_wheel_forces(
     car: &mut RigidBody,
     contacts: &WheelContacts,
+    previous_surface_up: Option<Vec3>,
     throttle_engaged: bool,
     dt: f32,
-) {
+) -> Option<Vec3> {
     let mut normal_sum = Vec3::ZERO;
     for contact in contacts.iter().flatten() {
         normal_sum += contact.normal;
         apply_suspension(car, contact, dt);
     }
-    let Some(surface_up) = normal_sum.normalize() else {
-        return;
-    };
+    if let Some(surface_up) = previous_surface_up {
+        apply_sticky_force(car, surface_up, throttle_engaged);
+    }
+    normal_sum.normalize()
+}
+
+fn apply_sticky_force(car: &mut RigidBody, surface_up: Vec3, throttle_engaged: bool) {
     let forward_speed = car.linear_velocity.dot(&forward_axis(car));
     let full_stick = throttle_engaged || forward_speed.abs() > STICKY_FULL_SPEED;
     let slope_share = if full_stick {

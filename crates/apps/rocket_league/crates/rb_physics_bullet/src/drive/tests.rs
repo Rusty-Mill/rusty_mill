@@ -153,6 +153,7 @@ fn step_with_input_and_dodge_flip(
         jump_hold_time_remaining: *jump_hold_time_remaining,
         flip: *flip,
         handbrake_amount: 0.0,
+        sticky_surface_up: None,
     };
     car.clear_forces();
     apply_driven_forces(
@@ -2390,6 +2391,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             jump_hold_time_remaining: 0.0,
             flip: None,
             handbrake_amount: 0.0,
+            sticky_surface_up: None,
         }
     );
 }
@@ -2816,19 +2818,20 @@ fn level_car_at_height(z: f32) -> RigidBody {
 
 #[test]
 fn wheel_rays_ground_a_car_hovering_within_their_reach() {
-    // Front rays start 20.755 uu up and reach 48.755 uu, so a level car
-    // is grounded up to an origin height of 28 uu, box off the floor or not.
+    // Front rays start 20.755 uu up and reach 51.255 uu (FR-092), so a
+    // level car is grounded up to an origin height of 30.5 uu, box off the
+    // floor or not.
     assert!(wheels_on_ground(
         &level_car_at_height(CAR_HALF_EXTENTS.z),
         &floor()
     ));
-    assert!(wheels_on_ground(&level_car_at_height(27.9), &floor()));
+    assert!(wheels_on_ground(&level_car_at_height(30.4), &floor()));
 }
 
 #[test]
 fn wheel_rays_do_not_ground_a_car_just_beyond_their_reach() {
-    // At 28.5 uu only the two longer back rays (reach 28.8) still touch.
-    assert!(!wheels_on_ground(&level_car_at_height(28.5), &floor()));
+    // At 31.0 uu only the two longer back rays (reach 31.3) still touch.
+    assert!(!wheels_on_ground(&level_car_at_height(31.0), &floor()));
 }
 
 #[test]
@@ -2929,12 +2932,19 @@ fn straight_throttle_from_rest_does_not_yaw() {
 fn a_resting_car_on_flat_ground_gets_half_gravity_of_sticky_force() {
     // RB-PHYSICS-001-FR-090: RocketSim's `_UpdateWheels` pushes a car whose
     // wheels touch into the surface at half of default gravity; the slope
-    // share is zero on flat ground.
+    // share is zero on flat ground. FR-092: the step after they touched.
     let mut c = car();
     let wheels = resting_contacts(&c);
-    let state = DriveState::new();
+    let mut state = DriveState::new();
+    state.sticky_surface_up = Some(Vec3::new(0.0, 0.0, 1.0));
     let before = c.linear_velocity;
-    apply_wheel_forces(&mut c, &ControllerInput::default(), &wheels, &state, TICK);
+    apply_wheel_forces(
+        &mut c,
+        &ControllerInput::default(),
+        &wheels,
+        &mut state,
+        TICK,
+    );
     assert_eq!(
         c.linear_velocity, before,
         "a suspension at rest gives no impulse"
@@ -2946,11 +2956,68 @@ fn a_resting_car_on_flat_ground_gets_half_gravity_of_sticky_force() {
 #[test]
 fn an_airborne_car_gets_no_wheel_forces() {
     let mut c = car();
-    let state = DriveState::new();
-    apply_wheel_forces(&mut c, &full_throttle(), &NO_WHEEL_CONTACTS, &state, TICK);
+    let mut state = DriveState::new();
+    apply_wheel_forces(
+        &mut c,
+        &full_throttle(),
+        &NO_WHEEL_CONTACTS,
+        &mut state,
+        TICK,
+    );
     integrate::integrate_velocities(&mut c, TICK);
     assert_eq!(c.linear_velocity, Vec3::ZERO);
     assert_eq!(c.angular_velocity, Vec3::ZERO);
+    assert_eq!(state.sticky_surface_up, None);
+}
+
+#[test]
+fn the_sticky_force_acts_the_step_after_the_wheels_touch() {
+    // RB-PHYSICS-001-FR-092: the owner's capture keeps the sticky force one
+    // tick past the wheels' last grip after a jump.
+    let mut c = car();
+    let mut state = DriveState::new();
+    let wheels = resting_contacts(&c);
+    apply_wheel_forces(
+        &mut c,
+        &ControllerInput::default(),
+        &wheels,
+        &mut state,
+        TICK,
+    );
+    integrate::integrate_velocities(&mut c, TICK);
+    assert_eq!(
+        c.linear_velocity,
+        Vec3::ZERO,
+        "first touching step: no sticky force yet"
+    );
+    assert_eq!(state.sticky_surface_up, Some(Vec3::new(0.0, 0.0, 1.0)));
+
+    c.clear_forces();
+    apply_wheel_forces(
+        &mut c,
+        &ControllerInput::default(),
+        &NO_WHEEL_CONTACTS,
+        &mut state,
+        TICK,
+    );
+    integrate::integrate_velocities(&mut c, TICK);
+    assert_close(
+        c.linear_velocity.z,
+        -0.5 * 650.0 * TICK,
+        "one step after the last touch",
+    );
+    assert_eq!(state.sticky_surface_up, None);
+}
+
+#[test]
+fn wheel_rays_reach_the_fully_extended_wheel() {
+    // RB-PHYSICS-001-FR-092: no RocketSim `SUSPENSION_SUBTRACTION` on the
+    // reach, which ended at origin height 28.0 (front) / 28.8 (back).
+    let floor = floor();
+    let at_old_limit = cast_wheels(&level_car_at_height(29.7), &floor, TICK);
+    assert_eq!(at_old_limit.iter().flatten().count(), 4);
+    let back_only = cast_wheels(&level_car_at_height(31.0), &floor, TICK);
+    assert_eq!(back_only.iter().flatten().count(), 2);
 }
 
 #[test]
@@ -2962,7 +3029,7 @@ fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
         &mut low,
         &ControllerInput::default(),
         &low_wheels,
-        &DriveState::new(),
+        &mut DriveState::new(),
         TICK,
     );
     assert!(
@@ -2978,7 +3045,7 @@ fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
         &mut high,
         &ControllerInput::default(),
         &high_wheels,
-        &DriveState::new(),
+        &mut DriveState::new(),
         TICK,
     );
     assert_eq!(

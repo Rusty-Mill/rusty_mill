@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.95.0
+- Version: 0.96.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5538,6 +5538,24 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     matches to 0.1 uu/s from the press through 4.175 s; `--self-growth`
     4-5 s 5.1 uu (was 7.0).
 
+- `RB-PHYSICS-001-FR-092` (wheel reach and sticky-force timing, implemented,
+  verified by unit tests, ADR-0019 amendment): wheel rays reach the fully
+  extended wheel (`rest + travel + radius`, no RocketSim
+  `SUSPENSION_SUBTRACTION`; a level car touches up to origin height 30.5
+  front / 31.3 back), and the sticky force acts the step after the wheels
+  touch, along that step's normal.
+  - Why: after the 4.142 s jump the recorded wheels still grip in the step
+    from origin height 29.7 (RocketSim's reach ends at 28.0) and the sticky
+    force lasts one step past the last grip.
+  - **Verification**: `world` test
+    `a_held_ground_jump_gains_speed_as_the_real_capture_does` now checks
+    the full recorded pattern (295.7, six ticks of +4.0, then +6.7);
+    `drive` tests `wheel_rays_reach_the_fully_extended_wheel` and
+    `the_sticky_force_acts_the_step_after_the_wheels_touch`.
+  - **Real capture** (`--self-trace test2.jsonl 4.1 4.3`): every jump tick
+    matches; velocity error 2.6-3.3 uu/s over 4.19-4.3 s (was 13);
+    `--self-growth` 4-5 s 2.7 uu (was 5.1), 5-6 s 41 uu (was 54).
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7019,6 +7037,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.96.0 (2026-10-01): `RB-PHYSICS-001-FR-092` — wheel reach without
+  `SUSPENSION_SUBTRACTION`, sticky force one step late (ADR-0019
+  amendment). 370 tests in `rb_physics_bullet`.
 - 0.95.0 (2026-10-01): `RB-PHYSICS-001-FR-091` — ground-jump force from
   the press tick at full strength, suspension damping after the drive
   impulses (ADR-0019). 368 tests in `rb_physics_bullet`.

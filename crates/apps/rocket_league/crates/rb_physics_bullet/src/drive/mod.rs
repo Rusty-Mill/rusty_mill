@@ -417,6 +417,10 @@ pub struct DriveState {
     /// down once released (`ground::POWERSLIDE_RISE_RATE`/`FALL_RATE`),
     /// scaling the tire grip reduction and the powerslide steer blend.
     pub handbrake_amount: f32,
+    /// The previous step's average wheel contact normal, `None` if no wheel
+    /// touched: the sticky force acts along it one step late
+    /// (`RB-PHYSICS-001-FR-092`).
+    pub sticky_surface_up: Option<Vec3>,
 }
 
 impl DriveState {
@@ -429,6 +433,7 @@ impl DriveState {
             jump_hold_time_remaining: 0.0,
             flip: None,
             handbrake_amount: 0.0,
+            sticky_surface_up: None,
         }
     }
 }
@@ -567,10 +572,12 @@ pub fn apply_wheel_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
     wheels: &WheelContacts,
-    state: &DriveState,
+    state: &mut DriveState,
     dt: f32,
 ) {
-    wheels::apply_wheel_forces(car, wheels, effective_throttle(input, state) != 0.0, dt);
+    let throttle_engaged = effective_throttle(input, state) != 0.0;
+    state.sticky_surface_up =
+        wheels::apply_wheel_forces(car, wheels, state.sticky_surface_up, throttle_engaged, dt);
 }
 
 /// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if
