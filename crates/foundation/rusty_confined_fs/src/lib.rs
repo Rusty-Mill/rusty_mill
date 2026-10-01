@@ -1,5 +1,5 @@
-//! Create directories and open files for writing beneath a root directory
-//! without following a symlink anywhere below it.
+//! Create directories and open files beneath a root directory without
+//! following a symlink anywhere below it.
 //!
 //! For code that writes paths chosen by someone else: a received file
 //! name, an archive entry, a config path from a request. Every component of
@@ -51,10 +51,21 @@ pub fn open_for_write(root: &Path, rel: &Path) -> io::Result<Opened> {
     BACKEND.open_for_write(root, rel)
 }
 
-/// One implementation of the two operations, over validated names.
+/// Opens the regular file `rel` beneath `root` for reading.
+///
+/// # Errors
+/// `InvalidInput` if `rel` is empty, absolute or contains `..`. An error
+/// if any component is a symlink, a parent is not a directory, or `rel`
+/// is not a regular file, or from the underlying I/O.
+pub fn open_for_read(root: &Path, rel: &Path) -> io::Result<File> {
+    BACKEND.open_for_read(root, rel)
+}
+
+/// One implementation of the operations, over validated names.
 struct Backend {
     create_dir_all: fn(&Path, &[&OsStr]) -> io::Result<()>,
     open_for_write: fn(&Path, &[&OsStr], &OsStr) -> io::Result<Opened>,
+    open_for_read: fn(&Path, &[&OsStr], &OsStr) -> io::Result<File>,
 }
 
 #[cfg(target_os = "linux")]
@@ -73,6 +84,14 @@ impl Backend {
             return Err(invalid("an empty path names no file"));
         };
         (self.open_for_write)(root, parents, last)
+    }
+
+    fn open_for_read(&self, root: &Path, rel: &Path) -> io::Result<File> {
+        let names = normal_components(rel)?;
+        let Some((last, parents)) = names.split_last() else {
+            return Err(invalid("an empty path names no file"));
+        };
+        (self.open_for_read)(root, parents, last)
     }
 }
 
@@ -97,7 +116,7 @@ fn invalid(why: &'static str) -> io::Error {
 }
 
 fn not_a_regular_file() -> io::Error {
-    io::Error::other("refusing to write: the destination is not a regular file")
+    io::Error::other("refusing: the path is not a regular file")
 }
 
 #[cfg(target_os = "linux")]
@@ -124,6 +143,7 @@ mod fd_walk {
     pub(super) const BACKEND: Backend = Backend {
         create_dir_all,
         open_for_write,
+        open_for_read,
     };
 
     fn create_dir_all(root: &Path, names: &[&OsStr]) -> io::Result<()> {
@@ -135,10 +155,7 @@ mod fd_walk {
     }
 
     fn open_for_write(root: &Path, parents: &[&OsStr], last: &OsStr) -> io::Result<Opened> {
-        let mut dir = open_root(root)?;
-        for name in parents {
-            dir = descend(&dir, &c_name(name)?, false)?;
-        }
+        let dir = open_parent(root, parents)?;
         let name = c_name(last)?;
         let create = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC;
         match openat(dir.as_raw_fd(), &name, create, 0o666) {
@@ -162,6 +179,27 @@ mod fd_walk {
             file,
             created: false,
         })
+    }
+
+    fn open_for_read(root: &Path, parents: &[&OsStr], last: &OsStr) -> io::Result<File> {
+        let dir = open_parent(root, parents)?;
+        // `O_NONBLOCK` as in `open_for_write`: a FIFO is refused, not waited on.
+        let flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
+        let file = File::from(owned(openat(dir.as_raw_fd(), &c_name(last)?, flags, 0)?));
+        if !file.metadata()?.is_file() {
+            return Err(not_a_regular_file());
+        }
+        Ok(file)
+    }
+
+    /// The directory holding the last component, reached without following
+    /// a symlink.
+    fn open_parent(root: &Path, parents: &[&OsStr]) -> io::Result<OwnedFd> {
+        let mut dir = open_root(root)?;
+        for name in parents {
+            dir = descend(&dir, &c_name(name)?, false)?;
+        }
+        Ok(dir)
     }
 
     fn open_root(root: &Path) -> io::Result<OwnedFd> {
@@ -208,17 +246,39 @@ mod checked {
 
     use super::{Backend, Opened, not_a_regular_file};
     use std::ffi::OsStr;
-    use std::fs::{self, OpenOptions};
+    use std::fs::{self, File, OpenOptions};
     use std::io;
     use std::path::{Path, PathBuf};
 
     pub(super) const BACKEND: Backend = Backend {
         create_dir_all,
         open_for_write,
+        open_for_read,
     };
 
     fn create_dir_all(root: &Path, names: &[&OsStr]) -> io::Result<()> {
         walk(root, names, true).map(drop)
+    }
+
+    fn open_for_read(root: &Path, parents: &[&OsStr], last: &OsStr) -> io::Result<File> {
+        let path = walk(root, parents, false)?.join(last);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(symlink_refused(&path));
+        }
+        let file = File::open(&path)?;
+        verify_opened(&file, &path)?;
+        Ok(file)
+    }
+
+    /// `file` must be the regular file `lstat` finds at `path`, not a
+    /// symlink target swapped in before the open.
+    fn verify_opened(file: &File, path: &Path) -> io::Result<()> {
+        let opened = file.metadata()?;
+        let at_path = fs::symlink_metadata(path)?;
+        if !opened.is_file() || at_path.file_type().is_symlink() || !same_file(&opened, &at_path) {
+            return Err(not_a_regular_file());
+        }
+        Ok(())
     }
 
     fn open_for_write(root: &Path, parents: &[&OsStr], last: &OsStr) -> io::Result<Opened> {
@@ -237,11 +297,7 @@ mod checked {
             Err(e) => return Err(e),
         }
         let file = OpenOptions::new().write(true).open(&path)?;
-        let opened = file.metadata()?;
-        let at_path = fs::symlink_metadata(&path)?;
-        if !opened.is_file() || at_path.file_type().is_symlink() || !same_file(&opened, &at_path) {
-            return Err(not_a_regular_file());
-        }
+        verify_opened(&file, &path)?;
         Ok(Opened {
             file,
             created: false,
@@ -441,6 +497,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn open_for_read_reads_a_regular_file_and_refuses_anything_else() {
+        use std::io::Read;
+        for (name, b) in backends() {
+            let s = Scratch::new(name);
+            std::fs::create_dir(s.root.join("d")).expect(name);
+            std::fs::write(s.root.join("d/f"), b"data").expect(name);
+            let mut out = String::new();
+            b.open_for_read(&s.root, Path::new("d/f"))
+                .expect(name)
+                .read_to_string(&mut out)
+                .expect(name);
+            assert_eq!(out, "data", "{name}");
+
+            let missing = b
+                .open_for_read(&s.root, Path::new("d/absent"))
+                .expect_err(name);
+            assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{name}");
+            assert!(b.open_for_read(&s.root, Path::new("d")).is_err(), "{name}");
+            assert!(
+                b.open_for_read(&s.root, Path::new("../x")).is_err(),
+                "{name}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     mod symlinks {
         use super::*;
@@ -494,6 +576,22 @@ mod tests {
         }
 
         #[test]
+        fn open_for_read_refuses_a_symlink_at_any_component() {
+            for (name, b) in backends() {
+                let s = Scratch::new(name);
+                std::fs::write(s.outside.join("secret"), b"no").expect(name);
+                symlink(s.outside.join("secret"), s.root.join("f")).expect(name);
+                symlink(&s.outside, s.root.join("sub")).expect(name);
+
+                assert!(b.open_for_read(&s.root, Path::new("f")).is_err(), "{name}");
+                assert!(
+                    b.open_for_read(&s.root, Path::new("sub/secret")).is_err(),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
         fn a_symlinked_root_is_trusted() {
             for (name, b) in backends() {
                 let s = Scratch::new(name);
@@ -518,6 +616,8 @@ mod tests {
             assert_eq!(dir.raw_os_error(), Some(20), "ENOTDIR");
             let file = open_for_write(&s.root, Path::new("f")).expect_err("file");
             assert_eq!(file.raw_os_error(), Some(40), "ELOOP");
+            let read = open_for_read(&s.root, Path::new("f")).expect_err("read");
+            assert_eq!(read.raw_os_error(), Some(40), "ELOOP");
         }
     }
 }

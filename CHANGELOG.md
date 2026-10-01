@@ -53,6 +53,13 @@ Removed / Fixed / Security, newest first.
     - Nexus: comments, editor save and journal, CRDT publisher, CLI merge driver, skills index, and the shell's state and granted capabilities.
     - `rusty_rusqlite`, `rusty_term`'s config, `remind_me_core`'s API keys, endpoint and OAuth state, `rusty_tick`'s users, sessionmgr's session catalog, and `rusty_crypto_key`.
     - 9 of them never fsynced. sessionmgr's records were briefly readable at the default mode before their `chmod`. `rusty_crypto_key` on Windows wrote in place.
+  - New `rusty_confined_fs` (foundation): `create_dir_all`, `open_for_write` and `open_for_read` beneath a root. They refuse `..`, absolute paths and a symlink at any component.
+    - On Linux they walk descriptors with `openat(O_NOFOLLOW)`, so there is no window between check and open. Elsewhere a checked `lstat` walk is used; it is also tested on Linux.
+    - `rusty_libc` gains `O_NOFOLLOW`.
+  - `rusty-croc` receives through `rusty_confined_fs`:
+    - Files and folders, including the empty-folder list and ZIP directories, which `create_dir_all` previously created through symlinks.
+    - A received file's mode is now set through its handle.
+  - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.

@@ -13945,6 +13945,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-mock",
+ "rusty_confined_fs",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

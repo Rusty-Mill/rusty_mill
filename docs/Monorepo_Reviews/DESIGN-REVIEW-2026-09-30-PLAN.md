@@ -52,7 +52,9 @@ three real call sites, so the shared helper is justified.
 *Landed in Tranche 4 as `crates/foundation/rusty_atomic_file`, a std
 crate, not rustils: rustils has no filesystem backend on macOS, where Nexus
 ships, and a foundation crate is usable by every layer. 16 call sites moved;
-the multimodal engine keeps its own `durability` helper.*
+the multimodal engine keeps its own `durability` helper. The 3.2 rooted open
+landed alongside it as `crates/foundation/rusty_confined_fs` (an
+`openat`/`O_NOFOLLOW` walk on Linux), used by croc and the Fedora agent.*
 
 ## Tranche 3 — Fail-closed and bounded I/O (P1/P2)
 
