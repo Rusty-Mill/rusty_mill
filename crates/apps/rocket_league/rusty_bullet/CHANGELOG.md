@@ -940,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- No air throttle while boosting (`RB-PHYSICS-001-FR-096`, ADR-0019
+  amendment): the airborne boost constant already includes a full air
+  throttle, per the real capture's boost with throttle -1 at 4.99-5.18 s.
 - Air control waits one step after the wheels let go
   (`RB-PHYSICS-001-FR-095`, ADR-0019 amendment), as the sticky force does,
   per the real capture's takeoff after its 4.142 s jump.

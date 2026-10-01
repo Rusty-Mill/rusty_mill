@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.99.0
+- Version: 0.100.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5608,6 +5608,17 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `--self-trace 4.15 4.35`: yaw rate -2.03 vs recorded -2.02 rad/s
     through 4.192 s (was applying air-control yaw a step early), rotation
     error 0.00 through the 4.317 s flip.
+- `RB-PHYSICS-001-FR-096` (no air throttle while boosting, implemented,
+  verified by unit tests, ADR-0019 amendment): airborne, the throttle stick
+  adds no force while boost fires (`drive::air_throttle`).
+  - Why: `BOOST_ACCEL_AIR` (3175/3) is the grounded boost (2975/3) plus a
+    full `THROTTLE_AIR_ACCEL` (200/3), the throttle boost forces to 1.
+    RocketSim adds the raw stick on top; the capture's car boosting with
+    throttle -1 over 4.99-5.18 s gains the full 3175/3 (8.7 uu/s per tick
+    against the candidate's 8.2), which grew the velocity error from 4 to
+    18 uu/s.
+  - **Verification**: `drive` test
+    `boosting_in_the_air_ignores_the_throttle_stick`.
 
 ## Architecture and interfaces
 
@@ -7090,6 +7101,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.100.0 (2026-10-01): `RB-PHYSICS-001-FR-096` — no air throttle while
+  boosting (ADR-0019 amendment). 374 tests in `rb_physics_bullet`.
 - 0.99.0 (2026-10-01): `RB-PHYSICS-001-FR-095` — air control waits one
   step after the wheels let go (ADR-0019 amendment). 373 tests in
   `rb_physics_bullet`.

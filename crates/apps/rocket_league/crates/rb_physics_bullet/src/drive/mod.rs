@@ -554,7 +554,7 @@ pub fn apply_driven_forces(
         // step from 4.183 s, after its 4.142 s jump.
         if !state.was_on_ground {
             air::apply_air_control(car, input, pitch_scale, dt);
-            air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
+            air::apply_air_throttle(car, air_throttle(input, state), forward);
         }
         if state.flip == flip_before_press {
             jump::advance_flip(car, &mut state.flip, dt);
@@ -575,6 +575,20 @@ pub fn apply_driven_forces(
 
 /// Throttle as the pedals see it: RocketSim treats a boosting car with
 /// boost left as full throttle.
+/// Throttle for `air::apply_air_throttle` (`RB-PHYSICS-001-FR-096`):
+/// none while boosting. `BOOST_ACCEL_AIR` (3175/3) is the grounded boost
+/// (2975/3) plus a full `THROTTLE_AIR_ACCEL` (200/3), so boost already
+/// carries the throttle it forces to 1; RocketSim adds the raw stick on
+/// top, but the capture's car boosting with throttle -1 (4.99-5.18 s)
+/// gains the full 3175/3.
+fn air_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
+    if input.boost && state.boost_amount > 0.0 {
+        0.0
+    } else {
+        input.throttle.clamp(-1.0, 1.0)
+    }
+}
+
 fn effective_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
     if input.boost && state.boost_amount > 0.0 {
         1.0

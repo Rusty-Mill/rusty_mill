@@ -3183,3 +3183,24 @@ fn air_control_waits_one_step_after_the_wheels_let_go() {
         "second airborne step: air control yaws"
     );
 }
+
+#[test]
+fn boosting_in_the_air_ignores_the_throttle_stick() {
+    // RB-PHYSICS-001-FR-096: BOOST_ACCEL_AIR already includes a full air
+    // throttle, so throttle -1 while boosting changes nothing; without
+    // boost the stick still pushes.
+    let airborne_step = |throttle: f32, boost: bool| {
+        let mut c = car();
+        let mut state = DriveState::new();
+        state.was_on_ground = false;
+        let input = ControllerInput {
+            throttle,
+            boost,
+            ..Default::default()
+        };
+        apply_driven_forces(&mut c, &input, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+        c.total_force()
+    };
+    assert_eq!(airborne_step(-1.0, true), airborne_step(0.0, true));
+    assert!(airborne_step(-1.0, false).x < airborne_step(0.0, false).x);
+}

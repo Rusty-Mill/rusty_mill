@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Boost already carries the air throttle
+**2026-10-01** · `RB-PHYSICS-001-FR-096` · ADR-0019 amendment
+
+- While boosting in the air, the throttle stick no longer adds or removes
+  force: the airborne boost constant is the grounded boost plus a full air
+  throttle. The owner's capture, boosting with throttle -1, gains the full
+  airborne boost; the port lost 0.6 uu/s per tick to the reversed stick,
+  growing its velocity error from 4 to 18 uu/s. 440 tests.
+
 ## Takeoff counts as grounded for one more step
 **2026-10-01** · `RB-PHYSICS-001-FR-095` · ADR-0019 amendment
 
