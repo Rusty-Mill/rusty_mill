@@ -544,11 +544,11 @@ pub fn apply_driven_forces(
 
 /// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if
 /// its length exceeds it, preserving direction — a no-op otherwise. Call
-/// once per step, right after `integrate::integrate_velocities`, so it
-/// sees this step's fully-integrated angular velocity (this function's own
-/// caller, and `apply_driven_forces`'s doc comment, cover why the ordering
-/// matters: torque applied by `apply_driven_forces` isn't reflected in
-/// `angular_velocity` until `integrate_velocities` runs).
+/// once per step at its very end, after the transform has integrated
+/// (`RB-PHYSICS-001-FR-087`): RocketSim clamps in `Car::_PostTickUpdate`,
+/// after Bullet's step, so a step's orientation moves with the unclamped
+/// spin. The real capture confirms it: a flipping car turns at ~7.6 rad/s
+/// (5.5 plus one tick of flip torque) while reporting 5.5.
 pub fn clamp_angular_speed(car: &mut RigidBody) {
     let speed = car.angular_velocity.length();
     if speed > MAX_CAR_ANGULAR_SPEED {

@@ -4,7 +4,9 @@
 
 use rb_capture_ingest::CaptureFileSource;
 use rb_domain::divergence::DivergenceScore;
-use rb_domain::{CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource};
+use rb_domain::{
+    CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
+};
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
 use rb_physics_bullet::world::simulate_recorded;
 use rb_physics_bullet::PhysicsWorld;
@@ -190,6 +192,26 @@ impl TraceRow {
             .angular_velocity
             .distance(&self.candidate.angular_velocity)
     }
+}
+
+/// World-frame angular velocity (rad/s) that turns `from` into `to` over
+/// `dt`: the rotation `to * from^-1` as axis times angle, divided by `dt`
+/// (the same left-multiplied, world-frame convention `integrate_transform`
+/// uses). `Vec3::ZERO` for no rotation or a non-positive `dt`. Lets
+/// `--self-trace` check a capture's recorded orientations against its own
+/// recorded angular velocity.
+pub fn rotation_rate(from: &Quat, to: &Quat, dt: f32) -> Vec3 {
+    let mut delta = to.mul(&from.conjugate());
+    if delta.w < 0.0 {
+        delta = Quat::new(-delta.x, -delta.y, -delta.z, -delta.w);
+    }
+    let axis = Vec3::new(delta.x, delta.y, delta.z);
+    let sin_half = axis.length();
+    if dt <= 0.0 || sin_half < 1e-9 {
+        return Vec3::ZERO;
+    }
+    let angle = 2.0 * sin_half.atan2(delta.w);
+    axis * (angle / (sin_half * dt))
 }
 
 /// A per-frame trace of a capture against the candidate simulated from it
@@ -381,6 +403,20 @@ mod tests {
         assert_eq!(first.velocity_error(), 0.0);
         assert_eq!(first.spin_error(), 0.0);
         assert!(first.input.is_some());
+    }
+
+    #[test]
+    fn rotation_rate_recovers_a_known_spin() {
+        // 0.1 rad about +Z over 0.1 s is 1 rad/s about +Z.
+        let half = 0.05_f32;
+        let to = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let rate = rotation_rate(&Quat::IDENTITY, &to, 0.1);
+        assert!(
+            (rate - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-4,
+            "{rate:?}"
+        );
+        assert_eq!(rotation_rate(&to, &to, 0.1), Vec3::ZERO);
+        assert_eq!(rotation_rate(&Quat::IDENTITY, &to, 0.0), Vec3::ZERO);
     }
 
     #[test]

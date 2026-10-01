@@ -448,11 +448,8 @@ impl PhysicsWorld {
     /// dodge's flip torque and vertical damping, driven by `flip`)
     /// alongside gravity, so `input`'s forces/impulses
     /// (and tire grip) are part of the same velocity-prediction
-    /// phase. Since `RB-PHYSICS-001-FR-057`, also calls
-    /// `drive::clamp_angular_speed` right after `integrate_velocities`, so
-    /// this step's angular velocity — air control torque and any direct
-    /// writes (the flip torque, steering) alike —
-    /// never leaves this function above `drive::MAX_CAR_ANGULAR_SPEED`.
+    /// phase. The car's angular speed is not clamped here: `step` clamps it
+    /// after the transform integrates (`RB-PHYSICS-001-FR-087`).
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
@@ -467,7 +464,6 @@ impl PhysicsWorld {
         drive::apply_driven_forces(car, input, on_ground, wall_normal, drive_state, dt);
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
-        drive::clamp_angular_speed(car);
     }
 
     /// Detects every one of `body`'s contacts against every static surface
@@ -798,6 +794,12 @@ impl PhysicsWorld {
         Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
         for car in &mut self.cars {
             Self::integrate_transform_and_refresh_inertia(car, dt);
+            // RB-PHYSICS-001-FR-087: clamp after the orientation has moved
+            // with this step's unclamped spin, as RocketSim's
+            // `Car::_PostTickUpdate` does after Bullet's step. The owner's
+            // capture shows a flipping car turning at ~7.6 rad/s while its
+            // reported spin stays at the 5.5 cap.
+            drive::clamp_angular_speed(car);
         }
 
         self.elapsed_secs += dt;
@@ -3673,6 +3675,43 @@ mod tests {
         assert!(
             (yaw_rate - expected).abs() <= 0.1 * expected.abs(),
             "yaw rate {yaw_rate} rad/s, expected ~{expected} at {forward_speed} uu/s"
+        );
+    }
+
+    #[test]
+    fn a_flipping_cars_orientation_turns_faster_than_its_clamped_spin() {
+        // RB-PHYSICS-001-FR-087: the clamp runs after the transform
+        // integrates, so once a flip saturates the 5.5 rad/s cap each step
+        // still turns the car by the cap plus that step's flip torque, as
+        // the owner's capture shows (~7.6 rad/s turned, 5.5 reported).
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 1000.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                pitch: Some(-1.0),
+                ..ControllerInput::default()
+            },
+        );
+        let dt = 1.0 / 120.0;
+        for _ in 0..10 {
+            world.step(dt);
+        }
+        let before = world.cars[0].orientation;
+        world.step(dt);
+        let after = world.cars[0].orientation;
+        let turned_per_second = before.angle_to(&after) / dt;
+        let spin = world.cars[0].angular_velocity.length();
+        assert!(
+            (spin - crate::drive::MAX_CAR_ANGULAR_SPEED).abs() < 1e-3,
+            "spin {spin}"
+        );
+        assert!(
+            turned_per_second > spin + 1.0,
+            "turned {turned_per_second} rad/s at a reported {spin}"
         );
     }
 }

@@ -28,8 +28,9 @@
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{ControllerInput, Vec3};
 use rb_verify_cli::{
-    score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    rotation_rate, score_capture_against_candidate, score_capture_growth,
+    score_replay_against_capture, trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS,
+    DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::process::ExitCode;
@@ -96,12 +97,34 @@ fn fmt_input(input: Option<ControllerInput>) -> String {
     )
 }
 
+/// Each row also prints, from the previous row of the same car, the spin
+/// implied by the change in recorded and simulated orientation
+/// (`rotation_rate`): matching `spin` means a stream's orientations agree
+/// with its own angular velocity.
 fn print_trace(rows: &[TraceRow]) {
+    let mut previous: Vec<&TraceRow> = Vec::new();
     for row in rows {
+        let id = row.recorded.player_id;
+        let prior = previous.iter().position(|p| p.recorded.player_id == id);
+        let rates = prior.map(|i| {
+            let p = previous[i];
+            let dt = row.t_secs - p.t_secs;
+            (
+                rotation_rate(&p.recorded.rotation, &row.recorded.rotation, dt),
+                rotation_rate(&p.candidate.rotation, &row.candidate.rotation, dt),
+            )
+        });
+        let q_rate = rates.map_or_else(
+            || "-".to_string(),
+            |(r, c)| format!("rec {} sim {}", fmt_spin(&r), fmt_spin(&c)),
+        );
+        match prior {
+            Some(i) => previous[i] = row,
+            None => previous.push(row),
+        }
         println!(
-            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2} | spin rec {rs} sim {cs} err {es:.2}",
+            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2} | spin rec {rs} sim {cs} err {es:.2} | q-rate {q_rate}",
             t = row.t_secs,
-            id = row.recorded.player_id,
             input = fmt_input(row.input),
             rp = fmt_vec(&row.recorded.position),
             rv = fmt_vec(&row.recorded.velocity),

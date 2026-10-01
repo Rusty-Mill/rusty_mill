@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace` prints each stream's orientation-implied spin
+  (`q-rate`, `rb_verify_cli::rotation_rate`; `RB-VERIFY-003` 0.13.0).
 - ADR-0016: steer through per-wheel side impulses (supersedes ADR-0011).
 - `rb-verify --self-trace` prints recorded and simulated angular velocity
   and a spin error per row (`TraceRow::spin_error`, `RB-VERIFY-003` 0.12.0).
@@ -935,6 +937,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Car angular speed is clamped after the transform integrates
+  (`RB-PHYSICS-001-FR-087`), as RocketSim and the real capture do, so a
+  saturated flip turns at ~7.5 rad/s while reporting 5.5.
 - Steering (`RB-PHYSICS-001-FR-086`, ADR-0016): each wheel's side impulse
   at its contact point turns the car, so the turn rate builds up and dies
   away as recorded, instead of being set to the bicycle-model value.
