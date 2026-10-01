@@ -313,11 +313,18 @@ impl ScheduledIo {
         // step, so a concurrent `clear_if_unchanged` holding an older
         // token either lands entirely before this (and is then
         // overridden by it) or fails its compare -- never interleaves.
-        let _ = self
-            .word(interest)
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
-                Some(word.wrapping_add(TICK) | READY)
-            });
+        // A compare-and-swap loop rather than `fetch_update`, deprecated
+        // in Rust 1.99 for a `try_update` newer than this workspace's MSRV.
+        let word = self.word(interest);
+        let mut current = word.load(Ordering::Acquire);
+        while let Err(actual) = word.compare_exchange_weak(
+            current,
+            current.wrapping_add(TICK) | READY,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            current = actual;
+        }
         if let Some(waker) = waker_slot.lock().unwrap().take() {
             waker.wake();
         }

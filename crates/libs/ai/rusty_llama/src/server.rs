@@ -278,12 +278,16 @@ struct ConnectionSlot(&'static AtomicUsize);
 impl ConnectionSlot {
     /// A slot if fewer than `max` are held.
     fn acquire(active: &'static AtomicUsize, max: usize) -> Option<Self> {
-        active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < max).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| ConnectionSlot(active))
+        // A compare-and-swap loop rather than `fetch_update`, deprecated in
+        // Rust 1.99 for a `try_update` newer than this workspace's MSRV.
+        let mut n = active.load(Ordering::Acquire);
+        while n < max {
+            match active.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(ConnectionSlot(active)),
+                Err(current) => n = current,
+            }
+        }
+        None
     }
 }
 
