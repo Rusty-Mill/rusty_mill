@@ -77,16 +77,16 @@ version: `a245d35`).
 
 ## Next
 
-1. Run `rb-verify --self-trace <test2.jsonl path> 2.5 4.5` on the owner's
-   machine. FR-004's real run (see Validation) localized the derailment
-   to the car at ~3 s; the trace shows which input preceded it.
-   Leading hypothesis, from tracing the synthetic fixture: the seeded car
-   box (half-height 19.33) starts ~2.3 uu inside the floor, because a
-   recorded car position (~z 17 at rest) is the car origin, which rides
-   on wheels, and the port has no hitbox offset (RocketSim's
-   `hitboxPosOffset`). Pushed off the floor, the car briefly counts as
-   airborne, so a ground jump fires as a dodge. Confirm on real data
-   before changing the model (ADR-0009).
+1. Steering. After `RB-PHYSICS-001-FR-079` the real-capture trace shows
+   the jump at t=4.133 s firing correctly (sim vz 286 vs recorded 296),
+   so heading is now the dominant error: the recorded car turns on steer
+   input at 3.742 s and 4.050 s, the candidate barely does (constant
+   ~0.45-0.50 rad orientation error, velocity direction 45 deg vs mostly
+   +Y). Proposed: drive turn rate from real Rocket League's
+   `STEER_ANGLE_FROM_SPEED_CURVE` through a simple wheelbase model,
+   calibrated against this trace (FR-065 / ADR-0009). Secondary: floor
+   friction on the sliding box (~10% slower by 4.1 s) and the 2.3 uu
+   origin-vs-hitbox offset.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -95,7 +95,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (401 tests: 27 `rb_domain`, 337
+- `cargo test --workspace`: pass (402 tests: 27 `rb_domain`, 338
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -124,6 +124,13 @@ version: `a245d35`).
   4 s; ball within 0.05 uu until 5 s, when a car reaches it in one run
   but not the other. Abrupt, car-only derailment: a targeted mechanic
   fix, not broad `RB-PHYSICS-001-FR-005` calibration, comes first.
+- `rb-verify --self-growth test2.jsonl` after `RB-PHYSICS-001-FR-079`
+  (owner's machine, 2026-10-01): 3-4 s window 10 uu / 67 uu/s (was 34 uu
+  / 164 uu/s); 4-5 s window 751 uu / 1.21 rad / 1,902 uu/s (was 1,315 uu
+  / 1.37 rad / 2,887 uu/s); ball 0.01 uu (was 0.05) until a car reaches
+  it. `--self-trace 4.10 4.20`: the jump fires as a jump (sim vz 286 vs
+  recorded 296), no sideways dodge; remaining error is heading (~0.45 rad)
+  and ~10% speed.
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate

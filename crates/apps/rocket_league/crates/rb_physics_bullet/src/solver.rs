@@ -159,12 +159,23 @@ use std::collections::HashMap;
 /// config yet (bullet3/src/BulletDynamics/ConstraintSolver/btContactSolverInfo.h).
 /// Confirmed byte-for-byte against real `btContactSolverInfoData`'s own
 /// constructor (`RB-PHYSICS-001-FR-048`): `m_erp2 = 0.2`, `m_globalCfm = 0.`,
-/// `m_linearSlop = 0.`, `m_restitutionVelocityThreshold = 0.2f`,
+/// `m_linearSlop = 0.`, `m_restitutionVelocityThreshold = 0.2f` (Bullet
+/// units; scaled to uu below),
 /// `m_sor = 1.`, `m_numIterations = 10` all match exactly.
 const ERP2: f32 = 0.2;
 const GLOBAL_CFM: f32 = 0.0;
 const LINEAR_SLOP: f32 = 0.0;
-const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.2;
+/// Bullet's `m_restitutionVelocityThreshold` is 0.2 in Bullet's own units
+/// (m/s). This port works in Unreal units, and RocketSim runs Bullet at
+/// `BT_TO_UU = 50` uu per Bullet unit (`src/BulletLink.h`), so the same
+/// threshold here is 0.2 * 50 = 10 uu/s. `RB-PHYSICS-001-FR-079`: copying
+/// 0.2 verbatim made every gravity touchdown (~5-11 uu/s per tick) bounce
+/// at full restitution, so a driving car hopped off the floor and counted
+/// as grounded only one tick in three.
+const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.2 * BULLET_TO_UU;
+/// Unreal units per Bullet length unit, matching RocketSim's `BT_TO_UU`.
+/// Any Bullet default that carries a length unit must be scaled by this.
+const BULLET_TO_UU: f32 = 50.0;
 const RELAXATION: f32 = 1.0;
 const SOLVER_ITERATIONS: u32 = 10;
 const UPPER_LIMIT: f32 = 1e10;

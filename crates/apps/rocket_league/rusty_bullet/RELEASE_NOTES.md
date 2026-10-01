@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Fixed the driving-car hop (restitution threshold units)
+**2026-10-01** · `RB-PHYSICS-001-FR-079`
+
+- The first real `--self-trace` showed a driving car grounded only one
+  tick in three, so throttle under-applied and a jump fired as a side
+  dodge. Cause: Bullet's 0.2 m/s restitution threshold copied as 0.2 uu/s;
+  now 10 uu/s (RocketSim's `BT_TO_UU = 50`). New regression test: before,
+  airborne 24 of 36 ticks; after, grounded every tick. 402 tests pass.
+
 ## Per-frame candidate trace (`rb-verify --self-trace`)
 **2026-10-01** · `RB-VERIFY-003-FR-005`
 
