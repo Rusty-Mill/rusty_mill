@@ -13891,6 +13891,13 @@ name = "rusty_config"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_confined_fs"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+]
+
+[[package]]
 name = "rusty_crypto_key"
 version = "0.1.0"
 dependencies = [
