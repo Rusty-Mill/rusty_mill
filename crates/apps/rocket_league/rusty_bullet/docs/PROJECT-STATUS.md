@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#177](https://github.com/baileyrd/rusty_bullet/pull/177) — spin in
+  `--self-trace` (`RB-VERIFY-003` 0.12.0) and `RB-PHYSICS-001-FR-085`,
+  flip torque on the press tick.
 - [#176](https://github.com/baileyrd/rusty_bullet/pull/176) —
   `RB-PHYSICS-001-FR-084`, RocketSim air control (ADR-0015).
 - [#175](https://github.com/baileyrd/rusty_bullet/pull/175) —
@@ -69,9 +72,9 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-VERIFY-003` 0.12.0 (spin in `--self-trace`) and
-  `RB-PHYSICS-001-FR-085` (flip torque on the press tick): done, awaiting
-  PR.
+- `RB-PHYSICS-001-FR-086`, steering by per-wheel side impulses
+  (ADR-0016): verified on the real capture (orientation error at the
+  4.317 s dodge 0.22 to 0.04 rad); in review.
 
 ## Blocked
 
@@ -98,12 +101,10 @@ version: `a245d35`).
 
 ## Next
 
-1. Dynamic steering: ground steering sets the yaw rate to its target at
-   once (ADR-0011), while the recorded yaw rate ramps (-1.0 to -1.7 rad/s
-   over 4.10-4.14 s against a -2.17 target). The resulting ~0.2 rad
-   heading error at the 4.317 s dodge tilts the flip axis ~10 deg, which
-   is the flip's remaining orientation error. Replace the kinematic yaw
-   with per-wheel lateral tire forces that produce it. Known small
+1. Trace 4.6-5.6 s: from 5 s the ball diverges (mean 82 uu, max 660 uu),
+   as a car reaches it in one run and not the other. Smaller leftovers:
+   steady yaw rate ~5% low (2.28 vs 2.40 rad/s near 4.0 s), and a ~3 deg
+   flip-axis offset (orientation error 0.04 to 0.58 rad over 4.32-4.6 s). Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -117,7 +118,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (418 tests: 27 `rb_domain`, 354
+- `cargo test --workspace`: pass (417 tests: 27 `rb_domain`, 353
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -178,6 +179,14 @@ version: `a245d35`).
   1.37 rad / 2,887 uu/s at the start of the day), 5-6 s 219 uu (was
   2,660); ball diverges from 5 s. `--self-trace 4.3 5.0`: orientation
   error at 5.0 s 1.36 rad (was 1.41), at 4.30 s 0.21 (was 0.14).
+- After `RB-PHYSICS-001-FR-086` (owner's machine, 2026-10-01):
+  `--self-growth` 3-4 s 2.5 uu / 0.01 rad / 5.2 uu/s; 4-5 s 16 uu / 0.48
+  rad / 35 uu/s (was 30 / 0.55 / 95); 5-6 s 157 uu (was 219).
+  `--self-trace 3.7 4.6`: yaw spin ramps with the recording (0.27 vs
+  0.31, 0.92 vs 1.06, 1.61 vs 1.80 rad/s over the first 9 ticks after
+  3.742 s); orientation error 0.04 rad at the dodge (was 0.22); spin error
+  just before it 0.10 rad/s (was 0.71); velocity error after it 36 uu/s
+  (was 128).
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate

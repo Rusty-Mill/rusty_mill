@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0016: steer through per-wheel side impulses (supersedes ADR-0011).
 - `rb-verify --self-trace` prints recorded and simulated angular velocity
   and a spin error per row (`TraceRow::spin_error`, `RB-VERIFY-003` 0.12.0).
 - ADR-0015: RocketSim's air control and damping; no airborne auto-upright.
@@ -934,6 +935,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Steering (`RB-PHYSICS-001-FR-086`, ADR-0016): each wheel's side impulse
+  at its contact point turns the car, so the turn rate builds up and dies
+  away as recorded, instead of being set to the bicycle-model value.
 - A dodge's flip torque now acts on the press tick, as the real capture
   shows (`RB-PHYSICS-001-FR-085`), one tick earlier than RocketSim's order.
 - Air control (`RB-PHYSICS-001-FR-084`, ADR-0015): RocketSim's torque,
