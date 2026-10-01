@@ -15,7 +15,7 @@
 
 use std::collections::VecDeque;
 use std::error::Error;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
@@ -664,10 +664,6 @@ const MAX_HEADER_BYTES: usize = 8 * 1024;
 /// Per-connection socket read/write timeout — a slowloris guard.
 const SOCKET_TIMEOUT_SECS: u64 = 30;
 
-fn body_within_limit(content_length: usize) -> bool {
-    content_length <= MAX_BODY_BYTES
-}
-
 fn handle_connection(stream: TcpStream, jobs: &SyncSender<Job>, model_id: &str) -> io::Result<()> {
     // Bound how long one (stalled or slowloris) client can pin this worker thread:
     // without read/write timeouts a client that opens a socket and never finishes
@@ -675,59 +671,21 @@ fn handle_connection(stream: TcpStream, jobs: &SyncSender<Job>, model_id: &str) 
     let timeout = Some(std::time::Duration::from_secs(SOCKET_TIMEOUT_SECS));
     stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(timeout)?;
-    let mut reader = BufReader::new(stream.try_clone()?);
     let mut stream = stream;
 
-    let mut header_bytes = 0usize;
-    let mut request_line = String::new();
-    let remaining = MAX_HEADER_BYTES.saturating_sub(header_bytes);
-    let n = (&mut reader)
-        .take(remaining as u64)
-        .read_line(&mut request_line)?;
-    if n == 0 {
-        return Ok(()); // client hung up
-    }
-    if n == remaining && !request_line.ends_with('\n') {
-        return write_json(&mut stream, 400, &error_json("request line too large"));
-    }
-    header_bytes += n;
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
-
-    let mut content_length = 0usize;
-    loop {
-        let mut header = String::new();
-        let remaining = MAX_HEADER_BYTES.saturating_sub(header_bytes);
-        if remaining == 0 {
-            return write_json(&mut stream, 400, &error_json("request headers too large"));
+    // Parsing and framing are `rusty_http`'s (design review Tranche 4): the
+    // head is capped at `MAX_HEADER_BYTES`, the body at `MAX_BODY_BYTES`
+    // however it is framed, and ambiguous framing (Transfer-Encoding with
+    // Content-Length, a bad or conflicting Content-Length) is refused
+    // rather than guessed at (review 3.4).
+    let (method, path, body) = match read_request(&stream) {
+        Ok(request) => request,
+        Err(Refusal::HungUp) => return Ok(()),
+        Err(Refusal::Io(e)) => return Err(e),
+        Err(Refusal::Status(status, message)) => {
+            return write_json(&mut stream, status, &error_json(message));
         }
-        let n = (&mut reader)
-            .take(remaining as u64)
-            .read_line(&mut header)?;
-        if n == 0 {
-            break;
-        }
-        if n == remaining && !header.ends_with('\n') {
-            return write_json(&mut stream, 400, &error_json("request headers too large"));
-        }
-        header_bytes += n;
-        if header.trim().is_empty() {
-            break;
-        }
-        let lower = header.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            content_length = v.trim().parse().unwrap_or(0);
-        }
-    }
-    // Cap the body so a single request can't make us allocate an unbounded buffer
-    // (a one-line memory-exhaustion DoS): reject oversized bodies with 413 rather
-    // than `vec![0u8; client_supplied_len]`.
-    if !body_within_limit(content_length) {
-        return write_json(&mut stream, 413, &error_json("request body too large"));
-    }
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body)?;
+    };
 
     match (method.as_str(), path.as_str()) {
         ("POST", "/v1/chat/completions") => handle_chat(&mut stream, &body, jobs, model_id),
@@ -736,6 +694,46 @@ fn handle_connection(stream: TcpStream, jobs: &SyncSender<Job>, model_id: &str) 
         ("GET", "/health") | ("GET", "/") => write_text(&mut stream, 200, "ok\n"),
         _ => write_json(&mut stream, 404, &error_json("not found")),
     }
+}
+
+/// Why a request was not read.
+enum Refusal {
+    /// The client left before sending a complete head.
+    HungUp,
+    /// The socket failed (including the read timeout).
+    Io(io::Error),
+    /// The request is malformed or too large; answer with this status.
+    Status(u16, &'static str),
+}
+
+/// Reads one request: method, request-target and body.
+fn read_request(stream: &TcpStream) -> Result<(String, String, Vec<u8>), Refusal> {
+    use rusty_http::{
+        body::request_framing, sync::SyncTransport, Error as HttpError, TransportError,
+    };
+
+    let refuse = |err: TransportError, malformed: &'static str| match err {
+        TransportError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => Refusal::HungUp,
+        TransportError::Io(e) => Refusal::Io(e),
+        TransportError::Http(HttpError::HeadTooLarge) => {
+            Refusal::Status(400, "request headers too large")
+        }
+        TransportError::Http(HttpError::BodyTooLarge) => {
+            Refusal::Status(413, "request body too large")
+        }
+        TransportError::Http(_) => Refusal::Status(400, malformed),
+    };
+
+    let mut transport = SyncTransport::new(stream.try_clone().map_err(Refusal::Io)?);
+    let head = transport
+        .read_request_head(MAX_HEADER_BYTES)
+        .map_err(|e| refuse(e, "malformed request"))?;
+    let framing = request_framing(&head.headers)
+        .map_err(|e| refuse(TransportError::Http(e), "malformed request framing"))?;
+    let body = transport
+        .read_request_body(framing, MAX_BODY_BYTES as u64)
+        .map_err(|e| refuse(e, "malformed request body"))?;
+    Ok((head.method.as_str().to_string(), head.target, body))
 }
 
 fn handle_chat(
@@ -1149,6 +1147,7 @@ fn write_sse_event(stream: &mut TcpStream, data: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn parses_openai_chat_request() {
@@ -1207,16 +1206,6 @@ mod tests {
     }
 
     #[test]
-    fn body_limit_rejects_oversized() {
-        // The clamp that guards `vec![0u8; content_length]` against an unbounded
-        // client-supplied length. At-limit is allowed; one byte over is rejected.
-        assert!(body_within_limit(0));
-        assert!(body_within_limit(MAX_BODY_BYTES));
-        assert!(!body_within_limit(MAX_BODY_BYTES + 1));
-        assert!(!body_within_limit(usize::MAX));
-    }
-
-    #[test]
     fn header_read_rejects_oversized_request_line() {
         // Regression test: before any `Content-Length` is parsed, an
         // arbitrarily long request line must be capped instead of buffered
@@ -1256,6 +1245,90 @@ mod tests {
             resp.contains("400"),
             "expected a 400 for an oversized request line, got: {resp}"
         );
+    }
+
+    /// Sends `raw` to one `handle_connection` and returns the status code.
+    fn status_for(raw: Vec<u8>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (jobs_tx, _jobs_rx) = sync_channel::<Job>(1);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let _ = handle_connection(stream, &jobs_tx, "test-model");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("set read timeout");
+        // The peer may answer before reading the whole request; a write
+        // error then is expected, not a failure.
+        let _ = client.write_all(&raw);
+        let _ = client.shutdown(std::net::Shutdown::Write);
+        let mut resp = String::new();
+        let _ = client.read_to_string(&mut resp);
+        server.join().expect("server thread panicked");
+        resp.split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Design review Tranche 4: request parsing moved onto `rusty_http`,
+    /// which applies the 3.4 framing rules. The hand-rolled parser ignored
+    /// `Transfer-Encoding` and read an unparsable or conflicting
+    /// `Content-Length` as 0, so every malformed request here was routed
+    /// (200) with its body left unread in the stream.
+    #[test]
+    fn malformed_request_framing_is_refused() {
+        let head = |headers: &str| format!("GET /v1/models HTTP/1.1\r\nHost: x\r\n{headers}\r\n");
+        let cases: &[(&str, String, u16)] = &[
+            ("plain request", head(""), 200),
+            (
+                "valid empty chunked body",
+                head("Transfer-Encoding: chunked\r\n") + "0\r\n\r\n",
+                200,
+            ),
+            (
+                "TE with CL",
+                head("Transfer-Encoding: chunked\r\nContent-Length: 5\r\n") + "0\r\n\r\n",
+                400,
+            ),
+            (
+                "TE not ending in chunked",
+                head("Transfer-Encoding: gzip\r\n"),
+                400,
+            ),
+            ("non-numeric CL", head("Content-Length: abc\r\n"), 400),
+            (
+                "conflicting CLs",
+                head("Content-Length: 1\r\nContent-Length: 2\r\n") + "ab",
+                400,
+            ),
+        ];
+        for (name, raw, want) in cases {
+            assert_eq!(status_for(raw.clone().into_bytes()), *want, "{name}");
+        }
+    }
+
+    /// The body cap holds for a chunked body too, which the old parser
+    /// never read at all.
+    #[test]
+    fn an_oversized_chunked_body_is_refused() {
+        let size = MAX_BODY_BYTES + 1;
+        let mut raw = format!(
+            "POST /v1/completions HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n{size:x}\r\n"
+        )
+        .into_bytes();
+        raw.extend(std::iter::repeat_n(b'a', size));
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(status_for(raw), 413);
+
+        // A declared Content-Length over the cap is refused before reading.
+        let declared = format!(
+            "POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        assert_eq!(status_for(declared.into_bytes()), 413);
     }
 
     /// Design review 3.7 (N01): the job queue was unbounded. A full bounded

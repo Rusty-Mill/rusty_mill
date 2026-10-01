@@ -263,6 +263,14 @@ impl Future for PidfdReady {
                 return Poll::Ready(Err(e));
             }
             this.registered = true;
+        } else {
+            // Later polls may come from another task or executor: point the
+            // registration at the current waker, then re-check `ready` in
+            // case the fire path ran (and woke the old waker) in between.
+            this.reactor.update_waker(this.fd.as_raw_fd(), cx.waker());
+            if this.ready.load(Ordering::Acquire) {
+                return Poll::Ready(Ok(()));
+            }
         }
         Poll::Pending
     }
@@ -324,6 +332,9 @@ struct WaitJob {
     reaped: Arc<Mutex<Option<ExitStatus>>>,
     result: Arc<Mutex<Option<Result<ExitStatus>>>>,
     spawned: bool,
+    /// The latest poller's waker (design review 4): the thread used to
+    /// capture the first poll's waker only.
+    waker: platform_async::waker_slot::WakerSlot,
 }
 
 impl WaitJob {
@@ -333,6 +344,7 @@ impl WaitJob {
             reaped,
             result: Arc::new(Mutex::new(None)),
             spawned: false,
+            waker: platform_async::waker_slot::WakerSlot::new(),
         }
     }
 }
@@ -342,6 +354,8 @@ impl Future for WaitJob {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<ExitStatus>> {
         let this = self.get_mut();
+        // Update before checking the result: see `WakerSlot`'s ordering note.
+        this.waker.update(cx.waker());
         if let Some(result) = this.result.lock().unwrap_or_else(|p| p.into_inner()).take() {
             return Poll::Ready(result);
         }
@@ -349,7 +363,7 @@ impl Future for WaitJob {
             this.spawned = true;
             let result_slot = Arc::clone(&this.result);
             let reaped = Arc::clone(&this.reaped);
-            let waker = cx.waker().clone();
+            let waker = this.waker.clone();
             let pid = this.pid;
             let spawned = std::thread::Builder::new()
                 .name("rustils-async-waitjob".to_owned())
@@ -495,5 +509,52 @@ mod wait_any_leak_tests {
         child
             .kill_single(Signal::Kill)
             .expect("no signal to a reaped pid");
+    }
+
+    /// Waits until `counter` is non-zero, up to 5 s.
+    fn await_wake(counter: &CountingWaker, what: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while counter.0.load(Ordering::SeqCst) == 0 {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Design review 4: `WaitJob` and `PidfdReady` kept the first poll's
+    /// waker. After a second poll with another waker, that one is woken.
+    #[test]
+    fn wait_job_and_pidfd_ready_wake_the_latest_poller() {
+        for use_pidfd in [false, true] {
+            let child = std::process::Command::new("/bin/sleep")
+                .arg("0.2")
+                .spawn()
+                .expect("spawn child");
+            let pid = child.id() as libc::pid_t;
+            let a = Arc::new(CountingWaker(AtomicUsize::new(0)));
+            let b = Arc::new(CountingWaker(AtomicUsize::new(0)));
+            let wa = std::task::Waker::from(Arc::clone(&a));
+            let wb = std::task::Waker::from(Arc::clone(&b));
+            let reactor = EpollReactor::new().expect("reactor");
+            let mut fut: Pin<Box<dyn Future<Output = Result<()>>>> = if use_pidfd {
+                let fd = sys::pidfd::open(pid).expect("pidfd");
+                Box::pin(PidfdReady::new(Arc::clone(&reactor), fd))
+            } else {
+                let reaped = Arc::new(Mutex::new(None));
+                let job = WaitJob::new(pid, reaped);
+                Box::pin(async move { job.await.map(|_| ()) })
+            };
+            assert!(fut
+                .as_mut()
+                .poll(&mut Context::from_waker(&wa))
+                .is_pending());
+            assert!(fut
+                .as_mut()
+                .poll(&mut Context::from_waker(&wb))
+                .is_pending());
+            await_wake(&b, "the latest poller was never woken");
+            assert_eq!(a.0.load(Ordering::SeqCst), 0, "pidfd={use_pidfd}");
+            assert!(fut.as_mut().poll(&mut Context::from_waker(&wb)).is_ready());
+            drop(child); // reaped by WaitJob, or zombie until process exit
+        }
     }
 }

@@ -28,10 +28,7 @@ fn map_win32(op: &str, err: rusty_win32::Win32Error) -> Error {
 /// (`rusty_win32::net`) on Windows -- `connect` performs a genuine
 /// `connect(2)`/`connect`, `read`/`write` genuinely `recv`/`send` on the
 /// wire. On any other target (e.g. `wasm32`) there is no wired socket
-/// implementation yet: `connect` stores the address without opening a real
-/// socket, `write` unconditionally reports every byte as sent, and `read`
-/// always reports immediate EOF -- callers on those targets must not treat
-/// this as real network I/O.
+/// implementation yet, and `connect` fails with [`Error::Unsupported`].
 pub struct TcpStream {
     addr: SocketAddr,
     #[cfg(target_os = "linux")]
@@ -42,8 +39,7 @@ pub struct TcpStream {
 
 impl TcpStream {
     /// Connects to a remote socket address, opening a real OS socket on
-    /// Linux/Windows (see the type-level docs for the unwired-target
-    /// fallback).
+    /// Linux/Windows. [`Error::Unsupported`] on any other target.
     pub fn connect(addr: SocketAddr) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -88,7 +84,8 @@ impl TcpStream {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
-            Ok(Self { addr })
+            let _ = addr;
+            Err(Error::Unsupported("net::TcpStream::connect"))
         }
     }
 
@@ -114,7 +111,8 @@ impl Read for TcpStream {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
-            Ok(0)
+            let _ = buf;
+            Err(Error::Unsupported("net::TcpStream::read"))
         }
     }
 }
@@ -135,7 +133,8 @@ impl Write for TcpStream {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
-            Ok(buf.len())
+            let _ = buf;
+            Err(Error::Unsupported("net::TcpStream::write"))
         }
     }
 
@@ -161,7 +160,24 @@ impl Drop for TcpStream {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(target_os = "linux", windows))))]
+mod unwired_tests {
+    use super::*;
+
+    #[test]
+    fn connect_is_unsupported_where_no_socket_is_wired() {
+        let addr = SocketAddr {
+            ip: [127, 0, 0, 1],
+            port: 1,
+        };
+        assert!(matches!(
+            TcpStream::connect(addr),
+            Err(Error::Unsupported("net::TcpStream::connect"))
+        ));
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests {
     use super::*;
 

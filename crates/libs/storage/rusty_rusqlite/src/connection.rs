@@ -261,7 +261,7 @@ impl Connection {
             return Ok(());
         };
         let bytes = crate::serialize::serialize(&self.db);
-        write_atomically(path, &bytes).map_err(|e| Error::Io(e.to_string()))
+        rusty_atomic_file::write(path, &bytes).map_err(|e| Error::Io(e.to_string()))
     }
 
     /// [`Connection::flush`] unless a transaction is open: inside one,
@@ -1584,38 +1584,6 @@ fn is_create_virtual_table(tokens: &[Token]) -> bool {
 /// second token to tell them apart (issue #122).
 fn is_index_statement(tokens: &[Token]) -> bool {
     matches!(tokens.get(1), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("INDEX"))
-}
-
-/// Replace `path` with `bytes` crash-atomically: write a sibling temporary
-/// file, sync it, rename it over `path`, then sync the directory so the
-/// rename itself survives a power loss.
-fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&tmp, path)?;
-    sync_parent_dir(path)
-}
-
-#[cfg(unix)]
-fn sync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => std::path::Path::new("."),
-    };
-    std::fs::File::open(dir)?.sync_all()
-}
-
-/// Windows cannot open a directory as a file to sync it; `rename` there
-/// (`MoveFileEx` with replace) is the durability point this crate relies on.
-#[cfg(not(unix))]
-fn sync_parent_dir(_path: &std::path::Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -4333,20 +4301,22 @@ mod tests {
         assert!(db.db().index("i").is_some(), "drop rolled back");
     }
 
-    /// Review 2.4: the file is replaced whole, through a synced sibling,
-    /// even when a previous interrupted flush left that sibling behind.
+    /// Review 2.4: the file is replaced whole (`rusty_atomic_file`), and a
+    /// temp file left by an interrupted flush (the old fixed name) neither
+    /// blocks a flush nor leaks into the database.
     #[test]
-    fn flush_replaces_the_file_through_a_temporary_sibling() {
+    fn flush_replaces_the_file_whole_despite_a_stale_temporary_sibling() {
         let path = temp_db_path("atomic_flush");
-        let tmp = path.with_file_name("rusty_rusqlite_test_atomic_flush.db.tmp");
+        let stale = path.with_file_name("rusty_rusqlite_test_atomic_flush.db.tmp");
         let _ = std::fs::remove_file(&path);
-        std::fs::write(&tmp, b"torn leftovers").unwrap();
+        std::fs::write(&stale, b"torn leftovers").unwrap();
         let mut db = Connection::open(&path).unwrap();
         db.execute("CREATE TABLE t (a INTEGER)").unwrap();
         db.execute("INSERT INTO t VALUES (7)").unwrap();
-        assert!(!tmp.exists(), "renamed into place");
         assert_eq!(rows_on_disk(&path), vec![7]);
+        assert_eq!(std::fs::read(&stale).unwrap(), b"torn leftovers");
         drop(db);
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&stale);
     }
 }

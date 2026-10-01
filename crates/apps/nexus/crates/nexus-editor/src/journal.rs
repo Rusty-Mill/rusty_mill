@@ -106,9 +106,7 @@ impl EditJournal {
             recorded_at_unix: now_unix_secs(),
         };
         let bytes = serde_json::to_vec(&file).map_err(io::Error::other)?;
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, bytes)?;
-        fs::rename(&tmp, &path)
+        rusty_atomic_file::write(&path, &bytes)
     }
 
     /// Content to restore for `relpath` given the bytes now on disk, or

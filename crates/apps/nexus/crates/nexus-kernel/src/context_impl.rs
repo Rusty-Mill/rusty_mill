@@ -233,12 +233,19 @@ impl KernelPluginContext {
             Some(parent) => parent.child_token(),
             None => tokio_util::sync::CancellationToken::new(),
         };
+        // Design review 4 (N4): a deadline, or the caller dropping this
+        // call, must *signal* the handler's token -- a timeout used to only
+        // return `Timeout`, so a polling handler, its spawned work, or a
+        // sync handler on the blocking pool never learned it should stop.
+        // Disarmed when the handler finishes on its own, so work it
+        // deliberately left running is not cancelled after a normal return.
+        let cancel_on_abandon = dispatch_cancel.clone().drop_guard();
 
         if let Some(fut) =
             dispatcher.dispatch_async(&self.plugin_id, &target, &command, args.clone())
         {
             let scoped = crate::cancel::scope_async(dispatch_cancel.clone(), fut);
-            return tokio::select! {
+            let outcome = tokio::select! {
                 // Bias toward cancel so a same-tick cancel beats a stale
                 // ready-result from the future arm.
                 biased;
@@ -255,6 +262,7 @@ impl KernelPluginContext {
                     }),
                 },
             };
+            return finish(cancel_on_abandon, outcome);
         }
 
         // Sync path: install the token on the spawned blocking thread so a
@@ -275,7 +283,7 @@ impl KernelPluginContext {
             }
         });
 
-        tokio::select! {
+        let outcome = tokio::select! {
             biased;
             () = dispatch_cancel.cancelled() => Err(IpcError::Cancelled {
                 plugin_id: target,
@@ -294,7 +302,8 @@ impl KernelPluginContext {
                     timeout_ms,
                 }),
             },
-        }
+        };
+        finish(cancel_on_abandon, outcome)
     }
 
     /// Check that the plugin holds `cap`, logging a denial and returning an
@@ -579,6 +588,19 @@ impl LogTrait for KernelPluginContext {
 mod dispatch;
 
 pub use dispatch::in_flight_sync_dispatches;
+
+/// Ends a dispatch: a timeout lets `guard` drop, cancelling the handler's
+/// token; any other outcome (the handler finished, or its token was already
+/// cancelled) disarms it (design review 4, N4).
+fn finish(
+    guard: tokio_util::sync::DropGuard,
+    outcome: std::result::Result<serde_json::Value, IpcError>,
+) -> std::result::Result<serde_json::Value, IpcError> {
+    if !matches!(outcome, Err(IpcError::Timeout { .. })) {
+        let _ = guard.disarm();
+    }
+    outcome
+}
 
 #[cfg(test)]
 #[path = "context_impl_tests.rs"]

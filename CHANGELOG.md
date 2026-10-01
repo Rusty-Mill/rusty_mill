@@ -34,6 +34,48 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Fixed
+- **Design review Tranche 4, lifecycle:**
+  - `nexus-kernel`: an IPC deadline or a dropped caller cancels the dispatch token (N4).
+  - `nexus-ai-runtime`: the shared pool handle follows the live pool across a forge switch, never a torn-down runtime (N5).
+  - `platform-async(-linux)`: `Timeout`, `WaitJob` and `PidfdReady` wake the latest poller, not the first.
+  - `rusty_yirp` (sessionmgr):
+    - Teardown signals a recorded pid only when its start fingerprint still matches, and `terminate` refuses pid 0 and out-of-range values.
+    - Processes still alive after termination block a destructive close. A timeout is no longer treated as proof that nothing is running.
+  - `rusty_tailscale` (`ts-engine`, `ts-magicsock`): a peer the netmap drops — absent from a full `Peers` snapshot, listed in `PeersRemoved`, or replaced by a rekey — loses its WireGuard session, address ownership, metadata, DNS names and disco state. Traffic from a non-member peer is dropped.
+  - `rusty_multimodal_db` drain:
+    - A request pipelined behind the one in flight is no longer executed after a shutdown (D4).
+    - `serve`/`serve_tables` return a `DrainOutcome`, and `memory_server` marks change logs clean only after a completed drain. It exits non-zero otherwise (D5).
+  - `rusty_gui::Window` now destroys its native window on drop, and on Linux closes the X display connection it opened. Previously each window leaked its X socket, or its `HWND` on Windows.
+  - `rusty_gui::Clipboard::get_text`/`set_text` now return `Err(UNSUPPORTED)` instead of an empty string and a write that never happened.
+  - `rusty_multimodal_db`: `Session::commit` docs now say that `Ok(())` means the batch applied, not every write. Per-op outcomes such as `Duplicate` are discarded; use `commit_results` or a strict session to see them.
+  - `#[derive(RustyJson)]` is now a compile error pointing to serde derives, instead of generating a `to_json_string` that serialized no fields and a `from_json_str` that always failed.
+  - **Breaking:** removed `rusty_wiremock::{MockServer, RequestMatcher, ResponseTemplate}`. They were a scaffold: `start` bound nothing and `register` did nothing. No crate used them. `canned` is unchanged, and the scaffold's unused dependencies (`rusty_http`, `rusty_json`, `rusty_std`) are gone with it.
+  - **Breaking:** `rusty_std::Error` gains `Unsupported(&'static str)` and is now `#[non_exhaustive]`. On targets with no backend (wasm32 and others), `File::open`/`create`/`read`/`write`, `TcpStream::connect`/`read`/`write` and `Command::status` return it. Before, reads returned EOF, writes reported every byte written, `connect` returned a stream with no socket behind it, and `status` reported success without spawning. The wasm32 fake `File` is gone.
+  - **Breaking:** retired the coreutils `rtail`, `rwc` and `rxargs` binaries (incomplete, e.g. `rxargs` ignored every flag). `rush` no longer aliases `tail`, `wc` or `xargs`, so they resolve through `PATH`.
+  - New `rusty_atomic_file` (foundation, no dependencies): `write` and `write_private` (0600) replace a file crash-atomically, with a unique temp name, fsync, rename and directory fsync. 16 hand-rolled writers now use it:
+    - Nexus: comments, editor save and journal, CRDT publisher, CLI merge driver, skills index, and the shell's state and granted capabilities.
+    - `rusty_rusqlite`, `rusty_term`'s config, `remind_me_core`'s API keys, endpoint and OAuth state, `rusty_tick`'s users, sessionmgr's session catalog, and `rusty_crypto_key`.
+    - 9 of them never fsynced. sessionmgr's records were briefly readable at the default mode before their `chmod`. `rusty_crypto_key` on Windows wrote in place.
+  - New `rusty_confined_fs` (foundation): `create_dir_all`, `open_for_write` and `open_for_read` beneath a root. They refuse `..`, absolute paths and a symlink at any component.
+    - On Linux they walk descriptors with `openat(O_NOFOLLOW)`, so there is no window between check and open. Elsewhere a checked `lstat` walk is used; it is also tested on Linux.
+    - `rusty_libc` gains `O_NOFOLLOW`.
+  - `rusty-croc` receives through `rusty_confined_fs`:
+    - Files and folders, including the empty-folder list and ZIP directories, which `create_dir_all` previously created through symlinks.
+    - A received file's mode is now set through its handle.
+  - `adk-mcp` moves onto `rmcp`, the workspace's shared MCP stack. About 950 lines of hand-written JSON-RPC, handshake and transport code are gone.
+    - A new wire-level conformance suite (`tests/conformance.rs`, 17 cases over stdio, HTTP and the client) passed before and after the move, unchanged.
+    - Still pinned to MCP `2025-06-18` for other-language ADK clients. The 16 MiB line cap and the client request deadline are kept.
+    - **Breaking:** `McpServer::handle`/`handle_raw`, the `JsonRpcRequest`/`JsonRpcResponse`/`JsonRpcError` types, and the `protocol` helpers other than `PROTOCOL_VERSION` are removed; nothing in the workspace used them. `serve_stream` now needs a `Send + 'static` reader and writer.
+    - Behavior changes from `rmcp`: a malformed stdio line is ignored rather than answered with a parse error; a request before `initialize` ends the session; the client follows `tools/list` pagination.
+  - `adk-models::StreamAggregator` is the one reducer for streamed model output. `aggregate_stream` and `LlmAgent`'s streaming path, which each had their own copy of the loop, both use it.
+    - Fixed along the way: `LlmAgent` in SSE mode folded an error chunk into the answer as if it were text. A model error mid-stream (for example `RESOURCE_EXHAUSTED`) became an empty, apparently successful reply. It is now reported as an error event, as in non-streaming mode.
+  - The `rusty_llama` server (`server` feature) and `whisper-server` parse requests with `rusty_http` instead of their own hand-written parsers. Both now refuse ambiguous framing with a 400, as review 3.4 did for `rusty_http`: `Transfer-Encoding` with `Content-Length`, `Transfer-Encoding` not ending in `chunked`, and a bad or conflicting `Content-Length`.
+    - Previously both ignored `Transfer-Encoding` and read an unparsable `Content-Length` as no body.
+    - Chunked request bodies are now read, within the same body caps (llama 16 MiB, whisper 256 MiB); llama answers an oversized one with 413.
+    - whisper's head limit is now 64 KiB for the whole head, in place of 8 KiB per line, and still at most 100 headers.
+  - `rusty_http`: `SyncTransport::read_request_body(framing, max_body_len)` caps a request body whatever its framing; `read_body`'s chunked path has no total cap. `SyncTransport`'s read methods now need only `Read`, and its write methods only `Write`.
+  - rush has bash-conformance fixtures for glob matching and `$(( ))` in `crates/apps/rush/tests/conformance/`. They were written for rush and nexus-rush to share; nexus-rush has since been removed in favour of rush.
+  - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
   - `rusty_fedora_agent` checks config reads and writes against the resolved filesystem path, not just the path text.

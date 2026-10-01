@@ -20,7 +20,7 @@ use crate::session::{SessionId, WorkerRef};
 /// tree-kill. Windows Job Objects are kill-on-close, which is structurally
 /// incompatible with a session surviving the manager exiting -- so the
 /// port offers per-pid operations only, and teardown targets an explicit
-/// pid list (see [`crate::recovery::teardown_pids`]).
+/// list of identity-bearing targets (see [`crate::recovery::teardown_targets`]).
 pub trait ProcessPort {
     /// Is `pid` alive **and** still the same process that recorded
     /// `expected`?

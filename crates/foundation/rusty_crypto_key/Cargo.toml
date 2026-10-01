@@ -13,9 +13,10 @@ categories = ["cryptography", "no-std"]
 layer = "foundation"
 
 [dependencies]
+rusty_atomic_file = { workspace = true, optional = true }
 
 [features]
 default = ["std"]
-std = []
+std = ["dep:rusty_atomic_file"]
 
 [dev-dependencies]

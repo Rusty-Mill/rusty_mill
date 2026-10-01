@@ -4588,12 +4588,28 @@ fn handle_connection(
     let mut failures: u32 = 0;
     let peer_ip = peer.map(|addr| addr.ip());
 
+    // Design review D4: a requested shutdown ends the connection at the next
+    // request boundary. Shutting the socket's read side does not reach frames
+    // already in `reader`'s buffer (or TLS plaintext), so the flag is checked
+    // before a frame is read and again before it is acted on.
+    let draining = || {
+        options
+            .shutdown
+            .as_ref()
+            .is_some_and(Shutdown::is_requested)
+    };
     loop {
         let store: &dyn ConnectionStore = tables[table].1.as_ref();
+        if draining() {
+            return;
+        }
         let req: Request = match framing::read_message(&mut reader) {
             Ok(req) => req,
             Err(_) => return, // client disconnected, or a framing/decode error — end the connection
         };
+        if draining() {
+            return;
+        }
         // `CLP-FR-001`/`002` (ADR-0102): under a row cap, a `Query` with no
         // `limit` is clamped to the cap here, before anything else reads
         // the request, and counted so an operator can see it happening.
@@ -5298,9 +5314,28 @@ pub fn serve<S: ConnectionStore + 'static>(
     listener: TcpListener,
     store: Arc<S>,
     options: ServeOptions,
-) {
+) -> DrainOutcome {
     let name = store.table_name().to_string();
-    serve_tables(listener, vec![(name, store)], 0, options);
+    serve_tables(listener, vec![(name, store)], 0, options)
+}
+
+/// How a server stopped (design review D5), so a caller can tell a
+/// completed drain from one its deadline cut short before declaring the
+/// data it served cleanly closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "only a `Drained` server has no connection still running"]
+pub enum DrainOutcome {
+    /// Every connection had ended when the server returned.
+    Drained,
+    /// The drain deadline passed with `open` connection handlers still
+    /// running (detached; they may yet apply a write).
+    TimedOut {
+        /// Connection handlers still running at the deadline.
+        open: usize,
+    },
+    /// The listener could not be polled for a shutdown, so nothing was
+    /// served.
+    NotServed,
 }
 
 /// `DRN-FR-003` (ADR-0127): how long a stopping server waits for its
@@ -5404,6 +5439,9 @@ impl Drop for ShutdownGuard {
 /// is unchanged. One `options` — tokens, TLS, logs, rate limit — is
 /// shared by every table; per-table authorization is a named non-goal.
 ///
+/// Returns only once the listener stops — with a [`Shutdown`], after the
+/// drain — saying whether every connection had ended ([`DrainOutcome`]).
+///
 /// # Panics
 ///
 /// Panics if `tables` is empty or `primary` is out of range — a
@@ -5413,7 +5451,7 @@ pub fn serve_tables(
     tables: ServedTables,
     primary: usize,
     mut options: ServeOptions,
-) {
+) -> DrainOutcome {
     let metrics_listener = options.metrics_http.take();
     assert!(
         primary < tables.len(),
@@ -5443,7 +5481,7 @@ pub fn serve_tables(
     // `incoming()` loop below is the original path, untouched.
     let shutdown = options.shutdown.clone();
     if shutdown.is_some() && listener.set_nonblocking(true).is_err() {
-        return; // cannot poll, so cannot honor a shutdown: do not serve
+        return DrainOutcome::NotServed; // cannot poll, so cannot honor a shutdown
     }
     let mut incoming = listener.incoming();
     loop {
@@ -5510,6 +5548,10 @@ pub fn serve_tables(
         while options.in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
             thread::sleep(ACCEPT_POLL / 2);
         }
+    }
+    match options.in_flight.load(Ordering::Acquire) {
+        0 => DrainOutcome::Drained,
+        open => DrainOutcome::TimedOut { open },
     }
 }
 
