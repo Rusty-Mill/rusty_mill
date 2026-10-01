@@ -127,7 +127,8 @@ not a guess.
   behind retention is told `Gone` and resyncs. *Since phases 2/3:* `replica_refresh --follow` tails the log into a
   refreshed directory, resyncing on `Gone`, and promotion is a documented
   manual step (stop the tool, serve the directory). Still absent: logging `detach_record` cascades and `Compact`, lifting the 8 MiB
-  snapshot cap, and a cheaper log (measured, `ADR-0131`: the log costs one
+  snapshot cap (`ADR-0136` proposes chunked snapshots staged under a
+  short lock), and a cheaper log (measured, `ADR-0131`: the log costs one
   `fsync` per write and, on an update-heavy journaled table, group commit —
   17k against 3k ops/s at 16 writers on the test disk; `ADR-0134` proposes and spikes a grouped sync that recovers most of it); automatic failover, consensus and write forwarding stay
   non-goals.
