@@ -2814,3 +2814,81 @@ fn wheel_rays_do_not_ground_a_car_on_its_side() {
     car.orientation = Quat::new(half, 0.0, 0.0, half);
     assert!(!wheels_on_ground(&car, &floor()));
 }
+
+/// Steady yaw rate after 0.5 s of full steer with `throttle`, the car's
+/// speed held at `speed` so the pedals only act through where they push.
+fn held_speed_turn_yaw_rate(speed: f32, throttle: f32) -> f32 {
+    let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+    car.linear_velocity = Vec3::new(speed, 0.0, 0.0);
+    let mut state = DriveState::new();
+    let input = ControllerInput {
+        throttle,
+        steer: 1.0,
+        ..Default::default()
+    };
+    let dt = 1.0 / 120.0;
+    for _ in 0..60 {
+        apply_driven_forces(&mut car, &input, true, None, &mut state, dt);
+        integrate::integrate_velocities(&mut car, dt);
+        car.clear_forces();
+        car.linear_velocity = car.linear_velocity * (speed / car.linear_velocity.length());
+        let (position, orientation) = integrate::integrate_transform(
+            car.position,
+            car.orientation,
+            car.linear_velocity,
+            car.angular_velocity,
+            dt,
+        );
+        car.position = position;
+        car.orientation = orientation;
+        car.update_inertia_tensor();
+    }
+    car.angular_velocity.z
+}
+
+#[test]
+fn throttle_through_steered_front_wheels_tightens_a_turn() {
+    // RB-PHYSICS-001-FR-089: RocketSim pushes each wheel along its own
+    // heading, so the steered front wheels' engine force turns the car too.
+    // The owner's capture turns ~5% faster under throttle (2.40 rad/s at
+    // ~945 uu/s) than this port did with the engine at the centre of mass.
+    let coasting = held_speed_turn_yaw_rate(950.0, 0.0);
+    let driving = held_speed_turn_yaw_rate(950.0, 1.0);
+    assert!(
+        driving > coasting * 1.03,
+        "expected throttle to tighten the turn, coasting {coasting}, driving {driving}"
+    );
+}
+
+#[test]
+fn throttle_with_steer_starts_turning_a_car_from_rest() {
+    let mut steered = car();
+    let mut boost = MAX_BOOST;
+    let input = ControllerInput {
+        throttle: 1.0,
+        steer: 1.0,
+        ..Default::default()
+    };
+    step_with_input(&mut steered, &input, true, &mut boost, 1.0 / 120.0);
+    let mut moving = car();
+    moving.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+    step_with_input(&mut moving, &full_steer(), true, &mut boost, 1.0 / 120.0);
+    assert!(
+        steered.angular_velocity.z * moving.angular_velocity.z > 0.0,
+        "expected the steered wheels' push to yaw the same way steering does, got {:?}",
+        steered.angular_velocity
+    );
+}
+
+#[test]
+fn straight_throttle_from_rest_does_not_yaw() {
+    let mut c = car();
+    let mut boost = MAX_BOOST;
+    step_with_input(&mut c, &full_throttle(), true, &mut boost, 1.0 / 120.0);
+    assert!(
+        c.angular_velocity.length() < 1e-6,
+        "got {:?}",
+        c.angular_velocity
+    );
+    assert!(c.linear_velocity.x > 0.0);
+}

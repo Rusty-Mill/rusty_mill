@@ -46,7 +46,7 @@ grip rate.
 
 ## Decision
 
-Option 1. `drive::ground::wheel_side_impulses` computes each wheel's
+Option 1. `drive::ground::wheel_side_impulses` (renamed `wheel_impulses` by FR-089) computes each wheel's
 impulse from the same pre-impulse state and applies it at the flattened
 contact point. Each wheel's slip ratio, and therefore its grip and the
 handbrake's reduction, comes from that wheel's own contact velocity.
@@ -65,7 +65,9 @@ brakes stay at the centre of mass.
   at once (FR-081's zero-steer target is gone).
 - Still not modeled:
   - suspension and per-wheel normal load;
-  - engine force through the steered front wheels' direction;
+  - engine force through the steered front wheels' direction (added by
+    FR-089: each wheel now carries a quarter of the engine force along its
+    own heading, as in `calcFrictionImpulses`);
   - roll from cornering.
 - The 3.7-4.3 s heading match FR-080 achieved (0.06 rad at 4.0 s) needs a
   re-trace: the ramp now lags the target, as the recording does, but the

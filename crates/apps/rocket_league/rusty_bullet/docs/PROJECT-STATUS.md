@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#180](https://github.com/baileyrd/rusty_bullet/pull/180) —
+  `RB-PHYSICS-001-FR-088`, ground contact from wheel rays (ADR-0017).
 - [#179](https://github.com/baileyrd/rusty_bullet/pull/179) —
   `RB-PHYSICS-001-FR-087`, car spin clamped after the transform;
   `RB-VERIFY-003` 0.13.0 `q-rate`.
@@ -77,7 +79,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-089` (engine force at each wheel along its heading):
+  implemented; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -104,14 +107,16 @@ version: `a245d35`).
 
 ## Next
 
-1. Steady yaw rate ~5% low (2.27 vs 2.40 rad/s, 3.95-4.0 s): velocity
-   error builds from ~5 to 47 uu/s over 3.75-4.05 s while turning, and is
-   now the earliest real-capture error; it carries through the 4.142 s
-   jump and 4.317 s dodge. Then: raycast suspension and the 20.755 uu
-   hitbox offset (ADR-0017 option 2) — the candidate rides 2.3 uu high
-   (19.3 vs 17.0), so its wheels leave the floor 2 ticks early after a
-   jump and its box bounces on landing (5.575 s); the 5.758 s car-ball hit
-   lands 3 ticks late because the car trails ~33 uu.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.2` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-089`: the simulated yaw
+   spin under full steer near 3.95-4.0 s should reach ~2.40 rad/s like the
+   recording (was 2.27), and velocity error at 4.05 s should stay well
+   under 47 uu/s. Then: raycast suspension and the 20.755 uu hitbox offset
+   (ADR-0017 option 2) — the candidate rides 2.3 uu high (19.3 vs 17.0), so
+   its wheels leave the floor 2 ticks early after a jump and its box
+   bounces on landing (5.575 s); the 5.758 s car-ball hit lands 3 ticks
+   late because the car trails ~33 uu. Brake is still applied at the centre
+   of mass rather than per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -120,7 +125,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (424 tests: 27 `rb_domain`, 359
+- `cargo test --workspace`: pass (427 tests: 27 `rb_domain`, 362
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
