@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.98.0
+- Version: 0.99.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5593,6 +5593,19 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     4.983 s as recorded; height within 0.1 uu through the flip (was 1.9);
     orientation error 0.04-0.05 rad through 5.5 s (was rising to 0.10).
 
+- `RB-PHYSICS-001-FR-095` (air control waits one step after the wheels let
+  go, implemented, verified by unit tests, ADR-0019 amendment): air control
+  and air throttle skip the first airborne step after the car was on the
+  ground (`DriveState::was_on_ground`), as the sticky force already does
+  (FR-092).
+  - Why: after the capture's 4.142 s jump, the step from 4.183 s has no
+    grip and no air control (yaw rate held at -2.02 rad/s); the candidate's
+    air control started a step early, leaving a 0.07 rad/s yaw offset into
+    the 4.317 s flip and the ~0.04 rad orientation offset that tilts the
+    boost from 4.94 s.
+  - **Verification**: `drive` test
+    `air_control_waits_one_step_after_the_wheels_let_go`.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7074,6 +7087,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.99.0 (2026-10-01): `RB-PHYSICS-001-FR-095` — air control waits one
+  step after the wheels let go (ADR-0019 amendment). 373 tests in
+  `rb_physics_bullet`.
 - 0.98.0 (2026-10-01): `RB-PHYSICS-001-FR-094` — flip clock starts after
   the press tick, compared within a tolerance. 372 tests in
   `rb_physics_bullet`.

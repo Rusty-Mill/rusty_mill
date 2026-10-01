@@ -940,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Air control waits one step after the wheels let go
+  (`RB-PHYSICS-001-FR-095`, ADR-0019 amendment), as the sticky force does,
+  per the real capture's takeoff after its 4.142 s jump.
 - The flip clock starts on the tick after the dodge press
   (`RB-PHYSICS-001-FR-094`), so a flip's torque lasts 79 ticks (press tick
   plus RocketSim's 78) as in the real capture, and is compared with its

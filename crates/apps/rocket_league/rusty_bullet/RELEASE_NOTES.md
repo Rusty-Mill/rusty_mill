@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Takeoff counts as grounded for one more step
+**2026-10-01** · `RB-PHYSICS-001-FR-095` · ADR-0019 amendment
+
+- Air control and air throttle now skip the first airborne step after the
+  car was on the ground, as the sticky force already does. After the
+  owner's 4.142 s jump the recorded car neither grips nor air-controls in
+  that step; the port's early air control left a 0.07 rad/s yaw offset
+  going into the flip. 439 tests.
+
 ## Flips end on the right tick
 **2026-10-01** · `RB-PHYSICS-001-FR-094`
 

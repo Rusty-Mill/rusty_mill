@@ -423,6 +423,9 @@ pub struct DriveState {
     /// touched: the sticky force acts along it one step late
     /// (`RB-PHYSICS-001-FR-092`).
     pub sticky_surface_up: Option<Vec3>,
+    /// Whether the car was on the ground last step. Air control waits one
+    /// step after the wheels let go (`RB-PHYSICS-001-FR-095`).
+    pub was_on_ground: bool,
 }
 
 impl DriveState {
@@ -436,6 +439,7 @@ impl DriveState {
             flip: None,
             handbrake_amount: 0.0,
             sticky_surface_up: None,
+            was_on_ground: false,
         }
     }
 }
@@ -544,12 +548,20 @@ pub fn apply_driven_forces(
             );
         }
         let pitch_scale = jump::apply_flip_torque(car, input, state.flip);
-        air::apply_air_control(car, input, pitch_scale, dt);
-        air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
+        // RB-PHYSICS-001-FR-095: the step after the wheels let go still
+        // counts as grounded for air control, as the sticky force does
+        // (FR-092): the capture's car neither grips nor air-controls in the
+        // step from 4.183 s, after its 4.142 s jump.
+        if !state.was_on_ground {
+            air::apply_air_control(car, input, pitch_scale, dt);
+            air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
+        }
         if state.flip == flip_before_press {
             jump::advance_flip(car, &mut state.flip, dt);
         }
     }
+
+    state.was_on_ground = on_ground;
 
     boost::apply_boost(
         car,

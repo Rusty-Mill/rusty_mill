@@ -154,6 +154,7 @@ fn step_with_input_and_dodge_flip(
         flip: *flip,
         handbrake_amount: 0.0,
         sticky_surface_up: None,
+        was_on_ground: false,
     };
     car.clear_forces();
     apply_driven_forces(
@@ -2405,6 +2406,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             flip: None,
             handbrake_amount: 0.0,
             sticky_surface_up: None,
+            was_on_ground: false,
         }
     );
 }
@@ -3147,4 +3149,37 @@ fn a_flips_torque_lasts_the_press_tick_plus_rocketsims_78_ticks() {
         );
     }
     assert_eq!(torque_ticks, 79);
+}
+
+#[test]
+fn air_control_waits_one_step_after_the_wheels_let_go() {
+    // RB-PHYSICS-001-FR-095: after the capture's 4.142 s jump, the step
+    // from 4.183 s has no grip and no air control; air control starts the
+    // step after.
+    let mut c = car();
+    let mut state = DriveState::new();
+    let yaw = ControllerInput {
+        yaw: Some(-1.0),
+        ..Default::default()
+    };
+    let wheels = resting_contacts(&c);
+    apply_driven_forces(
+        &mut c,
+        &ControllerInput::default(),
+        &wheels,
+        None,
+        &mut state,
+        TICK,
+    );
+    let before = c.angular_velocity;
+    apply_driven_forces(&mut c, &yaw, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+    assert_eq!(
+        c.angular_velocity, before,
+        "first airborne step: no air control"
+    );
+    apply_driven_forces(&mut c, &yaw, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+    assert!(
+        c.angular_velocity.z < before.z,
+        "second airborne step: air control yaws"
+    );
 }

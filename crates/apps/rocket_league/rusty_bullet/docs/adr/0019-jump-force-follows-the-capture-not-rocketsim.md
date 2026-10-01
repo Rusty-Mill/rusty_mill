@@ -118,3 +118,13 @@ uu/s; 4-5 s growth 5.1 to 2.7 uu.
 Tradeoff: both are fitted to one jump in one capture. The step delay could
 equally be a recording offset; revisit with a second capture that shows a
 landing or a jump from a slope.
+
+## Amendment (FR-095): air control waits one step too
+
+The same step after the 4.142 s jump (from origin height 32.3, no grip,
+sticky force still on) shows no air control either: the recorded yaw rate
+holds at -2.02 rad/s through it and only then changes by the yaw stick's
+-0.07 to -0.08 per tick; the candidate applied that air control one step
+early, leaving a 0.07 rad/s yaw offset going into the 4.317 s flip. So the
+real game keeps the car "grounded" for one step after its wheels let go,
+for both the sticky force and air control (`DriveState::was_on_ground`).
