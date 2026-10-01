@@ -5464,6 +5464,12 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     27.9 uu, not at 28.5) and a car on its roof or side. The new `world`
     test `a_jump_press_while_bouncing_just_off_the_floor_jumps_instead_of_dodging`
     fails under box contact (a 500 uu/s side dodge).
+  - **Real capture** (`--self-trace test2.jsonl 5.5 6.5`): at 5.758 s the
+    candidate ground-jumps (vz 57 to 344, recorded 228) instead of
+    dodging; `--self-growth` 5-6 s 49 uu / 115 uu/s (was 64 / 212). The
+    4-5 s window moved 16 to 23 uu: tire grip now lasts 3 ticks past the
+    4.142 s jump (5 recorded), carrying the existing steering error
+    differently.
 
 ## Architecture and interfaces
 

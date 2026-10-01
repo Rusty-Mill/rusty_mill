@@ -77,4 +77,10 @@ floor plane from its front side. Walls keep box contact for wall jumps.
 - Re-run `--self-trace test2.jsonl 5.5 6.5`: at 5.758 s the candidate
   should jump (vz ~+290), not dodge, and should dodge at 6.058 s like the
   recording.
+- Real capture, 2026-10-01: confirmed. At 5.758 s the candidate jumps (vz
+  57 to 344, recorded 228); 5-6 s growth 64 to 49 uu. The 4-5 s window
+  moved 16 to 23 uu because grip now lasts 3 ticks past the 4.142 s jump
+  (5 recorded), so the candidate's existing ~45 uu/s steering error carries
+  forward differently; the candidate rides 2.3 uu high and leaves the
+  floor 2 ticks early, which option 2 addresses.
 - Revisit when suspension forces or surface driving are added.
