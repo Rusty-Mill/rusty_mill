@@ -66,6 +66,11 @@ Removed / Fixed / Security, newest first.
     - Behavior changes from `rmcp`: a malformed stdio line is ignored rather than answered with a parse error; a request before `initialize` ends the session; the client follows `tools/list` pagination.
   - `adk-models::StreamAggregator` is the one reducer for streamed model output. `aggregate_stream` and `LlmAgent`'s streaming path, which each had their own copy of the loop, both use it.
     - Fixed along the way: `LlmAgent` in SSE mode folded an error chunk into the answer as if it were text. A model error mid-stream (for example `RESOURCE_EXHAUSTED`) became an empty, apparently successful reply. It is now reported as an error event, as in non-streaming mode.
+  - The `rusty_llama` server (`server` feature) and `whisper-server` parse requests with `rusty_http` instead of their own hand-written parsers. Both now refuse ambiguous framing with a 400, as review 3.4 did for `rusty_http`: `Transfer-Encoding` with `Content-Length`, `Transfer-Encoding` not ending in `chunked`, and a bad or conflicting `Content-Length`.
+    - Previously both ignored `Transfer-Encoding` and read an unparsable `Content-Length` as no body.
+    - Chunked request bodies are now read, within the same body caps (llama 16 MiB, whisper 256 MiB); llama answers an oversized one with 413.
+    - whisper's head limit is now 64 KiB for the whole head, in place of 8 KiB per line, and still at most 100 headers.
+  - `rusty_http`: `SyncTransport::read_request_body(framing, max_body_len)` caps a request body whatever its framing; `read_body`'s chunked path has no total cap. `SyncTransport`'s read methods now need only `Read`, and its write methods only `Write`.
   - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.

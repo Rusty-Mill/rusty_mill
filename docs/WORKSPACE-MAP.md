@@ -94,7 +94,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 13 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 15 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |

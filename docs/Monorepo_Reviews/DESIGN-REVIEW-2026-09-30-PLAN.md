@@ -88,7 +88,9 @@ rusty_gui clipboard (`Unsupported`), `rusty_std` stub I/O/process
 - one stream reducer shared by adk-agent and adk-models *(done:
   `adk_models::StreamAggregator`; it also fixed `LlmAgent` swallowing a
   streamed error chunk)*
-- HTTP parsing for llama and whisper onto `rusty_http`
+- HTTP parsing for llama and whisper onto `rusty_http` *(done: both
+  servers read requests through `rusty_http::sync::SyncTransport`, which
+  gained a capped `read_request_body`)*
 - shared `atomic_write` and rooted-fs helpers (from 2.9 / 3.2)
 - rush / nexus-rush shared fixtures only
 

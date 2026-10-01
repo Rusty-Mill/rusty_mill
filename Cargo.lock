@@ -13779,6 +13779,7 @@ name = "rusty-whisper"
 version = "0.8.0"
 dependencies = [
  "cpal",
+ "rusty_http",
  "rusty_simd",
  "rusty_std",
  "rusty_wire",
