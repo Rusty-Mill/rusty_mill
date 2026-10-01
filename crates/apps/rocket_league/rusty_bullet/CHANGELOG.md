@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0012: per-axis tire grip on a box with no floor friction (partially
+  supersedes ADR-0009).
+- Tire grip (`RB-PHYSICS-001-FR-081`, ADR-0012): a car's floor contact is
+  frictionless and `drive::ground` ports RocketSim's per-axis tire grip,
+  brake/coast pedal rules, and handbrake ramp with its anisotropic
+  factors. Removes `HANDBRAKE_FRICTION_MULTIPLIER` and
+  `DriveState::base_friction`; `DriveState::new` takes no arguments.
+  Grounded steering now targets zero yaw rate with no steer input.
 - ADR-0011: curve-based yaw-rate steering (partially supersedes ADR-0009).
 - `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`
   (`RB-VERIFY-003-FR-005`, `rb_verify_cli::trace_capture`): per-frame

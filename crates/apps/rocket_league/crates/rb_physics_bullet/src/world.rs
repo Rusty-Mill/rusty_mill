@@ -85,8 +85,7 @@ fn clamp_ball_velocity(ball: &mut RigidBody) {
 /// comment). Each car also has a
 /// current `ControllerInput` (`car_inputs`, set via `set_car_input`,
 /// `ControllerInput::default()` — neutral — until set) and a
-/// `drive::DriveState` (`car_drive`, starting at `DriveState::new` with the
-/// car's own `RigidBody.friction` snapshotted as its base friction): boost
+/// `drive::DriveState` (`car_drive`, starting at `DriveState::new`): boost
 /// fuel (settable via `set_car_boost`), jump-held edge tracking, the double
 /// jump, the jump-hold window, and the cancelable dodge flip — all driving
 /// the car via
@@ -387,10 +386,8 @@ impl PhysicsWorld {
     /// Adds one car-shaped body to the scene, with a neutral
     /// (`ControllerInput::default()`) input and a full boost tank
     /// (`drive::MAX_BOOST`) — set a real input afterward with
-    /// `set_car_input` if the car should actually drive. `car`'s current
-    /// `friction` is snapshotted as its base friction, so handbrake input
-    /// (which temporarily lowers `RigidBody.friction`) has a value to
-    /// restore to once released; its jump-held state starts `false`, so an
+    /// `set_car_input` if the car should actually drive. Its jump-held
+    /// state starts `false`, so an
     /// already-`jump: true` initial input still counts as a fresh press; its
     /// double jump starts available (`true`), matching a car that's
     /// effectively "just landed" before its first step; its jump-hold
@@ -401,7 +398,7 @@ impl PhysicsWorld {
     /// two-car scene — since a car's `player_id` in `frame()` is just its
     /// index in `cars`, added cars are always appended, never inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
-        self.car_drive.push(drive::DriveState::new(car.friction));
+        self.car_drive.push(drive::DriveState::new());
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
         self
@@ -438,8 +435,8 @@ impl PhysicsWorld {
     /// applies `drive::apply_driven_forces` (throttle/steer/handbrake/jump
     /// gated on `on_ground`, computed from the car's position at the start
     /// of this step, before anything moves; boost not gated on it, but
-    /// draining `drive_state.boost_amount`; handbrake temporarily lowering
-    /// `car.friction` below `drive_state.base_friction`; jump firing an
+    /// draining `drive_state.boost_amount`; tire grip, cut by the
+    /// handbrake; jump firing an
     /// instantaneous upward velocity change on a fresh press, tracked via
     /// `drive_state.jump_held`;
     /// double jump firing the same kind of impulse on a fresh airborne
@@ -450,7 +447,7 @@ impl PhysicsWorld {
     /// jump's variable height, driven by `jump_hold_time_remaining`; a
     /// dodge's spin flip-canceled by a further press, driven by
     /// `dodge_flip_active`) alongside gravity, so `input`'s forces/impulses
-    /// (and friction adjustment) are part of the same velocity-prediction
+    /// (and tire grip) are part of the same velocity-prediction
     /// phase. Since `RB-PHYSICS-001-FR-057`, also calls
     /// `drive::clamp_angular_speed` right after `integrate_velocities`, so
     /// this step's angular velocity — air control torque and any direct
@@ -507,36 +504,43 @@ impl PhysicsWorld {
     /// this isn't just six separate parameters — every caller still borrows
     /// the same six `PhysicsWorld` fields directly, same as before
     /// `RB-PHYSICS-001-FR-051`).
+    ///
+    /// `is_car` makes the ground manifold frictionless (`None`): a car's
+    /// floor grip comes from `drive`'s tire model, not its box's contact
+    /// friction (`RB-PHYSICS-001-FR-081`). Every other manifold carries
+    /// its shape's own friction.
     fn static_contact_manifolds(
         body: &RigidBody,
         scene: &StaticScene,
-    ) -> Vec<(f32, f32, Vec<collision::Contact>)> {
-        let mut manifolds: Vec<(f32, f32, Vec<collision::Contact>)> = Vec::new();
+        is_car: bool,
+    ) -> Vec<(f32, Option<f32>, Vec<collision::Contact>)> {
+        let mut manifolds: Vec<(f32, Option<f32>, Vec<collision::Contact>)> = Vec::new();
 
         let ground_contacts = collision::contacts_vs_plane(body, scene.ground);
         if !ground_contacts.is_empty() {
-            manifolds.push((
-                scene.ground.restitution,
-                scene.ground.friction,
-                ground_contacts,
-            ));
+            let friction = (!is_car).then_some(scene.ground.friction);
+            manifolds.push((scene.ground.restitution, friction, ground_contacts));
         }
         for wall in scene.walls {
             let contacts = collision::contacts_vs_plane(body, wall);
             if !contacts.is_empty() {
-                manifolds.push((wall.restitution, wall.friction, contacts));
+                manifolds.push((wall.restitution, Some(wall.friction), contacts));
             }
         }
         for curve in scene.curves {
             let contacts = collision::contacts_vs_quarter_pipe(body, curve);
             if !contacts.is_empty() {
-                manifolds.push((curve.restitution, curve.friction, contacts));
+                manifolds.push((curve.restitution, Some(curve.friction), contacts));
             }
         }
         for corner_fillet in scene.corner_fillets {
             let contacts = collision::contacts_vs_corner_fillet(body, corner_fillet);
             if !contacts.is_empty() {
-                manifolds.push((corner_fillet.restitution, corner_fillet.friction, contacts));
+                manifolds.push((
+                    corner_fillet.restitution,
+                    Some(corner_fillet.friction),
+                    contacts,
+                ));
             }
         }
         for goal_wall in scene.goal_walls {
@@ -544,7 +548,7 @@ impl PhysicsWorld {
             if !contacts.is_empty() {
                 manifolds.push((
                     goal_wall.plane.restitution,
-                    goal_wall.plane.friction,
+                    Some(goal_wall.plane.friction),
                     contacts,
                 ));
             }
@@ -554,7 +558,7 @@ impl PhysicsWorld {
             if !contacts.is_empty() {
                 manifolds.push((
                     bounded_wall.plane.restitution,
-                    bounded_wall.plane.friction,
+                    Some(bounded_wall.plane.friction),
                     contacts,
                 ));
             }
@@ -719,10 +723,11 @@ impl PhysicsWorld {
         bodies.push(self.ball);
         bodies.extend(self.cars.iter().copied());
 
-        let mut static_manifolds: Vec<(usize, f32, f32, Vec<collision::Contact>)> = Vec::new();
+        let mut static_manifolds: Vec<(usize, f32, Option<f32>, Vec<collision::Contact>)> =
+            Vec::new();
         for (body_index, body) in bodies.iter().enumerate() {
             for (restitution, friction, contacts) in
-                Self::static_contact_manifolds(body, &static_scene)
+                Self::static_contact_manifolds(body, &static_scene, body_index > 0)
             {
                 static_manifolds.push((body_index, restitution, friction, contacts));
             }
@@ -1758,45 +1763,30 @@ mod tests {
     }
 
     #[test]
-    fn handbrake_restores_a_cars_own_base_friction_not_a_hardcoded_default() {
-        // with_car snapshots whatever friction the car was constructed with
-        // as its base — releasing handbrake must restore that value, not
-        // some crate-wide default, even when it differs from one. Both
-        // restitutions are zeroed so the car stays in continuous ground
-        // contact frame-to-frame (a bouncy resting contact never fully
-        // settles under this port's solver — see `resting_ball_stays_at_rest`
-        // — which would otherwise flicker `on_ground` off for a step).
+    fn a_coasting_car_loses_only_the_tires_coasting_speed_not_box_friction() {
+        // RB-PHYSICS-001-FR-081: the box's floor contact is frictionless, so
+        // a car rolling straight with no input slows at COASTING_DECELERATION
+        // (525 uu/s^2), not the box's Coulomb friction (~0.5 g, ~325 uu/s
+        // lost in half a second on its own). Restitutions are zeroed so the
+        // car stays in continuous ground contact.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
         let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
-        car.friction = 0.9;
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
         car.restitution = 0.0;
         let ground = StaticPlane {
             restitution: 0.0,
             ..flat_ground()
         };
         let mut world = PhysicsWorld::new(ball, ground).with_car(car);
-        let dt = 1.0 / 60.0;
-
-        world.set_car_input(
-            0,
-            rb_domain::ControllerInput {
-                handbrake: true,
-                ..Default::default()
-            },
-        );
-        world.step(dt);
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+        let expected = 1000.0 - 525.0 * 0.5;
+        let got = world.cars[0].linear_velocity.x;
         assert!(
-            world.cars[0].friction < 0.9,
-            "expected handbrake to reduce friction below the car's own 0.9 base, got {}",
-            world.cars[0].friction
-        );
-
-        world.set_car_input(0, rb_domain::ControllerInput::default());
-        world.step(dt);
-        assert!(
-            (world.cars[0].friction - 0.9).abs() < 1e-6,
-            "expected releasing handbrake to restore the car's own 0.9 base friction, got {}",
-            world.cars[0].friction
+            (got - expected).abs() < 10.0,
+            "expected about {expected} uu/s after 0.5 s of coasting, got {got}"
         );
     }
 
@@ -3816,7 +3806,7 @@ mod tests {
         let car = &world.cars[0];
         let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
         let forward_speed = car.linear_velocity.dot(&forward);
-        let expected = crate::drive::steer_yaw_rate_for_tests(forward_speed, 1.0, false);
+        let expected = crate::drive::steer_yaw_rate_for_tests(forward_speed, 1.0, 0.0);
         let yaw_rate = car.angular_velocity.z;
         assert!(
             (yaw_rate - expected).abs() <= 0.1 * expected.abs(),

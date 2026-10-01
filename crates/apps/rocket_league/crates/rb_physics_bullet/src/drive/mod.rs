@@ -17,22 +17,14 @@
 //! wheels at all — it's pure torque, so it would be redundant with
 //! steering while grounded).
 //!
-//! Handbrake is modeled as a temporary ground-friction reduction rather
-//! than a separate lateral-slip system: this port has no per-wheel tire
-//! model (the car is one rigid box), so there's no distinct "rear grip"
-//! to lose the way a real car's handbrake works. Instead, while `handbrake`
-//! is held and the car is grounded, `RigidBody.friction` — the same
-//! material property the ground-contact solver already reads for Coulomb
-//! friction — is temporarily reduced, letting the box's existing momentum
-//! carry it into a slide instead of gripping the ground and turning
-//! cleanly. Releasing handbrake restores the car's original friction. This
-//! reuses machinery the solver already has rather than inventing a second
-//! grip model. Since `RB-PHYSICS-001-FR-066`, real Rocket League's own
-//! handbrake friction reduction is confirmed genuinely anisotropic (a
-//! separate, much milder reduction to forward/backward grip than to
-//! sideways grip) rather than the single uniform multiplier this port
-//! applies to both — see `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc
-//! comment for the full finding and why it isn't adopted.
+//! Tire grip and the handbrake (`RB-PHYSICS-001-FR-081`, ADR-0012): a
+//! grounded car's box has no floor friction of its own. `ground`'s tire
+//! model grips per axis instead, as RocketSim's wheels do: sideways grip
+//! from `LAT_FRICTION_CURVE` by slip ratio, free rolling forward and
+//! backward (coast-braking with no throttle). The handbrake cuts sideways
+//! grip to a tenth and forward/backward grip to `0.5..0.9`, RocketSim's
+//! own anisotropic factors, replacing the old isotropic friction
+//! multiplier `RB-PHYSICS-001-FR-066` found had the wrong shape.
 //!
 //! Jump is a single, fixed-height vertical impulse fired on the *rising
 //! edge* of `ControllerInput.jump` (a fresh press, not merely "held") while
@@ -267,9 +259,9 @@
 //! chosen) — an unlikely exact case, not addressed here.
 //!
 //! A car with no input set (or all-neutral `ControllerInput::default()`)
-//! behaves exactly as a free rigid box always has — this module only ever
-//! adds force/torque/impulse or adjusts the existing friction property,
-//! never removes physics outright.
+//! behaves as a free rigid box except for tire grip while grounded (see
+//! above) — this module only ever adds force/torque/impulse or a velocity
+//! change, never removes physics outright.
 //!
 //! This is not a Bullet3 port (Bullet has no concept of "a car's engine")
 //! — it's this project's own model of Rocket League's driving mechanics,
@@ -306,13 +298,10 @@
 //! from RocketSim's real steer-angle curves through a bicycle model over
 //! the Octane wheelbase (`ground::steer_yaw_rate`, ADR-0011), resolving
 //! the wrong-shape finding `RB-PHYSICS-001-FR-065` recorded.
-//! `HANDBRAKE_FRICTION_MULTIPLIER` itself likewise remains an uncalibrated
-//! placeholder, but since `RB-PHYSICS-001-FR-066` its own single uniform
-//! reduction is confirmed to have the wrong *shape* too — real Rocket
-//! League applies a genuinely anisotropic (direction-dependent) reduction,
-//! not this port's one isotropic factor — see that requirement's own
-//! entry and `HANDBRAKE_FRICTION_MULTIPLIER`'s own doc comment for the
-//! full finding. `LANDING_AUTO_UPRIGHT_TORQUE`
+//! The handbrake no longer uses a placeholder friction multiplier: since
+//! `RB-PHYSICS-001-FR-081` it scales the tire model's per-axis grip by
+//! RocketSim's real factors, resolving `RB-PHYSICS-001-FR-066`'s
+//! wrong-shape finding. `LANDING_AUTO_UPRIGHT_TORQUE`
 //! remains an uncalibrated placeholder chosen
 //! only to produce a visibly responsive flip for
 //! this car's mass/inertia in tests — in
@@ -327,8 +316,8 @@
 //! `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for the full finding.
 //! `AIR_CONTROL_TORQUE` itself (pitch's own magnitude) remains an
 //! uncalibrated placeholder too, but since `RB-PHYSICS-001-FR-068` its own
-//! per-axis *ratio* — unlike `HANDBRAKE_FRICTION_MULTIPLIER`/
-//! `WALL_JUMP_HORIZONTAL_SPEED`'s own confirmed-but-not-adopted findings —
+//! per-axis *ratio* — unlike `WALL_JUMP_HORIZONTAL_SPEED`'s own
+//! confirmed-but-not-adopted finding —
 //! is confirmed and directly adopted: yaw and roll are scaled from pitch's
 //! own by RocketSim's own confirmed real ratios, since real air control
 //! turned out to be the same *kind* of direct per-axis torque mechanism
@@ -340,7 +329,7 @@
 //! is confirmed to be a continuous per-axis torque over a fixed 0.65s
 //! window, not this port's own single instantaneous shared kick — a
 //! confirmed-but-not-adopted finding in the same category as
-//! `HANDBRAKE_FRICTION_MULTIPLIER`/`WALL_JUMP_HORIZONTAL_SPEED`,
+//! `WALL_JUMP_HORIZONTAL_SPEED`,
 //! since adopting the real shape would mean new per-car elapsed-flip-time
 //! state, a substantially larger redesign `RB-PHYSICS-001-FR-059`'s own
 //! Non-goals already flagged as out of scope — see that requirement's own
@@ -383,8 +372,12 @@ pub use boost::MAX_BOOST;
 
 /// `ground::steer_yaw_rate`, exposed to sibling modules' tests only.
 #[cfg(test)]
-pub(crate) fn steer_yaw_rate_for_tests(forward_speed: f32, steer: f32, handbrake: bool) -> f32 {
-    ground::steer_yaw_rate(forward_speed, steer, handbrake)
+pub(crate) fn steer_yaw_rate_for_tests(
+    forward_speed: f32,
+    steer: f32,
+    handbrake_amount: f32,
+) -> f32 {
+    ground::steer_yaw_rate(forward_speed, steer, handbrake_amount)
 }
 pub use jump::{DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED};
 
@@ -513,30 +506,35 @@ pub struct DriveState {
     /// with no wall contact and no double jump left spends it to cancel the
     /// flip — see the module doc comment's flip-cancel paragraph.
     pub dodge_flip_active: bool,
-    /// The car's nominal (non-handbraking) friction. Handbrake lowers
-    /// `car.friction` below it while held and grounded, and each call
-    /// restores it otherwise, so callers need no separate restore step.
-    pub base_friction: f32,
+    /// How engaged the handbrake is, `0.0..=1.0`: ramps up while held and
+    /// down once released (`ground::POWERSLIDE_RISE_RATE`/`FALL_RATE`),
+    /// scaling the tire grip reduction and the powerslide steer blend.
+    pub handbrake_amount: f32,
 }
 
 impl DriveState {
-    /// Defaults for a freshly added car whose nominal friction is
-    /// `base_friction`.
-    pub fn new(base_friction: f32) -> DriveState {
+    /// Defaults for a freshly added car.
+    pub fn new() -> DriveState {
         DriveState {
             boost_amount: MAX_BOOST,
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
             dodge_flip_active: false,
-            base_friction,
+            handbrake_amount: 0.0,
         }
     }
 }
 
+impl Default for DriveState {
+    fn default() -> DriveState {
+        DriveState::new()
+    }
+}
+
 /// Applies throttle, steering, boost, handbrake, jump, double jump, wall
-/// jump, and air control as forces/torques/impulses (or, for handbrake, a
-/// temporary friction adjustment) on `car`, reading and updating `state`
+/// jump, and air control as forces/torques/impulses (or, for steering and
+/// tire grip, direct velocity changes) on `car`, reading and updating `state`
 /// (see each `DriveState` field for its rules). Throttle, steering,
 /// handbrake, and the ground jump are a no-op unless `on_ground`; air
 /// control, double jump, and wall jump are the reverse — a no-op unless
@@ -580,12 +578,19 @@ pub fn apply_driven_forces(
     state.jump_held = input.jump;
 
     jump::apply_jump_hold(car, input.jump, &mut state.jump_hold_time_remaining, dt);
+    state.handbrake_amount = ground::ramp_handbrake(state.handbrake_amount, input.handbrake, dt);
 
     if on_ground {
         // Landing (or simply resting) always restores the double jump,
         // regardless of this step's input.
         state.double_jump_available = true;
-        ground::apply_ground_control(car, input, forward, state.base_friction);
+        // RocketSim treats a boosting car as full throttle for its pedals.
+        let throttle = if input.boost && state.boost_amount > 0.0 {
+            1.0
+        } else {
+            input.throttle.clamp(-1.0, 1.0)
+        };
+        ground::apply_ground_control(car, input, throttle, forward, state.handbrake_amount, dt);
         if jump_pressed {
             jump::ground_jump(car, &mut state.jump_hold_time_remaining);
         }

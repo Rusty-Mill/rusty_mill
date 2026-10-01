@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.84.0
+- Version: 0.85.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5247,6 +5247,52 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - **Not done here**: tire slip (heading turns at the geometric rate, an
     upper bound) and per-axis tire friction including handbrake (FR-066),
     planned next.
+  - **Real-capture result** (owner's machine, `--self-trace test2.jsonl
+    3.7 4.3`): orientation error at 4.0 s 0.06 rad (was 0.46), at most 0.09
+    rad through 4.13 s; velocity error at 4.10 s 364 uu/s (was 563). The
+    velocity direction still lags the heading (~53 deg vs 72 deg recorded)
+    and speed is ~10% low: FR-081's target.
+
+- `RB-PHYSICS-001-FR-081` (per-axis tire grip, implemented, verified):
+  after FR-080 the heading matched the real capture, but the velocity
+  direction lagged it and speed was ~10% low, both from the car's box
+  sliding on the floor under one isotropic Coulomb friction. A car's
+  ground-plane contact is now frictionless (`solver::resolve_manifolds`
+  takes `Option<f32>` static friction; `PhysicsWorld` passes `None` for a
+  car's ground manifold), and `drive::ground::apply_ground_control` ports
+  RocketSim's per-axis tire grip (`Car::_UpdateWheels`,
+  `btVehicleRL::calcFrictionImpulses`, fetched 2026-10-01):
+  - sideways: `LAT_FRICTION_CURVE(slip)` times `lateral_grip_rate` (four
+    wheels' `0.2 * jacDiagABInv * CAR_MASS_BT / 3` side impulse per unit
+    lateral speed, using this port's inertia at the Octane wheel contact
+    points; ~19.5/s for the standard car) of the lateral velocity is
+    cancelled per second;
+  - forward/backward: `pedals` ports the throttle/brake rules (coasting
+    brake 0.15 of 3500 uu/s^2, full brake under 25 uu/s or against the
+    car's motion; none while handbraking); the engine force is scaled by
+    the longitudinal grip factor; boosting counts as full throttle;
+  - handbrake: `DriveState::handbrake_amount` ramps at 5/s up and 2/s down
+    and blends in lateral x0.1 and longitudinal x0.5-0.9 (resolving
+    FR-066) and the powerslide steer curve.
+  Steering's yaw-rate target now also applies with no steer input
+  (target zero), so a released turn stops instead of spinning on.
+  `HANDBRAKE_FRICTION_MULTIPLIER` and `DriveState::base_friction` are
+  removed. `THROTTLE_ACCELERATION` (1600 uu/s^2) is confirmed against
+  RocketSim's engine force over four wheels. ADR-0012.
+  - **Verification**: 13 new `drive` tests (releasing steer stops the
+    turn, slip ratio, pedal rules, grip
+    factors and handbrake blend, handbrake ramp, grip rate bound and
+    orientation independence, lateral cancellation rolling and sliding,
+    coasting both ways, braking, stopping without reversing, no coasting
+    brake under handbrake, half-handbrake steer blend) and 1 `world` test
+    (a coasting car loses 525 uu/s^2, not box friction). The grounded boost
+    test now subtracts the forced-throttle share. Real capture (owner's
+    machine): velocity error at 4.0 s 9.9 uu/s, simulated (325, 968) vs
+    recorded (318, 961); `--self-growth` 3-4 s window 2.8 uu / 5.7 uu/s
+    (was 10 uu / 67 uu/s).
+  - **Not done here**: per-wheel slip and torque from tire impulses (grip
+    acts on the centre of mass); tire grip on walls, curves and ceiling;
+    sticky force; the hitbox offset.
 
 ## Architecture and interfaces
 
@@ -6729,6 +6775,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.85.0 (2026-10-01): `RB-PHYSICS-001-FR-081` — per-axis tire grip on a
+  frictionless box floor contact (ADR-0012), resolving FR-066; FR-080's
+  real-capture result recorded. 11 net new tests (355 in
+  `rb_physics_bullet`).
 - 0.84.0 (2026-10-01): `RB-PHYSICS-001-FR-080` — steering sets yaw rate
   from the real steer-angle curves via the bicycle model (ADR-0011),
   replacing `STEER_TORQUE`. 6 new tests (344 in `rb_physics_bullet`).

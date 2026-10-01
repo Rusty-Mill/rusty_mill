@@ -1426,7 +1426,10 @@ pub fn resolve_dynamic_manifolds(
 /// contacts)` tuples, one per static shape some `bodies[body_index]`
 /// currently touches — mirroring `resolve_static_manifolds`'s own
 /// per-manifold combined-restitution/friction setup, just indexed into
-/// `bodies` instead of naming a single body directly. `dynamic_manifolds`
+/// `bodies` instead of naming a single body directly. A `None`
+/// `static_friction` makes that manifold frictionless whatever the body's
+/// own friction: a grounded car's floor contact, whose grip comes from its
+/// tires instead (`RB-PHYSICS-001-FR-081`). `dynamic_manifolds`
 /// is unchanged from `resolve_dynamic_manifolds` — `(index_a, index_b,
 /// contacts)` triples. Every body's own static contacts and dynamic
 /// manifolds share one `DeltaVelocity`/push-delta accumulator (indexed by
@@ -1451,7 +1454,7 @@ pub fn resolve_dynamic_manifolds(
 /// already left open as separate future work.
 pub fn resolve_manifolds(
     bodies: &mut [RigidBody],
-    static_manifolds: &[(usize, f32, f32, Vec<Contact>)],
+    static_manifolds: &[(usize, f32, Option<f32>, Vec<Contact>)],
     dynamic_manifolds: &[(usize, usize, Vec<Contact>)],
     dt: f32,
     caches: &mut HashMap<(usize, usize), ContactCache>,
@@ -1494,7 +1497,8 @@ pub fn resolve_manifolds(
                 let body = bodies[*body_index];
                 let combined_restitution =
                     combine_restitution(body.restitution, *static_restitution);
-                let combined_friction = combine_friction(body.friction, *static_friction);
+                let combined_friction =
+                    static_friction.map_or(0.0, |f| combine_friction(body.friction, f));
                 let mut effective_body = body;
                 effective_body.restitution = combined_restitution;
                 let rows = contacts
@@ -1852,7 +1856,7 @@ mod tests {
         let mut bodies_c = vec![ball_c, heavy_c];
         resolve_manifolds(
             &mut bodies_c,
-            &[(0, plane_x_c.restitution, plane_x_c.friction, cxc)],
+            &[(0, plane_x_c.restitution, Some(plane_x_c.friction), cxc)],
             &[(0, 1, cyc)],
             dt,
             &mut HashMap::new(),
