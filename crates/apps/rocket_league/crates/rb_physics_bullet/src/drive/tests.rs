@@ -548,6 +548,16 @@ fn flip_spin_after_press_tick(input: &ControllerInput) -> Vec3 {
     c.angular_velocity
 }
 
+/// The press tick's spin from a flip spin of `flip_spin`: the flip torque,
+/// then air control with pitch locked, which stays on through a flip
+/// (`RB-PHYSICS-001-FR-093`).
+fn press_tick_spin(flip_spin: Vec3, input: &ControllerInput) -> Vec3 {
+    let mut c = car();
+    c.angular_velocity = flip_spin;
+    apply_air_control(&mut c, input, 0.0, TICK);
+    c.angular_velocity
+}
+
 /// One grounded `apply_ground_control` tick on a car facing +X (right is
 /// +Y), with `throttle` as the effective throttle.
 fn ground_tick(velocity: Vec3, throttle: f32, handbrake_amount: f32) -> Vec3 {
@@ -1045,7 +1055,8 @@ fn dodge_gives_forward_velocity_and_spin_when_pitched_in_the_air() {
     // The flip spins the car nose down from the press tick (RB-PHYSICS-001-FR-085).
     // The flip noses the car down on the press tick.
     let spin = flip_spin_after_press_tick(&input);
-    assert_close(spin.y, FLIP_TORQUE_FORWARD / 120.0, "pitch spin");
+    let expected = press_tick_spin(Vec3::new(0.0, FLIP_TORQUE_FORWARD / 120.0, 0.0), &input);
+    assert_close(spin.y, expected.y, "pitch spin");
 }
 
 #[test]
@@ -1075,7 +1086,8 @@ fn dodge_gives_lateral_velocity_and_spin_when_rolled_in_the_air() {
     );
     // A dodge to the right rolls the right side down on the press tick.
     let spin = flip_spin_after_press_tick(&input);
-    assert_close(spin.x, -FLIP_TORQUE_SIDE / 120.0, "roll spin");
+    let expected = press_tick_spin(Vec3::new(-FLIP_TORQUE_SIDE / 120.0, 0.0, 0.0), &input);
+    assert_close(spin.x, expected.x, "roll spin");
 }
 
 #[test]
@@ -1256,7 +1268,8 @@ fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
     );
     // Yaw folds into the dodge's side direction: the same roll spin.
     let spin = flip_spin_after_press_tick(&input);
-    assert_close(spin.x, -FLIP_TORQUE_SIDE / 120.0, "roll spin");
+    let expected = press_tick_spin(Vec3::new(-FLIP_TORQUE_SIDE / 120.0, 0.0, 0.0), &input);
+    assert_close(spin.x, expected.x, "roll spin");
 }
 
 #[test]
@@ -2589,14 +2602,14 @@ fn flip_at(time: f32, direction: (f32, f32)) -> Option<FlipState> {
 }
 
 #[test]
-fn a_flip_disables_air_control_and_spins_the_car_while_its_torque_lasts() {
+fn a_flip_locks_air_control_pitch_and_spins_the_car_while_its_torque_lasts() {
     let mut c = car();
-    let gate = apply_flip_torque(
+    let pitch_scale = apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(0.1, (1.0, 0.0)),
     );
-    assert!(!gate.enabled, "air control during a flip");
+    assert_eq!(pitch_scale, 0.0, "pitch torque locked during a flip");
     assert_close(
         c.angular_velocity.y,
         FLIP_TORQUE_FORWARD / 120.0,
@@ -2613,18 +2626,17 @@ fn a_flips_torque_ends_at_flip_torque_time_and_pitch_unlocks_after_the_extra_tim
         flip_at(0.7, (1.0, 0.0)),
     );
     assert_eq!(c.angular_velocity, Vec3::ZERO, "no torque after 0.65 s");
-    assert!(locked.enabled);
-    assert_eq!(locked.pitch_scale, 0.0, "pitch locked until 0.95 s");
+    assert_eq!(locked, 0.0, "pitch locked until 0.95 s");
     let open = apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(1.0, (1.0, 0.0)),
     );
-    assert_eq!(open.pitch_scale, 1.0);
+    assert_eq!(open, 1.0);
 }
 
 #[test]
-fn holding_pitch_against_a_flip_cancels_its_pitch_spin_and_frees_air_control() {
+fn holding_pitch_against_a_flip_cancels_its_pitch_spin() {
     // A forward flip (forward component +1) is cancelled by pitch +1
     // (stick back), RocketSim's flip cancel.
     let mut c = car();
@@ -2632,12 +2644,8 @@ fn holding_pitch_against_a_flip_cancels_its_pitch_spin_and_frees_air_control() {
         pitch: Some(1.0),
         ..Default::default()
     };
-    let gate = apply_flip_torque(&mut c, &input, flip_at(0.1, (1.0, 0.0)));
-    assert!(gate.enabled, "cancel re-enables air control");
-    assert_eq!(
-        gate.pitch_scale, 0.0,
-        "but pitch stays locked while flipping"
-    );
+    let pitch_scale = apply_flip_torque(&mut c, &input, flip_at(0.1, (1.0, 0.0)));
+    assert_eq!(pitch_scale, 0.0, "pitch stays locked while flipping");
     assert_eq!(
         c.angular_velocity.y, 0.0,
         "full cancel removes the pitch spin"
@@ -2647,12 +2655,12 @@ fn holding_pitch_against_a_flip_cancels_its_pitch_spin_and_frees_air_control() {
 #[test]
 fn a_stall_applies_no_flip_torque() {
     let mut c = car();
-    let gate = apply_flip_torque(
+    let pitch_scale = apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(0.1, (0.0, 0.0)),
     );
-    assert!(gate.enabled);
+    assert_eq!(pitch_scale, 0.0);
     assert_eq!(c.angular_velocity, Vec3::ZERO);
 }
 
@@ -3052,5 +3060,57 @@ fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
         high.linear_velocity,
         Vec3::ZERO,
         "extended past rest: no pull"
+    );
+}
+
+/// Car-frame `(roll, pitch)` rate magnitudes of a diagonal flip after
+/// `ticks` mid-flip ticks with `input` held, spin clamped each tick as in
+/// the world.
+fn diagonal_flip_roll_and_pitch(input: &ControllerInput, ticks: usize) -> (f32, f32) {
+    let half = std::f32::consts::FRAC_1_SQRT_2;
+    let mut c = car();
+    let mut state = DriveState::new();
+    state.flip = flip_at(0.2, (half, -half));
+    for _ in 0..ticks {
+        c.clear_forces();
+        apply_driven_forces(&mut c, input, &NO_WHEEL_CONTACTS, None, &mut state, TICK);
+        integrate::integrate_velocities(&mut c, TICK);
+        let (position, orientation) = integrate::integrate_transform(
+            c.position,
+            c.orientation,
+            c.linear_velocity,
+            c.angular_velocity,
+            TICK,
+        );
+        c.position = position;
+        c.orientation = orientation;
+        c.update_inertia_tensor();
+        clamp_angular_speed(&mut c);
+    }
+    (
+        c.angular_velocity.dot(&forward_axis(&c)).abs(),
+        c.angular_velocity.dot(&right_axis(&c)).abs(),
+    )
+}
+
+#[test]
+fn air_control_shapes_a_diagonal_flip_as_the_real_capture_does() {
+    // RB-PHYSICS-001-FR-093: the owner's 4.317 s diagonal flip spins at
+    // (roll 4.42, pitch 3.27) in the car frame while roll -1 is held and
+    // settles at (4.10, 3.66) once released; the flip torque alone would
+    // hold (4.17, 3.59).
+    let held_roll = ControllerInput {
+        roll: Some(-1.0),
+        ..Default::default()
+    };
+    let (roll, pitch) = diagonal_flip_roll_and_pitch(&held_roll, 40);
+    assert!(
+        (roll - 4.42).abs() < 0.1 && (pitch - 3.27).abs() < 0.1,
+        "held: {roll}, {pitch}"
+    );
+    let (roll, pitch) = diagonal_flip_roll_and_pitch(&ControllerInput::default(), 40);
+    assert!(
+        (roll - 4.10).abs() < 0.1 && (pitch - 3.66).abs() < 0.1,
+        "released: {roll}, {pitch}"
     );
 }

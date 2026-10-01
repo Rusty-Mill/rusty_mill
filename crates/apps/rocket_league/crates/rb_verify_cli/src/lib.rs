@@ -194,6 +194,14 @@ impl TraceRow {
     }
 }
 
+/// `spin` (world frame) expressed in the car's own frame for orientation
+/// `rotation`: `(forward, side, up)` components, i.e. roll, pitch and yaw
+/// rates. Lets `--self-trace` tell which car axis a spin change is about,
+/// whatever the car's orientation (`RB-VERIFY-003` 0.14.0).
+pub fn car_frame_spin(rotation: &Quat, spin: &Vec3) -> Vec3 {
+    rotation.conjugate().rotate(spin)
+}
+
 /// World-frame angular velocity (rad/s) that turns `from` into `to` over
 /// `dt`: the rotation `to * from^-1` as axis times angle, divided by `dt`
 /// (the same left-multiplied, world-frame convention `integrate_transform`
@@ -403,6 +411,21 @@ mod tests {
         assert_eq!(first.velocity_error(), 0.0);
         assert_eq!(first.spin_error(), 0.0);
         assert!(first.input.is_some());
+    }
+
+    #[test]
+    fn car_frame_spin_reads_a_world_spin_in_the_cars_axes() {
+        // A car yawed 90 deg left: its forward is world +Y, so a world spin
+        // about +Y is a roll about its own forward axis.
+        let half = std::f32::consts::FRAC_PI_4;
+        let yawed = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let local = car_frame_spin(&yawed, &Vec3::new(0.0, 2.0, 0.0));
+        assert!(
+            (local - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5,
+            "{local:?}"
+        );
+        let level = car_frame_spin(&Quat::IDENTITY, &Vec3::new(0.0, 0.0, 1.0));
+        assert_eq!(level, Vec3::new(0.0, 0.0, 1.0));
     }
 
     #[test]

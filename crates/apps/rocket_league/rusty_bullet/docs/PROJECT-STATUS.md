@@ -112,12 +112,14 @@ version: `a245d35`).
 
 ## Next
 
-1. Post-boost vertical divergence, now the earliest sizeable real-capture
-   error: trace `--self-trace <test2.jsonl> 4.9 5.6`. From the 4.94 s boost
-   the recorded car falls faster (vz -312 vs -260 uu/s at 5.575 s), so the
-   candidate lands ~6 ticks late. Smaller: ~3 uu/s lateral offset from the
-   4.142 s press tick's tire grip (recorded vy +2.9, candidate +0.1);
-   braking per wheel.
+1. Flip end timing, now the earliest real-capture error: the recorded
+   flip torque still acts at 4.975 s (spin 5.44, clamped) and stops at
+   4.983 s; the candidate's stops one tick earlier, and orientation error
+   steps 0.04 to 0.06 rad there, growing to ~0.10 by 5.3 s. That leaves the
+   boost tilted: velocity error 9 to 35 uu/s over 4.94-5.57 s (recorded vz
+   -311 vs -288 at 5.567 s). Then the 5.575 s landing (candidate's contact
+   one tick later), the ~3 uu/s lateral offset from the 4.142 s press
+   tick's tire grip, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -126,9 +128,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (435 tests: 27 `rb_domain`, 370
+- `cargo test --workspace`: pass (437 tests: 27 `rb_domain`, 371
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`
@@ -175,6 +177,12 @@ version: `a245d35`).
   over 4.19-4.3 s (was 13). Growth 4-5 s 2.7 uu / 8.5 uu/s (was 5.1 / 15),
   5-6 s 41 uu / 147 uu/s (was 54 / 170), ball 15 uu (was 25), 7-8 s 853 uu
   (was 1251).
+- Same, after `RB-PHYSICS-001-FR-093` (air control during a flip),
+  2026-10-01: car-frame flip spin (4.40, 3.30) with roll held and (4.08,
+  3.69) after, recorded (4.42, 3.27) / (4.11, 3.66); orientation error
+  0.03-0.04 rad through 4.97 s (was 0.12-0.13), velocity error at 5.5 s 32
+  uu/s (was 71). Growth 4-5 s 2.7 uu / 0.02 rad, 5-6 s 19 uu / 0.12 rad /
+  71 uu/s (was 41 / 0.26 / 147), ball 5-6 s 8.9 uu (was 15).
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames

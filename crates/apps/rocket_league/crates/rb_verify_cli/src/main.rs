@@ -28,7 +28,7 @@
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{ControllerInput, Vec3};
 use rb_verify_cli::{
-    rotation_rate, score_capture_against_candidate, score_capture_growth,
+    car_frame_spin, rotation_rate, score_capture_against_candidate, score_capture_growth,
     score_replay_against_capture, trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS,
     DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
@@ -97,7 +97,9 @@ fn fmt_input(input: Option<ControllerInput>) -> String {
     )
 }
 
-/// Each row also prints, from the previous row of the same car, the spin
+/// Each row prints both cars' spin in world axes and in the car's own
+/// `(forward, side, up)` frame (`car_frame_spin`), and, from the previous
+/// row of the same car, the spin
 /// implied by the change in recorded and simulated orientation
 /// (`rotation_rate`): matching `spin` means a stream's orientations agree
 /// with its own angular velocity.
@@ -123,7 +125,7 @@ fn print_trace(rows: &[TraceRow]) {
             None => previous.push(row),
         }
         println!(
-            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2} | spin rec {rs} sim {cs} err {es:.2} | q-rate {q_rate}",
+            "t={t:>7.3}s car={id} | {input} | rec pos {rp} vel {rv} | sim pos {cp} vel {cv} | err pos {ep:>7.1} vel {ev:>7.1} rot {er:.2} | spin rec {rs} sim {cs} err {es:.2} | car-frame spin rec {ls} sim {lc} | q-rate {q_rate}",
             t = row.t_secs,
             input = fmt_input(row.input),
             rp = fmt_vec(&row.recorded.position),
@@ -136,6 +138,8 @@ fn print_trace(rows: &[TraceRow]) {
             rs = fmt_spin(&row.recorded.angular_velocity),
             cs = fmt_spin(&row.candidate.angular_velocity),
             es = row.spin_error(),
+            ls = fmt_spin(&car_frame_spin(&row.recorded.rotation, &row.recorded.angular_velocity)),
+            lc = fmt_spin(&car_frame_spin(&row.candidate.rotation, &row.candidate.angular_velocity)),
         );
     }
 }

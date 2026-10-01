@@ -8,6 +8,23 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Air control works through a flip
+**2026-10-01** · `RB-PHYSICS-001-FR-093` · ADR-0015 amendment
+
+- In the air, roll and yaw air control and all three dampings now act
+  during a flip; only pitch torque is locked. RocketSim turns air control
+  off mid-flip, but the owner's capture shows the held roll stick shaping
+  the flip: car-frame spin (4.42, 3.27) recorded, (4.40, 3.30) now, (4.17,
+  3.59) before. 437 tests.
+
+## Spin in the car's own axes
+**2026-10-01** · `RB-VERIFY-003` 0.14.0
+
+- `--self-trace` now prints each car's spin as roll, pitch and yaw rates.
+  The capture's mid-flip response to a yaw input at 4.867 s could not be
+  read in world axes; keeping yaw air control on mid-flip (tried, reverted)
+  moved the simulated spin the wrong way. 436 tests.
+
 ## Wheels let go when the real ones do
 **2026-10-01** · `RB-PHYSICS-001-FR-092` · ADR-0019 amendment
 

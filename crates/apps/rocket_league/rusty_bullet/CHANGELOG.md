@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace` prints each car's spin in its own
+  `(forward, side, up)` frame (`RB-VERIFY-003` 0.14.0), to read a spin
+  change as roll, pitch or yaw.
 - `rb-verify --self-trace` prints each stream's orientation-implied spin
   (`q-rate`, `rb_verify_cli::rotation_rate`; `RB-VERIFY-003` 0.13.0).
 - ADR-0016: steer through per-wheel side impulses (supersedes ADR-0011).
@@ -937,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Air control stays on during a flip, with only its pitch torque locked
+  (`RB-PHYSICS-001-FR-093`, ADR-0015 amendment): the real capture's
+  diagonal flip carries the held roll stick and the dampings.
 - Wheel rays reach the fully extended wheel and the sticky force acts the
   step after the wheels touch (`RB-PHYSICS-001-FR-092`, ADR-0019
   amendment), matching every tick of the real capture's 4.142 s jump.
