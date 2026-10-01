@@ -37,7 +37,7 @@ pub struct SyncTransport<T> {
     end: usize,
 }
 
-impl<T: Read + Write> SyncTransport<T> {
+impl<T: Read> SyncTransport<T> {
     /// Wraps an already-connected transport. Performs no I/O itself.
     pub fn new(io: T) -> Self {
         SyncTransport {
@@ -133,22 +133,6 @@ impl<T: Read + Write> SyncTransport<T> {
                 }
             }
         }
-    }
-
-    /// Serializes and writes a request head.
-    pub fn write_request_head(&mut self, head: &RequestHead) -> Result<()> {
-        let mut out = Vec::new();
-        head.write(&mut out);
-        self.io.write_all(&out)?;
-        Ok(())
-    }
-
-    /// Serializes and writes a response head.
-    pub fn write_response_head(&mut self, head: &ResponseHead) -> Result<()> {
-        let mut out = Vec::new();
-        head.write(&mut out);
-        self.io.write_all(&out)?;
-        Ok(())
     }
 
     /// Reads a whole body into memory according to `framing`. For
@@ -276,31 +260,6 @@ impl<T: Read + Write> SyncTransport<T> {
         }
     }
 
-    /// Writes `body` verbatim -- for `Content-Length`-framed or
-    /// close-delimited bodies, where the wire bytes are just the body
-    /// itself.
-    pub fn write_body(&mut self, body: &[u8]) -> Result<()> {
-        self.io.write_all(body)?;
-        Ok(())
-    }
-
-    /// Writes one `Transfer-Encoding: chunked` chunk. A no-op for an
-    /// empty `data` -- see [`crate::body::write_chunk`].
-    pub fn write_chunk(&mut self, data: &[u8]) -> Result<()> {
-        let mut out = Vec::new();
-        body::write_chunk(&mut out, data);
-        self.io.write_all(&out)?;
-        Ok(())
-    }
-
-    /// Writes the terminating zero-size chunk, ending a chunked body.
-    pub fn write_chunked_end(&mut self) -> Result<()> {
-        let mut out = Vec::new();
-        body::write_chunked_end(&mut out);
-        self.io.write_all(&out)?;
-        Ok(())
-    }
-
     /// Consumes `self`, returning a [`BodyReader`] that pulls `framing`'s
     /// body incrementally via [`BodyReader::next_chunk`] instead of
     /// buffering it all upfront the way [`Self::read_body`] does -- for a
@@ -341,6 +300,51 @@ impl<T: Read + Write> SyncTransport<T> {
     }
 }
 
+/// Writing needs only `Write`; reading (above) only `Read`, so a
+/// read-only stream can use the parser.
+impl<T: Write> SyncTransport<T> {
+    /// Serializes and writes a request head.
+    pub fn write_request_head(&mut self, head: &RequestHead) -> Result<()> {
+        let mut out = Vec::new();
+        head.write(&mut out);
+        self.io.write_all(&out)?;
+        Ok(())
+    }
+
+    /// Serializes and writes a response head.
+    pub fn write_response_head(&mut self, head: &ResponseHead) -> Result<()> {
+        let mut out = Vec::new();
+        head.write(&mut out);
+        self.io.write_all(&out)?;
+        Ok(())
+    }
+
+    /// Writes `body` verbatim -- for `Content-Length`-framed or
+    /// close-delimited bodies, where the wire bytes are just the body
+    /// itself.
+    pub fn write_body(&mut self, body: &[u8]) -> Result<()> {
+        self.io.write_all(body)?;
+        Ok(())
+    }
+
+    /// Writes one `Transfer-Encoding: chunked` chunk. A no-op for an
+    /// empty `data` -- see [`crate::body::write_chunk`].
+    pub fn write_chunk(&mut self, data: &[u8]) -> Result<()> {
+        let mut out = Vec::new();
+        body::write_chunk(&mut out, data);
+        self.io.write_all(&out)?;
+        Ok(())
+    }
+
+    /// Writes the terminating zero-size chunk, ending a chunked body.
+    pub fn write_chunked_end(&mut self) -> Result<()> {
+        let mut out = Vec::new();
+        body::write_chunked_end(&mut out);
+        self.io.write_all(&out)?;
+        Ok(())
+    }
+}
+
 /// Bytes at a time an incremental [`BodyReader`] hands back per
 /// [`BodyReader::next_chunk`] call, at most, for `Close`/`ContentLength`
 /// framing -- `Chunked` framing yields whatever the wire's own chunk
@@ -366,7 +370,7 @@ pub struct BodyReader<T> {
     done: bool,
 }
 
-impl<T: Read + Write> BodyReader<T> {
+impl<T: Read> BodyReader<T> {
     /// The next chunk of body data, or `None` once the body is fully
     /// consumed. Chunk boundaries are an implementation detail (a wire
     /// chunk boundary for `Chunked` framing, or just "however much one
