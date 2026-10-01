@@ -1,7 +1,8 @@
 //! Airborne control: pitch/yaw/roll air control with its damping, and air
 //! throttle, ported from RocketSim's `Car::_UpdateAirTorque`
 //! (`RB-PHYSICS-001-FR-084`). The dodge's flip (in `jump`) decides whether
-//! air control acts at all and whether pitch is locked.
+//! pitch is locked; air control otherwise always acts in the air
+//! (`RB-PHYSICS-001-FR-093`).
 
 use super::{forward_axis, right_axis, up_axis};
 use crate::body::RigidBody;

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.96.0
+- Version: 0.97.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5556,6 +5556,20 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     matches; velocity error 2.6-3.3 uu/s over 4.19-4.3 s (was 13);
     `--self-growth` 4-5 s 2.7 uu (was 5.1), 5-6 s 41 uu (was 54).
 
+- `RB-PHYSICS-001-FR-093` (air control stays on during a flip, implemented,
+  verified by unit tests, ADR-0015 amendment): in the air, air control's
+  roll and yaw torque and all three dampings always act; a flip only locks
+  its pitch torque. RocketSim turns air control off during a flip.
+  - Why: the capture's 4.317 s diagonal flip spins at car-frame (roll 4.42,
+    pitch 3.27) while roll -1 is held and settles at (4.10, 3.66) once
+    released; the flip torque alone gives (4.17, 3.59). The ~0.1 rad
+    orientation gap this left tilted the boost from 4.94 s (~50 uu/s
+    vertical error by 5.5 s).
+  - **Verification**: `drive` test
+    `air_control_shapes_a_diagonal_flip_as_the_real_capture_does` (held
+    (4.40, 3.30), released (4.06, 3.72)); the dodge press-tick tests now
+    include air control.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7037,6 +7051,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.97.0 (2026-10-01): `RB-PHYSICS-001-FR-093` — air control stays on
+  during a flip, pitch torque locked (ADR-0015 amendment). 371 tests in
+  `rb_physics_bullet`.
 - 0.96.0 (2026-10-01): `RB-PHYSICS-001-FR-092` — wheel reach without
   `SUSPENSION_SUBTRACTION`, sticky force one step late (ADR-0019
   amendment). 370 tests in `rb_physics_bullet`.

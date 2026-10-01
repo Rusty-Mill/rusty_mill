@@ -940,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Air control stays on during a flip, with only its pitch torque locked
+  (`RB-PHYSICS-001-FR-093`, ADR-0015 amendment): the real capture's
+  diagonal flip carries the held roll stick and the dampings.
 - Wheel rays reach the fully extended wheel and the sticky force acts the
   step after the wheels touch (`RB-PHYSICS-001-FR-092`, ADR-0019
   amendment), matching every tick of the real capture's 4.142 s jump.

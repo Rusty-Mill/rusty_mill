@@ -60,3 +60,25 @@ Port it directly:
 - Re-run `rb-verify --self-trace test2.jsonl 4.3 5.0`. Orientation error
   through the flip should fall from ~1.4 rad at 5.0 s. Also re-run
   `--self-growth`.
+
+## Amendment (FR-093): air control stays on during a flip
+
+RocketSim turns air control off while a flip's torque lasts, except for the
+pitch cancel. The owner's capture disagrees. With `rb-verify --self-trace`'s
+car-frame spin (`RB-VERIFY-003` 0.14.0), the 4.317 s diagonal flip (pitch
+-1, roll -1) reads, as (roll, pitch) rates:
+
+| | roll -1 held | after release |
+|---|---|---|
+| recorded | (4.42, 3.27) | settles at (4.10, 3.66) |
+| flip torque alone (RocketSim) | (4.17, 3.59) | (4.17, 3.59) |
+| flip torque plus air control, pitch locked | (4.40, 3.30) | (4.06, 3.72) |
+
+The held roll stick adds its 400 torque and the roll and pitch dampings act
+throughout; the mid-flip yaw input at 4.867 s only nudges yaw (-0.06).
+An earlier yaw-only variant (reverted) moved the spin the wrong way.
+
+Decision: in the air, air control always acts; a flip only locks its pitch
+torque (`apply_flip_torque` returns the pitch scale, `0` while flipping and
+through `FLIP_PITCHLOCK_EXTRA_TIME`). This is the path RocketSim already
+takes for a flip cancel.

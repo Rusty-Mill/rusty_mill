@@ -308,49 +308,33 @@ impl FlipState {
     }
 }
 
-/// How air control may act this tick given the car's flip, per RocketSim's
-/// `_UpdateAirTorque`: whether it applies at all, and the scale on its
-/// pitch torque.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct AirControlGate {
-    pub enabled: bool,
-    pub pitch_scale: f32,
-}
-
 /// Applies a flip's torque for one airborne tick, before the jump press is
-/// handled, and returns how air control may act (RocketSim's
-/// `_UpdateAirTorque`). While flipping, air control is off and the flip
-/// spins the car at `FLIP_TORQUE_*`, except that holding pitch against the
-/// flip's forward direction scales the flip's pitch torque down by the
-/// stick amount and re-enables air control: the flip cancel. Air-control
-/// pitch stays locked through `FLIP_PITCHLOCK_EXTRA_TIME` after the flip.
+/// handled, and returns the scale on air control's pitch torque (RocketSim's
+/// `_UpdateAirTorque`): `0` while the flip spins the car at `FLIP_TORQUE_*`
+/// and through `FLIP_PITCHLOCK_EXTRA_TIME` after it, `1` otherwise. Holding
+/// pitch against the flip's forward direction scales the flip's pitch
+/// torque down by the stick amount: the flip cancel.
+///
+/// Air control itself (roll and yaw torque, and all three dampings) stays on
+/// through the flip (`RB-PHYSICS-001-FR-093`). RocketSim turns it off except
+/// for the cancel, but the owner's capture shows the 4.317 s flip carrying
+/// the held roll stick's torque and the dampings: its car-frame spin keeps
+/// the roll/pitch ratio 1.35 while roll -1 is held and settles at 1.12 once
+/// released, matching flip torque plus air control (1.35, 1.10), not the
+/// flip torque alone (1.16).
 pub(super) fn apply_flip_torque(
     car: &mut RigidBody,
     input: &ControllerInput,
     flip: Option<FlipState>,
-) -> AirControlGate {
-    let open = AirControlGate {
-        enabled: true,
-        pitch_scale: 1.0,
-    };
+) -> f32 {
     let Some(flip) = flip else {
-        return open;
+        return 1.0;
     };
     if !flip.is_flipping() {
         let locked = flip.time < FLIP_TORQUE_TIME + FLIP_PITCHLOCK_EXTRA_TIME;
-        return AirControlGate {
-            enabled: true,
-            pitch_scale: if locked { 0.0 } else { 1.0 },
-        };
+        return if locked { 0.0 } else { 1.0 };
     }
     let (mut forward_part, side_part) = flip.direction;
-    if forward_part == 0.0 && side_part == 0.0 {
-        // Stall: no torque, air control allowed but pitch still locked.
-        return AirControlGate {
-            enabled: true,
-            pitch_scale: 0.0,
-        };
-    }
     // RocketSim compares the pitch stick with flipRelTorque.y, which is
     // the forward component: same sign means stick against the flip.
     let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
@@ -359,14 +343,12 @@ pub(super) fn apply_flip_torque(
         forward_part *= 1.0 - pitch.abs();
     }
     // flipRelTorque is divided by RocketSim's tick-time scale, so each tick
-    // adds the same angular velocity whatever the step size.
+    // adds the same angular velocity whatever the step size. A stall
+    // (no direction) adds none.
     let spin = right_axis(car) * (forward_part * FLIP_TORQUE_FORWARD)
         - forward_axis(car) * (side_part * FLIP_TORQUE_SIDE);
     car.angular_velocity += spin * TICK_120;
-    AirControlGate {
-        enabled: cancelling,
-        pitch_scale: 0.0,
-    }
+    0.0
 }
 
 /// Advances an airborne car's flip clock by `dt` and applies the flip's

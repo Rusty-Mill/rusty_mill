@@ -85,8 +85,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-VERIFY-003` 0.14.0 (car-frame spin in `--self-trace`): implemented;
-  awaiting the owner's 4.8-5.0 s re-trace.
+- `RB-PHYSICS-001-FR-093` (air control stays on during a flip, ADR-0015
+  amendment): implemented; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -113,17 +113,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Post-boost vertical divergence, now the earliest sizeable real-capture
-   error. The 4.9-5.6 s trace showed the boost itself matches (~8.8 uu/s
-   per tick both); the recorded nose points ~0.1 rad lower, so it falls
-   ~1 uu/s per tick faster. That orientation gap starts at the 4.867 s
-   2-tick yaw input mid-flip: the recorded spin moves by (0.12, -0.01,
-   -0.10) and keeps drifting, the candidate ignores it. Keeping yaw air
-   control on mid-flip (tried as FR-093, reverted) moved the candidate the
-   wrong way (+0.05, 0, +0.03) and left 5-6 s growth slightly worse
-   (41.7 vs 40.5 uu). Next: `--self-trace <test2.jsonl> 4.8 5.0` with the
-   new car-frame spin column to see which car axis the recorded change is
-   about. Smaller: ~3 uu/s lateral offset from the 4.142 s press tick's
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.8 5.6` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-093`: the candidate's
+   car-frame spin should read ~(4.40, 3.30) while roll is held and ~(4.06,
+   3.72) after 4.867 s, as recorded (4.42, 3.27 / 4.10, 3.66), and the
+   post-boost vertical gap (vz -254 recorded vs -206 at 5.5 s) should
+   shrink. Smaller: ~3 uu/s lateral offset from the 4.142 s press tick's
    tire grip; braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
@@ -133,7 +128,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (436 tests: 27 `rb_domain`, 370
+- `cargo test --workspace`: pass (437 tests: 27 `rb_domain`, 371
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

@@ -169,12 +169,14 @@
 //! tick itself (`RB-PHYSICS-001-FR-085`, one tick earlier than RocketSim's
 //! order, per the owner's capture) until `FLIP_TORQUE_TIME` (0.65 s) the flip spins the car at
 //! `FLIP_TORQUE_FORWARD`/`FLIP_TORQUE_SIDE` (nose down for forward, right
-//! side down for right), air control is off, and from 0.15 s the car's fall
-//! is damped (`FLIP_Z_DAMP_*`). Holding pitch against the flip's forward
-//! direction scales its pitch spin down by the stick amount and frees air
-//! control: the flip cancel. A side flip has no pitch spin to cancel. Air
-//! control's pitch stays locked until `FLIP_PITCHLOCK_EXTRA_TIME` after the
-//! torque ends. Landing clears the flip. This replaces the port's earlier
+//! side down for right), air control's pitch torque is locked while its
+//! roll and yaw torque and all three dampings still act
+//! (`RB-PHYSICS-001-FR-093`, per the owner's capture; RocketSim turns air
+//! control off), and from 0.15 s the car's fall is damped
+//! (`FLIP_Z_DAMP_*`). Holding pitch against the flip's forward direction
+//! scales its pitch spin down by the stick amount: the flip cancel. A side
+//! flip has no pitch spin to cancel. Air control's pitch stays locked until
+//! `FLIP_PITCHLOCK_EXTRA_TIME` after the torque ends. Landing clears the flip. This replaces the port's earlier
 //! instant spin kick and its jump-press-again cancel, which Rocket League
 //! does not have (FR-069, FR-070).
 //!
@@ -536,10 +538,8 @@ pub fn apply_driven_forces(
                 &mut state.flip,
             );
         }
-        let gate = jump::apply_flip_torque(car, input, state.flip);
-        if gate.enabled {
-            air::apply_air_control(car, input, gate.pitch_scale, dt);
-        }
+        let pitch_scale = jump::apply_flip_torque(car, input, state.flip);
+        air::apply_air_control(car, input, pitch_scale, dt);
         air::apply_air_throttle(car, input.throttle.clamp(-1.0, 1.0), forward);
         jump::advance_flip(car, &mut state.flip, dt);
     }
