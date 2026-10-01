@@ -10,6 +10,7 @@ description = "Nexus side-margin comments subsystem (BL-050): persistent threads
 layer = "apps"
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }
 serde = { workspace = true }

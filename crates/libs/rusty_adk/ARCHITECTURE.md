@@ -218,7 +218,11 @@ with `#[adk_tool(crate = ::rusty_adk::tools)]`.
 ADK's SDKs share a protocol for *agents* (A2A) but not for tools; a tool is an
 in-process object in each language. The one path a Rust tool has into a Python,
 Go, TypeScript, Java, or Kotlin agent is MCP, which every ADK SDK consumes via
-`McpToolset`. `adk-mcp` therefore implements both directions.
+`McpToolset`. `adk-mcp` therefore implements both directions. The wire
+protocol is `rmcp`'s, the workspace's shared MCP stack, pinned to MCP
+`2025-06-18` (the revision the other SDKs speak); `adk-mcp` owns only the
+mapping between ADK tools and MCP tools. `tests/conformance.rs` holds that
+behavior in place at the wire.
 
 For agents there *is* a protocol, so `adk-a2a` (feature `a2a` on the facade)
 implements A2A's `AgentExecutor` over a `Runner`, using the `rusty_a2a` crate

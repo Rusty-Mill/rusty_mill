@@ -162,6 +162,20 @@ fn rush_interactive(input: &str) -> (String, String) {
     )
 }
 
+/// Interactive rush used to alias 21 standard commands to Rusty Mill
+/// replacements (`ls` to `rls`, `git` to `rgit`, `ssh` to `shh`, ...) without
+/// checking that they exist, so those commands failed wherever the
+/// replacements weren't installed, and `ls` ran rustup's `rls` proxy where
+/// it was. An interactive shell now starts with no aliases; the old set is an
+/// opt-in block in `examples/rushrc.example`.
+#[test]
+fn an_interactive_shell_starts_with_no_aliases() {
+    let (out, err) = rush_interactive("alias\ntype ls git ssh\n");
+    assert!(!out.contains("alias"), "unexpected alias output: {out}");
+    assert!(!out.contains("aliased"), "a command is aliased: {out}");
+    assert!(!err.contains("aliased"), "stderr: {err}");
+}
+
 #[test]
 fn pipeline_wires_stdout_to_stdin_across_two_real_processes() {
     let (out, status) = rush("echo hi | tr a-z A-Z");

@@ -1,0 +1,12 @@
+[package]
+name = "orch-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Orchestrator domain: goals, task cards, blackboard. Pure, no I/O."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]

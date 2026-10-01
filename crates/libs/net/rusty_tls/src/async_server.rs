@@ -72,42 +72,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsServerStream<S> {
         self.conn.alpn_protocol()
     }
 
-    /// Drives I/O specifically until the handshake completes (or fails).
-    /// Deliberately not built on [`poll_complete_io`](Self::poll_complete_io):
-    /// that loop only stops once `wants_read()` goes false, which on an
-    /// idle, already-established connection stays true indefinitely (a live
-    /// connection always "wants" future incoming bytes) — driven directly
-    /// from an async caller like this, that would block forever past the
-    /// point the handshake actually finished. This loop instead checks
-    /// `is_handshaking()` before every round, the same condition the sync
-    /// adapter's `rustls::Connection::complete_io` uses internally.
+    /// Drive the handshake until it completes, then write out its last
+    /// flight. Stops as soon as `is_handshaking()` goes false: reading on
+    /// past that point (`wants_read()` stays true on an idle connection)
+    /// would wait for bytes the peer has no reason to send, which is the
+    /// lost wakeup `tests/async_lost_wakeup.rs` pins. The condition the
+    /// sync adapter's `rustls::Connection::complete_io` uses too, and the
+    /// same `UnexpectedEof` if the peer closes mid-handshake.
     fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.conn.is_handshaking() {
-            while self.conn.wants_write() {
-                let mut adapter = PollAdapter {
-                    io: Pin::new(&mut self.io),
-                    cx,
-                };
-                match self.conn.write_tls(&mut adapter) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
-                    Err(e) => return Poll::Ready(Err(e)),
-                }
-            }
+            ready!(self.poll_write_tls(cx))?;
             if !self.conn.is_handshaking() {
                 break;
             }
+            if ready!(self.poll_read_tls(cx))? == 0 {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "TLS handshake: the peer closed the connection",
+                )));
+            }
+        }
+        self.poll_write_tls(cx)
+    }
+
+    /// Write out every pending TLS record.
+    fn poll_write_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.conn.wants_write() {
             let mut adapter = PollAdapter {
                 io: Pin::new(&mut self.io),
                 cx,
             };
-            match self.conn.read_tls(&mut adapter) {
-                Ok(0) => return Poll::Ready(Ok(())),
-                Ok(_) => {
-                    if let Err(e) = self.conn.process_new_packets() {
-                        return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, e)));
-                    }
-                }
+            match self.conn.write_tls(&mut adapter) {
+                Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
                 Err(e) => return Poll::Ready(Err(e)),
             }
@@ -115,41 +111,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsServerStream<S> {
         Poll::Ready(Ok(()))
     }
 
-    /// Drain pending TLS output, and — while the handshake is still in
-    /// progress — pull in and process the peer's next flight, looping until
-    /// neither is outstanding. See
-    /// [`AsyncTlsStream`](crate::AsyncTlsStream)'s identically-shaped
-    /// private method for why this exists and how it's used.
-    fn poll_complete_io(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        loop {
-            while self.conn.wants_write() {
-                let mut adapter = PollAdapter {
-                    io: Pin::new(&mut self.io),
-                    cx,
-                };
-                match self.conn.write_tls(&mut adapter) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
-                    Err(e) => return Poll::Ready(Err(e)),
+    /// Read one chunk of TLS input and process it; `Ready(Ok(0))` at the
+    /// underlying stream's EOF, which rustls' reader then reports (a clean
+    /// `close_notify` as `Ok(0)`, otherwise `UnexpectedEof`).
+    fn poll_read_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        let mut adapter = PollAdapter {
+            io: Pin::new(&mut self.io),
+            cx,
+        };
+        match self.conn.read_tls(&mut adapter) {
+            Ok(n) => {
+                if let Err(e) = self.conn.process_new_packets() {
+                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, e)));
                 }
+                Poll::Ready(Ok(n))
             }
-            if !self.conn.wants_read() {
-                return Poll::Ready(Ok(()));
-            }
-            let mut adapter = PollAdapter {
-                io: Pin::new(&mut self.io),
-                cx,
-            };
-            match self.conn.read_tls(&mut adapter) {
-                Ok(0) => return Poll::Ready(Ok(())),
-                Ok(_) => {
-                    if let Err(e) = self.conn.process_new_packets() {
-                        return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, e)));
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Poll::Pending,
-                Err(e) => return Poll::Ready(Err(e)),
-            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(e) => Poll::Ready(Err(e)),
         }
     }
 }
@@ -167,8 +145,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for AsyncTlsServerStream<S> {
                     buf.advance(n);
                     return Poll::Ready(Ok(()));
                 }
+                // No plaintext yet: send anything owed (a handshake flight,
+                // a key update), then wait for the peer's next records.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    ready!(this.poll_complete_io(cx))?;
+                    ready!(this.poll_write_tls(cx))?;
+                    ready!(this.poll_read_tls(cx))?;
                 }
                 Err(e) => return Poll::Ready(Err(e)),
             }
@@ -183,24 +164,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for AsyncTlsServerStream<S> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.conn.is_handshaking() {
-            ready!(this.poll_complete_io(cx))?;
-        }
+        // Finish the handshake before accepting new plaintext — the same
+        // ordering `rustls::Stream::write`'s `complete_prior_io` enforces
+        // for the sync adapter.
+        ready!(this.poll_handshake(cx))?;
         let n = this.conn.writer().write(buf)?;
-        let _ = this.poll_complete_io(cx);
+        // Best-effort send: `Pending` here doesn't mean the `n` bytes
+        // weren't accepted, only that they're queued for the next poll
+        // to push out; an error resurfaces on that poll.
+        let _ = this.poll_write_tls(cx);
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.conn.writer().flush()?;
-        this.poll_complete_io(cx)
+        ready!(this.poll_handshake(cx))?;
+        this.poll_write_tls(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.conn.send_close_notify();
-        ready!(this.poll_complete_io(cx))?;
+        ready!(this.poll_write_tls(cx))?;
         Pin::new(&mut this.io).poll_shutdown(cx)
     }
 }

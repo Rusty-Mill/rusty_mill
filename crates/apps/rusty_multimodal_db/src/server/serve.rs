@@ -1407,16 +1407,18 @@ fn equality_bucket<S: ConnectionStore + ?Sized>(
     first: usize,
 ) -> Result<Vec<RecordId>, ErrorCode> {
     let head = store.filter_eq(filter[first].field, &filter[first].value)?;
-    let worth = store
-        .record_count()
-        .is_some_and(|n| head.len().saturating_mul(EQ_INTERSECT_RATIO) >= n);
+    let several_eq = filter
+        .iter()
+        .filter(|p| p.op == protocol::CompareOp::Eq)
+        .count()
+        >= 2;
+    // The table size is asked for last: it only decides whether a second
+    // bucket is worth reading, and an adapter may answer it in O(table).
     if head.is_empty()
-        || !worth
-        || filter
-            .iter()
-            .filter(|p| p.op == protocol::CompareOp::Eq)
-            .count()
-            < 2
+        || !several_eq
+        || !store
+            .record_count()
+            .is_some_and(|n| head.len().saturating_mul(EQ_INTERSECT_RATIO) >= n)
     {
         return Ok(head);
     }
@@ -4771,12 +4773,28 @@ fn handle_connection(
     let mut failures: u32 = 0;
     let peer_ip = peer.map(|addr| addr.ip());
 
+    // Design review D4: a requested shutdown ends the connection at the next
+    // request boundary. Shutting the socket's read side does not reach frames
+    // already in `reader`'s buffer (or TLS plaintext), so the flag is checked
+    // before a frame is read and again before it is acted on.
+    let draining = || {
+        options
+            .shutdown
+            .as_ref()
+            .is_some_and(Shutdown::is_requested)
+    };
     loop {
         let store: &dyn ConnectionStore = tables[table].1.as_ref();
+        if draining() {
+            return;
+        }
         let req: Request = match framing::read_message(&mut reader) {
             Ok(req) => req,
             Err(_) => return, // client disconnected, or a framing/decode error — end the connection
         };
+        if draining() {
+            return;
+        }
         // `CLP-FR-001`/`002` (ADR-0102): under a row cap, a `Query` with no
         // `limit` is clamped to the cap here, before anything else reads
         // the request, and counted so an operator can see it happening.
@@ -5512,9 +5530,28 @@ pub fn serve<S: ConnectionStore + 'static>(
     listener: TcpListener,
     store: Arc<S>,
     options: ServeOptions,
-) {
+) -> DrainOutcome {
     let name = store.table_name().to_string();
-    serve_tables(listener, vec![(name, store)], 0, options);
+    serve_tables(listener, vec![(name, store)], 0, options)
+}
+
+/// How a server stopped (design review D5), so a caller can tell a
+/// completed drain from one its deadline cut short before declaring the
+/// data it served cleanly closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "only a `Drained` server has no connection still running"]
+pub enum DrainOutcome {
+    /// Every connection had ended when the server returned.
+    Drained,
+    /// The drain deadline passed with `open` connection handlers still
+    /// running (detached; they may yet apply a write).
+    TimedOut {
+        /// Connection handlers still running at the deadline.
+        open: usize,
+    },
+    /// The listener could not be polled for a shutdown, so nothing was
+    /// served.
+    NotServed,
 }
 
 /// `DRN-FR-003` (ADR-0127): how long a stopping server waits for its
@@ -5618,6 +5655,9 @@ impl Drop for ShutdownGuard {
 /// is unchanged. One `options` — tokens, TLS, logs, rate limit — is
 /// shared by every table; per-table authorization is a named non-goal.
 ///
+/// Returns only once the listener stops — with a [`Shutdown`], after the
+/// drain — saying whether every connection had ended ([`DrainOutcome`]).
+///
 /// # Panics
 ///
 /// Panics if `tables` is empty or `primary` is out of range — a
@@ -5627,7 +5667,7 @@ pub fn serve_tables(
     tables: ServedTables,
     primary: usize,
     mut options: ServeOptions,
-) {
+) -> DrainOutcome {
     let metrics_listener = options.metrics_http.take();
     assert!(
         primary < tables.len(),
@@ -5657,7 +5697,7 @@ pub fn serve_tables(
     // `incoming()` loop below is the original path, untouched.
     let shutdown = options.shutdown.clone();
     if shutdown.is_some() && listener.set_nonblocking(true).is_err() {
-        return; // cannot poll, so cannot honor a shutdown: do not serve
+        return DrainOutcome::NotServed; // cannot poll, so cannot honor a shutdown
     }
     let mut incoming = listener.incoming();
     loop {
@@ -5724,6 +5764,10 @@ pub fn serve_tables(
         while options.in_flight.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
             thread::sleep(ACCEPT_POLL / 2);
         }
+    }
+    match options.in_flight.load(Ordering::Acquire) {
+        0 => DrainOutcome::Drained,
+        open => DrainOutcome::TimedOut { open },
     }
 }
 
@@ -7083,6 +7127,9 @@ mod tests {
         /// counts every walk-only call.
         key_walks: std::sync::atomic::AtomicUsize,
         stat_folds: std::sync::atomic::AtomicUsize,
+        /// Tranche 5 (D3): `record_count` calls, which a real adapter
+        /// answers by touching every id in the table.
+        record_counts: std::sync::atomic::AtomicUsize,
     }
 
     impl PlannerFixture {
@@ -7101,7 +7148,12 @@ mod tests {
                 range_counts: Default::default(),
                 key_walks: Default::default(),
                 stat_folds: Default::default(),
+                record_counts: Default::default(),
             }
+        }
+        fn record_counts(&self) -> usize {
+            self.record_counts
+                .load(std::sync::atomic::Ordering::Relaxed)
         }
         fn range_counts(&self) -> usize {
             self.range_counts.load(std::sync::atomic::Ordering::Relaxed)
@@ -7174,6 +7226,8 @@ mod tests {
             }
         }
         fn record_count(&self) -> Option<usize> {
+            self.record_counts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(self.table_size.unwrap_or_else(|| self.rows().len()))
         }
         fn range_field(&self) -> Option<FieldRef> {
@@ -7835,6 +7889,31 @@ mod tests {
             "2 * {EQ_INTERSECT_RATIO} < 1000: bucket only"
         );
         assert_eq!(big.gets(), 2);
+    }
+
+    /// Tranche 5 (D3): the table size only decides whether a *second*
+    /// bucket is worth reading, so a lone `Eq` or an empty first bucket
+    /// answers without asking for it. A real adapter's count touches every
+    /// id in the table, which turned an O(bucket) lookup into O(table).
+    #[test]
+    fn equality_reads_the_table_size_only_when_a_second_bucket_could_be_read() {
+        let lone = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        let rows = query_candidates(&lone, QueryPlan::IndexEq(0), &[labrador()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(lone.record_counts(), 0, "one Eq predicate: no count");
+
+        let filter = [labrador(), eq(3, ScanValue::U32(9))];
+        let empty_head = two_index_fixture(3, vec![], vec![2, 3]);
+        assert!(query_candidates(&empty_head, QueryPlan::IndexEq(0), &filter).is_empty());
+        assert_eq!(
+            empty_head.record_counts(),
+            0,
+            "empty first bucket: no count"
+        );
+
+        let both = two_index_fixture(3, vec![1, 3], vec![2, 3]);
+        query_candidates(&both, QueryPlan::IndexEq(0), &filter);
+        assert_eq!(both.record_counts(), 1, "two Eq predicates: counted once");
     }
 
     /// `QPE-FR-002`: an empty second bucket ends the read with no decode; a

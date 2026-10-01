@@ -53,7 +53,7 @@ taken 2026-09-08 on the `claude/four-repo-consolidation-vb9c1l` branches.
 | Full-text search | tantivy 0.26 BM25 | SQLite FTS5 | tantivy 0.26 + vector, RRF hybrid | `to_lowercase().contains()` |
 | AI / RAG | Anthropic/OpenAI/Ollama, LanceDB vector store | **stub (19 LOC)** | anthropic/openai/ollama/llama.cpp, fastembed, RAG, enrichment, agent loop, session tree | hardcoded reply string |
 | MCP server | rmcp, 17 tools | none | ~65 tools + resources + prompts | hand-rolled JSON-RPC, 15 tools (3 return sample strings) |
-| Terminal | portable-pty over Tauri channel | **stub (10 LOC)** | `nexus-terminal` (~15k) + `nexus-vt` grid + `nexus-rush` sandbox shell | none |
+| Terminal | portable-pty over Tauri channel | **stub (10 LOC)** | `nexus-terminal` (~15k) + `nexus-vt` grid + `rush` sandbox shell | none |
 | Plugins | wasmtime WASI host w/ permission manifest (281 LOC) | `CorePlugin` trait, **no WASM** despite `extism` dep | wasmtime 44 sandbox + capability system + JS iframe sandbox | 3 hardcoded manifests |
 | Editor model | CM6 owns the doc | ropey rope + undo + CRC-framed buffer WAL | `nexus-editor` block tree + `nexus-crdt` (RGA) + collab relay | none |
 | MDX / JSX | two-pass parser (365 LOC), JSX placeholders in CLI/TUI | none | `nexus-storage/src/mdx.rs` (481 LOC) | none |

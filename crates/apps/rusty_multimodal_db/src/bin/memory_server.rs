@@ -226,7 +226,7 @@ use rusty_multimodal_db::server::exposure::{
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 use rusty_multimodal_db::server::{
-    serve_tables, ConnectionStore, RateLimit, ServeOptions, TlsConfig, TokenClass,
+    serve_tables, ConnectionStore, DrainOutcome, RateLimit, ServeOptions, TlsConfig, TokenClass,
 };
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -866,10 +866,30 @@ fn main() {
         }
         None => Vec::new(),
     };
-    serve_tables(listener, tables, 0, options);
-    for log in change_logs {
-        let _ = log.close_clean();
+    let outcome = serve_tables(listener, tables, 0, options);
+    if !close_change_logs(outcome, &change_logs) {
+        std::process::exit(1);
     }
+}
+
+/// Design review D5: mark each change log clean only after a completed
+/// drain. A drain cut short by its deadline leaves handlers that may still
+/// write, so the logs stay unclean and the next open starts a new epoch (a
+/// standby resyncs). Returns whether the server stopped cleanly; every
+/// reason it did not is printed.
+fn close_change_logs(outcome: DrainOutcome, logs: &[Arc<ChangeLog>]) -> bool {
+    if outcome != DrainOutcome::Drained {
+        eprintln!("memory_server: stopped with {outcome:?}; change logs left unclean");
+        return false;
+    }
+    let mut clean = true;
+    for log in logs {
+        if let Err(e) = log.close_clean() {
+            eprintln!("memory_server: change log did not close clean: {e}");
+            clean = false;
+        }
+    }
+    clean
 }
 
 /// Where this process keeps its three tables (`DDR-FR-002`).
@@ -1089,5 +1109,49 @@ fn rate_limit_from_env_value(
         Some(value) => RateLimit::parse(value)
             .map(|limit| auth.with_rate_limit(limit))
             .map_err(|e| format!("SERVER_AUTH_RATE_LIMIT configured but invalid: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh change log in its own temp directory, and its epoch.
+    fn fresh_log(label: &str) -> (PathBuf, Arc<ChangeLog>, u64) {
+        let dir = std::env::temp_dir().join(format!("{label}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("memory.changes");
+        let log = Arc::new(ChangeLog::open(&path, DEFAULT_RETAIN_BYTES).expect("open"));
+        let epoch = log.position().epoch;
+        (path, log, epoch)
+    }
+
+    fn reopened_epoch(path: &Path) -> u64 {
+        ChangeLog::open(path, DEFAULT_RETAIN_BYTES)
+            .expect("reopen")
+            .position()
+            .epoch
+    }
+
+    /// Design review D5: a completed drain closes the log clean, so the
+    /// next open continues its epoch.
+    #[test]
+    fn a_completed_drain_closes_change_logs_clean() {
+        let (path, log, epoch) = fresh_log("d5_drained");
+        assert!(close_change_logs(DrainOutcome::Drained, &[log]));
+        assert_eq!(reopened_epoch(&path), epoch);
+    }
+
+    /// Design review D5: a drain its deadline cut short is not clean, so
+    /// the next open starts a new epoch and a standby resyncs.
+    #[test]
+    fn a_timed_out_drain_leaves_change_logs_unclean() {
+        let (path, log, epoch) = fresh_log("d5_timed_out");
+        assert!(!close_change_logs(
+            DrainOutcome::TimedOut { open: 1 },
+            &[log]
+        ));
+        assert_ne!(reopened_epoch(&path), epoch);
     }
 }

@@ -8,7 +8,23 @@ lives in the git log and in `docs/0.1.2/audits/`.
 
 ## [Unreleased]
 
+### Changed
+- **The bundled shell is now the workspace's `rush` (`crates/apps/rush`); `nexus-rush` is removed** (RFC 0002). The vendored copy had drifted behind rush. `nexus-terminal` looks for a `rush` binary beside the executable instead of `nexus-rush`, and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell a session leader with the PTY as its controlling terminal, so rush's job control (`fg`, `bg`, Ctrl-Z) works, where nexus-rush had disabled it.
+
 ### Fixed
+- **nexus-rush: `&&`/`||` short-circuit in `$(( ))`, and `[[:class:]]` globs work** (design review 4, shared rush fixtures).
+  - `0 && 1 / 0` failed with "division by zero" instead of giving 0, so a guard like `(( n != 0 && total / n > 2 ))` broke when `n` was 0. The skipped side is still parsed, so a syntax error there is still an error.
+  - POSIX named classes (`[[:digit:]]`, `[![:alpha:]]`, ...) matched nothing. They are ported from rush, with its bash-verified edge cases.
+  - Both were found by the conformance fixtures nexus-rush now shares with rush.
+- **Every whole-file write is now crash-atomic and synced** (design review 4, consolidation).
+  - Comment sidecars, editor saves and journal, CRDT state, the CLI's CRDT merge driver, the skills registry index, and the shell's persisted state and granted capabilities now share `rusty_atomic_file::write`.
+  - Six of these renamed an unsynced temp file, so a power loss could leave an empty or partial file.
+  - A temp file left by a crash no longer blocks later saves, since each write uses a unique temp name.
+- **A forge switch no longer hands out the old AI runtime** (`nexus-ai-runtime`, design review 4 / N5).
+  - The shared pool handle was a `OnceLock`, set by the first forge and never replaced. After shutdown and a new boot in the same process, the indexing daemon got the torn-down runtime.
+  - Each pool now replaces the published handle, and clears it on drop if it is still its own. Readers get the live pool's handle or `None` (their existing fallback).
+  - `publish_shared_handle` now returns whether it replaced another live pool.
+- **An IPC timeout now cancels the handler's token** (`nexus-kernel`, design review 4 / N4). A deadline used to return `Timeout` without signalling the dispatch's cancellation token. Polling handlers, their spawned work, and sync handlers on the blocking pool kept running. A drop guard now cancels the token on timeout or when the caller drops the call, and is disarmed when the handler finishes on its own.
 - **Template substitution no longer panics on a short tag** (`nexus-templates`, design review 3.8).
   - `{{ab` sliced five bytes past a four-byte input and panicked; the escape check now uses `starts_with`.
   - Literal non-ASCII text used to be copied byte by byte and came out garbled (`é` became mojibake); it now survives intact.

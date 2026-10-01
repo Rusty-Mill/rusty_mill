@@ -1323,7 +1323,7 @@ impl ConnectionStore for MemoryConnectionStore {
 
     /// `SCB-FR-002` (ADR-0126): the id list's length; no record read.
     fn record_count(&self) -> Option<usize> {
-        Some(self.store.all_ids::<Memory>().len())
+        Some(self.store.id_count::<Memory>())
     }
 
     /// `ORD-FR-005` (ADR-0059): a page ordered by `updated_at_unix_ms`

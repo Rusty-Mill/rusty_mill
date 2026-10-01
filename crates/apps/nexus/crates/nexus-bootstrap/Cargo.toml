@@ -47,6 +47,7 @@ ts-export = [
 ]
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 nexus-formats = { path = "../nexus-formats" }
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-kv = { path = "../nexus-kv" }

@@ -30,14 +30,20 @@ A `Shutdown` handle, given to `ServeOptions::with_shutdown`. `request()`:
    of stream, which ends the connection through the path a client
    disconnect takes: session rolled back, MVCC snapshot released, gauges
    decremented, all by the existing `Drop` guards. Nothing is cut
-   mid-write.
+   mid-write. Frames already buffered in user space (pipelined requests,
+   TLS plaintext) are not reached by the socket shutdown, so each
+   connection also checks the flag at every request boundary (design
+   review D4).
 3. `serve_tables` waits for the in-flight count to reach zero, at most
-   `with_drain_timeout` (default 30 s), then returns.
+   `with_drain_timeout` (default 30 s), then returns a `DrainOutcome`:
+   `Drained`, `TimedOut { open }`, or `NotServed` (design review D5).
 
 `memory_server` (Linux): SIGTERM and SIGINT call `request()` through
 `rusty_libc::signal`. The handler stores one atomic (async-signal-safe); a
 watcher thread does the rest. `SERVER_DRAIN_TIMEOUT_SECS` sets the deadline.
 Elsewhere, or if a handler cannot be installed, the binary runs as it did.
+It marks its change logs clean only on `Drained`; a timed-out drain leaves
+them unclean (the next open starts a new epoch) and exits 1.
 
 ## Consequences
 
@@ -46,7 +52,7 @@ Elsewhere, or if a handler cannot be installed, the binary runs as it did.
 - Negative / tradeoffs: a request whose frame is only partly read when the
   read side closes is dropped with its connection (the client was
   mid-send); a request that runs past the drain timeout is left to the
-  process exit. The accept poll costs up to 20 ms of accept latency, only
+  process exit, which then exits 1 with its change logs unclean. The accept poll costs up to 20 ms of accept latency, only
   when a `Shutdown` is configured and the socket is idle.
 - New dependency: `rusty_libc`, first-party, already in the workspace,
   behind the `server` feature and Linux only; one `unsafe` call site with
@@ -64,3 +70,8 @@ Elsewhere, or if a handler cannot be installed, the binary runs as it did.
   (`--features server,research -D warnings`) and the crate's tests clean;
   workspace dependency and layer checks pass. Builder: Claude; independent
   inspection owed.
+- 2026-09-30 (design review D4/D5): boundary flag check and
+  `DrainOutcome`; `tests/server_drain_integration.rs` adds a pipelined
+  request that is never executed and a drain that reports
+  `TimedOut { open: 1 }`; `memory_server` unit tests cover clean vs
+  unclean change-log close.

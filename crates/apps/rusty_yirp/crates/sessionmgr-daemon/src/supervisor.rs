@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use sessionmgr_core::ports::GitPort;
 use sessionmgr_core::{
     AgentKind, Disposition, ParentReadiness, RecoveryAction, Session, SessionId, SessionKind,
-    SessionStatus, Workspace,
+    SessionStatus, WorkerRef, Workspace,
 };
 use sessionmgr_git::SystemGit;
 use sessionmgr_protocol::{Request, Response, SessionEvent, SessionSummary};
@@ -1151,7 +1151,10 @@ impl Supervisor {
     /// [`Self::session_close`]'s subsequent `dispose_workspace` race a
     /// process that is still holding a file open in the worktree it is
     /// about to remove.
-    async fn stop_worker(&self, id: &SessionId, session: &Session) {
+    ///
+    /// Returns the pids still running afterwards: an empty list is the
+    /// only proof nothing is left (design review 4).
+    async fn stop_worker(&self, id: &SessionId, session: &Session) -> Vec<u32> {
         // 1. Ask nicely. A worker that acks shuts its own child down and
         //    exits, which is cleaner than anything done from outside.
         let socket = paths::worker_socket(&self.root, id);
@@ -1173,17 +1176,17 @@ impl Supervisor {
         //    only the worker would leave its child running as an orphan
         //    with nothing tracking it and no way for the user to reach
         //    it. This is why both pids are recorded.
-        let pids = sessionmgr_core::recovery::teardown_pids(session);
-        for &pid in &pids {
-            if let Err(e) = sessionmgr_proc::terminate(pid) {
-                eprintln!("sessionmgr daemon: could not terminate pid {pid}: {e}");
-            }
+        //    Only a pid whose recorded start fingerprint still matches is
+        //    signalled (design review 4): a stale record's pid may have been
+        //    reused by an unrelated process.
+        let targets = sessionmgr_core::recovery::teardown_targets(session);
+        for target in &targets {
+            signal_if_ours(target);
         }
 
-        // 3. Confirm death. Only once this returns does the caller know
-        //    "nothing is running" is actually true, not merely
-        //    requested.
-        wait_for_pids_dead(&pids, TERMINATE_CONFIRM_TIMEOUT).await;
+        // 3. Confirm death. Only an empty result means "nothing is
+        //    running" is actually true, not merely requested.
+        wait_for_targets_dead(&targets, TERMINATE_CONFIRM_TIMEOUT).await
     }
 
     /// Graceful first, then force, then record.
@@ -1231,11 +1234,20 @@ impl Supervisor {
         }
 
         // 1-2. Ask nicely, then terminate whatever is left.
-        self.stop_worker(&id, &session).await;
+        let survivors = self.stop_worker(&id, &session).await;
 
         // 3. Only once nothing is running: dispose of the worktree. A
         //    live process holding a file open inside it would make the
-        //    removal fail, and on Windows that is not advisory.
+        //    removal fail, and on Windows that is not advisory. With
+        //    survivors, a destructive disposition is refused and the
+        //    session left open (design review 4) -- a timeout used to be
+        //    treated as proof that nothing remained.
+        if !survivors.is_empty() && disposition.is_some() {
+            return Err(Error::conflict(format!(
+                "session {id}: process(es) {survivors:?} still running after termination; \
+                 the workspace was not disposed of"
+            )));
+        }
         self.dispose_workspace(&session, disposition).await?;
 
         // 4. Now, with no other possible writer, record the outcome.
@@ -1309,36 +1321,60 @@ impl Supervisor {
 /// Best-effort past `timeout`: a pid that is still alive at that point
 /// gets logged and this simply returns, rather than blocking
 /// `session_close` forever over one stuck process.
-async fn wait_for_pids_dead(pids: &[u32], timeout: Duration) {
-    if pids.is_empty() {
-        return;
+async fn wait_for_targets_dead(targets: &[WorkerRef], timeout: Duration) -> Vec<u32> {
+    if targets.is_empty() {
+        return Vec::new();
     }
     let start = Instant::now();
     let mut escalated = false;
     loop {
-        let still_alive: Vec<u32> = pids
+        // Still ours and still running. `is_same_process` is the
+        // optimistic check (an unverifiable pid counts as alive), so a
+        // survivor is never reported gone by mistake.
+        let still_alive: Vec<&WorkerRef> = targets
             .iter()
-            .copied()
-            .filter(|&pid| sessionmgr_proc::is_alive(pid).unwrap_or(false))
+            .filter(|t| {
+                sessionmgr_proc::is_same_process(t.pid, t.start_fingerprint.as_deref())
+                    .unwrap_or(true)
+            })
             .collect();
         if still_alive.is_empty() {
-            return;
+            return Vec::new();
         }
         let elapsed = start.elapsed();
         if elapsed >= timeout {
+            let pids: Vec<u32> = still_alive.iter().map(|t| t.pid).collect();
             eprintln!(
-                "sessionmgr daemon: pid(s) {still_alive:?} still running {timeout:?} after \
+                "sessionmgr daemon: pid(s) {pids:?} still running {timeout:?} after \
                  termination; giving up waiting for confirmed exit"
             );
-            return;
+            return pids;
         }
         if !escalated && elapsed >= timeout / 2 {
             escalated = true;
-            for &pid in &still_alive {
-                let _ = sessionmgr_proc::terminate(pid);
+            for target in &still_alive {
+                signal_if_ours(target);
             }
         }
         rusty_tokio::time::sleep(TERMINATE_POLL_INTERVAL).await;
+    }
+}
+
+/// Sends the cooperative terminate to `target` only if its recorded start
+/// fingerprint proves it is still the process that was recorded.
+fn signal_if_ours(target: &WorkerRef) {
+    let pid = target.pid;
+    if !sessionmgr_proc::is_verifiably_same_process(pid, target.start_fingerprint.as_deref()) {
+        if sessionmgr_proc::is_alive(pid).unwrap_or(false) {
+            eprintln!(
+                "sessionmgr daemon: not signalling pid {pid}: its identity cannot be verified \
+                 (the pid may have been reused)"
+            );
+        }
+        return;
+    }
+    if let Err(e) = sessionmgr_proc::terminate(pid) {
+        eprintln!("sessionmgr daemon: could not terminate pid {pid}: {e}");
     }
 }
 
@@ -1569,13 +1605,13 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_pids_dead_blocks_until_the_process_actually_exits() {
+    fn wait_for_targets_dead_blocks_until_the_process_actually_exits() {
         // Finding 24's trigger: `sessionmgr_proc::terminate` only
         // *sends* SIGTERM/`TerminateProcess` and returns immediately --
         // a caller that trusted that alone would let `session_close`
         // proceed to `dispose_workspace` while the process is still
         // alive and possibly still holding a file open in the worktree
-        // being removed. This proves `wait_for_pids_dead` actually
+        // being removed. This proves `wait_for_targets_dead` actually
         // blocks until the pid is confirmed gone, not merely asked to
         // go.
         let rt = rusty_tokio::Runtime::new().expect("runtime");
@@ -1613,11 +1649,59 @@ mod tests {
             // "slow to terminate" case, not an already-dead pid.
             assert!(sessionmgr_proc::is_alive(pid).unwrap_or(false));
 
-            wait_for_pids_dead(&[pid], TERMINATE_CONFIRM_TIMEOUT).await;
+            let target = WorkerRef {
+                pid,
+                start_fingerprint: sessionmgr_proc::start_fingerprint(pid).ok().flatten(),
+            };
+            let survivors = wait_for_targets_dead(&[target], TERMINATE_CONFIRM_TIMEOUT).await;
+            assert!(survivors.is_empty(), "{survivors:?}");
 
             // Only returns once the pid is confirmed gone.
             assert!(!sessionmgr_proc::is_alive(pid).unwrap_or(true));
 
+            let _ = child.wait();
+        });
+    }
+
+    /// Design review 4: teardown signalled recorded pids without checking
+    /// identity, so a reused pid could be killed.
+    /// - A live process whose fingerprint does not match the record is a
+    ///   *different* process: it is not signalled, and the recorded one
+    ///   counts as gone.
+    /// - A live process with no recorded fingerprint cannot be verified:
+    ///   it is not signalled either, and is reported as a survivor, so
+    ///   `session_close` refuses to dispose of the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn unverifiable_or_mismatched_pids_are_never_signalled() {
+        let rt = rusty_tokio::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut child = std::process::Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .expect("spawn an unrelated process");
+            let pid = child.id();
+            let reused = WorkerRef {
+                pid,
+                start_fingerprint: Some("a-process-that-exited-long-ago".to_owned()),
+            };
+            let unverifiable = WorkerRef {
+                pid,
+                start_fingerprint: None,
+            };
+            signal_if_ours(&reused);
+            signal_if_ours(&unverifiable);
+            let short = Duration::from_millis(300);
+            assert!(wait_for_targets_dead(&[reused], short).await.is_empty());
+            assert_eq!(
+                wait_for_targets_dead(&[unverifiable], short).await,
+                vec![pid]
+            );
+            assert!(
+                matches!(child.try_wait(), Ok(None)),
+                "the unrelated process lives"
+            );
+            let _ = child.kill();
             let _ = child.wait();
         });
     }

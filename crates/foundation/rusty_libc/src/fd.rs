@@ -75,6 +75,16 @@ pub const O_DIRECTORY: i32 = 0o200000;
 #[cfg(target_arch = "aarch64")]
 pub const O_DIRECTORY: i32 = 0o40000;
 
+/// Fail with `ELOOP` if the final path component is a symlink, instead of
+/// following it. Per-arch like [`O_DIRECTORY`]: `0o400000` on x86_64,
+/// `0o100000` on aarch64.
+#[cfg(target_arch = "x86_64")]
+pub const O_NOFOLLOW: i32 = 0o400000;
+/// Fail with `ELOOP` if the final path component is a symlink (aarch64
+/// value).
+#[cfg(target_arch = "aarch64")]
+pub const O_NOFOLLOW: i32 = 0o100000;
+
 /// Special `dirfd` for [`openat`] meaning "resolve relative paths against the
 /// current working directory" — i.e. behave like [`open`].
 pub const AT_FDCWD: i32 = -100;

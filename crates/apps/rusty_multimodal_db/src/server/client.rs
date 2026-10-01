@@ -744,9 +744,16 @@ impl Session<'_> {
         }
     }
 
-    /// Apply every staged write as one all-or-nothing batch and close the
-    /// session. `Ok(())` means every write is now visible to every
-    /// connection; [`ClientError::TransactionFailed`] means none is.
+    /// Apply every staged write in one batch and close the session.
+    ///
+    /// `Ok(())` means the batch was applied, not that every write was: a
+    /// session that staged record writes gets one outcome per op back, and
+    /// `commit` discards them. A write whose outcome was
+    /// `Duplicate`/`NotFound`/`GuardFailed` did not apply, while the ops
+    /// beside it did. Call [`Session::commit_results`] to see those
+    /// outcomes, or open the session with [`SessionOptions::strict_commit`]
+    /// (`ADR-0133`) so any of them fails the whole commit.
+    /// [`ClientError::TransactionFailed`] means nothing was written.
     pub fn commit(mut self) -> Result<(), ClientError> {
         self.open = false;
         match self.client.roundtrip(Request::Commit)? {
@@ -764,7 +771,9 @@ impl Session<'_> {
                 message,
             }),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
-            _ => Err(ClientError::UnexpectedResponse("Ok or TransactionFailed")),
+            _ => Err(ClientError::UnexpectedResponse(
+                "Ok, BatchResults or TransactionFailed",
+            )),
         }
     }
 
