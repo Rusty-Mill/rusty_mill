@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Spin in the car's own axes
+**2026-10-01** · `RB-VERIFY-003` 0.14.0
+
+- `--self-trace` now prints each car's spin as roll, pitch and yaw rates.
+  The capture's mid-flip response to a yaw input at 4.867 s could not be
+  read in world axes; keeping yaw air control on mid-flip (tried, reverted)
+  moved the simulated spin the wrong way. 436 tests.
+
 ## Wheels let go when the real ones do
 **2026-10-01** · `RB-PHYSICS-001-FR-092` · ADR-0019 amendment
 

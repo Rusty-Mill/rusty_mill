@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-trace` prints each car's spin in its own
+  `(forward, side, up)` frame (`RB-VERIFY-003` 0.14.0), to read a spin
+  change as roll, pitch or yaw.
 - `rb-verify --self-trace` prints each stream's orientation-implied spin
   (`q-rate`, `rb_verify_cli::rotation_rate`; `RB-VERIFY-003` 0.13.0).
 - ADR-0016: steer through per-wheel side impulses (supersedes ADR-0011).

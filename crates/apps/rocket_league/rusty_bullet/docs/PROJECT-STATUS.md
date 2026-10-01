@@ -85,7 +85,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-VERIFY-003` 0.14.0 (car-frame spin in `--self-trace`): implemented;
+  awaiting the owner's 4.8-5.0 s re-trace.
 
 ## Blocked
 
@@ -113,11 +114,17 @@ version: `a245d35`).
 ## Next
 
 1. Post-boost vertical divergence, now the earliest sizeable real-capture
-   error: trace `--self-trace <test2.jsonl> 4.9 5.6`. From the 4.94 s boost
-   the recorded car falls faster (vz -312 vs -260 uu/s at 5.575 s), so the
-   candidate lands ~6 ticks late. Smaller: ~3 uu/s lateral offset from the
-   4.142 s press tick's tire grip (recorded vy +2.9, candidate +0.1);
-   braking per wheel.
+   error. The 4.9-5.6 s trace showed the boost itself matches (~8.8 uu/s
+   per tick both); the recorded nose points ~0.1 rad lower, so it falls
+   ~1 uu/s per tick faster. That orientation gap starts at the 4.867 s
+   2-tick yaw input mid-flip: the recorded spin moves by (0.12, -0.01,
+   -0.10) and keeps drifting, the candidate ignores it. Keeping yaw air
+   control on mid-flip (tried as FR-093, reverted) moved the candidate the
+   wrong way (+0.05, 0, +0.03) and left 5-6 s growth slightly worse
+   (41.7 vs 40.5 uu). Next: `--self-trace <test2.jsonl> 4.8 5.0` with the
+   new car-frame spin column to see which car axis the recorded change is
+   about. Smaller: ~3 uu/s lateral offset from the 4.142 s press tick's
+   tire grip; braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -126,9 +133,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (435 tests: 27 `rb_domain`, 370
+- `cargo test --workspace`: pass (436 tests: 27 `rb_domain`, 370
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`
