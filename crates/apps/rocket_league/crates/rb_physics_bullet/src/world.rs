@@ -3748,4 +3748,47 @@ mod tests {
              ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
         );
     }
+
+    /// Regression for the real-capture trace (`RB-VERIFY-003-FR-005`,
+    /// `test2.jsonl`, t=3.433 s onward): a car driving on flat ground must
+    /// keep touching it every tick. Before `RB-PHYSICS-001-FR-079` the
+    /// solver's restitution threshold was Bullet's 0.2 m/s copied as
+    /// 0.2 uu/s, so every gravity touchdown bounced the car off the floor
+    /// and it counted as grounded only one tick in three: throttle applied a
+    /// third of the time, and a jump pressed on an "airborne" tick fired as
+    /// a dodge.
+    #[test]
+    fn a_car_driving_on_flat_ground_stays_grounded_every_tick() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                ..ControllerInput::default()
+            },
+        );
+        let dt = 1.0 / 120.0;
+        for tick in 0..36 {
+            world.step(dt);
+            let car = &world.cars[0];
+            assert!(
+                !collision::contacts_vs_plane(car, &world.ground).is_empty(),
+                "car left the ground on tick {tick}: z={}, vz={}",
+                car.position.z,
+                car.linear_velocity.z
+            );
+        }
+        // 0.3 s of full throttle from rest. Throttle with `drive`'s speed
+        // taper alone would give ~413 uu/s; this port reaches ~330 because
+        // the box also slides against floor friction (a real car rolls; a
+        // known car-model gap, ADR-0009). The hopping car reached ~69,
+        // grounded only 12 of these 36 ticks.
+        let speed = world.cars[0].linear_velocity.length();
+        assert!(
+            speed > 250.0,
+            "throttle should apply every tick; got {speed} uu/s after 0.3 s"
+        );
+    }
 }

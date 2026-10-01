@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.82.0
+- Version: 0.83.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5201,6 +5201,32 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   stays a plain state DTO plus general-purpose vector/quaternion algebra;
   `rb_physics_bullet` owns all rigid-body/solver-specific types.
 
+- `RB-PHYSICS-001-FR-079` (restitution threshold in uu, implemented,
+  verified): the real-capture trace (`RB-VERIFY-003-FR-005`, `test2.jsonl`)
+  showed a driving car hopping: grounded one tick in three, vz cycling
+  +5.4 / 0 / -5.4 uu/s, so throttle and boost applied a third of the time
+  and a jump pressed at t=4.133 s fired as a side dodge (velocity error
+  657 to 2,335 uu/s in one tick). Cause: `solver`'s
+  `RESTITUTION_VELOCITY_THRESHOLD` was Bullet's `0.2` copied verbatim,
+  but Bullet's value is in m/s and this port works in uu; RocketSim runs
+  Bullet at `BT_TO_UU = 50` uu per unit (`src/BulletLink.h`), so the
+  threshold is `0.2 * 50 = 10` uu/s. At 0.2 uu/s every gravity touchdown
+  (~5-11 uu/s per tick) bounced at restitution 0.5.
+  - **Change**: new `BULLET_TO_UU = 50.0` in `solver`, threshold now
+    `0.2 * BULLET_TO_UU`. The other solver/body/collision thresholds were
+    checked: the rest are dimensionless or already this port's own
+    uu-scale placeholders.
+  - **Verification**: new `world` test
+    `a_car_driving_on_flat_ground_stays_grounded_every_tick` (full
+    throttle on flat ground, 36 ticks at 120 Hz): before, airborne on 24
+    of 36 ticks and 69 uu/s after 0.3 s; after, grounded every tick and
+    330 uu/s. All 337 existing `rb_physics_bullet` tests unchanged.
+  - **Not fixed here**: the remaining gap to taper-only throttle (~413
+    uu/s) is floor friction on the sliding box (a real car rolls;
+    ADR-0009); and a car seeded from a recorded frame starts 2.3 uu inside
+    the floor, because a recorded position is the car origin (~z 17 at
+    rest), not the hitbox center (no hitbox offset is modeled).
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6682,6 +6708,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.83.0 (2026-10-01): `RB-PHYSICS-001-FR-079` — `solver`'s restitution
+  velocity threshold scaled from Bullet units to uu (0.2 to 10 uu/s),
+  ending the driving-car hop the real-capture trace exposed. 1 new
+  `world` regression test (338 in `rb_physics_bullet`).
 - 0.82.0 (2026-09-04): `RB-VERIFY-003-FR-004`'s divergence-growth
   diagnostic (referenced from `FR-005`'s own entry and `FR-077`'s
   Non-goals) is now implemented — `rb_domain::divergence::score_windows`

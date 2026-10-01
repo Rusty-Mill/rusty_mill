@@ -916,6 +916,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- A driving car hopped off the floor and counted as grounded only one
+  tick in three (`RB-PHYSICS-001-FR-079`): `solver`'s restitution
+  velocity threshold was Bullet's 0.2 m/s copied as 0.2 uu/s; now
+  `0.2 * BULLET_TO_UU` = 10 uu/s (RocketSim's `BT_TO_UU = 50`).
 - Broken markdown tables: 61 requirement rows (`RB-PHYSICS-001-FR-015`
   through `FR-075`) sat inside `TRACEABILITY.md`'s ADR table and are now
   back in the requirements table; unescaped `|` inside code spans (`||`,

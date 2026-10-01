@@ -77,16 +77,15 @@ version: `a245d35`).
 
 ## Next
 
-1. Run `rb-verify --self-trace <test2.jsonl path> 2.5 4.5` on the owner's
-   machine. FR-004's real run (see Validation) localized the derailment
-   to the car at ~3 s; the trace shows which input preceded it.
-   Leading hypothesis, from tracing the synthetic fixture: the seeded car
-   box (half-height 19.33) starts ~2.3 uu inside the floor, because a
-   recorded car position (~z 17 at rest) is the car origin, which rides
-   on wheels, and the port has no hitbox offset (RocketSim's
-   `hitboxPosOffset`). Pushed off the floor, the car briefly counts as
-   airborne, so a ground jump fires as a dodge. Confirm on real data
-   before changing the model (ADR-0009).
+1. Re-run `rb-verify --self-growth` and `--self-trace <test2.jsonl> 2.5
+   4.5` on the owner's machine to confirm `RB-PHYSICS-001-FR-079`. The
+   first trace (2026-10-01) showed the derailment: the car hopped while
+   driving (grounded one tick in three), so throttle under-applied and a
+   jump at t=4.133 s fired as a side dodge. FR-079 fixes the hop (a Bullet
+   m/s threshold copied as uu/s). Next gaps, in trace order: floor
+   friction on the sliding box (~20% less throttle acceleration), weak
+   steering (FR-065), and a 2.3 uu origin-vs-hitbox height offset that
+   leaves a car seeded mid-motion inside the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -95,7 +94,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (401 tests: 27 `rb_domain`, 337
+- `cargo test --workspace`: pass (402 tests: 27 `rb_domain`, 338
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
