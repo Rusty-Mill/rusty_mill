@@ -5340,7 +5340,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     cancel; stall; vertical damping window; a dodge starts a flip and
     landing clears it). The three dodge-spin tests now check the flip
     torque on the following tick. The 5 `drive` and 2 `world` tests for the
-    jump-press-again cancel are removed with the mechanic.
+    jump-press-again cancel are removed with the mechanic. Real capture
+    (owner's machine): the flip's vz stall is -15.5 uu/s, as recorded
+    (was falling to -211 uu/s by 5.0 s); orientation error at 5.0 s 1.41
+    rad (was 1.63).
   - **Not done here**: air-control magnitudes and damping
     (`CAR_AIR_CONTROL_TORQUE`/`DAMPING`, `CAR_TORQUE_SCALE`); auto-flip.
 

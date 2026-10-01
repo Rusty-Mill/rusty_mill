@@ -65,7 +65,8 @@ version: `a245d35`).
 ## In progress
 
 - `RB-PHYSICS-001-FR-083`, the flip as RocketSim has it (ADR-0014):
-  implemented and unit-tested; awaiting the owner's re-trace of 4.3-5.0 s.
+  verified on the real capture (flip vz stall -15.5 uu/s, as recorded); in
+  review.
 
 ## Blocked
 
@@ -92,10 +93,11 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.0` to confirm
-   `RB-PHYSICS-001-FR-083`: vz should stall near -15 uu/s from ~4.47 s
-   and orientation error should fall from ~1.6 rad. Then air-control
-   magnitudes and damping (`CAR_AIR_CONTROL_TORQUE`/`DAMPING`). Known small
+1. Air-control magnitudes and damping (`CAR_AIR_CONTROL_TORQUE`,
+   `CAR_AIR_CONTROL_DAMPING`, `CAR_TORQUE_SCALE`): the port's air torque
+   is still a placeholder, and orientation error grows 0.15 to ~1.4 rad
+   through 4.3-4.97 s, most likely from pre-flip roll/pitch spin carried
+   through the flip. Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -158,6 +160,13 @@ version: `a245d35`).
   1,902). With the zero-steer yaw fix: velocity error at 4.10 s 22 uu/s
   (was 96), at 4.30 s 38 uu/s (was 132); position error at most 6 uu
   through 3.7-4.3 s.
+- `rb-verify --self-trace test2.jsonl 4.3 5.0` after
+  `RB-PHYSICS-001-FR-083` (owner's machine, 2026-10-01): flip vz stall
+  -15.5 uu/s from 4.55 s, matching the recording (was falling to -211);
+  vz at 5.0 s -23 (recorded -4, was -211); position error at 5.0 s 79 uu;
+  orientation error at 5.0 s 1.41 rad (was 1.63). Damping starts one tick
+  early, likely because the trace's per-pair dt differs from RocketSim's
+  fixed 1/120.
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate
