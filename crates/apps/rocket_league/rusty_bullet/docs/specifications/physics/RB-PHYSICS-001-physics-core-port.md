@@ -5589,6 +5589,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - **Verification**: `drive` test
     `a_flips_torque_lasts_the_press_tick_plus_rocketsims_78_ticks`; the
     flip-start test now expects the clock at 0 after the press tick.
+  - **Real capture** (`--self-trace test2.jsonl 4.9 5.6`): spin drops at
+    4.983 s as recorded; height within 0.1 uu through the flip (was 1.9);
+    orientation error 0.04-0.05 rad through 5.5 s (was rising to 0.10).
 
 ## Architecture and interfaces
 
