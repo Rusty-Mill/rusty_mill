@@ -632,14 +632,15 @@ impl PhysicsWorld {
     pub fn step(&mut self, dt: f32) {
         // Ground contact for driving purposes is checked up front, against
         // each car's position at the start of this step (before gravity or
-        // driven forces move anything) — `static_contact_manifolds` below
-        // re-derives the same contacts for the actual solve; the small
-        // duplicated `contacts_vs_plane` call is simpler than threading
-        // the manifold through, and cheap (a handful of corner checks).
+        // driven forces move anything). Since RB-PHYSICS-001-FR-088 it's
+        // RocketSim's wheel-ray rule (three of four wheels reach the
+        // floor), not box contact: a car bouncing a few uu off the floor
+        // after a landing is still grounded, so a jump press there jumps
+        // instead of dodging.
         let car_on_ground: Vec<bool> = self
             .cars
             .iter()
-            .map(|car| !collision::contacts_vs_plane(car, &self.ground).is_empty())
+            .map(|car| drive::wheels_on_ground(car, &self.ground))
             .collect();
         // Same idea as car_on_ground, but for walls: the outward push-off
         // direction for a wall jump. Since `RB-PHYSICS-001-FR-039`, a car
@@ -1870,6 +1871,38 @@ mod tests {
             world.cars[0].position.z > start_z + 1.0,
             "expected jump input to lift the car off the ground, start={start_z}, end={}",
             world.cars[0].position.z
+        );
+    }
+
+    #[test]
+    fn a_jump_press_while_bouncing_just_off_the_floor_jumps_instead_of_dodging() {
+        // RB-PHYSICS-001-FR-088: the owner's capture at 5.758 s. The box
+        // hovers ~5 uu off the floor after a landing, but the wheel rays
+        // still reach it, so a press with the stick held sideways is a
+        // ground jump (straight up), not a side dodge.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z + 5.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                jump: true,
+                steer: 1.0,
+                yaw: Some(1.0),
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+
+        let velocity = world.cars[0].linear_velocity;
+        assert!(
+            (velocity.z - crate::drive::JUMP_SPEED).abs() < 50.0,
+            "expected a ground jump's ~JUMP_SPEED upward, got {velocity:?}"
+        );
+        assert!(
+            velocity.x.hypot(velocity.y) < 1.0,
+            "expected no dodge push sideways, got {velocity:?}"
         );
     }
 

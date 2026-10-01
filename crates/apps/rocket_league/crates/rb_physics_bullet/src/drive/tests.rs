@@ -3,7 +3,9 @@ use super::boost::*;
 use super::ground::*;
 use super::jump::*;
 use super::*;
+use crate::body::{StaticPlane, CAR_HALF_EXTENTS};
 use crate::integrate;
+use rb_domain::Quat;
 
 fn car() -> RigidBody {
     RigidBody::standard_car(Vec3::ZERO)
@@ -2771,4 +2773,44 @@ fn throttle_pushes_an_airborne_car_forward_gently() {
         THROTTLE_AIR_ACCELERATION * TICK,
         "air throttle",
     );
+}
+
+fn floor() -> StaticPlane {
+    StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
+}
+
+fn level_car_at_height(z: f32) -> RigidBody {
+    RigidBody::standard_car(Vec3::new(0.0, 0.0, z))
+}
+
+#[test]
+fn wheel_rays_ground_a_car_hovering_within_their_reach() {
+    // Front rays start 20.755 uu up and reach 48.755 uu, so a level car
+    // is grounded up to an origin height of 28 uu, box off the floor or not.
+    assert!(wheels_on_ground(
+        &level_car_at_height(CAR_HALF_EXTENTS.z),
+        &floor()
+    ));
+    assert!(wheels_on_ground(&level_car_at_height(27.9), &floor()));
+}
+
+#[test]
+fn wheel_rays_do_not_ground_a_car_just_beyond_their_reach() {
+    // At 28.5 uu only the two longer back rays (reach 28.8) still touch.
+    assert!(!wheels_on_ground(&level_car_at_height(28.5), &floor()));
+}
+
+#[test]
+fn wheel_rays_do_not_ground_a_car_lying_on_its_roof() {
+    let mut car = level_car_at_height(CAR_HALF_EXTENTS.z);
+    car.orientation = Quat::new(1.0, 0.0, 0.0, 0.0);
+    assert!(!wheels_on_ground(&car, &floor()));
+}
+
+#[test]
+fn wheel_rays_do_not_ground_a_car_on_its_side() {
+    let half = std::f32::consts::FRAC_1_SQRT_2;
+    let mut car = level_car_at_height(CAR_HALF_EXTENTS.y);
+    car.orientation = Quat::new(half, 0.0, 0.0, half);
+    assert!(!wheels_on_ground(&car, &floor()));
 }

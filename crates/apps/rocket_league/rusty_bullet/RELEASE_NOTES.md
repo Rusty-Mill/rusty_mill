@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Grounded on wheels, not the box
+**2026-10-01** · `RB-PHYSICS-001-FR-088` · ADR-0017
+
+- A car now counts as on the ground when three of its four wheel rays reach
+  the floor, as in RocketSim. Before, it took a box corner touching. At
+  5.758 s in the real capture, the candidate's box was bouncing 3 uu off
+  the floor, so a jump press fired a side dodge and velocity error jumped
+  from 430 to 1,248 uu/s. 424 tests.
+
 ## Flips turn as fast as the real ones
 **2026-10-01** · `RB-PHYSICS-001-FR-087` · `RB-VERIFY-003` 0.13.0
 
