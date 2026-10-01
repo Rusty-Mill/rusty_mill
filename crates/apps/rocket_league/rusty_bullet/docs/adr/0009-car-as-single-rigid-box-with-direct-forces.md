@@ -5,7 +5,8 @@
 - Deciders: baileyrd
 - Related: RB-PHYSICS-001-FR-007, FR-008, FR-009, FR-057, FR-063,
   FR-065, FR-066, FR-067, FR-005; ADR-0003, ADR-0004
-- Supersedes/Superseded by: steering partially superseded by ADR-0011
+- Supersedes/Superseded by: steering partially superseded by ADR-0011;
+  floor grip and handbrake partially superseded by ADR-0012
 
 ## Context
 

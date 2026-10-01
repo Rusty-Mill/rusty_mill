@@ -8,6 +8,17 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Tire grip: cars roll, grip sideways, and drift on the handbrake
+**2026-10-01** · `RB-PHYSICS-001-FR-081` · ADR-0012
+
+- A car's box no longer slides on the floor. Its contact there is
+  frictionless, and RocketSim's tire model grips instead: sideways by the
+  lateral friction curve, coast-braking at 525 uu/s², braking at
+  3500 uu/s² against opposing throttle. The handbrake ramps in and cuts
+  sideways grip to a tenth while keeping most forward grip. Targets the
+  real capture's velocity-direction lag and ~10% speed gap after FR-080.
+  10 net new tests (418 total).
+
 ## Steering from Rocket League's real steer-angle curve
 **2026-10-01** · `RB-PHYSICS-001-FR-080` · ADR-0011
 

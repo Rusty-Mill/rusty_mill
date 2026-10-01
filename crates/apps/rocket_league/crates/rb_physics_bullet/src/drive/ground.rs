@@ -1,15 +1,18 @@
-//! Ground driving: throttle (with its speed taper), steering, handbrake, and
-//! the ground jump's initial impulse. Every function here assumes the car
-//! is on the ground; `super::apply_driven_forces` does the gating.
+//! Ground driving: throttle (with its speed taper), steering, tire grip
+//! (with the handbrake), and the ground jump's initial impulse. Every
+//! function here assumes the car is on the ground;
+//! `super::apply_driven_forces` does the gating.
 
-use super::{up_axis, UNBOOSTED_MAX_CAR_SPEED};
-use crate::body::RigidBody;
+use super::{right_axis, up_axis, UNBOOSTED_MAX_CAR_SPEED};
+use crate::body::{RigidBody, Shape};
 use rb_domain::{ControllerInput, Vec3};
 
-/// Peak throttle acceleration (uu/s^2), at a standing start — still an
-/// uncalibrated placeholder pending calibration against recorded data
-/// (unlike the taper shape it's scaled by, see `drive_speed_taper` below,
-/// this magnitude itself has no confirmed real-world source). Since
+/// Peak throttle acceleration (uu/s^2), at a standing start. Long an
+/// uncalibrated placeholder, `RB-PHYSICS-001-FR-081` confirmed it against
+/// RocketSim's `btVehicleRL::calcFrictionImpulses`: each wheel's engine
+/// force (`THROTTLE_TORQUE_AMOUNT * UU_TO_BT = 1440`) becomes a `1440 *
+/// dt` impulse on the `180` mass car, `8` m/s^2 per wheel, `1600` uu/s^2
+/// over four wheels. Since
 /// `RB-PHYSICS-001-FR-058`, this is no longer applied flat: it's scaled by
 /// `drive_speed_taper`'s own real curve as speed rises, tapering smoothly
 /// to zero at `UNBOOSTED_MAX_CAR_SPEED` instead of applying at full
@@ -110,75 +113,189 @@ pub(super) const WHEELBASE: f32 = 51.25 + 33.75;
 /// `forward_speed` makes reversing turn the other way, and zero speed gives
 /// zero yaw (no turning in place). Tire slip is not modeled, so this is an
 /// upper bound on how fast the real car's heading turns (ADR-0011).
-pub(super) fn steer_yaw_rate(forward_speed: f32, steer: f32, handbrake: bool) -> f32 {
-    let max_angle = if handbrake {
-        curve(
-            &POWERSLIDE_STEER_ANGLE_FROM_SPEED_CURVE,
-            forward_speed.abs(),
-        )
-    } else {
-        curve(&STEER_ANGLE_FROM_SPEED_CURVE, forward_speed.abs())
-    };
+///
+/// `handbrake_amount` (`0..=1`, see `DriveState::handbrake_amount`) blends
+/// the steer angle toward the powerslide curve, as RocketSim's
+/// `Car::_UpdateWheels` does with its own `handbrakeVal`.
+pub(super) fn steer_yaw_rate(forward_speed: f32, steer: f32, handbrake_amount: f32) -> f32 {
+    let speed = forward_speed.abs();
+    let normal = curve(&STEER_ANGLE_FROM_SPEED_CURVE, speed);
+    let powerslide = curve(&POWERSLIDE_STEER_ANGLE_FROM_SPEED_CURVE, speed);
+    let max_angle = normal + (powerslide - normal) * handbrake_amount;
     forward_speed * (steer.clamp(-1.0, 1.0) * max_angle).tan() / WHEELBASE
 }
 
-/// Uncalibrated placeholder: while grounded and `handbrake` is held, the
-/// car's `RigidBody.friction` is multiplied by this factor before the
-/// ground-contact solver runs, sharply reducing grip so existing momentum
-/// carries the car into a slide instead of a clean turn. Chosen only to
-/// produce a visibly reduced (not zero) grip in tests, not derived from any
-/// measured or documented Rocket League value — this port has no per-wheel
-/// tire model to calibrate a real rear-grip-loss number against.
-///
-/// `RB-PHYSICS-001-FR-066` fetched RocketSim's real `Car.cpp`
-/// (`_UpdateWheels`, matching `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`/
-/// `FR-065`'s own real-implementation-file method) and found real Rocket
-/// League's own handbrake friction reduction is genuinely anisotropic, not
-/// a single uniform multiplier: two separate confirmed real curves,
-/// `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE` (`0.1` at every speed — this
-/// value's own coincidental exact match to this port's own `0.1` is
-/// striking but not a confirmation, see below) and
-/// `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE` (`0.5` at a standstill, `0.9` at
-/// and above 1 uu/s — effectively a near-constant, barely-reduced `0.9`
-/// for any real driving speed), are applied to lateral and longitudinal
-/// tire friction independently. Real Rocket League's handbrake drift
-/// keeps a car's forward/backward grip almost intact (`x0.9`) while
-/// cutting sideways grip to a tenth (`x0.1`) — this port's own single
-/// isotropic `RigidBody.friction` scalar, read identically by both of
-/// `solver::friction_directions`' own two tangent rows, has no way to
-/// apply a different factor to each direction without threading a second,
-/// direction-specific friction coefficient through every one of
-/// `solver.rs`'s several row-limit-computation call sites
-/// (`resolve_contacts`, `resolve_contacts_between`,
-/// `resolve_static_manifolds`, `resolve_dynamic_manifolds`,
-/// `resolve_manifolds`) — a substantially larger architecture change than
-/// this finding alone justifies, the same category
-/// `RB-PHYSICS-001-FR-063`/`FR-065` already established. `0.1`'s own
-/// coincidental match to the real lateral-only factor is exactly that: a
-/// coincidence, since this port's uniform `0.1` also (wrongly) crushes
-/// longitudinal grip to a tenth, where real Rocket League keeps it near
-/// `0.9` — this port's own handbrake understates real forward-momentum
-/// retention during a drift. Not adopted as a fix; left for a future,
-/// dedicated requirement.
-pub(super) const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
+/// Sideways tire grip by slip ratio: RocketSim's `LAT_FRICTION_CURVE`
+/// (`RLConst.h`). Full grip while rolling straight, a fifth of it when
+/// sliding fully sideways.
+pub(super) const LAT_FRICTION_CURVE: [(f32, f32); 2] = [(0.0, 1.0), (1.0, 0.2)];
 
-/// Throttle force, curve-based steering yaw rate, and handbrake friction for
-/// a grounded car. `base_friction` is the car's nominal friction; handbrake
-/// scales it down while held and this call restores it otherwise.
+/// Sideways grip factor at full handbrake: RocketSim's
+/// `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE`, a constant `0.1`.
+pub(super) const HANDBRAKE_LAT_FRICTION_FACTOR: f32 = 0.1;
+
+/// Forward/backward grip factor by slip ratio at full handbrake:
+/// RocketSim's `HANDBRAKE_LONG_FRICTION_FACTOR_CURVE`.
+pub(super) const HANDBRAKE_LONG_FRICTION_FACTOR_CURVE: [(f32, f32); 2] = [(0.0, 0.5), (1.0, 0.9)];
+
+/// RocketSim's `POWERSLIDE_RISE_RATE` and `POWERSLIDE_FALL_RATE` (1/s): how
+/// fast `DriveState::handbrake_amount` ramps toward `1` while the handbrake
+/// is held and back toward `0` once released.
+pub(super) const POWERSLIDE_RISE_RATE: f32 = 5.0;
+pub(super) const POWERSLIDE_FALL_RATE: f32 = 2.0;
+
+/// Ramps `handbrake_amount` one tick toward held (`1`) or released (`0`).
+pub(super) fn ramp_handbrake(handbrake_amount: f32, held: bool, dt: f32) -> f32 {
+    let rate = if held {
+        POWERSLIDE_RISE_RATE
+    } else {
+        -POWERSLIDE_FALL_RATE
+    };
+    (handbrake_amount + rate * dt).clamp(0.0, 1.0)
+}
+
+/// Lateral speed (uu/s) at or below which slip reads as zero — RocketSim's
+/// `_UpdateWheels` only computes a slip ratio above it.
+pub(super) const SLIP_LATERAL_SPEED_THRESHOLD: f32 = 5.0;
+
+/// Bullet's `resolveSingleBilateral` contact damping: each tick a wheel's
+/// side impulse cancels this share of its contact's lateral velocity.
+const SIDE_IMPULSE_DAMPING: f32 = 0.2;
+
+/// `btVehicleRL::calcFrictionImpulses`' `frictionScale`: RocketSim's
+/// `CAR_MASS_BT / 3`, multiplied into every wheel's friction impulse.
+const FRICTION_SCALE: f32 = 180.0 / 3.0;
+
+/// Octane wheel contact points in the car's local frame (uu): RocketSim
+/// `CarConfig.cpp` wheel x/y offsets, at the floor under this port's box.
+const WHEEL_CONTACTS: [(f32, f32); 4] = [
+    (51.25, 25.90),
+    (51.25, -25.90),
+    (-33.75, 29.50),
+    (-33.75, -29.50),
+];
+
+/// Full brake deceleration (uu/s^2). RocketSim's per-wheel brake
+/// (`BRAKE_TORQUE_AMOUNT * UU_TO_BT = 52.5`) times four wheels over
+/// `frictionScale`'s `CAR_MASS_BT / 3` gives `70` m/s^2, i.e. `3500` uu/s^2.
+pub(super) const BRAKE_DECELERATION: f32 = 3500.0;
+
+/// Share of `BRAKE_DECELERATION` applied while coasting: RocketSim's
+/// `COASTING_BRAKE_FACTOR` (`525` uu/s^2).
+pub(super) const COASTING_BRAKE_FACTOR: f32 = 0.15;
+
+/// Forward speed (uu/s) below which a coasting car brakes fully, and at or
+/// below which opposing throttle drives rather than brakes: RocketSim's
+/// `STOPPING_FORWARD_VEL`.
+pub(super) const STOPPING_FORWARD_SPEED: f32 = 25.0;
+
+/// Throttle magnitude below which RocketSim treats the car as coasting:
+/// `THROTTLE_DEADZONE`.
+pub(super) const THROTTLE_DEADZONE: f32 = 0.001;
+
+/// Slip ratio RocketSim's tire curves are looked up by: the lateral share
+/// of the contact speed, zero at or below `SLIP_LATERAL_SPEED_THRESHOLD`.
+pub(super) fn slip_ratio(forward_speed: f32, lateral_speed: f32) -> f32 {
+    let lateral = lateral_speed.abs();
+    if lateral <= SLIP_LATERAL_SPEED_THRESHOLD {
+        return 0.0;
+    }
+    lateral / (forward_speed.abs() + lateral)
+}
+
+/// Engine throttle and brake (`0..=1`) for one tick, per RocketSim's
+/// `Car::_UpdateWheels` pedal logic. Holding the handbrake passes throttle
+/// through with no brake. Otherwise, throttle against the car's motion
+/// above `STOPPING_FORWARD_SPEED` brakes fully and cuts the engine, and
+/// no throttle coasts: `COASTING_BRAKE_FACTOR`, or a full brake below
+/// `STOPPING_FORWARD_SPEED`.
+pub(super) fn pedals(throttle: f32, forward_speed: f32, handbrake: bool) -> (f32, f32) {
+    if handbrake {
+        return (throttle, 0.0);
+    }
+    if throttle.abs() < THROTTLE_DEADZONE {
+        let brake = if forward_speed.abs() < STOPPING_FORWARD_SPEED {
+            1.0
+        } else {
+            COASTING_BRAKE_FACTOR
+        };
+        return (0.0, brake);
+    }
+    if forward_speed.abs() > STOPPING_FORWARD_SPEED && throttle.signum() != forward_speed.signum() {
+        return (0.0, 1.0);
+    }
+    (throttle, 0.0)
+}
+
+/// Lateral and longitudinal tire grip factors at `slip`, with the
+/// handbrake's reductions blended in by `handbrake_amount` (`0..=1`).
+pub(super) fn tire_grip(slip: f32, handbrake_amount: f32) -> (f32, f32) {
+    let lateral = curve(&LAT_FRICTION_CURVE, slip)
+        * (1.0 + (HANDBRAKE_LAT_FRICTION_FACTOR - 1.0) * handbrake_amount);
+    let longitudinal =
+        1.0 + (curve(&HANDBRAKE_LONG_FRICTION_FACTOR_CURVE, slip) - 1.0) * handbrake_amount;
+    (lateral, longitudinal)
+}
+
+/// Rate (1/s) at which full-grip tires cancel the car's lateral velocity:
+/// the sum over the four wheels of RocketSim's side impulse
+/// (`SIDE_IMPULSE_DAMPING * rel_vel * jacDiagABInv`, scaled by
+/// `FRICTION_SCALE`) as a velocity change per unit lateral speed. Each
+/// wheel's `jacDiagABInv` is the car's effective mass along `right` at that
+/// wheel's contact point, here divided by the car's mass: `1` for a point
+/// at the centre of mass, less where the push also spins the car.
+pub(super) fn lateral_grip_rate(car: &RigidBody, right: Vec3) -> f32 {
+    let Shape::Box { half_extents } = car.shape else {
+        return 0.0;
+    };
+    let inv_inertia = car.inv_inertia_world();
+    WHEEL_CONTACTS
+        .iter()
+        .map(|&(x, y)| {
+            let offset = car.orientation.rotate(&Vec3::new(x, y, -half_extents.z));
+            let arm = offset.cross(&right);
+            let inv_effective_mass = car.inv_mass() + arm.dot(&inv_inertia.mul_vec3(&arm));
+            SIDE_IMPULSE_DAMPING * FRICTION_SCALE * car.inv_mass() / inv_effective_mass
+        })
+        .sum()
+}
+
+/// Throttle, curve-based steering yaw rate, and tire grip for a grounded
+/// car (`RB-PHYSICS-001-FR-081`, ADR-0012). `throttle` is the effective
+/// throttle (boosting forces it to `1`, as in RocketSim).
+///
+/// The car's box has no floor friction (see `PhysicsWorld`'s static
+/// manifolds); its tires grip instead, per axis as in RocketSim's
+/// `Car::_UpdateWheels` and `btVehicleRL::calcFrictionImpulses`:
+///
+/// - **Forward/backward**: the engine force, scaled by the longitudinal
+///   grip factor, and `pedals`' brake at `BRAKE_DECELERATION`, never
+///   reversing the car.
+/// - **Sideways**: `lateral_grip_rate` times `LAT_FRICTION_CURVE(slip)`
+///   of the lateral velocity is cancelled per second.
+///
+/// Both act on the centre of mass only: tire impulses add no torque here,
+/// since steering already sets the yaw rate directly (ADR-0011).
 pub(super) fn apply_ground_control(
     car: &mut RigidBody,
     input: &ControllerInput,
+    throttle: f32,
     forward: Vec3,
-    base_friction: f32,
+    handbrake_amount: f32,
+    dt: f32,
 ) {
+    let right = right_axis(car);
     let forward_speed = car.linear_velocity.dot(&forward);
-    let throttle = input.throttle.clamp(-1.0, 1.0);
-    if throttle != 0.0 {
-        let taper = drive_speed_taper(throttle.signum() * forward_speed);
+    let lateral_speed = car.linear_velocity.dot(&right);
+    let (lateral_grip, longitudinal_grip) =
+        tire_grip(slip_ratio(forward_speed, lateral_speed), handbrake_amount);
+    let (engine, brake) = pedals(throttle, forward_speed, input.handbrake);
+
+    if engine != 0.0 {
+        let taper = drive_speed_taper(engine.signum() * forward_speed);
         if taper > 0.0 {
-            car.apply_central_force(
-                forward * (throttle * THROTTLE_ACCELERATION * taper * car.mass()),
-            );
+            let acceleration = engine * THROTTLE_ACCELERATION * taper * longitudinal_grip;
+            car.apply_central_force(forward * (acceleration * car.mass()));
         }
     }
 
@@ -189,14 +306,14 @@ pub(super) fn apply_ground_control(
     let steer = input.steer.clamp(-1.0, 1.0);
     if steer != 0.0 {
         let up = up_axis(car);
-        let target = steer_yaw_rate(forward_speed, steer, input.handbrake);
+        let target = steer_yaw_rate(forward_speed, steer, handbrake_amount);
         let current = car.angular_velocity.dot(&up);
         car.angular_velocity += up * (target - current);
     }
 
-    car.friction = if input.handbrake {
-        base_friction * HANDBRAKE_FRICTION_MULTIPLIER
-    } else {
-        base_friction
-    };
+    let lateral_share = (lateral_grip_rate(car, right) * lateral_grip * dt).min(1.0);
+    car.linear_velocity -= right * (lateral_speed * lateral_share);
+
+    let speed_drop = (BRAKE_DECELERATION * brake * dt).min(forward_speed.abs());
+    car.linear_velocity -= forward * (forward_speed.signum() * speed_drop);
 }

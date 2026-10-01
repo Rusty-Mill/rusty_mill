@@ -5,8 +5,6 @@ use super::jump::*;
 use super::*;
 use crate::integrate;
 
-const DEFAULT_TEST_FRICTION: f32 = 0.5;
-
 fn car() -> RigidBody {
     RigidBody::standard_car(Vec3::ZERO)
 }
@@ -137,7 +135,7 @@ fn step_with_input_and_dodge_flip(
         double_jump_available: *double_jump_available,
         jump_hold_time_remaining: *jump_hold_time_remaining,
         dodge_flip_active: *dodge_flip_active,
-        base_friction: DEFAULT_TEST_FRICTION,
+        handbrake_amount: 0.0,
     };
     car.clear_forces();
     apply_driven_forces(car, input, on_ground, wall_normal, &mut state, dt);
@@ -220,10 +218,6 @@ fn neutral_input_applies_no_force_or_torque() {
     assert_eq!(c.linear_velocity, Vec3::ZERO);
     assert_eq!(c.angular_velocity, Vec3::ZERO);
     assert_eq!(boost, MAX_BOOST, "unused boost shouldn't drain");
-    assert_eq!(
-        c.friction, DEFAULT_TEST_FRICTION,
-        "no handbrake input shouldn't touch friction"
-    );
 }
 
 #[test]
@@ -474,13 +468,16 @@ fn boost_accelerates_an_airborne_car_faster_than_a_grounded_one() {
         1.0 / 60.0,
     );
 
+    // RB-PHYSICS-001-FR-081: grounded boost also forces full throttle (as
+    // in RocketSim), so take the engine's share out to compare boost alone.
+    let grounded_boost_only = grounded.linear_velocity.x - THROTTLE_ACCELERATION / 60.0;
     assert!(
-        airborne.linear_velocity.x > grounded.linear_velocity.x,
+        airborne.linear_velocity.x > grounded_boost_only,
         "expected airborne boost ({}) to accelerate faster than grounded boost ({})",
         airborne.linear_velocity.x,
-        grounded.linear_velocity.x
+        grounded_boost_only
     );
-    let ratio = airborne.linear_velocity.x / grounded.linear_velocity.x;
+    let ratio = airborne.linear_velocity.x / grounded_boost_only;
     let expected_ratio = BOOST_ACCELERATION_AIR / BOOST_ACCELERATION_GROUND;
     assert!(
         (ratio - expected_ratio).abs() < 1e-4,
@@ -525,49 +522,161 @@ fn boost_still_drains_at_max_speed_even_though_it_stops_accelerating() {
     );
 }
 
-#[test]
-fn handbrake_reduces_friction_while_grounded() {
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    step_with_input(&mut c, &full_handbrake(), true, &mut boost, 1.0 / 60.0);
-    assert_eq!(
-        c.friction,
-        DEFAULT_TEST_FRICTION * HANDBRAKE_FRICTION_MULTIPLIER,
-        "expected handbrake to reduce friction below its base value"
-    );
-}
+const TICK: f32 = 1.0 / 120.0;
 
-#[test]
-fn handbrake_has_no_effect_on_friction_while_airborne() {
+/// One grounded `apply_ground_control` tick on a car facing +X (right is
+/// +Y), with `throttle` as the effective throttle.
+fn ground_tick(velocity: Vec3, throttle: f32, handbrake_amount: f32) -> Vec3 {
     let mut c = car();
-    let mut boost = MAX_BOOST;
-    step_with_input(&mut c, &full_handbrake(), false, &mut boost, 1.0 / 60.0);
-    assert_eq!(
-        c.friction, DEFAULT_TEST_FRICTION,
-        "airborne handbrake shouldn't touch friction — no wheels to lock"
-    );
-}
-
-#[test]
-fn releasing_handbrake_restores_friction() {
-    let mut c = car();
-    let mut boost = MAX_BOOST;
-    step_with_input(&mut c, &full_handbrake(), true, &mut boost, 1.0 / 60.0);
-    assert!(
-        c.friction < DEFAULT_TEST_FRICTION,
-        "handbrake should have engaged"
-    );
-    step_with_input(
+    c.linear_velocity = velocity;
+    let input = ControllerInput {
+        throttle,
+        handbrake: handbrake_amount > 0.0,
+        ..Default::default()
+    };
+    apply_ground_control(
         &mut c,
-        &ControllerInput::default(),
-        true,
-        &mut boost,
-        1.0 / 60.0,
+        &input,
+        throttle,
+        Vec3::new(1.0, 0.0, 0.0),
+        handbrake_amount,
+        TICK,
     );
+    c.linear_velocity
+}
+
+fn assert_close(got: f32, expected: f32, what: &str) {
+    assert!(
+        (got - expected).abs() < 1e-3,
+        "{what}: got {got}, expected {expected}"
+    );
+}
+
+#[test]
+fn slip_ratio_is_zero_at_the_lateral_threshold_and_one_when_purely_sideways() {
+    assert_eq!(slip_ratio(1000.0, SLIP_LATERAL_SPEED_THRESHOLD), 0.0);
+    assert_eq!(slip_ratio(0.0, -300.0), 1.0);
+    assert_close(slip_ratio(-300.0, 100.0), 0.25, "mixed slip");
+}
+
+#[test]
+fn pedals_follow_rocketsims_throttle_and_brake_rules() {
+    assert_eq!(pedals(1.0, 1000.0, false), (1.0, 0.0), "driving");
     assert_eq!(
-        c.friction, DEFAULT_TEST_FRICTION,
-        "releasing handbrake should restore the car's base friction"
+        pedals(0.0, 1000.0, false),
+        (0.0, COASTING_BRAKE_FACTOR),
+        "coasting"
     );
+    assert_eq!(pedals(0.0, 20.0, false), (0.0, 1.0), "slow coast stops");
+    assert_eq!(pedals(-1.0, 1000.0, false), (0.0, 1.0), "reverse brakes");
+    assert_eq!(
+        pedals(-1.0, 20.0, false),
+        (-1.0, 0.0),
+        "slow reverse drives"
+    );
+    assert_eq!(pedals(0.0, 1000.0, true), (0.0, 0.0), "handbrake: no brake");
+    assert_eq!(
+        pedals(-1.0, 1000.0, true),
+        (-1.0, 0.0),
+        "handbrake: no brake"
+    );
+}
+
+#[test]
+fn tire_grip_follows_the_slip_curve_and_blends_in_the_handbrake() {
+    assert_eq!(tire_grip(0.0, 0.0), (1.0, 1.0));
+    assert_close(tire_grip(1.0, 0.0).0, 0.2, "full slide lateral");
+    let (lateral, longitudinal) = tire_grip(0.0, 1.0);
+    assert_close(lateral, HANDBRAKE_LAT_FRICTION_FACTOR, "handbrake lateral");
+    assert_close(longitudinal, 0.5, "handbrake longitudinal");
+    assert_close(tire_grip(0.0, 0.5).0, 0.55, "half handbrake lateral");
+}
+
+#[test]
+fn handbrake_ramps_up_at_the_rise_rate_and_down_at_the_fall_rate() {
+    assert_close(ramp_handbrake(0.0, true, TICK), 5.0 * TICK, "rise");
+    assert_eq!(ramp_handbrake(0.99, true, TICK), 1.0, "clamped at full");
+    assert_close(ramp_handbrake(1.0, false, TICK), 1.0 - 2.0 * TICK, "fall");
+    assert_eq!(ramp_handbrake(0.0, false, TICK), 0.0, "clamped at zero");
+}
+
+#[test]
+fn lateral_grip_rate_is_below_the_point_mass_bound_and_orientation_independent() {
+    let level = car();
+    let rate = lateral_grip_rate(&level, Vec3::new(0.0, 1.0, 0.0));
+    // Four wheels at 0.2 * 60 each if every push went through the centre
+    // of mass; spin at the contact points takes some of it.
+    assert!(rate > 0.0 && rate < 48.0, "rate {rate}");
+
+    let mut turned = car();
+    // 1 rad yaw about +Z.
+    turned.orientation = rb_domain::Quat::new(0.0, 0.0, 0.5_f32.sin(), 0.5_f32.cos());
+    turned.update_inertia_tensor();
+    let right = turned.orientation.rotate(&Vec3::new(0.0, 1.0, 0.0));
+    assert_close(lateral_grip_rate(&turned, right), rate, "turned car");
+}
+
+#[test]
+fn rolling_tires_cancel_lateral_velocity_at_the_grip_rate() {
+    // 4 uu/s sideways is at the slip threshold: full grip.
+    let rate = lateral_grip_rate(&car(), Vec3::new(0.0, 1.0, 0.0));
+    let v = ground_tick(Vec3::new(1000.0, 4.0, 0.0), 1.0, 0.0);
+    assert_close(v.y, 4.0 * (1.0 - rate * TICK), "lateral speed");
+}
+
+#[test]
+fn a_full_slide_keeps_more_lateral_speed_than_a_rolling_car() {
+    let rate = lateral_grip_rate(&car(), Vec3::new(0.0, 1.0, 0.0));
+    let v = ground_tick(Vec3::new(0.0, 500.0, 0.0), 1.0, 0.0);
+    assert_close(v.y, 500.0 * (1.0 - 0.2 * rate * TICK), "lateral speed");
+}
+
+#[test]
+fn a_coasting_car_decelerates_at_the_coasting_rate_both_ways() {
+    let coast = BRAKE_DECELERATION * COASTING_BRAKE_FACTOR * TICK;
+    let forward = ground_tick(Vec3::new(1000.0, 0.0, 0.0), 0.0, 0.0);
+    assert_close(forward.x, 1000.0 - coast, "forward coast");
+    let reverse = ground_tick(Vec3::new(-1000.0, 0.0, 0.0), 0.0, 0.0);
+    assert_close(reverse.x, -1000.0 + coast, "reverse coast");
+}
+
+#[test]
+fn opposing_throttle_brakes_at_full_brake_deceleration() {
+    let v = ground_tick(Vec3::new(1000.0, 0.0, 0.0), -1.0, 0.0);
+    assert_close(v.x, 1000.0 - BRAKE_DECELERATION * TICK, "braking");
+}
+
+#[test]
+fn a_slow_coasting_car_brakes_to_a_stop_without_reversing() {
+    let v = ground_tick(Vec3::new(20.0, 0.0, 0.0), 0.0, 0.0);
+    assert_eq!(v.x, 0.0);
+}
+
+#[test]
+fn a_handbraking_car_does_not_coast_brake() {
+    let v = ground_tick(Vec3::new(1000.0, 0.0, 0.0), 0.0, 1.0);
+    assert_eq!(v.x, 1000.0);
+}
+
+#[test]
+fn steer_yaw_rate_blends_halfway_at_half_handbrake() {
+    let normal = steer_yaw_rate(1000.0, 1.0, 0.0);
+    let powerslide = steer_yaw_rate(1000.0, 1.0, 1.0);
+    let half = steer_yaw_rate(1000.0, 1.0, 0.5);
+    assert!(
+        (half - normal).abs() < (powerslide - normal).abs(),
+        "half {half} should sit between {normal} and {powerslide}"
+    );
+    assert!((half - powerslide).abs() < (powerslide - normal).abs());
+}
+
+#[test]
+fn tire_grip_does_not_act_on_an_airborne_car() {
+    let mut c = car();
+    c.linear_velocity = Vec3::new(0.0, 500.0, 0.0);
+    let mut boost = MAX_BOOST;
+    step_with_input(&mut c, &full_handbrake(), false, &mut boost, 1.0 / 120.0);
+    assert_eq!(c.linear_velocity.y, 500.0);
 }
 
 #[test]
@@ -2779,7 +2888,7 @@ fn sustained_full_roll_input_never_exceeds_the_hard_angular_speed_cap() {
 
 #[test]
 fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
-    let state = DriveState::new(0.7);
+    let state = DriveState::new();
     assert_eq!(
         state,
         DriveState {
@@ -2788,7 +2897,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
             dodge_flip_active: false,
-            base_friction: 0.7,
+            handbrake_amount: 0.0,
         }
     );
 }
@@ -2796,10 +2905,9 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
 #[test]
 fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
     // One grounded step with jump + boost pressed: jump_held latches, the
-    // hold window arms, boost drains, and friction restores to base.
+    // hold window arms, and boost drains.
     let mut car = car();
-    car.friction = 0.0;
-    let mut state = DriveState::new(DEFAULT_TEST_FRICTION);
+    let mut state = DriveState::new();
     state.double_jump_available = false;
     let input = ControllerInput {
         jump: true,
@@ -2812,14 +2920,13 @@ fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
     assert!(state.double_jump_available);
     assert_eq!(state.jump_hold_time_remaining, JUMP_HOLD_MAX_DURATION);
     assert!(state.boost_amount < MAX_BOOST);
-    assert_eq!(car.friction, DEFAULT_TEST_FRICTION);
 }
 
 #[test]
 fn steer_yaw_rate_follows_the_bicycle_model_on_the_real_steer_curve() {
     // 500 uu/s sits exactly on a curve point (0.31930 rad).
     let expected = 500.0 * 0.31930_f32.tan() / WHEELBASE;
-    let got = steer_yaw_rate(500.0, 1.0, false);
+    let got = steer_yaw_rate(500.0, 1.0, 0.0);
     assert!(
         (got - expected).abs() < 1e-4,
         "got {got}, expected {expected}"
@@ -2832,9 +2939,9 @@ fn steer_yaw_rate_follows_the_bicycle_model_on_the_real_steer_curve() {
 
 #[test]
 fn steer_yaw_rate_is_zero_at_a_standstill_and_flips_in_reverse() {
-    assert_eq!(steer_yaw_rate(0.0, 1.0, false), 0.0);
-    let forward = steer_yaw_rate(500.0, 1.0, false);
-    let reverse = steer_yaw_rate(-500.0, 1.0, false);
+    assert_eq!(steer_yaw_rate(0.0, 1.0, 0.0), 0.0);
+    let forward = steer_yaw_rate(500.0, 1.0, 0.0);
+    let reverse = steer_yaw_rate(-500.0, 1.0, 0.0);
     assert!(forward > 0.0);
     assert!(
         (reverse + forward).abs() < 1e-6,
@@ -2846,8 +2953,8 @@ fn steer_yaw_rate_is_zero_at_a_standstill_and_flips_in_reverse() {
 fn steer_yaw_rate_uses_the_powerslide_curve_while_handbraking() {
     // At 2500 uu/s the powerslide curve (0.12610 rad) steers more than the
     // normal one (interpolated between 1750 and 3000, ~0.0547 rad).
-    let normal = steer_yaw_rate(2500.0, 1.0, false);
-    let powerslide = steer_yaw_rate(2500.0, 1.0, true);
+    let normal = steer_yaw_rate(2500.0, 1.0, 0.0);
+    let powerslide = steer_yaw_rate(2500.0, 1.0, 1.0);
     let expected = 2500.0 * 0.12610_f32.tan() / WHEELBASE;
     assert!((powerslide - expected).abs() < 1e-3);
     assert!(powerslide > normal);

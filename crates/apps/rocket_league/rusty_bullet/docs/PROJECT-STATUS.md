@@ -34,6 +34,14 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#172](https://github.com/baileyrd/rusty_bullet/pull/172) —
+  `RB-PHYSICS-001-FR-080`, curve-based steering (ADR-0011); real-capture
+  heading error at 4.0 s 0.46 to 0.06 rad.
+- [#171](https://github.com/baileyrd/rusty_bullet/pull/171) —
+  `RB-PHYSICS-001-FR-079`, restitution threshold in uu; ended the
+  driving-car hop.
+- [#170](https://github.com/baileyrd/rusty_bullet/pull/170) —
+  `RB-VERIFY-003-FR-005`, per-frame trace (`rb-verify --self-trace`).
 - [#165](https://github.com/baileyrd/rusty_bullet/pull/165) — per-car drive
   state grouped into `drive::DriveState`; refactor, no behavior change.
 - [#164](https://github.com/baileyrd/rusty_bullet/pull/164) — `drive.rs`
@@ -50,7 +58,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012): implemented and
+  unit-tested; awaiting the owner's real-capture re-trace.
 
 ## Blocked
 
@@ -79,12 +88,11 @@ version: `a245d35`).
 
 1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.3` and
    `--self-growth` on the owner's machine to confirm
-   `RB-PHYSICS-001-FR-080` (curve-based steering, ADR-0011): orientation
-   error at 4.0 s should fall from ~0.45 rad. Then per-axis tire friction
-   (FR-066: rolling instead of sliding forward, real lateral and handbrake
-   factors), which should close the ~10% speed gap. Later: the real
-   hitbox sits 20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu
-   above the floor at rest, while the port's box rests on the floor.
+   `RB-PHYSICS-001-FR-081` (tire grip, ADR-0012): the simulated velocity
+   direction at 4.0 s should approach the recorded ~72 deg (was ~53) and
+   speed the recorded ~1012 uu/s (was ~906). Later: the real hitbox sits
+   20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu above the
+   floor at rest, while the port's box rests on the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -93,7 +101,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (408 tests: 27 `rb_domain`, 344
+- `cargo test --workspace`: pass (418 tests: 27 `rb_domain`, 354
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
@@ -129,6 +137,11 @@ version: `a245d35`).
   it. `--self-trace 4.10 4.20`: the jump fires as a jump (sim vz 286 vs
   recorded 296), no sideways dodge; remaining error is heading (~0.45 rad)
   and ~10% speed.
+- `rb-verify --self-trace test2.jsonl 3.7 4.3` after
+  `RB-PHYSICS-001-FR-080` (owner's machine, 2026-10-01): orientation error
+  at 4.0 s 0.06 rad (was 0.46), at most 0.09 rad through 4.13 s; velocity
+  error at 4.10 s 364 uu/s (was 563); jump still correct (vz 286 vs 296).
+  Remaining: velocity direction ~53 deg vs 72 deg recorded, speed ~10% low.
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate
