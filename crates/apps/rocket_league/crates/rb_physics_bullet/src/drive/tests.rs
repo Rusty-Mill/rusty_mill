@@ -2814,3 +2814,69 @@ fn apply_driven_forces_updates_every_drive_state_field_it_owns() {
     assert!(state.boost_amount < MAX_BOOST);
     assert_eq!(car.friction, DEFAULT_TEST_FRICTION);
 }
+
+#[test]
+fn steer_yaw_rate_follows_the_bicycle_model_on_the_real_steer_curve() {
+    // 500 uu/s sits exactly on a curve point (0.31930 rad).
+    let expected = 500.0 * 0.31930_f32.tan() / WHEELBASE;
+    let got = steer_yaw_rate(500.0, 1.0, false);
+    assert!(
+        (got - expected).abs() < 1e-4,
+        "got {got}, expected {expected}"
+    );
+    assert!(
+        (expected - 1.95).abs() < 0.01,
+        "sanity: ~1.95 rad/s, got {expected}"
+    );
+}
+
+#[test]
+fn steer_yaw_rate_is_zero_at_a_standstill_and_flips_in_reverse() {
+    assert_eq!(steer_yaw_rate(0.0, 1.0, false), 0.0);
+    let forward = steer_yaw_rate(500.0, 1.0, false);
+    let reverse = steer_yaw_rate(-500.0, 1.0, false);
+    assert!(forward > 0.0);
+    assert!(
+        (reverse + forward).abs() < 1e-6,
+        "reverse should mirror forward"
+    );
+}
+
+#[test]
+fn steer_yaw_rate_uses_the_powerslide_curve_while_handbraking() {
+    // At 2500 uu/s the powerslide curve (0.12610 rad) steers more than the
+    // normal one (interpolated between 1750 and 3000, ~0.0547 rad).
+    let normal = steer_yaw_rate(2500.0, 1.0, false);
+    let powerslide = steer_yaw_rate(2500.0, 1.0, true);
+    let expected = 2500.0 * 0.12610_f32.tan() / WHEELBASE;
+    assert!((powerslide - expected).abs() < 1e-3);
+    assert!(powerslide > normal);
+}
+
+#[test]
+fn curve_clamps_outside_its_range_and_interpolates_inside() {
+    let points = [(0.0, 1.0), (10.0, 0.0)];
+    assert_eq!(curve(&points, -5.0), 1.0);
+    assert_eq!(curve(&points, 5.0), 0.5);
+    assert_eq!(curve(&points, 50.0), 0.0);
+    assert_eq!(curve(&[], 1.0), 0.0);
+}
+
+#[test]
+fn steer_does_not_yaw_an_airborne_car() {
+    let mut c = car();
+    let mut boost = MAX_BOOST;
+    c.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+    let input = ControllerInput {
+        steer: 1.0,
+        ..Default::default()
+    };
+    step_with_input(&mut c, &input, false, &mut boost, 1.0 / 60.0);
+    // Airborne, steer alone does nothing (yaw comes from `input.yaw` air
+    // control, which is unset here).
+    assert!(
+        c.angular_velocity.z.abs() < 1e-3,
+        "expected no yaw from steer while airborne, got {:?}",
+        c.angular_velocity
+    );
+}

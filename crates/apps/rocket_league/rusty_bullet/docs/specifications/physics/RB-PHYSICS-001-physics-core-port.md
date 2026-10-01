@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.83.0
+- Version: 0.84.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5227,6 +5227,27 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the floor, because a recorded position is the car origin (~z 17 at
     rest), not the hitbox center (no hitbox offset is modeled).
 
+- `RB-PHYSICS-001-FR-080` (curve-based steering, implemented, verified):
+  after FR-079 the real-capture trace showed steering as the dominant
+  error (recorded car turns at 3.742 s and 4.050 s, candidate barely does;
+  ~0.45-0.50 rad orientation error by 4.1 s). Replaces `STEER_TORQUE`
+  with a yaw rate set from RocketSim's real `STEER_ANGLE_FROM_SPEED_CURVE`
+  (`POWERSLIDE_STEER_ANGLE_FROM_SPEED_CURVE` while handbraking) through
+  the bicycle model over the Octane wheelbase (51.25 + 33.75 = 85 uu):
+  `yaw_rate = forward_speed * tan(steer * max_angle) / WHEELBASE`
+  (`drive::ground::steer_yaw_rate`, ADR-0011). Resolves FR-065's
+  wrong-shape finding.
+  - **Verification**: 5 new `drive` tests (bicycle-model value at 500 uu/s
+    ~1.95 rad/s; zero at a standstill and mirrored in reverse; powerslide
+    curve on handbrake; curve clamping; no yaw from steer while
+    airborne); 1 new `world` test (full-step turn rate within 10% of the
+    target). The existing steering tests pass unchanged. A shared
+    `ground::curve` now serves both the throttle taper and the steer
+    curves.
+  - **Not done here**: tire slip (heading turns at the geometric rate, an
+    upper bound) and per-axis tire friction including handbrake (FR-066),
+    planned next.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6708,6 +6729,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.84.0 (2026-10-01): `RB-PHYSICS-001-FR-080` — steering sets yaw rate
+  from the real steer-angle curves via the bicycle model (ADR-0011),
+  replacing `STEER_TORQUE`. 6 new tests (344 in `rb_physics_bullet`).
 - 0.83.0 (2026-10-01): `RB-PHYSICS-001-FR-079` — `solver`'s restitution
   velocity threshold scaled from Bullet units to uu (0.2 to 10 uu/s),
   ending the driving-car hop the real-capture trace exposed. 1 new

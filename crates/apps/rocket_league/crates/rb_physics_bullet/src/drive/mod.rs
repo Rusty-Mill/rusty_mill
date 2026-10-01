@@ -301,11 +301,11 @@
 //! opposing current motion, or any side dodge, growing stronger as current
 //! speed rises) matches RocketSim's own confirmed real ratios via
 //! `dodge_speed_scale` — the same "shape confirmed, magnitude not" split
-//! `THROTTLE_ACCELERATION` already has. `STEER_TORQUE` itself remains an
-//! uncalibrated placeholder, but since `RB-PHYSICS-001-FR-065` its own
-//! `speed_factor` scale-up is confirmed to have the wrong *shape*, not
-//! merely an uncalibrated magnitude — see that requirement's own entry and
-//! `STEER_TORQUE`'s own doc comment for the full finding.
+//! `THROTTLE_ACCELERATION` already has. Steering no longer uses a
+//! placeholder torque: since `RB-PHYSICS-001-FR-080` it sets the yaw rate
+//! from RocketSim's real steer-angle curves through a bicycle model over
+//! the Octane wheelbase (`ground::steer_yaw_rate`, ADR-0011), resolving
+//! the wrong-shape finding `RB-PHYSICS-001-FR-065` recorded.
 //! `HANDBRAKE_FRICTION_MULTIPLIER` itself likewise remains an uncalibrated
 //! placeholder, but since `RB-PHYSICS-001-FR-066` its own single uniform
 //! reduction is confirmed to have the wrong *shape* too — real Rocket
@@ -327,12 +327,12 @@
 //! `WALL_JUMP_HORIZONTAL_SPEED`'s own doc comment for the full finding.
 //! `AIR_CONTROL_TORQUE` itself (pitch's own magnitude) remains an
 //! uncalibrated placeholder too, but since `RB-PHYSICS-001-FR-068` its own
-//! per-axis *ratio* — unlike `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/
+//! per-axis *ratio* — unlike `HANDBRAKE_FRICTION_MULTIPLIER`/
 //! `WALL_JUMP_HORIZONTAL_SPEED`'s own confirmed-but-not-adopted findings —
 //! is confirmed and directly adopted: yaw and roll are scaled from pitch's
 //! own by RocketSim's own confirmed real ratios, since real air control
 //! turned out to be the same *kind* of direct per-axis torque mechanism
-//! this port already models, unlike those other three findings' own
+//! this port already models, unlike those other findings' own
 //! architecture mismatches — see that requirement's own entry and
 //! `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full finding.
 //! `DODGE_ANGULAR_SPEED` itself remains an uncalibrated placeholder too,
@@ -340,7 +340,7 @@
 //! is confirmed to be a continuous per-axis torque over a fixed 0.65s
 //! window, not this port's own single instantaneous shared kick — a
 //! confirmed-but-not-adopted finding in the same category as
-//! `STEER_TORQUE`/`HANDBRAKE_FRICTION_MULTIPLIER`/`WALL_JUMP_HORIZONTAL_SPEED`,
+//! `HANDBRAKE_FRICTION_MULTIPLIER`/`WALL_JUMP_HORIZONTAL_SPEED`,
 //! since adopting the real shape would mean new per-car elapsed-flip-time
 //! state, a substantially larger redesign `RB-PHYSICS-001-FR-059`'s own
 //! Non-goals already flagged as out of scope — see that requirement's own
@@ -380,6 +380,12 @@ mod jump;
 mod tests;
 
 pub use boost::MAX_BOOST;
+
+/// `ground::steer_yaw_rate`, exposed to sibling modules' tests only.
+#[cfg(test)]
+pub(crate) fn steer_yaw_rate_for_tests(forward_speed: f32, steer: f32, handbrake: bool) -> f32 {
+    ground::steer_yaw_rate(forward_speed, steer, handbrake)
+}
 pub use jump::{DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED};
 
 use crate::body::RigidBody;
@@ -390,12 +396,6 @@ use rb_domain::{ControllerInput, Vec3};
 /// during `RB-PHYSICS-001-FR-031`'s audit (`CAR_MAX_SPEED = 2300.f` in the
 /// RocketSim project's `RLConst.h`; matched independently by RLUtilities'
 /// `Car::v_max` and the RLBot community wiki's "Useful Game Values" page).
-/// Also used as the turning-torque scale-up reference in `speed_factor`
-/// below — an arbitrary normalization choice, not a claim that a car's
-/// actual turning grip caps out at boosted speed specifically.
-/// `RB-PHYSICS-001-FR-065` found `speed_factor`'s own scale-up *direction*
-/// against this reference doesn't match real Rocket League's own steering
-/// model at all — see `STEER_TORQUE`'s own doc comment for the finding.
 pub const MAX_CAR_SPEED: f32 = 2300.0;
 
 /// Hard cap (rad/s) on a car's angular speed, enforced by

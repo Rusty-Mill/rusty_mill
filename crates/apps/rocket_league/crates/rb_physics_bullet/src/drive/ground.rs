@@ -2,7 +2,7 @@
 //! the ground jump's initial impulse. Every function here assumes the car
 //! is on the ground; `super::apply_driven_forces` does the gating.
 
-use super::{up_axis, MAX_CAR_SPEED, UNBOOSTED_MAX_CAR_SPEED};
+use super::{up_axis, UNBOOSTED_MAX_CAR_SPEED};
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
 
@@ -51,66 +51,76 @@ pub(super) const DRIVE_SPEED_TAPER_BREAKPOINTS: [(f32, f32); 3] =
 /// against your own current motion tapers too) this requirement doesn't
 /// take on; see its own Non-goals.
 pub(super) fn drive_speed_taper(signed_speed_in_throttle_direction: f32) -> f32 {
-    let speed = signed_speed_in_throttle_direction.max(0.0);
-    let points = DRIVE_SPEED_TAPER_BREAKPOINTS;
-    if speed <= points[0].0 {
-        return points[0].1;
-    }
-    for window in points.windows(2) {
-        let (x0, y0) = window[0];
-        let (x1, y1) = window[1];
-        if speed <= x1 {
-            return y0 + (y1 - y0) * (speed - x0) / (x1 - x0);
-        }
-    }
-    points[points.len() - 1].1
+    curve(
+        &DRIVE_SPEED_TAPER_BREAKPOINTS,
+        signed_speed_in_throttle_direction.max(0.0),
+    )
 }
 
-/// Uncalibrated placeholder steering torque magnitude (about the car's
-/// local up axis, at full `steer` input and at/above `MAX_CAR_SPEED`) —
-/// chosen only so a full-lock turn is visibly responsive for this car's
-/// mass/inertia in tests, not derived from any measured or documented
-/// Rocket League value.
+/// Piecewise-linear lookup of `x` in `points` (sorted by x), clamped to the
+/// first and last values outside their range — the evaluation RocketSim's
+/// own `LinearPieceCurve` performs for every `RLConst.h` curve this module
+/// ports.
+pub(super) fn curve(points: &[(f32, f32)], x: f32) -> f32 {
+    let (Some(&(x_first, y_first)), Some(&(_, y_last))) = (points.first(), points.last()) else {
+        return 0.0;
+    };
+    if x <= x_first {
+        return y_first;
+    }
+    for window in points.windows(2) {
+        let ((x0, y0), (x1, y1)) = (window[0], window[1]);
+        if x <= x1 {
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+        }
+    }
+    y_last
+}
+
+/// Real Rocket League's maximum front-wheel steer angle (rad) by forward
+/// speed (uu/s): RocketSim's `STEER_ANGLE_FROM_SPEED_CURVE` (`RLConst.h`),
+/// tightest from a standstill and only gentle at speed.
+pub(super) const STEER_ANGLE_FROM_SPEED_CURVE: [(f32, f32); 6] = [
+    (0.0, 0.53356),
+    (500.0, 0.31930),
+    (1000.0, 0.18203),
+    (1500.0, 0.10570),
+    (1750.0, 0.08507),
+    (3000.0, 0.03454),
+];
+
+/// The same, while the handbrake is held (powersliding): RocketSim's
+/// `POWERSLIDE_STEER_ANGLE_FROM_SPEED_CURVE`.
+pub(super) const POWERSLIDE_STEER_ANGLE_FROM_SPEED_CURVE: [(f32, f32); 2] =
+    [(0.0, 0.39235), (2500.0, 0.12610)];
+
+/// Octane wheelbase (uu): front axle `+51.25` to rear axle `-33.75` along
+/// the car's local forward axis (RocketSim `CarConfig.cpp`,
+/// `CAR_CONFIG_OCTANE` wheel connection points).
+pub(super) const WHEELBASE: f32 = 51.25 + 33.75;
+
+/// Yaw rate (rad/s, about the car's up axis) a grounded car at
+/// `forward_speed` turns at with `steer` held — `RB-PHYSICS-001-FR-080`.
 ///
-/// `RB-PHYSICS-001-FR-065` fetched RocketSim's real `Car.cpp` (`_UpdateWheels`,
-/// matching `RB-PHYSICS-001-FR-058`/`FR-059`/`FR-064`'s own
-/// real-implementation-file method) and found real Rocket League's
-/// steering isn't a direct yaw-torque model at all: a wheel's *steer
-/// angle* (not a torque) is set from a confirmed real
-/// `STEER_ANGLE_FROM_SPEED_CURVE` (`RLConst.h`, radians), and that angled
-/// wheel's lateral tire friction — computed per-wheel by `btVehicleRL`, a
-/// custom extension of Bullet's own raycast vehicle system
-/// (`btDefaultVehicleRaycaster`), through a further confirmed
-/// `LAT_FRICTION_CURVE` slip-friction curve — is what actually turns the
-/// car. This port has no wheels, raycasting, or tire-slip model at all
-/// (the car is one rigid box), so this real mechanism can't be ported
-/// without a substantially larger architecture change, the same category
-/// `RB-PHYSICS-001-FR-063` already established for per-contact-pair-type
-/// restitution/friction.
-///
-/// One finding is still directly actionable even without that larger
-/// change: the confirmed real curve's own *shape* is the opposite of this
-/// port's own `speed_factor` below. Real Rocket League's maximum steering
-/// angle is highest at a standstill (`0.53356` rad ≈ 30.6° at 0 uu/s) and
-/// decreases sharply as speed rises (down to `0.03454` rad ≈ 2° at 3000
-/// uu/s) — a car can turn tightest from a stop, only gently at speed. This
-/// port's own `speed_factor` does the opposite: zero torque at a
-/// standstill, scaling *up* to full `STEER_TORQUE` at `MAX_CAR_SPEED`.
-/// Not adopted as a fix: unlike `RB-PHYSICS-001-FR-058`'s throttle taper
-/// or `FR-059`'s dodge scale (direct multipliers on a force/impulse this
-/// port already applies the same way real Rocket League does), the real
-/// curve maps speed to a *wheel angle*, which real Rocket League then
-/// feeds through nonlinear tire-slip friction (dependent on wheelbase
-/// geometry and friction curves this port doesn't model at all) to
-/// produce the actual turning force — there's no principled way to carry
-/// even the curve's normalized shape onto this port's own direct-torque
-/// model. Reversing `speed_factor`'s direction without that transfer
-/// function would substitute one unconfirmed guess for another, not adopt
-/// a confirmed real value — the same reasoning that kept
-/// `RB-PHYSICS-001-FR-057`'s `AIR_CONTROL_TORQUE` and `FR-059`'s
-/// `DODGE_SPEED` base magnitude as placeholders despite a real reference
-/// existing for each.
-pub(super) const STEER_TORQUE: f32 = 1_500_000.0;
+/// Real Rocket League steers by angling the front wheels (the steer-angle
+/// curves above) and letting per-wheel tire friction turn the car
+/// (`btVehicleRL`, `RB-PHYSICS-001-FR-065`). This port has no wheels, so it
+/// uses the kinematic bicycle model that geometry implies without slip:
+/// `yaw_rate = forward_speed * tan(steer_angle) / WHEELBASE`. Signed
+/// `forward_speed` makes reversing turn the other way, and zero speed gives
+/// zero yaw (no turning in place). Tire slip is not modeled, so this is an
+/// upper bound on how fast the real car's heading turns (ADR-0011).
+pub(super) fn steer_yaw_rate(forward_speed: f32, steer: f32, handbrake: bool) -> f32 {
+    let max_angle = if handbrake {
+        curve(
+            &POWERSLIDE_STEER_ANGLE_FROM_SPEED_CURVE,
+            forward_speed.abs(),
+        )
+    } else {
+        curve(&STEER_ANGLE_FROM_SPEED_CURVE, forward_speed.abs())
+    };
+    forward_speed * (steer.clamp(-1.0, 1.0) * max_angle).tan() / WHEELBASE
+}
 
 /// Uncalibrated placeholder: while grounded and `handbrake` is held, the
 /// car's `RigidBody.friction` is multiplied by this factor before the
@@ -152,7 +162,7 @@ pub(super) const STEER_TORQUE: f32 = 1_500_000.0;
 /// dedicated requirement.
 pub(super) const HANDBRAKE_FRICTION_MULTIPLIER: f32 = 0.1;
 
-/// Throttle force, speed-scaled steering torque, and handbrake friction for
+/// Throttle force, curve-based steering yaw rate, and handbrake friction for
 /// a grounded car. `base_friction` is the car's nominal friction; handbrake
 /// scales it down while held and this call restores it otherwise.
 pub(super) fn apply_ground_control(
@@ -172,19 +182,16 @@ pub(super) fn apply_ground_control(
         }
     }
 
+    // RB-PHYSICS-001-FR-080: steering sets the car's yaw rate about its
+    // own up axis directly (see `steer_yaw_rate`), replacing the old
+    // speed-scaled torque. With no steer input the yaw rate is left alone,
+    // so contacts and momentum still govern a car that isn't steering.
     let steer = input.steer.clamp(-1.0, 1.0);
     if steer != 0.0 {
-        // A stationary car can't carve a turn — scale the available
-        // torque by how fast it's already going, up to MAX_CAR_SPEED.
-        // RB-PHYSICS-001-FR-065: real Rocket League's own confirmed
-        // steering curve has this backwards — maximum turning ability
-        // is highest at a standstill and decreases with speed — but
-        // that curve doesn't transfer onto this port's own
-        // direct-torque model; see STEER_TORQUE's own doc comment.
-        let speed_factor = (car.linear_velocity.length() / MAX_CAR_SPEED).min(1.0);
-        if speed_factor > 0.0 {
-            car.apply_torque(up_axis(car) * (steer * STEER_TORQUE * speed_factor));
-        }
+        let up = up_axis(car);
+        let target = steer_yaw_rate(forward_speed, steer, input.handbrake);
+        let current = car.angular_velocity.dot(&up);
+        car.angular_velocity += up * (target - current);
     }
 
     car.friction = if input.handbrake {
