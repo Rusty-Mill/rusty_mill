@@ -18,12 +18,15 @@ pub struct Product {
     pub features: Option<String>,
     pub bin: String,
     pub mode: Mode,
+    /// Environment variables set for the run, from leading `KEY=value`s.
+    pub env: Vec<(String, String)>,
     pub args: Vec<String>,
 }
 
 /// Parses the product list: one product per line,
-/// `<package>[:<features>] <bin> <exit|idle> [args...]`.
-/// Blank lines and `#` comments are skipped.
+/// `<package>[:<features>] <bin> <exit|idle> [KEY=value...] [args...]`.
+/// Leading `KEY=value`s (an uppercase name) set the run's environment, as
+/// in a shell. Blank lines and `#` comments are skipped.
 pub fn parse(text: &str) -> Result<Vec<Product>, String> {
     text.lines()
         .enumerate()
@@ -54,13 +57,29 @@ fn parse_line(line: &str) -> Result<Product, String> {
         Some((package, features)) => (package, Some(features.to_owned())),
         None => (package, None),
     };
+    let mut fields = fields.peekable();
+    let mut env = Vec::new();
+    while let Some((key, value)) = fields.peek().and_then(|field| env_assignment(field)) {
+        env.push((key.to_owned(), value.to_owned()));
+        fields.next();
+    }
     Ok(Product {
         package: package.to_owned(),
         features,
         bin: bin.to_owned(),
         mode,
+        env,
         args: fields.map(str::to_owned).collect(),
     })
+}
+
+fn env_assignment(field: &str) -> Option<(&str, &str)> {
+    let (key, value) = field.split_once('=')?;
+    let is_name = !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    is_name.then_some((key, value))
 }
 
 #[cfg(test)]
@@ -80,6 +99,21 @@ mod tests {
         assert_eq!(products[1].features.as_deref(), Some("server,client"));
         assert_eq!(products[1].mode, Mode::Idle);
         assert!(products[1].args.is_empty());
+    }
+
+    #[test]
+    fn leading_assignments_are_env_and_later_ones_are_args() {
+        let product = parse("tick rusty_tick idle TOKEN=a=b DIR=x --flag KEY=arg\n")
+            .unwrap()
+            .remove(0);
+        let env = [
+            ("TOKEN".to_owned(), "a=b".to_owned()),
+            ("DIR".to_owned(), "x".to_owned()),
+        ];
+        assert_eq!(product.env, env);
+        assert_eq!(product.args, ["--flag", "KEY=arg"]);
+        // A lowercase name is an argument (e.g. awk's `var=value`).
+        assert_eq!(parse("t rawk exit fs=, x").unwrap()[0].args, ["fs=,", "x"]);
     }
 
     #[test]

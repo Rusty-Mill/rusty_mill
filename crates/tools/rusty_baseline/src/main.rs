@@ -96,7 +96,12 @@ fn baseline(options: &Options) -> Result<String, String> {
         eprintln!("rusty_baseline: measuring {}", product.bin);
         rows.push(measure_one(options, product, entry_point, &home));
     }
-    Ok(format!("{}\n{}", environment(), report::render(&rows)))
+    let floor = sys::floor();
+    Ok(format!(
+        "{}\n{}",
+        environment(floor),
+        report::render(&rows, floor)
+    ))
 }
 
 fn measure_one(options: &Options, product: &Product, entry_point: &Path, home: &Path) -> Row {
@@ -132,7 +137,7 @@ fn measure_one(options: &Options, product: &Product, entry_point: &Path, home: &
 }
 
 /// One line naming what the numbers were measured on.
-fn environment() -> String {
+fn environment(floor: Option<u64>) -> String {
     let probe = |program: &str, args: &[&str]| {
         Command::new(program)
             .args(args)
@@ -143,8 +148,14 @@ fn environment() -> String {
             .unwrap_or_else(|| "unknown".to_owned())
     };
     let cpus = std::thread::available_parallelism().map_or(0, usize::from);
+    let floor = floor.map_or_else(String::new, |bytes| {
+        format!(
+            " An exiting product's peak RSS cannot read below {:.1} MiB here: Linux counts the spawner's resident set at `exec` (measured on `true`). Servers' peaks are read from the live process, so have no floor.",
+            bytes as f64 / 1_048_576.0
+        )
+    });
     format!(
-        "{}-{}, {cpus} CPUs, {}, commit {}. Release profile; RSS in MiB, startup is the median of the timed runs.\n",
+        "{}-{}, {cpus} CPUs, {}, commit {}. Release profile; startup is the median of the timed runs.{floor}\n",
         std::env::consts::OS,
         std::env::consts::ARCH,
         probe("rustc", &["-V"]),

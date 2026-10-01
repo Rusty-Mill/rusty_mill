@@ -16,7 +16,7 @@ pub enum Run {
         peak_rss: Option<u64>,
         ended: Ended,
     },
-    /// An `idle`-mode product: RSS once settled, and its peak until killed.
+    /// An `idle`-mode product: RSS once settled, and its peak so far.
     Idle {
         idle_rss: Option<u64>,
         peak_rss: Option<u64>,
@@ -77,13 +77,18 @@ fn run_idle(
             product.bin
         ));
     }
-    let idle_rss = sys::current_rss(&child);
+    // Read before the kill: the process's own counters, no spawner floor.
+    let memory = sys::memory(&child);
     child
         .kill()
         .map_err(|error| format!("killing {}: {error}", product.bin))?;
-    let (_, peak_rss) = sys::wait_with_peak(&mut child)
+    child
+        .wait()
         .map_err(|error| format!("waiting for {}: {error}", product.bin))?;
-    Ok(Run::Idle { idle_rss, peak_rss })
+    Ok(Run::Idle {
+        idle_rss: memory.map(|memory| memory.current),
+        peak_rss: memory.map(|memory| memory.peak),
+    })
 }
 
 fn spawn(product: &Product, binary: &Path, home: &Path) -> Result<Child, String> {
@@ -97,6 +102,8 @@ fn spawn(product: &Product, binary: &Path, home: &Path) -> Result<Child, String>
     for variable in HOME_VARIABLES {
         command.env(variable, home);
     }
+    command.envs(product.env.iter().map(|(key, value)| (key, value)));
+    sys::reset_peak();
     command
         .spawn()
         .map_err(|error| format!("starting {}: {error}", binary.display()))

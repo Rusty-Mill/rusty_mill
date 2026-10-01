@@ -21,17 +21,18 @@ pub struct Row {
 
 const HEADER: &str = "| Product | Binary | Deps (workspace + external) | Clean build | Incremental | Startup | Idle RSS | Peak RSS | Notes |\n|---|--:|--:|--:|--:|--:|--:|--:|---|\n";
 
-/// The table, one row per product, in the order given.
-pub fn render(rows: &[Row]) -> String {
+/// The table, one row per product, in the order given. An exited
+/// product's peak at or below `floor` (see `sys::floor`) shows as `≤ floor`.
+pub fn render(rows: &[Row], floor: Option<u64>) -> String {
     let mut out = String::from(HEADER);
     for row in rows {
         // Writing to a `String` cannot fail.
-        let _ = writeln!(out, "{}", render_row(row));
+        let _ = writeln!(out, "{}", render_row(row, floor));
     }
     out
 }
 
-fn render_row(row: &Row) -> String {
+fn render_row(row: &Row, floor: Option<u64>) -> String {
     let mut notes = Vec::new();
     let deps = match &row.closure {
         Ok(closure) => format!("{} + {}", closure.workspace, closure.external),
@@ -51,7 +52,11 @@ fn render_row(row: &Row) -> String {
             if *ended != Ended::Exited(0) {
                 notes.push(format!("ended {ended:?}"));
             }
-            (millis(*startup), DASH.to_owned(), bytes(*peak_rss))
+            let peak = match (peak_rss, floor) {
+                (Some(peak), Some(floor)) if peak <= &floor => format!("≤ {}", bytes(Some(floor))),
+                _ => bytes(*peak_rss),
+            };
+            (millis(*startup), DASH.to_owned(), peak)
         }
         Ok(Run::Idle { idle_rss, peak_rss }) => {
             (DASH.to_owned(), bytes(*idle_rss), bytes(*peak_rss))
@@ -122,9 +127,11 @@ mod tests {
             }),
         };
         assert_eq!(
-            render_row(&row),
+            render_row(&row, None),
             "| `rush` | 3.0 MiB | 12 + 3 | 61.2 s | 2.0 s | 1.5 ms | — | 4.0 MiB | ended Exited(2) |"
         );
+        assert!(render_row(&row, Some(4 * 1_048_576)).contains("| ≤ 4.0 MiB |"));
+        assert!(render_row(&row, Some(3 * 1_048_576)).contains("| 4.0 MiB |"));
     }
 
     #[test]
@@ -140,7 +147,7 @@ mod tests {
             run: Err("not built".into()),
         };
         assert_eq!(
-            render_row(&row),
+            render_row(&row, None),
             "| `hub` | — | 1 + 0 | failed | — | — | — | — | build: no \\| linker |"
         );
     }
@@ -161,7 +168,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            render_row(&row),
+            render_row(&row, None),
             "| `ts-daemon` | 1.0 MiB | 4 + 0 | — | — | — | 2.0 MiB | — |  |"
         );
     }
