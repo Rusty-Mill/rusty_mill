@@ -58,9 +58,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012): implemented,
-  verified on the real capture (see Validation); zero-steer yaw fix
-  awaiting a re-trace.
+- `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012): implemented
+  and verified on the real capture (see Validation); in review.
 
 ## Blocked
 
@@ -87,11 +86,11 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.3` on the owner's
-   machine to confirm the zero-steer yaw fix: velocity error at
-   4.05-4.10 s should fall from ~46-97 uu/s. Then trace the airborne
-   stretch after the 4.142 s jump, where simulated horizontal velocity
-   stays flat while the recorded one turns. Later: the real hitbox sits
+1. Trace the next window where `--self-growth` error jumps (4.3-5.0 s;
+   the 4-5 s window is still 532 uu). Known small gap: for ~0.05 s after
+   the 4.142 s jump the recorded car's horizontal velocity keeps turning
+   (its wheels likely still touch via suspension) while the box leaves
+   the floor at once. Later: the real hitbox sits
    20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu above the
    floor at rest, while the port's box rests on the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -148,7 +147,9 @@ version: `a245d35`).
   4.0 s 9.9 uu/s (was ~250), simulated (325, 968) vs recorded (318, 961).
   `--self-growth`: 3-4 s window 2.8 uu / 0.03 rad / 5.7 uu/s (was 10 uu /
   67 uu/s); 4-5 s 532 uu / 1.15 rad / 1,574 uu/s (was 751 / 1.21 /
-  1,902).
+  1,902). With the zero-steer yaw fix: velocity error at 4.10 s 22 uu/s
+  (was 96), at 4.30 s 38 uu/s (was 132); position error at most 6 uu
+  through 3.7-4.3 s.
 - `rb-verify --self-trace` against the synthetic capture fixture
   (2026-10-01, `RB-VERIFY-003-FR-005`): runs end-to-end; shows a
   recorded ground jump (t=0.15 s) firing as a dodge in the candidate
