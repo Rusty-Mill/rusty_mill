@@ -219,11 +219,17 @@ impl ServerMetrics {
         self.latency_buckets[bucket].fetch_add(1, Ordering::Relaxed);
         self.latency_count.fetch_add(1, Ordering::Relaxed);
         let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-        self.latency_sum_micros
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sum| {
-                Some(sum.saturating_add(micros))
-            })
-            .ok();
+        // A compare-and-swap loop rather than `fetch_update`, deprecated in
+        // Rust 1.99 for a `try_update` newer than this crate's MSRV (1.89).
+        let mut sum = self.latency_sum_micros.load(Ordering::Relaxed);
+        while let Err(current) = self.latency_sum_micros.compare_exchange_weak(
+            sum,
+            sum.saturating_add(micros),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            sum = current;
+        }
     }
 
     /// `RLH-FR-004`: the histogram's text — cumulative `_bucket` lines
