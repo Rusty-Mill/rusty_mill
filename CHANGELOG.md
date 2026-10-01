@@ -28,6 +28,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_remind_me`'s hub applies each push through it.
 
 ### Changed
+- **Nexus's bundled shell is now the workspace's own `rush`; the vendored `nexus-rush` copy is removed** (about 3,000 lines). The copy had drifted behind rush. `nexus-terminal` launches the `rush` binary for sandboxed sessions (RFC 0002) and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell its own session leader, so rush's normal job control applies, where nexus-rush had switched it off. Nexus also drops nexus-rush's `rustyline` dependency for the shell (rush uses `rusty_lines`).
 - rush: an interactive shell no longer aliases 21 standard commands (`ls`, `git`, `ssh`, ...) to Rusty Mill tools that may not be installed; `ls` ran rustup's `rls` proxy wherever rustup was installed. The aliases are an opt-in block in `crates/apps/rush/examples/rushrc.example`.
 - **`rusty_multimodal_db`: documentation brought up to date** (README, AGENTS, WORKFLOW, architecture, specs, traceability, status, Python client README).
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).

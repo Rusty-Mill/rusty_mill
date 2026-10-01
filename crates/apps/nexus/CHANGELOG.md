@@ -8,6 +8,9 @@ lives in the git log and in `docs/0.1.2/audits/`.
 
 ## [Unreleased]
 
+### Changed
+- **The bundled shell is now the workspace's `rush` (`crates/apps/rush`); `nexus-rush` is removed** (RFC 0002). The vendored copy had drifted behind rush. `nexus-terminal` looks for a `rush` binary beside the executable instead of `nexus-rush`, and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell a session leader with the PTY as its controlling terminal, so rush's job control (`fg`, `bg`, Ctrl-Z) works, where nexus-rush had disabled it.
+
 ### Fixed
 - **Template substitution no longer panics on a short tag** (`nexus-templates`, design review 3.8).
   - `{{ab` sliced five bytes past a four-byte input and panicked; the escape check now uses `starts_with`.

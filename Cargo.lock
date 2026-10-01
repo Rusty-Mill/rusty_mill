@@ -9027,16 +9027,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nexus-rush"
-version = "0.1.0"
-dependencies = [
- "libc 0.2.189",
- "platform",
- "platform-linux",
- "rustyline",
-]
-
-[[package]]
 name = "nexus-security"
 version = "0.1.0"
 dependencies = [

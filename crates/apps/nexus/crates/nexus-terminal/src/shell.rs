@@ -52,7 +52,7 @@ impl ShellSpec {
     }
 }
 
-/// Locate the bundled `nexus-rush` shell binary, expected to sit beside the
+/// Locate the bundled `rush` shell binary, expected to sit beside the
 /// running executable — the same discovery shape as
 /// [`nexus_types::default_helper_path`] for `nexus-sandbox`. Returns `None`
 /// (so callers fall back to the system shell) when the binary can't be found,
@@ -61,18 +61,19 @@ impl ShellSpec {
 pub fn bundled_shell_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let name = if cfg!(windows) {
-        "nexus-rush.exe"
+        "rush.exe"
     } else {
-        "nexus-rush"
+        "rush"
     };
     let path = exe.with_file_name(name);
     path.exists().then_some(path)
 }
 
-/// Build a [`ShellSpec`] for the bundled `nexus-rush` shell, run interactively.
+/// Build a [`ShellSpec`] for the bundled `rush` shell, run interactively.
 /// `None` when the bundled binary isn't present (caller falls back to the
-/// detected system shell). The session layer sets `NEXUS_EMBEDDED_SHELL=1` so
-/// rush disables its job-control terminal hand-off inside the Nexus PTY.
+/// detected system shell). rush runs with its normal job control: the PTY
+/// spawn makes it a session leader with the PTY as its controlling terminal,
+/// as for any system shell.
 #[must_use]
 pub fn resolve_bundled_shell() -> Option<ShellSpec> {
     let program = bundled_shell_path()?;
