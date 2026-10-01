@@ -5569,6 +5569,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `air_control_shapes_a_diagonal_flip_as_the_real_capture_does` (held
     (4.40, 3.30), released (4.06, 3.72)); the dodge press-tick tests now
     include air control.
+  - **Real capture** (`--self-trace test2.jsonl 4.8 5.6`): car-frame spin
+    within 0.04 rad/s of the recording through the flip; orientation error
+    0.03-0.04 rad through 4.97 s (was 0.12-0.13); `--self-growth` 5-6 s
+    19 uu (was 41).
 
 ## Architecture and interfaces
 

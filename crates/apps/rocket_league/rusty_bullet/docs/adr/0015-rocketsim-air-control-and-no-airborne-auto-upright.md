@@ -82,3 +82,7 @@ Decision: in the air, air control always acts; a flip only locks its pitch
 torque (`apply_flip_torque` returns the pitch scale, `0` while flipping and
 through `FLIP_PITCHLOCK_EXTRA_TIME`). This is the path RocketSim already
 takes for a flip cancel.
+
+Real capture, 2026-10-01: confirmed. The candidate's car-frame spin tracks
+the recording within 0.04 rad/s through the flip; orientation error at 4.9 s
+0.13 to 0.04 rad; 5-6 s growth 41 to 19 uu.

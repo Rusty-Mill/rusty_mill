@@ -85,8 +85,7 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-093` (air control stays on during a flip, ADR-0015
-  amendment): implemented; awaiting the owner's re-trace.
+- None.
 
 ## Blocked
 
@@ -113,13 +112,14 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <test2.jsonl> 4.8 5.6` and
-   `--self-growth` to confirm `RB-PHYSICS-001-FR-093`: the candidate's
-   car-frame spin should read ~(4.40, 3.30) while roll is held and ~(4.06,
-   3.72) after 4.867 s, as recorded (4.42, 3.27 / 4.10, 3.66), and the
-   post-boost vertical gap (vz -254 recorded vs -206 at 5.5 s) should
-   shrink. Smaller: ~3 uu/s lateral offset from the 4.142 s press tick's
-   tire grip; braking per wheel.
+1. Flip end timing, now the earliest real-capture error: the recorded
+   flip torque still acts at 4.975 s (spin 5.44, clamped) and stops at
+   4.983 s; the candidate's stops one tick earlier, and orientation error
+   steps 0.04 to 0.06 rad there, growing to ~0.10 by 5.3 s. That leaves the
+   boost tilted: velocity error 9 to 35 uu/s over 4.94-5.57 s (recorded vz
+   -311 vs -288 at 5.567 s). Then the 5.575 s landing (candidate's contact
+   one tick later), the ~3 uu/s lateral offset from the 4.142 s press
+   tick's tire grip, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -177,6 +177,12 @@ version: `a245d35`).
   over 4.19-4.3 s (was 13). Growth 4-5 s 2.7 uu / 8.5 uu/s (was 5.1 / 15),
   5-6 s 41 uu / 147 uu/s (was 54 / 170), ball 15 uu (was 25), 7-8 s 853 uu
   (was 1251).
+- Same, after `RB-PHYSICS-001-FR-093` (air control during a flip),
+  2026-10-01: car-frame flip spin (4.40, 3.30) with roll held and (4.08,
+  3.69) after, recorded (4.42, 3.27) / (4.11, 3.66); orientation error
+  0.03-0.04 rad through 4.97 s (was 0.12-0.13), velocity error at 5.5 s 32
+  uu/s (was 71). Growth 4-5 s 2.7 uu / 0.02 rad, 5-6 s 19 uu / 0.12 rad /
+  71 uu/s (was 41 / 0.26 / 147), ball 5-6 s 8.9 uu (was 15).
 - `cargo run -p rb_verify_cli --bin rb-verify -- --self test2.jsonl`
   (manual, owner's machine, 2026-09-04, default 0.02s timestamp
   tolerance, `RB-PHYSICS-001-FR-077`'s own real-capture run): `frames
