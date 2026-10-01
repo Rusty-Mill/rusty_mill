@@ -72,10 +72,9 @@
 //! `pitch`/`roll` stick input at the moment of the press: if either exceeds
 //! `DODGE_DEADZONE`, a dodge fires instead — a purely horizontal
 //! `DODGE_SPEED` impulse (along `forward_axis` for pitch, `right_axis` for
-//! roll) plus an instantaneous `DODGE_ANGULAR_SPEED` spin about the
-//! perpendicular axis (`right_axis` for pitch, `forward_axis` for roll),
-//! with RocketSim's signs: stick forward (pitch -1) dodges forward and
-//! noses down, like a fast air-control pitch (`RB-PHYSICS-001-FR-082`). Since `RB-PHYSICS-001-FR-073`, the roll axis's own
+//! roll), followed by a flip (see **Flip** below), with RocketSim's signs:
+//! stick forward (pitch -1) dodges forward and noses down
+//! (`RB-PHYSICS-001-FR-082`). Since `RB-PHYSICS-001-FR-073`, the roll axis's own
 //! stick value also includes `yaw` input (`roll + yaw`, each clamped to
 //! `[-1.0, 1.0]` individually first) — matching RocketSim's own confirmed
 //! `dodgeDir = (-pitch, yaw + roll, 0)`, so a yaw-only press (no roll held)
@@ -105,19 +104,12 @@
 //! ratios and `dodge_pitch_is_backward`'s for the backward classification.
 //! A dodge is purely horizontal (no vertical component, unlike the plain double
 //! jump) — real Rocket League's dodge impulse does have a small upward
-//! component too, not modeled here. Since `RB-PHYSICS-001-FR-069`, real
-//! Rocket League's own dodge spin is confirmed to be a continuous torque
-//! applied every step for `FLIP_TORQUE_TIME` (0.65s) with no decay, not
-//! this port's own single instantaneous `DODGE_ANGULAR_SPEED` kick, and
-//! the real torque also genuinely differs between pitch and roll — see
-//! `DODGE_ANGULAR_SPEED`'s own doc comment for the full finding and why
-//! it isn't adopted. Below `DODGE_DEADZONE` on both axes,
+//! component too, not modeled here. Below `DODGE_DEADZONE` on both axes,
 //! the plain vertical double jump fires exactly as before dodge existed.
 //! Either way, the press still spends the one `double_jump_available` per
 //! airborne period — a dodge and a plain double jump share the same
-//! resource, matching real Rocket League. A dodge also leaves a per-car
-//! `dodge_flip_active` flag set, spent by **flip-cancel** below; a plain
-//! double jump explicitly clears it instead (there's no flip to cancel).
+//! resource, matching real Rocket League. A dodge also starts a per-car
+//! `DriveState::flip`.
 //!
 //! Wall jump is a *third* jump variant, alongside the ground jump and the
 //! double jump: a fresh press while airborne *and* touching an arena wall
@@ -150,9 +142,7 @@
 //! outward-plus-upward impulse fires exactly as before this existed. At or
 //! above it, a **wall-jump dodge** fires instead: the same
 //! outward-plus-upward push combined with a horizontal `DODGE_SPEED`
-//! impulse and `DODGE_ANGULAR_SPEED` spin (identical axis/sign conventions
-//! to the ground dodge), leaving a cancelable flip behind
-//! (`dodge_flip_active`) just like a ground dodge does. Unlike the plain
+//! impulse and the same flip as a ground dodge. Unlike the plain
 //! wall jump, a wall-jump dodge *does* consume `double_jump_available` —
 //! the same resource a ground dodge spends — a deliberate simplification:
 //! this port has no way to separately account for "a wall touch refilled
@@ -185,46 +175,19 @@
 //! per car via `jump_hold_time_remaining`, the same kind of caller-owned
 //! persisted state `jump_held`/`double_jump_available` already are.
 //!
-//! A dodge's spin can be canceled early — **flip-cancel** — by pressing
-//! jump again before landing or wall contact: a fresh press while airborne,
-//! not touching a wall, `double_jump_available` already spent (so this
-//! isn't a wall jump or another double jump/dodge), and `dodge_flip_active`
-//! still set, zeroes `RigidBody.angular_velocity` outright and clears
-//! `dodge_flip_active` — stopping the flip immediately. This applies
-//! equally to a wall-jump dodge's spin, since it also consumes
-//! `double_jump_available` and sets `dodge_flip_active` exactly like a
-//! ground dodge does. It doesn't touch linear velocity (the dodge's own
-//! translation is unaffected) and doesn't consume or restore
-//! `double_jump_available` (already spent by the dodge that set the flag).
-//! This port has no timed flip animation to interrupt (a dodge is one
-//! instantaneous angular-velocity kick, not a sustained torque over a fixed
-//! duration — see above), so "mid-flip" here means "any time before
-//! landing or a wall touch re-arms the double jump," a documented
-//! simplification of real Rocket League's actual flip-duration window.
-//! `RB-PHYSICS-001-FR-070` fetched RocketSim's real `Car.cpp` and found real
-//! Rocket League's own flip-cancel is a substantially different mechanism
-//! from this jump-press trigger and outright zeroing: it's driven by
-//! *holding pitch* (not pressing jump again) in the same direction as the
-//! dodge's own pitch-torque component, continuously, every tick, for as
-//! long as `isFlipping` holds — `pitchScale = 1 - abs(controls.pitch)`
-//! scales down (not zeros, unless pitch is fully held) only the flip's
-//! *pitch-axis* torque component, leaving any roll-axis component
-//! untouched; a sideways (roll-only) dodge has no pitch-torque component at
-//! all and so can't be canceled by pitch input in real Rocket League at
-//! all, unlike this port's own jump-press cancel, which zeros every axis
-//! uniformly regardless of dodge direction. Not adopted: this port's dodge
-//! is a single flat angular-velocity kick with no per-axis torque split to
-//! partially cancel (`RB-PHYSICS-001-FR-069` already confirmed this same
-//! architecture gap for the dodge's own spin), and real flip-cancel's input
-//! channel (a continuously-held stick) is a different trigger shape than
-//! this port's discrete jump-press-again gate — reproducing it would need
-//! the same continuous per-axis torque and elapsed-flip-time state
-//! `RB-PHYSICS-001-FR-059`'s own Non-goals already flagged as out of scope.
-//! Wall jump keeps priority over flip-cancel on a fresh press while
-//! touching a wall, unchanged. A plain double jump explicitly clears
-//! `dodge_flip_active` rather than leaving it alone, so a stale flag from
-//! an earlier dodge (long since landed from) can't make a *later*,
-//! unrelated plain double jump's next press incorrectly fire a flip-cancel.
+//! **Flip** (`RB-PHYSICS-001-FR-083`, ported from RocketSim's
+//! `_UpdateAirTorque` and `_UpdateDoubleJumpOrFlip`): a dodge records its
+//! direction and starts a flip clock (`DriveState::flip`). From the next
+//! tick until `FLIP_TORQUE_TIME` (0.65 s) the flip spins the car at
+//! `FLIP_TORQUE_FORWARD`/`FLIP_TORQUE_SIDE` (nose down for forward, right
+//! side down for right), air control is off, and from 0.15 s the car's fall
+//! is damped (`FLIP_Z_DAMP_*`). Holding pitch against the flip's forward
+//! direction scales its pitch spin down by the stick amount and frees air
+//! control: the flip cancel. A side flip has no pitch spin to cancel. Air
+//! control's pitch stays locked until `FLIP_PITCHLOCK_EXTRA_TIME` after the
+//! torque ends. Landing clears the flip. This replaces the port's earlier
+//! instant spin kick and its jump-press-again cancel, which Rocket League
+//! does not have (FR-069, FR-070).
 //!
 //! **Landing auto-orientation assistance**: while airborne, with no active
 //! `pitch`/`roll` air control input this step and no fresh jump press this
@@ -323,7 +286,8 @@
 //! this port already models, unlike those other findings' own
 //! architecture mismatches — see that requirement's own entry and
 //! `AIR_CONTROL_YAW_SCALE`'s own doc comment for the full finding.
-//! `DODGE_ANGULAR_SPEED` itself remains an uncalibrated placeholder too,
+//! (Historical, before `RB-PHYSICS-001-FR-083` replaced it with the real
+//! flip torque:) `DODGE_ANGULAR_SPEED` remained an uncalibrated placeholder too,
 //! but since `RB-PHYSICS-001-FR-069` real Rocket League's own dodge spin
 //! is confirmed to be a continuous per-axis torque over a fixed 0.65s
 //! window, not this port's own single instantaneous shared kick — a
@@ -378,7 +342,7 @@ pub(crate) fn steer_yaw_rate_for_tests(
 ) -> f32 {
     ground::steer_yaw_rate(forward_speed, steer, handbrake_amount)
 }
-pub use jump::{DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED};
+pub use jump::{FlipState, DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED};
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -400,13 +364,8 @@ pub const MAX_CAR_SPEED: f32 = 2300.0;
 /// audit: `CAR_MAX_ANG_SPEED = 5.5f, // Car can never exceed this angular
 /// velocity (radians/s)`.
 ///
-/// Coincidentally equal to this port's own pre-existing
-/// `DODGE_ANGULAR_SPEED` placeholder further below — chosen independently,
-/// before this cap existed, only to look visibly fast in tests, not
-/// derived from this same real value (see that constant's own doc
-/// comment). The two serve different purposes (an instantaneous kick
-/// magnitude vs. a continuous hard ceiling on the result); nothing here
-/// depends on them staying numerically equal.
+/// A flip's torque (`jump::FLIP_TORQUE_*`, `RB-PHYSICS-001-FR-083`)
+/// reaches this cap within a few ticks, as in RocketSim.
 ///
 /// Only covers this port's own driven-forces sources (continuous air
 /// control torque integrated this step, plus any single-step direct
@@ -498,13 +457,10 @@ pub struct DriveState {
     /// decrementing it at a `JUMP_PRE_MIN_ACCEL_SCALE`-scaled acceleration.
     /// Untouched by the double jump, a dodge, or the wall jump.
     pub jump_hold_time_remaining: f32,
-    /// Whether the car's most recent double-jump-or-dodge press was a dodge
-    /// whose spin hasn't been canceled or superseded yet. A dodge sets it,
-    /// a plain double jump clears it (so a stale `true` can't leak into a
-    /// later unrelated double jump), and a further fresh airborne press
-    /// with no wall contact and no double jump left spends it to cancel the
-    /// flip — see the module doc comment's flip-cancel paragraph.
-    pub dodge_flip_active: bool,
+    /// The dodge flip since the last dodge press, until landing
+    /// (`RB-PHYSICS-001-FR-083`): drives the flip torque, vertical damping,
+    /// and air-control lock. `None` on the ground and before any dodge.
+    pub flip: Option<FlipState>,
     /// How engaged the handbrake is, `0.0..=1.0`: ramps up while held and
     /// down once released (`ground::POWERSLIDE_RISE_RATE`/`FALL_RATE`),
     /// scaling the tire grip reduction and the powerslide steer blend.
@@ -519,7 +475,7 @@ impl DriveState {
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
-            dodge_flip_active: false,
+            flip: None,
             handbrake_amount: 0.0,
         }
     }
@@ -583,6 +539,7 @@ pub fn apply_driven_forces(
         // Landing (or simply resting) always restores the double jump,
         // regardless of this step's input.
         state.double_jump_available = true;
+        state.flip = None;
         // RocketSim treats a boosting car as full throttle for its pedals.
         let throttle = if input.boost && state.boost_amount > 0.0 {
             1.0
@@ -600,7 +557,12 @@ pub fn apply_driven_forces(
             // rule landing uses — regardless of whether jump is pressed.
             state.double_jump_available = true;
         }
-        air::apply_air_control(car, input, forward, jump_pressed);
+        // RocketSim's order: flip torque and air control from the flip as
+        // it stood, then the jump press, then the flip clock and damping.
+        let gate = jump::apply_flip_torque(car, input, state.flip);
+        if gate.enabled {
+            air::apply_air_control(car, input, forward, jump_pressed, gate.pitch_scale);
+        }
         if jump_pressed {
             jump::airborne_jump_press(
                 car,
@@ -608,9 +570,10 @@ pub fn apply_driven_forces(
                 forward,
                 wall_normal,
                 &mut state.double_jump_available,
-                &mut state.dodge_flip_active,
+                &mut state.flip,
             );
         }
+        jump::advance_flip(car, &mut state.flip, dt);
     }
 
     boost::apply_boost(

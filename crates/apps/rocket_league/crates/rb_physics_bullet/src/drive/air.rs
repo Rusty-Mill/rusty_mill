@@ -94,6 +94,7 @@ pub(super) fn apply_air_control(
     input: &ControllerInput,
     forward: Vec3,
     jump_pressed: bool,
+    pitch_scale: f32,
 ) {
     // Unlike ground steering, not scaled by speed — a car can spin from a
     // standing start in the air, since there's no wheel grip to require
@@ -101,8 +102,9 @@ pub(super) fn apply_air_control(
     let pitch = input.pitch.unwrap_or(0.0).clamp(-1.0, 1.0);
     if pitch != 0.0 {
         // RocketSim's `dirPitch_right = -GetRightDir()`: positive pitch
-        // raises the nose (RB-PHYSICS-001-FR-082).
-        car.apply_torque(right_axis(car) * (-pitch * AIR_CONTROL_TORQUE));
+        // raises the nose (RB-PHYSICS-001-FR-082). `pitch_scale` is zero
+        // while a flip locks pitch (RB-PHYSICS-001-FR-083).
+        car.apply_torque(right_axis(car) * (-pitch * pitch_scale * AIR_CONTROL_TORQUE));
     }
 
     let yaw = input.yaw.unwrap_or(0.0).clamp(-1.0, 1.0);

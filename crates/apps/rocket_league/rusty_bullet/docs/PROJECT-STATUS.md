@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#174](https://github.com/baileyrd/rusty_bullet/pull/174) —
+  `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
+  (ADR-0013); real-capture position error at 5.0 s 1,590 to 79 uu.
 - [#173](https://github.com/baileyrd/rusty_bullet/pull/173) —
   `RB-PHYSICS-001-FR-081`, per-axis tire grip (ADR-0012); real-capture
   velocity error at 4.0 s ~250 to 9.9 uu/s.
@@ -61,9 +64,8 @@ version: `a245d35`).
 
 ## In progress
 
-- `RB-PHYSICS-001-FR-082`, RocketSim stick signs and dodge impulse
-  (ADR-0013): verified on the real capture (position error at 5.0 s 1,590
-  to 79 uu); ground-plane push fix awaiting a re-trace.
+- `RB-PHYSICS-001-FR-083`, the flip as RocketSim has it (ADR-0014):
+  implemented and unit-tested; awaiting the owner's re-trace of 4.3-5.0 s.
 
 ## Blocked
 
@@ -90,10 +92,10 @@ version: `a245d35`).
 
 ## Next
 
-1. Flip vertical damping (`FLIP_Z_DAMP_*`: recorded vz falls 211 to
-   ~-15 uu/s from ~0.15 s after the 4.317 s dodge and stalls there) and
-   the continuous flip torque (FR-069; orientation error grows to ~1.6 rad
-   through the flip). Known small
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.3 5.0` to confirm
+   `RB-PHYSICS-001-FR-083`: vz should stall near -15 uu/s from ~4.47 s
+   and orientation error should fall from ~1.6 rad. Then air-control
+   magnitudes and damping (`CAR_AIR_CONTROL_TORQUE`/`DAMPING`). Known small
    gap: for ~0.05 s after the 4.142 s jump the recorded car's horizontal
    velocity keeps turning (wheels likely still touch via suspension).
    Later: the real hitbox sits
@@ -107,7 +109,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (422 tests: 27 `rb_domain`, 358
+- `cargo test --workspace`: pass (421 tests: 27 `rb_domain`, 357
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

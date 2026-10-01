@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.86.0
+- Version: 0.87.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5314,7 +5314,35 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     League's signs with the same intent. The backward-dodge test includes
     the 16/15 scale.
   - **Not done here**: flip vertical damping (`FLIP_Z_DAMP_*`), the
-    continuous flip torque (FR-069), flip pitch lock.
+    continuous flip torque (FR-069), flip pitch lock. Done in FR-083.
+
+- `RB-PHYSICS-001-FR-083` (flip as RocketSim has it, implemented,
+  verified): after FR-082 the real trace matched the 4.317 s dodge
+  impulse, but the recorded vz stalled at about -15 uu/s from ~0.15 s
+  after it while the candidate kept falling, and orientation error grew to
+  ~1.6 rad through the flip. The port's instant `DODGE_ANGULAR_SPEED` kick
+  and jump-press-again cancel (FR-069 and FR-070's deferred findings) are
+  replaced by RocketSim's flip:
+  - `DriveState::flip: Option<FlipState>` records time and direction;
+  - `jump::apply_flip_torque` applies `FLIP_TORQUE_FORWARD` 224 and
+    `FLIP_TORQUE_SIDE` 260 per 120 Hz tick while `time < 0.65 s`, turns
+    air control off, and handles the pitch-stick cancel (`1 - |pitch|` on
+    the pitch torque, air control back on);
+  - air-control pitch is locked until 0.95 s;
+  - `jump::advance_flip` damps vz by 0.35 per tick from 0.15 s while
+    falling, or before 0.21 s;
+  - the torque starts the tick after the press, as in RocketSim;
+  - landing clears the flip.
+
+  ADR-0014.
+  - **Verification**: 6 new `drive` tests (torque and air-control gate
+    while flipping; torque end and pitch-lock release; pitch-stick
+    cancel; stall; vertical damping window; a dodge starts a flip and
+    landing clears it). The three dodge-spin tests now check the flip
+    torque on the following tick. The 5 `drive` and 2 `world` tests for the
+    jump-press-again cancel are removed with the mechanic.
+  - **Not done here**: air-control magnitudes and damping
+    (`CAR_AIR_CONTROL_TORQUE`/`DAMPING`, `CAR_TORQUE_SCALE`); auto-flip.
 
 ## Architecture and interfaces
 
@@ -6797,6 +6825,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.87.0 (2026-10-01): `RB-PHYSICS-001-FR-083` — a dodge's flip as
+  RocketSim's timed torque with vertical damping, pitch lock and
+  pitch-stick cancel (ADR-0014); the instant spin kick and jump-press
+  cancel are removed. 357 tests in `rb_physics_bullet`.
 - 0.86.0 (2026-10-01): `RB-PHYSICS-001-FR-082` — dodge and air-control
   pitch/roll read in RocketSim's sign convention; `DODGE_SPEED` 500 and the
   16/15 backward scale, ground-plane push (ADR-0013). 3 new tests (358 in
