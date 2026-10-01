@@ -3,8 +3,9 @@
 //! function here assumes the car is on the ground;
 //! `super::apply_driven_forces` does the gating.
 
+use super::wheels::{WheelContacts, WHEELS, WHEEL_RAY_START_Z};
 use super::{forward_axis, right_axis, up_axis, UNBOOSTED_MAX_CAR_SPEED};
-use crate::body::{RigidBody, Shape, StaticPlane};
+use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
 
 /// Peak throttle acceleration (uu/s^2), at a standing start. Long an
@@ -155,58 +156,6 @@ const SIDE_IMPULSE_DAMPING: f32 = 0.2;
 /// `CAR_MASS_BT / 3`, multiplied into every wheel's friction impulse.
 const FRICTION_SCALE: f32 = 180.0 / 3.0;
 
-/// Octane wheels in the car's local frame (uu): RocketSim `CarConfig.cpp`
-/// x/y offsets, and whether the wheel steers. Contacts sit at the floor
-/// under this port's box.
-const WHEELS: [(f32, f32, bool); 4] = [
-    (FRONT_AXLE_X, 25.90, true),
-    (FRONT_AXLE_X, -25.90, true),
-    (REAR_AXLE_X, 29.50, false),
-    (REAR_AXLE_X, -29.50, false),
-];
-
-/// Height of the Octane's wheel ray starts above the car origin (uu),
-/// RocketSim `CarConfig.cpp`'s `connectionPointOffset.z`.
-const WHEEL_RAY_START_Z: f32 = 20.755;
-
-/// Wheel ray reach (uu): RocketSim's `btVehicleRL::rayCast` length,
-/// `(restLength - MAX_SUSPENSION_TRAVEL) + MAX_SUSPENSION_TRAVEL + radius -
-/// SUSPENSION_SUBTRACTION`, i.e. `restLength + radius - 2.5`. Front: rest
-/// `38.755`, radius `12.5`; back: rest `37.055`, radius `15`.
-const FRONT_WHEEL_RAY_LENGTH: f32 = 38.755 + 12.5 - 2.5;
-const BACK_WHEEL_RAY_LENGTH: f32 = 37.055 + 15.0 - 2.5;
-
-/// Wheels whose ray must reach a surface for the car to count as on the
-/// ground: RocketSim `Car.cpp`'s `numWheelsInContact >= 3`.
-const MIN_WHEELS_FOR_GROUND: usize = 3;
-
-/// Whether `car` is on the ground (`RB-PHYSICS-001-FR-088`): at least three
-/// of its four wheel rays, cast straight down the car's own axis from
-/// RocketSim's Octane connection points, reach `plane` from its front side.
-/// Unlike box-corner contact, this holds while the box hovers on its
-/// suspension or bounces a few uu off the floor, as the real wheels do.
-pub fn wheels_on_ground(car: &RigidBody, plane: &StaticPlane) -> bool {
-    let down = car.orientation.rotate(&Vec3::new(0.0, 0.0, -1.0));
-    let approach = -plane.normal.dot(&down);
-    if approach <= 0.0 {
-        return false;
-    }
-    let touching = WHEELS
-        .iter()
-        .filter(|&&(x, y, front)| {
-            let start = car.position + car.orientation.rotate(&Vec3::new(x, y, WHEEL_RAY_START_Z));
-            let height = plane.signed_distance(&start);
-            let reach = if front {
-                FRONT_WHEEL_RAY_LENGTH
-            } else {
-                BACK_WHEEL_RAY_LENGTH
-            };
-            height >= 0.0 && height <= reach * approach
-        })
-        .count();
-    touching >= MIN_WHEELS_FOR_GROUND
-}
-
 /// Full brake deceleration (uu/s^2). RocketSim's per-wheel brake
 /// (`BRAKE_TORQUE_AMOUNT * UU_TO_BT = 52.5`) times four wheels over
 /// `frictionScale`'s `CAR_MASS_BT / 3` gives `70` m/s^2, i.e. `3500` uu/s^2.
@@ -269,31 +218,32 @@ pub(super) fn tire_grip(slip: f32, handbrake_amount: f32) -> (f32, f32) {
     (lateral, longitudinal)
 }
 
-/// Each wheel's impulse for one tick, RocketSim's
-/// `btVehicleRL::calcFrictionImpulses`. The side impulse
-/// (`RB-PHYSICS-001-FR-086`) acts along the
-/// wheel's axle (the front wheels turned by `steer_angle`), cancelling
-/// `SIDE_IMPULSE_DAMPING` of the contact point's sideways velocity through
-/// the car's effective mass there (`jacDiagABInv`), scaled by the tire's
-/// lateral grip and `FRICTION_SCALE * dt`. The slip ratio each wheel's grip
-/// is looked up by uses that wheel's own contact velocity, so a yawing car's
-/// rear wheels slip and resist the yaw. Each wheel also carries a quarter of
-/// `engine_acceleration` along its own heading (`RB-PHYSICS-001-FR-089`), so
-/// the steered front wheels' push turns the car as well. Returns
-/// `(impulse, point)` pairs,
-/// all computed from the same pre-impulse state as RocketSim does, with the
-/// point flattened onto the car's floor plane (RocketSim's
-/// `applyFrictionImpulses`), so the impulses yaw the car without rolling it.
+/// Each touching wheel's impulse for one tick, RocketSim's
+/// `btVehicleRL::calcFrictionImpulses`; a wheel with no contact gives none.
+///
+/// - **Side** (`RB-PHYSICS-001-FR-086`): along the wheel's axle (the front
+///   wheels turned by `steer_angle`), projected onto the contact surface,
+///   cancelling `SIDE_IMPULSE_DAMPING` of the contact point's sideways
+///   velocity through the car's effective mass there (`jacDiagABInv`),
+///   scaled by the tire's lateral grip and `FRICTION_SCALE * dt`. The grip's
+///   slip ratio uses the wheel's hard-point velocity (`Car::_UpdateWheels`),
+///   so a yawing car's rear wheels slip and resist the yaw.
+/// - **Engine** (`RB-PHYSICS-001-FR-089`): a quarter of
+///   `engine_acceleration` along the wheel's heading, so the steered front
+///   wheels' push turns the car as well.
+///
+/// Returns `(impulse, point)` pairs, all from the same pre-impulse state as
+/// RocketSim, with the ray's contact point (`RB-PHYSICS-001-FR-090`)
+/// flattened onto the plane through the car origin (`applyFrictionImpulses`),
+/// so the impulses yaw the car without rolling it.
 fn wheel_impulses(
     car: &RigidBody,
+    contacts: &WheelContacts,
     steer: f32,
     handbrake_amount: f32,
     engine_acceleration: f32,
     dt: f32,
 ) -> Vec<(Vec3, Vec3)> {
-    let Shape::Box { half_extents } = car.shape else {
-        return Vec::new();
-    };
     let forward = forward_axis(car);
     let right = right_axis(car);
     let up = up_axis(car);
@@ -301,28 +251,38 @@ fn wheel_impulses(
     let front_angle = steer_angle(car.linear_velocity.dot(&forward), steer, handbrake_amount);
     WHEELS
         .iter()
-        .map(|&(x, y, steers)| {
+        .zip(contacts)
+        .filter_map(|(&(x, y, steers), contact)| {
+            let contact = contact.as_ref()?;
             let angle = if steers { front_angle } else { 0.0 };
-            let axle = right * angle.cos() - forward * angle.sin();
-            let rolling = forward * angle.cos() + right * angle.sin();
-            let flat = forward * x + right * y;
-            let contact = flat - up * half_extents.z;
-            let velocity = car.velocity_at_point(&contact);
-            let lateral = velocity.dot(&axle);
+            let axle = on_surface(right * angle.cos() - forward * angle.sin(), contact.normal);
+            let rolling = on_surface(forward * angle.cos() + right * angle.sin(), contact.normal);
+            let point = contact.point - car.position;
+            let flat = point - up * up.dot(&point);
+            let hard_point = car.orientation.rotate(&Vec3::new(x, y, WHEEL_RAY_START_Z));
+            let wheel_velocity = car.velocity_at_point(&hard_point);
             let (lateral_grip, _) = tire_grip(
-                slip_ratio(velocity.dot(&rolling), lateral),
+                slip_ratio(wheel_velocity.dot(&rolling), wheel_velocity.dot(&axle)),
                 handbrake_amount,
             );
-            let arm = contact.cross(&axle);
+            let lateral = car.velocity_at_point(&point).dot(&axle);
+            let arm = point.cross(&axle);
             let inv_effective_mass = car.inv_mass() + arm.dot(&inv_inertia.mul_vec3(&arm));
             let impulse = -SIDE_IMPULSE_DAMPING * lateral / inv_effective_mass
                 * lateral_grip
                 * FRICTION_SCALE
                 * dt;
             let drive = engine_acceleration * car.mass() / WHEELS.len() as f32 * dt;
-            (axle * impulse + rolling * drive, flat)
+            Some((axle * impulse + rolling * drive, flat))
         })
         .collect()
+}
+
+/// `direction` projected onto the surface with `normal`, renormalized, as
+/// `calcFrictionImpulses` does with each wheel's axle.
+fn on_surface(direction: Vec3, normal: Vec3) -> Vec3 {
+    let projected = direction - normal * direction.dot(&normal);
+    projected.normalize().unwrap_or(direction)
 }
 
 /// Throttle, steering and tire grip for a grounded car
@@ -345,6 +305,7 @@ fn wheel_impulses(
 ///   builds up and dies away instead of being set.
 pub(super) fn apply_ground_control(
     car: &mut RigidBody,
+    contacts: &WheelContacts,
     input: &ControllerInput,
     throttle: f32,
     forward: Vec3,
@@ -363,7 +324,14 @@ pub(super) fn apply_ground_control(
 
     // RB-PHYSICS-001-FR-086/FR-089: steering, sideways grip and the engine
     // are per-wheel impulses; the steered front wheels' impulses turn the car.
-    for (impulse, point) in wheel_impulses(car, input.steer, handbrake_amount, acceleration, dt) {
+    for (impulse, point) in wheel_impulses(
+        car,
+        contacts,
+        input.steer,
+        handbrake_amount,
+        acceleration,
+        dt,
+    ) {
         car.apply_impulse(impulse, point);
     }
 

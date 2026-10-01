@@ -135,6 +135,12 @@ pub const CAR_MASS: f32 = 180.0;
 /// ~44%); `RB-PHYSICS-001-FR-078` retuned every one of those existing test
 /// call sites to this constant instead of the old placeholder.
 pub const CAR_HALF_EXTENTS: Vec3 = Vec3::new(60.2535, 43.3497, 19.32955);
+/// Octane hitbox centre relative to the car origin (uu), RocketSim
+/// `CarConfig.cpp`'s `hitboxPosOffset` (`RB-PHYSICS-001-FR-090`). RocketSim
+/// adds the hitbox as an offset child of a compound shape, so the box sits
+/// forward of and above the centre of mass while the inertia stays the
+/// box's own, about the origin.
+pub const CAR_HITBOX_OFFSET: Vec3 = Vec3::new(13.8757, 0.0, 20.755);
 
 /// A dynamic rigid body: either a sphere (the ball) or a box (a car).
 /// Mirrors the subset of `bullet3/src/BulletDynamics/Dynamics/btRigidBody.h`'s
@@ -179,6 +185,11 @@ pub struct RigidBody {
     /// convention of exposing simulation state as plain fields rather than
     /// getters where nothing needs guarding.
     pub is_sleeping: bool,
+    /// Collision shape centre relative to `position`, in the body's local
+    /// frame — Bullet's compound child transform (`RB-PHYSICS-001-FR-090`).
+    /// Zero except for `standard_car`. Moves where the shape collides, not
+    /// the centre of mass or the inertia.
+    pub shape_offset: Vec3,
     /// Consecutive seconds this body's velocity has stayed below both
     /// sleep thresholds — private scratch state `update_sleep_state`/`wake`
     /// alone manage, not meaningful to a caller the way `is_sleeping` is.
@@ -226,6 +237,7 @@ impl RigidBody {
             total_force: Vec3::ZERO,
             total_torque: Vec3::ZERO,
             is_sleeping: false,
+            shape_offset: Vec3::ZERO,
             sleep_timer: 0.0,
         };
         body.update_inertia_tensor();
@@ -331,8 +343,19 @@ impl RigidBody {
     /// architecture has no way to represent. Inventing a single number
     /// here would be exactly the "false precision"
     /// `RB-PHYSICS-001-FR-031`/`FR-040` already refused to do.
+    ///
+    /// The box is offset by `CAR_HITBOX_OFFSET` (`RB-PHYSICS-001-FR-090`),
+    /// so a standard car rides on its wheel suspension rather than on its box.
     pub fn standard_car(position: Vec3) -> RigidBody {
-        RigidBody::car_box(CAR_HALF_EXTENTS, CAR_MASS, position)
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, CAR_MASS, position);
+        car.shape_offset = CAR_HITBOX_OFFSET;
+        car
+    }
+
+    /// World-space centre of the collision shape: `position` plus
+    /// `shape_offset` rotated into the world frame.
+    pub fn shape_center(&self) -> Vec3 {
+        self.position + self.orientation.rotate(&self.shape_offset)
     }
 
     /// Recomputes `inv_inertia_world` from the body's current `orientation`

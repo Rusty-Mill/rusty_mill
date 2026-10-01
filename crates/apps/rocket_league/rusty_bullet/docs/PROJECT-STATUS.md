@@ -34,6 +34,8 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#181](https://github.com/baileyrd/rusty_bullet/pull/181) —
+  `RB-PHYSICS-001-FR-089`, engine force at each wheel along its heading.
 - [#180](https://github.com/baileyrd/rusty_bullet/pull/180) —
   `RB-PHYSICS-001-FR-088`, ground contact from wheel rays (ADR-0017).
 - [#179](https://github.com/baileyrd/rusty_bullet/pull/179) —
@@ -79,7 +81,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-090` (raycast suspension and hitbox offset,
+  ADR-0018): implemented; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -106,12 +109,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Raycast suspension and the 20.755 uu hitbox offset (ADR-0017 option
-   2), now the earliest real-capture error: the candidate rides 2.3 uu high
-   (19.3 vs 17.0), so after the 4.142 s jump its wheels leave the floor 2
-   ticks early (velocity error 0.5 to 28 uu/s by 4.183 s); its box also
-   bounces on landing (5.575 s), and the 5.758 s car-ball hit lands late.
-   Smaller: brake still acts at the centre of mass, not per wheel.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 4.1 4.3`, `5.5 6.0` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-090`: rest height ~17.0
+   like the recording (was 19.3), wheels touching until ~4.183 s after the
+   4.142 s jump (velocity error was 28 uu/s there), no bounce on the 5.575 s
+   landing, and the 5.758 s car-ball hit on time. Smaller: brake still at
+   the centre of mass; wheels cast against the floor only.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -120,7 +123,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (427 tests: 27 `rb_domain`, 362
+- `cargo test --workspace`: pass (432 tests: 27 `rb_domain`, 367
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

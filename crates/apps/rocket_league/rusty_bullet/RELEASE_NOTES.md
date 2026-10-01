@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Cars ride on suspension
+**2026-10-01** · `RB-PHYSICS-001-FR-090` · ADR-0018
+
+- A standard car now rides on RocketSim's four suspended wheel rays, with
+  its hitbox offset 13.9 uu forward and 20.8 uu up as in the game. It
+  settles at 17.0 uu, the recorded rest height (it rested at 19.3 on its
+  box), and lands on springs instead of bouncing. 432 tests.
+
 ## Throttle turns the car through its front wheels
 **2026-10-01** · `RB-PHYSICS-001-FR-089`
 

@@ -280,9 +280,10 @@ mod jump;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
+mod wheels;
 
 pub use boost::MAX_BOOST;
-pub use ground::wheels_on_ground;
+pub use wheels::{cast_wheels, is_on_ground, WheelContact, WheelContacts, NO_WHEEL_CONTACTS};
 
 /// The no-slip bicycle-model yaw rate for `ground::steer_angle` over the
 /// Octane wheelbase: the turn rate grip-limited steering approaches, for
@@ -443,7 +444,10 @@ impl Default for DriveState {
 /// Applies throttle, steering, boost, handbrake, jump, double jump, wall
 /// jump, and air control as forces/torques/impulses (or, for tire grip,
 /// direct velocity changes) on `car`, reading and updating `state`
-/// (see each `DriveState` field for its rules). Throttle, steering,
+/// (see each `DriveState` field for its rules). `wheels` are the wheel
+/// rays' hits cast at the start of the step (`cast_wheels`); the car is on
+/// the ground when at least three touch (`is_on_ground`); their suspension
+/// is `apply_wheel_forces`, called separately. Throttle, steering,
 /// handbrake, and the ground jump are a no-op unless `on_ground`; air
 /// control, double jump, and wall jump are the reverse — a no-op unless
 /// *not* `on_ground`; boost isn't gated on ground contact at all, but is a
@@ -465,11 +469,12 @@ impl Default for DriveState {
 pub fn apply_driven_forces(
     car: &mut RigidBody,
     input: &ControllerInput,
-    on_ground: bool,
+    wheels: &WheelContacts,
     wall_normal: Option<Vec3>,
     state: &mut DriveState,
     dt: f32,
 ) {
+    let on_ground = is_on_ground(wheels);
     // RB-PHYSICS-001-FR-037: any genuinely active input wakes the car
     // unconditionally, before that input's own force/impulse has a chance
     // to move it — a resultant-velocity-only wake check would zero right
@@ -488,18 +493,21 @@ pub fn apply_driven_forces(
     jump::apply_jump_hold(car, input.jump, &mut state.jump_hold_time_remaining, dt);
     state.handbrake_amount = ground::ramp_handbrake(state.handbrake_amount, input.handbrake, dt);
 
+    let throttle = effective_throttle(input, state);
     if on_ground {
         // Landing (or simply resting) always restores the double jump,
         // regardless of this step's input.
         state.double_jump_available = true;
         state.flip = None;
-        // RocketSim treats a boosting car as full throttle for its pedals.
-        let throttle = if input.boost && state.boost_amount > 0.0 {
-            1.0
-        } else {
-            input.throttle.clamp(-1.0, 1.0)
-        };
-        ground::apply_ground_control(car, input, throttle, forward, state.handbrake_amount, dt);
+        ground::apply_ground_control(
+            car,
+            wheels,
+            input,
+            throttle,
+            forward,
+            state.handbrake_amount,
+            dt,
+        );
         if jump_pressed {
             jump::ground_jump(car, &mut state.jump_hold_time_remaining);
         }
@@ -541,6 +549,30 @@ pub fn apply_driven_forces(
         &mut state.boost_amount,
         dt,
     );
+}
+
+/// Throttle as the pedals see it: RocketSim treats a boosting car with
+/// boost left as full throttle.
+fn effective_throttle(input: &ControllerInput, state: &DriveState) -> f32 {
+    if input.boost && state.boost_amount > 0.0 {
+        1.0
+    } else {
+        input.throttle.clamp(-1.0, 1.0)
+    }
+}
+
+/// Every touching wheel's suspension and the sticky force for one step
+/// (`RB-PHYSICS-001-FR-090`, `wheels::apply_wheel_forces`), from `wheels`
+/// cast at the start of the step. Call after `apply_driven_forces`, as
+/// RocketSim's `updateVehicleSecond` follows its drive logic.
+pub fn apply_wheel_forces(
+    car: &mut RigidBody,
+    input: &ControllerInput,
+    wheels: &WheelContacts,
+    state: &DriveState,
+    dt: f32,
+) {
+    wheels::apply_wheel_forces(car, wheels, effective_throttle(input, state) != 0.0, dt);
 }
 
 /// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if

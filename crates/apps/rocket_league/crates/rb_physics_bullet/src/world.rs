@@ -433,7 +433,7 @@ impl PhysicsWorld {
 
     /// Like `apply_forces_and_integrate_velocities`, but for a car: also
     /// applies `drive::apply_driven_forces` (throttle/steer/handbrake/jump
-    /// gated on `on_ground`, computed from the car's position at the start
+    /// gated on `wheels` touching, cast from the car's position at the start
     /// of this step, before anything moves; boost not gated on it, but
     /// draining `drive_state.boost_amount`; tire grip, cut by the
     /// handbrake; jump firing an
@@ -446,14 +446,15 @@ impl PhysicsWorld {
     /// position at the start of this step, like `on_ground`; the ground
     /// jump's variable height, driven by `jump_hold_time_remaining`; a
     /// dodge's flip torque and vertical damping, driven by `flip`)
-    /// alongside gravity, so `input`'s forces/impulses
-    /// (and tire grip) are part of the same velocity-prediction
+    /// alongside gravity, then `drive::apply_wheel_forces` (suspension and
+    /// sticky force, `RB-PHYSICS-001-FR-090`), so `input`'s forces/impulses,
+    /// tire grip and suspension are part of the same velocity-prediction
     /// phase. The car's angular speed is not clamped here: `step` clamps it
     /// after the transform integrates (`RB-PHYSICS-001-FR-087`).
     fn drive_and_integrate_velocities(
         car: &mut RigidBody,
         input: &ControllerInput,
-        on_ground: bool,
+        wheels: &drive::WheelContacts,
         wall_normal: Option<Vec3>,
         drive_state: &mut drive::DriveState,
         gravity: Vec3,
@@ -461,7 +462,8 @@ impl PhysicsWorld {
     ) {
         car.clear_forces();
         integrate::apply_gravity(car, gravity);
-        drive::apply_driven_forces(car, input, on_ground, wall_normal, drive_state, dt);
+        drive::apply_driven_forces(car, input, wheels, wall_normal, drive_state, dt);
+        drive::apply_wheel_forces(car, input, wheels, drive_state, dt);
         integrate::apply_damping(car, dt);
         integrate::integrate_velocities(car, dt);
     }
@@ -636,13 +638,14 @@ impl PhysicsWorld {
         // RocketSim's wheel-ray rule (three of four wheels reach the
         // floor), not box contact: a car bouncing a few uu off the floor
         // after a landing is still grounded, so a jump press there jumps
-        // instead of dodging.
-        let car_on_ground: Vec<bool> = self
+        // instead of dodging. The same hits drive the suspension
+        // (RB-PHYSICS-001-FR-090), as RocketSim casts once per tick.
+        let car_wheels: Vec<drive::WheelContacts> = self
             .cars
             .iter()
-            .map(|car| drive::wheels_on_ground(car, &self.ground))
+            .map(|car| drive::cast_wheels(car, &self.ground, dt))
             .collect();
-        // Same idea as car_on_ground, but for walls: the outward push-off
+        // Same idea as car_wheels, but for walls: the outward push-off
         // direction for a wall jump. Since `RB-PHYSICS-001-FR-039`, a car
         // touching two walls at once (a corner — reachable at a diagonal
         // corner wall's own two seams, where it meets a side or back wall)
@@ -680,18 +683,18 @@ impl PhysicsWorld {
             .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for ((((car, input), on_ground), wall_normal), drive_state) in self
+        for ((((car, input), wheels), wall_normal), drive_state) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
-            .zip(car_on_ground.iter())
+            .zip(car_wheels.iter())
             .zip(car_wall_normal.iter())
             .zip(self.car_drive.iter_mut())
         {
             Self::drive_and_integrate_velocities(
                 car,
                 input,
-                *on_ground,
+                wheels,
                 *wall_normal,
                 drive_state,
                 self.gravity,
@@ -2037,9 +2040,12 @@ mod tests {
             },
         );
         world.step(dt);
+        // Less one tick of the grounded car's sticky force, half of default
+        // gravity whatever `world.gravity` is (RB-PHYSICS-001-FR-090).
         let velocity_after_ground_jump = world.cars[0].linear_velocity.z;
+        let expected = crate::drive::JUMP_SPEED - 0.5 * 650.0 * dt;
         assert!(
-            (velocity_after_ground_jump - crate::drive::JUMP_SPEED).abs() < 1.0,
+            (velocity_after_ground_jump - expected).abs() < 1.0,
             "expected the ground jump to give ~JUMP_SPEED upward velocity, got {velocity_after_ground_jump}"
         );
 
@@ -2676,10 +2682,11 @@ mod tests {
 
         // A tolerance rather than exact equality: air-control damping
         // (RB-PHYSICS-001-FR-084) acts on the neutral release step in
-        // between, which a leftover flip torque would dwarf.
+        // between, on the small pitch the suspension gives the jump; a
+        // leftover flip torque (~1.9 rad/s per tick) would dwarf it.
         assert!(
             (world.cars[0].angular_velocity - angular_velocity_after_plain_double_jump).length()
-                < 0.01,
+                < 0.05,
             "expected no leftover flip spin after an unrelated plain double jump, before \
              release/re-press={angular_velocity_after_plain_double_jump:?}, after={:?}",
             world.cars[0].angular_velocity
@@ -3652,21 +3659,54 @@ mod tests {
             world.step(dt);
             let car = &world.cars[0];
             assert!(
-                !collision::contacts_vs_plane(car, &world.ground).is_empty(),
+                drive::is_on_ground(&drive::cast_wheels(car, &world.ground, dt)),
                 "car left the ground on tick {tick}: z={}, vz={}",
                 car.position.z,
                 car.linear_velocity.z
             );
         }
-        // 0.3 s of full throttle from rest. Throttle with `drive`'s speed
-        // taper alone would give ~413 uu/s; this port reaches ~330 because
-        // the box also slides against floor friction (a real car rolls; a
-        // known car-model gap, ADR-0009). The hopping car reached ~69,
-        // grounded only 12 of these 36 ticks.
+        // 0.3 s of full throttle from rest: ~413 uu/s with `drive`'s speed
+        // taper, now that the car rides its wheels (RB-PHYSICS-001-FR-090)
+        // instead of sliding its box. The hopping car reached ~69, grounded
+        // only 12 of these 36 ticks.
         let speed = world.cars[0].linear_velocity.length();
         assert!(
-            speed > 250.0,
+            speed > 400.0,
             "throttle should apply every tick; got {speed} uu/s after 0.3 s"
+        );
+    }
+
+    /// `RB-PHYSICS-001-FR-090`: a standard car dropped onto the floor
+    /// settles on its suspension at RocketSim's ride height, which is the
+    /// real capture's resting 17.0 uu, with its box clear of the floor.
+    #[test]
+    fn a_standard_car_settles_on_its_suspension_at_the_real_ride_height() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 60.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..240 {
+            world.step(dt);
+        }
+        let car = &world.cars[0];
+        assert!(
+            (car.position.z - 17.0).abs() < 0.1,
+            "rest height {}",
+            car.position.z
+        );
+        assert!(
+            car.linear_velocity.length() < 1.0,
+            "still moving: {:?}",
+            car.linear_velocity
+        );
+        assert!(
+            car.angular_velocity.length() < 0.01,
+            "still turning: {:?}",
+            car.angular_velocity
+        );
+        assert!(
+            collision::contacts_vs_plane(car, &world.ground).is_empty(),
+            "the box should ride clear of the floor"
         );
     }
 

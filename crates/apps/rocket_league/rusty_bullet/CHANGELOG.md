@@ -937,6 +937,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Cars ride on RocketSim's raycast suspension with the Octane hitbox
+  offset (`RB-PHYSICS-001-FR-090`, ADR-0018): a standard car rests at the
+  recorded 17.0 uu instead of 19.3 on its box, landings are sprung, and
+  the ball meets the box where the real hitbox is.
 - Engine force acts at each wheel along its heading
   (`RB-PHYSICS-001-FR-089`), as in RocketSim, so throttle through steered
   front wheels tightens a turn (steady yaw at 950 uu/s 2.33 to 2.45 rad/s;

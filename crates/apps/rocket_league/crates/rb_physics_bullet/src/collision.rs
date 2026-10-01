@@ -144,7 +144,7 @@ pub fn contacts_vs_plane(body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> 
             .into_iter()
             .collect(),
         Shape::Box { half_extents } => {
-            box_vs_plane(body.position, body.orientation, half_extents, plane)
+            box_vs_plane(body.shape_center(), body.orientation, half_extents, plane)
         }
     }
 }
@@ -258,7 +258,7 @@ pub fn contacts_vs_goal_wall(body: &RigidBody, wall: &StaticGoalWall) -> Vec<Con
             .into_iter()
             .collect(),
         Shape::Box { half_extents } => {
-            box_vs_goal_wall(body.position, body.orientation, half_extents, wall)
+            box_vs_goal_wall(body.shape_center(), body.orientation, half_extents, wall)
         }
     }
 }
@@ -356,7 +356,7 @@ pub fn contacts_vs_bounded_wall(body: &RigidBody, wall: &StaticBoundedWall) -> V
             .into_iter()
             .collect(),
         Shape::Box { half_extents } => {
-            box_vs_bounded_wall(body.position, body.orientation, half_extents, wall)
+            box_vs_bounded_wall(body.shape_center(), body.orientation, half_extents, wall)
         }
     }
 }
@@ -498,7 +498,7 @@ pub fn contacts_vs_quarter_pipe(body: &RigidBody, pipe: &StaticQuarterPipe) -> V
             .into_iter()
             .collect(),
         Shape::Box { half_extents } => {
-            box_vs_quarter_pipe(body.position, body.orientation, half_extents, pipe)
+            box_vs_quarter_pipe(body.shape_center(), body.orientation, half_extents, pipe)
         }
     }
 }
@@ -592,7 +592,7 @@ pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) 
             .into_iter()
             .collect(),
         Shape::Box { half_extents } => {
-            box_vs_corner_fillet(body.position, body.orientation, half_extents, fillet)
+            box_vs_corner_fillet(body.shape_center(), body.orientation, half_extents, fillet)
         }
     }
 }
@@ -1228,20 +1228,28 @@ fn box_vs_box(
 /// never collide in this port, but the shape pairing itself is real now.
 pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
     match (a.shape, b.shape) {
-        (Shape::Sphere { radius }, Shape::Box { half_extents }) => {
-            sphere_vs_box(a.position, radius, b.position, b.orientation, half_extents)
-                .into_iter()
-                .collect()
-        }
-        (Shape::Box { half_extents }, Shape::Sphere { radius }) => {
-            sphere_vs_box(b.position, radius, a.position, a.orientation, half_extents)
-                .map(|c| Contact {
-                    normal: -c.normal,
-                    ..c
-                })
-                .into_iter()
-                .collect()
-        }
+        (Shape::Sphere { radius }, Shape::Box { half_extents }) => sphere_vs_box(
+            a.shape_center(),
+            radius,
+            b.shape_center(),
+            b.orientation,
+            half_extents,
+        )
+        .into_iter()
+        .collect(),
+        (Shape::Box { half_extents }, Shape::Sphere { radius }) => sphere_vs_box(
+            b.shape_center(),
+            radius,
+            a.shape_center(),
+            a.orientation,
+            half_extents,
+        )
+        .map(|c| Contact {
+            normal: -c.normal,
+            ..c
+        })
+        .into_iter()
+        .collect(),
         (Shape::Sphere { radius: radius_a }, Shape::Sphere { radius: radius_b }) => {
             sphere_vs_sphere(a.position, radius_a, b.position, radius_b)
                 .into_iter()
@@ -1255,10 +1263,10 @@ pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
                 half_extents: half_b,
             },
         ) => box_vs_box(
-            a.position,
+            a.shape_center(),
             a.orientation,
             half_a,
-            b.position,
+            b.shape_center(),
             b.orientation,
             half_b,
         ),
@@ -1353,8 +1361,29 @@ mod tests {
         }
     }
 
+    /// An Octane-sized box centred on its origin, so these geometry tests
+    /// read in box coordinates (`standard_car`'s hitbox offset is covered by
+    /// `a_cars_hitbox_offset_moves_where_the_ball_hits_it`).
     fn stationary_car() -> RigidBody {
-        RigidBody::standard_car(Vec3::ZERO)
+        RigidBody::car_box(CAR_HALF_EXTENTS, crate::body::CAR_MASS, Vec3::ZERO)
+    }
+
+    #[test]
+    fn a_cars_hitbox_offset_moves_where_the_ball_hits_it() {
+        // RB-PHYSICS-001-FR-090: the Octane box sits 13.88 uu forward of and
+        // 20.755 uu above the car origin, so a ball just touching the
+        // centred box's front face is now 13.88 uu inside the real one.
+        let car = RigidBody::standard_car(Vec3::ZERO);
+        let offset = crate::body::CAR_HITBOX_OFFSET;
+        let ball = RigidBody::sphere(
+            93.15,
+            1.0,
+            Vec3::new(CAR_HALF_EXTENTS.x + 93.15, 0.0, offset.z),
+        );
+        let contacts = contacts_between(&ball, &car);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - offset.x).abs() < 1e-3);
+        assert!((contacts[0].point.z - offset.z).abs() < 1e-3);
     }
 
     #[test]
