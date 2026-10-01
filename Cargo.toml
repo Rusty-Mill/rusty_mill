@@ -148,6 +148,7 @@ members = [
     "crates/apps/rusty_skillopt/crates/skillopt-cli",
     "crates/apps/rusty_orch/crates/orch-core",
     "crates/apps/rusty_orch/crates/orch-dispatch",
+    "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
     "crates/apps/rusty_key/crates/constrain",
@@ -499,6 +500,7 @@ skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
 # dependencies; orch-core keeps its literal `[package]` fields ("MIT",
 # rust-version 1.75) -- rusty_db treatment.
 orch-core = { path = "crates/apps/rusty_orch/crates/orch-core" }
+orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [
