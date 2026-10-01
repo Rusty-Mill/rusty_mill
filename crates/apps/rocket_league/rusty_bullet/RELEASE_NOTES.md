@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Wheels let go when the real ones do
+**2026-10-01** · `RB-PHYSICS-001-FR-092` · ADR-0019 amendment
+
+- Wheel rays now reach the fully extended wheel (RocketSim cut 2.5 uu off),
+  and the sticky force acts one step after the wheels touch. A jump from
+  rest now matches every tick of the owner's capture: 295.7 uu/s, six
+  ticks of +4.0, then +6.7. 435 tests.
+
 ## Jumps rise like the real ones
 **2026-10-01** · `RB-PHYSICS-001-FR-091` · ADR-0019
 

@@ -2041,11 +2041,11 @@ mod tests {
         );
         world.step(dt);
         // Plus the press tick's own hold force (1458.33 uu/s^2,
-        // RB-PHYSICS-001-FR-091), less one tick of the grounded car's sticky
-        // force, half of default gravity whatever `world.gravity` is
-        // (RB-PHYSICS-001-FR-090).
+        // RB-PHYSICS-001-FR-091). No sticky force yet: it acts the step
+        // after the wheels touch (RB-PHYSICS-001-FR-092), and this is the
+        // world's first step.
         let velocity_after_ground_jump = world.cars[0].linear_velocity.z;
-        let expected = crate::drive::JUMP_SPEED + (4375.0 / 3.0 - 0.5 * 650.0) * dt;
+        let expected = crate::drive::JUMP_SPEED + 4375.0 / 3.0 * dt;
         assert!(
             (velocity_after_ground_jump - expected).abs() < 1.0,
             "expected the ground jump to give ~JUMP_SPEED upward velocity, got {velocity_after_ground_jump}"
@@ -3714,9 +3714,10 @@ mod tests {
 
     /// `RB-PHYSICS-001-FR-091`: a ground jump from a car resting on its
     /// suspension follows the owner's capture tick by tick: the press tick
-    /// gives `JUMP_SPEED` plus 4.0 uu/s, each tick while the wheels still
-    /// touch gives 4.0 (hold force less gravity less the sticky force), and
-    /// each tick after gives 6.7 (hold force less gravity).
+    /// gives `JUMP_SPEED` plus 4.0 uu/s, the next six ticks give 4.0 (hold
+    /// force less gravity less the sticky force: five while the wheels still
+    /// touch, one for the sticky force's step of delay, FR-092), and each
+    /// tick after gives 6.7 (hold force less gravity).
     #[test]
     fn a_held_ground_jump_gains_speed_as_the_real_capture_does() {
         let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
@@ -3743,9 +3744,13 @@ mod tests {
             (gains[0] - (crate::drive::JUMP_SPEED + 4.0)).abs() < 0.5,
             "press tick: {gains:?}"
         );
-        assert!((gains[1] - 4.0).abs() < 0.2, "wheels touching: {gains:?}");
-        let last = gains[gains.len() - 1];
-        assert!((last - 6.7).abs() < 0.2, "airborne: {gains:?}");
+        // FR-092: then six more ticks of +4.0, as recorded, and +6.7 after.
+        for (tick, gain) in gains[1..7].iter().enumerate() {
+            assert!((gain - 4.0).abs() < 0.2, "tick {}: {gains:?}", tick + 1);
+        }
+        for gain in &gains[7..] {
+            assert!((gain - 6.7).abs() < 0.2, "airborne: {gains:?}");
+        }
     }
 
     /// `RB-PHYSICS-001-FR-080`: full steer on flat ground turns the car at
