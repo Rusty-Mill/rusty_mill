@@ -93,53 +93,100 @@ impl ModelRegistry {
     }
 }
 
-/// Collapses a stream of chunks into the single response they describe.
+/// Folds streamed chunks into the single response they describe.
 ///
-/// Concatenates text across chunks and keeps the last non-text parts, usage,
-/// and finish reason. Useful for treating a streaming model uniformly with a
-/// non-streaming one.
-pub async fn aggregate_stream(
-    mut stream: BoxStream<'_, Result<LlmResponse>>,
-) -> Result<LlmResponse> {
-    use adk_core::{Content, Part, Role};
+/// The one reducer for streamed model output, used by [`aggregate_stream`]
+/// and by agents that forward each chunk as it arrives: text is
+/// concatenated across chunks, other parts are kept in order after it, and
+/// the latest finish reason and usage win. An error chunk ends the stream:
+/// [`StreamAggregator::failed`] turns true and [`StreamAggregator::finish`]
+/// returns that error rather than a partial answer.
+#[derive(Debug, Default)]
+pub struct StreamAggregator {
+    text: String,
+    other_parts: Vec<adk_core::Part>,
+    finish_reason: Option<String>,
+    usage: Option<crate::request::UsageMetadata>,
+    error: Option<LlmResponse>,
+}
 
-    let mut text = String::new();
-    let mut other_parts: Vec<Part> = Vec::new();
-    let mut final_response = LlmResponse {
-        turn_complete: true,
-        ..Default::default()
-    };
+impl StreamAggregator {
+    /// An empty aggregator.
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    /// Folds in one chunk. Chunks after an error are ignored.
+    pub fn push(&mut self, chunk: &LlmResponse) {
+        use adk_core::Part;
+
+        if self.error.is_some() {
+            return;
+        }
         if chunk.is_error() {
-            return Ok(chunk);
+            self.error = Some(chunk.clone());
+            return;
         }
         if let Some(content) = &chunk.content {
             for part in &content.parts {
                 match part {
-                    Part::Text(t) => text.push_str(t),
-                    other => other_parts.push(other.clone()),
+                    Part::Text(t) => self.text.push_str(t),
+                    other => self.other_parts.push(other.clone()),
                 }
             }
         }
         if chunk.finish_reason.is_some() {
-            final_response.finish_reason = chunk.finish_reason.clone();
+            self.finish_reason = chunk.finish_reason.clone();
         }
         if chunk.usage.is_some() {
-            final_response.usage = chunk.usage.clone();
+            self.usage = chunk.usage.clone();
         }
     }
 
-    let mut parts = Vec::new();
-    if !text.is_empty() {
-        parts.push(Part::Text(text));
+    /// True once an error chunk has been pushed; the caller should stop
+    /// reading the stream.
+    pub fn failed(&self) -> bool {
+        self.error.is_some()
     }
-    parts.extend(other_parts);
-    if !parts.is_empty() {
-        final_response.content = Some(Content::new(Role::Model, parts));
+
+    /// The aggregated, turn-complete response, or the error chunk if one
+    /// arrived.
+    pub fn finish(self) -> LlmResponse {
+        use adk_core::{Content, Part, Role};
+
+        if let Some(error) = self.error {
+            return error;
+        }
+        let mut parts = Vec::new();
+        if !self.text.is_empty() {
+            parts.push(Part::Text(self.text));
+        }
+        parts.extend(self.other_parts);
+        LlmResponse {
+            content: (!parts.is_empty()).then(|| Content::new(Role::Model, parts)),
+            finish_reason: self.finish_reason,
+            usage: self.usage,
+            turn_complete: true,
+            ..Default::default()
+        }
     }
-    Ok(final_response)
+}
+
+/// Collapses a stream of chunks into the single response they describe.
+///
+/// See [`StreamAggregator`] for how chunks combine. Useful for treating a
+/// streaming model uniformly with a non-streaming one.
+pub async fn aggregate_stream(
+    mut stream: BoxStream<'_, Result<LlmResponse>>,
+) -> Result<LlmResponse> {
+    let mut aggregator = StreamAggregator::new();
+    while let Some(chunk) = stream.next().await {
+        aggregator.push(&chunk?);
+        if aggregator.failed() {
+            break;
+        }
+    }
+    Ok(aggregator.finish())
 }
 
 #[cfg(test)]
@@ -188,5 +235,67 @@ mod tests {
         let aggregated = aggregate_stream(stream).await.unwrap();
         assert_eq!(aggregated.text_content(), "The capital is Paris.");
         assert!(aggregated.turn_complete);
+    }
+
+    fn usage(candidates_tokens: u32) -> crate::request::UsageMetadata {
+        crate::request::UsageMetadata {
+            candidates_tokens,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn text_comes_first_then_other_parts_in_order_and_the_latest_metadata_wins() {
+        use adk_core::{Content, FunctionCall, Part, Role};
+
+        let call = |name: &str| {
+            LlmResponse::from_content(Content::new(
+                Role::Model,
+                vec![Part::FunctionCall(FunctionCall::new(
+                    name,
+                    Default::default(),
+                ))],
+            ))
+        };
+        let mut first = LlmResponse::chunk("Hel");
+        first.usage = Some(usage(1));
+        let mut last = LlmResponse::chunk("lo");
+        last.finish_reason = Some("STOP".into());
+        last.usage = Some(usage(7));
+
+        let mut aggregator = StreamAggregator::new();
+        for chunk in [first, call("a"), call("b"), last] {
+            aggregator.push(&chunk);
+        }
+        let response = aggregator.finish();
+
+        let parts = &response.content.as_ref().unwrap().parts;
+        assert!(matches!(&parts[0], Part::Text(t) if t == "Hello"));
+        assert!(matches!(&parts[1], Part::FunctionCall(c) if c.name == "a"));
+        assert!(matches!(&parts[2], Part::FunctionCall(c) if c.name == "b"));
+        assert_eq!(response.finish_reason.as_deref(), Some("STOP"));
+        assert_eq!(response.usage.map(|u| u.candidates_tokens), Some(7));
+        assert!(response.turn_complete);
+    }
+
+    #[test]
+    fn an_error_chunk_ends_the_stream_and_is_the_result() {
+        let mut aggregator = StreamAggregator::new();
+        aggregator.push(&LlmResponse::chunk("partial answer"));
+        assert!(!aggregator.failed());
+        aggregator.push(&LlmResponse::error("RESOURCE_EXHAUSTED", "quota"));
+        assert!(aggregator.failed());
+        aggregator.push(&LlmResponse::chunk(" ignored"));
+
+        let response = aggregator.finish();
+        assert!(response.is_error());
+        assert_eq!(response.error_code.as_deref(), Some("RESOURCE_EXHAUSTED"));
+    }
+
+    #[test]
+    fn an_empty_stream_is_a_complete_response_without_content() {
+        let response = StreamAggregator::new().finish();
+        assert!(response.content.is_none());
+        assert!(response.turn_complete);
     }
 }

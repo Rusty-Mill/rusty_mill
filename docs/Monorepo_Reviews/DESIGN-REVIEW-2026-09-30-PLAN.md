@@ -85,7 +85,9 @@ rusty_gui clipboard (`Unsupported`), `rusty_std` stub I/O/process
 **Consolidation (only after conformance tests exist):**
 - `adk-mcp` onto the shared MCP stack *(done: conformance suite first, then
   `rmcp`; see `crates/libs/rusty_adk/crates/adk-mcp/tests/conformance.rs`)*
-- one stream reducer shared by adk-agent and adk-models
+- one stream reducer shared by adk-agent and adk-models *(done:
+  `adk_models::StreamAggregator`; it also fixed `LlmAgent` swallowing a
+  streamed error chunk)*
 - HTTP parsing for llama and whisper onto `rusty_http`
 - shared `atomic_write` and rooted-fs helpers (from 2.9 / 3.2)
 - rush / nexus-rush shared fixtures only

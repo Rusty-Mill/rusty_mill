@@ -64,6 +64,8 @@ Removed / Fixed / Security, newest first.
     - Still pinned to MCP `2025-06-18` for other-language ADK clients. The 16 MiB line cap and the client request deadline are kept.
     - **Breaking:** `McpServer::handle`/`handle_raw`, the `JsonRpcRequest`/`JsonRpcResponse`/`JsonRpcError` types, and the `protocol` helpers other than `PROTOCOL_VERSION` are removed; nothing in the workspace used them. `serve_stream` now needs a `Send + 'static` reader and writer.
     - Behavior changes from `rmcp`: a malformed stdio line is ignored rather than answered with a parse error; a request before `initialize` ends the session; the client follows `tools/list` pagination.
+  - `adk-models::StreamAggregator` is the one reducer for streamed model output. `aggregate_stream` and `LlmAgent`'s streaming path, which each had their own copy of the loop, both use it.
+    - Fixed along the way: `LlmAgent` in SSE mode folded an error chunk into the answer as if it were text. A model error mid-stream (for example `RESOURCE_EXHAUSTED`) became an empty, apparently successful reply. It is now reported as an error event, as in non-streaming mode.
   - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.
