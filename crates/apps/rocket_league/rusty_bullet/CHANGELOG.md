@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0011: curve-based yaw-rate steering (partially supersedes ADR-0009).
 - `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`
   (`RB-VERIFY-003-FR-005`, `rb_verify_cli::trace_capture`): per-frame
   trace of a capture against its simulated candidate, printing each car's
@@ -867,6 +868,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   matched real Rocket League exactly. No new tests; all 322 pre-existing
   tests pass unchanged.
 ### Changed
+- Steering (`RB-PHYSICS-001-FR-080`, ADR-0011): `STEER_TORQUE` replaced
+  by a yaw rate from RocketSim's real steer-angle curves (powerslide curve
+  on handbrake) through the bicycle model over the 85 uu Octane wheelbase.
 - `RELEASE_NOTES.md` slimmed from 222 KB to 44 KB: all 95 entries keep
   their heading and date/PR/commit line; entries over ~900 characters are
   trimmed to their first (summary) bullet. Full text up to `72494f4` stays

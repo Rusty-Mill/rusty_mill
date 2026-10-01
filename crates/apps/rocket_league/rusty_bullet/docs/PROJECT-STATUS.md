@@ -77,16 +77,14 @@ version: `a245d35`).
 
 ## Next
 
-1. Steering. After `RB-PHYSICS-001-FR-079` the real-capture trace shows
-   the jump at t=4.133 s firing correctly (sim vz 286 vs recorded 296),
-   so heading is now the dominant error: the recorded car turns on steer
-   input at 3.742 s and 4.050 s, the candidate barely does (constant
-   ~0.45-0.50 rad orientation error, velocity direction 45 deg vs mostly
-   +Y). Proposed: drive turn rate from real Rocket League's
-   `STEER_ANGLE_FROM_SPEED_CURVE` through a simple wheelbase model,
-   calibrated against this trace (FR-065 / ADR-0009). Secondary: floor
-   friction on the sliding box (~10% slower by 4.1 s) and the 2.3 uu
-   origin-vs-hitbox offset.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 3.7 4.3` and
+   `--self-growth` on the owner's machine to confirm
+   `RB-PHYSICS-001-FR-080` (curve-based steering, ADR-0011): orientation
+   error at 4.0 s should fall from ~0.45 rad. Then per-axis tire friction
+   (FR-066: rolling instead of sliding forward, real lateral and handbrake
+   factors), which should close the ~10% speed gap. Later: the real
+   hitbox sits 20.755 uu above the car origin (`hitboxPosOffset`), ~18 uu
+   above the floor at rest, while the port's box rests on the floor.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -95,7 +93,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (402 tests: 27 `rb_domain`, 338
+- `cargo test --workspace`: pass (408 tests: 27 `rb_domain`, 344
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 13 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

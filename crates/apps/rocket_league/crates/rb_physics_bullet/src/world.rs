@@ -3791,4 +3791,36 @@ mod tests {
             "throttle should apply every tick; got {speed} uu/s after 0.3 s"
         );
     }
+
+    /// `RB-PHYSICS-001-FR-080`: full steer on flat ground turns the car at
+    /// the bicycle-model rate for its current speed, through the full step
+    /// (contacts and friction included), not just in `drive` isolation.
+    #[test]
+    fn a_car_steering_on_flat_ground_turns_at_the_steer_curve_rate() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
+        car.linear_velocity = Vec3::new(500.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                steer: 1.0,
+                ..ControllerInput::default()
+            },
+        );
+        let dt = 1.0 / 120.0;
+        for _ in 0..30 {
+            world.step(dt);
+        }
+        let car = &world.cars[0];
+        let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        let forward_speed = car.linear_velocity.dot(&forward);
+        let expected = crate::drive::steer_yaw_rate_for_tests(forward_speed, 1.0, false);
+        let yaw_rate = car.angular_velocity.z;
+        assert!(
+            (yaw_rate - expected).abs() <= 0.1 * expected.abs(),
+            "yaw rate {yaw_rate} rad/s, expected ~{expected} at {forward_speed} uu/s"
+        );
+    }
 }

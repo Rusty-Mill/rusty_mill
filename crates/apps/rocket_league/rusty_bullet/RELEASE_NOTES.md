@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Steering from Rocket League's real steer-angle curve
+**2026-10-01** · `RB-PHYSICS-001-FR-080` · ADR-0011
+
+- Steering now sets the car's yaw rate from RocketSim's
+  `STEER_ANGLE_FROM_SPEED_CURVE` (powerslide curve on handbrake) through
+  the bicycle model over the 85 uu Octane wheelbase, replacing the
+  placeholder `STEER_TORQUE` whose shape FR-065 found was backwards. Turns
+  tightest from a stop, gently at speed, mirrored in reverse. 6 new tests
+  (408 total).
+
 ## Fixed the driving-car hop (restitution threshold units)
 **2026-10-01** · `RB-PHYSICS-001-FR-079`
 
