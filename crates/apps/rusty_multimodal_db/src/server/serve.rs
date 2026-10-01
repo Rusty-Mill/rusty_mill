@@ -891,10 +891,44 @@ fn table_files(base: &Path) -> io::Result<Vec<(String, PathBuf, u64)>> {
     Ok(files)
 }
 
-/// `CSN-FR-001` (ADR-0136): [`copy_table_files`] into `dir`, refused
-/// `TooLarge` before the first byte moves when the table is over `max_bytes`.
-/// Callers run it inside the table's exclusive section.
+/// Disk a staged copy must leave free beyond the table's own size, so the
+/// copy does not take the last of the disk from everything else.
+const STAGING_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Bytes an unprivileged process can still write on the filesystem holding
+/// `dir`; `None` where this build cannot ask (not Linux, or the call failed),
+/// which skips the check rather than refusing every snapshot.
+#[cfg(target_os = "linux")]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    rusty_libc::fs::statfs(&path)
+        .ok()
+        .map(|fs| fs.available_bytes())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn free_space(_dir: &Path) -> Option<u64> {
+    None
+}
+
+/// `CSN-FR-001` (ADR-0136): [`copy_table_files`] into `dir`, refused before
+/// the first byte moves — `TooLarge` when the table is over `max_bytes`,
+/// `Storage` when the disk holding `dir` cannot take it plus
+/// [`STAGING_HEADROOM_BYTES`]. Callers run it inside the table's exclusive
+/// section; both checks are a few syscalls, so a refusal holds the lock for
+/// microseconds, where a copy that ran out of disk would have held it for as
+/// long as the copy took.
 pub(crate) fn stage_table_files(base: &Path, dir: &Path, max_bytes: u64) -> Result<(), ErrorCode> {
+    stage_table_files_with(base, dir, max_bytes, &free_space)
+}
+
+fn stage_table_files_with(
+    base: &Path,
+    dir: &Path,
+    max_bytes: u64,
+    free: &dyn Fn(&Path) -> Option<u64>,
+) -> Result<(), ErrorCode> {
     let total: u64 = table_files(base)
         .map_err(|_| ErrorCode::Storage)?
         .iter()
@@ -902,6 +936,14 @@ pub(crate) fn stage_table_files(base: &Path, dir: &Path, max_bytes: u64) -> Resu
         .sum();
     if total > max_bytes {
         return Err(ErrorCode::TooLarge);
+    }
+    let needed = total.saturating_add(STAGING_HEADROOM_BYTES);
+    if dir
+        .parent()
+        .and_then(free)
+        .is_some_and(|room| room < needed)
+    {
+        return Err(ErrorCode::Storage);
     }
     copy_table_files(base, dir)
         .map(|_| ())
@@ -5946,6 +5988,52 @@ fn link_across(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CSN-FR-001` (ADR-0136): the staging copy is refused before a byte is
+    /// copied when the table is over the ceiling or the disk is too small,
+    /// copied when there is room, and not blocked where free space is unknown.
+    #[test]
+    fn staging_checks_the_ceiling_and_the_free_space_before_copying() {
+        let root = std::env::temp_dir().join(format!("stage_checks_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let base = root.join("t.mmap");
+        std::fs::write(&base, vec![1u8; 1000]).unwrap();
+        std::fs::write(root.join("t.mmap.pad"), vec![2u8; 1000]).unwrap();
+        let dir = root.join("snap-0");
+        let room = |n: u64| move |_: &Path| Some(n);
+
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1999, &room(u64::MAX)),
+            Err(ErrorCode::TooLarge)
+        );
+        let short = 2000 + STAGING_HEADROOM_BYTES - 1;
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1 << 20, &room(short)),
+            Err(ErrorCode::Storage)
+        );
+        assert!(!dir.exists(), "a refusal copies nothing");
+
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1 << 20, &room(short + 1)),
+            Ok(())
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1 << 20, &|_: &Path| None),
+            Ok(()),
+            "unknown free space does not refuse"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn free_space_reads_the_real_filesystem() {
+        assert!(free_space(&std::env::temp_dir()).is_some_and(|n| n > 0));
+        assert_eq!(free_space(Path::new("/no/such/dir")), None);
+    }
 
     /// `MHTTP-FR-001`: neither default constructor opens an HTTP port;
     /// only the builder supplies a caller-owned listener.

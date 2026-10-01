@@ -532,6 +532,7 @@ rather than silently added, each for a concrete reason:
   workloads, but nothing today measures pipeline `|` throughput as a
   bottleneck, so this stays a "revisit if profiling asks for it" item rather
   than a proposed addition.
-- **Extended attributes (`getxattr`/`setxattr`)** and **filesystem-level
-  stats (`statfs`)** — no shell-builtin need identified (no `df` or xattr-
-  aware builtin in `rush` today).
+- **Extended attributes (`getxattr`/`setxattr`)** — no shell-builtin need
+  identified (no xattr-aware builtin in `rush` today). *(`statfs` was
+  declined here too and has since been added for `rusty_multimodal_db`'s
+  free-space check.)*
