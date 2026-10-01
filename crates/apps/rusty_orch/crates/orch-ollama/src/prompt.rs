@@ -78,6 +78,7 @@ fn format_spec(role: Role) -> String {
          - finding requires confidence: low, medium, or high. Other kinds omit it.\n\
          - body is a short non-blank statement, at most {MAX_BODY_CHARS} characters. Put detail behind refs.\n\
          - refs is an array of strings: E-<n> for a board entry listed above, or path:<repo path>, commit:<hash>, url:<address>.\n\
+         - Never settle a decision; propose it as a finding.\n\
          - At most {MAX_ENTRIES} entries. At least one.\n"
     )
 }

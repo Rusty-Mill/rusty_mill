@@ -4,6 +4,16 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Agents never settle decisions alone
+**2026-10-01** · (link once pushed)
+
+- **Added:** a `Board` invariant in `orch-core`. `Board::append` accepts `EntryKind::Decision` from `Author::Human` unconditionally, and from `Author::Agent` only when `refs` includes a live (not superseded) `Review` with `Verdict::Approve`; otherwise `BoardError::DecisionNeedsApproval`. Supersessions follow the same rule, so an agent cannot overwrite a human's decision without an approval behind it. Enforced in the board so every adapter inherits it.
+- **Changed:** `orch-ollama` no longer offers `decision` to any role (Design had it). Agents propose decisions as findings; the prompt's format spec says so.
+- **Added:** ADR-0005 recording the policy. Seven new `orch-core` tests: human decision without refs, agent decision without refs, backed by an approving review, backed by changes-requested, backed by a superseded approval, backed by a non-review entry, and agent supersession of a human decision with and without approval. Existing dispatcher tests unchanged.
+- Out of scope, by choice: a `Proposal` kind, routing changes, auto-promotion of approved findings.
+
+---
+
 ## First real agent — orch-ollama
 **2026-10-01** · (link once pushed)
 

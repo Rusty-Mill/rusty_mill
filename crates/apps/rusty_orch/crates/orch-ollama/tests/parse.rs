@@ -56,10 +56,10 @@ fn rejects_unknown_kind_and_kind_not_allowed_for_role() {
         err(r#"{"entries":[{"kind":"decision","body":"x","refs":[]}]}"#).contains("not allowed")
     );
     let design = r#"{"entries":[{"kind":"decision","body":"x","refs":[]}]}"#;
-    assert_eq!(
-        parse(design, Role::Design).expect("design may decide")[0].kind,
-        EntryKind::Decision
-    );
+    assert!(parse(design, Role::Design)
+        .expect_err("agents never settle decisions")
+        .0
+        .contains("not allowed"));
 }
 
 #[test]
