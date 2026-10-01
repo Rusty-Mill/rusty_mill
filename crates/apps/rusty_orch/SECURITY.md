@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 Do **not** open a public issue. Report privately via
-[GitHub Security Advisories](https://github.com/baileyrd/rusty_orch/security/advisories/new),
+[GitHub Security Advisories](https://github.com/Rusty-Mill/rusty_mill/security/advisories/new),
 or reach baileyrd directly if advisories aren't set up on this repo yet.
 
 Include: what you found, affected version/commit, reproduction steps or PoC, and
