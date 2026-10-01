@@ -34,6 +34,9 @@ version: `a245d35`).
 
 ## Recently completed
 
+- [#179](https://github.com/baileyrd/rusty_bullet/pull/179) —
+  `RB-PHYSICS-001-FR-087`, car spin clamped after the transform;
+  `RB-VERIFY-003` 0.13.0 `q-rate`.
 - [#178](https://github.com/baileyrd/rusty_bullet/pull/178) —
   `RB-PHYSICS-001-FR-086`, steering by per-wheel side impulses (ADR-0016).
 - [#177](https://github.com/baileyrd/rusty_bullet/pull/177) — spin in
@@ -74,7 +77,8 @@ version: `a245d35`).
 
 ## In progress
 
-- None.
+- `RB-PHYSICS-001-FR-088` (ground contact from wheel rays, ADR-0017):
+  implemented; awaiting the owner's re-trace.
 
 ## Blocked
 
@@ -101,16 +105,15 @@ version: `a245d35`).
 
 ## Next
 
-1. Trace `rb-verify --self-trace <test2.jsonl> 5.5 6.5`: the 6-7 s
-   `--self-growth` window now dominates (442 uu / 1.70 rad / 923 uu/s,
-   ball 470 uu). Leads from the 4.3-5.6 s trace: after boost starts
-   (4.94 s) the recorded car falls faster (vz -311 vs -248 uu/s at
-   5.567 s) and velocity error grows 35 to 88 uu/s; at 5.575 s the
-   recorded spin jumps from (-0.17, 0.88, 0.71) to (1.10, 0.16, 0.10),
-   a contact near z 33-41 the candidate (z 46.7) does not have. Smaller
-   leftovers: steady yaw rate ~5% low; the real hitbox sits 20.755 uu
-   above the car origin (`hitboxPosOffset`) while the port's box rests on
-   the floor.
+1. Re-run `rb-verify --self-trace <test2.jsonl> 5.5 6.5` and
+   `--self-growth` to confirm `RB-PHYSICS-001-FR-088`: at 5.758 s the
+   candidate should ground-jump (vz ~+290), not dodge sideways, and dodge
+   at 6.058 s like the recording. Still open: the landing at 5.575 s (the
+   recorded car lands on its wheels at z 40.9; the candidate's box lands
+   later and bounces), which needs raycast suspension and the 20.755 uu
+   hitbox offset (ADR-0017 option 2); after boost starts (4.94 s) the
+   recorded car falls faster (vz -311 vs -248 uu/s at 5.567 s); steady yaw
+   rate ~5% low.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -119,7 +122,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (419 tests: 27 `rb_domain`, 354
+- `cargo test --workspace`: pass (424 tests: 27 `rb_domain`, 359
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 14 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

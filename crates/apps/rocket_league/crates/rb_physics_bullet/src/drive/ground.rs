@@ -4,7 +4,7 @@
 //! `super::apply_driven_forces` does the gating.
 
 use super::{forward_axis, right_axis, up_axis, UNBOOSTED_MAX_CAR_SPEED};
-use crate::body::{RigidBody, Shape};
+use crate::body::{RigidBody, Shape, StaticPlane};
 use rb_domain::{ControllerInput, Vec3};
 
 /// Peak throttle acceleration (uu/s^2), at a standing start. Long an
@@ -164,6 +164,48 @@ const WHEELS: [(f32, f32, bool); 4] = [
     (REAR_AXLE_X, 29.50, false),
     (REAR_AXLE_X, -29.50, false),
 ];
+
+/// Height of the Octane's wheel ray starts above the car origin (uu),
+/// RocketSim `CarConfig.cpp`'s `connectionPointOffset.z`.
+const WHEEL_RAY_START_Z: f32 = 20.755;
+
+/// Wheel ray reach (uu): RocketSim's `btVehicleRL::rayCast` length,
+/// `(restLength - MAX_SUSPENSION_TRAVEL) + MAX_SUSPENSION_TRAVEL + radius -
+/// SUSPENSION_SUBTRACTION`, i.e. `restLength + radius - 2.5`. Front: rest
+/// `38.755`, radius `12.5`; back: rest `37.055`, radius `15`.
+const FRONT_WHEEL_RAY_LENGTH: f32 = 38.755 + 12.5 - 2.5;
+const BACK_WHEEL_RAY_LENGTH: f32 = 37.055 + 15.0 - 2.5;
+
+/// Wheels whose ray must reach a surface for the car to count as on the
+/// ground: RocketSim `Car.cpp`'s `numWheelsInContact >= 3`.
+const MIN_WHEELS_FOR_GROUND: usize = 3;
+
+/// Whether `car` is on the ground (`RB-PHYSICS-001-FR-088`): at least three
+/// of its four wheel rays, cast straight down the car's own axis from
+/// RocketSim's Octane connection points, reach `plane` from its front side.
+/// Unlike box-corner contact, this holds while the box hovers on its
+/// suspension or bounces a few uu off the floor, as the real wheels do.
+pub fn wheels_on_ground(car: &RigidBody, plane: &StaticPlane) -> bool {
+    let down = car.orientation.rotate(&Vec3::new(0.0, 0.0, -1.0));
+    let approach = -plane.normal.dot(&down);
+    if approach <= 0.0 {
+        return false;
+    }
+    let touching = WHEELS
+        .iter()
+        .filter(|&&(x, y, front)| {
+            let start = car.position + car.orientation.rotate(&Vec3::new(x, y, WHEEL_RAY_START_Z));
+            let height = plane.signed_distance(&start);
+            let reach = if front {
+                FRONT_WHEEL_RAY_LENGTH
+            } else {
+                BACK_WHEEL_RAY_LENGTH
+            };
+            height >= 0.0 && height <= reach * approach
+        })
+        .count();
+    touching >= MIN_WHEELS_FOR_GROUND
+}
 
 /// Full brake deceleration (uu/s^2). RocketSim's per-wheel brake
 /// (`BRAKE_TORQUE_AMOUNT * UU_TO_BT = 52.5`) times four wheels over

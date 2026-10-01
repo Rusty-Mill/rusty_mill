@@ -937,6 +937,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- A car is on the ground when three of its four wheel rays reach the
+  floor (`RB-PHYSICS-001-FR-088`, ADR-0017), as in RocketSim, not when its
+  box touches. A jump press while bouncing just off the floor now jumps
+  instead of dodging.
 - Car angular speed is clamped after the transform integrates
   (`RB-PHYSICS-001-FR-087`), as RocketSim and the real capture do, so a
   saturated flip turns at ~7.5 rad/s while reporting 5.5.

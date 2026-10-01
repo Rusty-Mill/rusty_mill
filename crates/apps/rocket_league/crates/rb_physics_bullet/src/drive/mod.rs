@@ -282,6 +282,7 @@ mod jump;
 mod tests;
 
 pub use boost::MAX_BOOST;
+pub use ground::wheels_on_ground;
 
 /// The no-slip bicycle-model yaw rate for `ground::steer_angle` over the
 /// Octane wheelbase: the turn rate grip-limited steering approaches, for

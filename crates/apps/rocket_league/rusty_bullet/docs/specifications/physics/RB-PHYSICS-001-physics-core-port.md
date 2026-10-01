@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.91.0
+- Version: 0.92.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5448,6 +5448,23 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     through 5.6 s (was ~1.3 by 4.95 s); `--self-growth` 5-6 s 64 uu
     (was 157), ball 30 uu (was 82).
 
+- `RB-PHYSICS-001-FR-088` (ground contact from wheel rays, implemented,
+  verified by unit tests, ADR-0017): a car is on the ground when at least
+  three of its four wheel rays reach the floor, as in RocketSim's
+  `Car.cpp` (`numWheelsInContact >= 3`). This replaces box-corner contact.
+  - The rays are cast down the car's own axis from RocketSim's Octane
+    connection points (front (51.25, ±25.90), back (-33.75, ±29.50), 20.755
+    uu up). They reach `restLength + radius - 2.5`: 48.755 uu at the front,
+    49.555 at the back.
+  - Why: in the 5.5-6.5 s trace the candidate's box was mid-bounce at
+    z 22.6 when the recorded car ground-jumped at 5.758 s. The candidate
+    dodged sideways instead, and velocity error jumped from 430 to 1,248
+    uu/s.
+  - **Verification**: `drive` tests cover the reach boundary (grounded at
+    27.9 uu, not at 28.5) and a car on its roof or side. The new `world`
+    test `a_jump_press_while_bouncing_just_off_the_floor_jumps_instead_of_dodging`
+    fails under box contact (a 500 uu/s side dodge).
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -6929,6 +6946,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.92.0 (2026-10-01): `RB-PHYSICS-001-FR-088` — ground contact from
+  RocketSim's wheel rays, not box contact (ADR-0017). 359 tests in
+  `rb_physics_bullet`.
 - 0.91.0 (2026-10-01): `RB-PHYSICS-001-FR-087` — car angular speed clamped
   after the transform integrates, per RocketSim and the real capture. 354
   tests in `rb_physics_bullet`.
