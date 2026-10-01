@@ -30,6 +30,14 @@ tracing.workspace = true
 axum = { version = "0.8", optional = true }
 tokio = { workspace = true, optional = true }
 
+# Wire-level MCP conformance suite (design review Tranche 4). Its own
+# runner, because the binary doubles as the MCP server the client cases
+# launch over stdio.
+[[test]]
+name = "conformance"
+harness = false
+required-features = ["stdio", "http", "client"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tokio-test.workspace = true
