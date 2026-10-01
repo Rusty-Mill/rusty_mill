@@ -414,12 +414,10 @@ fn write_granted_entry(
     file.granted.dedup();
     let json = serde_json::to_string_pretty(&file)
         .map_err(|e| format!("serialize granted_caps.json: {e}"))?;
-    // Atomic write: tmp + rename so a crash mid-write can't produce a
-    // half-written file the kernel will parse as "deny-all".
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| format!("write tmp: {e}"))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("rename tmp: {e}"))?;
-    Ok(())
+    // Crash-atomic, so a crash mid-write can't produce a half-written
+    // file the kernel will parse as "deny-all".
+    rusty_atomic_file::write(&path, json.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Return the granted-caps snapshot for every plugin the scanner can see.

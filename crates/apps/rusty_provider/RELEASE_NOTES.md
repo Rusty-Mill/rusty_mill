@@ -24,6 +24,14 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## Design review 3.1: rp-server fails closed on authentication
+
+- **Security:** a configured API key, client key or JWT secret that does not resolve stops the server at startup, naming each one. It used to warn and run with less or no authentication.
+- **Security:** with no authentication configured, `/v1` is `401` unless `server.allow_unauthenticated = true`. This also holds at runtime, after the admin API removes the last client.
+- **Changed (breaking):** the default bind address is `127.0.0.1`. Containers must set `host = "0.0.0.0"`. The example config and README say so.
+
+---
+
 ## PR #149 — Add routing-decision trace headers (X-RP-Decision / X-RP-Fallback-Attempts)
 **2026-08-08** · [#149](https://github.com/baileyrd/rusty_provider/pull/149)
 

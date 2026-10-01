@@ -468,3 +468,78 @@ async fn ipc_call_returns_cancelled_when_parent_token_fires() {
         "cancel must short-circuit the 10-s sleep; took {elapsed:?}",
     );
 }
+
+/// Sync-only dispatcher whose handler polls its cancel token for up to 5 s
+/// and reports whether it saw cancellation.
+struct PollingSyncDispatcher {
+    saw_cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::ipc::IpcDispatcher for PollingSyncDispatcher {
+    fn dispatch(
+        &self,
+        _caller_plugin_id: &str,
+        _target_plugin_id: &str,
+        _command_id: &str,
+        _args: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, IpcError> {
+        let token = crate::cancel::ipc_cancel_token().expect("dispatch token installed");
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if token.is_cancelled() {
+                self.saw_cancel
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(serde_json::json!({}))
+    }
+}
+
+/// Design review 4 (N4): a deadline used to return `Timeout` without
+/// cancelling the dispatch token, so a polling sync handler kept running
+/// (holding its blocking-pool slot) until it finished on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timed_out_sync_handler_observes_cancellation() {
+    use crate::context::Ipc as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let kv: Arc<dyn KvStore> = Arc::new(InMemoryKvStore::new());
+    let bus = Arc::new(EventBus::new(16));
+    let saw_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatcher: Arc<dyn crate::ipc::IpcDispatcher> = Arc::new(PollingSyncDispatcher {
+        saw_cancel: saw_cancel.clone(),
+    });
+    let ctx = KernelPluginContext::new(
+        "com.test.caller",
+        "1.0.0",
+        [Capability::IpcCall].into_iter().collect::<CapabilitySet>(),
+        kv,
+        bus,
+        dir.path(),
+        Some(dispatcher),
+    )
+    .unwrap();
+
+    let result = ctx
+        .ipc_call(
+            "com.target",
+            "do",
+            serde_json::json!({}),
+            Duration::from_millis(50),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(IpcError::Timeout { .. })),
+        "{result:?}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !saw_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the handler never saw its token cancelled"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

@@ -43,7 +43,10 @@ pub fn render(input: &str, values: &BTreeMap<String, String>) -> Result<String, 
     while i < input.len() {
         if i + 1 < input.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             // Escape: {{!}} → literal `{{`.
-            if i + 4 <= input.len() && &input[i..i + 5] == "{{!}}" {
+            // `starts_with`, not a 5-byte slice: `{{ab` (4 bytes) used to
+            // panic, and a slice could split a multi-byte character
+            // (design review 3.8).
+            if input[i..].starts_with("{{!}}") {
                 out.push_str("{{");
                 i += 5;
                 continue;
@@ -66,8 +69,12 @@ pub fn render(input: &str, values: &BTreeMap<String, String>) -> Result<String, 
         if bytes[i] == b'\n' {
             line += 1;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Copy the whole character: pushing each UTF-8 byte as a `char`
+        // turned `é` into mojibake. `i` is always on a char boundary here,
+        // since tags are ASCII.
+        let ch = input[i..].chars().next().unwrap_or('\u{fffd}');
+        out.push(ch);
+        i += ch.len_utf8();
     }
     Ok(out)
 }
@@ -100,7 +107,7 @@ pub(crate) fn tag_names(input: &str) -> Vec<String> {
     let mut i = 0;
     while i < input.len() {
         if i + 1 < input.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            if i + 4 <= input.len() && &input[i..i + 5] == "{{!}}" {
+            if input[i..].starts_with("{{!}}") {
                 i += 5;
                 continue;
             }
@@ -187,5 +194,22 @@ mod tests {
     fn multiple_substitutions_in_one_string() {
         let v = vals(&[("a", "1"), ("b", "2"), ("c", "3")]);
         assert_eq!(render("{{a}}-{{b}}-{{c}}", &v).unwrap(), "1-2-3");
+    }
+
+    /// Design review 3.8: `{{ab` (four bytes) sliced five bytes and
+    /// panicked; non-ASCII literal text was pushed byte by byte as `char`.
+    #[test]
+    fn short_tags_do_not_panic_and_unicode_survives() {
+        assert!(matches!(
+            render("{{ab", &vals(&[])),
+            Err(SubstitutionError::MalformedTag { line: 1 })
+        ));
+        assert!(tag_names("{{ab").is_empty());
+        assert!(render("{{é", &vals(&[])).is_err());
+        assert_eq!(
+            render("café {{x}} — ok", &vals(&[("x", "naïve")])).unwrap(),
+            "café naïve — ok"
+        );
+        assert_eq!(render("{{!}}é", &vals(&[])).unwrap(), "{{é");
     }
 }

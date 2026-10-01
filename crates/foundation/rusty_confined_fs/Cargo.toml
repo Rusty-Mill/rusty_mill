@@ -1,0 +1,18 @@
+[package]
+name = "rusty_confined_fs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusty_libc = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

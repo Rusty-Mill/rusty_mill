@@ -27,6 +27,9 @@ pollster = { version = "0.4.0", optional = true }
 rayon = "1"
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
+# The workspace's one HTTP/1.1 parser (design review Tranche 4): the
+# server's request head and body framing, with its 3.4 framing rules.
+rusty_http = { workspace = true, optional = true }
 wgpu = { version = "29.0.3", optional = true }
 
 # `thin` LTO + `codegen-units=1` is deliberate. Measured 2026-06-19 on the
@@ -49,7 +52,7 @@ gpu = ["dep:wgpu", "dep:pollster"]
 # Optional OpenAI-compatible HTTP server (`serve` subcommand). Off by default so
 # the base build stays dependency-light; pulls only serde/serde_json (the HTTP/1.1
 # layer is hand-rolled on std::net). Works with any backend.
-server = ["dep:serde", "dep:serde_json"]
+server = ["dep:serde", "dep:serde_json", "dep:rusty_http"]
 
 # Optional NVIDIA CUDA backend (cuBLASLt tensor cores), behind cudarc. Off by
 # default and NVIDIA-only. `dynamic-loading` means no CUDA libraries or nvcc are

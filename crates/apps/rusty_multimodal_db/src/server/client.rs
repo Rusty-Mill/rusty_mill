@@ -179,7 +179,7 @@ use super::protocol::{
     FieldDescriptor, FieldRef, JoinSpec, ParentLookup, Predicate, RecordId, RelationDescriptor,
     Request, Response, ScanValue, Selection, ValueKind, WriteOp, WriteResult, PROTOCOL_VERSION,
     SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -390,6 +390,10 @@ pub struct ConnectOptions {
     /// (protocol 1, `SERVER-001` v0.9.1) no longer exist to fall back
     /// to; [`Self::allow_pre_hello_fallback`] restores the old behaviour.
     require_hello: bool,
+    /// `NLC-FR-007` (ADR-0128): the highest protocol version to offer.
+    /// Default [`PROTOCOL_VERSION`]. A client that does not want a nullable
+    /// column reported as `Null` (protocol 32) connects with 31.
+    max_protocol_version: u32,
 }
 
 impl Default for ConnectOptions {
@@ -398,6 +402,7 @@ impl Default for ConnectOptions {
             token: None,
             tls: None,
             require_hello: true,
+            max_protocol_version: PROTOCOL_VERSION,
         }
     }
 }
@@ -417,6 +422,15 @@ impl ConnectOptions {
     /// Complete a TLS handshake (as `tls` describes) before the `Hello`.
     pub fn tls(mut self, tls: ClientTlsConfig) -> Self {
         self.tls = Some(tls);
+        self
+    }
+
+    /// Offer at most protocol `version` in the `Hello` (`NLC-FR-007`,
+    /// ADR-0128): the server answers the lower of this and its own, so a
+    /// client written before protocol 32 keeps seeing a nullable column's
+    /// sentinel by connecting with `31`.
+    pub fn max_protocol_version(mut self, version: u32) -> Self {
+        self.max_protocol_version = version.min(PROTOCOL_VERSION);
         self
     }
 
@@ -508,6 +522,7 @@ pub struct SessionOptions {
     validate_on_stage: bool,
     snapshot_isolation: bool,
     mvcc_isolation: bool,
+    strict_commit: bool,
 }
 
 impl SessionOptions {
@@ -549,6 +564,19 @@ impl SessionOptions {
         self
     }
 
+    /// A strict session (`STC-FR-003`, `ADR-0133`, protocol 35): record
+    /// writes and updates stage in one list, `get` answers the record as
+    /// that list would leave it, and `commit` applies it all or nothing
+    /// including soft outcomes — the first op that would be `Duplicate`,
+    /// `NotFound`, `GuardFailed` or `AlreadyLinked` fails it with
+    /// `ClientError::TransactionFailed` and nothing is written. Stands
+    /// alone: combined with another option the server answers
+    /// `ErrorCode::Unsupported`.
+    pub fn strict_commit(mut self) -> Self {
+        self.strict_commit = true;
+        self
+    }
+
     fn flags(self) -> u32 {
         (if self.read_your_writes {
             SESSION_READ_YOUR_WRITES
@@ -566,12 +594,18 @@ impl SessionOptions {
             SESSION_MVCC_ISOLATION
         } else {
             0
+        }) | (if self.strict_commit {
+            SESSION_STRICT_COMMIT
+        } else {
+            0
         })
     }
 
     /// The protocol version the chosen options need.
     fn required_version(self) -> u32 {
-        if self.mvcc_isolation {
+        if self.strict_commit {
+            35
+        } else if self.mvcc_isolation {
             27
         } else if self.snapshot_isolation {
             7
@@ -615,13 +649,78 @@ impl Session<'_> {
         }
     }
 
-    /// Apply every staged write as one all-or-nothing batch and close the
-    /// session. `Ok(())` means every write is now visible to every
-    /// connection; [`ClientError::TransactionFailed`] means none is.
-    pub fn commit(mut self) -> Result<(), ClientError> {
+    /// Stage one whole-record write beside the session's updates
+    /// (`TXS-FR-003`, ADR-0130, protocol 33): the request is the same
+    /// single-shot one, and the server stages it, answering `Staged`. On a
+    /// session that asked for read-your-writes, snapshot isolation or
+    /// real MVCC it is `Server(Unsupported, _)` (whole-record overlays are a
+    /// later phase). [`ClientError::Unsupported`]`("session record writes")`
+    /// below 33, no frame sent.
+    fn stage_record_write(&mut self, request: Request) -> Result<u32, ClientError> {
+        if self.client.server_protocol_version() < 33 {
+            return Err(ClientError::Unsupported("session record writes"));
+        }
+        match self.client.roundtrip(request)? {
+            Response::Staged { index } => Ok(index),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Staged")),
+        }
+    }
+
+    /// Stage an insert (`TXS-FR-003`); fields named as
+    /// [`SchemaDrivenClient::insert`] names them.
+    pub fn insert(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<u32, ClientError> {
+        let fields = self.client.tag_fields(fields)?;
+        self.stage_record_write(Request::Insert { id, fields })
+    }
+
+    /// Stage a whole-record replace (`TXS-FR-003`).
+    pub fn replace(
+        &mut self,
+        id: RecordId,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<u32, ClientError> {
+        let fields = self.client.tag_fields(fields)?;
+        self.stage_record_write(Request::Replace { id, fields })
+    }
+
+    /// Stage a delete (`TXS-FR-003`). A batch does not cascade into other
+    /// tables (`WriteBatch`'s own rule).
+    pub fn delete(&mut self, id: RecordId) -> Result<u32, ClientError> {
+        self.stage_record_write(Request::Delete { id })
+    }
+
+    /// Stage an edge under a relation label (`TXS-FR-003`).
+    pub fn link(
+        &mut self,
+        left: RecordId,
+        right: RecordId,
+        relation: &str,
+    ) -> Result<u32, ClientError> {
+        self.stage_record_write(Request::Link {
+            left,
+            right,
+            relation: relation.to_string(),
+        })
+    }
+
+    /// [`Session::commit`], returning what a session with record writes
+    /// reports per staged op (`TXS-FR-004`): one [`WriteResult`] each, in
+    /// staged order. Empty for a session that staged only updates. A
+    /// `Duplicate`/`NotFound`/`GuardFailed` outcome is a result, not an
+    /// error, exactly as in an atomic `WriteBatch`: the ops beside it still
+    /// applied — unless the session was opened with
+    /// [`SessionOptions::strict_commit`] (`ADR-0133`), where any of them
+    /// fails the commit and nothing is written.
+    pub fn commit_results(mut self) -> Result<Vec<WriteResult>, ClientError> {
         self.open = false;
         match self.client.roundtrip(Request::Commit)? {
-            Response::Ok => Ok(()),
+            Response::Ok => Ok(Vec::new()),
+            Response::BatchResults { results } => Ok(results),
             Response::TransactionFailed {
                 index,
                 code,
@@ -632,7 +731,42 @@ impl Session<'_> {
                 message,
             }),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
-            _ => Err(ClientError::UnexpectedResponse("Ok or TransactionFailed")),
+            _ => Err(ClientError::UnexpectedResponse(
+                "Ok, BatchResults or TransactionFailed",
+            )),
+        }
+    }
+
+    /// Apply every staged write in one batch and close the session.
+    ///
+    /// `Ok(())` means the batch was applied, not that every write was: a
+    /// session that staged record writes gets one outcome per op back, and
+    /// `commit` discards them. A write whose outcome was
+    /// `Duplicate`/`NotFound`/`GuardFailed` did not apply, while the ops
+    /// beside it did. Call [`Session::commit_results`] to see those
+    /// outcomes, or open the session with [`SessionOptions::strict_commit`]
+    /// (`ADR-0133`) so any of them fails the whole commit.
+    /// [`ClientError::TransactionFailed`] means nothing was written.
+    pub fn commit(mut self) -> Result<(), ClientError> {
+        self.open = false;
+        match self.client.roundtrip(Request::Commit)? {
+            Response::Ok => Ok(()),
+            // `TXS-FR-004`: a session that staged record writes answers its
+            // per-op results; `commit` drops them, `commit_results` keeps them.
+            Response::BatchResults { .. } => Ok(()),
+            Response::TransactionFailed {
+                index,
+                code,
+                message,
+            } => Err(ClientError::TransactionFailed {
+                index,
+                code,
+                message,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse(
+                "Ok, BatchResults or TransactionFailed",
+            )),
         }
     }
 
@@ -734,6 +868,34 @@ pub enum BatchOp<'a> {
         right: RecordId,
         relation: &'a str,
     },
+    /// `TXS-FR-002` (ADR-0130, protocol 33): one field update, named as
+    /// [`SchemaDrivenClient::update`] names it.
+    UpdateField {
+        id: RecordId,
+        field: &'a str,
+        value: ScanValue,
+    },
+}
+
+/// [`SchemaDrivenClient::fetch_snapshot_at`]'s answer (`CHL-FR-005`,
+/// ADR-0131): the table's files and, for a table with a change log, the
+/// log's `(epoch, seq)` at the instant they were copied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotAt {
+    pub files: Vec<(String, Vec<u8>)>,
+    pub position: Option<(u64, u64)>,
+}
+
+/// [`SchemaDrivenClient::fetch_since`]'s answer (`CHL-FR-004`, ADR-0131):
+/// `entries` are consecutive commit units, the first being sequence number
+/// `first`; `head` is the log's last sequence number now. A standby applies
+/// each entry as one atomic `WriteBatch`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangeBatch {
+    pub epoch: u64,
+    pub first: u64,
+    pub head: u64,
+    pub entries: Vec<Vec<WriteOp>>,
 }
 
 /// One [`QueryResult::Groups`] row: one group's `GROUP BY` key values and
@@ -825,6 +987,9 @@ fn resolve_literal(
         (ValueKind::I64, sql::Literal::Number(n)) => Ok(ScanValue::I64(*n)),
         (ValueKind::Bool, sql::Literal::Bool(b)) => Ok(ScanValue::Bool(*b)),
         (ValueKind::Str, sql::Literal::Str(s)) => Ok(ScanValue::Str(s.clone())),
+        // `NLC-FR-006` (ADR-0128): `IS [NOT] NULL` — any kind; the server
+        // says whether the field is nullable.
+        (_, sql::Literal::Null) => Ok(ScanValue::Null),
         _ => Err(ClientError::Sql(format!(
             "{field_name}: this literal does not match the field's type ({kind:?})"
         ))),
@@ -904,7 +1069,7 @@ impl SchemaDrivenClient {
         let server_protocol_version = match Self::exchange(
             &mut stream,
             &Request::Hello {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: options.max_protocol_version,
             },
         ) {
             Ok(Response::Hello { protocol_version }) => protocol_version,
@@ -1156,6 +1321,17 @@ impl SchemaDrivenClient {
 
     fn field(&self, name: &str) -> Result<&FieldDescriptor, ClientError> {
         Self::field_in(&self.schema, name)
+    }
+
+    /// Field names resolved to tags, in order (`TXS-FR-003`).
+    fn tag_fields(
+        &self,
+        fields: &[(&str, ScanValue)],
+    ) -> Result<Vec<(FieldRef, ScanValue)>, ClientError> {
+        fields
+            .iter()
+            .map(|(name, value)| Ok((self.field(name)?.tag, value.clone())))
+            .collect()
     }
 
     /// [`Self::field`] against an arbitrary schema — another table's,
@@ -2345,6 +2521,27 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// The names of the selected table's nullable fields (`NLC-FR-005`,
+    /// ADR-0128, protocol 32): fields a connection at 32 reads and writes
+    /// as [`ScanValue::Null`] (SQL `IS NULL` tests them). One round trip;
+    /// a table with none answers an empty list.
+    /// [`ClientError::Unsupported`]`("describe_nullable")` below 32, no
+    /// frame sent (rule 4).
+    pub fn describe_nullable(&mut self) -> Result<Vec<String>, ClientError> {
+        if self.server_protocol_version() < 32 {
+            return Err(ClientError::Unsupported("describe_nullable"));
+        }
+        match self.roundtrip(Request::DescribeNullable)? {
+            Response::NullableFields { tags } => Ok(tags
+                .into_iter()
+                .filter_map(|tag| self.schema.fields.iter().find(|f| f.tag == tag))
+                .map(|f| f.name.clone())
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("NullableFields")),
+        }
+    }
+
     /// A batch of runtime writes in one request (`WBT-FR-004`, ADR-0060,
     /// protocol 22): the five single-shot writes carried together, field
     /// names resolved to tags here, answered one [`WriteResult`] per op
@@ -2367,6 +2564,14 @@ impl SchemaDrivenClient {
         }
         if ops.len() > super::protocol::MAX_BATCH_OPS {
             return Err(ClientError::Unsupported("write_batch size"));
+        }
+        // `TXS-FR-002` (ADR-0130): `UpdateField` is a protocol-33 op (rule 4).
+        if self.server_protocol_version() < 33
+            && ops
+                .iter()
+                .any(|op| matches!(op, BatchOp::UpdateField { .. }))
+        {
+            return Err(ClientError::Unsupported("write_batch update"));
         }
         let mut wire = Vec::with_capacity(ops.len());
         for op in ops {
@@ -2427,6 +2632,17 @@ impl SchemaDrivenClient {
                 }
             }
             BatchOp::Delete { id } => WriteOp::Delete { id: *id },
+            BatchOp::UpdateField { id, field, value } => {
+                let descriptor = self.field(field)?;
+                if !descriptor.capabilities.update {
+                    return Err(ClientError::Unsupported("update on this field"));
+                }
+                WriteOp::UpdateField {
+                    id: *id,
+                    field: descriptor.tag,
+                    value: value.clone(),
+                }
+            }
             BatchOp::Link {
                 left,
                 right,
@@ -2522,9 +2738,69 @@ impl SchemaDrivenClient {
             return Err(ClientError::Unsupported("fetch_snapshot"));
         }
         match self.roundtrip(Request::FetchSnapshot)? {
-            Response::Snapshot { files } => Ok(files),
+            Response::Snapshot { files } | Response::SnapshotAt { files, .. } => Ok(files),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Snapshot")),
+        }
+    }
+
+    /// [`Self::fetch_snapshot`] with the change log's position at the
+    /// instant of the copy (`CHL-FR-005`, ADR-0131, protocol 34): a standby
+    /// restored from `files` tails with [`Self::fetch_since`] from `seq` in
+    /// `epoch`. `position` is `None` for a table with no change log (or a
+    /// server below 34), which is a plain snapshot.
+    pub fn fetch_snapshot_at(&mut self) -> Result<SnapshotAt, ClientError> {
+        if self.server_protocol_version() < 25 {
+            return Err(ClientError::Unsupported("fetch_snapshot"));
+        }
+        match self.roundtrip(Request::FetchSnapshot)? {
+            Response::Snapshot { files } => Ok(SnapshotAt {
+                files,
+                position: None,
+            }),
+            Response::SnapshotAt { files, epoch, seq } => Ok(SnapshotAt {
+                files,
+                position: Some((epoch, seq)),
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Snapshot")),
+        }
+    }
+
+    /// The committed writes after sequence number `after` in the change log's
+    /// `epoch` (`CHL-FR-004`, ADR-0131, protocol 34), at most `limit`.
+    /// `Server(Unauthorized, _)` without the replication token;
+    /// `Server(Unsupported, _)` for a table with no change log;
+    /// `Server(Gone, _)` when the epoch is another or `after` is older than
+    /// the log holds — resync from [`Self::fetch_snapshot_at`].
+    /// [`ClientError::Unsupported`]`("fetch_since")` below 34, no frame sent.
+    pub fn fetch_since(
+        &mut self,
+        epoch: u64,
+        after: u64,
+        limit: u32,
+    ) -> Result<ChangeBatch, ClientError> {
+        if self.server_protocol_version() < 34 {
+            return Err(ClientError::Unsupported("fetch_since"));
+        }
+        match self.roundtrip(Request::FetchSince {
+            epoch,
+            after,
+            limit,
+        })? {
+            Response::Changes {
+                epoch,
+                first,
+                head,
+                entries,
+            } => Ok(ChangeBatch {
+                epoch,
+                first,
+                head,
+                entries,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Changes")),
         }
     }
 
@@ -2766,6 +3042,7 @@ fn carries_null(req: &Request) -> bool {
             WriteOp::ReplaceIf {
                 fields: f, guard, ..
             } => fields(f) || null(&guard.value),
+            WriteOp::UpdateField { value, .. } => null(value),
             WriteOp::Delete { .. } | WriteOp::Link { .. } => false,
         }),
         Request::Query { filter, .. } | Request::Aggregate { filter, .. } => preds(filter),

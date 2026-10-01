@@ -20,7 +20,7 @@ import uuid
 
 from .codec import CodecError, Reader, Writer
 
-PROTOCOL_VERSION = 31
+PROTOCOL_VERSION = 35
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 SESSION_READ_YOUR_WRITES = 1
@@ -29,6 +29,9 @@ SESSION_SNAPSHOT_ISOLATION = 4
 # MVCC2-FR-004/011, ADR-0072: real multi-version concurrency control on
 # Memory/Entity/Relation only (Unsupported elsewhere), protocol 27.
 SESSION_MVCC_ISOLATION = 8
+# STC-FR-003, ADR-0133: a strict session (all-or-nothing commit, whole-record
+# read-your-writes); stands alone, protocol 35.
+SESSION_STRICT_COMMIT = 16
 
 
 # ---- fieldless enums (a u32 index on the wire) ----
@@ -78,6 +81,7 @@ class ErrorCode(IntEnum):
     # WCB-FR-002, ADR-0103 (protocol 30): the server is at its connection
     # cap; this frame is the one a refused connect reads before the close.
     Busy = 15
+    Gone = 16
 
 
 # ---- ScanValue (enum family) ----
@@ -389,7 +393,19 @@ class WoLink:
     _spec: ClassVar[list] = [("left", "uuid"), ("right", "uuid"), ("relation", "str")]
 
 
-WriteOp = [WoInsert, WoReplace, WoReplaceIf, WoDelete, WoLink]
+@dataclass(frozen=True)
+class WoUpdateField:
+    """TXS-FR-001, ADR-0130, protocol 33: UpdateField's own three fields as
+    a batch op."""
+
+    id: uuid.UUID
+    field: int
+    value: Any
+    _index: ClassVar[int] = 5
+    _spec: ClassVar[list] = [("id", "uuid"), ("field", "u16"), ("value", ScanValue)]
+
+
+WriteOp = [WoInsert, WoReplace, WoReplaceIf, WoDelete, WoLink, WoUpdateField]
 
 
 @dataclass(frozen=True)
@@ -447,9 +463,17 @@ class WrFailed:
     _spec: ClassVar[list] = [("code", ErrorCode)]
 
 
+@dataclass(frozen=True)
+class WrUpdated:
+    """TXS-FR-001, ADR-0130, protocol 33: a WoUpdateField wrote."""
+
+    _index: ClassVar[int] = 9
+    _spec: ClassVar[list] = []
+
+
 WriteResult = [
     WrInserted, WrDuplicate, WrReplaced, WrNotFound, WrGuardFailed, WrLinked, WrAlreadyLinked,
-    WrDeleted, WrFailed,
+    WrDeleted, WrFailed, WrUpdated,
 ]
 
 
@@ -755,12 +779,32 @@ class FilteredPageDesc:
         object.__setattr__(self, "filter", tuple(self.filter))
 
 
+@_variant(38, [])
+class DescribeNullable:
+    """NLC-FR-005, ADR-0128, protocol 32: which fields of the selected
+    table are nullable — read and written as Null on a connection at 32 or
+    above while stored as a sentinel. Answered NullableFields."""
+
+
+@_variant(39, [("epoch", "u64"), ("after", "u64"), ("limit", "u32")])
+class FetchSince:
+    """RPL-FR-002, ADR-0131, protocol 34: the change-log entries after
+    sequence ``after`` in ``epoch`` (at most ``limit``). Replication token
+    only. Answered Changes; ErrorCode.Gone when the epoch differs or the
+    log no longer reaches back to ``after``."""
+
+    epoch: int
+    after: int
+    limit: int
+
+
 Request = [
     GetById, FilterEq, ScanField, UpdateField, ParentReq, ChildrenReq, NeighborsReq,
     DescribeSchema, Authenticate, Transaction, Hello, Begin, Commit, Rollback, BeginWith,
     Query, Aggregate, NeighborsByRelation, ListRelationKinds, Join, DescribeRelations,
     Insert, Link, Replace, Use, ListTables, Delete, Compact, ReplaceIf, Page, CountEdges,
     WriteBatch, Metrics, Backup, FetchSnapshot, FilteredPage, PageDesc, FilteredPageDesc,
+    DescribeNullable, FetchSince,
 ]
 
 # The protocol version each request first appeared at (compatibility rule
@@ -773,6 +817,7 @@ REQUEST_INTRODUCED_AT = {
     Insert: 13, Link: 14, Replace: 15, Use: 16, ListTables: 16, Delete: 17, Compact: 18,
     ReplaceIf: 19, Page: 20, CountEdges: 21, WriteBatch: 22, Metrics: 23, Backup: 24,
     FetchSnapshot: 25, FilteredPage: 26, PageDesc: 28, FilteredPageDesc: 28,
+    DescribeNullable: 32, FetchSince: 34,
 }
 
 
@@ -970,10 +1015,58 @@ class RowsClamped:
         )
 
 
+@_variant(25, [("tags", ("vec", "u16"))])
+class NullableFields:
+    """NLC-FR-005, ADR-0128 (protocol 32). Answers DescribeNullable: the tag
+    of every nullable field, ascending."""
+
+    tags: Tuple[int, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "tags", tuple(self.tags))
+
+
+@_variant(
+    26,
+    [("epoch", "u64"), ("first", "u64"), ("head", "u64"), ("entries", ("vec", ("vec", WriteOp)))],
+)
+class Changes:
+    """RPL-FR-002, ADR-0131 (protocol 34). Answers FetchSince: entries
+    ``first``.. in apply order (each entry is one write batch), and the
+    log ``head``."""
+
+    epoch: int
+    first: int
+    head: int
+    entries: Tuple[Tuple[Any, ...], ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "entries", tuple(tuple(e) for e in self.entries))
+
+
+@_variant(
+    27,
+    [("files", ("vec", ("tuple", "str", ("vec", "u8")))), ("epoch", "u64"), ("seq", "u64")],
+)
+class SnapshotAt:
+    """RPL-FR-001, ADR-0131 (protocol 34). Snapshot plus the log position
+    (epoch, seq) it is consistent with; answers FetchSnapshot when the
+    table keeps a change log."""
+
+    files: Tuple[Tuple[str, bytes], ...]
+    epoch: int
+    seq: int
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "files", tuple((name, bytes(data)) for name, data in self.files)
+        )
+
+
 Response = [
     Record, RecordList, ScanValues, Id, Schema, NotFound, NoParent, Ok, Err, TransactionFailed,
     HelloResp, Staged, Rows, Groups, RelationKinds, JoinedRows, Relations, Tables, Compacted, Count,
-    BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped,
+    BatchResults, MetricsResp, BackedUp, Snapshot, RowsClamped, NullableFields, Changes, SnapshotAt,
 ]
 
 

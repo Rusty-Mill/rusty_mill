@@ -240,6 +240,9 @@ impl<'a> Future for WaitAny<'a> {
 struct Timeout {
     deadline: Option<Instant>,
     thread_armed: bool,
+    /// The latest poller's waker, woken by the helper thread (design
+    /// review 4): it used to capture the *first* poll's waker only.
+    waker: crate::waker_slot::WakerSlot,
 }
 
 impl Timeout {
@@ -256,6 +259,7 @@ impl Timeout {
         Self {
             deadline,
             thread_armed: false,
+            waker: crate::waker_slot::WakerSlot::new(),
         }
     }
 }
@@ -268,13 +272,15 @@ impl Future for Timeout {
         let Some(deadline) = this.deadline else {
             return Poll::Pending;
         };
+        // Update before checking the clock: see `WakerSlot`'s ordering note.
+        this.waker.update(cx.waker());
         let now = Instant::now();
         if now >= deadline {
             return Poll::Ready(Ok(()));
         }
         if !this.thread_armed {
             this.thread_armed = true;
-            let waker = cx.waker().clone();
+            let waker = this.waker.clone();
             let remaining = deadline.saturating_duration_since(now);
             let spawned = std::thread::Builder::new()
                 .name("rustils-async-timeout".to_owned())
@@ -317,5 +323,41 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let poll = Pin::new(&mut timeout).poll(&mut cx);
         assert!(matches!(poll, Poll::Pending));
+    }
+
+    struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Design review 4: the helper thread woke the *first* poll's waker.
+    /// Polled again from another task (waker B), B must be the one woken.
+    #[test]
+    fn timeout_wakes_the_latest_poller() {
+        let a = Arc::new(CountingWaker(Default::default()));
+        let b = Arc::new(CountingWaker(Default::default()));
+        let (wa, wb) = (Waker::from(Arc::clone(&a)), Waker::from(Arc::clone(&b)));
+        let mut timeout = Timeout::new(Some(Duration::from_millis(50)));
+        let mut pinned = std::pin::Pin::new(&mut timeout);
+        assert!(pinned
+            .as_mut()
+            .poll(&mut Context::from_waker(&wa))
+            .is_pending());
+        assert!(pinned
+            .as_mut()
+            .poll(&mut Context::from_waker(&wb))
+            .is_pending());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while b.0.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the latest poller was never woken"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(a.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

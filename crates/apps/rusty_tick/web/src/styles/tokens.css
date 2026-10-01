@@ -1,0 +1,35 @@
+/* Design tokens. Colours are space-separated RGB triplets so Tailwind can apply
+   opacity; every colour in the UI comes from here, so dark is a variable swap. */
+:root {
+  --text: 25 25 25; /* #191919 */
+  --grey: 168 168 168; /* #a8a8a8 */
+  --line: 240 241 242; /* #f0f1f2 */
+  --surface: 255 255 255;
+  --rail: 250 250 250; /* #fafafa */
+  --side: 247 247 247; /* #f7f7f7 */
+  --hover: 245 245 245;
+  --selected: 240 240 240; /* #f0f0f0 */
+  --primary: 71 114 250; /* #4772FA */
+  --green: 12 206 156; /* #0CCE9C */
+  --danger: 229 49 45; /* #E5312D */
+  --prio-high: 229 49 45;
+  --prio-medium: 250 167 0;
+  --prio-low: 71 114 250;
+  --mark: 255 214 102; /* #FFD666 */
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.12);
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --text: 232 232 232;
+  --grey: 140 140 140;
+  --line: 48 48 50;
+  --surface: 26 26 28;
+  --rail: 32 32 34;
+  --side: 30 30 32;
+  --hover: 40 40 43;
+  --selected: 52 52 56;
+  --primary: 92 133 255;
+  --mark: 140 110 20;
+  color-scheme: dark;
+}

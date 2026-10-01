@@ -89,8 +89,11 @@ impl CommentStore {
     }
 
     /// Persist a [`CommentFile`] to disk, replacing any existing
-    /// sidecar. When `file.threads` is empty the sidecar is removed
-    /// to avoid littering the forge with empty JSON.
+    /// sidecar crash-atomically: the sidecar is the only copy of its
+    /// threads, so a crash or short write must leave the previous one
+    /// whole, never a truncated file (design review 2.9 / N6). When
+    /// `file.threads` is empty the sidecar is removed to avoid littering
+    /// the forge with empty JSON.
     ///
     /// # Errors
     /// I/O failures bubble up unchanged.
@@ -112,7 +115,7 @@ impl CommentStore {
                     path: sidecar.clone(),
                     source,
                 })?;
-            fs::write(&sidecar, body)?;
+            rusty_atomic_file::write(&sidecar, &body)?;
             Ok(())
         }
     }
@@ -587,5 +590,44 @@ mod tests {
     fn normalize_collapses_curdir_segments() {
         assert_eq!(normalize_relpath("./foo.md").unwrap(), "foo.md");
         assert_eq!(normalize_relpath("a/./b.md").unwrap(), "a/b.md");
+    }
+
+    /// Review 2.9 (N6): a save that fails partway leaves the previous
+    /// sidecar whole (the old `fs::write` truncated it first), and a
+    /// successful save leaves no temp file behind.
+    /// Saves go through `rusty_atomic_file`, whose own tests cover a failed
+    /// write leaving the previous file whole. Here: a stale temp file left
+    /// by a crash (the old fixed name) no longer blocks saving, and a save
+    /// leaves nothing beside the sidecar.
+    #[test]
+    fn a_stale_temp_file_does_not_block_a_save_and_none_is_left_behind() {
+        let (d, s) = store();
+        let block = Uuid::new_v4();
+        s.create_thread("foo.md", block, "first".into(), None)
+            .unwrap();
+        let sidecar = s.sidecar_path("foo.md");
+        let stale = sidecar.with_file_name(format!(
+            ".{}.tmp",
+            sidecar.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir(&stale).unwrap();
+
+        s.create_thread("foo.md", block, "second".into(), None)
+            .unwrap();
+        assert_eq!(s.list_threads("foo.md").unwrap().len(), 2);
+
+        let dir = sidecar.parent().unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let mut expected = vec![
+            sidecar.file_name().unwrap().to_string_lossy().into_owned(),
+            stale.file_name().unwrap().to_string_lossy().into_owned(),
+        ];
+        expected.sort();
+        assert_eq!(names, expected);
+        drop(d);
     }
 }

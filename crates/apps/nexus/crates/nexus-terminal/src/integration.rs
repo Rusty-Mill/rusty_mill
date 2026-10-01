@@ -7,7 +7,7 @@
 //! `SessionConfig.shell_integration`; `Session::spawn` then writes
 //! [`integration_payload`] into the PTY right after the shell starts.
 //!
-//! The bundled `nexus-rush` shell does **not** emit OSC 133 yet — it has no
+//! The bundled `rush` shell does **not** emit OSC 133 yet — it has no
 //! precmd/preexec hook — so rush sessions fall back to the sentinel. Teaching
 //! rush to emit OSC 133 is an RFC 0002 Stage 2 follow-up.
 //!
@@ -40,7 +40,7 @@ pub enum IntegrationShell {
 impl IntegrationShell {
     /// Detect the integration shell from a program path by basename (stripping a
     /// `.exe` suffix). Returns `None` for shells without an emitter (`sh`, `cmd`,
-    /// the bundled `nexus-rush`, …).
+    /// the bundled `rush`, …).
     #[must_use]
     pub fn detect(program: &Path) -> Option<Self> {
         let name = program.file_name()?.to_str()?;
@@ -148,10 +148,7 @@ mod tests {
         );
         // No emitter for plain sh or the bundled rush.
         assert_eq!(IntegrationShell::detect(&PathBuf::from("/bin/sh")), None);
-        assert_eq!(
-            IntegrationShell::detect(&PathBuf::from("/opt/nexus-rush")),
-            None
-        );
+        assert_eq!(IntegrationShell::detect(&PathBuf::from("/opt/rush")), None);
     }
 
     #[test]

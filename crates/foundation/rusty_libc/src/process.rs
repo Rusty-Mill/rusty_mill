@@ -523,14 +523,31 @@ pub fn process_vm_readv(
 /// Write `local` (this process's buffers) into `pid`'s memory, scatter/gather
 /// style — the write counterpart of [`process_vm_readv`]; same permission
 /// requirements, same positional matching between `local` and `remote`.
-pub fn process_vm_writev(
+///
+/// Unsafe because the kernel happily writes into *this* address space when
+/// `pid` names this process, one of its threads, or a `CLONE_VM` sibling —
+/// bypassing Rust's aliasing and validity rules for whatever lives at
+/// `remote` (immutable data, live `&`/`&mut` borrows, typed values). A pid
+/// check alone cannot rule that out, so the caller carries the contract:
+///
+/// ```compile_fail
+/// use rusty_libc::process::{process_vm_writev, RemoteIoVec};
+/// let _ = process_vm_writev(1, &[], &[] as &[RemoteIoVec]);
+/// ```
+///
+/// # Safety
+/// If `pid`'s address space is shared with this process, every `remote`
+/// range must be memory the caller may write through a raw pointer: not
+/// borrowed, not immutable, and valid for any bytes written.
+pub unsafe fn process_vm_writev(
     pid: i32,
     local: &[IoSlice],
     remote: &[RemoteIoVec],
 ) -> Result<usize, Errno> {
     // process_vm_writev(pid, lvec, liovcnt, rvec, riovcnt, flags = 0).
     // SAFETY: `local` only borrows buffers the kernel reads from; `remote`
-    // only describes the target's address ranges to write into.
+    // only describes the target's address ranges, whose validity for a
+    // shared address space is this function's own caller contract.
     let ret = unsafe {
         syscall6(
             nr::PROCESS_VM_WRITEV,
@@ -1965,8 +1982,11 @@ mod tests {
                 fd::close(addr_r).ok();
                 let addr = usize::from_ne_bytes(addr_bytes);
 
-                let writev_result =
-                    process_vm_writev(pid, &[IoSlice::new(b"world")], &[RemoteIoVec::new(addr, 5)]);
+                // SAFETY: `pid` is a forked child with its own address
+                // space, not one shared with this process.
+                let writev_result = unsafe {
+                    process_vm_writev(pid, &[IoSlice::new(b"world")], &[RemoteIoVec::new(addr, 5)])
+                };
 
                 fd::close(block_w).ok();
 

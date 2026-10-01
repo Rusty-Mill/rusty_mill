@@ -27,6 +27,7 @@ name = "sessionmgr"
 path = "src/main.rs"
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 sessionmgr-core = { workspace = true }
 sessionmgr-protocol = { workspace = true }
 sessionmgr-proc = { workspace = true }

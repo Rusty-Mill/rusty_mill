@@ -25,14 +25,15 @@
 //!
 //! ## Certificate verification
 //!
-//! RDP servers overwhelmingly present self-signed certificates and rely on
-//! out-of-band trust, so [`connect_tls`] uses
-//! [`rusty_tls::TrustPolicy::DangerNoVerification`] — it does **not** verify
-//! the server certificate. That means it does not protect against an active
-//! man-in-the-middle. If you need verification, build your own TLS stream
-//! (`rusty_tls::TlsStream::new` with `TrustPolicy::System` or
-//! `TrustPolicy::PinnedAnchors`) and use the [`RdpTransport::new_enhanced`]
-//! path.
+//! Every client connector takes the caller's [`rusty_tls::TrustPolicy`]
+//! (design review 3.6): `System` for a CA-issued certificate, or
+//! `PinnedAnchors` for the self-signed certificate an RDP server usually
+//! presents, pinned out of band. They used to force
+//! `DangerNoVerification` with no way to opt out, so NLA credentials were
+//! offered to any man-in-the-middle.
+//!
+//! Skipping verification is still possible, but only by name:
+//! [`connect_tls_unverified`] and [`connect_tls_kerberos_unverified`].
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -77,14 +78,27 @@ fn os_random(buf: &mut [u8]) -> io::Result<()> {
 /// to standard RDP security returns an error pointing at
 /// [`RdpTransport::establish`].
 ///
-/// The server certificate is **not** verified — see the [module
+/// The server certificate is checked against `trust` — see the [module
 /// docs](self#certificate-verification).
 pub fn connect_tls(
     addr: &str,
     config: &EstablishConfig,
     requested: SecurityProtocols,
+    trust: &rusty_tls::TrustPolicy,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
-    connect_tls_impl(addr, config, requested, run_credssp)
+    connect_tls_impl(addr, config, requested, trust, run_credssp)
+}
+
+/// [`connect_tls`] **without verifying the server certificate**: an active
+/// man-in-the-middle sees the session and, with NLA, the credentials. Only
+/// for a lab or a network where the path itself is trusted.
+pub fn connect_tls_unverified(
+    addr: &str,
+    config: &EstablishConfig,
+    requested: SecurityProtocols,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    let trust = rusty_tls::TrustPolicy::DangerNoVerification;
+    connect_tls(addr, config, requested, &trust)
 }
 
 /// Like [`connect_tls`], but draws the CredSSP exchange's nonce/challenge/key
@@ -95,9 +109,10 @@ pub fn connect_tls_with_csprng(
     addr: &str,
     config: &EstablishConfig,
     requested: SecurityProtocols,
+    trust: &rusty_tls::TrustPolicy,
     csprng: &dyn platform::security::Csprng,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
-    connect_tls_impl(addr, config, requested, |tls, config| {
+    connect_tls_impl(addr, config, requested, trust, |tls, config| {
         run_credssp_with_csprng(tls, config, csprng)
     })
 }
@@ -109,6 +124,7 @@ fn connect_tls_impl(
     addr: &str,
     config: &EstablishConfig,
     requested: SecurityProtocols,
+    trust: &rusty_tls::TrustPolicy,
     run_credssp: impl FnOnce(&mut TlsStream, &EstablishConfig) -> io::Result<()>,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
     // Host portion of `host:port`, for the TLS server name.
@@ -136,11 +152,8 @@ fn connect_tls_impl(
     };
     let tcp = pre.into_inner();
 
-    // 2. Upgrade the same TCP connection to TLS. See the module docs for
-    //    why `DangerNoVerification`: RDP servers overwhelmingly present
-    //    self-signed certificates and rely on out-of-band trust.
-    let mut tls =
-        rusty_tls::TlsStream::new(tcp, host, &rusty_tls::TrustPolicy::DangerNoVerification)?;
+    // 2. Upgrade the same TCP connection to TLS, verified per `trust`.
+    let mut tls = rusty_tls::TlsStream::new(tcp, host, trust)?;
 
     // 3. If the server chose CredSSP, authenticate before the RDP sequence.
     if use_nla {
@@ -233,17 +246,31 @@ fn run_credssp_with_csprng(
 /// a credential cache — fetching them is out of scope), and finishes with
 /// [`RdpTransport::establish_enhanced`].
 ///
-/// The server certificate is **not** verified — see the [module
+/// The server certificate is checked against `trust` — see the [module
 /// docs](self#certificate-verification).
 pub fn connect_tls_kerberos(
     addr: &str,
     config: &EstablishConfig,
     ap_req: Vec<u8>,
     session_key: AesKey,
+    trust: &rusty_tls::TrustPolicy,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
-    connect_tls_kerberos_impl(addr, config, move |tls, config| {
+    connect_tls_kerberos_impl(addr, config, trust, move |tls, config| {
         run_credssp_kerberos(tls, config, ap_req, session_key)
     })
+}
+
+/// [`connect_tls_kerberos`] **without verifying the server certificate**
+/// (see [`connect_tls_unverified`]): the Kerberos AP-REQ goes to whoever
+/// answers.
+pub fn connect_tls_kerberos_unverified(
+    addr: &str,
+    config: &EstablishConfig,
+    ap_req: Vec<u8>,
+    session_key: AesKey,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    let trust = rusty_tls::TrustPolicy::DangerNoVerification;
+    connect_tls_kerberos(addr, config, ap_req, session_key, &trust)
 }
 
 /// Like [`connect_tls_kerberos`], but draws the CredSSP exchange's nonce and
@@ -256,9 +283,10 @@ pub fn connect_tls_kerberos_with_csprng(
     config: &EstablishConfig,
     ap_req: Vec<u8>,
     session_key: AesKey,
+    trust: &rusty_tls::TrustPolicy,
     csprng: &dyn platform::security::Csprng,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
-    connect_tls_kerberos_impl(addr, config, move |tls, config| {
+    connect_tls_kerberos_impl(addr, config, trust, move |tls, config| {
         run_credssp_kerberos_with_csprng(tls, config, ap_req, session_key, csprng)
     })
 }
@@ -267,6 +295,7 @@ pub fn connect_tls_kerberos_with_csprng(
 fn connect_tls_kerberos_impl(
     addr: &str,
     config: &EstablishConfig,
+    trust: &rusty_tls::TrustPolicy,
     run_credssp_kerberos: impl FnOnce(&mut TlsStream, &EstablishConfig) -> io::Result<()>,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
@@ -283,8 +312,7 @@ fn connect_tls_kerberos_impl(
     }
     let tcp = pre.into_inner();
 
-    let mut tls =
-        rusty_tls::TlsStream::new(tcp, host, &rusty_tls::TrustPolicy::DangerNoVerification)?;
+    let mut tls = rusty_tls::TlsStream::new(tcp, host, trust)?;
 
     run_credssp_kerberos(&mut tls, config)?;
 
@@ -628,6 +656,38 @@ mod tests {
     use super::*;
     use crate::credssp::TsRequest;
 
+    /// An unrelated self-signed CA certificate (design review 3.6 test):
+    /// a pinned anchor the test server's certificate does not chain to.
+    const OTHER_CERT_DER: [u8; 401] = [
+        0x30, 0x82, 0x01, 0x8d, 0x30, 0x82, 0x01, 0x33, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x14,
+        0x68, 0xa5, 0x19, 0x5a, 0x55, 0x6b, 0x38, 0xa5, 0xf0, 0xd0, 0x5c, 0x29, 0xb1, 0x82, 0x40,
+        0x35, 0xf1, 0xc0, 0x23, 0x24, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04,
+        0x03, 0x02, 0x30, 0x1b, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x10,
+        0x6f, 0x74, 0x68, 0x65, 0x72, 0x2d, 0x72, 0x64, 0x70, 0x2d, 0x61, 0x6e, 0x63, 0x68, 0x6f,
+        0x72, 0x30, 0x20, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x39, 0x33, 0x30, 0x31, 0x38, 0x31, 0x30,
+        0x31, 0x32, 0x5a, 0x18, 0x0f, 0x32, 0x31, 0x32, 0x36, 0x30, 0x39, 0x30, 0x36, 0x31, 0x38,
+        0x31, 0x30, 0x31, 0x32, 0x5a, 0x30, 0x1b, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55, 0x04,
+        0x03, 0x0c, 0x10, 0x6f, 0x74, 0x68, 0x65, 0x72, 0x2d, 0x72, 0x64, 0x70, 0x2d, 0x61, 0x6e,
+        0x63, 0x68, 0x6f, 0x72, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+        0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        0x04, 0x89, 0xfa, 0x93, 0xfc, 0xa6, 0x80, 0x63, 0x06, 0xcf, 0x1f, 0x39, 0x1c, 0x9a, 0xbf,
+        0x8d, 0x80, 0x3a, 0x9b, 0x6f, 0xac, 0x18, 0x1d, 0x37, 0x8c, 0xce, 0x0b, 0x7c, 0x49, 0x42,
+        0x44, 0x05, 0xb2, 0xcd, 0xc2, 0x45, 0xdb, 0xb7, 0x68, 0x6c, 0x5c, 0xb5, 0xae, 0x8e, 0x25,
+        0xd5, 0x7d, 0x4a, 0x40, 0x01, 0xcf, 0x40, 0xef, 0x20, 0x03, 0xf5, 0xc5, 0x1c, 0xb1, 0x64,
+        0x5a, 0x2b, 0x65, 0x70, 0x1b, 0xa3, 0x53, 0x30, 0x51, 0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d,
+        0x0e, 0x04, 0x16, 0x04, 0x14, 0xad, 0xf3, 0x7d, 0x14, 0x5d, 0xa4, 0xf5, 0xa8, 0x67, 0x90,
+        0x94, 0xf8, 0x8d, 0x3a, 0x62, 0x2e, 0xe6, 0x29, 0x9f, 0x23, 0x30, 0x1f, 0x06, 0x03, 0x55,
+        0x1d, 0x23, 0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0xad, 0xf3, 0x7d, 0x14, 0x5d, 0xa4, 0xf5,
+        0xa8, 0x67, 0x90, 0x94, 0xf8, 0x8d, 0x3a, 0x62, 0x2e, 0xe6, 0x29, 0x9f, 0x23, 0x30, 0x0f,
+        0x06, 0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xff,
+        0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x48, 0x00,
+        0x30, 0x45, 0x02, 0x21, 0x00, 0x86, 0x0d, 0xae, 0x21, 0x2c, 0xd8, 0xb9, 0x7b, 0x54, 0xbc,
+        0x14, 0xa0, 0x85, 0x38, 0xe0, 0xf0, 0x3a, 0x07, 0xb0, 0xb2, 0x2d, 0x5b, 0xa7, 0xf1, 0x39,
+        0x6c, 0xb5, 0xea, 0x73, 0x77, 0xb4, 0x62, 0x02, 0x20, 0x40, 0x92, 0x9f, 0x82, 0x8a, 0x6d,
+        0xee, 0xc6, 0xdc, 0x84, 0x05, 0x44, 0xf2, 0x79, 0xb1, 0xee, 0x0a, 0x74, 0xae, 0xa1, 0x00,
+        0x15, 0x93, 0xdc, 0x3e, 0xb9, 0xc3, 0x36, 0x2e, 0xfa, 0x04, 0x8f,
+    ];
+
     // A throwaway self-signed P-256 cert/key pair (10-year validity, CN
     // "localhost"), generated once with:
     //   openssl ecparam -name prime256v1 -genkey -noout -out key.pem
@@ -744,7 +804,8 @@ mod tests {
 
         let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
         let (_transport, session) =
-            connect_tls(&addr.to_string(), &establish_config, SecurityProtocols::SSL).unwrap();
+            connect_tls_unverified(&addr.to_string(), &establish_config, SecurityProtocols::SSL)
+                .unwrap();
 
         let (accepted, server_still_handshaking) = server.join().unwrap();
         assert!(
@@ -799,7 +860,7 @@ mod tests {
         });
 
         let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
-        let (_transport, session) = connect_tls(
+        let (_transport, session) = connect_tls_unverified(
             &addr.to_string(),
             &establish_config,
             SecurityProtocols::HYBRID,
@@ -843,6 +904,7 @@ mod tests {
             &addr.to_string(),
             &establish_config,
             SecurityProtocols::HYBRID,
+            &rusty_tls::TrustPolicy::DangerNoVerification,
             &csprng,
         )
         .unwrap();
@@ -854,6 +916,41 @@ mod tests {
         assert_eq!(identity.domain, "CORP");
         assert_eq!(identity.user, "alice");
         assert_eq!(identity.password, "secret");
+    }
+
+    /// Design review 3.6: `connect_tls` used to force
+    /// `DangerNoVerification`. With a trust policy the self-signed test
+    /// certificate does not satisfy, the handshake now fails, before any
+    /// credentials are sent.
+    #[test]
+    fn connect_tls_verifies_the_server_certificate_against_the_trust_policy() {
+        use crate::net::AcceptConfig;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let config = AcceptConfig::new(1024, 768);
+            accept_tls(stream, test_tls_server_config(), &config).is_err()
+        });
+
+        // A pinned anchor that is not the server's certificate.
+        let other = rustls::pki_types::CertificateDer::from(OTHER_CERT_DER.to_vec());
+        let trust = rusty_tls::TrustPolicy::PinnedAnchors(vec![other]);
+        let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
+        let client = connect_tls(
+            &addr.to_string(),
+            &establish_config,
+            SecurityProtocols::SSL,
+            &trust,
+        );
+        assert!(
+            client.is_err(),
+            "an untrusted certificate must fail the handshake"
+        );
+        assert!(server.join().unwrap(), "the server saw the handshake fail");
     }
 
     #[test]
@@ -877,7 +974,7 @@ mod tests {
         });
 
         let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "wrong-password");
-        let client_result = connect_tls(
+        let client_result = connect_tls_unverified(
             &addr.to_string(),
             &establish_config,
             SecurityProtocols::HYBRID,
