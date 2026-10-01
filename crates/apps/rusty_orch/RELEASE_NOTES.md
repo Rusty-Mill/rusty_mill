@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## No self-approval, and the deadline is a hard bound
+**2026-10-01** · (link once pushed)
+
+- **Changed:** `orch-core` `Board::append` now requires that the live approving `Review` an agent cites for a `Decision` be written by a different author. A human's review counts for any agent; an agent's own never counts for itself; one qualifying review among several self-approvals is enough. Same `BoardError::DecisionNeedsApproval`. Five new tests; ADR-0005 carries the author rule.
+- **Changed:** `orch-ollama` `StdCommand` spawns the child as leader of its own process group and, on timeout or overflow, kills the whole group through the system `kill` (unix) or `taskkill /T` (Windows) with a fixed argv, then reaps the leader. Pipe reader threads are joined for at most `JOIN_GRACE` (2s) and detached otherwise; `Timeout` and `StdoutOverflow` take precedence over any pipe-join error. A child that exits while a grandchild holds stdout fails within the grace period instead of blocking. No `libc` or `windows-sys` dependency, so the crate stays registry-free. Windows path compiles but is not exercised in CI. Three new unix tests: a forking child with a 1s timeout returns `Timeout` in under 3s and leaves no group member behind; an overflow with a forking child returns within the bound; a grandchild holding stdout after exit is bounded by the grace period. ADR-0004 updated.
+
+---
+
 ## Agents never settle decisions alone
 **2026-10-01** · (link once pushed)
 

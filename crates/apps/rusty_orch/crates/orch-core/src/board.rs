@@ -4,8 +4,8 @@
 //! kind that `supersedes` it; [`Board::live`] hides the old one. Every
 //! entry-to-entry pointer is checked on append, so the board has no
 //! dangling references. Agents never settle decisions alone: an
-//! agent-authored `Decision` must reference a live approving `Review`
-//! (ADR-0005).
+//! agent-authored `Decision` must reference a live approving `Review` by a
+//! different author (ADR-0005).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -200,7 +200,7 @@ impl Board {
         }
         if new.kind == EntryKind::Decision
             && matches!(new.author, Author::Agent(_))
-            && !self.backed_by_live_approval(&new.refs)
+            && !self.backed_by_live_approval(new.author, &new.refs)
         {
             return Err(BoardError::DecisionNeedsApproval);
         }
@@ -229,18 +229,21 @@ impl Board {
         self.get(id).ok_or(BoardError::UnknownEntry(id))
     }
 
-    /// True if any ref points at a live `Review` with `Verdict::Approve`.
-    fn backed_by_live_approval(&self, refs: &[Ref]) -> bool {
+    /// True if any ref points at a live `Review` with `Verdict::Approve`
+    /// written by someone other than `author`. A human's review counts for
+    /// any agent; an agent's own review never counts for itself.
+    fn backed_by_live_approval(&self, author: Author, refs: &[Ref]) -> bool {
         refs.iter().any(|r| match r {
             Ref::Entry(id) => {
                 let approving = self.get(*id).is_some_and(|e| {
-                    matches!(
-                        e.content.kind,
-                        EntryKind::Review {
-                            verdict: Verdict::Approve,
-                            ..
-                        }
-                    )
+                    e.content.author != author
+                        && matches!(
+                            e.content.kind,
+                            EntryKind::Review {
+                                verdict: Verdict::Approve,
+                                ..
+                            }
+                        )
                 });
                 approving && !self.is_superseded(*id)
             }
@@ -401,7 +404,19 @@ mod tests {
         }
     }
 
+    /// A review by Codex, so the default Gemini author can cite it.
     fn review(verdict: Verdict) -> NewEntry {
+        NewEntry {
+            author: Author::Agent(Agent::Codex),
+            ..entry(EntryKind::Review {
+                of: TaskId::from_raw(1),
+                verdict,
+            })
+        }
+    }
+
+    /// A review by the same author as `entry()`: Gemini.
+    fn own_review(verdict: Verdict) -> NewEntry {
         entry(EntryKind::Review {
             of: TaskId::from_raw(1),
             verdict,
@@ -492,5 +507,60 @@ mod tests {
                 ..decision_backed_by(approve)
             })
             .is_ok());
+    }
+
+    #[test]
+    fn agent_decision_citing_own_approval_rejected() {
+        let mut b = board();
+        let own = b.append(own_review(Verdict::Approve)).expect("append");
+        assert_eq!(
+            b.append(decision_backed_by(own)),
+            Err(BoardError::DecisionNeedsApproval)
+        );
+    }
+
+    #[test]
+    fn agent_decision_citing_other_agents_approval_accepted() {
+        let mut b = board();
+        let other = b.append(review(Verdict::Approve)).expect("append");
+        assert!(b.append(decision_backed_by(other)).is_ok());
+    }
+
+    #[test]
+    fn agent_decision_citing_human_approval_accepted() {
+        let mut b = board();
+        let human_ok = b
+            .append(human(EntryKind::Review {
+                of: TaskId::from_raw(1),
+                verdict: Verdict::Approve,
+            }))
+            .expect("append");
+        assert!(b.append(decision_backed_by(human_ok)).is_ok());
+    }
+
+    #[test]
+    fn agent_decision_citing_own_and_others_approval_accepted() {
+        let mut b = board();
+        let own = b.append(own_review(Verdict::Approve)).expect("append");
+        let other = b.append(review(Verdict::Approve)).expect("append");
+        let new = NewEntry {
+            refs: vec![Ref::Entry(own), Ref::Entry(other)],
+            ..entry(EntryKind::Decision)
+        };
+        assert!(b.append(new).is_ok());
+    }
+
+    #[test]
+    fn agent_superseding_with_only_self_approval_rejected() {
+        let mut b = board();
+        let settled = b.append(human(EntryKind::Decision)).expect("append");
+        let own = b.append(own_review(Verdict::Approve)).expect("append");
+        assert_eq!(
+            b.append(NewEntry {
+                supersedes: Some(settled),
+                ..decision_backed_by(own)
+            }),
+            Err(BoardError::DecisionNeedsApproval)
+        );
     }
 }

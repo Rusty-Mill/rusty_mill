@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `orch-core`: an agent-authored `Decision` must cite a live approving `Review` by a different author; self-approval is rejected with the existing `DecisionNeedsApproval`. ADR-0005 updated.
+- `orch-ollama`: `StdCommand` spawns the child as a process-group leader and kills the whole group (unix `kill -KILL -- -<pgid>`, Windows `taskkill /T /F`) on timeout or overflow; pipe threads are joined for at most `JOIN_GRACE` (2s) and detached otherwise, so the deadline is a hard bound. ADR-0004 updated.
 - `orch-core`: `Board::append` refuses an agent-authored `Decision` unless a ref points at a live approving `Review`; new `BoardError::DecisionNeedsApproval`. Applies to supersessions. ADR-0005.
 ### Changed
 - `orch-ollama`: `decision` removed from every role's allowed kinds; the prompt spec tells the model to propose decisions as findings.
