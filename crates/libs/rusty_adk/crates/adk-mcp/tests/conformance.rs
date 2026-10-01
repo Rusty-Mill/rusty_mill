@@ -45,12 +45,97 @@ macro_rules! ensure {
 /// Set when the confirmation-gated tool's body runs, which it never may.
 static APPROVE_ME_RAN: AtomicBool = AtomicBool::new(false);
 
+/// One case per function, named after it.
+macro_rules! cases {
+    ($($name:ident),* $(,)?) => {
+        &[$((stringify!($name), || Box::pin($name()) as Pin<Box<dyn Future<Output = Outcome>>>)),*]
+    };
+}
+
+const CASES: &[(&str, Case)] = cases![
+    stdio_initialize,
+    stdio_notification,
+    stdio_tools_list,
+    stdio_call_ok,
+    stdio_call_tool_error,
+    stdio_call_unknown,
+    stdio_call_bad_args,
+    stdio_call_gated,
+    stdio_unknown_method,
+    stdio_malformed,
+    stdio_oversized,
+    http_round_trip,
+    client_discovers,
+    client_filter,
+    client_calls,
+    client_stall,
+    client_reconnects,
+];
+
 fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     match std::env::var(ROLE).as_deref() {
         Ok("server") => runtime.block_on(serve_role()),
         Ok("stall") => runtime.block_on(stall_role()),
-        _ => std::process::exit(runtime.block_on(run_cases())),
+        _ => {
+            let args = Args::parse(std::env::args().skip(1));
+            if args.list {
+                args.selected()
+                    .for_each(|(name, _)| println!("{name}: test"));
+                return;
+            }
+            std::process::exit(runtime.block_on(run_cases(&args)));
+        }
+    }
+}
+
+/// The slice of libtest's command line that `cargo test` and nextest use:
+/// `--list` (with `--format terse`), a name filter, `--exact`, and
+/// `--ignored` (no case here is ignored, so it selects none). Anything
+/// else (`--nocapture`, `--test-threads`, ...) is accepted and ignored.
+struct Args {
+    list: bool,
+    exact: bool,
+    ignored_only: bool,
+    filter: Option<String>,
+}
+
+impl Args {
+    fn parse(args: impl Iterator<Item = String>) -> Self {
+        let mut parsed = Self {
+            list: false,
+            exact: false,
+            ignored_only: false,
+            filter: None,
+        };
+        let mut args = args.peekable();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--list" => parsed.list = true,
+                "--exact" => parsed.exact = true,
+                "--ignored" => parsed.ignored_only = true,
+                // Flags that take a value: skip the value too.
+                "--format" | "--test-threads" | "--color" | "--logfile" | "--skip" => {
+                    args.next();
+                }
+                flag if flag.starts_with('-') => {}
+                name => parsed.filter = Some(name.to_string()),
+            }
+        }
+        parsed
+    }
+
+    fn selected(&self) -> impl Iterator<Item = &'static (&'static str, Case)> + '_ {
+        CASES.iter().filter(move |(name, _)| {
+            !self.ignored_only
+                && self.filter.as_deref().is_none_or(|filter| {
+                    if self.exact {
+                        *name == filter
+                    } else {
+                        name.contains(filter)
+                    }
+                })
+        })
     }
 }
 
@@ -65,64 +150,14 @@ async fn stall_role() {
     let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut tokio::io::sink()).await;
 }
 
-async fn run_cases() -> i32 {
-    let cases: &[(&str, Case)] = &[
-        ("stdio: initialize negotiates 2025-06-18", || {
-            Box::pin(stdio_initialize())
-        }),
-        ("stdio: a notification is not answered", || {
-            Box::pin(stdio_notification())
-        }),
-        ("stdio: tools/list declares lower-case schemas", || {
-            Box::pin(stdio_tools_list())
-        }),
-        ("stdio: tools/call wraps the result as text", || {
-            Box::pin(stdio_call_ok())
-        }),
-        ("stdio: a failing tool is a tool error", || {
-            Box::pin(stdio_call_tool_error())
-        }),
-        ("stdio: an unknown tool is a protocol error", || {
-            Box::pin(stdio_call_unknown())
-        }),
-        ("stdio: non-object arguments are rejected", || {
-            Box::pin(stdio_call_bad_args())
-        }),
-        ("stdio: a gated tool never runs", || {
-            Box::pin(stdio_call_gated())
-        }),
-        ("stdio: an unknown method is -32601", || {
-            Box::pin(stdio_unknown_method())
-        }),
-        ("stdio: a malformed line keeps the session", || {
-            Box::pin(stdio_malformed())
-        }),
-        ("stdio: a line past 16 MiB ends the session", || {
-            Box::pin(stdio_oversized())
-        }),
-        ("http: initialize, notify, list and call", || {
-            Box::pin(http_round_trip())
-        }),
-        ("client: discovers tools with ADK schemas", || {
-            Box::pin(client_discovers())
-        }),
-        ("client: a filter limits the tools", || {
-            Box::pin(client_filter())
-        }),
-        ("client: calls decode success and error", || {
-            Box::pin(client_calls())
-        }),
-        ("client: a stalled server times out", || {
-            Box::pin(client_stall())
-        }),
-        ("client: close then reuse respawns", || {
-            Box::pin(client_reconnects())
-        }),
-    ];
-    let mut failed = 0;
-    for (name, case) in cases {
+async fn run_cases(args: &Args) -> i32 {
+    let (mut passed, mut failed) = (0, 0);
+    for (name, case) in args.selected() {
         match timeout(Duration::from_secs(60), case()).await {
-            Ok(Ok(())) => println!("ok      {name}"),
+            Ok(Ok(())) => {
+                passed += 1;
+                println!("ok      {name}");
+            }
             Ok(Err(why)) => {
                 failed += 1;
                 println!("FAILED  {name}: {why}");
@@ -133,7 +168,7 @@ async fn run_cases() -> i32 {
             }
         }
     }
-    println!("\n{} passed; {failed} failed", cases.len() - failed);
+    println!("\n{passed} passed; {failed} failed");
     i32::from(failed > 0)
 }
 
