@@ -71,6 +71,7 @@ Removed / Fixed / Security, newest first.
     - Chunked request bodies are now read, within the same body caps (llama 16 MiB, whisper 256 MiB); llama answers an oversized one with 413.
     - whisper's head limit is now 64 KiB for the whole head, in place of 8 KiB per line, and still at most 100 headers.
   - `rusty_http`: `SyncTransport::read_request_body(framing, max_body_len)` caps a request body whatever its framing; `read_body`'s chunked path has no total cap. `SyncTransport`'s read methods now need only `Read`, and its write methods only `Write`.
+  - rush and nexus-rush share test fixtures, not code: `crates/apps/rush/tests/conformance/` holds glob-matching and `$(( ))` cases that both shells' tests run against their own implementations, checked against bash. The first run found two nexus-rush bugs, now fixed: `&&`/`||` did not short-circuit, and `[[:class:]]` globs matched nothing.
   - `rusty_fedora_agent` config reads and writes open beneath the matched allowlist prefix through `rusty_confined_fs`. A directory swapped for a symlink after the allowlist check is refused at the open.
 - **Design review Tranche 3 (#419), receive and config confinement (3.2):**
   - `rusty-croc` opens every received file through one confined open, including zero-byte and ZIP entries.

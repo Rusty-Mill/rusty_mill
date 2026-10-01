@@ -1,0 +1,43 @@
+# Shared glob-matching fixtures for rush and nexus-rush (design review
+# Tranche 4: the two shells share test fixtures, not code). Each crate runs
+# every case against its own glob::match_component; both must agree with
+# bash. Format: pattern<TAB>name<TAB>match|nomatch. # starts a comment.
+
+# Stars and question marks
+*	anything	match
+*.rs	main.rs	match
+*.rs	main.rsx	nomatch
+?	a	match
+?	ab	nomatch
+a?c	abc	match
+a*b*c	axxbyyc	match
+a*b*c	axxbyy	nomatch
+*a	bba	match
+abc	abc	match
+abc	abd	nomatch
+
+# Bracket expressions
+[abc]	b	match
+[abc]	d	nomatch
+[a-c]x	bx	match
+[!a-c]x	dx	match
+[!a-c]x	ax	nomatch
+[^a-c]x	dx	match
+[]a]	]	match
+[a-]	-	match
+[[:digit:]]	7	match
+[[:alpha:]]	7	nomatch
+[[:upper:]]*	Readme	match
+[![:digit:]]	x	match
+[![:digit:]]	7	nomatch
+[[:bogus:]]	a	nomatch
+[[:digit]	d	match
+[[:digit]	[	nomatch
+
+# Escapes
+\*	*	match
+\*	a	nomatch
+a\?	a?	match
+
+# Adversarial: must finish quickly (review round 4, unmemoized backtracking)
+*a*a*a*a*a*a*a*a*b	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	nomatch

@@ -10,7 +10,11 @@
 
 pub fn eval(src: &str) -> Result<i64, String> {
     let tokens = tokenize(src)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        skipping: 0,
+    };
     let value = parser.parse_or()?;
     if parser.pos != parser.tokens.len() {
         return Err("syntax error in arithmetic expression".into());
@@ -96,6 +100,9 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
 struct Parser {
     tokens: Vec<Tok>,
     pos: usize,
+    /// Nonzero while parsing a short-circuited operand, which is parsed
+    /// but not evaluated.
+    skipping: u32,
 }
 
 impl Parser {
@@ -117,11 +124,15 @@ impl Parser {
         None
     }
 
+    // `&&` and `||` short-circuit as in the shell: once the left side
+    // decides the result, the right side is still parsed (a syntax error
+    // there is still an error) but not evaluated, so `0 && 1 / 0` is 0.
     fn parse_or(&mut self) -> Result<i64, String> {
         let mut value = self.parse_and()?;
         while self.eat(&["||"]).is_some() {
-            let rhs = self.parse_and()?;
-            value = bool_int(value != 0 || rhs != 0);
+            let decided = value != 0;
+            let rhs = self.skipping_if(decided, Self::parse_and)?;
+            value = bool_int(decided || rhs != 0);
         }
         Ok(value)
     }
@@ -129,10 +140,23 @@ impl Parser {
     fn parse_and(&mut self) -> Result<i64, String> {
         let mut value = self.parse_equality()?;
         while self.eat(&["&&"]).is_some() {
-            let rhs = self.parse_equality()?;
-            value = bool_int(value != 0 && rhs != 0);
+            let decided = value == 0;
+            let rhs = self.skipping_if(decided, Self::parse_equality)?;
+            value = bool_int(!decided && rhs != 0);
         }
         Ok(value)
+    }
+
+    /// Runs `parse`, without evaluating it when `skip` is set.
+    fn skipping_if(
+        &mut self,
+        skip: bool,
+        parse: fn(&mut Self) -> Result<i64, String>,
+    ) -> Result<i64, String> {
+        self.skipping += u32::from(skip);
+        let result = parse(self);
+        self.skipping -= u32::from(skip);
+        result
     }
 
     fn parse_equality(&mut self) -> Result<i64, String> {
@@ -176,6 +200,10 @@ impl Parser {
         while let Some(op) = self.eat(&["*", "/", "%"]) {
             let rhs = self.parse_unary()?;
             if (op == "/" || op == "%") && rhs == 0 {
+                if self.skipping > 0 {
+                    value = 0;
+                    continue;
+                }
                 return Err("division by zero".into());
             }
             value = match op {
@@ -207,6 +235,9 @@ impl Parser {
             }
             Some(Tok::Ident(name)) => {
                 self.pos += 1;
+                if self.skipping > 0 {
+                    return Ok(0);
+                }
                 var_value(&name)
             }
             Some(Tok::Op("(")) => {
@@ -242,6 +273,44 @@ fn var_value(name: &str) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design review Tranche 4: rush and nexus-rush share these fixtures,
+    /// not code. Every case must hold for this crate's own evaluator.
+    #[test]
+    fn shared_conformance_fixtures() {
+        let fixtures = include_str!("../../../../rush/tests/conformance/arith.tsv");
+        let mut failures = Vec::new();
+        let mut cases = 0;
+        for (index, line) in fixtures.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            cases += 1;
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [expr, expected] = fields[..] else {
+                panic!("arith.tsv:{}: expected 2 tab-separated fields", index + 1);
+            };
+            let got = eval(expr);
+            let ok = match expected {
+                "error" => got.is_err(),
+                value => {
+                    let value: i64 = value.parse().unwrap_or_else(|_| {
+                        panic!("arith.tsv:{}: bad expected value {value:?}", index + 1)
+                    });
+                    got == Ok(value)
+                }
+            };
+            if !ok {
+                failures.push(format!(
+                    "arith.tsv:{}: {expr:?} should be {expected}, got {got:?}",
+                    index + 1
+                ));
+            }
+        }
+        assert!(cases > 0, "no fixture cases were read");
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
 
     #[test]
     fn arithmetic() {

@@ -9,6 +9,10 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **nexus-rush: `&&`/`||` short-circuit in `$(( ))`, and `[[:class:]]` globs work** (design review 4, shared rush fixtures).
+  - `0 && 1 / 0` failed with "division by zero" instead of giving 0, so a guard like `(( n != 0 && total / n > 2 ))` broke when `n` was 0. The skipped side is still parsed, so a syntax error there is still an error.
+  - POSIX named classes (`[[:digit:]]`, `[![:alpha:]]`, ...) matched nothing. They are ported from rush, with its bash-verified edge cases.
+  - Both were found by the conformance fixtures nexus-rush now shares with rush.
 - **Every whole-file write is now crash-atomic and synced** (design review 4, consolidation).
   - Comment sidecars, editor saves and journal, CRDT state, the CLI's CRDT merge driver, the skills registry index, and the shell's persisted state and granted capabilities now share `rusty_atomic_file::write`.
   - Six of these renamed an unsynced temp file, so a power loss could leave an empty or partial file.

@@ -864,6 +864,44 @@ fn numeric_value(name: &str, raw: String) -> Result<i64, String> {
 mod tests {
     use super::*;
 
+    /// Design review Tranche 4: rush and nexus-rush share these fixtures,
+    /// not code. Every case must hold for this crate's own evaluator.
+    #[test]
+    fn shared_conformance_fixtures() {
+        let fixtures = include_str!("../tests/conformance/arith.tsv");
+        let mut failures = Vec::new();
+        let mut cases = 0;
+        for (index, line) in fixtures.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            cases += 1;
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [expr, expected] = fields[..] else {
+                panic!("arith.tsv:{}: expected 2 tab-separated fields", index + 1);
+            };
+            let got = eval(expr);
+            let ok = match expected {
+                "error" => got.is_err(),
+                value => {
+                    let value: i64 = value.parse().unwrap_or_else(|_| {
+                        panic!("arith.tsv:{}: bad expected value {value:?}", index + 1)
+                    });
+                    got == Ok(value)
+                }
+            };
+            if !ok {
+                failures.push(format!(
+                    "arith.tsv:{}: {expr:?} should be {expected}, got {got:?}",
+                    index + 1
+                ));
+            }
+        }
+        assert!(cases > 0, "no fixture cases were read");
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
     #[test]
     fn arithmetic() {
         assert_eq!(eval("1 + 2 * 3"), Ok(7));

@@ -219,14 +219,48 @@ fn matches(p: &[char], pi: usize, s: &[char], si: usize) -> bool {
 
 struct Class {
     negate: bool,
-    ranges: Vec<(char, char)>,
+    items: Vec<ClassItem>,
+}
+
+/// One member of a bracket expression: a character range (a single
+/// character is a degenerate `c-c` range) or a POSIX named class
+/// (`[:alpha:]`, `[:digit:]`, ...) mapped to its predicate. Ported from
+/// rush, which the shared conformance fixtures hold both shells to.
+enum ClassItem {
+    Range(char, char),
+    Named(fn(char) -> bool),
 }
 
 impl Class {
     fn matches(&self, ch: char) -> bool {
-        let inside = self.ranges.iter().any(|&(lo, hi)| ch >= lo && ch <= hi);
+        let inside = self.items.iter().any(|item| match *item {
+            ClassItem::Range(lo, hi) => ch >= lo && ch <= hi,
+            ClassItem::Named(pred) => pred(ch),
+        });
         inside ^ self.negate
     }
+}
+
+/// The standard POSIX class names to predicates. `digit`/`xdigit` are
+/// ASCII-only even in a Unicode locale, matching real bash; the letter-ish
+/// classes use Rust's Unicode-aware predicates, which agree with bash under
+/// the usual UTF-8 locales.
+fn named_class(name: &str) -> Option<fn(char) -> bool> {
+    Some(match name {
+        "alpha" => char::is_alphabetic,
+        "digit" => |c| c.is_ascii_digit(),
+        "alnum" => |c| c.is_alphabetic() || c.is_ascii_digit(),
+        "upper" => char::is_uppercase,
+        "lower" => char::is_lowercase,
+        "space" => char::is_whitespace,
+        "blank" => |c| c == ' ' || c == '\t',
+        "punct" => |c| c.is_ascii_punctuation(),
+        "cntrl" => char::is_control,
+        "graph" => |c| !c.is_whitespace() && !c.is_control(),
+        "print" => |c| c == ' ' || (!c.is_whitespace() && !c.is_control()),
+        "xdigit" => |c| c.is_ascii_hexdigit(),
+        _ => return None,
+    })
 }
 
 /// Parse a `[...]` class starting at `start` (the `[`). Returns the class and
@@ -239,19 +273,34 @@ fn parse_class(p: &[char], start: usize) -> Option<(Class, usize)> {
         i += 1;
     }
 
-    let mut ranges = Vec::new();
+    let mut items = Vec::new();
     let mut first = true;
     while i < p.len() {
         // A `]` is only the terminator if it isn't the very first class member.
         if p[i] == ']' && !first {
-            return Some((Class { negate, ranges }, i + 1));
+            return Some((Class { negate, items }, i + 1));
         }
         first = false;
+        // `[:name:]` is a POSIX named class. An unknown name with proper
+        // `[: :]` delimiters matches nothing rather than failing to parse;
+        // a `[:` never closed by `:]` drops just the `[` and keeps the rest
+        // as ordinary members (both verified against bash, as in rush).
+        if p[i] == '[' && i + 1 < p.len() && p[i + 1] == ':' {
+            match (i + 2..p.len().saturating_sub(1)).find(|&j| p[j] == ':' && p[j + 1] == ']') {
+                Some(close) => {
+                    let name: String = p[i + 2..close].iter().collect();
+                    items.push(ClassItem::Named(named_class(&name).unwrap_or(|_| false)));
+                    i = close + 2;
+                }
+                None => i += 1,
+            }
+            continue;
+        }
         if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
-            ranges.push((p[i], p[i + 2]));
+            items.push(ClassItem::Range(p[i], p[i + 2]));
             i += 3;
         } else {
-            ranges.push((p[i], p[i]));
+            items.push(ClassItem::Range(p[i], p[i]));
             i += 1;
         }
     }
@@ -261,6 +310,40 @@ fn parse_class(p: &[char], start: usize) -> Option<(Class, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design review Tranche 4: rush and nexus-rush share these fixtures,
+    /// not code. Every case must hold for this crate's own matcher.
+    #[test]
+    fn shared_conformance_fixtures() {
+        let fixtures = include_str!("../../../../rush/tests/conformance/glob.tsv");
+        let mut failures = Vec::new();
+        let mut cases = 0;
+        for (index, line) in fixtures.lines().enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            cases += 1;
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [pattern, name, expected] = fields[..] else {
+                panic!("glob.tsv:{}: expected 3 tab-separated fields", index + 1);
+            };
+            let expected = match expected {
+                "match" => true,
+                "nomatch" => false,
+                other => panic!("glob.tsv:{}: unknown expectation {other:?}", index + 1),
+            };
+            if match_component(pattern, name) != expected {
+                failures.push(format!(
+                    "glob.tsv:{}: {pattern:?} against {name:?} should be {}",
+                    index + 1,
+                    if expected { "a match" } else { "no match" }
+                ));
+            }
+        }
+        assert!(cases > 0, "no fixture cases were read");
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
 
     #[test]
     fn star_matches_within_component() {

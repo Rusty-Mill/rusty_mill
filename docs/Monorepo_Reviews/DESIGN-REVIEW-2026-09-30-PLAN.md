@@ -92,7 +92,9 @@ rusty_gui clipboard (`Unsupported`), `rusty_std` stub I/O/process
   servers read requests through `rusty_http::sync::SyncTransport`, which
   gained a capped `read_request_body`)*
 - shared `atomic_write` and rooted-fs helpers (from 2.9 / 3.2)
-- rush / nexus-rush shared fixtures only
+- rush / nexus-rush shared fixtures only *(done:
+  `crates/apps/rush/tests/conformance/{glob,arith}.tsv`, run by both
+  crates; they found two nexus-rush bugs, fixed)*
 
 ## Tranche 5 — Measurement
 
