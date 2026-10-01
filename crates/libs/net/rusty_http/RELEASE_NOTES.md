@@ -23,6 +23,15 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
+## Design review 3.4: Transfer-Encoding fails closed
+
+- **Fixed:** all `Transfer-Encoding` fields are combined into one coding list.
+  - `chunked` must appear exactly once, at the end.
+  - A request with both `Transfer-Encoding` and `Content-Length` is refused, closing a request-smuggling gap.
+  - A response keeps `Transfer-Encoding` over `Content-Length`, as RFC 9112 requires.
+
+---
+
 ## PR #18 — Sensitive-header marking + `Debug` redaction for `HeaderMap`
 **2026-07-23** · [#18](https://github.com/baileyrd/rusty_http/pull/18)
 

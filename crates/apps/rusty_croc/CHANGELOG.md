@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Every received file now goes through one confined open (design review 3.2).
+  This covers regular files, zero-byte files and ZIP-extracted entries.
+  - Before, the zero-byte branch used `File::create`, and ZIP extraction checked
+    entry names only. Either could truncate or write a file outside the receive
+    folder through a symlink already there.
+  - Now a symlinked destination, or an ancestor that resolves outside the folder,
+    is refused.
+  - An existing file is opened without truncation and, on Unix, checked to be
+    the same file on disk before any byte is written.
+
 ## v0.1.0
 
 First release: a Rust port of [croc](https://github.com/schollz/croc)

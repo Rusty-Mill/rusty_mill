@@ -4,6 +4,11 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- `rusty-search-sqlite-fts5`: `delete` removed the full-text row and the
+  content row in two separate commits, so a failure between them left a
+  document the full-text index no longer knew about. Both are now one
+  transaction.
 ### Changed
 - `rusty-search-algolia`, `rusty-search-azure-search`,
   `rusty-search-elasticsearch`, `rusty-search-opensearch`, and

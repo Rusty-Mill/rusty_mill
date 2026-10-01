@@ -10,6 +10,7 @@ description = "Nexus editor engine: block tree, annotations, transactions (PRD 0
 layer = "apps"
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 serde_norway     = { workspace = true }

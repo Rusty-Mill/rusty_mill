@@ -29,6 +29,7 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
+rusty_confined_fs = { workspace = true }
 # platform/platform-linux are rustils' own portable process-spawning
 # layer -- siblings in this same workspace, already hoisted in
 # [workspace.dependencies]. Reused here rather than adding a subprocess

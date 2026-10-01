@@ -1,16 +1,15 @@
-//! Minimal hand-rolled HTTP/1.1 core for `whisper-server` — whisper.cpp's
+//! Minimal HTTP/1.1 core for `whisper-server` — whisper.cpp's
 //! `examples/server/server.cpp` equivalent: basic request routing, `GET
 //! /health`, `GET /` (static file serving), and unconditional CORS headers
 //! + `OPTIONS` preflight handling.
 //!
-//! No HTTP crate dependency (this project is zero-dependency): request
-//! parsing and response serialization are hand-rolled over
-//! `std::io::Read`/`Write`, deliberately supporting only what a local
-//! transcription server actually needs — one request per connection, no
-//! keep-alive, no chunked transfer-encoding, `Content-Length` bodies only.
+//! Requests are parsed by `rusty_http`, the workspace's one HTTP/1.1
+//! parser (no third-party dependency); responses are serialized here. It
+//! supports what a local transcription server needs: one request per
+//! connection, no keep-alive, `Content-Length` or chunked request bodies.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 
 #[derive(Debug, PartialEq)]
 pub struct Request {
@@ -42,65 +41,68 @@ impl Request {
 /// upload.
 const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 
-fn body_within_limit(content_length: usize) -> bool {
-    content_length <= MAX_BODY_BYTES
-}
+/// Longest request head accepted: request line plus headers (design
+/// review 3.7, N02). Heads used to be read unbounded, so a peer could
+/// stream one endless header line into memory past the body cap.
+pub const MAX_HEAD_BYTES: usize = 64 * 1024;
+/// Most header lines accepted in one request.
+pub const MAX_HEADERS: usize = 100;
 
-/// Read and parse one request from `r`: the request line, headers up to
-/// the blank line, then a `Content-Length`-sized body if present (chunked
-/// transfer-encoding isn't supported — this server only ever needs to
-/// read requests small clients send in one shot).
+/// Read and parse one request from `r`: the head (at most
+/// [`MAX_HEAD_BYTES`] and [`MAX_HEADERS`] headers), then the body, framed
+/// by `Content-Length` or chunked and at most [`MAX_BODY_BYTES`].
+///
+/// Parsing and framing are `rusty_http`'s (design review Tranche 4),
+/// which refuses ambiguous framing (Transfer-Encoding with
+/// Content-Length, a bad or conflicting Content-Length) rather than
+/// guessing at it (review 3.4).
+///
+/// # Errors
+/// `InvalidData` for a malformed, oversized or ambiguously framed
+/// request; the underlying I/O error otherwise.
 pub fn parse_request(r: &mut impl Read) -> io::Result<Request> {
-    let mut reader = BufReader::new(r);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let line = line.trim_end();
-    let mut parts = line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty request line"))?
-        .to_string();
-    let target = parts
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request target"))?;
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), q.to_string()),
-        None => (target.to_string(), String::new()),
-    };
+    use rusty_http::{body::request_framing, sync::SyncTransport, TransportError};
 
-    let mut headers = HashMap::new();
-    loop {
-        let mut hline = String::new();
-        reader.read_line(&mut hline)?;
-        let hline = hline.trim_end_matches(['\r', '\n']);
-        if hline.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = hline.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-        }
+    use rusty_http::Error as HttpError;
+
+    let invalid = |err: TransportError| match err {
+        TransportError::Io(e) => e,
+        TransportError::Http(HttpError::BodyTooLarge) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("request body too large (max {MAX_BODY_BYTES} bytes)"),
+        ),
+        TransportError::Http(HttpError::HeadTooLarge) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("request head too large (max {MAX_HEAD_BYTES} bytes)"),
+        ),
+        TransportError::Http(e) => io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
+    };
+    let mut transport = SyncTransport::new(r);
+    let head = transport
+        .read_request_head(MAX_HEAD_BYTES)
+        .map_err(invalid)?;
+    if head.headers.iter().count() > MAX_HEADERS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("more than {MAX_HEADERS} headers"),
+        ));
     }
+    let framing = request_framing(&head.headers).map_err(|e| invalid(TransportError::Http(e)))?;
+    let body = transport
+        .read_request_body(framing, MAX_BODY_BYTES as u64)
+        .map_err(invalid)?;
 
-    let body = match headers
-        .get("content-length")
-        .and_then(|v| v.parse::<usize>().ok())
-    {
-        Some(len) if len > 0 => {
-            if !body_within_limit(len) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("request body too large ({len} bytes, max {MAX_BODY_BYTES})"),
-                ));
-            }
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf)?;
-            buf
-        }
-        _ => Vec::new(),
+    let (path, query) = match head.target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (head.target.clone(), String::new()),
     };
-
+    let headers = head
+        .headers
+        .iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+        .collect();
     Ok(Request {
-        method,
+        method: head.method.as_str().to_string(),
         path,
         query,
         headers,
@@ -453,5 +455,58 @@ mod tests {
         assert!(serve_static(&dir, "/missing.txt").is_none());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Design review Tranche 4: parsing moved onto `rusty_http`, which
+    /// applies the 3.4 framing rules. The hand-rolled parser ignored
+    /// `Transfer-Encoding` and read an unparsable `Content-Length` as no
+    /// body, so each of these was accepted with its framing guessed.
+    #[test]
+    fn ambiguous_request_framing_is_refused() {
+        let head = |headers: &str| format!("POST /inference HTTP/1.1\r\n{headers}\r\n");
+        for (name, raw) in [
+            (
+                "TE with CL",
+                head("Transfer-Encoding: chunked\r\nContent-Length: 5\r\n") + "0\r\n\r\n",
+            ),
+            (
+                "TE not ending in chunked",
+                head("Transfer-Encoding: gzip\r\n"),
+            ),
+            ("non-numeric CL", head("Content-Length: abc\r\n")),
+            (
+                "conflicting CLs",
+                head("Content-Length: 1\r\nContent-Length: 2\r\n") + "ab",
+            ),
+        ] {
+            assert!(parse_request(&mut raw.as_bytes()).is_err(), "{name}");
+        }
+    }
+
+    /// A chunked upload is read (and decoded), where it used to be read as
+    /// an empty body.
+    #[test]
+    fn parse_request_reads_a_chunked_body() {
+        let raw = "POST /inference HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n";
+        let req = parse_request(&mut raw.as_bytes()).unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    /// Design review 3.7 (N02): an over-long head and too many
+    /// headers are refused instead of read into memory without bound.
+    #[test]
+    fn oversized_heads_are_refused() {
+        let long = format!(
+            "GET / HTTP/1.1\r\nX: {}\r\n\r\n",
+            "a".repeat(MAX_HEAD_BYTES)
+        );
+        assert!(parse_request(&mut long.as_bytes()).is_err());
+        let many = format!(
+            "GET / HTTP/1.1\r\n{}\r\n",
+            "X: y\r\n".repeat(MAX_HEADERS + 1)
+        );
+        assert!(parse_request(&mut many.as_bytes()).is_err());
+        let ok = format!("GET / HTTP/1.1\r\n{}\r\n", "X: y\r\n".repeat(MAX_HEADERS));
+        assert!(parse_request(&mut ok.as_bytes()).is_ok());
     }
 }

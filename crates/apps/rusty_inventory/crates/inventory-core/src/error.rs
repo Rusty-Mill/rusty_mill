@@ -31,6 +31,12 @@ pub enum Error {
     #[error("{path} was encrypted by an older version of Inventory and cannot be read by this one.\nMove it aside and re-index — your tools' own history is untouched and will be read again.")]
     LegacyIndexFormat { path: PathBuf },
 
+    /// Another process sealed the index after this one read it. Sealing
+    /// this process's copy would silently overwrite that save, so it is
+    /// refused; nothing was written (design review 2.9).
+    #[error("{path} was saved by another Inventory process (the desktop app or `inv`) after this one opened it.\nThis process's unsaved changes were not written, so as not to overwrite that save. Reopen Inventory to continue.")]
+    ConcurrentWriter { path: PathBuf },
+
     #[error("no conversation with id {0}")]
     NoSuchConversation(i64),
 

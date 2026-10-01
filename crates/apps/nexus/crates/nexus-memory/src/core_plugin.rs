@@ -44,7 +44,6 @@ use nexus_kernel::KernelPluginContext;
 use nexus_plugins::{CorePlugin, CorePluginFuture, PluginError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 #[cfg(feature = "ts-export")]
 use schemars::JsonSchema;
@@ -52,7 +51,7 @@ use schemars::JsonSchema;
 use ts_rs::TS;
 
 use crate::db::{MemoryDb, MemoryDbError};
-use crate::model::{Memory, MemoryStatus, MemoryType};
+use crate::model::{Memory, MemoryId, MemoryStatus, MemoryType};
 
 /// Reverse-DNS identifier.
 pub const PLUGIN_ID: &str = "com.nexus.memory";
@@ -481,7 +480,7 @@ impl MemoryCorePlugin {
         // (bumps access_count / accessed_at) — the ACT-R vitality input.
         match self
             .db
-            .get_recording_access(parse_id(&a.id)?)
+            .get_recording_access(&parse_id(&a.id)?)
             .map_err(db_err)?
         {
             Some(m) => to_value(&m, "get"),
@@ -518,7 +517,7 @@ impl MemoryCorePlugin {
         let id = parse_id(&a.id)?;
         let mut m = self
             .db
-            .get(id)
+            .get(&id)
             .map_err(db_err)?
             .ok_or_else(|| exec_err(format!("no memory with id '{}'", a.id)))?;
         if let Some(c) = a.content {
@@ -551,7 +550,7 @@ impl MemoryCorePlugin {
 
     fn delete(&self, args: &Value) -> Result<Value, PluginError> {
         let a: IdArgs = parse_args(args, "delete")?;
-        let deleted = self.db.delete(parse_id(&a.id)?).map_err(db_err)?;
+        let deleted = self.db.delete(&parse_id(&a.id)?).map_err(db_err)?;
         Ok(json!({ "deleted": deleted }))
     }
 
@@ -650,13 +649,13 @@ impl MemoryCorePlugin {
         let clusters = crate::consolidate::cluster_duplicates(mems);
         let mut superseded = 0_u64;
         for cluster in &clusters {
-            let canonical = cluster[0].id;
+            let canonical = &cluster[0].id;
             for loser in &cluster[1..] {
                 let changed = if dry_run {
                     true
                 } else {
                     self.db
-                        .mark_superseded(loser.id, canonical)
+                        .mark_superseded(&loser.id, canonical)
                         .map_err(db_err)?
                 };
                 if changed {
@@ -740,9 +739,10 @@ fn db_err(e: MemoryDbError) -> PluginError {
     exec_err(format!("memory db: {e}"))
 }
 
-/// Parse a UUID string argument, surfacing a clear error on malformed input.
-fn parse_id(s: &str) -> Result<Uuid, PluginError> {
-    Uuid::parse_str(s).map_err(|e| exec_err(format!("invalid memory id '{s}': {e}")))
+/// Parse a memory id argument (any origin's form — see [`MemoryId`]),
+/// surfacing a clear error on malformed input.
+fn parse_id(s: &str) -> Result<MemoryId, PluginError> {
+    MemoryId::parse(s).map_err(|e| exec_err(e.to_string()))
 }
 
 #[cfg(test)]
@@ -864,7 +864,7 @@ mod tests {
     fn get_unknown_id_errors() {
         let mut p = plugin();
         let err = p
-            .dispatch(HANDLER_GET, &json!({ "id": Uuid::now_v7().to_string() }))
+            .dispatch(HANDLER_GET, &json!({ "id": MemoryId::new().to_string() }))
             .unwrap_err();
         match err {
             PluginError::ExecutionFailed { reason, .. } => assert!(reason.contains("no memory")),
@@ -876,7 +876,8 @@ mod tests {
     fn invalid_id_errors() {
         let mut p = plugin();
         let err = p
-            .dispatch(HANDLER_GET, &json!({ "id": "not-a-uuid" }))
+            // Ids are opaque (any origin's form), but not arbitrary text.
+            .dispatch(HANDLER_GET, &json!({ "id": "../not an id" }))
             .unwrap_err();
         match err {
             PluginError::ExecutionFailed { reason, .. } => {

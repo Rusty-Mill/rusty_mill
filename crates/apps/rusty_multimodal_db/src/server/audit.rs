@@ -108,6 +108,10 @@ pub enum RequestKind {
     /// `PGD-FR-005` (ADR-0089, protocol 28): the descending twins.
     PageDesc,
     FilteredPageDesc,
+    /// `NLC-FR-005` (ADR-0128, protocol 32).
+    DescribeNullable,
+    /// `CHL-FR-004` (ADR-0131, protocol 34).
+    FetchSince,
 }
 
 impl RequestKind {
@@ -151,6 +155,8 @@ impl RequestKind {
             Request::FilteredPage { .. } => RequestKind::FilteredPage,
             Request::PageDesc { .. } => RequestKind::PageDesc,
             Request::FilteredPageDesc { .. } => RequestKind::FilteredPageDesc,
+            Request::DescribeNullable => RequestKind::DescribeNullable,
+            Request::FetchSince { .. } => RequestKind::FetchSince,
         }
     }
 }

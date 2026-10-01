@@ -22,6 +22,7 @@ use crate::db::memories::{
 };
 use crate::db::Result;
 use crate::models::{Memory, UnannotatedMemory, UnclassifiedMemory};
+use crate::sync::TOMBSTONE_CONTENT;
 use rusty_multimodal_db_engine::fulltext::{FullTextIndex, Query};
 use rusty_multimodal_db_engine::generic::query::{AllIds, FilterEq, GetById};
 use rusty_multimodal_db_engine::generic::traits::{
@@ -44,6 +45,9 @@ pub(crate) type MemoryTable = GenericMmapStore<MemoryRecord, ByDoc, CreatedAt>;
 /// The full-text index over (content, category, tags), as `memories_fts`
 /// indexes them; keyed by memory id.
 pub(crate) type MemorySearch = FullTextIndex<String, 3>;
+
+/// An emptied tombstone's `tags` column.
+const EMPTY_TAGS: &str = "[]";
 
 /// One `memories` row, every column as SQLite stores it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -211,6 +215,28 @@ impl MemoryRow {
         }
     }
 
+    /// Drop a tombstone's text (ADR-0024). Whether anything changed: `false`
+    /// for a live memory or a tombstone already emptied.
+    pub(crate) fn empty_if_tombstone(&mut self) -> bool {
+        if self.deleted_at.is_none() || self.is_emptied() {
+            return false;
+        }
+        self.content = TOMBSTONE_CONTENT.to_string();
+        self.tags = EMPTY_TAGS.to_string();
+        self.subject = None;
+        self.predicate = None;
+        self.object = None;
+        true
+    }
+
+    pub(crate) fn is_emptied(&self) -> bool {
+        self.content == TOMBSTONE_CONTENT
+            && self.tags == EMPTY_TAGS
+            && self.subject.is_none()
+            && self.predicate.is_none()
+            && self.object.is_none()
+    }
+
     fn is_live(&self) -> bool {
         self.deleted_at.is_none() && self.superseded_by.is_none()
     }
@@ -307,8 +333,18 @@ impl TagIndex {
 }
 
 /// Put `row` into the derived indexes.
+///
+/// Only a live row goes into the full-text index: every search keeps live
+/// rows alone, and a node keeps its deleted and superseded rows as sync
+/// tombstones, which were 76% of a real node's 62,060 rows. Leaving them out
+/// shrinks the index and its rebuild at open by as much. BM25 then counts
+/// live rows only, where FTS5 counts every row it holds, so scores differ
+/// from SQLite's when tombstones exist; matches do not. A row that comes
+/// back to life is indexed on the write that revives it.
 pub(crate) fn index(search: &mut MemorySearch, tags: &mut TagIndex, row: &MemoryRow) {
-    search.upsert(row.id.clone(), [&row.content, &row.category, &row.tags]);
+    if row.is_live() {
+        search.upsert(row.id.clone(), [&row.content, &row.category, &row.tags]);
+    }
     tags.add(row);
 }
 
@@ -702,9 +738,24 @@ pub(crate) fn delete_live(
         let mut row = row.clone();
         row.deleted_at = Some(at.to_string());
         row.updated_at = at.to_string();
+        row.empty_if_tombstone();
         Ok(Edit::Put(Box::new(row)))
     })?;
     Ok(deleted)
+}
+
+/// Drop the text of every tombstone that still holds it, in one journal
+/// batch and without queueing anything. How many changed.
+pub(crate) fn empty_tombstones(tables: &mut EngineTables) -> Result<usize> {
+    let changes: Vec<Change> = rows(core_ref(tables)?)
+        .filter_map(|mut row| row.empty_if_tombstone().then_some(row))
+        .map(|row| Change::Memory(engine_id(&row.id), Some(Box::new(MemoryRecord::new(row)))))
+        .collect();
+    let emptied = changes.len();
+    if emptied > 0 {
+        tables.commit(changes)?;
+    }
+    Ok(emptied)
 }
 
 // --- reads ----------------------------------------------------------------
@@ -716,6 +767,11 @@ fn stored(core: &CoreTables, id: &str) -> Result<Option<MemoryRow>> {
     };
     ensure_same_id(&record.row.id, id)?;
     Ok(Some(record.row))
+}
+
+/// Whether memory `id` is a tombstone.
+pub(crate) fn is_tombstone(core: &CoreTables, id: &str) -> bool {
+    row(core, id).is_some_and(|row| row.deleted_at.is_some())
 }
 
 /// Memory `id`'s row, if there is one.
@@ -747,6 +803,7 @@ pub(crate) fn sync_view(tables: &EngineTables, id: &str) -> Result<Option<SyncVi
         tags: serde_json::from_str(&row.tags).unwrap_or_default(),
         metadata: serde_json::from_str(&row.metadata)
             .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        deleted: row.deleted_at.is_some(),
         updated_at: row.updated_at,
     }))
 }
@@ -1187,6 +1244,31 @@ mod tests {
         write(&mut tables, "a", Origin::Local, |_| Ok(Edit::Delete)).unwrap();
         assert!(hits(&tables, "wombat").is_empty());
         assert!(!core_ref(&tables).unwrap().tags.has("blue", "a"));
+    }
+
+    #[test]
+    fn only_live_rows_are_in_the_full_text_index() {
+        let mut tables = EngineTables::open_temporary().unwrap();
+        for id in ["live", "superseded", "deleted"] {
+            insert(&mut tables, &NewMemory::new(id, "quokka", T1)).unwrap();
+        }
+        set_superseded_by(&mut tables, "superseded", "live", Some(T2)).unwrap();
+        assert!(delete_live(&mut tables, "deleted", Some(T2)).unwrap());
+        assert_eq!(hits(&tables, "quokka"), ["live"]);
+        assert_eq!(core_ref(&tables).unwrap().search.len(), 1);
+
+        // A superseded row brought back is searchable again.
+        let revive = MemoryEdit {
+            clear_superseded: true,
+            updated_at: T2.to_string(),
+            ..MemoryEdit::default()
+        };
+        apply_edit(&mut tables, "superseded", &revive).unwrap();
+        assert_eq!(hits(&tables, "quokka"), ["live", "superseded"]);
+
+        // The rebuild at open indexes the same rows as the writes did.
+        rebuild(&mut tables).unwrap();
+        assert_eq!(hits(&tables, "quokka"), ["live", "superseded"]);
     }
 
     #[test]

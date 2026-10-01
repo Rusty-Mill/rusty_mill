@@ -89,7 +89,9 @@ fn inheritable_nul(read: bool) -> Result<SlotHandle> {
             std::ptr::null_mut(),
         )
     };
-    OwnedWinHandle::from_raw(h)
+    // SAFETY: `h` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    unsafe { OwnedWinHandle::from_raw(h) }
         .map(SlotHandle::Owned)
         .ok_or_else(|| errmap::last_win32_err("CreateFileW", OsStr::new("NUL")))
 }
@@ -115,9 +117,13 @@ fn inheritable_nul(read: bool) -> Result<SlotHandle> {
 fn make_pipe(stdin_slot: bool) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     let (read, write) =
         rusty_win32::handle::create_pipe().map_err(|e| errmap::trackw_err("CreatePipe", e))?;
-    let read = OwnedWinHandle::from_raw(read)
+    // SAFETY: `read` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let read = unsafe { OwnedWinHandle::from_raw(read) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
-    let write = OwnedWinHandle::from_raw(write)
+    // SAFETY: `write` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let write = unsafe { OwnedWinHandle::from_raw(write) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
     let (child, parent) = if stdin_slot {
         (read, write)
@@ -146,9 +152,13 @@ fn make_pipe(stdin_slot: bool) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     if ok == 0 {
         return Err(errmap::last_win32_err("CreatePipe", OsStr::new("")));
     }
-    let read = OwnedWinHandle::from_raw(read)
+    // SAFETY: `read` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let read = unsafe { OwnedWinHandle::from_raw(read) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
-    let write = OwnedWinHandle::from_raw(write)
+    // SAFETY: `write` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let write = unsafe { OwnedWinHandle::from_raw(write) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
     let (child, parent) = if stdin_slot {
         (read, write)
@@ -230,7 +240,9 @@ fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
     // process's own std slot — `duplicate`'s whole safety contract.
     let dup = unsafe { rusty_win32::handle::duplicate(current, true) }
         .map_err(|e| errmap::trackw_err("DuplicateHandle", e))?;
-    match OwnedWinHandle::from_raw(dup) {
+    // SAFETY: `dup` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    match unsafe { OwnedWinHandle::from_raw(dup) } {
         Some(h) => Ok(Some(SlotHandle::Owned(h))),
         None => Err(PlatformError::new(
             ErrorKind::Other,
@@ -267,7 +279,9 @@ fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
     if ok == 0 {
         return Err(errmap::last_win32_err("DuplicateHandle", OsStr::new("")));
     }
-    Ok(OwnedWinHandle::from_raw(dup).map(SlotHandle::Owned))
+    // SAFETY: `dup` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    Ok(unsafe { OwnedWinHandle::from_raw(dup) }.map(SlotHandle::Owned))
 }
 
 /// Create a kill-on-close Job Object (extraction map D2: the group
@@ -286,7 +300,9 @@ fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
 #[cfg(feature = "track-w")]
 pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
     let raw = rusty_win32::job::create().map_err(|e| errmap::trackw_err("CreateJobObjectW", e))?;
-    let job = OwnedWinHandle::from_raw(raw)
+    // SAFETY: `raw` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let job = unsafe { OwnedWinHandle::from_raw(raw) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreateJobObjectW"))?;
     // SAFETY: `job` is the valid handle just created and still open (it is
     // dropped no earlier than this function's return) — `set_kill_on_close`'s
@@ -300,7 +316,9 @@ pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
 pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
     // SAFETY: null security attributes and name are documented-valid.
     let job = unsafe { w::CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    let job = OwnedWinHandle::from_raw(job)
+    // SAFETY: `job` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let job = unsafe { OwnedWinHandle::from_raw(job) }
         .ok_or_else(|| errmap::last_win32_err("CreateJobObjectW", OsStr::new("")))?;
     // SAFETY: JOBOBJECT_EXTENDED_LIMIT_INFORMATION is plain-old-data for
     // which all-zeroes is valid; only the limit flag is set before use.
@@ -347,7 +365,9 @@ pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
 pub fn adopt(pid: u32) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     let raw = rusty_win32::process::open_by_pid(pid, w::PROCESS_SET_QUOTA | w::PROCESS_TERMINATE)
         .map_err(|e| errmap::trackw_err("OpenProcess", e))?;
-    let process = OwnedWinHandle::from_raw(raw)
+    // SAFETY: `raw` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let process = unsafe { OwnedWinHandle::from_raw(raw) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "OpenProcess"))?;
     let job = create_kill_on_close_job()?;
     // SAFETY: `job` and `process` are both valid, currently-open handles,
@@ -363,7 +383,9 @@ pub fn adopt(pid: u32) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     // all — `OpenProcess` reports that as a `NULL` return, checked by
     // `OwnedWinHandle::from_raw` below, not as UB.
     let handle = unsafe { w::OpenProcess(w::PROCESS_SET_QUOTA | w::PROCESS_TERMINATE, 0, pid) };
-    let process = OwnedWinHandle::from_raw(handle)
+    // SAFETY: `handle` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let process = unsafe { OwnedWinHandle::from_raw(handle) }
         .ok_or_else(|| errmap::last_win32_err("OpenProcess", OsStr::new("")))?;
     let job = create_kill_on_close_job()?;
     // SAFETY: `job`/`process` are both valid, currently-open handles for
@@ -528,9 +550,13 @@ pub fn spawn(
     }
     // Slot handles (NUL opens and inheritable duplicates) close as
     // `slot_handles` drops here — CreateProcessW has snapshotted them.
-    let process = OwnedWinHandle::from_raw(pi.hProcess)
+    // SAFETY: `pi.hProcess` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let process = unsafe { OwnedWinHandle::from_raw(pi.hProcess) }
         .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreateProcessW"))?;
-    let thread = OwnedWinHandle::from_raw(pi.hThread);
+    // SAFETY: `pi.hThread` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let thread = unsafe { OwnedWinHandle::from_raw(pi.hThread) };
 
     if !new_group {
         // The main thread runs immediately; its handle is not retained.
@@ -847,7 +873,9 @@ pub fn is_alive(pid: u32) -> Result<bool> {
     // all — `OpenProcess` reports that as a `NULL` return, checked below,
     // not as UB.
     let handle = unsafe { w::OpenProcess(w::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    let process = match OwnedWinHandle::from_raw(handle) {
+    // SAFETY: `handle` is a failure sentinel or a fresh handle from the call
+    // above that nothing else owns.
+    let process = match unsafe { OwnedWinHandle::from_raw(handle) } {
         Some(p) => p,
         None => {
             // SAFETY: `GetLastError` takes no arguments and has no

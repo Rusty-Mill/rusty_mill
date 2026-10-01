@@ -8,6 +8,11 @@ log, see [`CHANGELOG.md`](CHANGELOG.md); this page is the narrative version.
 
 ## Unreleased
 
+- **Pending work is bounded (design review 3.7).** `with_max_concurrent_requests` limited how many handlers *run*, but every request still got a task, and notifications queued without limit.
+  - Requests: pending requests are capped at 1,024 by default. Excess requests are answered `RequestFailed` at once.
+  - Notifications: a notification backlog over 4,096 ends the connection with an error.
+  - Both limits are configurable. A client that stays under them sees no change.
+
 Closing LSP 3.17 spec-coverage gaps found by a full audit against the
 official specification (method/notification coverage was already 100% —
 every remaining gap is at the capability-negotiation/type-modeling layer).

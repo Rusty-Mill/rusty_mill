@@ -813,23 +813,14 @@ async fn send_with_redirects(
             .to_string();
         let next_url = url.resolve_redirect(&location)?;
 
-        // A redirect to a different host/port must not carry credentials
-        // meant for the original origin along with it (the same class of
-        // leak `requests` itself fixed after CVE-2018-18074). That fix
-        // also treats any downgrade off `https` as cross-origin
-        // regardless of host/port match -- an http-to-https upgrade on
-        // the same host/port is fine, but an https-to-http downgrade
-        // must strip credentials even when host and port are identical,
-        // since the token would otherwise be replayed in plaintext.
-        let scheme_downgrade = url.scheme == "https" && next_url.scheme != "https";
-        let cross_origin = scheme_downgrade
-            || !next_url.host.eq_ignore_ascii_case(&url.host)
-            || next_url.port != url.port;
-        if cross_origin {
-            hop_headers.remove("Authorization");
-        }
-
-        (method, body) = redirect_method_and_body(response.status().as_u16(), method, body);
+        (method, body) = prepare_redirect_hop(
+            &url,
+            &next_url,
+            response.status().as_u16(),
+            method,
+            body,
+            &mut hop_headers,
+        );
         url = next_url;
         hop += 1;
     }
@@ -987,20 +978,49 @@ async fn send_with_redirects_streaming(
             .to_string();
         let next_url = url.resolve_redirect(&location)?;
 
-        // Same downgrade-off-https rule as `send_with_redirects` above
-        // (see the comment there for the CVE-2018-18074 rationale).
-        let scheme_downgrade = url.scheme == "https" && next_url.scheme != "https";
-        let cross_origin = scheme_downgrade
-            || !next_url.host.eq_ignore_ascii_case(&url.host)
-            || next_url.port != url.port;
-        if cross_origin {
-            hop_headers.remove("Authorization");
-        }
-
-        (method, body) = redirect_method_and_body(status.as_u16(), method, body);
+        (method, body) = prepare_redirect_hop(
+            &url,
+            &next_url,
+            status.as_u16(),
+            method,
+            body,
+            &mut hop_headers,
+        );
         url = next_url;
         hop += 1;
     }
+}
+
+/// Caller-set headers that carry credentials for one origin. They are
+/// dropped when a redirect leaves it (the leak `requests` fixed after
+/// CVE-2018-18074); `Cookie` joined `Authorization` here in design review
+/// 3.3 -- the jar's own cookies are recomputed per hop and are unaffected.
+const ORIGIN_CREDENTIAL_HEADERS: [&str; 3] = ["Authorization", "Proxy-Authorization", "Cookie"];
+
+/// The one redirect policy both the buffered and the streaming send paths
+/// apply between hops: strip [`ORIGIN_CREDENTIAL_HEADERS`] when `next`
+/// is cross-origin (a different host or port, or any downgrade off
+/// `https` even to the same host and port, since the secret would then
+/// travel in plaintext; an http-to-https upgrade on the same host and port
+/// is not), then rewrite the method and body per the status.
+fn prepare_redirect_hop(
+    current: &Url,
+    next: &Url,
+    status: u16,
+    method: Method,
+    body: Body,
+    hop_headers: &mut HeaderMap,
+) -> (Method, Body) {
+    let scheme_downgrade = current.scheme == "https" && next.scheme != "https";
+    let cross_origin = scheme_downgrade
+        || !next.host.eq_ignore_ascii_case(&current.host)
+        || next.port != current.port;
+    if cross_origin {
+        for name in ORIGIN_CREDENTIAL_HEADERS {
+            hop_headers.remove(name);
+        }
+    }
+    redirect_method_and_body(status, method, body)
 }
 
 fn is_redirect_status(status: u16) -> bool {

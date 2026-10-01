@@ -14,6 +14,7 @@ use super::{Result, Store};
 use crate::db::derived::{memory_ids, write_memory, Origin};
 use crate::db::queries::{parse_memory_row, prefixed_memory_columns, MEMORY_COLUMNS};
 use crate::models::{Memory, UnannotatedMemory, UnclassifiedMemory};
+use crate::sync::TOMBSTONE_CONTENT;
 use crate::vitality::EFFECTIVE_VITALITY_FN;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -58,6 +59,19 @@ pub struct NewMemory {
 }
 
 impl NewMemory {
+    /// Drop a tombstone's text, keeping what last-write-wins and re-imports
+    /// read (ADR-0024). A live memory is left as it is.
+    pub fn empty_if_tombstone(&mut self) {
+        if self.deleted_at.is_none() {
+            return;
+        }
+        self.content = TOMBSTONE_CONTENT.to_string();
+        self.tags.clear();
+        self.subject = None;
+        self.predicate = None;
+        self.object = None;
+    }
+
     /// A row holding `content` under `id`, created and updated at `now`, with
     /// every other column at the schema's default (`schema_tables.sql`).
     pub fn new(id: impl Into<String>, content: impl Into<String>, now: &str) -> Self {
@@ -100,6 +114,8 @@ pub struct SyncView {
     pub tags: Vec<String>,
     pub metadata: Value,
     pub updated_at: String,
+    /// Whether the local copy is a tombstone.
+    pub deleted: bool,
 }
 
 /// What recording an access needs of a memory.
@@ -401,7 +417,8 @@ impl<'c> Memories<'c> {
         Ok(self
             .conn
             .query_row(
-                "SELECT tags, metadata, updated_at FROM memories WHERE id = ?",
+                "SELECT tags, metadata, updated_at, deleted_at IS NOT NULL \
+                 FROM memories WHERE id = ?",
                 params![id],
                 |row| {
                     let tags_json: String = row.get(0)?;
@@ -411,6 +428,7 @@ impl<'c> Memories<'c> {
                         metadata: serde_json::from_str(&metadata_json)
                             .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
                         updated_at: row.get(2)?,
+                        deleted: row.get(3)?,
                     })
                 },
             )
@@ -883,26 +901,68 @@ impl<'c> Memories<'c> {
         Ok(())
     }
 
+    /// Drop the text of every tombstone that still holds it (ADR-0024), as
+    /// storage rather than an edit: `updated_at` stays and nothing is
+    /// queued, since every node empties its own copy. How many changed; 0
+    /// once they all have, so it is cheap to run at every open.
+    pub fn empty_tombstones(&self) -> Result<usize> {
+        on_core!(self, |tables| engine::memories::empty_tombstones(
+            &mut tables
+        ));
+        let ids = memory_ids(
+            self.conn,
+            "SELECT id FROM memories WHERE deleted_at IS NOT NULL \
+             AND NOT (content = ? AND tags = '[]' AND subject IS NULL \
+                      AND predicate IS NULL AND object IS NULL)",
+            params![TOMBSTONE_CONTENT],
+        )?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        // One transaction for them all: a savepoint per memory alone would
+        // sync the file once per tombstone.
+        self.conn.execute_batch("SAVEPOINT empty_tombstones;")?;
+        let emptied = ids.iter().try_for_each(|id| {
+            write_memory(self.conn, id, Origin::Sync, || {
+                Ok(self.conn.execute(
+                    "UPDATE memories SET content = ?, tags = '[]', subject = NULL, \
+                     predicate = NULL, object = NULL WHERE id = ?",
+                    params![TOMBSTONE_CONTENT, id],
+                )?)
+            })
+            .map(drop)
+        });
+        match emptied {
+            Ok(()) => self.conn.execute_batch("RELEASE empty_tombstones;")?,
+            Err(e) => {
+                self.conn
+                    .execute_batch("ROLLBACK TO empty_tombstones; RELEASE empty_tombstones;")?;
+                return Err(e);
+            }
+        }
+        Ok(ids.len())
+    }
+
     /// Delete live memory `id`: tombstone it at `tombstone_at` (stamping
-    /// `deleted_at` and `updated_at`), or remove the row when that is
-    /// `None`. Whether there was a live memory to delete.
+    /// `deleted_at` and `updated_at`, and dropping its text as ADR-0024
+    /// says), or remove the row when that is `None`. Whether there was a live memory to delete.
     pub fn delete_live(&self, id: &str, tombstone_at: Option<&str>) -> Result<bool> {
         on_core!(self, |tables| engine::memories::delete_live(
             &mut tables,
             id,
             tombstone_at
         ));
-        let affected = write_memory(self.conn, id, Origin::Local, || {
-            match tombstone_at {
+        let affected = write_memory(self.conn, id, Origin::Local, || match tombstone_at {
             Some(at) => Ok(self.conn.execute(
-                "UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
-                params![at, at, id],
+                "UPDATE memories SET deleted_at = ?, updated_at = ?, content = ?, tags = '[]', \
+                 subject = NULL, predicate = NULL, object = NULL \
+                 WHERE id = ? AND deleted_at IS NULL",
+                params![at, at, TOMBSTONE_CONTENT, id],
             )?),
             None => Ok(self.conn.execute(
                 "DELETE FROM memories WHERE id = ? AND deleted_at IS NULL",
                 params![id],
             )?),
-        }
         })?;
         Ok(affected > 0)
     }
@@ -1570,7 +1630,11 @@ mod tests {
     /// A corpus searched through `db`'s full-text index: every ranked and
     /// paged answer, scores to ten significant digits so float noise cannot
     /// fail the comparison but a real difference in ranking does.
-    fn exercise_search(db: &Database) -> Vec<Value> {
+    /// Every search the node makes, on a fixed corpus, as comparable values.
+    /// With `tombstones`, one row is superseded and one deleted, and hits
+    /// are compared as sets of ids: FTS5's BM25 counts those rows, the
+    /// engine's does not, so only the matches must agree.
+    fn exercise_search(db: &Database, tombstones: bool) -> Vec<Value> {
         const T2: &str = "2026-09-27T00:00:00+00:00";
         let store = db.store();
         let m = Memories::new(&store);
@@ -1628,8 +1692,10 @@ mod tests {
             })
             .unwrap();
         }
-        m.set_superseded_by("h", "a", None).unwrap();
-        m.delete_live("i", Some(T2)).unwrap();
+        if tombstones {
+            m.set_superseded_by("h", "a", None).unwrap();
+            m.delete_live("i", Some(T2)).unwrap();
+        }
         crate::db::entities::Entities::new(&store)
             .insert(
                 &crate::entity::Entity {
@@ -1673,15 +1739,21 @@ mod tests {
         for query in queries {
             for filter in &filters {
                 for limit in [2, 20] {
-                    let hits: Vec<Value> = m
-                        .keyword_hits(&phrases(query), filter, limit)
-                        .unwrap()
-                        .into_iter()
-                        .map(|(memory, score)| {
-                            serde_json::json!([memory.id, format!("{score:.9e}")])
-                        })
-                        .collect();
-                    seen.push(serde_json::json!([query, limit, hits]));
+                    let hits = m.keyword_hits(&phrases(query), filter, limit).unwrap();
+                    if !tombstones {
+                        let hits: Vec<Value> = hits
+                            .into_iter()
+                            .map(|(memory, score)| {
+                                serde_json::json!([memory.id, format!("{score:.9e}")])
+                            })
+                            .collect();
+                        seen.push(serde_json::json!([query, limit, hits]));
+                    } else if limit == 20 {
+                        let mut ids: Vec<String> =
+                            hits.into_iter().map(|(memory, _)| memory.id).collect();
+                        ids.sort();
+                        seen.push(serde_json::json!([query, ids]));
+                    }
                 }
             }
         }
@@ -1729,7 +1801,11 @@ mod tests {
                 .keyword_page(&phrases(query), &filter, limit, offset)
                 .unwrap();
             let ids: Vec<String> = page.into_iter().map(|m| m.id).collect();
-            seen.push(serde_json::json!([query, total, ids]));
+            if tombstones {
+                seen.push(serde_json::json!([query, total]));
+            } else {
+                seen.push(serde_json::json!([query, total, ids]));
+            }
         }
         let mut sensitive: Vec<String> = m.sensitive_ids().unwrap().into_iter().collect();
         sensitive.sort();
@@ -1740,7 +1816,7 @@ mod tests {
     #[test]
     fn the_engine_core_searches_as_fts5_does() {
         let mut observed = Vec::new();
-        on_each_backend(|db| observed.push(exercise_search(db)));
+        on_each_backend(|db| observed.push(exercise_search(db, false)));
         #[cfg(feature = "engine-store")]
         assert_eq!(observed.len(), 2, "both backends ran");
         let sqlite = &observed[0];
@@ -1755,6 +1831,27 @@ mod tests {
                 assert_eq!(theirs, ours);
             }
             assert_eq!(other.len(), sqlite.len());
+        }
+    }
+
+    /// FTS5 keeps superseded and deleted rows in its index and counts them
+    /// in BM25; the engine indexes live rows only. Search keeps live rows
+    /// alone either way, so both find the same memories.
+    #[test]
+    fn with_tombstones_the_engine_core_finds_what_fts5_finds() {
+        let mut observed = Vec::new();
+        on_each_backend(|db| observed.push(exercise_search(db, true)));
+        #[cfg(feature = "engine-store")]
+        assert_eq!(observed.len(), 2, "both backends ran");
+        let sqlite = &observed[0];
+        assert!(
+            sqlite
+                .iter()
+                .any(|v| v[1].as_array().is_some_and(|ids| ids.len() > 2)),
+            "the corpus gives some query several hits: {sqlite:?}"
+        );
+        for other in &observed[1..] {
+            assert_eq!(other, sqlite);
         }
     }
 

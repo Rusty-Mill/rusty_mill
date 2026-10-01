@@ -459,12 +459,9 @@ pub(crate) fn save_settings(path: &std::path::Path, edits: &[SettingEdit]) -> st
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    // Write to a sibling temp file then rename: the live-reload watcher (and
-    // any concurrent loader) polls this path, so an atomic replace avoids it
-    // ever observing a half-written config.
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, updated)?;
-    std::fs::rename(&tmp, path)
+    // Atomic replace: the live-reload watcher (and any concurrent loader)
+    // polls this path, so it must never observe a half-written config.
+    rusty_atomic_file::write(path, updated.as_bytes())
 }
 
 /// Upsert `edits` into config `text`: each setting's existing active `key = …`

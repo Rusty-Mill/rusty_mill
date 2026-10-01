@@ -301,21 +301,23 @@ impl SearchBackend for SqliteFts5Backend {
         Ok(())
     }
 
+    /// Removes the document from `idx_fts` and `content` in one
+    /// transaction, so a failure (or crash) between the two leaves both,
+    /// never a row the full-text index no longer knows about.
     async fn delete(&self, index: &str, id: &str) -> Result<()> {
         let handle = self.handle(index).await?;
-        let conn = handle.conn.lock().expect("connection mutex poisoned");
+        let mut conn = handle.conn.lock().expect("connection mutex poisoned");
+        let tx = conn.as_raw_mut().transaction().map_err(backend_err)?;
         if handle.has_fts {
-            conn.as_raw()
-                .execute(
-                    "DELETE FROM idx_fts WHERE rowid = (SELECT rowid FROM content WHERE _id = ?1)",
-                    params![id],
-                )
-                .map_err(backend_err)?;
-        }
-        conn.as_raw()
-            .execute("DELETE FROM content WHERE _id = ?1", params![id])
+            tx.execute(
+                "DELETE FROM idx_fts WHERE rowid = (SELECT rowid FROM content WHERE _id = ?1)",
+                params![id],
+            )
             .map_err(backend_err)?;
-        Ok(())
+        }
+        tx.execute("DELETE FROM content WHERE _id = ?1", params![id])
+            .map_err(backend_err)?;
+        tx.commit().map_err(backend_err)
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
@@ -768,5 +770,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(invalid, SearchError::InvalidQuery(_)));
+    }
+
+    /// Review 2.5: a delete that fails after removing the full-text row
+    /// rolls that removal back; the document stays whole and findable.
+    #[tokio::test]
+    async fn a_failed_delete_leaves_the_document_whole() {
+        let backend = seeded_backend().await;
+        let handle = backend.handle("articles").await.unwrap();
+        handle
+            .conn
+            .lock()
+            .unwrap()
+            .as_raw()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE DELETE ON content \
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(backend.delete("articles", "1").await.is_err());
+        let results = backend
+            .search("articles", Query::match_query("title", "cooking").into())
+            .await
+            .unwrap();
+        assert_eq!(results.total, 1, "unrelated rows untouched");
+        let results = backend
+            .search("articles", Query::match_query("title", "async rust").into())
+            .await
+            .unwrap();
+        let ids: std::collections::HashSet<_> = results.hits.iter().map(|h| h.id.clone()).collect();
+        assert!(
+            ids.contains("1"),
+            "the full-text row survived the failed delete"
+        );
     }
 }

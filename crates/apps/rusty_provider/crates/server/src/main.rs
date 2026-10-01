@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
@@ -28,15 +27,28 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(providers = ?configured, "providers ready");
     }
 
-    let api_key = config
-        .server
-        .api_key_env
-        .as_ref()
-        .and_then(|var| std::env::var(var).ok());
-    if api_key.is_none() && config.server.api_key_env.is_some() {
-        tracing::warn!(
-            "server.api_key_env is set in config but the env var isn't — running with no auth"
-        );
+    // Design review 3.1: a configured credential that does not resolve is a
+    // startup error, not a warning followed by less (or no) authentication.
+    let credentials =
+        rp_server::credentials::resolve_credentials(&config, &|var| std::env::var(var).ok())
+            .map_err(|e| anyhow::anyhow!(e))?;
+    let (api_key, client_keys, jwt) = (
+        credentials.api_key,
+        credentials.client_keys,
+        credentials.jwt,
+    );
+    if api_key.is_none() && client_keys.is_empty() && jwt.is_none() {
+        if config.server.allow_unauthenticated {
+            tracing::warn!("no caller authentication configured and server.allow_unauthenticated is set: /v1 is open to anyone who can reach it");
+        } else {
+            tracing::warn!("no caller authentication configured: /v1 answers 401 until a client is added (or set server.allow_unauthenticated)");
+        }
+    }
+    if !client_keys.is_empty() {
+        tracing::info!(clients = ?config.clients.iter().map(|c| &c.name).collect::<Vec<_>>(), "named clients ready");
+    }
+    if jwt.is_some() {
+        tracing::info!("JWT auth enabled");
     }
 
     let admin_key = config
@@ -51,44 +63,6 @@ async fn main() -> anyhow::Result<()> {
     } else if admin_key.is_some() {
         tracing::info!("admin API enabled");
     }
-
-    let mut client_keys = HashMap::new();
-    for client in &config.clients {
-        match std::env::var(&client.api_key_env) {
-            Ok(k) if !k.is_empty() => {
-                client_keys.insert(k, (client.name.clone(), client.requests_per_minute));
-            }
-            _ => {
-                tracing::warn!(client = %client.name, env_var = %client.api_key_env, "skipping client: API key env var not set");
-            }
-        }
-    }
-    if !client_keys.is_empty() {
-        tracing::info!(clients = ?config.clients.iter().map(|c| &c.name).collect::<Vec<_>>(), "named clients ready");
-    }
-
-    // Same soft-failure pattern as moderation/web_search: [jwt] present
-    // but neither mode actually resolvable (hs256_secret_env unset, no
-    // jwks_url) disables JWT auth with a warning rather than refusing to
-    // start.
-    let jwt = config.jwt.as_ref().and_then(|cfg| {
-        let hs256_secret = cfg
-            .hs256_secret_env
-            .as_ref()
-            .and_then(|var| std::env::var(var).ok());
-        match rp_server::jwt::JwtVerifier::new(cfg, hs256_secret) {
-            Some(verifier) => {
-                tracing::info!("JWT auth enabled");
-                Some(Arc::new(verifier))
-            }
-            None => {
-                tracing::warn!(
-                    "[jwt] is configured but neither hs256_secret_env nor jwks_url resolved to something usable; JWT auth stays disabled"
-                );
-                None
-            }
-        }
-    });
 
     let mcp = match &config.mcp {
         Some(mcp_config) if mcp_config.enabled => {
@@ -123,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         mcp_path,
         concurrency_limiter,
         cors_allowed_origins: config.server.cors_allowed_origins.clone(),
+        allow_unauthenticated: config.server.allow_unauthenticated,
     };
 
     if std::env::var("MCP_STDIO").is_ok() {

@@ -144,14 +144,10 @@ fn load_from(path: &Path) -> ShellState {
     }
 }
 
-/// Atomic write: serialize to a sibling `.tmp` then rename over the
-/// target so a crash mid-write can't produce a half-written file.
+/// Crash-atomic, so a crash mid-write can't produce a half-written file.
 fn save_to(path: &Path, state: &ShellState) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(state).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-    Ok(())
+    rusty_atomic_file::write(path, &bytes).map_err(|e| e.to_string())
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────

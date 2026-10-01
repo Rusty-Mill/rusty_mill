@@ -2,7 +2,9 @@
 # Every provider's API key comes from an env var, never from this file.
 
 [server]
-host = "0.0.0.0"
+# Loopback by default. In a container, or to serve other machines, set
+# host = "0.0.0.0" -- and configure authentication below.
+host = "127.0.0.1"
 port = 8080
 # Ceiling on an inbound request body, in bytes, enforced before a handler
 # ever parses it. axum's Json/Bytes extractors already refuse anything
@@ -14,6 +16,11 @@ port = 8080
 # where <token> is the value of the named env var. Any key from
 # `[[clients]]` below also authenticates, independent of this field.
 # api_key_env = "RUSTY_PROVIDER_API_KEY"
+# A configured key (here, a [[clients]] key or [jwt]) whose env var is unset
+# stops the server at startup. With no auth configured at all, /v1 answers
+# 401 unless you opt in here (local development, or behind a gateway that
+# authenticates for you):
+# allow_unauthenticated = true
 # Requests-per-minute limit for callers not matched to a `[[clients]]`
 # entry, bucketed by source IP. Unset (the default) means no limit for
 # such callers — rate limiting is entirely opt-in.

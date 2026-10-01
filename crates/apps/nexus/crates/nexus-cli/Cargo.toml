@@ -14,6 +14,7 @@ name = "nexus"
 path = "src/main.rs"
 
 [dependencies]
+rusty_atomic_file = { workspace = true }
 nexus-bootstrap = { path = "../nexus-bootstrap" }
 nexus-collab = { path = "../nexus-collab" }
 nexus-crdt = { path = "../nexus-crdt" }

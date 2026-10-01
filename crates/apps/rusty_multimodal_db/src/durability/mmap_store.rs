@@ -336,6 +336,11 @@ impl MmapAgeStore {
         self.records.keys().copied().collect()
     }
 
+    /// How many ids [`Self::ids`] would return, without building the list.
+    pub(crate) fn id_count(&self) -> usize {
+        self.records.len()
+    }
+
     /// One bounds check on a 4-byte slice, not four separate bounds checks
     /// on individual byte indices — see `scan_ages`'s own doc comment for
     /// why this matters far more there than it does for this single-position
