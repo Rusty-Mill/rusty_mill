@@ -25,6 +25,6 @@ mod parse;
 mod prompt;
 
 pub use agent::OllamaAgent;
-pub use exec::{CommandRunner, ExecError, Exit, StdCommand, MAX_STDOUT_BYTES};
+pub use exec::{CommandRunner, ExecError, Exit, StdCommand, JOIN_GRACE, MAX_STDOUT_BYTES};
 pub use parse::{allowed_kinds, parse, MAX_BODY_CHARS, MAX_ENTRIES};
 pub use prompt::render;

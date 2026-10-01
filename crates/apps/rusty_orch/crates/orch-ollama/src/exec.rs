@@ -1,19 +1,30 @@
-//! The process seam: argv in, captured output out, with a deadline.
+//! The process seam: argv in, captured output out, with a hard deadline.
 //!
 //! `contract::ProcessRunner` has no stdin and no timeout, so this crate
 //! keeps its own one-method trait (ADR-0004). It collapses into `contract`
 //! the day that trait grows both.
+//!
+//! The deadline is a hard bound. The child is spawned as the leader of its
+//! own process group (unix) and the whole group, or process tree on
+//! Windows, is killed on timeout or overflow, then the leader is reaped.
+//! Pipe reader threads are then joined for at most [`JOIN_GRACE`]; if a
+//! grandchild that escaped the group (`setsid`) still holds a pipe, the
+//! reader thread is detached and leaks, and the deadline still holds.
 
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// Captured stdout is cut off here; a reply this long is never valid.
 pub const MAX_STDOUT_BYTES: usize = 1 << 20;
+
+/// How long to wait for the pipe threads after the child is gone.
+pub const JOIN_GRACE: Duration = Duration::from_secs(2);
 
 const POLL: Duration = Duration::from_millis(10);
 
@@ -31,11 +42,12 @@ pub struct Exit {
 pub enum ExecError {
     /// The program could not be started.
     Spawn(String),
-    /// The deadline passed; the process was killed and reaped.
+    /// The deadline passed; the process group was killed and reaped.
     Timeout(Duration),
-    /// stdout exceeded [`MAX_STDOUT_BYTES`]; the process was killed.
+    /// stdout exceeded [`MAX_STDOUT_BYTES`]; the process group was killed.
     StdoutOverflow,
-    /// Reading or writing a pipe failed.
+    /// Reading or writing a pipe failed, or a pipe stayed open past
+    /// [`JOIN_GRACE`] after the child exited.
     Io(String),
 }
 
@@ -67,32 +79,102 @@ impl CommandRunner for StdCommand {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| ExecError::Spawn("empty argv".to_owned()))?;
-        let mut child = Command::new(program)
-            .args(args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| ExecError::Spawn(e.to_string()))?;
+            .stderr(Stdio::piped());
+        own_process_group(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| ExecError::Spawn(e.to_string()))?;
         let pipes = Pipes::take(&mut child, stdin);
-        let status = wait_with_deadline(&mut child, &pipes.overflow, timeout);
-        let (stdout, stderr) = pipes.join()?;
-        Ok(Exit {
-            status: status?,
-            stdout,
-            stderr,
-        })
+        let status = match wait_with_deadline(&mut child, &pipes.overflow, timeout) {
+            Ok(status) => status,
+            Err(stop) => {
+                // Timeout and overflow win over anything the pipes report.
+                let _ = pipes.join(JOIN_GRACE);
+                return Err(stop);
+            }
+        };
+        match pipes.join(JOIN_GRACE) {
+            Ok((stdout, stderr)) => Ok(Exit {
+                status,
+                stdout,
+                stderr,
+            }),
+            Err(e) => {
+                // A reader is still blocked: something the child spawned holds
+                // the pipe. Take the group down so the deadline holds.
+                let _ = kill_group(&mut child);
+                Err(e)
+            }
+        }
     }
 }
 
-/// The three pipe threads. stdin is written and closed on its own thread so
-/// a child that writes before it reads cannot deadlock us; stdout and stderr
-/// are drained concurrently for the same reason.
+#[cfg(unix)]
+fn own_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // Leader of a new group whose id equals the child's pid, so the group
+    // can be addressed as `-<pid>` without a libc dependency.
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn own_process_group(_: &mut Command) {}
+
+/// Kill the child and everything it spawned, then reap the child. The
+/// child itself is also killed directly in case the group command fails.
+fn kill_group(child: &mut Child) -> Result<(), ExecError> {
+    let _ = kill_descendants(child.id());
+    match child.kill() {
+        Ok(()) => {}
+        // Already gone: fine, we only need it reaped below.
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => {}
+        Err(e) => return Err(ExecError::Io(e.to_string())),
+    }
+    child.wait().map_err(|e| ExecError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// SIGKILL the whole process group via the system `kill`, fixed argv.
+#[cfg(unix)]
+fn kill_descendants(pid: u32) -> io::Result<()> {
+    Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+}
+
+/// Kill the process tree via the system `taskkill`, fixed argv. Compiles
+/// on Windows; not exercised in CI.
+#[cfg(windows)]
+fn kill_descendants(pid: u32) -> io::Result<()> {
+    Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn kill_descendants(_: u32) -> io::Result<()> {
+    Ok(())
+}
+
+/// The three pipe threads, each reporting on its own channel so a join can
+/// be bounded: stdin is written and closed on its own thread so a child that
+/// writes before it reads cannot deadlock us; stdout and stderr are drained
+/// concurrently for the same reason.
 struct Pipes {
     overflow: Arc<AtomicBool>,
-    stdin: Option<thread::JoinHandle<io::Result<()>>>,
-    stdout: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
-    stderr: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+    stdin: Option<Receiver<io::Result<()>>>,
+    stdout: Option<Receiver<io::Result<Vec<u8>>>>,
+    stderr: Option<Receiver<io::Result<Vec<u8>>>>,
 }
 
 impl Pipes {
@@ -100,7 +182,7 @@ impl Pipes {
         let overflow = Arc::new(AtomicBool::new(false));
         let input = input.to_vec();
         let stdin = child.stdin.take().map(|mut pipe| {
-            thread::spawn(move || {
+            spawn_reporting(move || {
                 let written = pipe.write_all(&input);
                 drop(pipe);
                 // A child that exits without reading its prompt reports
@@ -115,11 +197,11 @@ impl Pipes {
         let stdout = child
             .stdout
             .take()
-            .map(|pipe| thread::spawn(move || read_capped(pipe, &flag)));
+            .map(|pipe| spawn_reporting(move || read_capped(pipe, &flag)));
         let stderr = child
             .stderr
             .take()
-            .map(|pipe| thread::spawn(move || read_capped(pipe, &AtomicBool::new(false))));
+            .map(|pipe| spawn_reporting(move || read_capped(pipe, &AtomicBool::new(false))));
         Self {
             overflow,
             stdin,
@@ -128,10 +210,13 @@ impl Pipes {
         }
     }
 
-    fn join(self) -> Result<(Vec<u8>, Vec<u8>), ExecError> {
-        join(self.stdin).map(|_| ())?;
-        let stdout = join(self.stdout)?.unwrap_or_default();
-        let stderr = join(self.stderr)?.unwrap_or_default();
+    /// Wait at most `grace` in total for all three threads. A thread that
+    /// does not finish is detached, never blocked on.
+    fn join(self, grace: Duration) -> Result<(Vec<u8>, Vec<u8>), ExecError> {
+        let deadline = Instant::now() + grace;
+        recv_by(self.stdin, deadline, "stdin")?;
+        let stdout = recv_by(self.stdout, deadline, "stdout")?.unwrap_or_default();
+        let stderr = recv_by(self.stderr, deadline, "stderr")?.unwrap_or_default();
         if self.overflow.load(Ordering::SeqCst) {
             return Err(ExecError::StdoutOverflow);
         }
@@ -139,19 +224,41 @@ impl Pipes {
     }
 }
 
-fn join<T>(handle: Option<thread::JoinHandle<io::Result<T>>>) -> Result<Option<T>, ExecError> {
-    let Some(handle) = handle else {
+fn spawn_reporting<T: Send + 'static>(
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> Receiver<io::Result<T>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        // The receiver is gone only if the caller already gave up on us.
+        let _ = tx.send(work());
+    });
+    rx
+}
+
+fn recv_by<T>(
+    rx: Option<Receiver<io::Result<T>>>,
+    deadline: Instant,
+    name: &str,
+) -> Result<Option<T>, ExecError> {
+    let Some(rx) = rx else {
         return Ok(None);
     };
-    let result = handle
-        .join()
-        .map_err(|_| ExecError::Io("pipe thread panicked".to_owned()))?;
-    result.map(Some).map_err(|e| ExecError::Io(e.to_string()))
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(Ok(value)) => Ok(Some(value)),
+        Ok(Err(e)) => Err(ExecError::Io(format!("{name}: {e}"))),
+        Err(RecvTimeoutError::Timeout) => Err(ExecError::Io(format!(
+            "{name} still open {}s after the process ended",
+            JOIN_GRACE.as_secs()
+        ))),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(ExecError::Io(format!("{name} pipe thread panicked")))
+        }
+    }
 }
 
 /// Read until EOF or one byte past [`MAX_STDOUT_BYTES`]. On overflow the
-/// flag is raised and the pipe dropped, so the child sees EPIPE and the
-/// waiter kills it.
+/// flag is raised and the pipe dropped, so the waiter kills the group.
 fn read_capped(mut pipe: impl Read, overflow: &AtomicBool) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -169,8 +276,8 @@ fn read_capped(mut pipe: impl Read, overflow: &AtomicBool) -> io::Result<Vec<u8>
     }
 }
 
-/// Poll until exit, deadline, or overflow. On deadline or overflow the child
-/// is killed and reaped so it never lingers as a zombie.
+/// Poll until exit, deadline, or overflow. On deadline or overflow the
+/// whole group is killed and the child reaped so nothing lingers.
 fn wait_with_deadline(
     child: &mut Child,
     overflow: &AtomicBool,
@@ -182,19 +289,13 @@ fn wait_with_deadline(
             return Ok(status.code().unwrap_or(-1));
         }
         if overflow.load(Ordering::SeqCst) {
-            kill_and_reap(child)?;
+            kill_group(child)?;
             return Err(ExecError::StdoutOverflow);
         }
         if Instant::now() >= deadline {
-            kill_and_reap(child)?;
+            kill_group(child)?;
             return Err(ExecError::Timeout(timeout));
         }
         thread::sleep(POLL);
     }
-}
-
-fn kill_and_reap(child: &mut Child) -> Result<(), ExecError> {
-    child.kill().map_err(|e| ExecError::Io(e.to_string()))?;
-    child.wait().map_err(|e| ExecError::Io(e.to_string()))?;
-    Ok(())
 }
