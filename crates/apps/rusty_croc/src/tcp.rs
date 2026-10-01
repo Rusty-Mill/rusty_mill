@@ -508,28 +508,38 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Occupy the cap with connections that never complete the
-        // handshake, mirroring stalled pre-auth clients.
-        let mut held = Vec::new();
-        for _ in 0..2 {
-            held.push(TcpStream::connect(("127.0.0.1", port)).unwrap());
+        // Connections that never complete the handshake, mirroring stalled
+        // pre-auth clients, three more than the cap. The readiness probes
+        // above may still hold slots for a while (each handler computes its
+        // PAKE curve before reading, which is slow in a loaded debug build),
+        // so which of ours get a slot depends on timing. The invariant does
+        // not: at most `cap` of them are ever accepted, and the rest are
+        // closed.
+        const CAP: usize = 2;
+        let mut ours = Vec::new();
+        for _ in 0..CAP + 3 {
+            ours.push(TcpStream::connect(("127.0.0.1", port)).unwrap());
         }
-        // Give the accept loop time to count these connections in.
         std::thread::sleep(Duration::from_millis(300));
 
-        let mut excess = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        excess
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut buf = [0u8; 1];
-        match excess.read(&mut buf) {
-            Ok(0) => {} // closed, as expected
-            Ok(n) => panic!("expected the excess connection to be closed, got {n} byte(s)"),
-            Err(e) => panic!(
-                "excess connection beyond the cap should be closed, not left open (read errored/timed out instead: {e})"
-            ),
+        let mut accepted = 0;
+        for mut stream in ours {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buf = [0u8; 1];
+            match stream.read(&mut buf) {
+                Ok(0) => {}                                                     // shed
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // shed
+                Ok(n) => panic!("a stalled pre-auth client was sent {n} byte(s)"),
+                // Still open: the relay accepted it and is waiting for the
+                // handshake.
+                Err(_) => accepted += 1,
+            }
         }
-
-        drop(held);
+        assert!(
+            accepted <= CAP,
+            "{accepted} connections accepted with a cap of {CAP}"
+        );
     }
 }
