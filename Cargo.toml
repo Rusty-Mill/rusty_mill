@@ -231,7 +231,6 @@ members = [
     "crates/apps/nexus/crates/nexus-theme",
     "crates/apps/nexus/crates/nexus-bootstrap",
     "crates/apps/nexus/crates/nexus-editor",
-    "crates/apps/nexus/crates/nexus-rush",
     "crates/apps/nexus/crates/nexus-vt",
     "crates/apps/nexus/crates/nexus-terminal",
     "crates/apps/nexus/crates/nexus-agent",
@@ -715,7 +714,8 @@ windows-sys = { version = "0.59", features = [
 # matched this root's on every field it set (version 0.1.0, edition 2021,
 # license "MIT OR Apache-2.0", publish = false), so -- like rusty_test and
 # unlike rusty_db -- its crates keep inheriting via `field.workspace = true`;
-# nexus-rush and nexus-vt already carried a literal `edition = "2024"`.
+# nexus-vt already carried a literal `edition = "2024"` (as did nexus-rush,
+# since replaced by crates/apps/rush).
 #
 # Seven of its entries collided with this root's on something a member
 # cannot override by inheriting, and stay literal in the nexus crates that
@@ -733,7 +733,8 @@ windows-sys = { version = "0.59", features = [
 # `tracing-subscriber` gained `fmt`, `futures-util` gained `sink`).
 #
 # Its two `rustils` git pins (`platform`/`platform-linux` at rev 3772d60f,
-# used by nexus-rush's Linux job control) retire to this root's existing
+# used by nexus-rush's Linux job control, before nexus-rush was replaced by
+# crates/apps/rush) retire to this root's existing
 # path entries -- the ADR-0002 rule, and the same swap rusty_yirp's
 # sessionmgr-pty made.
 nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
@@ -819,7 +820,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 clap_complete = "4.5"
 comfy-table = "7"
 ctrlc = "3.5"
-# REPL line editing for `nexus ai chat` and nexus-rush's interactive mode.
+# REPL line editing for `nexus ai chat`.
 rustyline = "18"
 petgraph = "0.7"
 # SMTP client (nexus-notifications email transport). `rustls-tls` keeps the

@@ -10,6 +10,10 @@ The shell grew from a foundation (REPL, pipelines, redirection, three builtins)
 into a near-complete POSIX-style shell. Work is grouped by area below; see the
 git history for the commit-by-commit narrative.
 
+### Interactive startup
+
+- An interactive shell no longer aliases standard commands to Rusty Mill tools. It used to alias 21 of them (`ls` to `rls`, `git` to `rgit`, `ssh` to `shh`, ...) without checking that the targets exist, so those commands failed wherever the tools weren't installed, and `ls` ran rustup's `rls` proxy where it was. The set is now an opt-in, commented-out block in `examples/rushrc.example`.
+
 ### Expansion
 
 - Brace expansion is bounded and cannot overflow (design review 3.8).

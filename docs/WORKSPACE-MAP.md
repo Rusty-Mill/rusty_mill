@@ -52,9 +52,9 @@ Families are the current directories immediately below `crates/`.
 | platform | portable-runtime | proc-runner |  | 0 |
 | platform | portable-runtime | pty-shell |  | 0 |
 | platform | portable-runtime | stat-tool |  | 0 |
-| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 19 |
+| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 18 |
 | platform | rustils | platform-bsd | BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering. | 2 |
-| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 10 |
+| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 9 |
 | platform | rustils | platform-mock | In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1). | 7 |
 | platform | rustils | platform-parity | Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate. | 4 |
 | platform | rustils | platform-windows | Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it. | 4 |
@@ -165,7 +165,6 @@ Families are the current directories immediately below `crates/`.
 | apps | nexus | nexus-plugins | Nexus plugin system: manifest parsing, WASM sandbox, host functions, plugin loader, settings, hot-reload | 27 |
 | apps | nexus | nexus-protocol | Speech-act protocol layer for Nexus agent communication | 0 |
 | apps | nexus | nexus-remote | Nexus remote-forge JSON-RPC server (BL-140 Phase 1) — exposes the kernel IPC surface and event bus over stdio so a local frontend can drive a headless Nexus instance | 2 |
-| apps | nexus | nexus-rush | Bundled POSIX-ish shell for Nexus sandboxed terminal sessions: an in-tree vendoring of baileyrd/rush refactored to lib + thin bin (RFC 0002). No l13/gui. | 0 |
 | apps | nexus | nexus-security | Nexus security: capability risk metadata, credential vault, audit logging, path validation | 5 |
 | apps | nexus | nexus-skills | Nexus skills subsystem: .skill.md parser + registry + activation (PRD-13 scaffold) | 1 |
 | apps | nexus | nexus-storage | Nexus storage engine: forge layout, atomic writes, SQLite index, markdown parsing, file watching, Tantivy search | 2 |

@@ -575,8 +575,7 @@ fn parse_class(p: &[char], start: usize) -> Option<(Class, usize)> {
 mod tests {
     use super::*;
 
-    /// Design review Tranche 4: rush and nexus-rush share these fixtures,
-    /// not code. Every case must hold for this crate's own matcher.
+    /// Every case in the bash-conformance fixture file must hold.
     #[test]
     fn shared_conformance_fixtures() {
         let fixtures = include_str!("../tests/conformance/glob.tsv");

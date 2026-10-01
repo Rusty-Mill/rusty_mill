@@ -8,6 +8,9 @@ lives in the git log and in `docs/0.1.2/audits/`.
 
 ## [Unreleased]
 
+### Changed
+- **The bundled shell is now the workspace's `rush` (`crates/apps/rush`); `nexus-rush` is removed** (RFC 0002). The vendored copy had drifted behind rush. `nexus-terminal` looks for a `rush` binary beside the executable instead of `nexus-rush`, and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell a session leader with the PTY as its controlling terminal, so rush's job control (`fg`, `bg`, Ctrl-Z) works, where nexus-rush had disabled it.
+
 ### Fixed
 - **nexus-rush: `&&`/`||` short-circuit in `$(( ))`, and `[[:class:]]` globs work** (design review 4, shared rush fixtures).
   - `0 && 1 / 0` failed with "division by zero" instead of giving 0, so a guard like `(( n != 0 && total / n > 2 ))` broke when `n` was 0. The skipped side is still parsed, so a syntax error there is still an error.

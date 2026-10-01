@@ -1,6 +1,5 @@
-# Shared arithmetic fixtures for rush and nexus-rush (design review
-# Tranche 4: shared test fixtures, not code). Each crate runs every case
-# against its own arith::eval; both must agree with bash $(( )).
+# Arithmetic conformance fixtures for rush: every case must agree with
+# bash $(( )). Run against arith::eval.
 # Format: expression<TAB>value|error. # starts a comment.
 
 # Precedence and grouping

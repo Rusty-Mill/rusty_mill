@@ -79,7 +79,7 @@ pub struct ServerSpawnConfig {
     /// bridge that reads `sandbox.toml`. Server-spawned interactive sessions
     /// leave this `None`.
     pub sandbox: Option<SandboxPolicy>,
-    /// Opt in to the bundled `nexus-rush` shell (RFC 0002). Only effective with
+    /// Opt in to the bundled `rush` shell (RFC 0002). Only effective with
     /// a confining [`sandbox`](Self::sandbox) policy and no explicit
     /// [`shell`](Self::shell); threaded from `sandbox.toml`'s
     /// `bundled_shell_for_sandbox` by the caller. Default `false`.

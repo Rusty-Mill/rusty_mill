@@ -161,7 +161,7 @@ pub struct SessionConfig {
     /// caller opts in. When set to an enforcing policy, the shell is launched
     /// through the `nexus-sandbox` helper (filesystem + network confinement).
     pub sandbox: Option<SandboxPolicy>,
-    /// Opt in to the bundled `nexus-rush` shell for this session (RFC 0002).
+    /// Opt in to the bundled `rush` shell for this session (RFC 0002).
     /// Only takes effect when no explicit [`shell`](Self::shell) is pinned and a
     /// confining [`sandbox`](Self::sandbox) policy is set — see
     /// [`use_bundled_shell`]. The caller (which reads `sandbox.toml`'s
@@ -176,7 +176,7 @@ pub struct SessionConfig {
     pub shell_integration: bool,
 }
 
-/// Whether a session should launch the bundled `nexus-rush` shell rather than
+/// Whether a session should launch the bundled `rush` shell rather than
 /// the system shell: only when the caller pinned no explicit shell, opted in via
 /// `bundled_shell`, and a *confining* sandbox policy is set. Keeping this a pure
 /// function makes the decision unit-testable without touching the filesystem
@@ -270,7 +270,7 @@ impl Session {
     #[allow(clippy::too_many_lines)]
     pub fn spawn(config: SessionConfig) -> Result<Self, TerminalError> {
         // Bundled-shell opt-in (RFC 0002): a sandboxed session with no pinned
-        // shell prefers the bundled nexus-rush. Resolution is best-effort — if
+        // shell prefers the bundled rush. Resolution is best-effort — if
         // the bundled binary can't be found we fall back to the system shell, so
         // a misconfigured install never blocks the session.
         let bundled = use_bundled_shell(
@@ -280,7 +280,6 @@ impl Session {
         )
         .then(crate::shell::resolve_bundled_shell)
         .flatten();
-        let is_bundled = bundled.is_some();
         let shell = bundled
             .or(config.shell)
             .unwrap_or_else(detect_default_shell);
@@ -321,11 +320,6 @@ impl Session {
         // `xterm-256color` matches what xterm.js on the frontend emulates.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        // Tell the bundled rush it's embedded in a Nexus-owned PTY so it skips
-        // claiming the controlling terminal (job-control hand-off).
-        if is_bundled {
-            cmd.env("NEXUS_EMBEDDED_SHELL", "1");
-        }
         for (k, v) in &config.env {
             cmd.env(k, v);
         }

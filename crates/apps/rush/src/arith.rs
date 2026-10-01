@@ -864,8 +864,7 @@ fn numeric_value(name: &str, raw: String) -> Result<i64, String> {
 mod tests {
     use super::*;
 
-    /// Design review Tranche 4: rush and nexus-rush share these fixtures,
-    /// not code. Every case must hold for this crate's own evaluator.
+    /// Every case in the bash-conformance fixture file must hold.
     #[test]
     fn shared_conformance_fixtures() {
         let fixtures = include_str!("../tests/conformance/arith.tsv");
