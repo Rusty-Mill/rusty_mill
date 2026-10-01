@@ -346,6 +346,22 @@ pub fn is_same_process(pid: u32, expected_fingerprint: Option<&str>) -> io::Resu
     }
 }
 
+/// Is `pid` provably the process that recorded `expected_fingerprint`?
+///
+/// The authority to *kill* (design review 4): unlike [`is_same_process`],
+/// which resolves ambiguity toward "alive" for display and adoption, this
+/// resolves it toward "not provably ours" -- no recorded fingerprint, an
+/// unreadable one, or a mismatch all return `false`, since signalling a
+/// recycled pid would hit an unrelated process.
+#[must_use]
+pub fn is_verifiably_same_process(pid: u32, expected_fingerprint: Option<&str>) -> bool {
+    let Some(expected) = expected_fingerprint else {
+        return false;
+    };
+    matches!(is_alive(pid), Ok(true))
+        && matches!(start_fingerprint(pid), Ok(Some(current)) if current == expected)
+}
+
 /// Terminates an arbitrary pid this process did not itself spawn.
 ///
 /// Unix: `SIGTERM` -- a cooperative shutdown request, not `SIGKILL`.
@@ -356,6 +372,15 @@ pub fn is_same_process(pid: u32, expected_fingerprint: Option<&str>) -> io::Resu
 /// A pid that is already gone is **not** an error: the caller's goal is
 /// "this is not running", which is already true.
 pub fn terminate(pid: u32) -> io::Result<()> {
+    // One process only (design review 4): pid 0 means the caller's process
+    // group, and a value past `i32::MAX` wraps negative -- "every process"
+    // or a group -- once cast to `pid_t`.
+    if pid == 0 || i32::try_from(pid).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{pid} does not name a single process"),
+        ));
+    }
     #[cfg(unix)]
     {
         // SAFETY: `kill(pid, SIGTERM)` on a caller-supplied pid is a
@@ -551,6 +576,32 @@ mod tests {
         );
         let b = start_fingerprint(me).expect("fingerprint call must not error");
         assert_eq!(a, b, "a process's start time must not change between reads");
+    }
+
+    #[test]
+    fn terminate_refuses_pids_that_are_not_one_process() {
+        for pid in [0, u32::MAX, i32::MAX as u32 + 1] {
+            let err = terminate(pid).expect_err("refused");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{pid}");
+        }
+    }
+
+    #[test]
+    fn only_a_matching_fingerprint_authorizes_a_kill() {
+        let me = std::process::id();
+        let real = start_fingerprint(me)
+            .expect("fingerprint")
+            .expect("present");
+        assert!(is_verifiably_same_process(me, Some(&real)));
+        assert!(!is_verifiably_same_process(me, Some("not-this-process")));
+        assert!(
+            !is_verifiably_same_process(me, None),
+            "no fingerprint, no kill"
+        );
+        assert!(
+            is_same_process(me, None).unwrap(),
+            "display stays optimistic"
+        );
     }
 
     #[test]

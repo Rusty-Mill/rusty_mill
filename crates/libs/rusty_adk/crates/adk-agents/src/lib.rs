@@ -659,6 +659,34 @@ mod tests {
         assert_eq!(final_event.text(), "The answer.");
     }
 
+    /// Design review Tranche 4: the streaming path folded every chunk into
+    /// the answer without checking for an error chunk, so a model error
+    /// arriving mid-stream became an empty, apparently successful reply.
+    #[tokio::test]
+    async fn a_streamed_model_error_is_reported_not_swallowed() {
+        let session = Session::new("s", "app", "u");
+        let services = Services::new(Arc::new(InMemorySessionService::new()));
+        let ctx = InvocationContext::new(
+            session,
+            services,
+            RunConfig {
+                streaming_mode: StreamingMode::Sse,
+                ..Default::default()
+            },
+        );
+        let model =
+            MockModel::new().push_response(LlmResponse::error("RESOURCE_EXHAUSTED", "quota"));
+        let agent = LlmAgent::builder("a")
+            .model(Arc::new(model))
+            .build()
+            .unwrap();
+
+        let events = drain(&agent, &ctx).await;
+        let last = events.last().unwrap();
+        assert_eq!(last.error_code.as_deref(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(last.error_message.as_deref(), Some("quota"));
+    }
+
     // ---- workflow agents ----
 
     fn scripted(name: &str, text: &str) -> SharedAgent {

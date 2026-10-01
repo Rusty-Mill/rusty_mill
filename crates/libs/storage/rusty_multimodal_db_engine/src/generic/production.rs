@@ -202,6 +202,20 @@ impl<S> GenericProductionStore<S> {
         self.inner.read().expect(LOCK_POISONED).all_ids()
     }
 
+    /// How many ids [`Self::all_ids`] would return, without building the
+    /// list — O(1) on the shipped stores (Tranche 5, D3).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn id_count<R>(&self) -> usize
+    where
+        R: Record,
+        S: AllIds<R>,
+    {
+        self.inner.read().expect(LOCK_POISONED).id_count()
+    }
+
     /// # Panics
     ///
     /// Panics if the lock is poisoned — see `LOCK_POISONED`.

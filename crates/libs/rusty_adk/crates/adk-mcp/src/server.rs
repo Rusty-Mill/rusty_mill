@@ -1,20 +1,29 @@
 //! The MCP server: exposes ADK tools to any MCP client.
 //!
-//! [`McpServer::handle`] is transport-independent — it takes a JSON-RPC request
-//! and returns the response — so the stdio and HTTP transports are thin
-//! wrappers around it, and the whole protocol is testable without I/O.
+//! [`McpServer`] is an `rmcp` server handler: the stdio and HTTP transports
+//! hand it to `rmcp`, which owns the wire protocol. This module owns only
+//! what is ADK-specific, running ADK tools against a session.
+
+use std::borrow::Cow;
 
 use adk_core::{InvocationContext, RunConfig, Services, Session};
 use adk_tools::{invoke_tool, SharedTool, ToolContext};
-use serde_json::{json, Map, Value};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, ErrorCode, Implementation, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler};
 use std::sync::Arc;
 
-use crate::protocol::{
-    initialize_result, tool_entry, tool_result, JsonRpcRequest, JsonRpcResponse, INTERNAL_ERROR,
-    INVALID_PARAMS, METHOD_NOT_FOUND,
-};
+use crate::protocol::{protocol_version, tool_entry, tool_result, SUPPORTED_VERSIONS};
 
 /// Serves a set of ADK tools over the Model Context Protocol.
+///
+/// An [`rmcp`] server handler: the transports in this crate hand it to
+/// `rmcp`, which owns the wire protocol. Cloning is cheap (the tools are
+/// shared), and each connection serves its own clone.
+#[derive(Clone)]
 pub struct McpServer {
     name: String,
     version: String,
@@ -60,62 +69,21 @@ impl McpServer {
         &self.tools
     }
 
-    /// Handles one JSON-RPC request.
-    ///
-    /// Returns `None` for a notification, which the protocol says must not be
-    /// answered.
-    pub async fn handle(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
-        let id = request.id.clone();
-        let is_notification = request.is_notification();
-
-        let outcome = match request.method.as_str() {
-            "initialize" => Ok(initialize_result(&self.name, &self.version)),
-            "notifications/initialized" | "notifications/cancelled" => Ok(Value::Null),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({
-                "tools": self
-                    .tools
-                    .iter()
-                    .filter_map(|t| t.declaration())
-                    .map(|d| tool_entry(&d))
-                    .collect::<Vec<_>>(),
-            })),
-            "tools/call" => self.call_tool(request.params).await,
-            other => Err((METHOD_NOT_FOUND, format!("unsupported method '{other}'"))),
-        };
-
-        if is_notification {
-            return None;
-        }
-
-        let id = id.unwrap_or(Value::Null);
-        Some(match outcome {
-            Ok(result) => JsonRpcResponse::success(id, result),
-            Err((code, message)) => JsonRpcResponse::error(id, code, message),
-        })
-    }
-
-    /// Handles `tools/call`.
-    async fn call_tool(&self, params: Option<Value>) -> Result<Value, (i32, String)> {
-        let params = params.unwrap_or(Value::Null);
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| (INVALID_PARAMS, "missing tool name".to_string()))?;
-
-        let args: Map<String, Value> = match params.get("arguments") {
-            None | Some(Value::Null) => Map::new(),
-            Some(Value::Object(map)) => map.clone(),
-            Some(_) => {
-                return Err((INVALID_PARAMS, "arguments must be an object".to_string()));
-            }
-        };
-
+    /// Runs `tools/call` for the named tool.
+    async fn call(&self, request: CallToolRequestParams) -> Result<CallToolResponse, ErrorData> {
+        let name = request.name.as_ref();
+        let args = request.arguments.unwrap_or_default();
         let tool = self
             .tools
             .iter()
             .find(|t| t.name() == name)
-            .ok_or_else(|| (METHOD_NOT_FOUND, format!("unknown tool '{name}'")))?;
+            .ok_or_else(|| {
+                ErrorData::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    format!("unknown tool '{name}'"),
+                    None,
+                )
+            })?;
 
         // This transport has no channel to carry a confirmation answer back
         // to the tool: `tools/call` is a single request/response round trip
@@ -126,13 +94,13 @@ impl McpServer {
         // error branch below, indistinguishable from a real tool failure.
         // Fail fast instead, with a message that names the actual limitation.
         if let Some(hint) = tool.confirmation_hint(&args) {
-            return Err((
-                INTERNAL_ERROR,
+            return Err(ErrorData::internal_error(
                 format!(
                     "tool '{name}' requires user confirmation ('{hint}') before it can run, \
                      but the MCP stdio/http transport does not support confirmation-gated \
                      tools: there is no channel to carry an approval back to a suspended call"
                 ),
+                None,
             ));
         }
 
@@ -146,40 +114,45 @@ impl McpServer {
         // A tool failure is reported as an MCP tool error, not a JSON-RPC
         // error: the protocol distinguishes "the tool ran and failed" from
         // "the request was malformed", and clients rely on that difference.
-        match invoke_tool(tool.as_ref(), args, &ctx).await {
-            Ok(value) => Ok(tool_result(&value)),
-            Err(err) => Ok(tool_result(&adk_tools::error(err.to_string()))),
-        }
+        let value = match invoke_tool(tool.as_ref(), args, &ctx).await {
+            Ok(value) => value,
+            Err(err) => adk_tools::error(err.to_string()),
+        };
+        Ok(tool_result(&value).into())
+    }
+}
+
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(self.name.clone(), self.version.clone()))
+            .with_protocol_version(protocol_version())
     }
 
-    /// Handles a raw JSON body, for transports that deal in bytes.
-    ///
-    /// Returns the serialized response, or `None` for a notification.
-    pub async fn handle_raw(&self, body: &str) -> Option<String> {
-        let request: JsonRpcRequest = match serde_json::from_str(body) {
-            Ok(request) => request,
-            Err(err) => {
-                let response = JsonRpcResponse::error(
-                    Value::Null,
-                    crate::protocol::PARSE_ERROR,
-                    format!("invalid JSON-RPC request: {err}"),
-                );
-                return serde_json::to_string(&response).ok();
-            }
-        };
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(SUPPORTED_VERSIONS)
+    }
 
-        let response = self.handle(request).await?;
-        match serde_json::to_string(&response) {
-            Ok(text) => Some(text),
-            Err(err) => {
-                let fallback = JsonRpcResponse::error(
-                    Value::Null,
-                    INTERNAL_ERROR,
-                    format!("failed to encode response: {err}"),
-                );
-                serde_json::to_string(&fallback).ok()
-            }
-        }
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let tools = self
+            .tools
+            .iter()
+            .filter_map(|t| t.declaration())
+            .map(|d| tool_entry(&d))
+            .collect();
+        Ok(ListToolsResult::with_all_items(tools))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        self.call(request).await
     }
 }
 

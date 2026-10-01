@@ -23,7 +23,6 @@
 use crate::api::constant_time_eq;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -379,21 +378,7 @@ impl Registry {
     ///
     /// [`UsersError::Io`].
     pub fn save(&self, path: &Path) -> Result<(), UsersError> {
-        let mut temporary = path.as_os_str().to_owned();
-        temporary.push(".tmp");
-        let temporary = PathBuf::from(temporary);
-        let write = || -> std::io::Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            let mut file = options.open(&temporary)?;
-            file.write_all(self.to_json().as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, path)
-        };
-        write().map_err(|source| {
-            let _ = std::fs::remove_file(&temporary);
+        rusty_atomic_file::write_private(path, self.to_json().as_bytes()).map_err(|source| {
             UsersError::Io {
                 path: path.to_path_buf(),
                 source,

@@ -114,7 +114,11 @@ impl Allowlist {
     /// symlinks, must still lie under a (resolved) allowed prefix. The
     /// lexical check alone let a symlink inside an allowed prefix reach
     /// any file on the box.
-    pub fn resolve_config_path(&self, path: &Path) -> Result<PathBuf, AgentError> {
+    ///
+    /// Returns the matched prefix and the path beneath it, so the open
+    /// itself can refuse a symlink swapped in after this check
+    /// (`rusty_confined_fs`).
+    pub fn resolve_config_path(&self, path: &Path) -> Result<ConfigTarget, AgentError> {
         let path = self.check_config_path(path)?;
         let refuse = || AgentError::PathNotAllowed(path.display().to_string());
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -124,13 +128,32 @@ impl Allowlist {
             return Err(refuse());
         };
         let resolved = parent.canonicalize()?.join(name);
-        let inside = self
-            .config
+        self.config
             .config_path_prefixes
             .iter()
             .filter_map(|prefix| prefix.canonicalize().ok())
-            .any(|prefix| resolved.starts_with(prefix));
-        if inside { Ok(resolved) } else { Err(refuse()) }
+            .find_map(|root| {
+                let rel = resolved.strip_prefix(&root).ok()?.to_path_buf();
+                Some(ConfigTarget { root, rel })
+            })
+            .ok_or_else(refuse)
+    }
+}
+
+/// A config path that passed the allowlist: `rel` beneath the allowed,
+/// canonical prefix `root`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigTarget {
+    /// The allowed prefix, canonicalized.
+    pub root: PathBuf,
+    /// The path beneath `root`.
+    pub rel: PathBuf,
+}
+
+impl ConfigTarget {
+    /// The full path, for messages and existence checks.
+    pub fn path(&self) -> PathBuf {
+        self.root.join(&self.rel)
     }
 }
 

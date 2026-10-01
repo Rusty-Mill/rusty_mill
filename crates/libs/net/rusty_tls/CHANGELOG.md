@@ -5,6 +5,25 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Fixed
+- **Async adapters: a lost wakeup that hung a `write` (or `flush`/
+  `shutdown`) after the handshake** — the flaky Windows `async_handshake`
+  tests (600 s timeout, then a 0.019 s pass). `poll_complete_io` drove the
+  handshake by reading until `wants_read()` went false, which on an
+  established, idle connection it never does. TLS 1.3 servers send session
+  tickets after the handshake; when they arrived before the client's next
+  read, the client consumed them, read again, and returned `Pending` from a
+  write it could complete, with nothing left to wake it. A server that
+  speaks first hit the same loop, and `flush`/`shutdown` waited on input
+  after writing. Both adapters now split I/O into `poll_write_tls`,
+  `poll_read_tls` and a `poll_handshake` that stops when the handshake
+  does (the sync `complete_io`'s condition); only `poll_read` waits for
+  input. A peer closing mid-handshake is now `UnexpectedEof`, as in the
+  sync adapter, where the server's `complete_handshake` used to return
+  `Ok`. `tests/async_lost_wakeup.rs` drives each adapter against an
+  in-process rustls peer that never wakes, so any `Pending` fails; two of
+  its three tests failed before the fix.
+
 ### Added
 - **`TlsServerStream::peer_certificate_der`**, the server-side mirror of
   `TlsStream::peer_certificate_der`: the DER-encoded end-entity certificate

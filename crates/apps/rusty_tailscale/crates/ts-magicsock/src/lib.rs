@@ -174,6 +174,18 @@ impl MagicSock {
         });
     }
 
+    /// Forgets a peer the netmap removed (design review 4): its disco key,
+    /// paths, endpoint index and in-flight pings, so neither disco traffic
+    /// nor a stale direct path can be attributed to it any more.
+    pub fn remove_peer(&mut self, node: &NodePublic) {
+        if let Some(paths) = self.peers.remove(node) {
+            self.disco_to_node.remove(&paths.disco_key);
+        }
+        self.disco_to_node.retain(|_, n| n != node);
+        self.endpoint_to_node.retain(|_, n| n != node);
+        self.pending.retain(|_, (n, _, _)| n != node);
+    }
+
     /// Discovers our local candidate endpoints: the primary interface address
     /// toward `control_ip` plus, if `reflexive` is provided (from STUN), the
     /// server-reflexive endpoint. Both carry the UDP socket's port.

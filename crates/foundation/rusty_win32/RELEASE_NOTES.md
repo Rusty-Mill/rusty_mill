@@ -6,6 +6,18 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## process: add memory (GetProcessMemoryInfo)
+**2026-10-01** · branch `claude/peaceful-brown-r44bh2-t5` (no PR number yet)
+
+- **Added:** `process::memory`, wrapping `K32GetProcessMemoryInfo`: the
+  current and peak working set of a process. Needs only
+  `PROCESS_QUERY_LIMITED_INFORMATION`, like `times`.
+- **Behavior worth knowing:** the peak survives the process's exit while
+  the handle stays open, so a parent can read a finished child's peak
+  memory. Tested that way, on `cmd.exe /c exit 0`.
+
+---
+
 ## net: add peer_addr_unix, closing #271
 **2026-08-08** · branch `claude/rustils-windows-deps-mtimc7` (no PR number yet)
 

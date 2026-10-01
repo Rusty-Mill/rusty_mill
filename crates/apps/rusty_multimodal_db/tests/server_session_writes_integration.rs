@@ -192,6 +192,23 @@ fn a_soft_outcome_is_a_result_and_the_rest_of_the_batch_still_applies() {
     assert_eq!(count_of(&mut client, 2), Some(ScanValue::I64(8)));
 }
 
+/// `Session::commit`'s contract: `Ok(())` means the batch applied, not every
+/// write. The soft outcome is discarded, so a caller that needs it must use
+/// `commit_results` or a strict session.
+#[test]
+fn plain_commit_is_ok_even_when_a_staged_write_did_not_apply() {
+    let addr = start();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let dup = fields_like(&mut client, 1, "duplicate");
+    let mut session = client.begin().unwrap();
+    session.insert(id(1), &borrowed(&dup)).unwrap();
+    session
+        .update(id(2), "access_count", ScanValue::I64(9))
+        .unwrap();
+    session.commit().unwrap();
+    assert_eq!(count_of(&mut client, 2), Some(ScanValue::I64(9)));
+}
+
 /// `TXS-FR-003`: a bad staged write aborts the whole commit before anything
 /// is applied, naming the op; read-your-writes / snapshot sessions (and MVCC ones, same guard)
 /// refuse a record write (`Unsupported`); below 33 nothing is staged.
