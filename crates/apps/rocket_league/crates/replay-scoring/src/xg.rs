@@ -6,7 +6,7 @@
 //! `xg-fit` replaces it with weights fitted on labelled shots. Calibration (Brier,
 //! reliability) says how far to trust either.
 
-use replay_analyzer::field::BACK_WALL_Y;
+use replay_analyzer::field::{BACK_WALL_Y, BALL_RADIUS};
 use serde::{Deserialize, Serialize};
 
 use crate::calibrate::solve;
@@ -16,6 +16,8 @@ use crate::episodes::{Episode, Outcome};
 pub const N: usize = 6;
 /// Goal half-width (uu), to scale how far toward a post the ball is aimed.
 const GOAL_HALF_W: f32 = 892.755;
+/// Goal height (uu).
+const GOAL_H: f32 = 642.775;
 /// A shot with no projection is treated as aimed this many half-widths wide.
 const NO_AIM_EDGE: f32 = 2.0;
 
@@ -41,11 +43,13 @@ impl Default for XgModel {
 
 /// `[1, distance to goal (km), ball speed (km/s), on target, defenders, aim edge]`, or `None`
 /// for anything but a shot.
+///
+/// Only what is known before the shot resolves: `on target` is the projected path alone, never
+/// the episode's `on_target` flag, which is also set for goals and saves once their outcome is known.
 pub fn features(e: &Episode) -> Option<[f32; N]> {
     let Episode::Shot {
         speed,
         aim,
-        on_target,
         at,
         def,
         ..
@@ -53,13 +57,15 @@ pub fn features(e: &Episode) -> Option<[f32; N]> {
     else {
         return None;
     };
+    let on_target = aim
+        .is_some_and(|a| a[0].abs() <= GOAL_HALF_W - BALL_RADIUS && a[1] <= GOAL_H - BALL_RADIUS);
     let dist = at[0].hypot(BACK_WALL_Y - at[1]);
     let edge = aim.map_or(NO_AIM_EDGE, |a| (a[0].abs() / GOAL_HALF_W).min(NO_AIM_EDGE));
     Some([
         1.0,
         dist / 1000.0,
         speed / 1000.0,
-        f32::from(*on_target),
+        f32::from(on_target),
         f32::from(*def),
         edge,
     ])
@@ -247,5 +253,23 @@ mod tests {
     #[test]
     fn too_few_shots_is_not_a_fit() {
         assert!(XgModel::fit(&[([1.0; N], true)], 1.0).is_none());
+    }
+
+    /// The model must not see the outcome: a shot's features are the same whether it ended as
+    /// a goal (which forces the episode's `on_target` flag) or as a miss.
+    #[test]
+    fn features_do_not_depend_on_the_outcome() {
+        let as_miss = shot(1500.0, false, 1);
+        let mut as_goal = shot(1500.0, false, 1);
+        if let Episode::Shot {
+            outcome, on_target, ..
+        } = &mut as_goal
+        {
+            (*outcome, *on_target) = (Outcome::Goal, true);
+        }
+        assert_eq!(features(&as_goal), features(&as_miss));
+        // ...while a path that really crosses the mouth is on target.
+        assert_eq!(features(&shot(1500.0, true, 1)).unwrap()[3], 1.0);
+        assert_eq!(features(&as_miss).unwrap()[3], 0.0);
     }
 }
