@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Unsupported adapter roles fail once (#440)
+**2026-10-02** · (link once pushed)
+
+- **Fixed:** `AgentRunner::supports` gives adapters an explicit capability check. The dispatcher uses it before counting a call or invoking the backend; an unsupported agent/role pair becomes a typed `UnsupportedRole` error and a terminally failed card, so later runs do not retry it.
+- **Preserved:** ordinary `AgentError`s remain transient and retry under both goal and task ceilings. Ollama and Codex still serve Research, Design, Triage, and Review; both explicitly reject Implement before spawning a CLI, and Codex does so before creating scratch files.
+- **Compatibility:** the new trait method defaults to supporting all routes, preserving existing in-repo and downstream runners. Capability-aware composite runners delegate the query to the selected adapter. No `orch-core` API or persisted shape changes.
+
+---
+
 ## Superseded refs resolve to their live successors (#439)
 **2026-10-02** · (link once pushed)
 

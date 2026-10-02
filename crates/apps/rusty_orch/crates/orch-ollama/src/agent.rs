@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use orch_core::board::Board;
-use orch_core::task::{Agent, Task};
+use orch_core::task::{Agent, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, Output};
 
 use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
@@ -12,8 +12,9 @@ use crate::render;
 
 /// [`Agent::Local`] over `ollama run <model> --format json`, prompt on stdin.
 ///
-/// Serves only `Agent::Local`; any other agent is an [`AgentError`]. The
-/// argv is a fixed vector with no shell and no interpolation.
+/// Serves non-implementation roles through `Agent::Local`; unsupported
+/// agent/role pairs are rejected before any process is spawned. The argv is
+/// a fixed vector with no shell and no interpolation.
 #[derive(Debug, Clone)]
 pub struct OllamaAgent<C = StdCommand> {
     model: String,
@@ -53,10 +54,15 @@ impl<C: CommandRunner> OllamaAgent<C> {
 }
 
 impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
+    fn supports(&self, agent: Agent, role: Role) -> bool {
+        agent == Agent::Local && !matches!(role, Role::Implement)
+    }
+
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
-        if agent != Agent::Local {
+        if !self.supports(agent, task.spec().role) {
             return Err(AgentError(format!(
-                "ollama adapter serves Local, not {agent:?}"
+                "ollama adapter cannot serve {:?} through {agent:?}",
+                task.spec().role
             )));
         }
         let prompt = render(task, board);

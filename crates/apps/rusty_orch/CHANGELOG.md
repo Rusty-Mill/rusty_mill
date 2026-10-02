@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- `orch-dispatch`: adapters now declare agent/role capability, so a routed but unsupported role fails its card once before call accounting or backend setup instead of consuming its retry budget (#440). ADR-0007.
 - `orch-cli` `render`: explicit entry refs now follow supersession chains and show the newest live entry's id, kind, and body. Aliases of the same live entry are rendered once and are not repeated in card history (#439).
 - `orch-cli` `render`: a card's own live entries and the answers to them are inlined, so a card resumed after a `Question` sees its `Answer` (#448).
 ### Added
