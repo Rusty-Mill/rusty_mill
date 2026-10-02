@@ -8,6 +8,23 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Stalls
+**2026-10-02** · `RB-PHYSICS-001-FR-104` · ADR-0023 amendment
+
+- Air roll one way with yaw the other plus jump is now a stall, as in the
+  real game: the flip is spent with no push or spin, and the car's fall
+  is damped 0.15 s later. The port used to double-jump instead. The owner's
+  stall at 15.6 s in the main capture now matches to under 1 uu/s. 461
+  tests.
+
+## Keyboard dodges and the car speed cap
+**2026-10-02** · `RB-PHYSICS-001-FR-103` · ADR-0023
+
+- A side dodge with throttle held now goes diagonally forward, as all of
+  the owner's keyboard dodges do, and a car's speed is capped at 2300 uu/s
+  like the real game. The two worst remaining jump presses in the owner's
+  main capture now match to under 1 uu/s. 460 tests.
+
 ## Real arena curves; wheels grip walls
 **2026-10-02** · `RB-PHYSICS-001-FR-102` · ADR-0022
 
