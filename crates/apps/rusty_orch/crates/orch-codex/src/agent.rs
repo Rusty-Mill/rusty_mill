@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use orch_core::board::Board;
-use orch_core::task::{Agent, Task};
+use orch_core::task::{Agent, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, Output};
 
 use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
@@ -24,7 +24,8 @@ static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// [`Agent::Codex`] over `codex exec`, read-only, prompt on stdin.
 ///
-/// Serves only `Agent::Codex`; any other agent is an [`AgentError`]. The
+/// Serves non-implementation roles through `Agent::Codex`; unsupported
+/// agent/role pairs are rejected before scratch files or processes. The
 /// argv is a fixed vector with no shell and no interpolation; the model is
 /// Codex's default unless [`CodexAgent::model`] sets one.
 ///
@@ -105,10 +106,15 @@ impl<C: CommandRunner> CodexAgent<C> {
 }
 
 impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
+    fn supports(&self, agent: Agent, role: Role) -> bool {
+        agent == Agent::Codex && !matches!(role, Role::Implement)
+    }
+
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
-        if agent != Agent::Codex {
+        if !self.supports(agent, task.spec().role) {
             return Err(AgentError(format!(
-                "codex adapter serves Codex, not {agent:?}"
+                "codex adapter cannot serve {:?} through {agent:?}",
+                task.spec().role
             )));
         }
         let scratch = Scratch::create()?;
