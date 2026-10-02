@@ -10,8 +10,8 @@
 
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, ReadBuf};
@@ -88,7 +88,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for LineCapped<R> {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::Waker;
 
     use super::*;
     use tokio::io::AsyncReadExt;
@@ -141,19 +141,12 @@ mod tests {
         }
     }
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<R: AsyncRead + Unpin>(
         reader: &mut R,
         storage: &mut [u8],
         prefilled: &[u8],
     ) -> (Poll<io::Result<()>>, usize, Vec<u8>) {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut buf = ReadBuf::new(storage);
         buf.put_slice(prefilled);
         let result = Pin::new(reader).poll_read(&mut cx, &mut buf);
@@ -209,22 +202,34 @@ mod tests {
         assert!(!exceeded);
     }
 
-    #[tokio::test]
-    async fn exact_cap_completed_lines_are_accepted_same_and_cross_poll() {
-        let line = vec![b'a'; MAX_LINE_BYTES as usize];
-        let mut same_poll = line.clone();
-        same_poll.push(b'\n');
-        same_poll.extend_from_slice(&line);
-        same_poll.push(b'\n');
-        let expected = same_poll.clone();
-        let (result, exceeded) = read_all([Step::Data(same_poll)]).await;
-        assert_eq!(result.unwrap(), expected);
-        assert!(!exceeded);
+    #[test]
+    fn exact_cap_completed_line_is_accepted_in_one_poll() {
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let mut payload = vec![b'a'; MAX_LINE_BYTES as usize];
+        payload.push(b'\n');
+        let inner = ScriptedReader::new([Step::Data(payload.clone())]);
+        let mut capped = LineCapped::new(inner, Arc::clone(&exceeded));
+        let prefix = b"existing";
+        let mut storage = vec![0; prefix.len() + payload.len()];
 
-        let mut newline = line.clone();
-        newline.push(b'\n');
+        let (result, filled, contents) = poll_once(&mut capped, &mut storage, prefix);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert_eq!(capped.inner.polls, 1);
+        let mut expected = prefix.to_vec();
+        expected.extend_from_slice(&payload);
+        assert_eq!(filled, expected.len());
+        assert_eq!(&contents[..prefix.len()], prefix);
+        assert_eq!(contents, expected);
+        assert!(!exceeded.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn exact_cap_completed_line_is_accepted_across_polls() {
+        let line = vec![b'a'; MAX_LINE_BYTES as usize];
+        let mut expected = line.clone();
+        expected.push(b'\n');
         let (result, exceeded) = read_all([Step::Data(line), Step::Data(b"\n".to_vec())]).await;
-        assert_eq!(result.unwrap(), newline);
+        assert_eq!(result.unwrap(), expected);
         assert!(!exceeded);
     }
 
@@ -238,20 +243,40 @@ mod tests {
         assert_cap_error(result, exceeded);
     }
 
-    #[tokio::test]
-    async fn cap_plus_one_then_newline_fails_in_one_poll() {
+    #[test]
+    fn cap_plus_one_then_newline_fails_in_one_poll() {
+        let exceeded = Arc::new(AtomicBool::new(false));
         let mut payload = vec![b'a'; MAX_LINE_BYTES as usize + 1];
         payload.push(b'\n');
-        let (result, exceeded) = read_all([Step::Data(payload)]).await;
-        assert_cap_error(result, exceeded);
+        let inner = ScriptedReader::new([Step::Data(payload.clone())]);
+        let mut capped = LineCapped::new(inner, Arc::clone(&exceeded));
+        let prefix = b"existing";
+        let mut storage = vec![0; prefix.len() + payload.len()];
+
+        let (result, filled, contents) = poll_once(&mut capped, &mut storage, prefix);
+        assert_poll_error(result, io::ErrorKind::InvalidData);
+        assert_eq!(capped.inner.polls, 1);
+        assert_eq!(filled, prefix.len());
+        assert_eq!(contents, prefix);
+        assert!(exceeded.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
-    async fn oversized_first_line_before_short_second_fails_in_one_poll() {
+    #[test]
+    fn oversized_first_line_before_short_second_fails_in_one_poll() {
+        let exceeded = Arc::new(AtomicBool::new(false));
         let mut payload = vec![b'a'; MAX_LINE_BYTES as usize + 1];
         payload.extend_from_slice(b"\nok\n");
-        let (result, exceeded) = read_all([Step::Data(payload)]).await;
-        assert_cap_error(result, exceeded);
+        let inner = ScriptedReader::new([Step::Data(payload.clone())]);
+        let mut capped = LineCapped::new(inner, Arc::clone(&exceeded));
+        let prefix = b"existing";
+        let mut storage = vec![0; prefix.len() + payload.len()];
+
+        let (result, filled, contents) = poll_once(&mut capped, &mut storage, prefix);
+        assert_poll_error(result, io::ErrorKind::InvalidData);
+        assert_eq!(capped.inner.polls, 1);
+        assert_eq!(filled, prefix.len());
+        assert_eq!(contents, prefix);
+        assert!(exceeded.load(Ordering::Acquire));
     }
 
     #[tokio::test]
