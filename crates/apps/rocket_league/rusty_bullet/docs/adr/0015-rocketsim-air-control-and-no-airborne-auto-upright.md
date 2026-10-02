@@ -86,3 +86,20 @@ takes for a flip cancel.
 Real capture, 2026-10-01: confirmed. The candidate's car-frame spin tracks
 the recording within 0.04 rad/s through the flip; orientation error at 4.9 s
 0.13 to 0.04 rad; 5-6 s growth 41 to 19 uu.
+
+## Amendment (FR-097): damping before flip torque
+
+The remaining 0.04 rad came from order, not magnitude: RocketSim accumulates
+the flip torque and Bullet integrates it after the air-control damping is
+computed from the step's starting spin, but the candidate added the flip
+spin first and then damped it. A dedicated pure front flip capture
+(`front.jsonl`, 17.800 s) fits the RocketSim order exactly: first tick 2.08
+to 3.89 rad/s (predicted 3.90; the candidate gave 3.85), unclamped mid-flip
+rate 7.23 rad/s (predicted 7.235; the candidate 7.19). A 3.5% stronger flip
+torque, the alternative considered, fit the diagonal flip only roughly and
+the pure front flip not at all (2.2%). So air control now runs before the
+flip torque (`jump::flip_pitch_scale` gives it the pitch lock).
+
+Real capture, 2026-10-02: confirmed. Rotation error 0.00 through the front
+flip (was 0.03) and through `test2.jsonl`'s diagonal flip to 5.0 s (was
+0.04).

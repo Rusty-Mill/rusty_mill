@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.100.0
+- Version: 0.101.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5621,6 +5621,27 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `boosting_in_the_air_ignores_the_throttle_stick`; real capture
     `--self-trace 4.9 5.6`: velocity error 8.0 uu/s at 5.175 s, the end of
     the throttle -1 boost (was 17.0).
+- `RB-PHYSICS-001-FR-097` (air damping reads the spin before the flip
+  torque, implemented, verified by unit tests, ADR-0015 amendment): air
+  control runs before the flip torque each airborne tick, so its damping
+  sees the step's starting spin (`jump::flip_pitch_scale` split out of
+  `jump::apply_flip_torque`).
+  - Why: RocketSim accumulates the flip torque and Bullet integrates it
+    after the damping is computed from the step's starting spin; the
+    candidate added the flip spin first and damped it too. The owner's pure
+    front flip (`front.jsonl`, 17.800 s) turns 2.08 to 3.89 rad/s on its
+    first tick (flip torque 1.867 minus damping of 2.08: 1.817; the
+    candidate gave 1.77) and runs at 7.23 rad/s unclamped mid-flip (5.5 +
+    1.867 - 0.132; the candidate gave 7.19), which built a 0.03 rad
+    orientation error over the flip. The same accounts for the diagonal
+    4.317 s flip in `test2.jsonl` (first-tick gap 0.06 roll, 0.03 pitch,
+    as predicted).
+  - **Verification**: `drive` test
+    `air_damping_reads_the_spin_before_the_flip_torque`; real capture
+    re-traces: the front flip's first tick 3.89 rad/s as recorded, and
+    rotation error 0.00 through it (was 0.03) and through `test2.jsonl`'s
+    diagonal flip to 5.0 s (was 0.04; velocity error there 3.2 uu/s, was
+    4.1).
 
 ## Architecture and interfaces
 
@@ -7103,6 +7124,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.101.0 (2026-10-02): `RB-PHYSICS-001-FR-097` — air damping reads the
+  spin before the flip torque (ADR-0015 amendment). 375 tests in
+  `rb_physics_bullet`.
 - 0.100.0 (2026-10-01): `RB-PHYSICS-001-FR-096` — no air throttle while
   boosting (ADR-0019 amendment). 374 tests in `rb_physics_bullet`.
 - 0.99.0 (2026-10-01): `RB-PHYSICS-001-FR-095` — air control waits one

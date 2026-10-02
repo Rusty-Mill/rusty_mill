@@ -940,6 +940,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Air-control damping reads the spin before the flip torque
+  (`RB-PHYSICS-001-FR-097`, ADR-0015 amendment), as Bullet integrates the
+  accumulated flip torque after RocketSim computes the damping; per the
+  owner's pure front flip capture.
 - No air throttle while boosting (`RB-PHYSICS-001-FR-096`, ADR-0019
   amendment): the airborne boost constant already includes a full air
   throttle, per the real capture's boost with throttle -1 at 4.99-5.18 s.

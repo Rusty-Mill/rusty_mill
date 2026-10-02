@@ -549,14 +549,14 @@ fn flip_spin_after_press_tick(input: &ControllerInput) -> Vec3 {
     c.angular_velocity
 }
 
-/// The press tick's spin from a flip spin of `flip_spin`: the flip torque,
-/// then air control with pitch locked, which stays on through a flip
-/// (`RB-PHYSICS-001-FR-093`).
+/// The press tick's spin from a flip spin of `flip_spin`, starting at rest:
+/// air control with pitch locked, which stays on through a flip
+/// (`RB-PHYSICS-001-FR-093`), then the flip torque, which its damping never
+/// sees (`RB-PHYSICS-001-FR-097`).
 fn press_tick_spin(flip_spin: Vec3, input: &ControllerInput) -> Vec3 {
     let mut c = car();
-    c.angular_velocity = flip_spin;
     apply_air_control(&mut c, input, 0.0, TICK);
-    c.angular_velocity
+    c.angular_velocity + flip_spin
 }
 
 /// One grounded `apply_ground_control` tick on a car facing +X (right is
@@ -2606,12 +2606,16 @@ fn flip_at(time: f32, direction: (f32, f32)) -> Option<FlipState> {
 #[test]
 fn a_flip_locks_air_control_pitch_and_spins_the_car_while_its_torque_lasts() {
     let mut c = car();
-    let pitch_scale = apply_flip_torque(
+    apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(0.1, (1.0, 0.0)),
     );
-    assert_eq!(pitch_scale, 0.0, "pitch torque locked during a flip");
+    assert_eq!(
+        flip_pitch_scale(flip_at(0.1, (1.0, 0.0))),
+        0.0,
+        "pitch torque locked during a flip"
+    );
     assert_close(
         c.angular_velocity.y,
         FLIP_TORQUE_FORWARD / 120.0,
@@ -2622,19 +2626,19 @@ fn a_flip_locks_air_control_pitch_and_spins_the_car_while_its_torque_lasts() {
 #[test]
 fn a_flips_torque_ends_at_flip_torque_time_and_pitch_unlocks_after_the_extra_time() {
     let mut c = car();
-    let locked = apply_flip_torque(
+    apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(0.7, (1.0, 0.0)),
     );
     assert_eq!(c.angular_velocity, Vec3::ZERO, "no torque after 0.65 s");
-    assert_eq!(locked, 0.0, "pitch locked until 0.95 s");
-    let open = apply_flip_torque(
-        &mut c,
-        &ControllerInput::default(),
-        flip_at(1.0, (1.0, 0.0)),
+    assert_eq!(
+        flip_pitch_scale(flip_at(0.7, (1.0, 0.0))),
+        0.0,
+        "pitch locked until 0.95 s"
     );
-    assert_eq!(open, 1.0);
+    assert_eq!(flip_pitch_scale(flip_at(1.0, (1.0, 0.0))), 1.0);
+    assert_eq!(flip_pitch_scale(None), 1.0);
 }
 
 #[test]
@@ -2646,8 +2650,7 @@ fn holding_pitch_against_a_flip_cancels_its_pitch_spin() {
         pitch: Some(1.0),
         ..Default::default()
     };
-    let pitch_scale = apply_flip_torque(&mut c, &input, flip_at(0.1, (1.0, 0.0)));
-    assert_eq!(pitch_scale, 0.0, "pitch stays locked while flipping");
+    apply_flip_torque(&mut c, &input, flip_at(0.1, (1.0, 0.0)));
     assert_eq!(
         c.angular_velocity.y, 0.0,
         "full cancel removes the pitch spin"
@@ -2657,12 +2660,11 @@ fn holding_pitch_against_a_flip_cancels_its_pitch_spin() {
 #[test]
 fn a_stall_applies_no_flip_torque() {
     let mut c = car();
-    let pitch_scale = apply_flip_torque(
+    apply_flip_torque(
         &mut c,
         &ControllerInput::default(),
         flip_at(0.1, (0.0, 0.0)),
     );
-    assert_eq!(pitch_scale, 0.0);
     assert_eq!(c.angular_velocity, Vec3::ZERO);
 }
 
@@ -3203,4 +3205,31 @@ fn boosting_in_the_air_ignores_the_throttle_stick() {
     };
     assert_eq!(airborne_step(-1.0, true), airborne_step(0.0, true));
     assert!(airborne_step(-1.0, false).x < airborne_step(0.0, false).x);
+}
+
+#[test]
+fn air_damping_reads_the_spin_before_the_flip_torque() {
+    // RB-PHYSICS-001-FR-097: the owner's front flip (front.jsonl, 17.800 s)
+    // turns 2.08 -> 3.89 rad/s on its first tick, flip torque minus damping
+    // of the 2.08 rad/s the step started with, not of the 3.85 the flip
+    // torque had already reached.
+    let mut c = car();
+    let mut state = DriveState::new();
+    state.flip = flip_at(0.1, (1.0, 0.0));
+    let right = right_axis(&c);
+    c.angular_velocity = right * 2.0;
+    apply_driven_forces(
+        &mut c,
+        &ControllerInput::default(),
+        &NO_WHEEL_CONTACTS,
+        None,
+        &mut state,
+        TICK,
+    );
+    let damping = AIR_CONTROL_DAMPING.x * 2.0 * CAR_TORQUE_SCALE * TICK;
+    assert_close(
+        c.angular_velocity.dot(&right),
+        2.0 + FLIP_TORQUE_FORWARD * TICK - damping,
+        "pitch spin after one flip tick",
+    );
 }

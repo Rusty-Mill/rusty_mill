@@ -123,15 +123,11 @@ version: `a245d35`).
 
 ## Next
 
-1. The 0.04 rad orientation offset that builds during the 4.317 s flip
-   (0.00 at 4.35 s, 0.04 by 4.9 s), which tilts the 4.95 s boost and grows
-   the vertical velocity error by ~0.24 uu/s per tick: on every flip tick
-   the real car turns ~0.07 rad/s (~3.5% of the flip torque) more than the
-   candidate (first tick 4.75 vs 4.68 rad/s; mid-flip orientation-derived
-   rate 7.26 vs 7.20), with and without the roll stick held, and the gap
-   vanishes when the flip torque ends. Then the 5.575 s landing. Then the 5.575 s
-   landing, the ~3 uu/s lateral offset from the 4.142 s press tick's tire
-   grip, and braking per wheel.
+1. `RB-PHYSICS-001-FR-097` (air damping before flip torque) is confirmed:
+   rotation error 0.00 through both captured flips. Next, the ~3 uu/s
+   horizontal velocity a plain jump from rest
+   gains on its second tick (`front.jsonl`, 12.025 s: 3.3 vs 0.3 uu/s),
+   the 5.575 s landing, the side-flip capture, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -140,7 +136,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (440 tests: 27 `rb_domain`, 374
+- `cargo test --workspace`: pass (441 tests: 27 `rb_domain`, 375
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

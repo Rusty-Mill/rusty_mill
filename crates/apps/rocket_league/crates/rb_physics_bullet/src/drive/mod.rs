@@ -530,8 +530,8 @@ pub fn apply_driven_forces(
         // The jump press first, so a dodge's flip torque acts on the press
         // tick itself: the owner's capture shows the real game's spin jump
         // by one tick of flip torque on that tick (RB-PHYSICS-001-FR-085),
-        // one tick earlier than RocketSim's order. Then flip torque and air
-        // control, then the flip clock and damping. The press tick's torque
+        // one tick earlier than RocketSim's order. Then air control, flip
+        // torque, and the flip clock and damping. The press tick's torque
         // is extra: the clock starts on the tick after it, as RocketSim's
         // does, so the torque, damping and pitch lock end on RocketSim's
         // ticks (RB-PHYSICS-001-FR-094: the capture's 4.317 s flip torque
@@ -547,15 +547,19 @@ pub fn apply_driven_forces(
                 &mut state.flip,
             );
         }
-        let pitch_scale = jump::apply_flip_torque(car, input, state.flip);
         // RB-PHYSICS-001-FR-095: the step after the wheels let go still
         // counts as grounded for air control, as the sticky force does
         // (FR-092): the capture's car neither grips nor air-controls in the
         // step from 4.183 s, after its 4.142 s jump.
         if !state.was_on_ground {
+            let pitch_scale = jump::flip_pitch_scale(state.flip);
             air::apply_air_control(car, input, pitch_scale, dt);
             air::apply_air_throttle(car, air_throttle(input, state), forward);
         }
+        // RB-PHYSICS-001-FR-097: after air control, whose damping reads the
+        // spin before this tick's flip torque, as Bullet integrates the
+        // accumulated torque after RocketSim computes the damping.
+        jump::apply_flip_torque(car, input, state.flip);
         if state.flip == flip_before_press {
             jump::advance_flip(car, &mut state.flip, dt);
         }
