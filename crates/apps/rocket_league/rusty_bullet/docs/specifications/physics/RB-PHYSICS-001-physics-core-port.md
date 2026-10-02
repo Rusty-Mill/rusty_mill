@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.112.0
+- Version: 0.113.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5896,6 +5896,33 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     1 uu. Real capture `--self-onestep`: `test2` ball mean 0.41 uu/s (was
     1.00), max 252 (was 1072); car mean 1.72 (was 1.67, 9.067-9.125 s up to
     50); `front` car mean 0.302 (was 0.385); `side` 0.219.
+- `RB-PHYSICS-001-FR-109` (mesh edge contacts follow Bullet's
+  `btAdjustInternalEdgeContacts`; implemented, verified by tests and the
+  owner's capture, ADR-0028):
+  - `mesh::StaticMesh::new` classifies each triangle edge against the
+    triangle sharing it: convex, smooth (concave or flat), or open
+    (unshared).
+  - `sphere_contacts` gives a contact within 5 uu of a non-open edge the
+    face normal (smooth) or clamps it to the wedge between the two faces
+    (convex). The point moves to keep the sphere's own contact point.
+  - `world::combined_ball_world_contact` averages the distance to the
+    ball's own contact point (Bullet's `rel_pos1`).
+  - Why: at `test2.jsonl` 7.95 s the ball touched three neighbouring
+    triangles' edges as well as its face. Their edge-to-centre normals
+    tilted the folded contact 9 degrees up where the recording shows 6
+    (the face's), so the ball was 201 uu/s off.
+  - **Verification**:
+    - `mesh` tests: `a_contact_on_a_concave_edge_takes_the_face_normal`,
+      `a_contact_on_a_convex_edge_turns_no_further_than_the_next_face`,
+      `a_contact_on_an_open_edge_keeps_its_own_normal`.
+    - `ball_world_contacts_fold_into_one_at_the_average_normal_and_distance`
+      now expects the ball-side distance.
+    - `a_goal_posts_fillet_stops_a_ball_moving_into_its_corner` lifts the
+      ball clear of the floor.
+    - Real capture `--self-onestep`: `test2` ball mean 0.17 uu/s (was
+      0.41); 7.95 s 32 (was 201); 13.967 s out of the top steps; car
+      errors unchanged.
+
 
 ## Architecture and interfaces
 
@@ -7386,6 +7413,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.113.0 (2026-10-02): `RB-PHYSICS-001-FR-109` — mesh edge contacts
+  follow Bullet's internal-edge adjustment (ADR-0028). 404 tests in
+  `rb_physics_bullet`.
 - 0.112.0 (2026-10-02): `RB-PHYSICS-001-FR-108` — ball-world contacts
   fold into one velocity-only contact with the arena's material; no
   speculative term (ADR-0027). 401 tests in `rb_physics_bullet`.

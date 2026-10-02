@@ -81,7 +81,9 @@ fn combined_ball_world_contact(
     let mut distance = 0.0;
     for contact in &contacts {
         normal += contact.normal * share;
-        distance += (contact.point - ball.position).length() * share;
+        // Bullet's `rel_pos1`: from the centre to the ball's own contact point.
+        let on_ball = contact.point - contact.normal * contact.penetration_depth;
+        distance += (on_ball - ball.position).length() * share;
     }
     // Opposite contacts cancel: no direction left to push along.
     normal.normalize()?;
@@ -4087,9 +4089,11 @@ mod tests {
             .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
         // Overlapping the fillet's own material by 10 units (further from
         // the axis than the resting distance, toward the sharp corner the
-        // fillet replaces).
+        // fillet replaces), well clear of the ground so its contact isn't
+        // folded in with the fillet's (RB-PHYSICS-001-FR-108).
         let embedded_distance = curve.radius - ball_radius + 10.0;
-        let embedded_position = curve.axis_point + bisector * embedded_distance;
+        let embedded_position =
+            curve.axis_point + bisector * embedded_distance + Vec3::new(0.0, 0.0, 500.0);
         let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
         ball.restitution = 0.0;
         // Moving further into the fillet: RocketSim resolves ball-world
@@ -4115,7 +4119,7 @@ mod tests {
         );
         let final_dist = final_horizontal_rel.length();
         assert!(
-            final_dist < embedded_distance + 10.0,
+            final_dist < embedded_distance + 1.0,
             "expected the goal-post fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
         );
     }
@@ -4423,10 +4427,11 @@ mod tests {
             combined_ball_world_contact(&ball, manifolds).expect("two contacts fold into one");
         // Average normal, deliberately not renormalized (RocketSim's own).
         assert_eq!(combined.normal, Vec3::new(0.5, 0.0, 0.5));
-        // Average distance (90, 80) = 85 back along that normal.
+        // Average distance from the centre to the ball's own contact points
+        // (each `point - normal * depth`: 95 and 85) = 90, back along it.
         assert_eq!(
             combined.point,
-            ball.position - Vec3::new(0.5, 0.0, 0.5) * 85.0
+            ball.position - Vec3::new(0.5, 0.0, 0.5) * 90.0
         );
         // Velocity only: no position correction.
         assert_eq!(combined.penetration_depth, 0.0);
