@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0031 (`RB-PHYSICS-001-FR-111`): unlimited boost —
+  `PhysicsWorld::set_boost_used_per_second` (`drive::BOOST_USED_PER_SECOND`
+  by default, 0 unlimited), detected by `rb_verify_cli::boost_is_unlimited`
+  when a capture's fuel never drops while boost is held. Renames
+  `BOOST_CONSUMPTION_RATE` to the public `BOOST_USED_PER_SECOND`.
 - `rb-verify --self-kstep <capture> [k] [count]` (`RB-VERIFY-003-FR-008`,
   ADR-0030): every frame predicted `k` ticks ahead from the recording
   (`k_step_score`, `world::simulate_recorded_k_step`); `PhysicsWorld` and

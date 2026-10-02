@@ -373,8 +373,38 @@ fn seed(capture_path: impl AsRef<Path>) -> Result<(Vec<PhysicsFrame>, PhysicsWor
         })?;
 
     let recorded = captured[seed_index..].to_vec();
-    let world = PhysicsWorld::from_frame(&recorded[0]);
+    let mut world = PhysicsWorld::from_frame(&recorded[0]);
+    if boost_is_unlimited(&recorded) {
+        world.set_boost_used_per_second(0.0);
+    }
     Ok((recorded, world))
+}
+
+/// Frames of held boost (with fuel in the tank) a capture needs before an
+/// untouched tank counts as unlimited: a tenth of a second at 120 Hz.
+const UNLIMITED_BOOST_MIN_HELD_FRAMES: usize = 12;
+
+/// Whether a capture was recorded with unlimited boost
+/// (`RB-PHYSICS-001-FR-111`): some car holds boost with fuel in the tank
+/// for at least `UNLIMITED_BOOST_MIN_HELD_FRAMES` frames, yet no car's fuel
+/// ever drops from one frame to the next. A capture that never boosts
+/// can't tell, and keeps the default drain.
+pub fn boost_is_unlimited(frames: &[PhysicsFrame]) -> bool {
+    let held = frames
+        .iter()
+        .flat_map(|frame| &frame.cars)
+        .filter(|car| car.boost_amount > 0.0 && car.input.is_some_and(|input| input.boost))
+        .count();
+    let drained = frames.windows(2).any(|pair| {
+        pair[1].cars.iter().any(|after| {
+            pair[0]
+                .cars
+                .iter()
+                .find(|before| before.player_id == after.player_id)
+                .is_some_and(|before| after.boost_amount < before.boost_amount)
+        })
+    });
+    held >= UNLIMITED_BOOST_MIN_HELD_FRAMES && !drained
 }
 
 #[cfg(test)]
@@ -569,6 +599,46 @@ mod tests {
     fn k_step_missing_file_reports_io_error() {
         let result = k_step_score("does-not-exist.capture.jsonl", 30, 0.02);
         assert!(matches!(result, Err(IngestError::Io(_))));
+    }
+
+    /// `frames` frames of one car holding `boost`, its fuel `fuel(i)`.
+    fn boost_frames(frames: usize, boost: bool, fuel: impl Fn(usize) -> f32) -> Vec<PhysicsFrame> {
+        (0..frames)
+            .map(|i| PhysicsFrame {
+                timestamp_secs: i as f32 / 120.0,
+                ball: BallState {
+                    position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                },
+                cars: vec![CarState {
+                    player_id: 0,
+                    position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                    boost_amount: fuel(i),
+                    input: Some(ControllerInput {
+                        boost,
+                        ..ControllerInput::default()
+                    }),
+                }],
+            })
+            .collect()
+    }
+
+    /// RB-PHYSICS-001-FR-111: a tank that never drops while boost is held
+    /// is unlimited; one that drains, or one never boosted, is not.
+    #[test]
+    fn unlimited_boost_is_detected_only_from_a_held_boost_that_never_drains() {
+        assert!(boost_is_unlimited(&boost_frames(12, true, |_| 100.0)));
+        assert!(!boost_is_unlimited(&boost_frames(11, true, |_| 100.0)));
+        assert!(!boost_is_unlimited(&boost_frames(60, false, |_| 100.0)));
+        assert!(!boost_is_unlimited(&boost_frames(60, true, |i| {
+            100.0 - i as f32 * 0.28
+        })));
+        assert!(!boost_is_unlimited(&boost_frames(60, true, |_| 0.0)));
     }
 
     #[test]

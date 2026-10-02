@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Unlimited boost
+**2026-10-02** · `RB-PHYSICS-001-FR-111` · ADR-0031
+
+- The simulator can run with unlimited boost, as in freeplay, and the
+  verifier turns it on by itself when a recording's fuel never drops while
+  boosting. A full replay of `test2` no longer runs out of boost (mean car
+  position error 906 uu, was 1,365; that run is still chaotic after the
+  kickoff). 480 tests.
+
 ## Predictions keep the recorded boost
 **2026-10-02** · `RB-VERIFY-003-FR-009`
 

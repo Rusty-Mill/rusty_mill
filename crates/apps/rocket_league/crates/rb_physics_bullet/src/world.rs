@@ -226,6 +226,9 @@ pub struct PhysicsWorld {
     pub cars: Vec<RigidBody>,
     car_inputs: Vec<ControllerInput>,
     car_drive: Vec<drive::DriveState>,
+    /// Fuel every car drains per second of held boost
+    /// (`set_boost_used_per_second`).
+    boost_used_per_second: f32,
     pub ground: StaticPlane,
     pub walls: Vec<StaticPlane>,
     /// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`),
@@ -387,6 +390,7 @@ impl PhysicsWorld {
             cars: Vec::new(),
             car_inputs: Vec::new(),
             car_drive: Vec::new(),
+            boost_used_per_second: drive::BOOST_USED_PER_SECOND,
             ground,
             walls: Vec::new(),
             curves: Vec::new(),
@@ -614,7 +618,10 @@ impl PhysicsWorld {
     /// two-car scene — since a car's `player_id` in `frame()` is just its
     /// index in `cars`, added cars are always appended, never inserted.
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
-        self.car_drive.push(drive::DriveState::new());
+        self.car_drive.push(drive::DriveState {
+            boost_used_per_second: self.boost_used_per_second,
+            ..drive::DriveState::new()
+        });
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
         self
@@ -627,6 +634,17 @@ impl PhysicsWorld {
     /// condition (see the crate's "trust internal callers" convention).
     pub fn set_car_input(&mut self, index: usize, input: ControllerInput) {
         self.car_inputs[index] = input;
+    }
+
+    /// Sets how much fuel every car, present and later, drains per second
+    /// of held boost: RocketSim's `MutatorConfig::boostUsedPerSecond`
+    /// (`RB-PHYSICS-001-FR-111`). `drive::BOOST_USED_PER_SECOND` by default;
+    /// 0 is unlimited boost, as in freeplay. Negative rates count as 0.
+    pub fn set_boost_used_per_second(&mut self, rate: f32) {
+        self.boost_used_per_second = rate.max(0.0);
+        for drive in &mut self.car_drive {
+            drive.boost_used_per_second = self.boost_used_per_second;
+        }
     }
 
     /// Sets car `index`'s current boost amount, clamped to
@@ -2314,6 +2332,53 @@ mod tests {
             boost_after < crate::drive::MAX_BOOST,
             "expected a held boost to have drained some fuel, got {boost_after}"
         );
+    }
+
+    /// `RB-PHYSICS-001-FR-111`: with unlimited boost (a drain of 0) a held
+    /// boost still pushes the car but never empties the tank, for cars
+    /// added before and after the setting.
+    #[test]
+    fn unlimited_boost_pushes_without_draining_any_car() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut world =
+            PhysicsWorld::new(ball, flat_ground()).with_car(some_car(Vec3::new(0.0, 0.0, 1000.0)));
+        world.set_boost_used_per_second(0.0);
+        world = world.with_car(some_car(Vec3::new(0.0, 500.0, 1000.0)));
+        world.gravity = Vec3::ZERO;
+        let boost = rb_domain::ControllerInput {
+            boost: true,
+            ..Default::default()
+        };
+        world.set_car_input(0, boost);
+        world.set_car_input(1, boost);
+        for _ in 0..240 {
+            world.step(1.0 / 120.0);
+        }
+        for (car, state) in world.cars.iter().zip(&world.frame().cars) {
+            assert!(
+                car.position.x > 100.0,
+                "boost should still push: {}",
+                car.position.x
+            );
+            assert_eq!(state.boost_amount, crate::drive::MAX_BOOST);
+        }
+    }
+
+    #[test]
+    fn a_negative_boost_drain_counts_as_unlimited() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
+        let mut world =
+            PhysicsWorld::new(ball, flat_ground()).with_car(some_car(Vec3::new(0.0, 0.0, 1000.0)));
+        world.set_boost_used_per_second(-5.0);
+        world.set_car_input(
+            0,
+            rb_domain::ControllerInput {
+                boost: true,
+                ..Default::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
     }
 
     #[test]

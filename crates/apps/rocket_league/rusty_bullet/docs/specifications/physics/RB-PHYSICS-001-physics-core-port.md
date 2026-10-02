@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.114.0
+- Version: 0.115.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5953,6 +5953,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       (was 1026).
 - `RB-PHYSICS-001-FR-049` is amended by FR-110: its second direction is
   gone.
+- `RB-PHYSICS-001-FR-111` (unlimited boost as a drain rate; implemented,
+  verified by tests and the owner's capture, ADR-0031):
+  - `PhysicsWorld::set_boost_used_per_second(rate)` (RocketSim's
+    `MutatorConfig::boostUsedPerSecond`) sets how much fuel every car,
+    present and later, drains per second of held boost.
+  - Default is `drive::BOOST_USED_PER_SECOND` (33.3); 0 is unlimited.
+  - `rb_verify_cli::boost_is_unlimited` turns it on for a capture whose
+    fuel never drops while boost is held.
+  - Why: the owner's captures are unlimited-boost freeplay, and a free run
+    of `test2` ran out of boost.
+  - **Verification**:
+    - `world` tests `unlimited_boost_pushes_without_draining_any_car` and
+      `a_negative_boost_drain_counts_as_unlimited`.
+    - `rb_verify_cli` test
+      `unlimited_boost_is_detected_only_from_a_held_boost_that_never_drains`.
+    - Real capture: `test2` `--self` mean car position 906 uu (was 1,365).
 
 
 ## Architecture and interfaces
@@ -7444,6 +7460,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.115.0 (2026-10-02): `RB-PHYSICS-001-FR-111` — unlimited boost as a
+  drain rate, detected from the capture (ADR-0031). 409 tests in
+  `rb_physics_bullet`.
 - 0.114.0 (2026-10-02): `RB-PHYSICS-001-FR-110` — one friction row per
   contact, Bullet's default (ADR-0029). 404 tests in `rb_physics_bullet`.
 - 0.113.0 (2026-10-02): `RB-PHYSICS-001-FR-109` — mesh edge contacts

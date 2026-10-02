@@ -171,6 +171,9 @@ version: `a245d35`).
    the candidate's tank had run dry): `test2` k = 30 car 0.68 uu / 5.78
    uu/s, one-step car mean 0.90. Worst k = 30 windows now: the 5.5 s
    kickoff (49 uu/s) and the 9.0 s corner impact (45), both hard contacts.
+   `RB-PHYSICS-001-FR-111` (ADR-0031) models unlimited boost as a drain
+   rate of 0, detected from the capture: `test2` free run 906 uu (was
+   1,365), still chaotic after the kickoff.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -179,9 +182,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (477 tests: 27 `rb_domain`, 407
+- `cargo test --workspace`: pass (480 tests: 27 `rb_domain`, 409
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 19 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`

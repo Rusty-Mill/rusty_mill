@@ -36,21 +36,22 @@ pub(super) const BOOST_ACCELERATION_AIR: f32 = 3175.0 / 3.0;
 /// and `CarState::boost_amount` use.
 pub const MAX_BOOST: f32 = 100.0;
 
-/// Simplified constant boost drain rate (units/s) while `boost` is held —
-/// a full tank lasting ~3 seconds nonstop is the commonly-cited number
-/// this approximates; real Rocket League's actual drain behavior around
-/// zero-throttle/wavedash edge cases isn't modeled.
-pub(super) const BOOST_CONSUMPTION_RATE: f32 = 33.3;
+/// Default boost drain rate (units/s) while `boost` is held, RocketSim's
+/// `MutatorConfig::boostUsedPerSecond` default — a full tank lasts ~3
+/// seconds nonstop. Unlimited-boost freeplay is a rate of 0
+/// (`PhysicsWorld::set_boost_used_per_second`, `RB-PHYSICS-001-FR-111`).
+pub const BOOST_USED_PER_SECOND: f32 = 33.3;
 
 /// Applies boost acceleration along `forward` while `boost_held` and the
-/// tank isn't empty, below `MAX_CAR_SPEED`, and drains the tank regardless
-/// of whether the force applied.
+/// tank isn't empty, below `MAX_CAR_SPEED`, and drains the tank by
+/// `used_per_second` regardless of whether the force applied.
 pub(super) fn apply_boost(
     car: &mut RigidBody,
     boost_held: bool,
     on_ground: bool,
     forward: Vec3,
     boost_amount: &mut f32,
+    used_per_second: f32,
     dt: f32,
 ) {
     if !(boost_held && *boost_amount > 0.0) {
@@ -74,5 +75,5 @@ pub(super) fn apply_boost(
     // apply (e.g. already at MAX_CAR_SPEED, or pushing into a wall) —
     // matching real Rocket League, where holding boost costs fuel
     // regardless of whether it's doing anything.
-    *boost_amount = (*boost_amount - BOOST_CONSUMPTION_RATE * dt).max(0.0);
+    *boost_amount = (*boost_amount - used_per_second * dt).max(0.0);
 }
