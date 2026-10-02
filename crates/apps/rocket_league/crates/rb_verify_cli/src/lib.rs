@@ -5,7 +5,7 @@
 use rb_capture_ingest::CaptureFileSource;
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{
-    CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
+    BallState, CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
 };
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
 use rb_physics_bullet::world::{simulate_recorded, simulate_recorded_one_step};
@@ -168,6 +168,11 @@ pub struct TraceRow {
     pub input: Option<ControllerInput>,
     pub recorded: CarState,
     pub candidate: CarState,
+    /// The ball in the same recorded and candidate frames
+    /// (`RB-VERIFY-003-FR-007`), so a car-ball hit's effect on the ball is
+    /// visible next to the car's.
+    pub recorded_ball: BallState,
+    pub candidate_ball: BallState,
 }
 
 impl TraceRow {
@@ -179,6 +184,13 @@ impl TraceRow {
     /// Distance (uu/s) between recorded and simulated car velocities.
     pub fn velocity_error(&self) -> f32 {
         self.recorded.velocity.distance(&self.candidate.velocity)
+    }
+
+    /// Distance (uu/s) between recorded and simulated ball velocities.
+    pub fn ball_velocity_error(&self) -> f32 {
+        self.recorded_ball
+            .velocity
+            .distance(&self.candidate_ball.velocity)
     }
 
     /// Angle (rad) between recorded and simulated car orientations.
@@ -286,6 +298,8 @@ fn trace_rows(
                 input: rec_car.input,
                 recorded: *rec_car,
                 candidate: *cand_car,
+                recorded_ball: rec.ball,
+                candidate_ball: cand.ball,
             });
         }
     }
@@ -490,6 +504,9 @@ mod tests {
         let one_step = one_step_capture(capture_fixture()).unwrap();
         assert_eq!(one_step.len(), continuous.len());
         assert_eq!(one_step[0].velocity_error(), 0.0);
+        // RB-VERIFY-003-FR-007: each row carries the ball too.
+        assert_eq!(one_step[0].ball_velocity_error(), 0.0);
+        assert_eq!(one_step[0].recorded_ball, one_step[0].candidate_ball);
     }
 
     #[test]

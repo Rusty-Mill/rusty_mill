@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.110.0
+- Version: 0.111.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5843,6 +5843,31 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (was 134), 8.958 s 173 (was 223); `front.jsonl` mean 0.385 (was
     0.407); `side.jsonl` unchanged.
 
+- `RB-PHYSICS-001-FR-107` (car-ball and car-car contacts use RocketSim's
+  materials; Psyonix's extra ball-hit velocity; implemented, verified by
+  tests and the owner's capture, ADR-0026): dynamic manifolds take an
+  optional `solver::PairMaterial`; car-ball contacts use restitution 0.0,
+  friction 2.0 (`CARBALL_COLLISION_*`), car-car 0.1 / 0.09
+  (`CARCAR_COLLISION_*`). Each car touching the ball adds
+  `world::extra_ball_hit_velocity` (`Ball::_OnHit`'s
+  `BALL_CAR_EXTRA_IMPULSE_*`) to the ball after the solve, at most every
+  other tick per car. Closes FR-063's open overrides; bumps and demos stay
+  out.
+  - Why: `test2.jsonl`'s kickoff hit (5.758 s) and 12.267 s hit were the
+    worst one-step car errors after FR-106 (155, 107 uu/s), and the ball
+    left those hits up to ~1200 uu/s off.
+  - **Verification**: `world` tests
+    `piecewise_linear_interpolates_and_clamps`,
+    `a_car_driving_into_the_ball_adds_psyonixs_extra_hit_velocity`,
+    `the_extra_ball_hit_velocity_applies_at_most_every_other_tick`;
+    `solver` test `a_pair_material_replaces_the_bodies_combined_coefficients`;
+    `a_ball_wedged_between_a_wall_and_a_heavy_car_settles_symmetrically_instead_of_favoring_one`
+    now matches the wall to the car-ball material and removes the extra
+    velocity. Real capture `--self-onestep`: car error 5.758 s 21 uu/s (was
+    155), 12.267 s 15 (was 107), `test2` mean 1.67 (was 1.78); ball error
+    on those hits 129 and 90 uu/s (1192 and 970 without the extra
+    velocity); `front`/`side` unchanged.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7332,6 +7357,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.111.0 (2026-10-02): `RB-PHYSICS-001-FR-107` — car-ball and car-car
+  materials, Psyonix's extra ball-hit velocity (ADR-0026). 394 tests in
+  `rb_physics_bullet`.
 - 0.110.0 (2026-10-02): `RB-PHYSICS-001-FR-106` — side ramps and corners
   are the real collision mesh; speculative manifold points; repository
   GPL-3.0-only (ADR-0025). 390 tests in `rb_physics_bullet`.

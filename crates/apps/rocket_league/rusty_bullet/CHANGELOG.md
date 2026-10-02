@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0026 (`RB-PHYSICS-001-FR-107`): car-ball contacts use RocketSim's
+  material (restitution 0, friction 2) and add Psyonix's extra ball-hit
+  velocity; car-car contacts 0.1 / 0.09; `solver::resolve_manifolds`'s
+  dynamic manifolds take an optional `PairMaterial`.
+- `rb-verify --self-onestep` prints the ball's velocity error per row;
+  `TraceRow` carries the ball (`RB-VERIFY-003-FR-007`).
 - ADR-0025 (`RB-PHYSICS-001-FR-106`): the arena's side ramps and corners
   are Rocket League's collision triangles (`mesh::StaticMesh`,
   `arena::standard_meshes`, RLUtilities' GPL-3.0 soccar assets under
