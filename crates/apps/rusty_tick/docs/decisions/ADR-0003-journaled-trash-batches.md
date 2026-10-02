@@ -20,10 +20,12 @@ on open and may safely be applied again.
 
 ## Decision
 
-`TaskStore` owns `tasks.journal`. `replace_batch` validates and encodes every
+`TaskStore` owns `tasks.journal`. The batch entry point is crate-private and is
+used only by the trash transition, whose replacements do not change list or
+sort slots. `replace_batch` rejects duplicate ids, then validates and encodes every
 replacement, commits one redo batch, applies all task puts with store syncing
-deferred, syncs the task store once, publishes the derived full-text and tag
-changes, and finally checkpoints the journal. Startup replays every committed
+deferred, syncs the task store once, checkpoints the journal, and only then
+publishes the derived full-text and tag changes. Startup replays every committed
 batch into the durable task stack before rebuilding derived indexes and
 checkpointing.
 
@@ -32,18 +34,29 @@ bumps the update timestamp and version of every child and the parent just as
 individual saves did. It submits those replacements as one batch. Restoration,
 move, purge, list deletion, and other writes retain their existing behavior.
 
-The durable boundary is `Journal::commit`: a refusal before it changes nothing;
-a successful commit may be replayed as a whole after interruption at any later
-prefix. The derived indexes are not changed while a batch is only partly
-applied. Tests simulate process loss by dropping isolated synthetic stores at
+Validation failures are definite pre-commit refusals and change nothing. Any
+I/O error returned by `Journal::commit` is ambiguous: its write may have landed
+before its sync failed. Such an error, or any apply, store-sync, or checkpoint
+error after acceptance, fences the live store. It retains a complete
+pre-operation read view and refuses every later mutation until reopen; thus a
+later operation can neither retire an earlier redo nor be overwritten by it.
+The derived indexes are not changed until checkpoint succeeds. Tests simulate
+process loss by dropping isolated synthetic stores at
 each apply prefix; this verifies redo/reopen behavior, not physical power-loss
 properties of a particular filesystem or device.
+
+Opening inspects the journal before the task store. When authoritative redo is
+pending, it may remove an empty insert log or an exact, incomplete prefix of
+the expected insert-log header left by interrupted creation. Established logs,
+valid entries, foreign headers, and all other malformed data remain subject to
+the engine's normal parsing and corruption refusal.
 
 ## Consequences
 
 - Acknowledged trash work survives and converges to the complete intended
   parent/child set on reopen.
-- A pre-commit refusal leaves the previous committed records and indexes.
+- A definite pre-commit refusal leaves the previous committed records and
+  indexes; an ambiguous or post-acceptance failure requires reopen.
 - Replay is idempotent and unrelated tasks are untouched.
 - The journal is an additive sidecar, not a task-record migration. Existing
   `tasks.mmap` stores create an empty journal on first open.

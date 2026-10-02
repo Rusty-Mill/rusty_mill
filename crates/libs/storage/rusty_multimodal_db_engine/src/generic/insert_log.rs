@@ -105,6 +105,29 @@ pub fn log_path(path: &Path) -> PathBuf {
     PathBuf::from(log)
 }
 
+/// Remove the only insert-log images that can be left by interruption while
+/// creating a new log: an empty file or an exact prefix of this record type's
+/// header.  Callers must independently know that authoritative redo is
+/// pending; this function deliberately does not treat a malformed established
+/// log as disposable.
+pub fn clear_interrupted_creation<R>(path: &Path) -> Result<bool, DurabilityError>
+where
+    R: SchemaTag,
+{
+    let log = log_path(path);
+    let raw = match std::fs::read(&log) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let header = encode_tagged_image(&MAGIC, LOG_VERSION, 0, R::SCHEMA_TAG, &[]);
+    if raw.len() < TAGGED_HEADER_LEN && header.starts_with(&raw) {
+        clear(&log)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Append one record to the log at `log`, creating the file (header
 /// included) on first use. When this returns `Ok`, the entry is on disk
 /// (`sync_data`) — the durability `GenericMmapStore::insert` promises.

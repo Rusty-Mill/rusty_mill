@@ -14,7 +14,7 @@ use rusty_multimodal_db_engine::generic::query::{
 use rusty_multimodal_db_engine::generic::store::GroupCommit;
 use rusty_multimodal_db_engine::generic::store::Ordered;
 use rusty_multimodal_db_engine::generic::{
-    DeleteError, GenericMmapStore, InsertError, ReplaceError,
+    insert_log, DeleteError, GenericMmapStore, InsertError, ReplaceError,
 };
 use rusty_multimodal_db_engine::journal::{Batch, Journal, JournalError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,6 +40,8 @@ pub enum TickError {
     Io(#[from] std::io::Error),
     #[error("task journal: {0}")]
     Journal(#[from] JournalError),
+    #[error("task store requires reopen after an interrupted atomic trash operation")]
+    RecoveryRequired,
 }
 
 pub struct TaskStore {
@@ -47,6 +49,10 @@ pub struct TaskStore {
     search: FullTextIndex<Uuid, 2>,
     tags: BTreeMap<String, BTreeSet<Uuid>>,
     journal: Journal,
+    // A complete pre-operation view retained after an ambiguous failure. It
+    // prevents reads from observing a partly applied redo; all writes are
+    // refused until the owner reopens and replays the journal.
+    recovery_view: Option<BTreeMap<Uuid, Task>>,
 }
 
 const TASKS: &str = "tasks";
@@ -56,13 +62,16 @@ impl TaskStore {
     pub fn open(dir: &Path) -> Result<Self, TickError> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("tasks.mmap");
+        let opened = Journal::open(&dir.join("tasks.journal"))?;
+        if !opened.replay.is_empty() {
+            insert_log::clear_interrupted_creation::<Task>(&path)?;
+        }
         let core: Core = if path.exists() {
             GenericMmapStore::open_portable(&path)?
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
         let mut stack = Ordered::new(Ordered::new(core));
-        let opened = Journal::open(&dir.join("tasks.journal"))?;
         for batch in &opened.replay {
             Self::apply_batch(&mut stack, batch, usize::MAX)?;
         }
@@ -76,6 +85,7 @@ impl TaskStore {
             search: FullTextIndex::new(),
             tags: BTreeMap::new(),
             journal,
+            recovery_view: None,
         };
         for id in store.stack.all_ids() {
             if let Some(task) = store.stack.get(id) {
@@ -107,6 +117,7 @@ impl TaskStore {
     }
 
     pub fn insert(&mut self, task: Task) -> Result<(), TickError> {
+        self.require_writable()?;
         let id = task.id;
         match self.stack.insert(task.clone()) {
             Ok(()) => {}
@@ -118,6 +129,7 @@ impl TaskStore {
     }
 
     pub fn replace(&mut self, task: Task) -> Result<(), TickError> {
+        self.require_writable()?;
         let id = task.id;
         let old = self.stack.get(id).ok_or(TickError::NotFound(id))?;
         match self.stack.replace(task.clone()) {
@@ -135,7 +147,15 @@ impl TaskStore {
     /// The redo entry is synced before any record changes. Derived indexes are
     /// published only after all record writes are durable; an interruption
     /// before the checkpoint replays the complete set on the next open.
-    pub fn replace_batch(&mut self, tasks: Vec<Task>) -> Result<(), TickError> {
+    pub(crate) fn replace_batch(&mut self, tasks: Vec<Task>) -> Result<(), TickError> {
+        self.require_writable()?;
+        let mut ids = BTreeSet::new();
+        for task in &tasks {
+            if !ids.insert(task.id) {
+                return Err(TickError::Duplicate(task.id));
+            }
+        }
+        let before = self.snapshot();
         let mut old = Vec::with_capacity(tasks.len());
         let mut batch = Batch::default();
         for task in &tasks {
@@ -151,18 +171,48 @@ impl TaskStore {
             );
         }
 
-        self.journal.commit(&batch)?;
+        if let Err(error) = self.journal.commit(&batch) {
+            self.recovery_view = Some(before);
+            return Err(error.into());
+        }
         self.stack.defer_sync();
-        Self::apply_batch(&mut self.stack, &batch, usize::MAX)?;
-        self.stack.commit()?;
+        if let Err(error) = Self::apply_batch(&mut self.stack, &batch, usize::MAX) {
+            self.recovery_view = Some(before);
+            return Err(error);
+        }
+        if let Err(error) = self.stack.commit() {
+            self.recovery_view = Some(before);
+            return Err(error.into());
+        }
+        // Do not publish derived indexes until both the records and retirement
+        // of their redo are known to have completed.
+        if let Err(error) = self.journal.checkpoint() {
+            self.recovery_view = Some(before);
+            return Err(error.into());
+        }
         for task in &old {
             self.unindex(task);
         }
         for task in &tasks {
             self.index(task);
         }
-        self.journal.checkpoint()?;
         Ok(())
+    }
+
+    fn require_writable(&self) -> Result<(), TickError> {
+        if self.recovery_view.is_some() {
+            Err(TickError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn snapshot(&self) -> BTreeMap<Uuid, Task> {
+        self.stack
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| self.stack.get(id).map(|task| (id, task)))
+            .collect()
     }
 
     fn apply_batch(stack: &mut Stack, batch: &Batch, limit: usize) -> Result<(), TickError> {
@@ -196,6 +246,7 @@ impl TaskStore {
     }
 
     pub fn delete(&mut self, id: Uuid) -> Result<(), TickError> {
+        self.require_writable()?;
         let old = self.stack.get(id).ok_or(TickError::NotFound(id))?;
         match self.stack.delete(id) {
             Ok(()) => {}
@@ -207,11 +258,17 @@ impl TaskStore {
     }
 
     pub fn get(&self, id: Uuid) -> Option<Task> {
+        if let Some(view) = &self.recovery_view {
+            return view.get(&id).cloned();
+        }
         self.stack.get(id)
     }
 
     /// Every task, trashed ones included, unspecified order.
     pub fn all(&self) -> Vec<Task> {
+        if let Some(view) = &self.recovery_view {
+            return view.values().cloned().collect();
+        }
         self.stack
             .all_ids()
             .into_iter()
@@ -221,6 +278,13 @@ impl TaskStore {
 
     /// Every task in `list`, in the store's own (unspecified) order.
     pub fn in_list(&self, list: Uuid) -> Vec<Task> {
+        if self.recovery_view.is_some() {
+            return self
+                .all()
+                .into_iter()
+                .filter(|task| task.list_id == list)
+                .collect();
+        }
         FilterEq::<Task, ByList>::filter_eq(&self.stack, &list)
             .into_iter()
             .filter_map(|id| self.stack.get(id))
@@ -229,6 +293,17 @@ impl TaskStore {
 
     /// Tasks of `list` due within `[from, to)`, soonest first (a smart list).
     pub fn due_between(&self, list: Uuid, from: i64, to: i64) -> Vec<Task> {
+        if self.recovery_view.is_some() {
+            let mut tasks: Vec<_> = self
+                .all()
+                .into_iter()
+                .filter(|task| {
+                    task.list_id == list && task.due_ms.is_some_and(|due| due >= from && due < to)
+                })
+                .collect();
+            tasks.sort_by_key(|task| (task.due_ms, task.id));
+            return tasks;
+        }
         RangeBy::<Task, DueAt>::range_by(
             &self.stack,
             Bound::Included(((list, from), Uuid::nil())),
@@ -241,6 +316,11 @@ impl TaskStore {
 
     /// Tasks of `list` in manual order.
     pub fn in_manual_order(&self, list: Uuid) -> Vec<Task> {
+        if self.recovery_view.is_some() {
+            let mut tasks = self.in_list(list);
+            tasks.sort_by_key(|task| (task.sort_order, task.id));
+            return tasks;
+        }
         // Only the outermost `Ordered` answers `RangeBy`; the inner layer's
         // index is reached through `inner()` (finding F2 in SPIKE-FINDINGS.md).
         RangeBy::<Task, SortOrder>::range_by(
@@ -262,6 +342,7 @@ impl TaskStore {
 
     /// Move one task to `sort_order`: rewrites one 8-byte slot, not the record.
     pub fn reorder(&mut self, id: Uuid, sort_order: i64) -> Result<(), TickError> {
+        self.require_writable()?;
         UpdateField::<Task, SortOrder>::update(&mut self.stack, id, sort_order)
             .map_err(|_| TickError::NotFound(id))
     }
@@ -375,10 +456,14 @@ mod tests {
     #[test]
     fn an_injected_precommit_refusal_leaves_the_previous_state() {
         let (dir, originals, unrelated) = fixture();
-        let (_changed, _uncommitted) = trash_batch(&originals, 50);
-        // Inject the failure immediately before Journal::commit by dropping
-        // the prepared operation. No record or derived index was published.
-        let store = TaskStore::open(dir.path()).unwrap();
+        let (changed, _) = trash_batch(&originals, 50);
+        let mut duplicate = changed.clone();
+        duplicate.push(changed[0].clone());
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            store.replace_batch(duplicate),
+            Err(TickError::Duplicate(id)) if id == changed[0].id
+        ));
         for original in &originals {
             assert_eq!(store.get(original.id).unwrap(), *original);
             if !original.is_deleted() {
@@ -391,6 +476,74 @@ mod tests {
         for original in &originals {
             assert_eq!(reopened.get(original.id).unwrap(), *original);
         }
+    }
+
+    #[test]
+    fn checkpoint_failure_fences_follow_up_writes_and_preserves_a_consistent_view() {
+        let (dir, originals, unrelated) = fixture();
+        let (changed, _) = trash_batch(&originals, 50);
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert!(matches!(
+            store.replace_batch(changed.clone()),
+            Err(TickError::Journal(_))
+        ));
+
+        // Reads retain the complete view from before acceptance, never a
+        // prefix, while every kind of later mutation is explicitly refused.
+        for original in &originals {
+            assert_eq!(store.get(original.id).unwrap(), *original);
+        }
+        assert!(matches!(
+            store.replace(unrelated.clone()),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.delete(unrelated.id),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.reorder(unrelated.id, 7),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.replace_batch(changed),
+            Err(TickError::RecoveryRequired)
+        ));
+
+        drop(store);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert_replayed(dir.path(), &originals, &unrelated, 50);
+    }
+
+    #[test]
+    fn accepted_redo_recovers_recognized_insert_log_creation_prefixes_only() {
+        for prefix_len in [0, 10] {
+            let (dir, originals, unrelated) = fixture();
+            let (_, batch) = trash_batch(&originals, 50);
+            let mut store = TaskStore::open(dir.path()).unwrap();
+            store.journal.commit(&batch).unwrap();
+            drop(store);
+
+            let mmap = dir.path().join("tasks.mmap");
+            let log = insert_log::log_path(&mmap);
+            insert_log::append(&log, &unrelated).unwrap();
+            let header = std::fs::read(&log).unwrap();
+            std::fs::write(&log, &header[..prefix_len]).unwrap();
+            assert_replayed(dir.path(), &originals, &unrelated, 50);
+        }
+
+        let (dir, originals, _) = fixture();
+        let (_, batch) = trash_batch(&originals, 50);
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        store.journal.commit(&batch).unwrap();
+        drop(store);
+        std::fs::write(
+            insert_log::log_path(&dir.path().join("tasks.mmap")),
+            b"not a header",
+        )
+        .unwrap();
+        assert!(TaskStore::open(dir.path()).is_err());
     }
 
     #[test]
