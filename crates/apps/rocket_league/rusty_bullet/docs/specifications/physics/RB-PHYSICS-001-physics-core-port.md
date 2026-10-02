@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.101.0
+- Version: 0.102.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5642,6 +5642,21 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     rotation error 0.00 through it (was 0.03) and through `test2.jsonl`'s
     diagonal flip to 5.0 s (was 0.04; velocity error there 3.2 uu/s, was
     4.1).
+- `RB-PHYSICS-001-FR-098` (the brake acts along the surface, implemented,
+  verified by tests): `ground::apply_ground_control` brakes along the car's
+  forward direction projected onto the wheels' average contact normal
+  (`wheels::average_normal`), not along the car's own forward axis.
+  - Why: the car rests pitched ~0.011 rad on its suspension, so with
+    throttle 0 the stopping brake read a jump's 296 uu/s vertical speed as
+    -3.3 uu/s forward on the tick after the press (wheels still touching)
+    and cancelled it, pushing the car 3.3 uu/s forward. RocketSim's rolling
+    friction acts along each wheel's in-plane forward direction. The
+    owner's `front.jsonl` jump from rest (12.008 s) gains under 1 uu/s
+    horizontally; the candidate gained 3.3.
+  - **Verification**: `world` test `a_jump_from_rest_goes_straight_up`;
+    real capture `front.jsonl`: horizontal velocity 0.0 vs recorded 0.3
+    uu/s at 12.025 s (was 3.3). The recorded car then drifts to 0.9 uu/s
+    while jump is held, which the candidate does not model (open).
 
 ## Architecture and interfaces
 
@@ -7124,6 +7139,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.102.0 (2026-10-02): `RB-PHYSICS-001-FR-098` — the brake acts along
+  the surface. 376 tests in `rb_physics_bullet`.
 - 0.101.0 (2026-10-02): `RB-PHYSICS-001-FR-097` — air damping reads the
   spin before the flip torque (ADR-0015 amendment). 375 tests in
   `rb_physics_bullet`.

@@ -3753,6 +3753,35 @@ mod tests {
         }
     }
 
+    /// `RB-PHYSICS-001-FR-098`: a jump from rest goes straight up. The
+    /// owner's capture (`front.jsonl`, 12.008 s) gains under 1 uu/s of
+    /// horizontal speed; braking along the car's slightly pitched forward
+    /// axis instead of the floor turned the jump's vertical speed into
+    /// 3.3 uu/s forward on the tick after the press.
+    #[test]
+    fn a_jump_from_rest_goes_straight_up() {
+        let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        for tick in 0..10 {
+            world.step(dt);
+            let velocity = world.cars[0].linear_velocity;
+            let horizontal = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
+            assert!(horizontal < 0.1, "tick {tick}: {velocity:?}");
+        }
+    }
+
     /// `RB-PHYSICS-001-FR-080`: full steer on flat ground turns the car at
     /// the bicycle-model rate for its current speed, through the full step
     /// (contacts and friction included), not just in `drive` isolation.

@@ -940,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- The brake acts along the surface (`RB-PHYSICS-001-FR-098`), not the car's
+  slightly pitched forward axis, so a jump from rest no longer gains
+  3.3 uu/s forward, per the owner's `front.jsonl` capture.
 - Air-control damping reads the spin before the flip torque
   (`RB-PHYSICS-001-FR-097`, ADR-0015 amendment), as Bullet integrates the
   accumulated flip torque after RocketSim computes the damping; per the
