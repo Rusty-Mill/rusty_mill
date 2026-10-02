@@ -165,6 +165,10 @@ pub struct PhysicsWorld {
     /// only a body's dynamic manifolds (not its static-shape contacts) are
     /// warm-started.
     dynamic_manifold_caches: HashMap<(usize, usize), ContactCache>,
+    /// Each car's persistent contact with the ground (index 0) and each of
+    /// `walls` (index `i + 1`), Bullet's one-corner-a-tick manifold
+    /// (`RB-PHYSICS-001-FR-105`, ADR-0024). Sized in `step`.
+    car_plane_manifolds: Vec<Vec<collision::PlaneManifold>>,
 }
 
 /// Borrowed references to every static-shape collection in a `PhysicsWorld`
@@ -262,6 +266,7 @@ impl PhysicsWorld {
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
             dynamic_manifold_caches: HashMap::new(),
+            car_plane_manifolds: Vec::new(),
         }
     }
 
@@ -583,11 +588,20 @@ impl PhysicsWorld {
     /// `is_car` gives every manifold RocketSim's fixed car-vs-world
     /// coefficients (`CAR_WORLD_MATERIAL`, `RB-PHYSICS-001-FR-100`); every
     /// other body's manifolds carry the shape's own coefficients.
+    /// `plane_manifolds` (cars only) holds the body's persistent contact
+    /// with the ground and each wall (`RB-PHYSICS-001-FR-105`); without it
+    /// (the ball) planes are tested statelessly.
     fn static_contact_manifolds(
         body: &RigidBody,
         scene: &StaticScene,
         is_car: bool,
+        mut plane_manifolds: Option<&mut [collision::PlaneManifold]>,
     ) -> Vec<(solver::StaticMaterial, Vec<collision::Contact>)> {
+        let mut plane_contacts =
+            |index: usize, plane: &StaticPlane| match plane_manifolds.as_deref_mut() {
+                Some(manifolds) => manifolds[index].update(body, plane),
+                None => collision::contacts_vs_plane(body, plane),
+            };
         let material = |restitution: f32, friction: f32| {
             if is_car {
                 CAR_WORLD_MATERIAL
@@ -608,13 +622,13 @@ impl PhysicsWorld {
         push(
             ground.restitution,
             ground.friction,
-            collision::contacts_vs_plane(body, ground),
+            plane_contacts(0, ground),
         );
-        for wall in scene.walls {
+        for (index, wall) in scene.walls.iter().enumerate() {
             push(
                 wall.restitution,
                 wall.friction,
-                collision::contacts_vs_plane(body, wall),
+                plane_contacts(index + 1, wall),
             );
         }
         for curve in scene.curves {
@@ -794,7 +808,17 @@ impl PhysicsWorld {
             );
         }
 
-        let static_scene = self.static_scene();
+        // Field by field rather than `static_scene()`, so the cars' plane
+        // manifolds can be borrowed mutably alongside it.
+        let static_scene = StaticScene {
+            ground: &self.ground,
+            walls: &self.walls,
+            curves: &self.curves,
+            corner_fillets: &self.corner_fillets,
+            swept_fillets: &self.swept_fillets,
+            goal_walls: &self.goal_walls,
+            bounded_walls: &self.bounded_walls,
+        };
         // Combined static-and-dynamic solve (RB-PHYSICS-001-FR-052): every
         // body's own static-shape contacts (`static_manifolds`) and every
         // ball-vs-car/car-vs-car manifold (`dynamic_manifolds`) are gathered
@@ -808,11 +832,20 @@ impl PhysicsWorld {
         bodies.push(self.ball);
         bodies.extend(self.cars.iter().copied());
 
+        let plane_count = 1 + self.walls.len();
+        self.car_plane_manifolds
+            .resize_with(self.cars.len(), Vec::new);
+        for manifolds in &mut self.car_plane_manifolds {
+            manifolds.resize_with(plane_count, Default::default);
+        }
         let mut static_manifolds: Vec<(usize, solver::StaticMaterial, Vec<collision::Contact>)> =
             Vec::new();
         for (body_index, body) in bodies.iter().enumerate() {
+            let plane_manifolds = body_index
+                .checked_sub(1)
+                .map(|car_index| self.car_plane_manifolds[car_index].as_mut_slice());
             for (material, contacts) in
-                Self::static_contact_manifolds(body, &static_scene, body_index > 0)
+                Self::static_contact_manifolds(body, &static_scene, body_index > 0, plane_manifolds)
             {
                 static_manifolds.push((body_index, material, contacts));
             }
@@ -1320,11 +1353,10 @@ mod tests {
             "expected the ball to be asleep before the car arrives"
         );
 
-        let mut car = RigidBody::car_box(
-            Vec3::new(50.0, 50.0, 20.0),
-            1.0,
-            Vec3::new(-300.0, 0.0, 20.0),
-        );
+        // A real car on its wheels: since RB-PHYSICS-001-FR-105 a bare box
+        // sliding flat at speed rides on one corner a tick (Bullet's
+        // manifold) and trips, which a car on its suspension never does.
+        let mut car = RigidBody::standard_car(Vec3::new(-300.0, 0.0, 17.0));
         car.linear_velocity = Vec3::new(2000.0, 0.0, 0.0);
         world = world.with_car(car);
         for _ in 0..60 {

@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Cars touch the floor one corner at a time
+**2026-10-02** · `RB-PHYSICS-001-FR-105` · ADR-0024
+
+- A car's body now meets the floor and walls the way the game's physics
+  engine does: one corner per tick, remembered for later ticks, instead of
+  every corner at once. The owner's nose-first landings now pick up the
+  yaw and roll the real car does; their error drops by about 40%. 463
+  tests.
+
 ## Stalls
 **2026-10-02** · `RB-PHYSICS-001-FR-104` · ADR-0023 amendment
 

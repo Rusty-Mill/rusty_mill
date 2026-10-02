@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.108.0
+- Version: 0.109.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5791,6 +5791,28 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     (were up to 293); `test2` mean 2.25 uu/s (was 2.72); `front`/`side`
     unchanged.
 
+- `RB-PHYSICS-001-FR-105` (a car meets the ground and walls through
+  Bullet's one-corner-a-tick persistent manifold; implemented, verified by
+  tests and the owner's capture, ADR-0024): `collision::PlaneManifold`
+  adds the box's support corner each tick, keeps earlier corners until
+  they lift or slide past the breaking threshold (0.02 times the shape's
+  angular motion disc, about 2 uu for the car), up to 4. `PhysicsWorld`
+  keeps one per car per plane.
+  - Why: `front.jsonl`'s nose-first landings (19.083 s, 25.967 s) leave
+    the recorded car with large yaw and roll; the candidate's all-corner
+    contact (FR-047) bounced it off flat. RocketSim's floor and walls are
+    `btStaticPlaneShape`s, met by `btConvexPlaneCollisionAlgorithm` one
+    support vertex per tick.
+  - **Verification**: `collision` tests
+    `a_box_landing_on_a_corner_gets_one_contact_at_that_corner` and
+    `a_manifold_keeps_earlier_corners_until_they_lift_or_slide_off`;
+    `world` test `a_sleeping_ball_wakes_up_when_a_moving_car_hits_it` now
+    drives a real car on its wheels (a bare 1 kg slab sliding flat at
+    2000 uu/s trips on its one corner). Real capture `--self-onestep`:
+    `front.jsonl` 19.083 s 30 uu/s (was 55), spin 1.1 (was 3.8); 25.967 s
+    156 (was 252), spin 2.0 (was 5.8); mean 0.407 (was 0.457); `test2` and
+    `side` unchanged.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7280,6 +7302,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.109.0 (2026-10-02): `RB-PHYSICS-001-FR-105` — car-plane contact
+  through Bullet's persistent manifold (ADR-0024). 395 tests in
+  `rb_physics_bullet`.
 - 0.108.0 (2026-10-02): `RB-PHYSICS-001-FR-104` — stalls: flip versus
   double jump from the stick's total deflection (ADR-0023 amendment). 393
   tests in `rb_physics_bullet`.

@@ -143,9 +143,11 @@ version: `a245d35`).
    (ADR-0023) fixed the next two, keyboard dodges whose forward part
    follows throttle plus the 2300 uu/s car speed cap: `test2` mean 2.72.
    `RB-PHYSICS-001-FR-104` fixed the 15.6-15.8 s stall (yaw against air
-   roll): `test2` mean 2.25. Worst steps now: `front` 25.967 s (~250),
-   `test2` 8.958-9.07 s (~130-220, the corner-wall impact), `test2`
-   5.758 s (~155, a ground jump).
+   roll): `test2` mean 2.25. `RB-PHYSICS-001-FR-105` (ADR-0024) gave cars
+   Bullet's one-corner-a-tick plane contact: `front` 25.967 s 156 (was
+   252), 19.083 s 30 (was 55). Worst steps now: `test2` 8.958-9.07 s
+   (~130-220, the corner-wall impact), `front` 25.967-25.975 s (~100-160),
+   `test2` 5.758 s (~155, a ground jump).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -154,7 +156,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (461 tests: 27 `rb_domain`, 393
+- `cargo test --workspace`: pass (463 tests: 27 `rb_domain`, 395
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 17 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
