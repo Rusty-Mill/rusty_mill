@@ -109,13 +109,14 @@ pub mod collision;
 pub mod drive;
 pub mod integrate;
 pub mod mat3;
+pub mod mesh;
 pub mod net;
 pub mod solver;
 pub mod world;
 
 pub use body::{
     RigidBody, Shape, StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane,
-    StaticQuarterPipe, StaticSweptFillet,
+    StaticQuarterPipe,
 };
 pub use collision::Contact;
 pub use mat3::Mat3;

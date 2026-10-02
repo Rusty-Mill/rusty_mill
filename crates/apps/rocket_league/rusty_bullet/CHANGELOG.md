@@ -5,6 +5,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0025 (`RB-PHYSICS-001-FR-106`): the arena's side ramps and corners
+  are Rocket League's collision triangles (`mesh::StaticMesh`,
+  `arena::standard_meshes`, RLUtilities' GPL-3.0 soccar assets under
+  `crates/rb_physics_bullet/assets/soccar/`); cars meet them through
+  `collision::ContactManifold` (was `PlaneManifold`), which now hands
+  speculative points to the solver; wheel rays hit triangles
+  (`drive::cast_wheels` takes a ray function).
+### Changed
+- **License: GPL-3.0-only** (was MIT OR Apache-2.0), to embed the GPL-3.0
+  arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
+  `LICENSE`.
+### Removed
+- `body::StaticSweptFillet`, `arena::standard_corner_sweeps`,
+  `SIDE_FLOOR_RADIUS`, `CORNER_FLOOR_RADIUS`, `CORNER_EDGE_RADIUS`, the
+  corner wall planes and the side/corner seams (replaced by the meshes);
+  `arena::standard_walls` returns 3 planes, `standard_curves` the 4
+  back-wall seams.
 - ADR-0024 (`RB-PHYSICS-001-FR-105`): `collision::PlaneManifold`, Bullet's
   one-corner-a-tick persistent manifold, for every car against the ground
   and walls; supersedes FR-047's all-corner box-vs-plane contact in the

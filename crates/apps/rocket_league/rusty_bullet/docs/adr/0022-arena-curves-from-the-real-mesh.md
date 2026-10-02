@@ -21,7 +21,7 @@ car then drives the corner and the side wall, where the wheel rays
 
 FR-040 found no reliable published radius. FR-036 had already used
 RLUtilities' extracted soccar collision mesh (`samuelpmish/RLUtilities`,
-`assets/soccar/*.bin`, MIT) for the flat walls. That mesh also fixes the
+`assets/soccar/*.bin`, GPL-3.0; only measured dimensions are used, no data is copied) for the flat walls. That mesh also fixes the
 curves: its ramp vertices lie on circles of 256 uu (side and corner floor),
 160 uu (back-wall floor) and 512 uu (every ceiling) to within 0.5 uu. The
 vertical corner edges are 864 uu bends, not the 292 uu placeholder. At the

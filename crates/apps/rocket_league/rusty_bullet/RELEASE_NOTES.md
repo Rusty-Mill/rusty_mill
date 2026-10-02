@@ -8,6 +8,17 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Real arena ramps and corners; GPL-3.0
+**2026-10-02** · `RB-PHYSICS-001-FR-106` · ADR-0025
+
+- The arena's side ramps and curved corners are now Rocket League's own
+  collision triangles instead of smooth shapes; their flat facets sit a
+  couple of uu further in, which is what the owner's car scrapes along on
+  a corner wall. Contacts about to happen now act a tick early, as in the
+  game's physics engine. One-step error on the main capture falls from
+  2.25 to 1.78 uu/s; on the corner-wall ride from 13.4 to 6.0. The mesh
+  data is GPL-3.0, so the repository is now GPL-3.0-only. 458 tests.
+
 ## Cars touch the floor one corner at a time
 **2026-10-02** · `RB-PHYSICS-001-FR-105` · ADR-0024
 

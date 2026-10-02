@@ -7,7 +7,7 @@
 use super::ground::{FRONT_AXLE_X, REAR_AXLE_X};
 use super::{forward_axis, up_axis};
 use crate::body::RigidBody;
-use crate::collision::{raycast, Contact};
+use crate::collision::RayHit;
 use rb_domain::Vec3;
 
 /// Octane wheels in the car's local frame (uu): RocketSim `CarConfig.cpp`
@@ -107,10 +107,10 @@ pub struct WheelContact {
 /// The four wheels' hits, in `WHEELS` order.
 pub type WheelContacts = [Option<WheelContact>; 4];
 
-/// Casts the four wheel rays down the car's own axis against the static
-/// geometry `contact_at` describes (`btVehicleRL::rayCast`): the deepest
-/// zero-radius contact at a point, so a ray hits walls, curves and the
-/// floor alike (`RB-PHYSICS-001-FR-102`; floor only before that). A ray
+/// Casts the four wheel rays down the car's own axis with `ray`
+/// (`btVehicleRL::rayCast`): `ray(origin, direction, length)` is the first
+/// static surface hit, so a ray hits walls, curves, meshes and the floor
+/// alike (`RB-PHYSICS-001-FR-102`, FR-106; floor only before that). A ray
 /// reaches `rest_length + MAX_SUSPENSION_TRAVEL + radius`, the fully
 /// extended wheel (51.255 uu front, 52.055 back, so a level car touches up
 /// to an origin height of 30.5 / 31.3 uu), and only hits a surface from
@@ -122,23 +122,15 @@ pub type WheelContacts = [Option<WheelContact>; 4];
 /// and stop in the step from 32.3, where RocketSim's reach ends at 28.0.
 pub fn cast_wheels(
     car: &RigidBody,
-    contact_at: impl Fn(Vec3) -> Option<Contact>,
+    ray: impl Fn(Vec3, Vec3, f32) -> Option<RayHit>,
     dt: f32,
 ) -> WheelContacts {
-    WHEELS.map(|(x, y, front)| {
-        cast_wheel(
-            car,
-            &contact_at,
-            Vec3::new(x, y, WHEEL_RAY_START_Z),
-            front,
-            dt,
-        )
-    })
+    WHEELS.map(|(x, y, front)| cast_wheel(car, &ray, Vec3::new(x, y, WHEEL_RAY_START_Z), front, dt))
 }
 
 fn cast_wheel(
     car: &RigidBody,
-    contact_at: &impl Fn(Vec3) -> Option<Contact>,
+    ray: &impl Fn(Vec3, Vec3, f32) -> Option<RayHit>,
     start_local: Vec3,
     front: bool,
     dt: f32,
@@ -147,7 +139,7 @@ fn cast_wheel(
     let up = up_axis(car);
     let hard_point = car.position + car.orientation.rotate(&start_local);
     let reach = wheel.rest_length + MAX_SUSPENSION_TRAVEL + wheel.radius;
-    let hit = raycast(contact_at, hard_point, -up, reach)?;
+    let hit = ray(hard_point, -up, reach)?;
     let normal = hit.normal;
     let approach = normal.dot(&up);
     if approach <= 0.0 {

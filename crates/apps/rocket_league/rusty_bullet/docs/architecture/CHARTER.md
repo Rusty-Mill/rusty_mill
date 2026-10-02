@@ -105,8 +105,8 @@ Both goals are served by the same build — there is one project, not two.
 ## Ownership, license, and classification
 
 - Owner: baileyrd.
-- License: dual MIT/Apache-2.0 (see [LICENSE-MIT](../../LICENSE-MIT),
-  [LICENSE-APACHE](../../LICENSE-APACHE)) — permissive, matching the
-  project's use of only independently-authored code.
+- License: GPL-3.0-only (see [LICENSE](../../LICENSE)) since ADR-0025,
+  because `rb_physics_bullet` embeds RLUtilities' GPL-3.0 soccar arena
+  meshes. Earlier commits were released under MIT OR Apache-2.0.
 - Data classification: no user data collection. Any recorded
   replays/captures used for verification are the owner's own match data.
