@@ -164,7 +164,7 @@ syntax. Malformed IDs are refused as `invalid_id`, not rewritten.
 
 The v1 timestamp profile is exactly
 `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)`: uppercase `T`/`Z`, Gregorian
-calendar date, 00–23 hour, 00–59 minute and second, and one through nine
+calendar date, ASCII digits only, 00–23 hour, 00–59 minute and second, and one through nine
 fractional digits when a fraction is present. Date-only, basic-date, ISO week
 date, space-separated, offset-free, leap-second, and greater-than-nanosecond
 forms are rejected. Comparison converts the represented instant and its offset
@@ -179,6 +179,12 @@ V1 uses strict last-write-wins on normalized `updated_at`. A newer incoming
 record replaces every stored field **except `created_at`**, which retains the
 stored creation timestamp; an adapter must not rewrite creation history from a
 later update. An older record leaves the stored record byte-for-byte unchanged.
+For every existing-record decision, the effective incoming record is the
+incoming value with `created_at` replaced by the stored `created_at` before
+timestamp ordering or canonical equality is evaluated. Thus replaying an
+accepted update after a lost acknowledgement is idempotent even when its
+discarded creation timestamp differs; differences in every other field remain
+significant and an equal-time mutable-field disagreement is still refused.
 Equal-time records are **refused with `equal_time_conflict` unless their
 canonical v1 values are equal**, in which case the operation is an idempotent
 success and also leaves the stored record unchanged.
@@ -211,6 +217,9 @@ then a disagreement is explicit and deterministic.
   the receiver must still retain the explicit fields in a v1 record.
 * Non-null capture, supersession, or SPO lineage without `field.lineage` is
   refused. Emptying these fields is not compatibility.
+* A non-null `superseded_by` is an opaque memory ID and must satisfy the same
+  ASCII syntax as `id`; empty values and values containing spaces are refused
+  as `invalid_id` rather than rewritten.
 * `status: "deleted"` and non-null `deleted_at` are different deletion markers.
   A mismatch is refused as `tombstone_capability_mismatch` unless an explicitly
   selected adapter policy translates it. Live records require `deleted_at:null`.

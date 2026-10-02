@@ -22,6 +22,8 @@
     {"name": "lineage not preserved", "mutate": {"source_capture_id": "capture-1"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status"], "error": "unsupported_lineage"},
     {"name": "malformed timestamp", "mutate": {"updated_at": "tomorrow"}, "error": "invalid_timestamp"},
     {"name": "unsupported id", "mutate": {"id": "contains spaces"}, "error": "invalid_id"},
+    {"name": "empty superseded id", "mutate": {"superseded_by": ""}, "error": "invalid_id"},
+    {"name": "invalid superseded id", "mutate": {"superseded_by": "contains spaces"}, "error": "invalid_id"},
     {"name": "empty content", "mutate": {"content": ""}, "error": "invalid_record_type"},
     {"name": "empty category", "mutate": {"category": ""}, "error": "invalid_record_type"},
     {"name": "empty source", "mutate": {"source": ""}, "error": "invalid_record_type"},
@@ -46,6 +48,13 @@
     "2026-02-29T03:04:05Z",
     "2026-01-02T24:00:00Z",
     "2026-01-02T03:04:05.1234567890Z",
-    "2026-01-02T03:04:05"
-  ]
+    "2026-01-02T03:04:05",
+    "２０２６-01-02T03:04:05Z",
+    "2026-01-02T03:04:05.١Z",
+    "2026-01-02T03:04:05+٠١:00"
+  ],
+  "exact_numbers": {
+    "large_decimal": 1e400,
+    "large_integer": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  }
 }

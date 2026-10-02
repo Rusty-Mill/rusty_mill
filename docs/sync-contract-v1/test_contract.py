@@ -20,8 +20,8 @@ CASES = json.loads(
 )
 ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 TIMESTAMP_RE = re.compile(
-    r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})"
-    r"(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})\Z"
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+    r"(?:\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})\Z"
 )
 CLOSED_TYPES = {"episodic", "semantic", "procedural", "unclassified"}
 MEMORY_TYPE_CAPABILITIES = {"memory-types.closed", "memory-types.open"}
@@ -50,6 +50,19 @@ def is_integer(value):
 
 def is_number(value):
     return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+
+
+def is_finite_number(value):
+    """Check supported exact numbers without coercing integers or decimals to float."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, Decimal):
+        return value.is_finite()
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return False
 
 
 def validate_capability_choice(capabilities, alternatives, error):
@@ -123,11 +136,13 @@ def validate_record(record, capabilities):
         raise ContractError("invalid_record_type")
     if not all(record[field] is None or isinstance(record[field], str) for field in NULLABLE_STRINGS):
         raise ContractError("invalid_record_type")
+    if record["superseded_by"] is not None and not ID_RE.fullmatch(record["superseded_by"]):
+        raise ContractError("invalid_id")
     if not isinstance(record["sensitive"], bool):
         raise ContractError("invalid_record_type")
     if not is_integer(record["access_count"]) or record["access_count"] < 0:
         raise ContractError("invalid_record_type")
-    if not all(is_number(record[field]) and math.isfinite(record[field])
+    if not all(is_finite_number(record[field])
                for field in ("decay_rate", "vitality", "base_weight")):
         raise ContractError("invalid_record_type")
 
@@ -234,14 +249,14 @@ def canonical_equal(left, right, timestamp_field=False, record_object=True):
 
 
 def resolve_record(stored, incoming):
-    stored_time, incoming_time = timestamp(stored["updated_at"]), timestamp(incoming["updated_at"])
+    effective = copy.deepcopy(incoming)
+    effective["created_at"] = stored["created_at"]
+    stored_time, incoming_time = timestamp(stored["updated_at"]), timestamp(effective["updated_at"])
     if incoming_time > stored_time:
-        result = copy.deepcopy(incoming)
-        result["created_at"] = stored["created_at"]
-        return "newer", result
+        return "newer", effective
     if incoming_time < stored_time:
         return "older", copy.deepcopy(stored)
-    if canonical_equal(stored, incoming):
+    if canonical_equal(stored, effective):
         return "idempotent", copy.deepcopy(stored)
     raise ContractError("equal_time_conflict")
 
@@ -297,11 +312,33 @@ class ContractFixtures(unittest.TestCase):
         outcome, result = resolve_record(stored, newer)
         self.assertEqual(outcome, "newer"); self.assertEqual(result["content"], "new")
         self.assertEqual(result["created_at"], stored["created_at"])
+        self.assertEqual(resolve_record(result, newer), ("idempotent", result))
+        retry_conflict = copy.deepcopy(newer); retry_conflict["content"] = "genuinely different"
+        with self.assertRaisesRegex(ContractError, "^equal_time_conflict$"):
+            resolve_record(result, retry_conflict)
         older = copy.deepcopy(stored); older.update(content="old", updated_at="2026-01-02T03:04:05Z")
         self.assertEqual(resolve_record(stored, older), ("older", stored))
         conflict = copy.deepcopy(stored); conflict["content"] = "different"
         with self.assertRaisesRegex(ContractError, "^equal_time_conflict$"):
             resolve_record(stored, conflict)
+
+    def test_exact_large_numbers_and_superseded_id(self):
+        base = copy.deepcopy(CASES["compatible"]["record"])
+        capabilities = set(CASES["compatible"]["capabilities"])
+        base["decay_rate"] = CASES["exact_numbers"]["large_decimal"]
+        base["vitality"] = CASES["exact_numbers"]["large_integer"]
+        validate_record(base, capabilities)
+        equivalent = copy.deepcopy(base); equivalent["decay_rate"] = 10 ** 400
+        self.assertTrue(canonical_equal(base, equivalent))
+        adjacent = copy.deepcopy(equivalent); adjacent["decay_rate"] += 1
+        self.assertFalse(canonical_equal(base, adjacent))
+        for value in (Decimal("NaN"), Decimal("Infinity"), float("nan"), float("inf"), True):
+            invalid = copy.deepcopy(base); invalid["vitality"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ContractError, "^invalid_record_type$"):
+                validate_record(invalid, capabilities)
+        base["superseded_by"] = "opaque_valid-ID"
+        validate_record(base, capabilities)
+        self.assertEqual(base["superseded_by"], "opaque_valid-ID")
 
     def test_push_shapes_and_complete_accounting(self):
         self.assertEqual(validate_push_body({"records": [{"id": "a"}, {"id": "b"}]}), ["a", "b"])
