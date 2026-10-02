@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.102.0
+- Version: 0.103.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5657,6 +5657,16 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     real capture `front.jsonl`: horizontal velocity 0.0 vs recorded 0.3
     uu/s at 12.025 s (was 3.3). The recorded car then drifts to 0.9 uu/s
     while jump is held, which the candidate does not model (open).
+- `RB-PHYSICS-001-FR-099` (wheels grip and brake whenever they touch,
+  implemented, verified by tests, ADR-0020): the tire model runs with any
+  wheel touching, the engine quartered below three wheels; the brake is per
+  wheel; air control needs no wheel touching.
+  - Why: the owner's front flip lands nose first (`front.jsonl`, 19.058 s)
+    and loses 2.2 uu/s per tick on its two front wheels, half the coasting
+    brake, as RocketSim brakes per touching wheel; the candidate lost none
+    and air-damped the pitch RocketSim leaves alone there.
+  - **Verification**: `drive` test
+    `two_touching_wheels_brake_at_half_strength_without_air_control`.
 
 ## Architecture and interfaces
 
@@ -7139,6 +7149,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.103.0 (2026-10-02): `RB-PHYSICS-001-FR-099` — wheels grip and brake
+  whenever they touch (ADR-0020). 377 tests in `rb_physics_bullet`.
 - 0.102.0 (2026-10-02): `RB-PHYSICS-001-FR-098` — the brake acts along
   the surface. 376 tests in `rb_physics_bullet`.
 - 0.101.0 (2026-10-02): `RB-PHYSICS-001-FR-097` — air damping reads the
