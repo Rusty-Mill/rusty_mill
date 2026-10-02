@@ -197,17 +197,6 @@ impl TaskStore {
             self.recovery_view = Some(before);
             return Err(error);
         }
-        #[cfg(test)]
-        {
-            if rusty_multimodal_db_engine::test_support::take_fault(|fault| {
-                fault == rusty_multimodal_db_engine::test_support::Fault::GroupSync
-            })
-            .is_some()
-            {
-                self.recovery_view = Some(before);
-                return Err(std::io::Error::other("injected store group-sync failure").into());
-            }
-        }
         if let Err(error) = self.stack.commit() {
             self.recovery_view = Some(before);
             return Err(error.into());
@@ -249,15 +238,19 @@ impl TaskStore {
         for (position, change) in batch.changes.iter().take(limit).enumerate() {
             #[cfg(not(test))]
             let _ = position;
-            {
-                #[cfg(test)]
-                if rusty_multimodal_db_engine::test_support::take_fault(|fault| {
-                    fault == rusty_multimodal_db_engine::test_support::Fault::BatchApply(position)
-                })
-                .is_some()
-                {
-                    return Err(std::io::Error::other("injected batch apply failure").into());
-                }
+            #[cfg(test)]
+            let tear_this_append = rusty_multimodal_db_engine::test_support::take_fault(|fault| {
+                fault == rusty_multimodal_db_engine::test_support::Fault::BatchApply(position)
+            })
+            .is_some();
+            #[cfg(test)]
+            if tear_this_append {
+                // The first replacement established the insert-log header.
+                // Tear the upcoming real frame after three bytes rather than
+                // returning a synthetic error before persistence is attempted.
+                rusty_multimodal_db_engine::test_support::arm_fault(
+                    rusty_multimodal_db_engine::test_support::Fault::InsertWritePrefix(3),
+                );
             }
             if change.store != TASKS {
                 return Err(JournalError::Encode(format!(
@@ -278,7 +271,15 @@ impl TaskStore {
                     JournalError::Encode("task journal key/value mismatch".to_string()).into(),
                 );
             }
-            match stack.replace(task) {
+            let result = stack.replace(task);
+            #[cfg(test)]
+            if tear_this_append {
+                assert!(
+                    rusty_multimodal_db_engine::test_support::take_fault(|_| true).is_none(),
+                    "batch-apply tear must be consumed by the real insert-log append"
+                );
+            }
+            match result {
                 Ok(()) => {}
                 Err(ReplaceError::NotFound(_)) => return Err(TickError::NotFound(id)),
                 Err(ReplaceError::Durability(e)) => return Err(TickError::Storage(e)),
@@ -452,10 +453,14 @@ mod tests {
         let mut parent = task(1, list, "parent needle");
         let mut child = task(2, list, "first child");
         child.parent_id = Some(parent.id);
+        child.due_ms = Some(200);
         let mut already_trashed = task(3, list, "old child");
         already_trashed.parent_id = Some(parent.id);
         already_trashed.deleted_ms = Some(7);
-        let unrelated = task(4, list, "unrelated needle");
+        already_trashed.due_ms = Some(100);
+        parent.due_ms = Some(100);
+        let mut unrelated = task(4, list, "unrelated needle");
+        unrelated.due_ms = Some(300);
         parent.notes = "parent notes".into();
         let mut store = TaskStore::open(dir.path()).unwrap();
         for task in [&parent, &child, &already_trashed, &unrelated] {
@@ -487,6 +492,16 @@ mod tests {
         let mut expected_all = expected.to_vec();
         expected_all.sort_by_key(|task| task.id);
         assert_eq!(actual, expected_all);
+        let list = expected[0].list_id;
+        let mut in_list = store.in_list(list);
+        in_list.sort_by_key(|task| task.id);
+        let mut expected_in_list: Vec<_> = expected
+            .iter()
+            .filter(|task| task.list_id == list)
+            .cloned()
+            .collect();
+        expected_in_list.sort_by_key(|task| task.id);
+        assert_eq!(in_list, expected_in_list);
         for task in expected {
             assert_eq!(store.get(task.id).as_ref(), Some(task));
             let expected_search = if task.is_deleted() {
@@ -499,7 +514,6 @@ mod tests {
                 assert_eq!(store.with_tag(tag), expected_search);
             }
         }
-        let list = expected[0].list_id;
         let mut manual: Vec<_> = expected
             .iter()
             .filter(|task| task.list_id == list)
@@ -507,6 +521,10 @@ mod tests {
             .collect();
         manual.sort_by_key(|task| (task.sort_order, task.id));
         assert_eq!(store.in_manual_order(list), manual);
+        assert_eq!(
+            store.next_sort_order(list),
+            manual.last().unwrap().sort_order.saturating_add(SORT_STEP)
+        );
         let mut due: Vec<_> = expected
             .iter()
             .filter(|task| task.list_id == list && task.due_ms.is_some())
@@ -773,6 +791,38 @@ mod tests {
         )
         .unwrap();
         assert!(TaskStore::open(dir.path()).is_err());
+    }
+
+    #[test]
+    fn insert_log_header_repair_has_narrow_controls() {
+        // The narrow repair primitive leaves an established valid log byte
+        // for byte untouched.
+        let (dir, _, _) = fixture();
+        let mmap = dir.path().join("tasks.mmap");
+        let log = insert_log::log_path(&mmap);
+        let established = std::fs::read(&log).unwrap();
+        assert!(!insert_log::clear_interrupted_creation::<Task>(&mmap).unwrap());
+        assert_eq!(std::fs::read(&log).unwrap(), established);
+
+        // A foreign or otherwise malformed header remains an error and is
+        // never treated as an interrupted creation prefix.
+        for bytes in [b"FOREIGN! malformed".as_slice(), b"not a header".as_slice()] {
+            let (dir, _, _) = fixture();
+            let log = insert_log::log_path(&dir.path().join("tasks.mmap"));
+            std::fs::write(&log, bytes).unwrap();
+            assert!(TaskStore::open(dir.path()).is_err());
+            assert_eq!(std::fs::read(&log).unwrap(), bytes);
+        }
+
+        // Even a recognizable creation prefix requires authoritative redo;
+        // without it, open refuses and leaves the evidence untouched.
+        let (dir, _, _) = fixture();
+        let log = insert_log::log_path(&dir.path().join("tasks.mmap"));
+        let header = std::fs::read(&log).unwrap();
+        let prefix = header[..11].to_vec();
+        std::fs::write(&log, &prefix).unwrap();
+        assert!(TaskStore::open(dir.path()).is_err());
+        assert_eq!(std::fs::read(&log).unwrap(), prefix);
     }
 
     #[test]

@@ -397,10 +397,24 @@ impl Appender {
     /// As [`sync`].
     pub fn sync(&mut self) -> Result<(), DurabilityError> {
         match &self.file {
-            Some(file) => file.sync_data().map_err(|e| {
-                self.file = None;
-                e.into()
-            }),
+            Some(file) => {
+                #[cfg(feature = "test-support")]
+                let result = if crate::test_support::take_fault(|fault| {
+                    fault == crate::test_support::Fault::GroupSync
+                })
+                .is_some()
+                {
+                    Err(io::Error::other("injected store group-sync failure"))
+                } else {
+                    file.sync_data()
+                };
+                #[cfg(not(feature = "test-support"))]
+                let result = file.sync_data();
+                result.map_err(|e| {
+                    self.file = None;
+                    e.into()
+                })
+            }
             None => sync(&self.path),
         }
     }
