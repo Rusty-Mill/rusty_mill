@@ -11,6 +11,13 @@ Stay up to date with the latest changes to rusty_libc.
 
 ---
 
+## `statfs`, for a free-space check
+
+**Added**
+- `fs::statfs` + `Statfs` (`available_bytes`) — filesystem statistics for a path. First consumer: `rusty_multimodal_db` refuses a chunked snapshot up front when the staging disk is too small (ADR-0136). This reverses REVIEW.md's earlier "no consumer" call on `statfs`; xattrs stay declined.
+
+---
+
 ## Round 3, batch 4: timerfd, atomic pidfd via clone3, and a safe vfork — [PR #56](https://github.com/baileyrd/rusty_libc/pull/56)–[#58](https://github.com/baileyrd/rusty_libc/pull/58)
 
 **July 23, 2026 • [Compare changes](https://github.com/baileyrd/rusty_libc/compare/fa43cfc...4c561a1)**

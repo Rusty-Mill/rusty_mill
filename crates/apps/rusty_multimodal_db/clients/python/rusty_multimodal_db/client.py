@@ -12,6 +12,8 @@ implemented (see ADR-0043's Non-goals). No SQL front end: build
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import os
 import socket
 import ssl
 from dataclasses import dataclass
@@ -20,6 +22,34 @@ import uuid
 
 from . import protocol as p
 from .protocol import PROTOCOL_VERSION
+
+
+_RESERVED_CHARS = frozenset('/\\:*?"<>|')
+_DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"})
+_DEVICE_DIGITS = frozenset("0123456789\u00b9\u00b2\u00b3")
+
+
+def is_plain_file_name(name: str) -> bool:
+    """Whether a file name a server sent is safe to join under any directory
+    on any platform (CSN-FR-005, RGM-FR-008): one plain component that no
+    operating system's path syntax can turn into something else. Decided on
+    the text, not by ``os.path`` (which would let a Windows-style name through
+    on Linux), so the answer is the same everywhere. Refused: the empty name,
+    ``.`` and ``..``; ``/`` and ``\\``; ``:`` (a drive prefix such as
+    ``C:escape``, or a stream); ``* ? " < > |``; control characters; a trailing
+    ``.`` or space; a name over 255 bytes; and a Windows device name (``CON``,
+    ``NUL``, ``COM1``, ... with or without an extension). Mirrors the Rust
+    client's ``is_plain_file_name``."""
+    if not name or name in (".", "..") or len(name.encode("utf-8")) > 255:
+        return False
+    if any(c in _RESERVED_CHARS or ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in name):
+        return False
+    if name.endswith((".", " ")):
+        return False
+    stem = name.split(".", 1)[0].rstrip(" ").upper()
+    if stem in _DEVICE_NAMES:
+        return False
+    return not (len(stem) == 4 and stem[:3] in ("COM", "LPT") and stem[3] in _DEVICE_DIGITS)
 
 
 class ClientError(Exception):
@@ -640,6 +670,56 @@ class Client:
         if isinstance(reply, p.SnapshotAt):
             return list(reply.files), reply.epoch, reply.seq
         raise ProtocolError(type(reply).__name__)
+
+    def fetch_snapshot_chunked(self, directory: str) -> Tuple[int, Optional[Tuple[int, int]]]:
+        """``fetch_snapshot`` for a table of any size (CSN-FR-005, ADR-0136,
+        protocol 36): the server stages a copy and each file is streamed in
+        chunks of at most 4 MiB into the existing ``directory``, each checked
+        against the manifest's length and SHA-256. Returns ``(bytes written,
+        position)`` where position is the change-log ``(epoch, seq)`` or
+        ``None``. Replication token only; ``ErrorCode.Unsupported`` without
+        SERVER_SNAPSHOT_DIR, ``TooLarge`` over its ceiling, ``Busy`` while
+        the table's staged copy is held. Below 36, ``UnsupportedError`` with
+        no frame sent."""
+        manifest = self._roundtrip(p.BeginSnapshot())
+        if not isinstance(manifest, p.SnapshotManifest):
+            raise ProtocolError(type(manifest).__name__)
+        try:
+            written = self._download_staged(manifest, directory)
+        finally:
+            try:
+                self._roundtrip(p.EndSnapshot(manifest.snapshot))
+            except Exception:  # best effort: the server frees it on close
+                pass
+        return written, manifest.position
+
+    def _download_staged(self, manifest: p.SnapshotManifest, directory: str) -> int:
+        # Every name is checked before the first file is created or truncated:
+        # the manifest is the server's word and decides where bytes land.
+        for name, _length, _digest in manifest.files:
+            if not is_plain_file_name(name):
+                raise ProtocolError(f"manifest file name {name!r} is not a plain file name")
+        total = 0
+        for index, (name, length, digest) in enumerate(manifest.files):
+            hasher = hashlib.sha256()
+            offset = 0
+            with open(os.path.join(directory, name), "wb") as out:
+                while offset < length:
+                    want = min(length - offset, p.MAX_CHUNK_BYTES)
+                    chunk = self._roundtrip(p.FetchChunk(manifest.snapshot, index, offset, want))
+                    if not isinstance(chunk, p.Chunk):
+                        raise ProtocolError(type(chunk).__name__)
+                    if not 0 < len(chunk.bytes) <= want:
+                        raise ProtocolError(f"{name}: a chunk of {len(chunk.bytes)} bytes, wanted 1..{want}")
+                    hasher.update(chunk.bytes)
+                    out.write(chunk.bytes)
+                    offset += len(chunk.bytes)
+                out.flush()
+                os.fsync(out.fileno())
+            if hasher.digest() != digest:
+                raise ProtocolError(f"{name}: the SHA-256 differs from the manifest's")
+            total += length
+        return total
 
     def fetch_since(self, epoch: int, after: int, limit: int = 1000) -> p.Changes:
         """Change-log entries after ``after`` in ``epoch`` (RPL-FR-002,

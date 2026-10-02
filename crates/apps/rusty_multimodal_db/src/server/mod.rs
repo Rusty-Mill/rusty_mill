@@ -205,6 +205,9 @@ pub mod protocol;
 pub mod relation;
 #[cfg(feature = "server")]
 pub mod reminder;
+/// Chunked snapshots (`ADR-0136`).
+#[cfg(feature = "server")]
+pub(crate) mod snapshot;
 mod sql;
 /// The strict-commit check (`ADR-0133`).
 #[cfg(feature = "server")]

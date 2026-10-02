@@ -173,6 +173,18 @@
 //! over the connection, up to `MAX_SNAPSHOT_BYTES`. Unset, every
 //! `FetchSnapshot` request answers `Unauthorized`.
 //!
+//! # Chunked snapshots — `SERVER_SNAPSHOT_DIR` (ADR-0136)
+//!
+//! `FetchSnapshot` refuses a table over `MAX_SNAPSHOT_BYTES` (8 MiB). Set
+//! `SERVER_SNAPSHOT_DIR=<dir>` and a `Replication` connection at protocol 36 may
+//! `BeginSnapshot`: the table's files are copied into `<dir>` under its write lock
+//! (writers wait about 6 s per GiB on the measured disk), then streamed in
+//! 4 MiB chunks with a SHA-256 per file while writers run. `SERVER_SNAPSHOT_MAX_MB`
+//! (default 1024, `0` for none) refuses a larger table before copying; `<dir>`
+//! needs that much free space. One staged copy per table, freed by `EndSnapshot`,
+//! the connection closing, or 300 s idle when another `BeginSnapshot` wants the
+//! slot; leftovers are swept at startup. Unset, `BeginSnapshot` answers `Unsupported`.
+//!
 //! # Exposure — a non-loopback bind needs auth and TLS (ADR-0094)
 //!
 //! Binding anything but a loopback address (`127.0.0.1`, `[::1]`) with
@@ -320,6 +332,11 @@ fn bounded_env(name: &str, default: Option<u64>) -> Option<u64> {
         Err(_) => panic!("{name}={raw:?} is not a non-negative integer (0 turns the limit off)"),
     }
 }
+
+/// `CSN-FR-004` (ADR-0136): the largest table `BeginSnapshot` stages by default.
+/// A staged copy stalls writers about 6 s per GiB on the measured disk, so the
+/// default is about 6 s; an operator who needs more raises it.
+const DEFAULT_SNAPSHOT_MAX_MB: u64 = 1024;
 
 /// `DEF-FR-002` (ADR-0099): an on/off setting that defaults to on —
 /// unset or `1` is on, `0` is off, anything else a startup error.
@@ -695,6 +712,20 @@ fn main() {
         Err(_) => options,
     };
     let replication_tokened = std::env::var_os("SERVER_AUTH_REPLICATION_TOKEN").is_some();
+    // `SERVER_SNAPSHOT_DIR` / `SERVER_SNAPSHOT_MAX_MB` (ADR-0136, `CSN-FR-004`):
+    // opt-in — unset, `BeginSnapshot` answers `Unsupported`. A staged copy
+    // needs disk equal to its table, so the ceiling (default 1024 MiB, 0 for
+    // none) is checked before anything is copied.
+    let options = match std::env::var_os("SERVER_SNAPSHOT_DIR") {
+        Some(dir) => {
+            let max_mb = bounded_env("SERVER_SNAPSHOT_MAX_MB", Some(DEFAULT_SNAPSHOT_MAX_MB))
+                .unwrap_or(u64::MAX);
+            options
+                .with_snapshot_staging(PathBuf::from(&dir), max_mb)
+                .unwrap_or_else(|e| panic!("SERVER_SNAPSHOT_DIR {dir:?}: {e}"))
+        }
+        None => options,
+    };
     // `SERVER_IDLE_TIMEOUT_SECS` / `SERVER_MAX_CONNECTIONS` /
     // `SERVER_MAX_QUERY_ROWS` (ADR-0093, `LIM-FR-005`): each opt-in; a
     // value that is not a positive integer is a startup error, this

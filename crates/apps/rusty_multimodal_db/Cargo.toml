@@ -332,6 +332,11 @@ required-features = ["client"]
 name = "change_log_bench"
 required-features = ["server"]
 
+# `ADR-0136`: what a chunked snapshot costs the table's writers.
+[[example]]
+name = "snapshot_stall_bench"
+required-features = ["server"]
+
 # Its integration test serves a real table, so it needs `server`; the
 # file is `#![cfg(feature = "server")]` as well.
 [[test]]

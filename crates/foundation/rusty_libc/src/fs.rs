@@ -221,6 +221,74 @@ pub fn fstat(fd: i32) -> Result<Statx, Errno> {
     statx(fd, c"", AT_EMPTY_PATH, STATX_BASIC_STATS)
 }
 
+// --- filesystem statistics ----------------------------------------------------
+
+/// Filesystem statistics (kernel `struct statfs`, 120 bytes on both 64-bit
+/// targets this crate supports).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Statfs {
+    /// Filesystem type (a `*_SUPER_MAGIC` value).
+    pub f_type: i64,
+    /// Optimal transfer block size, in bytes.
+    pub f_bsize: i64,
+    /// Total data blocks, in [`Statfs::f_frsize`]-sized units.
+    pub f_blocks: u64,
+    /// Free blocks, including those reserved for the superuser.
+    pub f_bfree: u64,
+    /// Free blocks available to an unprivileged process.
+    pub f_bavail: u64,
+    /// Total file nodes.
+    pub f_files: u64,
+    /// Free file nodes.
+    pub f_ffree: u64,
+    /// Filesystem id.
+    pub f_fsid: [i32; 2],
+    /// Maximum length of a file name.
+    pub f_namelen: i64,
+    /// Fragment size: the unit the block counts are in.
+    pub f_frsize: i64,
+    /// Mount flags.
+    pub f_flags: i64,
+    __spare: [i64; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<Statfs>() == 120);
+const _: () = assert!(core::mem::offset_of!(Statfs, f_bavail) == 32);
+const _: () = assert!(core::mem::offset_of!(Statfs, f_fsid) == 56);
+const _: () = assert!(core::mem::offset_of!(Statfs, f_frsize) == 72);
+
+impl Statfs {
+    /// Bytes an unprivileged process can still write: [`Statfs::f_bavail`]
+    /// blocks of [`Statfs::f_frsize`] bytes (`f_bsize` where the filesystem
+    /// reports no fragment size).
+    #[inline]
+    pub const fn available_bytes(&self) -> u64 {
+        let unit = if self.f_frsize > 0 {
+            self.f_frsize
+        } else {
+            self.f_bsize
+        };
+        self.f_bavail.saturating_mul(unit as u64)
+    }
+}
+
+/// Statistics for the filesystem holding `path` (like `statfs(2)`).
+pub fn statfs(path: &CStr) -> Result<Statfs, Errno> {
+    let mut buf = Statfs::default();
+    // SAFETY: `path` is a valid C string; `buf` is a valid, exclusively
+    // borrowed `struct statfs` the kernel writes.
+    let ret = unsafe {
+        syscall2(
+            nr::STATFS,
+            path.as_ptr() as usize,
+            &mut buf as *mut Statfs as usize,
+        )
+    };
+    from_ret(ret)?;
+    Ok(buf)
+}
+
 // --- path mutations -----------------------------------------------------------
 
 /// Remove the link at `path` relative to `dirfd`. `flags` may be `0` (unlink a
@@ -640,6 +708,30 @@ mod tests {
             std::process::id()
         );
         std::ffi::CString::new(p).unwrap()
+    }
+
+    #[test]
+    fn statfs_reports_a_real_filesystem() {
+        let tmp = std::env::temp_dir();
+        let path = std::ffi::CString::new(tmp.to_str().unwrap()).unwrap();
+        let fs = statfs(&path).expect("statfs");
+        assert!(fs.f_blocks > 0);
+        assert!(fs.f_bavail <= fs.f_bfree && fs.f_bfree <= fs.f_blocks);
+        assert!(fs.available_bytes() <= fs.f_blocks * fs.f_bsize.max(fs.f_frsize) as u64);
+        assert_eq!(statfs(c"/no/such/rusty_libc/path"), Err(Errno::ENOENT));
+    }
+
+    #[test]
+    fn available_bytes_uses_the_fragment_size_or_falls_back_to_the_block_size() {
+        let mut fs = Statfs {
+            f_bavail: 10,
+            f_bsize: 4096,
+            f_frsize: 512,
+            ..Statfs::default()
+        };
+        assert_eq!(fs.available_bytes(), 5120);
+        fs.f_frsize = 0;
+        assert_eq!(fs.available_bytes(), 40960);
     }
 
     #[test]

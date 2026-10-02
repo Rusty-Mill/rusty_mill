@@ -21,8 +21,9 @@ use super::protocol::{
 use super::{
     bounded_filtered_page, bounded_walk_applies, copy_table_files, filtered_page_by_candidates,
     page_by_scan, page_by_scan_desc, page_key, predicate_matches, read_table_files,
-    uuid_pair_bounds, validate_predicate, BackupReport, ConnectionStore, DeleteOutcome,
-    InsertOutcome, KeyStats, PageRow, ReadTableFilesError, ReplaceIfOutcome, ReplaceOutcome,
+    stage_table_files, uuid_pair_bounds, validate_predicate, BackupReport, ConnectionStore,
+    DeleteOutcome, InsertOutcome, KeyStats, PageRow, ReadTableFilesError, ReplaceIfOutcome,
+    ReplaceOutcome,
 };
 use crate::durability::DurabilityError;
 use crate::generic::insert_log::{self, LogEntry};
@@ -1503,6 +1504,14 @@ impl ConnectionStore for RelationConnectionStore {
         self.store
             .with_exclusive(|_| copy_table_files(base, target_dir))
             .map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `CSN-FR-001` (ADR-0136): the staged copy [`ConnectionStore::backup`] makes.
+    fn stage_snapshot(&self, dir: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        self.store
+            .with_exclusive(|_| stage_table_files(base, dir, max_bytes))
+            .map(|()| None)
     }
 
     /// `RPL-FR-003` (ADR-0067): [`ConnectionStore::backup`]'s reading
