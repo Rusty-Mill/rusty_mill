@@ -105,27 +105,28 @@ fn baseline(options: &Options) -> Result<String, String> {
     let mut rows = Vec::with_capacity(products.len());
     let mut entry_points = entry_points.iter();
     for product in &products {
-        let Some(platform) = product
-            .platform
-            .filter(|_| !product.supports_os(std::env::consts::OS))
-        else {
+        if product.supports_os(std::env::consts::OS) {
             let entry_point = entry_points
                 .next()
                 .expect("one entry point per eligible product");
             eprintln!("rusty_baseline: measuring {}", product.bin);
             rows.push(measure_one(options, product, entry_point, &home));
             continue;
-        };
+        }
+        let policy = product.platform.map_or_else(
+            || format!("excluded: {}", product.unsupported.unwrap().name()),
+            |platform| format!("allowed: {}", platform.name()),
+        );
         eprintln!(
-            "rusty_baseline: skipping {}: unsupported on {} (allowed: {})",
+            "rusty_baseline: skipping {}: unsupported on {} ({})",
             product.bin,
             std::env::consts::OS,
-            platform.name()
+            policy
         );
         rows.push(Row::Unsupported {
             bin: product.bin.clone(),
             current: std::env::consts::OS.to_owned(),
-            allowed: platform.name().to_owned(),
+            policy,
         });
     }
     let floor = sys::floor();

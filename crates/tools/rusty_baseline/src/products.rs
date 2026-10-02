@@ -49,15 +49,18 @@ pub struct Product {
     pub mode: Mode,
     /// The only supported OS, or `None` when the product is unrestricted.
     pub platform: Option<Platform>,
+    /// The explicitly unsupported OS, or `None` when no OS is excluded.
+    pub unsupported: Option<Platform>,
     /// Environment variables set for the run, from leading `KEY=value`s.
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
 }
 
 /// Parses the product list: one product per line,
-/// `<package>[:<features>] <bin> <exit|idle> [@platform=<os>] [KEY=value...] [args...]`.
-/// The optional platform declaration accepts `linux`, `windows`, or `macos`
-/// and must immediately follow the mode. An omitted declaration is unrestricted.
+/// `<package>[:<features>] <bin> <exit|idle> [@platform=<os>|@unsupported=<os>] [KEY=value...] [args...]`.
+/// The optional policy declaration accepts `linux`, `windows`, or `macos`
+/// and must immediately follow the mode. `@platform` is an allowlist while
+/// `@unsupported` excludes only the named OS. An omitted declaration is unrestricted.
 /// Leading `KEY=value`s (an uppercase name) set the run's environment, as
 /// in a shell. Blank lines and `#` comments are skipped.
 pub fn parse(text: &str) -> Result<Vec<Product>, String> {
@@ -91,22 +94,37 @@ fn parse_line(line: &str) -> Result<Product, String> {
         None => (package, None),
     };
     let mut fields = fields.peekable();
-    let platform = match fields.peek().copied() {
-        Some(field) if field.starts_with("@platform") => {
-            let value = field.strip_prefix("@platform=").ok_or_else(|| {
-                format!("malformed platform declaration `{field}` (expected `@platform=<os>`)")
+    let (platform, unsupported) = match fields.peek().copied() {
+        Some(field) if field.starts_with("@platform") || field.starts_with("@unsupported") => {
+            let (prefix, kind) = if field.starts_with("@platform") {
+                ("@platform=", "platform")
+            } else {
+                ("@unsupported=", "unsupported")
+            };
+            let value = field.strip_prefix(prefix).ok_or_else(|| {
+                format!("malformed {kind} declaration `{field}` (expected `{prefix}<os>`)")
             })?;
             if value.is_empty() {
-                return Err("malformed platform declaration `@platform=` (missing OS)".to_owned());
+                return Err(format!(
+                    "malformed {kind} declaration `{prefix}` (missing OS)"
+                ));
             }
             fields.next();
-            Some(Platform::parse(value)?)
+            let value = Platform::parse(value)?;
+            if kind == "platform" {
+                (Some(value), None)
+            } else {
+                (None, Some(value))
+            }
         }
-        _ => None,
+        _ => (None, None),
     };
-    if let Some(field) = fields.clone().find(|field| field.starts_with("@platform")) {
+    if let Some(field) = fields
+        .clone()
+        .find(|field| field.starts_with("@platform") || field.starts_with("@unsupported"))
+    {
         return Err(format!(
-            "platform declaration `{field}` must immediately follow the mode"
+            "platform policy declaration `{field}` must immediately follow the mode"
         ));
     }
     let mut env = Vec::new();
@@ -120,6 +138,7 @@ fn parse_line(line: &str) -> Result<Product, String> {
         bin: bin.to_owned(),
         mode,
         platform,
+        unsupported,
         env,
         args: fields.map(str::to_owned).collect(),
     })
@@ -138,6 +157,9 @@ impl Product {
     /// Whether this product is eligible on `os` (`std::env::consts::OS` form).
     pub fn supports_os(&self, os: &str) -> bool {
         self.platform.is_none_or(|platform| platform.name() == os)
+            && self
+                .unsupported
+                .is_none_or(|platform| platform.name() != os)
     }
 }
 
@@ -159,6 +181,20 @@ mod tests {
         assert_eq!(products[1].mode, Mode::Idle);
         assert!(products[1].args.is_empty());
         assert_eq!(products[0].platform, None);
+        assert_eq!(products[0].unsupported, None);
+    }
+
+    #[test]
+    fn exclusion_policy_excludes_only_the_named_platform() {
+        let product = parse("daemon daemon exit @unsupported=windows --help\n")
+            .unwrap()
+            .remove(0);
+        assert_eq!(product.platform, None);
+        assert_eq!(product.unsupported, Some(Platform::Windows));
+        assert_eq!(product.args, ["--help"]);
+        assert!(product.supports_os("linux"));
+        assert!(product.supports_os("macos"));
+        assert!(!product.supports_os("windows"));
     }
 
     #[test]
@@ -174,16 +210,23 @@ mod tests {
     }
 
     #[test]
-    fn malformed_platform_declarations_have_line_context() {
+    fn malformed_platform_policy_declarations_have_line_context() {
         for text in [
             "agent agent exit @platform=\n",
             "agent agent exit @platform-linux\n",
             "agent agent exit @platform=plan9\n",
             "agent agent exit --help @platform=linux\n",
+            "agent agent exit @unsupported=\n",
+            "agent agent exit @unsupported-windows\n",
+            "agent agent exit @unsupported=plan9\n",
+            "agent agent exit @platform=linux @unsupported=windows\n",
         ] {
             let error = parse(text).unwrap_err();
             assert!(error.starts_with("line 1:"), "{error}");
-            assert!(error.contains("platform"), "{error}");
+            assert!(
+                error.contains("platform") || error.contains("unsupported"),
+                "{error}"
+            );
         }
     }
 

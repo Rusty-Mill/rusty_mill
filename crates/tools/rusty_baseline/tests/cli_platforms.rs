@@ -144,6 +144,48 @@ fn all_unsupported_normal_and_prebuilt_never_invoke_cargo_or_a_binary() {
 }
 
 #[test]
+fn explicitly_excluded_host_never_invokes_cargo_or_an_existing_stub() {
+    let fixture = Fixture::new();
+    let cargo_marker = fixture.path("cargo-invoked");
+    let cargo_dir = fixture.path("trap-cargo");
+    let trap_cargo =
+        fixture.compile_helper("cargo-trap", &marker_helper(&cargo_marker, 91), &cargo_dir);
+    let products = fixture.products(&format!(
+        "absent ts-daemon exit @unsupported={} --help\n",
+        std::env::consts::OS
+    ));
+    let prebuilt_dir = fixture.path("prebuilt");
+    let stub_marker = fixture.path("stub-ran");
+    fixture.compile_helper(
+        "ts-daemon",
+        &marker_helper(&stub_marker, 0),
+        &prebuilt_dir.join("release"),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rusty_baseline"))
+        .current_dir(&fixture.root)
+        .env("CARGO", trap_cargo)
+        .args(["--products", products.to_str().unwrap(), "--work"])
+        .arg(fixture.path("work"))
+        .arg("--prebuilt")
+        .arg(&prebuilt_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout(&output).contains(&format!(
+        "unsupported on {} (excluded: {}); skipped",
+        std::env::consts::OS,
+        std::env::consts::OS
+    )));
+    assert!(!cargo_marker.exists(), "excluded selection invoked Cargo");
+    assert!(!stub_marker.exists(), "excluded stub binary ran");
+}
+
+#[test]
 fn mixed_prebuilt_selection_preserves_rows_and_runs_only_the_eligible_product() {
     let fixture = Fixture::new();
     fixture.workspace(&["good"]);

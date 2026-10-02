@@ -22,7 +22,7 @@ pub enum Row {
     Unsupported {
         bin: String,
         current: String,
-        allowed: String,
+        policy: String,
     },
 }
 
@@ -43,11 +43,11 @@ fn render_row(row: &Row, floor: Option<u64>) -> String {
     if let Row::Unsupported {
         bin,
         current,
-        allowed,
+        policy,
     } = row
     {
         return format!(
-            "| `{bin}` | — | — | — | — | — | — | — | unsupported on {current} (allowed: {allowed}); skipped |"
+            "| `{bin}` | — | — | — | — | — | — | — | unsupported on {current} ({policy}); skipped |"
         );
     }
     let Row::Measured {
@@ -205,7 +205,7 @@ mod tests {
         let row = Row::Unsupported {
             bin: "fedora".into(),
             current: "windows".into(),
-            allowed: "linux".into(),
+            policy: "allowed: linux".into(),
         };
         assert_eq!(
             render_row(&row, None),
