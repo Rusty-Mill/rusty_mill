@@ -4,9 +4,10 @@ mod common;
 
 use std::time::Duration;
 
-use common::{exit, fixture, task, ReplyFile, REPLY_ONE};
+use common::{exit, fixture, task, text, ReplyFile, REPLY_ONE};
 use orch_cli::ExecError;
 use orch_codex::CodexAgent;
+use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
 use orch_core::task::Agent;
 use orch_dispatch::AgentRunner;
 
@@ -125,4 +126,52 @@ fn missing_last_message_file_is_an_error() {
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("no file");
     assert!(err.0.contains("wrote no last message"));
+}
+
+#[test]
+fn resumed_card_prompt_carries_answers_and_live_successors() {
+    let (plan, mut board, referenced, _) = fixture();
+    let card = task(&plan);
+    let successor = board
+        .append(NewEntry {
+            task: None,
+            author: Author::Human,
+            kind: EntryKind::Finding {
+                confidence: Confidence::High,
+            },
+            body: text("The live referenced finding."),
+            refs: vec![],
+            supersedes: Some(referenced),
+        })
+        .expect("successor");
+    let question = board
+        .append(NewEntry {
+            task: Some(card.id()),
+            author: Author::Agent(Agent::Codex),
+            kind: EntryKind::Question,
+            body: text("Which branch is the baseline?"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("question");
+    board
+        .append(NewEntry {
+            task: None,
+            author: Author::Human,
+            kind: EntryKind::Answer { to: question },
+            body: text("Use main as of this morning."),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("answer");
+    let mut a = agent(ReplyFile::ok(REPLY_ONE));
+
+    a.run(Agent::Codex, card, &board).expect("ok");
+
+    let calls = a.runner().inner.calls.lock().expect("lock");
+    let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
+    assert!(prompt.contains("Use main as of this morning."));
+    assert!(prompt.contains(&format!("{successor} [Finding")));
+    assert!(prompt.contains("The live referenced finding."));
+    assert!(!prompt.contains("Plan::start rejects the author."));
 }

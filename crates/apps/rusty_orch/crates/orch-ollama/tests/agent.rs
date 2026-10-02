@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use common::{exit, fixture, task, text, Call, FakeCommand, REPLY_ONE};
 use orch_cli::ExecError;
-use orch_core::board::{Author, EntryKind, NewEntry};
+use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
 use orch_core::task::Agent;
 use orch_dispatch::AgentRunner;
 use orch_ollama::OllamaAgent;
@@ -129,8 +129,20 @@ fn a_calls(a: &OllamaAgent<FakeCommand>) -> Vec<Call> {
 /// the answer to its earlier question.
 #[test]
 fn resumed_card_prompt_carries_the_answer() {
-    let (plan, mut board, _, _) = fixture();
+    let (plan, mut board, referenced, _) = fixture();
     let card = task(&plan);
+    let successor = board
+        .append(NewEntry {
+            task: None,
+            author: Author::Human,
+            kind: EntryKind::Finding {
+                confidence: Confidence::High,
+            },
+            body: text("The live referenced finding."),
+            refs: vec![],
+            supersedes: Some(referenced),
+        })
+        .expect("successor");
     let question = board
         .append(NewEntry {
             task: Some(card.id()),
@@ -158,4 +170,7 @@ fn resumed_card_prompt_carries_the_answer() {
     let calls = a_calls(&a);
     let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
     assert!(prompt.contains("Use main as of this morning."));
+    assert!(prompt.contains(&format!("{successor} [Finding")));
+    assert!(prompt.contains("The live referenced finding."));
+    assert!(!prompt.contains("Plan::start rejects the author."));
 }

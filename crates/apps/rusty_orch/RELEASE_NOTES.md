@@ -11,6 +11,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Superseded refs resolve to their live successors (#439)
+**2026-10-02** · (link once pushed)
+
+- **Fixed:** the shared prompt renderer follows an explicit entry ref through the board's linear supersession chain and renders the newest live successor's actual id, kind, and body instead of silently dropping the context.
+- **Fixed:** duplicate refs and refs to several ancestors of one chain render that live entry once. Deduplication tracks entries actually rendered, so the same entry is not repeated under "THIS CARD SO FAR," while resumed-card questions and their linked human answers remain visible.
+- **Added:** shared-renderer regressions for zero-hop, multi-hop, alias, isolation, and history deduplication, plus Ollama and Codex fake-runner coverage of the prompt each adapter receives.
+
+---
+
 ## Resumed cards see their answers (#448)
 **2026-10-02** · (link once pushed)
 
