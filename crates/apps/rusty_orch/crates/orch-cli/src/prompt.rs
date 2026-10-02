@@ -1,6 +1,7 @@
 //! Prompt rendering: the card, the entries it points at, and the adapter's
 //! format-spec footer.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use orch_core::board::{Board, Entry, EntryKind};
@@ -34,19 +35,24 @@ pub fn render(task: &Task, board: &Board, footer: &str) -> String {
         let _ = writeln!(out, "- {}", ref_line(r));
     }
     out.push_str("\nCONTEXT (live board entries referenced above)\n");
+    let mut shown = HashSet::new();
     for r in &spec.refs {
         let Ref::Entry(id) = r else { continue };
-        let Some(entry) = board.get(*id).filter(|_| !board.is_superseded(*id)) else {
+        let Some(entry) = live_successor(board, *id) else {
             continue;
         };
+        if !shown.insert(entry.id()) {
+            continue;
+        }
         let _ = writeln!(
             out,
-            "{id} [{:?}]: {}",
+            "{} [{:?}]: {}",
+            entry.id(),
             entry.content().kind,
             entry.content().body
         );
     }
-    let history = card_history(task, board);
+    let history = card_history(task, board, &shown);
     if !history.is_empty() {
         out.push_str(
             "\nTHIS CARD SO FAR (your earlier entries on this card, and answers to them)\n",
@@ -67,16 +73,7 @@ pub fn render(task: &Task, board: &Board, footer: &str) -> String {
 
 /// Live entries written on this card, plus live answers to any of them,
 /// minus anything the card's refs already show. Board order.
-fn card_history<'b>(task: &Task, board: &'b Board) -> Vec<&'b Entry> {
-    let shown: Vec<EntryId> = task
-        .spec()
-        .refs
-        .iter()
-        .filter_map(|r| match r {
-            Ref::Entry(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
+fn card_history<'b>(task: &Task, board: &'b Board, shown: &HashSet<EntryId>) -> Vec<&'b Entry> {
     let own: Vec<EntryId> = board
         .live()
         .filter(|e| e.content().task == Some(task.id()))
@@ -90,6 +87,19 @@ fn card_history<'b>(task: &Task, board: &'b Board) -> Vec<&'b Entry> {
             (own.contains(&e.id()) || answers_own) && !shown.contains(&e.id())
         })
         .collect()
+}
+
+/// Follow the board's linear supersession links to the current entry.
+fn live_successor(board: &Board, mut id: EntryId) -> Option<&Entry> {
+    board.get(id)?;
+    while let Some(successor) = board
+        .entries()
+        .iter()
+        .find(|entry| entry.content().supersedes == Some(id))
+    {
+        id = successor.id();
+    }
+    board.get(id)
 }
 
 fn role_name(role: Role) -> &'static str {
