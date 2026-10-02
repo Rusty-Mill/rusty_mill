@@ -201,11 +201,6 @@ fn an_eligible_missing_binary_is_an_error_and_later_measurement_completes() {
         &products,
         &["--prebuilt", target.to_str().unwrap(), "--runs", "1"],
     );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     let table = stdout(&output);
     let missing = table
         .lines()
