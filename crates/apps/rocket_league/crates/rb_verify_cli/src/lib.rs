@@ -8,7 +8,7 @@ use rb_domain::{
     CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
 };
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
-use rb_physics_bullet::world::simulate_recorded;
+use rb_physics_bullet::world::{simulate_recorded, simulate_recorded_one_step};
 use rb_physics_bullet::PhysicsWorld;
 use rb_replay_ingest::ReplayFileSource;
 use std::path::Path;
@@ -240,8 +240,32 @@ pub fn trace_capture(
     to_secs: f32,
 ) -> Result<Vec<TraceRow>, IngestError> {
     let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    Ok(trace_rows(&recorded, &candidate, from_secs, to_secs))
+}
+
+/// Every car at every frame of a capture against the candidate's one-step
+/// prediction of that frame (`RB-VERIFY-003-FR-006`,
+/// `simulate_recorded_one_step`): each candidate frame is stepped once
+/// from the recorded frame before it, so a row's error is that one step's
+/// model error alone, not divergence carried from earlier frames. Same
+/// seed frame and time axis as [`trace_capture`].
+pub fn one_step_capture(capture_path: impl AsRef<Path>) -> Result<Vec<TraceRow>, IngestError> {
+    let (recorded, world) = seed(capture_path)?;
+    let candidate = simulate_recorded_one_step(world, &recorded);
+    Ok(trace_rows(&recorded, &candidate, 0.0, f32::INFINITY))
+}
+
+/// Pairs recorded and candidate frames by index and cars by `player_id`,
+/// keeping frames whose time since the first recorded frame falls in
+/// `[from_secs, to_secs]`.
+fn trace_rows(
+    recorded: &[PhysicsFrame],
+    candidate: &[PhysicsFrame],
+    from_secs: f32,
+    to_secs: f32,
+) -> Vec<TraceRow> {
     let Some(origin) = recorded.first().map(|frame| frame.timestamp_secs) else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let mut rows = Vec::new();
     for (rec, cand) in recorded.iter().zip(candidate.iter()) {
@@ -265,7 +289,7 @@ pub fn trace_capture(
             });
         }
     }
-    Ok(rows)
+    rows
 }
 
 /// Shared plumbing behind [`score_capture_against_candidate`] and
@@ -277,6 +301,14 @@ pub fn trace_capture(
 fn seed_and_simulate(
     capture_path: impl AsRef<Path>,
 ) -> Result<(Vec<PhysicsFrame>, Vec<PhysicsFrame>), IngestError> {
+    let (recorded, world) = seed(capture_path)?;
+    let candidate = simulate_recorded(world, &recorded);
+    Ok((recorded, candidate))
+}
+
+/// The capture from its first grounded, neutral frame on, and a world
+/// seeded from that frame.
+fn seed(capture_path: impl AsRef<Path>) -> Result<(Vec<PhysicsFrame>, PhysicsWorld), IngestError> {
     let captured = CaptureFileSource::new(capture_path.as_ref()).frames()?;
 
     let seed_index = captured
@@ -290,9 +322,7 @@ fn seed_and_simulate(
 
     let recorded = captured[seed_index..].to_vec();
     let world = PhysicsWorld::from_frame(&recorded[0]);
-    let candidate = simulate_recorded(world, &recorded);
-
-    Ok((recorded, candidate))
+    Ok((recorded, world))
 }
 
 #[cfg(test)]
@@ -452,6 +482,20 @@ mod tests {
         assert!(!later.is_empty());
         assert!(later.iter().all(|row| row.t_secs >= last_t));
         assert!(later.len() < all.len());
+    }
+
+    #[test]
+    fn one_step_rows_cover_the_whole_capture_and_start_exact() {
+        let continuous = trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
+        let one_step = one_step_capture(capture_fixture()).unwrap();
+        assert_eq!(one_step.len(), continuous.len());
+        assert_eq!(one_step[0].velocity_error(), 0.0);
+    }
+
+    #[test]
+    fn one_step_missing_file_reports_io_error() {
+        let result = one_step_capture("does-not-exist.capture.jsonl");
+        assert!(matches!(result, Err(IngestError::Io(_))));
     }
 
     #[test]

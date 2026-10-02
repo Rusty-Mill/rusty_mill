@@ -132,8 +132,15 @@ version: `a245d35`).
    first flip tick, mid-flip rate and landing match, rotation error 0.00.
    `RB-PHYSICS-001-FR-101` (jumps along the car's up axis, tires after the
    jump) is confirmed: `test2.jsonl` growth window 4 s 0.64 uu (was 1.27),
-   5 s 4.6 uu (was 7.3). Next, the largest early error left: `test2.jsonl`
-   window 5 s (37 uu/s), the 5.575 s landing.
+   5 s 4.6 uu (was 7.3). The 5.575 s landing was investigated: what is
+   left is a few uu/s of lateral tire friction on a tilted two-wheel
+   landing that the side-flip capture contradicts; parked.
+   `rb-verify --self-onestep` (`RB-VERIFY-003-FR-006`) now ranks the
+   model's worst single steps: by far the largest are `test2.jsonl`
+   8.86-8.95 s (~1,200 uu/s), the car driving along a corner transition,
+   which needs wheel rays against walls and curves (they only cast
+   against the floor) and the arena's curve geometry checked (the
+   candidate's corner surface sits ~30 uu inside the recorded car).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -142,7 +149,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (445 tests: 27 `rb_domain`, 379
+- `cargo test --workspace`: pass (448 tests: 27 `rb_domain`, 380
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

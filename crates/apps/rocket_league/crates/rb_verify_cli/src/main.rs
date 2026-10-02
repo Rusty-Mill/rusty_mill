@@ -19,6 +19,11 @@
 //!   `window-secs`-wide time window instead of one whole-run number, so
 //!   whether the divergence grows gradually or abruptly can be read
 //!   directly from the output.
+//! - `rb-verify --self-onestep <capture-file> [count]`: the `count`
+//!   (default 20) frames with the largest one-step car velocity error
+//!   (`one_step_capture`, `RB-VERIFY-003-FR-006`) — each frame predicted
+//!   from the recorded frame before it, so the list points at the model's
+//!   worst single steps rather than at accumulated divergence.
 //! - `rb-verify --self-trace <capture-file> <from-secs> <to-secs>`: the
 //!   per-frame trace (`trace_capture`, `RB-VERIFY-003-FR-005`) — every car
 //!   at every frame in that window, with the recorded input and the
@@ -28,9 +33,9 @@
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{ControllerInput, Vec3};
 use rb_verify_cli::{
-    car_frame_spin, rotation_rate, score_capture_against_candidate, score_capture_growth,
-    score_replay_against_capture, trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS,
-    DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    car_frame_spin, one_step_capture, rotation_rate, score_capture_against_candidate,
+    score_capture_growth, score_replay_against_capture, trace_capture, TraceRow,
+    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::process::ExitCode;
@@ -144,6 +149,28 @@ fn print_trace(rows: &[TraceRow]) {
     }
 }
 
+/// The `count` rows with the largest velocity error, worst first: time,
+/// input, velocity and spin errors, and the recorded vs. predicted
+/// velocity and spin.
+fn print_worst_steps(rows: &[TraceRow], count: usize) {
+    let mut worst: Vec<&TraceRow> = rows.iter().collect();
+    worst.sort_by(|a, b| b.velocity_error().total_cmp(&a.velocity_error()));
+    for row in worst.into_iter().take(count) {
+        println!(
+            "t={t:>7.3}s car={id} | {input} | err vel {ev:>6.1} spin {es:.2} | vel rec {rv} sim {cv} | spin rec {rs} sim {cs}",
+            t = row.t_secs,
+            id = row.recorded.player_id,
+            input = fmt_input(row.input),
+            ev = row.velocity_error(),
+            es = row.spin_error(),
+            rv = fmt_vec(&row.recorded.velocity),
+            cv = fmt_vec(&row.candidate.velocity),
+            rs = fmt_spin(&row.recorded.angular_velocity),
+            cs = fmt_spin(&row.candidate.angular_velocity),
+        );
+    }
+}
+
 fn parse_secs(name: &str, raw: Option<String>) -> Result<f32, String> {
     let raw = raw.ok_or_else(|| format!("missing {name}"))?;
     raw.parse::<f32>()
@@ -169,7 +196,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>"
+    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]"
 }
 
 fn main() -> ExitCode {
@@ -200,6 +227,31 @@ fn main() -> ExitCode {
             }
             Ok(rows) => {
                 print_trace(&rows);
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
+    if first == "--self-onestep" {
+        let Some(capture_path) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let count = match args.next().map(|raw| raw.parse::<usize>()) {
+            None => 20,
+            Some(Ok(count)) => count,
+            Some(Err(_)) => {
+                eprintln!("invalid count\n{}", usage());
+                return ExitCode::FAILURE;
+            }
+        };
+        return match one_step_capture(capture_path) {
+            Err(e) => {
+                eprintln!("ingestion failed: {e}");
+                ExitCode::FAILURE
+            }
+            Ok(rows) => {
+                print_worst_steps(&rows, count);
                 ExitCode::SUCCESS
             }
         };
