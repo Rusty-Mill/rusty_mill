@@ -130,11 +130,10 @@ version: `a245d35`).
    the recorded car rolls and yaws (possibly the real triangle-mesh
    floor). The side-flip capture (`side.jsonl`) confirms the roll axis:
    first flip tick, mid-flip rate and landing match, rotation error 0.00.
-   Next: re-run `rb-verify --self-trace <test2.jsonl> 4.1 4.2`,
-   `<front.jsonl> 12.0 12.2` and `--self-growth <test2.jsonl>` to confirm
    `RB-PHYSICS-001-FR-101` (jumps along the car's up axis, tires after the
-   jump): the 4.142 s press tick should gain ~2.9 uu/s forward as
-   recorded, and the jump from rest stay under 1 uu/s.
+   jump) is confirmed: `test2.jsonl` growth window 4 s 0.64 uu (was 1.27),
+   5 s 4.6 uu (was 7.3). Next, the largest early error left: `test2.jsonl`
+   window 5 s (37 uu/s), the 5.575 s landing.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).

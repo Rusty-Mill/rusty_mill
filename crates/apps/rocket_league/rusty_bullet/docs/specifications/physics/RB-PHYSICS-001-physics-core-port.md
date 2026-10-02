@@ -5703,7 +5703,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     tick, as recorded (candidate 0.137).
   - **Verification**: `drive` test
     `a_ground_jump_pushes_along_the_cars_up_axis`; `world` test
-    `a_jump_from_rest_goes_straight_up` (now under 1 uu/s).
+    `a_jump_from_rest_goes_straight_up` (now under 1 uu/s); real capture
+    re-traces: `test2.jsonl` velocity error at the 4.142 s press tick 1.0
+    uu/s (was 2.6); `front.jsonl` jump from rest within 1.1 uu/s, drifting
+    at the recorded rate; `--self-growth` `test2.jsonl` window 4 s 0.64 uu
+    / 1.33 uu/s (was 1.27 / 3.22), window 5 s 4.6 uu (was 7.3).
 
 ## Architecture and interfaces
 

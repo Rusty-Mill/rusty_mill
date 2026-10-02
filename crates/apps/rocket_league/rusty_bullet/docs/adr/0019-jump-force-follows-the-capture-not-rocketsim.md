@@ -150,7 +150,11 @@ along the pitched up axis. But that jump from rest keeps under 1 uu/s on
 its press tick, where the up-axis push alone gives 3.3: the brake already
 cancels it in that tick. RocketSim computes the tire impulses before the
 jump; the capture says the tires act after it, so the candidate now jumps
-first on the ground. So the
+first on the ground.
+
+Real capture, 2026-10-02: confirmed. `test2.jsonl`'s press-tick velocity
+error 1.0 uu/s (was 2.6); growth window 4 s 0.64 uu (was 1.27), window 5 s
+4.6 uu (was 7.3); `front.jsonl`'s jump from rest within 1.1 uu/s. So the
 real game keeps the car "grounded" for one step after its wheels let go,
 for both the sticky force and air control (`DriveState::was_on_ground`).
 The 4.15-4.35 s re-trace confirms it: the candidate's yaw rate now holds at
