@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- `orch-cli` `render`: explicit entry refs now follow supersession chains and show the newest live entry's id, kind, and body. Aliases of the same live entry are rendered once and are not repeated in card history (#439).
 - `orch-cli` `render`: a card's own live entries and the answers to them are inlined, so a card resumed after a `Question` sees its `Answer` (#448).
 ### Added
 - `orch-cli` crate: the CLI-adapter core extracted from `orch-ollama` (process seam, JSON reply parser, prompt core with a per-adapter footer, `fake` test doubles). `CommandRunner::run_scrubbed` removes named variables from the child environment. ADR-0004 amended.
