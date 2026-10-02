@@ -28,6 +28,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- One friction row per contact, Bullet's default solver mode
+  (`RB-PHYSICS-001-FR-110`, ADR-0029): `solver::friction_directions` is
+  `friction_direction`, `ContactCache` keeps `[normal, friction]`.
 - The solver drops Bullet's speculative velocity term for contacts still
   clear of their surface, as RocketSim does (`RB-PHYSICS-001-FR-108`); an
   embedded ball is no longer pushed out of the arena.

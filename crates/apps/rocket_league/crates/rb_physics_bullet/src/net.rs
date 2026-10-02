@@ -500,7 +500,9 @@ mod tests {
     /// own construction-time iteration order — physically, this setup has
     /// no way to prefer either side. `solver::resolve_dynamic_manifolds`'s
     /// combined solve reduces that residual roughly 15-fold, to ~0.016
-    /// units/s.
+    /// units/s; ~0.08 since `RB-PHYSICS-001-FR-110` gave each contact one
+    /// friction row along its own slip, still well under the sequential
+    /// loop's.
     #[test]
     fn a_ball_shot_squarely_into_the_net_stays_close_to_a_straight_line_instead_of_veering_sideways(
     ) {
@@ -535,7 +537,7 @@ mod tests {
         }
 
         assert!(
-            ball.linear_velocity.x.abs() < 0.05,
+            ball.linear_velocity.x.abs() < 0.15,
             "expected a squarely-centered, left-right-symmetric net impact to leave the ball's \
              own sideways velocity near zero (the pre-fix sequential loop measured ~0.25 here), \
              got vx={}",
