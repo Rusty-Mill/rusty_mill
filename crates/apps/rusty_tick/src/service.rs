@@ -277,6 +277,7 @@ impl Service {
 
     /// Delete a list; its tasks go to the trash.
     pub fn delete_list(&mut self, id: Uuid) -> Result<()> {
+        self.tasks.require_writable()?;
         if id == INBOX_ID {
             return invalid("the Inbox cannot be deleted");
         }
@@ -295,6 +296,7 @@ impl Service {
     // ---- tasks -------------------------------------------------------
 
     pub fn create_task(&mut self, new: NewTask) -> Result<Task> {
+        self.tasks.require_writable()?;
         self.live_list(new.list_id)?;
         if let Some(parent) = new.parent_id {
             let parent = self.task(parent)?;
@@ -336,6 +338,7 @@ impl Service {
     }
 
     pub fn patch_task(&mut self, id: Uuid, patch: TaskPatch) -> Result<Task> {
+        self.tasks.require_writable()?;
         let mut task = self.task(id)?;
         if let Some(title) = patch.title {
             task.title = clean_title(&title)?;
@@ -651,6 +654,7 @@ impl Service {
     /// Rename a tag everywhere: the entity, its children's `parent`, and every
     /// task that carries it.
     pub fn rename_tag(&mut self, name: &str, new_label: &str) -> Result<Tag> {
+        self.tasks.require_writable()?;
         let old = self.tag(name)?;
         let label = clean_tag_label(new_label)?;
         let new_name = tag_name(&label);
@@ -684,6 +688,7 @@ impl Service {
 
     /// Delete a tag and take it off every task.
     pub fn delete_tag(&mut self, name: &str) -> Result<()> {
+        self.tasks.require_writable()?;
         let tag = self.tag(name)?;
         self.tags.delete(&tag.name)?;
         for mut child in self
@@ -932,6 +937,77 @@ fn clean_items(items: Vec<ChecklistItem>) -> Result<Vec<ChecklistItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn is_recovery_required<T>(result: Result<T>) {
+        assert!(matches!(
+            result,
+            Err(ServiceError::Storage(TickError::RecoveryRequired))
+        ));
+    }
+
+    #[test]
+    fn task_fence_precedes_every_compound_registry_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let parent = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                title: "parent".into(),
+                tags: vec!["Original".into()],
+                ..NewTask::default()
+            })
+            .unwrap();
+        let child = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                parent_id: Some(parent.id),
+                title: "child".into(),
+                tags: vec!["Original".into()],
+                ..NewTask::default()
+            })
+            .unwrap();
+        let mut tasks_before = service.snapshot().tasks;
+        tasks_before.sort_by_key(|task| task.id);
+        let tags_before = service.tags();
+
+        // Force the real trash operation to reach checkpoint and fail there.
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert!(matches!(
+            service.trash_task(parent.id),
+            Err(ServiceError::Storage(TickError::Journal(_)))
+        ));
+
+        is_recovery_required(service.rename_tag("original", "renamed"));
+        is_recovery_required(service.delete_tag("original"));
+        is_recovery_required(service.create_task(NewTask {
+            list_id: INBOX_ID,
+            title: "refused".into(),
+            tags: vec!["created-by-refused-request".into()],
+            ..NewTask::default()
+        }));
+        is_recovery_required(service.patch_task(
+            child.id,
+            TaskPatch {
+                tags: Some(vec!["created-by-refused-patch".into()]),
+                ..TaskPatch::default()
+            },
+        ));
+
+        let mut tasks_after = service.snapshot().tasks;
+        tasks_after.sort_by_key(|task| task.id);
+        assert_eq!(tasks_after, tasks_before);
+        assert_eq!(service.tags(), tags_before);
+        assert!(service.tag("renamed").is_err());
+        assert!(service.tag("created-by-refused-request").is_err());
+        assert!(service.tag("created-by-refused-patch").is_err());
+
+        drop(service);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
+        assert!(reopened.task(parent.id).unwrap().is_deleted());
+        assert!(reopened.task(child.id).unwrap().is_deleted());
+        assert_eq!(reopened.tags(), tags_before);
+    }
 
     #[test]
     fn day_bounds_follow_the_callers_offset() {

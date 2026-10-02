@@ -40,6 +40,12 @@ before its sync failed. Such an error, or any apply, store-sync, or checkpoint
 error after acceptance, fences the live store. It retains a complete
 pre-operation read view and refuses every later mutation until reopen; thus a
 later operation can neither retire an earlier redo nor be overwritten by it.
+An ordinary task insert, replacement, or deletion durability error is fenced
+for the same reason: its append may have left an ambiguous partial frame.
+Compound service operations check this readiness before their first side
+effect, so they cannot mutate the tag or list registries before discovering a
+task-store fence. Duplicate and missing-record validation refusals remain
+definite and do not poison the store.
 The derived indexes are not changed until checkpoint succeeds. Tests simulate
 process loss by dropping isolated synthetic stores at
 each apply prefix; this verifies redo/reopen behavior, not physical power-loss

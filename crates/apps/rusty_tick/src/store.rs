@@ -118,11 +118,15 @@ impl TaskStore {
 
     pub fn insert(&mut self, task: Task) -> Result<(), TickError> {
         self.require_writable()?;
+        let before = self.snapshot();
         let id = task.id;
         match self.stack.insert(task.clone()) {
             Ok(()) => {}
             Err(InsertError::Duplicate(_)) => return Err(TickError::Duplicate(id)),
-            Err(InsertError::Durability(e)) => return Err(TickError::Storage(e)),
+            Err(InsertError::Durability(e)) => {
+                self.recovery_view = Some(before);
+                return Err(TickError::Storage(e));
+            }
         }
         self.index(&task);
         Ok(())
@@ -132,10 +136,14 @@ impl TaskStore {
         self.require_writable()?;
         let id = task.id;
         let old = self.stack.get(id).ok_or(TickError::NotFound(id))?;
+        let before = self.snapshot();
         match self.stack.replace(task.clone()) {
             Ok(()) => {}
             Err(ReplaceError::NotFound(_)) => return Err(TickError::NotFound(id)),
-            Err(ReplaceError::Durability(e)) => return Err(TickError::Storage(e)),
+            Err(ReplaceError::Durability(e)) => {
+                self.recovery_view = Some(before);
+                return Err(TickError::Storage(e));
+            }
         }
         self.unindex(&old);
         self.index(&task);
@@ -199,7 +207,7 @@ impl TaskStore {
         Ok(())
     }
 
-    fn require_writable(&self) -> Result<(), TickError> {
+    pub(crate) fn require_writable(&self) -> Result<(), TickError> {
         if self.recovery_view.is_some() {
             Err(TickError::RecoveryRequired)
         } else {
@@ -248,10 +256,14 @@ impl TaskStore {
     pub fn delete(&mut self, id: Uuid) -> Result<(), TickError> {
         self.require_writable()?;
         let old = self.stack.get(id).ok_or(TickError::NotFound(id))?;
+        let before = self.snapshot();
         match self.stack.delete(id) {
             Ok(()) => {}
             Err(DeleteError::NotFound(_)) => return Err(TickError::NotFound(id)),
-            Err(DeleteError::Durability(e)) => return Err(TickError::Storage(e)),
+            Err(DeleteError::Durability(e)) => {
+                self.recovery_view = Some(before);
+                return Err(TickError::Storage(e));
+            }
         }
         self.unindex(&old);
         Ok(())
@@ -517,8 +529,45 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_persistence_failure_fences_the_store_without_poisoning_not_found() {
+        let (dir, originals, unrelated) = fixture();
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            store.replace(task(999, unrelated.list_id, "missing")),
+            Err(TickError::NotFound(_))
+        ));
+        assert!(
+            store.get(unrelated.id).is_some(),
+            "validation is non-poisoning"
+        );
+
+        let log = insert_log::log_path(&dir.path().join("tasks.mmap"));
+        std::fs::create_dir(&log).unwrap();
+        let mut changed = unrelated.clone();
+        changed.title = "must not become visible".into();
+        assert!(matches!(store.replace(changed), Err(TickError::Storage(_))));
+        assert_eq!(store.get(unrelated.id).unwrap(), unrelated);
+        assert!(matches!(
+            store.insert(task(5, unrelated.list_id, "refused")),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.delete(originals[0].id),
+            Err(TickError::RecoveryRequired)
+        ));
+
+        drop(store);
+        std::fs::remove_dir(log).unwrap();
+        let reopened = TaskStore::open(dir.path()).unwrap();
+        assert_eq!(reopened.get(unrelated.id).unwrap(), unrelated);
+        for original in originals {
+            assert_eq!(reopened.get(original.id).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn accepted_redo_recovers_recognized_insert_log_creation_prefixes_only() {
-        for prefix_len in [0, 10] {
+        for prefix_len in [0, 1, 7, 8, 11, 27] {
             let (dir, originals, unrelated) = fixture();
             let (_, batch) = trash_batch(&originals, 50);
             let mut store = TaskStore::open(dir.path()).unwrap();
