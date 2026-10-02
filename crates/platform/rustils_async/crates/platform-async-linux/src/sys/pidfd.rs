@@ -94,3 +94,16 @@ pub(crate) fn descriptor_flags(raw_fd: std::os::fd::RawFd) -> i32 {
     // argument. Tests deliberately also pass a recently closed descriptor.
     unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }
 }
+
+#[cfg(test)]
+pub(crate) fn close_descriptor(raw_fd: std::os::fd::RawFd) {
+    // SAFETY: tests pass a descriptor they intentionally relinquish.
+    unsafe { libc::close(raw_fd) };
+}
+
+#[cfg(test)]
+pub(crate) fn replace_descriptor(source: BorrowedFd<'_>, target: std::os::fd::RawFd) -> i32 {
+    // SAFETY: `source` is valid for the call and dup2 atomically replaces the
+    // target descriptor. The returned descriptor remains owned by the caller.
+    unsafe { libc::dup2(source.as_raw_fd(), target) }
+}
