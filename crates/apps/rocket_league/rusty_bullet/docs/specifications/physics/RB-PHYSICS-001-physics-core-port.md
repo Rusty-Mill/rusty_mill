@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.109.0
+- Version: 0.110.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5814,6 +5814,35 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     156 (was 252), spin 2.0 (was 5.8); mean 0.407 (was 0.457); `test2` and
     `side` unchanged.
 
+- `RB-PHYSICS-001-FR-106` (the arena's side ramps and corners are the real
+  collision mesh; speculative manifold points; implemented, verified by
+  tests and the owner's capture, ADR-0025): `mesh::StaticMesh` and
+  `arena::standard_meshes` embed RLUtilities' soccar corner and ramp
+  triangles (GPL-3.0; the repository is GPL-3.0-only since), mirrored into
+  place, replacing the corner wall planes, side and corner seams, vertical
+  edges and FR-102's swept fillets. A car meets a mesh through
+  `collision::ContactManifold` (one corner per triangle a tick), the ball
+  through `StaticMesh::sphere_contacts`, and wheel rays hit triangles. The
+  manifold hands every stored point to the solver, so a point still up to
+  ~2 uu clear acts as a speculative contact, as in Bullet.
+  - Why: `test2.jsonl` 8.96-9.07 s, the corner-wall ride: against the
+    real triangles the recorded corners penetrate 0.4-1.6 uu while taking
+    small impulses; against FR-102's smooth curves they were 1-3 uu clear
+    and the candidate found no contact. At 9.067 s the recorded impulse
+    starts 0.75 uu clear (Bullet's speculative contact).
+  - **Verification**: `mesh` tests (orientation, ray front face, sphere
+    contacts, closest point); `collision` tests
+    `a_box_corner_below_a_mesh_triangle_gets_one_contact_for_it`,
+    `a_manifold_hands_a_point_still_clear_of_its_surface_to_the_solver`;
+    `arena` tests for triangle counts, facing, the four mirrored corner
+    walls and the ramp profile; `world` tests
+    `a_car_on_a_side_floor_ramp_has_its_wheels_on_the_mesh`,
+    `a_car_on_a_corner_wall_has_all_four_wheels_on_its_flat_facets`. Real
+    captures `--self-onestep`: `test2.jsonl` mean 1.78 uu/s (was 2.25),
+    corner/wall segment 6.0 (was 13.4), 8.967 s 23 (was 178), 9.067 s 36
+    (was 134), 8.958 s 173 (was 223); `front.jsonl` mean 0.385 (was
+    0.407); `side.jsonl` unchanged.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7303,6 +7332,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.110.0 (2026-10-02): `RB-PHYSICS-001-FR-106` — side ramps and corners
+  are the real collision mesh; speculative manifold points; repository
+  GPL-3.0-only (ADR-0025). 390 tests in `rb_physics_bullet`.
 - 0.109.0 (2026-10-02): `RB-PHYSICS-001-FR-105` — car-plane contact
   through Bullet's persistent manifold (ADR-0024). 395 tests in
   `rb_physics_bullet`.

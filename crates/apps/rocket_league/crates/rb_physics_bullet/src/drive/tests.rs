@@ -2842,9 +2842,18 @@ fn wheels_on_ground(car: &RigidBody, plane: &StaticPlane) -> bool {
     is_on_ground(&cast_wheels(car, plane_contact(plane), TICK))
 }
 
-/// The point probe `cast_wheels` takes, for a scene of just `plane`.
-fn plane_contact(plane: &StaticPlane) -> impl Fn(Vec3) -> Option<crate::Contact> + '_ {
-    move |point| crate::collision::sphere_vs_plane(point, 0.0, plane)
+/// The ray `cast_wheels` takes, for a scene of just `plane`.
+fn plane_contact(
+    plane: &StaticPlane,
+) -> impl Fn(Vec3, Vec3, f32) -> Option<crate::collision::RayHit> + '_ {
+    move |origin, direction, length| {
+        crate::collision::raycast(
+            |point| crate::collision::sphere_vs_plane(point, 0.0, plane),
+            origin,
+            direction,
+            length,
+        )
+    }
 }
 
 fn level_car_at_height(z: f32) -> RigidBody {

@@ -18,6 +18,7 @@
 //! since `RB-PHYSICS-001-FR-042`).
 
 use crate::body::{RigidBody, Shape};
+use crate::mesh::StaticMesh;
 use rb_domain::{Quat, Vec3};
 
 /// A single contact point between a dynamic body and a static plane.
@@ -37,11 +38,10 @@ pub struct Contact {
 /// `btManifoldPoint::getContactProcessingThreshold()`: contacts aren't
 /// generated until the gap is this small (or overlapping), so resting
 /// bodies don't jitter between "touching" and "not touching" every frame.
-const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
+pub(crate) const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
 
 use crate::body::{
     StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
-    StaticSweptFillet,
 };
 
 /// Analytic sphere-vs-plane contact: the sphere's closest point to the
@@ -164,84 +164,183 @@ const CONTACT_BREAKING_FACTOR: f32 = 0.02;
 /// `MANIFOLD_CACHE_SIZE`: points a Bullet persistent manifold keeps.
 const MANIFOLD_CAPACITY: usize = 4;
 
-/// One stored contact: the box corner (shape frame) and where it touched
-/// the plane when last detected.
+/// One stored contact: the box corner (shape frame), the surface plane it
+/// touched (`normal . p = offset`; a static plane or one mesh triangle's),
+/// and where on that plane it touched when last detected.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ManifoldPoint {
     local_corner: Vec3,
-    on_plane: Vec3,
+    normal: Vec3,
+    offset: f32,
+    on_surface: Vec3,
 }
 
-/// A box's contact with one static plane as Bullet keeps it
-/// (`RB-PHYSICS-001-FR-105`, ADR-0024): `btConvexPlaneCollisionAlgorithm`
-/// adds one support corner per tick (the multi-point perturbation is off
-/// by default), and the `btPersistentManifold` keeps earlier corners until
-/// they separate or slide past the breaking threshold, up to 4. A box
-/// landing on a corner therefore gets one off-centre contact on its first
-/// tick, which the owner's nose-first landings show as yaw and roll
-/// (`front.jsonl` 19.083 s and 25.967 s); a box lying flat collects all 4
-/// corners within a few ticks.
+/// Deepest a box corner may sit behind a mesh triangle and still be taken
+/// as touching it (uu); deeper, it is past some other part of the wall.
+const MESH_MAX_DEPTH: f32 = 50.0;
+
+/// A box's contact with one static plane or mesh as Bullet keeps it
+/// (`RB-PHYSICS-001-FR-105`, ADR-0024; meshes since FR-106, ADR-0025):
+/// `btConvexPlaneCollisionAlgorithm` adds one support corner per tick
+/// against a plane (the multi-point perturbation is off by default), and
+/// `btConvexTriangleCallback` one point per triangle against a mesh. The
+/// `btPersistentManifold` keeps earlier points until they separate or
+/// slide past the breaking threshold, up to 4. A box landing on a corner
+/// therefore gets one off-centre contact on its first tick, which the
+/// owner's nose-first landings show as yaw and roll (`front.jsonl`
+/// 19.083 s and 25.967 s); a box lying flat collects all 4 corners within
+/// a few ticks.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct PlaneManifold {
+pub struct ContactManifold {
     points: Vec<ManifoldPoint>,
 }
 
-impl PlaneManifold {
-    /// Runs one tick of collision against `plane` and returns the contacts
-    /// to solve. A sphere has a single support point anyway and keeps
-    /// `contacts_vs_plane`.
-    pub fn update(&mut self, body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> {
+/// A box body's corners and breaking threshold, for manifold updates.
+struct BoxCorners<'a> {
+    body: &'a RigidBody,
+    half_extents: Vec3,
+    breaking: f32,
+}
+
+impl BoxCorners<'_> {
+    fn new(body: &RigidBody) -> Option<BoxCorners<'_>> {
         let Shape::Box { half_extents } = body.shape else {
+            return None;
+        };
+        let breaking =
+            CONTACT_BREAKING_FACTOR * (half_extents.length() + body.shape_offset.length());
+        Some(BoxCorners {
+            body,
+            half_extents,
+            breaking,
+        })
+    }
+
+    fn world(&self, local: &Vec3) -> Vec3 {
+        self.body.shape_center() + self.body.orientation.rotate(local)
+    }
+
+    fn locals(&self) -> [Vec3; 8] {
+        let h = self.half_extents;
+        std::array::from_fn(|i| {
+            let sign = |bit: usize| if i & bit == 0 { -1.0 } else { 1.0 };
+            Vec3::new(sign(1) * h.x, sign(2) * h.y, sign(4) * h.z)
+        })
+    }
+}
+
+impl ContactManifold {
+    /// Runs one tick of collision against `plane`: Bullet's support
+    /// corner, picked by sign on each axis. A sphere has a single support
+    /// point anyway and keeps `contacts_vs_plane`.
+    pub fn update_plane(&mut self, body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> {
+        let Some(corners) = BoxCorners::new(body) else {
             self.points.clear();
             return contacts_vs_plane(body, plane);
         };
-        let center = body.shape_center();
-        let world = |local: &Vec3| center + body.orientation.rotate(local);
-        let breaking =
-            CONTACT_BREAKING_FACTOR * (half_extents.length() + body.shape_offset.length());
-
         let toward = body.orientation.conjugate().rotate(&(-plane.normal));
         let pick = |direction: f32, half: f32| if direction >= 0.0 { half } else { -half };
+        let h = corners.half_extents;
         let local_corner = Vec3::new(
-            pick(toward.x, half_extents.x),
-            pick(toward.y, half_extents.y),
-            pick(toward.z, half_extents.z),
+            pick(toward.x, h.x),
+            pick(toward.y, h.y),
+            pick(toward.z, h.z),
         );
-        let corner = world(&local_corner);
-        let gap = plane.signed_distance(&corner);
-        if gap < breaking {
-            self.add(ManifoldPoint {
-                local_corner,
-                on_plane: corner - plane.normal * gap,
-            });
+        self.tick(
+            &corners,
+            [(local_corner, plane.normal, plane.offset)].into_iter(),
+        )
+    }
+
+    /// Runs one tick of collision against `mesh`: for each nearby
+    /// triangle, the box corner deepest below it while over it. A sphere
+    /// takes `StaticMesh::sphere_contacts`.
+    pub fn update_mesh(&mut self, body: &RigidBody, mesh: &StaticMesh) -> Vec<Contact> {
+        let Some(corners) = BoxCorners::new(body) else {
+            self.points.clear();
+            return match body.shape {
+                Shape::Sphere { radius } => mesh.sphere_contacts(body.position, radius),
+                Shape::Box { .. } => Vec::new(),
+            };
+        };
+        let locals = corners.locals();
+        let worlds = locals.map(|local| corners.world(&local));
+        let pad = Vec3::new(corners.breaking, corners.breaking, corners.breaking);
+        let min = worlds.iter().fold(worlds[0], |m, p| {
+            Vec3::new(m.x.min(p.x), m.y.min(p.y), m.z.min(p.z))
+        }) - pad;
+        let max = worlds.iter().fold(worlds[0], |m, p| {
+            Vec3::new(m.x.max(p.x), m.y.max(p.y), m.z.max(p.z))
+        }) + pad;
+        let candidates: Vec<(Vec3, Vec3, f32)> = mesh
+            .near(min, max)
+            .filter_map(|triangle| {
+                locals
+                    .iter()
+                    .zip(worlds.iter())
+                    .map(|(local, world)| (local, world, triangle.signed_distance(world)))
+                    .filter(|(_, world, gap)| {
+                        *gap < corners.breaking
+                            && *gap > -MESH_MAX_DEPTH
+                            && triangle.covers_at_depth(world, *gap)
+                    })
+                    .min_by(|a, b| a.2.total_cmp(&b.2))
+                    .map(|(local, _, _)| (*local, triangle.normal, triangle.offset()))
+            })
+            .collect();
+        self.tick(&corners, candidates.into_iter())
+    }
+
+    /// Adds this tick's detections, refreshes every stored point against
+    /// its own plane, and returns every stored point, as Bullet hands its
+    /// whole manifold to the solver: a point still up to the breaking
+    /// threshold clear of its surface is a speculative contact, which
+    /// `solver::setup_rows` lets close only that gap this tick
+    /// (`RB-PHYSICS-001-FR-106`; `test2.jsonl` 9.067 s, where the recorded
+    /// car takes a wall impulse from 0.75 uu clear).
+    fn tick(
+        &mut self,
+        corners: &BoxCorners,
+        detected: impl Iterator<Item = (Vec3, Vec3, f32)>,
+    ) -> Vec<Contact> {
+        for (local_corner, normal, offset) in detected {
+            let corner = corners.world(&local_corner);
+            let gap = normal.dot(&corner) - offset;
+            if gap < corners.breaking {
+                self.add(ManifoldPoint {
+                    local_corner,
+                    normal,
+                    offset,
+                    on_surface: corner - normal * gap,
+                });
+            }
         }
-
+        let gap_of = |point: &ManifoldPoint| {
+            let corner = corners.world(&point.local_corner);
+            (corner, point.normal.dot(&corner) - point.offset)
+        };
         self.points.retain(|point| {
-            let corner = world(&point.local_corner);
-            let gap = plane.signed_distance(&corner);
-            let drift = corner - plane.normal * gap - point.on_plane;
-            gap <= breaking && drift.length() <= breaking
+            let (corner, gap) = gap_of(point);
+            let drift = corner - point.normal * gap - point.on_surface;
+            gap <= corners.breaking && drift.length() <= corners.breaking
         });
-
         self.points
             .iter()
-            .filter_map(|point| {
-                let corner = world(&point.local_corner);
-                let gap = plane.signed_distance(&corner);
-                (gap <= CONTACT_PROCESSING_THRESHOLD).then_some(Contact {
-                    normal: plane.normal,
+            .map(|point| {
+                let (corner, gap) = gap_of(point);
+                Contact {
+                    normal: point.normal,
                     point: corner,
                     penetration_depth: -gap,
-                })
+                }
             })
             .collect()
     }
 
     /// Bullet's `getCacheEntry`/`replaceContactPoint`: the same corner
-    /// refreshes its entry. When full, this replaces the stored point
-    /// farthest from the plane at its last detection, a simpler stand-in
-    /// for Bullet's area-maximizing `sortCachedPoints` (a box against a
-    /// plane rarely has more than 4 corners within 2 uu of it).
+    /// refreshes its entry. When full, this replaces the oldest stored
+    /// point, a simpler stand-in for Bullet's area-maximizing
+    /// `sortCachedPoints`.
     fn add(&mut self, point: ManifoldPoint) {
         if let Some(existing) = self
             .points
@@ -251,11 +350,10 @@ impl PlaneManifold {
             *existing = point;
             return;
         }
-        if self.points.len() < MANIFOLD_CAPACITY {
-            self.points.push(point);
-            return;
+        if self.points.len() == MANIFOLD_CAPACITY {
+            self.points.remove(0);
         }
-        self.points[0] = point;
+        self.points.push(point);
     }
 
     /// Number of stored points, touching or not.
@@ -268,6 +366,7 @@ impl PlaneManifold {
         self.points.is_empty()
     }
 }
+
 /// Like `sphere_vs_plane`, but against a `StaticGoalWall`'s window
 /// (`RB-PHYSICS-001-FR-024`): a sphere whose *center* falls inside the
 /// window gets no contact at all, letting it pass straight through into
@@ -718,86 +817,6 @@ pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) 
             box_vs_corner_fillet(body.shape_center(), body.orientation, half_extents, fillet)
         }
     }
-}
-
-/// Analytic sphere-vs-swept-fillet contact (`RB-PHYSICS-001-FR-102`): the
-/// "ride the concave inside" test of `sphere_vs_quarter_pipe`, done in the
-/// meridian plane through `position`. That plane holds the closest surface
-/// point for a torus. Gated to the edge's sector, and within the meridian
-/// to the quadrant between the floor/ceiling and the edge's own cylinder.
-/// Outside that region the plane or the edge cylinder governs instead.
-pub(crate) fn sphere_vs_swept_fillet(
-    position: Vec3,
-    radius: f32,
-    fillet: &StaticSweptFillet,
-) -> Option<Contact> {
-    let rel = position - fillet.axis_point;
-    let radial = rel - fillet.axis_direction * rel.dot(&fillet.axis_direction);
-    let dist = radial.length();
-    if dist < 1e-6 {
-        return None;
-    }
-    let dir = radial * (1.0 / dist);
-    if fillet.sector_start.cross(&dir).dot(&fillet.axis_direction) < 0.0
-        || dir.cross(&fillet.sector_end).dot(&fillet.axis_direction) < 0.0
-    {
-        return None;
-    }
-    let tube = fillet.tube_radius_at(&dir);
-    let center = fillet.axis_point + dir * (fillet.wall_radius - tube) + fillet.inward * tube;
-    let offset = position - center;
-    if offset.dot(&dir) < 0.0 || offset.dot(&fillet.inward) > 0.0 {
-        return None;
-    }
-    let offset_length = offset.length();
-    let gap = (tube - radius) - offset_length;
-    if gap > CONTACT_PROCESSING_THRESHOLD || offset_length < 1e-6 {
-        return None;
-    }
-    let out = offset * (1.0 / offset_length);
-    Some(Contact {
-        normal: -out,
-        point: center + out * tube,
-        penetration_depth: -gap,
-    })
-}
-
-/// Dispatches a contact test against a swept fillet: a sphere directly, a
-/// box by its 8 corners as zero-radius spheres, the same technique as
-/// `box_vs_quarter_pipe`. Distance from the tube's center circle is only
-/// locally convex, so unlike the cylinder this is an approximation, exact
-/// whenever the box is small next to the tube (a car's 60 uu half-length
-/// against a 160 to 512 uu tube).
-pub fn contacts_vs_swept_fillet(body: &RigidBody, fillet: &StaticSweptFillet) -> Vec<Contact> {
-    match body.shape {
-        Shape::Sphere { radius } => sphere_vs_swept_fillet(body.position, radius, fillet)
-            .into_iter()
-            .collect(),
-        Shape::Box { half_extents } => {
-            box_corners(body.shape_center(), body.orientation, half_extents)
-                .into_iter()
-                .filter_map(|corner| {
-                    sphere_vs_swept_fillet(corner, 0.0, fillet).map(|contact| Contact {
-                        point: corner,
-                        ..contact
-                    })
-                })
-                .collect()
-        }
-    }
-}
-
-fn box_corners(position: Vec3, orientation: Quat, half_extents: Vec3) -> [Vec3; 8] {
-    let corner = |i: usize| {
-        let sign = |bit: usize| if i & bit == 0 { -1.0 } else { 1.0 };
-        let local = Vec3::new(
-            sign(1) * half_extents.x,
-            sign(2) * half_extents.y,
-            sign(4) * half_extents.z,
-        );
-        position + orientation.rotate(&local)
-    };
-    std::array::from_fn(corner)
 }
 
 /// A ray's first hit against a static surface.
@@ -2332,64 +2351,6 @@ mod tests {
         assert!(contacts_vs_bounded_wall(&car, &wall).is_empty());
     }
 
-    /// The standard arena's first swept fillet (the +X/+Y side edge's
-    /// floor ramp), and the outward unit direction to the 45-degree point
-    /// of its tube in the middle of its sector, plus that surface point.
-    fn swept_fillet_midpoint() -> (StaticSweptFillet, Vec3, Vec3) {
-        let fillet = crate::arena::standard_corner_sweeps()[0];
-        let dir = (fillet.sector_start + fillet.sector_end)
-            .normalize()
-            .unwrap();
-        let tube = fillet.tube_radius_at(&dir);
-        let center = fillet.axis_point + dir * (fillet.wall_radius - tube) + fillet.inward * tube;
-        let out = (dir - fillet.inward).normalize().unwrap();
-        (fillet, out, center + out * tube)
-    }
-
-    #[test]
-    fn a_point_past_a_swept_fillets_surface_is_pushed_back_toward_the_tube_center() {
-        let (fillet, out, surface) = swept_fillet_midpoint();
-        let contact = sphere_vs_swept_fillet(surface + out * 5.0, 0.0, &fillet).unwrap();
-        assert!((contact.penetration_depth - 5.0).abs() < 1e-2);
-        assert!((contact.normal + out).length() < 1e-4);
-        assert!(sphere_vs_swept_fillet(surface - out * 5.0, 0.0, &fillet).is_none());
-    }
-
-    #[test]
-    fn a_swept_fillet_ignores_points_outside_its_sector_or_tube_quadrant() {
-        let (fillet, out, surface) = swept_fillet_midpoint();
-        let past = surface + out * 5.0;
-        // Mirrored across the edge axis: outside the sector.
-        let mirrored = fillet.axis_point * 2.0 - Vec3::new(past.x, past.y, -past.z);
-        assert!(sphere_vs_swept_fillet(mirrored, 0.0, &fillet).is_none());
-        // Above the tube center: the vertical edge cylinder governs there.
-        let above = past + fillet.inward * 400.0;
-        assert!(sphere_vs_swept_fillet(above, 0.0, &fillet).is_none());
-    }
-
-    #[test]
-    fn a_box_corner_past_a_swept_fillet_makes_a_contact_at_that_corner() {
-        let (fillet, out, surface) = swept_fillet_midpoint();
-        let half_extents = Vec3::new(20.0, 20.0, 20.0);
-        let corner_offset = half_extents.length();
-        // Unrotated, so the corner toward `out` is the one nearest the
-        // surface; placed 3 uu past it along the corner's own diagonal.
-        let corner_dir =
-            Vec3::new(out.x.signum(), out.y.signum(), out.z.signum()) * (1.0 / 3f32.sqrt());
-        let car = RigidBody::car_box(
-            half_extents,
-            1.0,
-            surface + out * 3.0 - corner_dir * corner_offset,
-        );
-        let contacts = contacts_vs_swept_fillet(&car, &fillet);
-        assert!(!contacts.is_empty());
-        let far = contacts_vs_swept_fillet(
-            &RigidBody::car_box(half_extents, 1.0, surface - out * 200.0),
-            &fillet,
-        );
-        assert!(far.is_empty());
-    }
-
     fn floor_probe(point: Vec3) -> Option<Contact> {
         sphere_vs_plane(point, 0.0, &StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0))
     }
@@ -2463,8 +2424,8 @@ mod tests {
         // RB-PHYSICS-001-FR-105: Bullet's one support corner a tick.
         let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
         let car = tipped_box(0.6, 0.2, -1.0);
-        let mut manifold = PlaneManifold::default();
-        let contacts = manifold.update(&car, &floor);
+        let mut manifold = ContactManifold::default();
+        let contacts = manifold.update_plane(&car, &floor);
         assert_eq!(contacts.len(), 1);
         assert!((contacts[0].penetration_depth - 1.0).abs() < 1e-3);
         // The stateless query still sees the same single corner here.
@@ -2474,24 +2435,73 @@ mod tests {
     #[test]
     fn a_manifold_keeps_earlier_corners_until_they_lift_or_slide_off() {
         let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
-        let mut manifold = PlaneManifold::default();
+        let mut manifold = ContactManifold::default();
         // Settling flat: first the nose corner, then (rolled the other
         // way) its opposite side; both stay while within ~2 uu.
-        manifold.update(&tipped_box(0.002, 0.002, -0.5), &floor);
+        manifold.update_plane(&tipped_box(0.002, 0.002, -0.5), &floor);
         let level = tipped_box(0.002, -0.002, -0.5);
-        let contacts = manifold.update(&level, &floor);
+        let contacts = manifold.update_plane(&level, &floor);
         assert_eq!(manifold.len(), 2);
         assert_eq!(contacts.len(), 2);
         // Slid 5 uu along the floor: both drop, the new support corner
         // alone remains.
         let mut slid = level;
         slid.position.x += 5.0;
-        manifold.update(&slid, &floor);
+        manifold.update_plane(&slid, &floor);
         assert_eq!(manifold.len(), 1);
         // Lifted clear: nothing left.
         let mut lifted = slid;
         lifted.position.z += 10.0;
-        assert!(manifold.update(&lifted, &floor).is_empty());
+        assert!(manifold.update_plane(&lifted, &floor).is_empty());
         assert!(manifold.is_empty());
+    }
+
+    fn floor_mesh() -> StaticMesh {
+        let inside = Vec3::new(0.0, 0.0, 500.0);
+        let corners = [
+            Vec3::new(-500.0, -500.0, 0.0),
+            Vec3::new(500.0, -500.0, 0.0),
+            Vec3::new(500.0, 500.0, 0.0),
+            Vec3::new(-500.0, 500.0, 0.0),
+        ];
+        let triangles = [(0, 1, 2), (0, 2, 3)]
+            .iter()
+            .filter_map(|&(a, b, c)| {
+                crate::mesh::Triangle::facing(corners[a], corners[b], corners[c], inside)
+            })
+            .collect();
+        StaticMesh::new(triangles)
+    }
+
+    #[test]
+    fn a_box_corner_below_a_mesh_triangle_gets_one_contact_for_it() {
+        // RB-PHYSICS-001-FR-106: one point per triangle a tick, like
+        // Bullet's btConvexTriangleCallback; the tipped box's lowest corner
+        // lies over one of the two floor triangles.
+        let car = tipped_box(0.6, 0.2, -1.0);
+        let mut manifold = ContactManifold::default();
+        let contacts = manifold.update_mesh(&car, &floor_mesh());
+        let touching: Vec<&Contact> = contacts
+            .iter()
+            .filter(|c| c.penetration_depth > 0.0)
+            .collect();
+        assert_eq!(touching.len(), 1, "{contacts:?}");
+        assert!((touching[0].penetration_depth - 1.0).abs() < 1e-3);
+        assert!((touching[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_manifold_hands_a_point_still_clear_of_its_surface_to_the_solver() {
+        // Bullet's whole manifold reaches the solver; a stored point 1 uu
+        // clear (inside the ~2 uu breaking threshold) is a speculative
+        // contact with negative depth.
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let mut manifold = ContactManifold::default();
+        let contacts = manifold.update_plane(&tipped_box(0.6, 0.2, 1.0), &floor);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth + 1.0).abs() < 1e-3);
+        assert!(manifold
+            .update_plane(&tipped_box(0.6, 0.2, 5.0), &floor)
+            .is_empty());
     }
 }
