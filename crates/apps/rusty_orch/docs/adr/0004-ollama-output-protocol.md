@@ -1,7 +1,9 @@
-# ADR-0004: Ollama adapter: one JSON object on stdout, prompt on stdin
+# ADR-0004: CLI adapters: one JSON object out, prompt on stdin
 
 - **Status:** Accepted
-- **Date:** 2026-10-01
+- **Date:** 2026-10-01 (amended 2026-10-02: shared core extracted to `orch-cli`)
+
+> **Where this lives now.** The process seam (`CommandRunner`, `StdCommand`), the reply parser (`parse`, `allowed_kinds`), the prompt core (`render`, `format_spec`) and the test doubles (`fake`) moved from `orch-ollama` to `orch-cli` when the Codex adapter became the second call site. `orch-ollama` is a thin adapter on it: argv, footer, and the stderr-to-`AgentError` mapping. The protocol and the seam's behaviour below are unchanged.
 
 ## Context
 The first real `AgentRunner` is `Agent::Local` over the Ollama CLI, running one read-only research card and writing real entries to the `Board`. Two things had to be decided: how the model hands entries back, and how the adapter reaches the process.
@@ -18,7 +20,7 @@ The model replies with exactly one JSON object:
 {"entries":[{"kind":"finding","confidence":"high","body":"...","refs":["E-1","path:src/x.rs"]}]}
 ```
 
-- `kind` is a function of the card's `Role`: Research, Triage and Design may write `finding`, `question`, `assumption`; Implement and Review are not served by this adapter. `decision` is never offered: agents propose decisions as findings and the board refuses unreviewed ones (ADR-0005; Design briefly had `decision` before that ADR).
+- `kind` is a function of the card's `Role`: Research, Triage and Design may write `finding`, `question`, `assumption`; Review writes exactly one `review` (with `verdict`: `approve` or `changes_requested`, parsed to `EntryKind::Review { of: <target>, verdict }`) and may add findings beside it (added by ADR-0006); Implement is not served. `decision` is never offered: agents propose decisions as findings and the board refuses unreviewed ones (ADR-0005; Design briefly had `decision` before that ADR).
 - `finding` requires `confidence` in `low`, `medium`, `high`. Other kinds omit it.
 - `body` is non-blank and at most 500 characters. Detail belongs behind refs.
 - `refs` is an array of strings: `E-<n>` for a board entry, or `path:`, `commit:`, `url:` followed by non-blank text. `parse` checks syntax only; existence of `E-<n>` is left to `Board::append`, which already validates it.

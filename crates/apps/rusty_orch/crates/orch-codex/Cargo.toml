@@ -1,0 +1,21 @@
+[package]
+name = "orch-codex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+orch-core = { workspace = true }
+orch-dispatch = { workspace = true }
+orch-cli = { workspace = true }
+
+[dev-dependencies]
+orch-cli = { workspace = true, features = ["fake"] }
+orch-ollama = { workspace = true }
+# Dev-only: the contract test parses OUTPUT_SCHEMA to check it against the parser.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }

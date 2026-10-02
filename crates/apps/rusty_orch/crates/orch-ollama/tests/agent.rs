@@ -3,9 +3,10 @@ mod common;
 use std::time::Duration;
 
 use common::{exit, fixture, task, Call, FakeCommand, REPLY_ONE};
+use orch_cli::ExecError;
 use orch_core::task::Agent;
 use orch_dispatch::AgentRunner;
-use orch_ollama::{ExecError, OllamaAgent};
+use orch_ollama::OllamaAgent;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -29,6 +30,11 @@ fn success_path_runs_fixed_argv_with_prompt_on_stdin() {
     let prompt = String::from_utf8(stdin.clone()).expect("utf8");
     assert!(prompt.contains("OUTPUT FORMAT"));
     assert!(prompt.contains("Plan::start rejects the author."));
+    // Ollama has no API-key path: the child's environment is untouched.
+    assert_eq!(
+        a.runner().scrubbed.lock().expect("lock").as_slice(),
+        &[Vec::<String>::new()]
+    );
 }
 
 #[test]
