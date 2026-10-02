@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.107.0
+- Version: 0.108.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5769,6 +5769,28 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `front`/`side` unchanged. Open: recording `DodgeForward`/`DodgeStrafe`
     in the capture plugin would replace the inference.
 
+- `RB-PHYSICS-001-FR-104` (stall: flip versus double jump from the stick's
+  total deflection; implemented, verified by tests and the owner's capture,
+  ADR-0023 amendment): an airborne jump press flips once
+  `|yaw| + |pitch| + |roll|` reaches `FLIP_INPUT_DEADZONE` (0.5, RocketSim's
+  `CarConfig::dodgeDeadzone`), else double-jumps. A flip whose direction
+  cancels under `DODGE_DEADZONE` (yaw against air roll) is a stall: no
+  impulse, no torque, the flip spent, and the flip's vertical damping from
+  0.15 s.
+  - Why: `test2.jsonl` 15.617 s presses jump with yaw +1, roll -1. The
+    recorded car gets no impulse, then from 15.775 s its vertical speed
+    falls 836, 538, 344, 218 (x0.64 a tick, the flip damping). The
+    candidate took the direction cancel (FR-075) as the flip decision and
+    double-jumped. RocketSim `Car::_UpdateDoubleJumpOrFlip` decides from
+    the summed deflection first, then cancels the direction.
+  - **Verification**: `drive` tests
+    `yaw_against_air_roll_is_a_stall_not_a_double_jump` (rewritten from
+    `yaw_and_roll_combine_in_the_dodge_direction`, which encoded the
+    double jump) and `a_small_stick_deflection_double_jumps`; real capture
+    `--self-onestep`: every `test2.jsonl` tick in 15.6-15.82 s under 1 uu/s
+    (were up to 293); `test2` mean 2.25 uu/s (was 2.72); `front`/`side`
+    unchanged.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7258,6 +7280,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.108.0 (2026-10-02): `RB-PHYSICS-001-FR-104` — stalls: flip versus
+  double jump from the stick's total deflection (ADR-0023 amendment). 393
+  tests in `rb_physics_bullet`.
 - 0.107.0 (2026-10-02): `RB-PHYSICS-001-FR-103` — dodge forward follows
   throttle when pitch is centred; car speed capped (ADR-0023). 392 tests
   in `rb_physics_bullet`.

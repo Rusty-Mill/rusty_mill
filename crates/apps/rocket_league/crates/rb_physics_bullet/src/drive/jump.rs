@@ -72,10 +72,11 @@ pub const JUMP_SPEED: f32 = 875.0 / 3.0;
 /// shape itself is not a mistake to correct.
 pub const WALL_JUMP_HORIZONTAL_SPEED: f32 = 550.0;
 
-/// Deadzone for `pitch`/`roll` input at the moment of a double jump's
-/// fresh press: below this magnitude on both axes, the press is treated as
-/// "no directional intent" and fires a plain vertical double jump; at or
-/// above it on either axis, it fires a dodge instead.
+/// RocketSim's direction cancel: a flip whose `(forward, side)` parts are
+/// both under this is a stall, with no impulse and no torque. Since
+/// `RB-PHYSICS-001-FR-104` it no longer decides flip versus double jump;
+/// `FLIP_INPUT_DEADZONE` does. The FR-075 note below took this cancel for
+/// that decision, which made yaw against air roll a double jump.
 ///
 /// `RB-PHYSICS-001-FR-075` found this port's own long-standing "not a
 /// physics constant and not derived from any Rocket League value" framing
@@ -491,29 +492,41 @@ fn dodge_stick(input: &ControllerInput) -> (f32, f32) {
     (forward, side)
 }
 
-fn stick_past_deadzone(pitch: f32, roll: f32) -> bool {
-    pitch.abs() > DODGE_DEADZONE || roll.abs() > DODGE_DEADZONE
-}
+/// RocketSim's `CarConfig::dodgeDeadzone`: a jump press in the air flips,
+/// rather than double-jumps, once `|yaw| + |pitch| + |roll|` reaches this
+/// (`Car::_UpdateDoubleJumpOrFlip`; `RB-PHYSICS-001-FR-104`).
+pub(super) const FLIP_INPUT_DEADZONE: f32 = 0.5;
 
-/// The dodge a jump press makes, if the stick asks for one: `dodge_stick`
-/// past the deadzone, with the forward part taken from the throttle when
-/// pitch is centred (`RB-PHYSICS-001-FR-103`, ADR-0023). In the owner's
-/// keyboard captures, a yaw-only press with throttle held dodges
-/// diagonally (forward 354, side 354 scaled: `test2.jsonl` 6.058 s and
-/// 12.55 s), and one without throttle dodges purely sideways. Rocket
-/// League dodges from its own `DodgeForward` input, which the captures do
-/// not record; for them it follows the throttle. The throttle never starts
-/// a dodge on its own: no capture shows a neutral-stick press with
-/// throttle held.
+/// The flip a jump press makes, if the stick asks for one
+/// (`RB-PHYSICS-001-FR-104`): `None` for a double jump. Whether to flip
+/// comes from the stick's total deflection (`FLIP_INPUT_DEADZONE`), and
+/// only then its direction, `dodge_stick`. A direction under
+/// `DODGE_DEADZONE` on both parts is a stall: `(0.0, 0.0)`, a flip with no
+/// impulse and no torque. Yaw against air roll (`test2.jsonl` 15.617 s:
+/// yaw +1, roll -1) is the usual stall input.
+///
+/// With a side part and pitch centred, the forward part comes from the
+/// throttle (`RB-PHYSICS-001-FR-103`, ADR-0023). In the owner's keyboard
+/// captures, a yaw-only press with throttle held dodges diagonally
+/// (forward 354, side 354 scaled: `test2.jsonl` 6.058 s and 12.55 s), and
+/// one without throttle dodges purely sideways. Rocket League dodges from
+/// its own `DodgeForward` input, which the captures do not record; for
+/// them it follows the throttle. The throttle never starts a flip on its
+/// own, and no capture shows it during a stall, so a stall stays one.
 pub(super) fn dodge_direction(input: &ControllerInput) -> Option<(f32, f32)> {
-    let (forward, side) = dodge_stick(input);
-    if !stick_past_deadzone(forward, side) {
+    let axis = |value: Option<f32>| value.unwrap_or(0.0).clamp(-1.0, 1.0).abs();
+    let deflection = axis(input.pitch) + axis(input.yaw) + axis(input.roll);
+    if deflection < FLIP_INPUT_DEADZONE {
         return None;
     }
-    let forward = if forward.abs() > DODGE_DEADZONE {
-        forward
-    } else {
+    let (forward, side) = dodge_stick(input);
+    if forward.abs() < DODGE_DEADZONE && side.abs() < DODGE_DEADZONE {
+        return Some((0.0, 0.0));
+    }
+    let forward = if forward.abs() < DODGE_DEADZONE {
         input.throttle.clamp(-1.0, 1.0)
+    } else {
+        forward
     };
     Some((forward, side))
 }
@@ -558,9 +571,14 @@ fn apply_dodge(
     car.apply_impulse(dodge_impulse * car.mass(), Vec3::ZERO);
     // The spin comes from `apply_flip_torque`, starting this same tick.
     let length = (pitch * pitch + roll * roll).sqrt();
+    let direction = if length > 0.0 {
+        (pitch / length, roll / length)
+    } else {
+        (0.0, 0.0)
+    };
     *flip = Some(FlipState {
         time: 0.0,
-        direction: (pitch / length, roll / length),
+        direction,
     });
 }
 

@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- Stalls (`RB-PHYSICS-001-FR-104`, ADR-0023 amendment): an airborne jump
+  press flips once `|yaw| + |pitch| + |roll| >= 0.5`
+  (`drive::jump::FLIP_INPUT_DEADZONE`); yaw against air roll is a
+  zero-direction flip, not a double jump.
 - ADR-0023 (`RB-PHYSICS-001-FR-103`): a dodge's forward part follows the
   throttle when pitch is centred (`drive::jump::dodge_direction`), and
   car linear speed is capped at 2300 uu/s each step;

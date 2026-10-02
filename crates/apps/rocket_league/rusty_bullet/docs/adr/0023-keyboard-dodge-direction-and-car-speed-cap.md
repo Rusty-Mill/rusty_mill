@@ -49,3 +49,15 @@ capped spin.
   left as a proposal.
 - Whether throttle alone (neutral stick) starts a dodge is unknown: no
   capture has such a press. It is kept as a double jump.
+
+## Amendment (2026-10-02, FR-104): stalls
+
+The flip decision was the direction cancel (`|yaw + roll| < 0.1` and
+`|pitch| < 0.1` meant a double jump; FR-075). RocketSim decides first from
+`|yaw| + |pitch| + |roll| >= dodgeDeadzone` (0.5) and only then cancels
+the direction. So yaw against air roll is a stall: a flip with no impulse
+or torque, spending the flip, with the usual vertical damping from 0.15 s.
+`test2.jsonl` 15.617 s is one (yaw +1, roll -1); its damping is the
+x0.64-a-tick drop at 15.775 s. The throttle forward rule applies only when
+the flip has a side part, so a stall stays a stall. One-step error in
+15.6-15.82 s is now under 1 uu/s (was up to 293).

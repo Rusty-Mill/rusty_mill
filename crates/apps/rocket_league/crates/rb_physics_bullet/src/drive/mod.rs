@@ -58,8 +58,8 @@
 //! most once per airborne period no matter how many times jump is released
 //! and re-pressed after that. That impulse is either a plain vertical
 //! `JUMP_SPEED` kick, or a directional **dodge**, depending on the car's
-//! `pitch`/`roll` stick input at the moment of the press: if either exceeds
-//! `DODGE_DEADZONE`, a dodge fires instead — a purely horizontal
+//! `pitch`/`yaw`/`roll` stick input at the moment of the press: past
+//! `FLIP_INPUT_DEADZONE`, a dodge fires instead — a purely horizontal
 //! `DODGE_SPEED` impulse (along `forward_axis` for pitch, `right_axis` for
 //! roll), followed by a flip (see **Flip** below), with RocketSim's signs:
 //! stick forward (pitch -1) dodges forward and noses down
@@ -68,11 +68,11 @@
 //! `[-1.0, 1.0]` individually first) — matching RocketSim's own confirmed
 //! `dodgeDir = (-pitch, yaw + roll, 0)`, so a yaw-only press (no roll held)
 //! now fires a sideways dodge too, the same as a real Rocket League player
-//! nudging the right stick purely left/right. Since `RB-PHYSICS-001-FR-075`,
-//! `DODGE_DEADZONE`'s own trigger (`dodge_pitch.abs() > DODGE_DEADZONE ||
-//! dodge_roll.abs() > DODGE_DEADZONE`) is confirmed the same decision as
-//! RocketSim's own real cancellation check, once that fold-in is in place —
-//! see `DODGE_DEADZONE`'s own doc comment for the full finding. Both pitch
+//! nudging the right stick purely left/right. Since `RB-PHYSICS-001-FR-104`
+//! the press flips once `|yaw| + |pitch| + |roll|` reaches
+//! `FLIP_INPUT_DEADZONE` (0.5), as in RocketSim; a flip whose direction
+//! cancels under `DODGE_DEADZONE` is a stall, a flip with no impulse or
+//! torque that still damps vertical speed. Both pitch
 //! and the combined roll/yaw can contribute at once (a diagonal dodge): since
 //! `RB-PHYSICS-001-FR-072`, their combined
 //! `(pitch, roll)` direction is normalized to unit length before scaling —

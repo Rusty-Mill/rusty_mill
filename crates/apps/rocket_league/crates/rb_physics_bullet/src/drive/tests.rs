@@ -1274,10 +1274,12 @@ fn a_yaw_only_press_fires_a_sideways_dodge_like_roll() {
 }
 
 #[test]
-fn yaw_and_roll_combine_in_the_dodge_direction() {
-    // RB-PHYSICS-001-FR-073: yaw and roll both feed the same combined
-    // roll-axis stick value (roll + yaw) before normalization, so equal
-    // opposite yaw and roll cancel out to no sideways dodge at all.
+fn yaw_against_air_roll_is_a_stall_not_a_double_jump() {
+    // RB-PHYSICS-001-FR-104: yaw and roll feed one side value (FR-073), so
+    // equal and opposite they cancel the flip's direction; the stick's
+    // total deflection (2.0) still makes the press a flip (RocketSim's
+    // `dodgeDeadzone`). A stall: no impulse, and the flip is spent.
+    // test2.jsonl 15.617 s.
     let mut c = car();
     let mut boost = MAX_BOOST;
     let mut jump_held = false;
@@ -1288,6 +1290,7 @@ fn yaw_and_roll_combine_in_the_dodge_direction() {
         yaw: Some(-1.0),
         ..Default::default()
     };
+    assert_eq!(dodge_direction(&input), Some((0.0, 0.0)));
     step_with_input_and_double_jump_state(
         &mut c,
         &input,
@@ -1297,17 +1300,25 @@ fn yaw_and_roll_combine_in_the_dodge_direction() {
         &mut double_jump_available,
         1.0 / 60.0,
     );
-    assert_eq!(
-        c.linear_velocity.y, 0.0,
-        "expected equal-and-opposite roll and yaw to cancel out, got {}",
-        c.linear_velocity.y
-    );
+    assert_eq!(c.linear_velocity.y, 0.0);
     assert!(
-        (c.linear_velocity.z - JUMP_SPEED).abs() < 1.0,
-        "expected a plain double jump instead, since combined roll+yaw \
-         and pitch are both below DODGE_DEADZONE, got {}",
+        c.linear_velocity.z.abs() < 1.0,
+        "expected no double jump, got vz {}",
         c.linear_velocity.z
     );
+    assert!(!double_jump_available, "a stall spends the flip");
+}
+
+#[test]
+fn a_small_stick_deflection_double_jumps() {
+    // Under FLIP_INPUT_DEADZONE in total: a double jump, not a flip.
+    let input = ControllerInput {
+        jump: true,
+        pitch: Some(-0.2),
+        yaw: Some(0.2),
+        ..Default::default()
+    };
+    assert_eq!(dodge_direction(&input), None);
 }
 
 #[test]
