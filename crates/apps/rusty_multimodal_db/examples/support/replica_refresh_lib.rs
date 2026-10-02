@@ -19,8 +19,9 @@ use rusty_multimodal_db::server::client::{
 use rusty_multimodal_db::server::entity::EntityConnectionStore;
 #[cfg(feature = "server")]
 use rusty_multimodal_db::server::memory::MemoryConnectionStore;
+use rusty_multimodal_db::server::protocol::ErrorCode;
 #[cfg(feature = "server")]
-use rusty_multimodal_db::server::protocol::{ErrorCode, WriteOp, WriteResult};
+use rusty_multimodal_db::server::protocol::{WriteOp, WriteResult};
 #[cfg(feature = "server")]
 use rusty_multimodal_db::server::relation::RelationConnectionStore;
 #[cfg(feature = "server")]
@@ -196,16 +197,6 @@ fn refresh_impl(
 ) -> Result<RefreshReport, RefreshError> {
     let mut client = SchemaDrivenClient::connect_with(&target.addr, target.options.clone())
         .map_err(RefreshError::Connect)?;
-    let (files, position) = if with_position {
-        let snapshot = client.fetch_snapshot_at().map_err(RefreshError::Fetch)?;
-        let position = snapshot
-            .position
-            .map(|(epoch, seq)| Position { epoch, seq });
-        (snapshot.files, position)
-    } else {
-        (client.fetch_snapshot().map_err(RefreshError::Fetch)?, None)
-    };
-    drop(client);
 
     std::fs::create_dir_all(root).map_err(|e| staging(root, e))?;
     let stamp = SystemTime::now()
@@ -221,38 +212,23 @@ fn refresh_impl(
     let staging_dir = root.join(format!(".refresh-tmp-{name}"));
     let final_dir = root.join(&name);
 
-    // `RGM-FR-008` (ADR-0121): the server names the files; only a single
-    // normal path component may be joined under the staging directory.
-    for (file_name, _) in &files {
-        if !is_plain_file_name(file_name) {
-            return Err(RefreshError::Staging {
-                path: staging_dir,
-                source: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "the snapshot names a file that is not a plain file name: {file_name:?}"
-                    ),
-                ),
-            });
-        }
-    }
-
     std::fs::create_dir(&staging_dir).map_err(|e| staging(&staging_dir, e))?;
-    let mut bytes = 0u64;
-    let written = (|| -> io::Result<()> {
-        for (file_name, contents) in &files {
-            let path = staging_dir.join(file_name);
-            let mut file = std::fs::File::create(&path)?;
-            file.write_all(contents)?;
-            file.sync_all()?;
-            bytes += contents.len() as u64;
+    let fetched = fetch_into(&mut client, &staging_dir, with_position);
+    drop(client);
+    let (files, bytes, position) = match fetched {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(error);
         }
+    };
+    let finished = (|| -> io::Result<()> {
         if let Some(position) = position {
             write_position(&staging_dir, position)?;
         }
         std::fs::File::open(&staging_dir)?.sync_all()
     })();
-    if let Err(source) = written {
+    if let Err(source) = finished {
         let _ = std::fs::remove_dir_all(&staging_dir);
         return Err(RefreshError::Staging {
             path: staging_dir,
@@ -301,11 +277,83 @@ fn refresh_impl(
     };
     Ok(RefreshReport {
         directory: final_dir,
-        files: files.len() as u64,
+        files,
         bytes,
         records,
         position,
     })
+}
+
+/// Fetch one snapshot into the existing directory `dir`: `(files, bytes,
+/// position)`. A table that fits one frame goes the legacy way
+/// (`FetchSnapshot`, `ADR-0067`); one over its ceiling (`TooLarge`) streams in
+/// chunks (`ADR-0136`) when the server speaks 36 or more.
+fn fetch_into(
+    client: &mut SchemaDrivenClient,
+    dir: &Path,
+    with_position: bool,
+) -> Result<(u64, u64, Option<Position>), RefreshError> {
+    let whole = if with_position {
+        client.fetch_snapshot_at().map(|s| {
+            (
+                s.files,
+                s.position.map(|(epoch, seq)| Position { epoch, seq }),
+            )
+        })
+    } else {
+        client.fetch_snapshot().map(|files| (files, None))
+    };
+    match whole {
+        Ok((files, position)) => {
+            let bytes = write_files(dir, &files)?;
+            Ok((files.len() as u64, bytes, position))
+        }
+        Err(too_large @ ClientError::Server(ErrorCode::TooLarge, _))
+            if client.server_protocol_version() >= 36 =>
+        {
+            let done = match client.fetch_snapshot_chunked(dir) {
+                Ok(done) => done,
+                // No `SERVER_SNAPSHOT_DIR`: the table is simply too large, and
+                // that is the more useful thing to say.
+                Err(ClientError::Server(ErrorCode::Unsupported, _)) => {
+                    return Err(RefreshError::Fetch(too_large))
+                }
+                Err(e) => return Err(RefreshError::Fetch(e)),
+            };
+            let position = done
+                .position
+                .filter(|_| with_position)
+                .map(|(epoch, seq)| Position { epoch, seq });
+            Ok((done.files, done.bytes, position))
+        }
+        Err(e) => Err(RefreshError::Fetch(e)),
+    }
+}
+
+/// Write each file under `dir` and sync it; the bytes written.
+fn write_files(dir: &Path, files: &[(String, Vec<u8>)]) -> Result<u64, RefreshError> {
+    let mut bytes = 0u64;
+    for (file_name, contents) in files {
+        // `RGM-FR-008` (ADR-0121): the server names the files; only a single
+        // normal path component may be joined under the staging directory.
+        let written = if is_plain_file_name(file_name) {
+            std::fs::File::create(dir.join(file_name)).and_then(|mut file| {
+                file.write_all(contents)?;
+                file.sync_all()
+            })
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the snapshot names a file that is not a plain file name: {file_name:?}"),
+            ))
+        };
+        written.map_err(|source| RefreshError::Staging {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        bytes += contents.len() as u64;
+    }
+    Ok(bytes)
 }
 
 /// The prefix every snapshot directory name carries (`RGM-FR-006`).
@@ -315,14 +363,11 @@ pub const SNAPSHOT_PREFIX: &str = "refresh-";
 /// small number that happens to parse (an ISO date's year) never does.
 const EARLIEST_STAMP: u64 = 1_000_000_000;
 
-/// `RGM-FR-008`: exactly one normal path component — no separator, no
-/// `..`, no root, nothing empty.
+/// `RGM-FR-008`: one plain file name — the client library's portable rule
+/// (`is_plain_file_name`), which also refuses a Windows drive prefix, device
+/// names and the other spellings a host's `Path` parser would let through.
 pub fn is_plain_file_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    ) && !name.contains(['/', '\\'])
+    rusty_multimodal_db::server::client::is_plain_file_name(name)
 }
 
 /// `RRF-FR-004`: the snapshot directories under `root`, oldest first —

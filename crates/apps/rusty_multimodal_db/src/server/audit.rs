@@ -112,6 +112,10 @@ pub enum RequestKind {
     DescribeNullable,
     /// `CHL-FR-004` (ADR-0131, protocol 34).
     FetchSince,
+    /// `CSN-FR-001`–`003` (ADR-0136, protocol 36).
+    BeginSnapshot,
+    FetchChunk,
+    EndSnapshot,
 }
 
 impl RequestKind {
@@ -157,6 +161,9 @@ impl RequestKind {
             Request::FilteredPageDesc { .. } => RequestKind::FilteredPageDesc,
             Request::DescribeNullable => RequestKind::DescribeNullable,
             Request::FetchSince { .. } => RequestKind::FetchSince,
+            Request::BeginSnapshot => RequestKind::BeginSnapshot,
+            Request::FetchChunk { .. } => RequestKind::FetchChunk,
+            Request::EndSnapshot { .. } => RequestKind::EndSnapshot,
         }
     }
 }

@@ -20,6 +20,7 @@ use super::protocol::{
     MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_MVCC_ISOLATION, SESSION_READ_YOUR_WRITES,
     SESSION_SNAPSHOT_ISOLATION, SESSION_STRICT_COMMIT, SESSION_VALIDATE_ON_STAGE,
 };
+use super::snapshot::SnapshotStaging;
 use super::{access, audit, framing, pem, protocol, TlsConfigError};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -732,6 +733,20 @@ pub trait ConnectionStore: Send + Sync {
         Ok((self.fetch_snapshot()?, None))
     }
 
+    /// `CSN-FR-001` (ADR-0136, protocol 36): copy this table's files into `dir`
+    /// under the store's write lock, as [`Self::backup`] does, and return the
+    /// change log's `(epoch, seq)` the copy agrees with (`None` without a log).
+    /// `TooLarge` when the table is over `max_bytes`, checked before any byte
+    /// is copied; `Unsupported` with no known data directory; `Storage` for
+    /// an I/O failure — the caller removes a partial `dir` on any `Err`.
+    fn stage_snapshot(
+        &self,
+        _dir: &Path,
+        _max_bytes: u64,
+    ) -> Result<Option<(u64, u64)>, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
     /// `NLC-FR-001` (ADR-0128, protocol 32): the fields this table stores
     /// as a sentinel but shows as `NULL` to a connection at 32 or above —
     /// `handle_connection` translates at the wire edge
@@ -842,6 +857,18 @@ pub trait ConnectionStore: Send + Sync {
 /// that already exists there (a caller error, since `handle_connection`
 /// always passes a fresh temporary directory) is overwritten.
 pub(crate) fn copy_table_files(base: &Path, target_dir: &Path) -> io::Result<BackupReport> {
+    std::fs::create_dir_all(target_dir)?;
+    let mut report = BackupReport::default();
+    for (name, path, _) in table_files(base)? {
+        report.bytes += std::fs::copy(path, target_dir.join(name))?;
+        report.files += 1;
+    }
+    Ok(report)
+}
+
+/// Every file `base`'s on-disk stack owns — each entry of `base`'s directory
+/// whose name starts with `base`'s own file name — as `(name, path, length)`.
+fn table_files(base: &Path) -> io::Result<Vec<(String, PathBuf, u64)>> {
     let parent = base.parent().unwrap_or_else(|| Path::new("."));
     let stem = base.file_name().ok_or_else(|| {
         io::Error::new(
@@ -853,18 +880,74 @@ pub(crate) fn copy_table_files(base: &Path, target_dir: &Path) -> io::Result<Bac
         )
     })?;
     let stem = stem.to_string_lossy();
-    std::fs::create_dir_all(target_dir)?;
-    let mut report = BackupReport::default();
+    let mut files = Vec::new();
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with(stem.as_ref()) {
-            let bytes = std::fs::copy(entry.path(), target_dir.join(&name))?;
-            report.files += 1;
-            report.bytes += bytes;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(stem.as_ref()) {
+            files.push((name, entry.path(), entry.metadata()?.len()));
         }
     }
-    Ok(report)
+    Ok(files)
+}
+
+/// Disk a staged copy must leave free beyond the table's own size, so the
+/// copy does not take the last of the disk from everything else.
+const STAGING_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Bytes an unprivileged process can still write on the filesystem holding
+/// `dir`; `None` where this build cannot ask (not Linux, or the call failed),
+/// which skips the check rather than refusing every snapshot.
+#[cfg(target_os = "linux")]
+fn free_space(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    rusty_libc::fs::statfs(&path)
+        .ok()
+        .map(|fs| fs.available_bytes())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn free_space(_dir: &Path) -> Option<u64> {
+    None
+}
+
+/// `CSN-FR-001` (ADR-0136): [`copy_table_files`] into `dir`, refused before
+/// the first byte moves — `TooLarge` when the table is over `max_bytes`,
+/// `Storage` when the disk holding `dir` cannot take it plus
+/// [`STAGING_HEADROOM_BYTES`]. Callers run it inside the table's exclusive
+/// section; both checks are a few syscalls, so a refusal holds the lock for
+/// microseconds, where a copy that ran out of disk would have held it for as
+/// long as the copy took.
+pub(crate) fn stage_table_files(base: &Path, dir: &Path, max_bytes: u64) -> Result<(), ErrorCode> {
+    stage_table_files_with(base, dir, max_bytes, &free_space)
+}
+
+fn stage_table_files_with(
+    base: &Path,
+    dir: &Path,
+    max_bytes: u64,
+    free: &dyn Fn(&Path) -> Option<u64>,
+) -> Result<(), ErrorCode> {
+    let total: u64 = table_files(base)
+        .map_err(|_| ErrorCode::Storage)?
+        .iter()
+        .map(|(_, _, len)| len)
+        .sum();
+    if total > max_bytes {
+        return Err(ErrorCode::TooLarge);
+    }
+    let needed = total.saturating_add(STAGING_HEADROOM_BYTES);
+    if dir
+        .parent()
+        .and_then(free)
+        .is_some_and(|room| room < needed)
+    {
+        return Err(ErrorCode::Storage);
+    }
+    copy_table_files(base, dir)
+        .map(|_| ())
+        .map_err(|_| ErrorCode::Storage)
 }
 
 /// [`copy_table_files`]'s failure — a plain `io::Error` uses `Storage`
@@ -897,38 +980,15 @@ impl From<io::Error> for ReadTableFilesError {
 /// Every matched file's size is summed from its metadata and checked
 /// against [`super::protocol::MAX_SNAPSHOT_BYTES`] **before any file's
 /// bytes are read** (`RPL-FR-007`'s acceptance criterion: a table over
-/// the ceiling is refused, never partially streamed) — `TooLarge` short-
-/// circuits the whole call the moment the running total would exceed
-/// the ceiling, so a huge single companion file is caught exactly as
-/// early as many small ones would be.
+/// the ceiling is refused, never partially streamed).
 pub(crate) fn read_table_files(base: &Path) -> Result<Vec<(String, Vec<u8>)>, ReadTableFilesError> {
-    let parent = base.parent().unwrap_or_else(|| Path::new("."));
-    let stem = base.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "{}: no file name to match companions against",
-                base.display()
-            ),
-        )
-    })?;
-    let stem = stem.to_string_lossy();
-    let mut matched = Vec::new();
-    let mut total_bytes: u64 = 0;
-    for entry in std::fs::read_dir(parent)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if !name.to_string_lossy().starts_with(stem.as_ref()) {
-            continue;
-        }
-        total_bytes = total_bytes.saturating_add(entry.metadata()?.len());
-        if total_bytes > MAX_SNAPSHOT_BYTES {
-            return Err(ReadTableFilesError::TooLarge);
-        }
-        matched.push((name.to_string_lossy().into_owned(), entry.path()));
+    let matched = table_files(base)?;
+    let total: u64 = matched.iter().map(|(_, _, len)| len).sum();
+    if total > MAX_SNAPSHOT_BYTES {
+        return Err(ReadTableFilesError::TooLarge);
     }
     let mut files = Vec::with_capacity(matched.len());
-    for (name, path) in matched {
+    for (name, path, _) in matched {
         files.push((name, std::fs::read(path)?));
     }
     Ok(files)
@@ -965,6 +1025,9 @@ fn error_message(code: ErrorCode) -> &'static str {
         }
         ErrorCode::Busy => "the server is at its connection limit; retry later",
         ErrorCode::Gone => "the change log no longer holds that position; resync from a snapshot",
+        ErrorCode::NoSnapshot => {
+            "no staged snapshot has this handle on this connection (ended, expired, or never begun)"
+        }
     }
 }
 
@@ -2813,6 +2876,67 @@ fn handle_backup(store: &dyn ConnectionStore, options: &ServeOptions, name: &str
     })
 }
 
+/// `CSN-FR-001` (ADR-0136): stage `table` and answer the manifest; one staged
+/// snapshot per connection.
+fn handle_begin_snapshot(
+    options: &ServeOptions,
+    store: &dyn ConnectionStore,
+    table: usize,
+    held: &Cell<Option<(usize, u64)>>,
+) -> Response {
+    let Some(staging) = options.snapshots.as_deref() else {
+        return err_response(ErrorCode::Unsupported);
+    };
+    if held.get().is_some() {
+        return err_response(ErrorCode::Busy);
+    }
+    match staging.begin(table, &|dir, max| store.stage_snapshot(dir, max)) {
+        Ok(begun) => {
+            held.set(Some((table, begun.handle)));
+            Response::SnapshotManifest {
+                snapshot: begun.handle,
+                position: begun.position,
+                files: begun.files,
+            }
+        }
+        Err(code) => err_response(code),
+    }
+}
+
+/// `CSN-FR-002`/`003` (ADR-0136): run `step` against the staged snapshot this
+/// connection holds, if `snapshot` is its handle. `release` drops the
+/// connection's claim after the step succeeds (`EndSnapshot`); a `NoSnapshot`
+/// drops it too, since the handle is dead.
+fn handle_snapshot_step(
+    options: &ServeOptions,
+    held: &Cell<Option<(usize, u64)>>,
+    snapshot: u64,
+    release: bool,
+    step: impl FnOnce(&SnapshotStaging, usize) -> Result<Response, ErrorCode>,
+) -> Response {
+    let Some(staging) = options.snapshots.as_deref() else {
+        return err_response(ErrorCode::Unsupported);
+    };
+    let table = match held.get() {
+        Some((table, handle)) if handle == snapshot => table,
+        _ => return err_response(ErrorCode::NoSnapshot),
+    };
+    match step(staging, table) {
+        Ok(response) => {
+            if release {
+                held.set(None);
+            }
+            response
+        }
+        Err(code) => {
+            if code == ErrorCode::NoSnapshot {
+                held.set(None);
+            }
+            err_response(code)
+        }
+    }
+}
+
 /// `ACC-FR-001`: a dispatched request's outcome *shape*, for the access
 /// log — exhaustive over every `Response` variant, never its content.
 /// `NotFound`/`NoParent` are `Ok` (a normal outcome, per this crate's own
@@ -2847,7 +2971,9 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::RowsClamped { .. }
         | Response::NullableFields { .. }
         | Response::Changes { .. }
-        | Response::SnapshotAt { .. } => access::Outcome::Ok,
+        | Response::SnapshotAt { .. }
+        | Response::SnapshotManifest { .. }
+        | Response::Chunk { .. } => access::Outcome::Ok,
     }
 }
 
@@ -2923,6 +3049,10 @@ pub struct ServeOptions {
     /// default) answers every `Backup` request `Unsupported` —
     /// zero new filesystem-write surface unless an operator opts in.
     backup_root: Option<PathBuf>,
+    /// `CSN-FR-004` (ADR-0136): where `BeginSnapshot` stages copies and how
+    /// large a table it accepts. `None` answers every `BeginSnapshot`
+    /// `Unsupported` — zero new filesystem-write surface unless opted into.
+    snapshots: Option<Arc<SnapshotStaging>>,
     /// `RPL-FR-002` (ADR-0067): the one credential
     /// [`TokenClass::Replication`] is ever granted for — distinct from
     /// `read_only_token`/`read_write_token`, so a `ReadWrite` client
@@ -3006,6 +3136,14 @@ impl std::fmt::Debug for ServeOptions {
                 },
             )
             .field(
+                "snapshots",
+                &if self.snapshots.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+            )
+            .field(
                 "replication_token",
                 &if self.replication_token.is_some() {
                     "configured"
@@ -3044,6 +3182,7 @@ impl ServeOptions {
             metric_tables: None,
             metrics_http: None,
             backup_root: None,
+            snapshots: None,
             replication_token: None,
             idle_timeout: None,
             max_connections: None,
@@ -3227,6 +3366,7 @@ impl ServeOptions {
             metric_tables: None,
             metrics_http: None,
             backup_root: None,
+            snapshots: None,
             replication_token: std::env::var("SERVER_AUTH_REPLICATION_TOKEN").ok(),
             idle_timeout: None,
             max_connections: None,
@@ -3332,6 +3472,19 @@ impl ServeOptions {
     pub fn with_backup_root(mut self, root: PathBuf) -> Self {
         self.backup_root = Some(root);
         self
+    }
+
+    /// `CSN-FR-004` (ADR-0136): enable `BeginSnapshot`, staging copies under
+    /// `dir` and refusing a table over `max_mb` MiB (`TooLarge`). Creates `dir`
+    /// and removes the staging directories a crash left in it.
+    pub fn with_snapshot_staging(mut self, dir: PathBuf, max_mb: u64) -> io::Result<Self> {
+        let max_bytes = max_mb.saturating_mul(1024 * 1024);
+        self.snapshots = Some(Arc::new(SnapshotStaging::new(
+            dir,
+            max_bytes,
+            SNAPSHOT_IDLE_TTL,
+        )?));
+        Ok(self)
     }
 
     /// The configured backup root, or `None`.
@@ -4192,6 +4345,11 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // `BAK-FR-001` (ADR-0065): same story — `handle_backup` needs
         // `ServeOptions::backup_root`, which `dispatch` cannot reach.
         Request::Backup { .. } => err_response(ErrorCode::Unsupported),
+        // `CSN-FR-001`–`003` (ADR-0136): staged snapshots need `ServeOptions`
+        // and per-connection state, so `handle_connection` answers them.
+        Request::BeginSnapshot | Request::FetchChunk { .. } | Request::EndSnapshot { .. } => {
+            err_response(ErrorCode::Unsupported)
+        }
         // `RPL-FR-003` (ADR-0067): unlike `Backup`, this needs no
         // `ServeOptions` access beyond the `TokenClass::Replication`
         // gate `handle_connection` already checked before dispatching —
@@ -4415,6 +4573,24 @@ impl Drop for DisconnectAudit<'_> {
 /// dropped connection would leave a stale registration pinning
 /// `Compact`'s GC boundary forever, growing that table's MVCC history
 /// unbounded.
+/// `CSN-FR-003` (ADR-0136): how long a staged snapshot may sit untouched
+/// before another `BeginSnapshot` may take its table's slot.
+const SNAPSHOT_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// Frees a connection's staged snapshot however the connection ends.
+struct SnapshotGuard<'a> {
+    staging: Option<&'a SnapshotStaging>,
+    held: &'a Cell<Option<(usize, u64)>>,
+}
+
+impl Drop for SnapshotGuard<'_> {
+    fn drop(&mut self) {
+        if let (Some(staging), Some((table, handle))) = (self.staging, self.held.get()) {
+            staging.free(table, handle);
+        }
+    }
+}
+
 struct MvccReleaseGuard<'a> {
     tables: &'a [(String, Arc<dyn ConnectionStore>)],
     snapshot: &'a Cell<Option<(usize, u64)>>,
@@ -4550,6 +4726,13 @@ fn handle_connection(
     let _mvcc_release_guard = MvccReleaseGuard {
         tables,
         snapshot: &mvcc_snapshot,
+    };
+    // `CSN-FR-003` (ADR-0136): this connection's staged snapshot, `(table,
+    // handle)`, freed on any exit.
+    let staged_snapshot: Cell<Option<(usize, u64)>> = Cell::new(None);
+    let _snapshot_guard = SnapshotGuard {
+        staging: options.snapshots.as_deref(),
+        held: &staged_snapshot,
     };
 
     // `PROTO-FR-004`: only the very first frame may be a `Hello`. Since
@@ -4754,8 +4937,14 @@ fn handle_connection(
         // cannot be folded into a boolean flag on `ReadWrite` — the
         // match above already proves at compile time that no future
         // `TokenClass` variant is silently exempted here.
-        if matches!(req, Request::FetchSnapshot | Request::FetchSince { .. })
-            && class != TokenClass::Replication
+        if matches!(
+            req,
+            Request::FetchSnapshot
+                | Request::FetchSince { .. }
+                | Request::BeginSnapshot
+                | Request::FetchChunk { .. }
+                | Request::EndSnapshot { .. }
+        ) && class != TokenClass::Replication
         {
             sink.record(&audit::AuditEvent::now(
                 peer,
@@ -5169,6 +5358,31 @@ fn handle_connection(
             // below), since — unlike `Backup` — it needs no `options`
             // access this match arm would otherwise have to thread through.
             Request::FetchSnapshot if negotiated < 25 => err_response(ErrorCode::Malformed),
+            // `CSN-FR-001`–`003` (ADR-0136): gated like every appended request;
+            // the `Replication` class gate ran above.
+            Request::BeginSnapshot | Request::FetchChunk { .. } | Request::EndSnapshot { .. }
+                if negotiated < 36 =>
+            {
+                err_response(ErrorCode::Malformed)
+            }
+            Request::BeginSnapshot => {
+                handle_begin_snapshot(options, store, table, &staged_snapshot)
+            }
+            Request::FetchChunk {
+                snapshot,
+                file,
+                offset,
+                len,
+            } => handle_snapshot_step(options, &staged_snapshot, snapshot, false, |staging, t| {
+                staging
+                    .chunk(t, snapshot, file, offset, len)
+                    .map(|bytes| Response::Chunk { bytes })
+            }),
+            Request::EndSnapshot { snapshot } => {
+                handle_snapshot_step(options, &staged_snapshot, snapshot, true, |staging, t| {
+                    staging.end(t, snapshot).map(|()| Response::Ok)
+                })
+            }
             // `NLC-FR-005` (ADR-0128): gated like every appended request.
             Request::DescribeNullable if negotiated < 32 => err_response(ErrorCode::Malformed),
             // `CHL-FR-004` (ADR-0131): gated like every appended request; the
@@ -5818,6 +6032,52 @@ fn link_across(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CSN-FR-001` (ADR-0136): the staging copy is refused before a byte is
+    /// copied when the table is over the ceiling or the disk is too small,
+    /// copied when there is room, and not blocked where free space is unknown.
+    #[test]
+    fn staging_checks_the_ceiling_and_the_free_space_before_copying() {
+        let root = std::env::temp_dir().join(format!("stage_checks_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let base = root.join("t.mmap");
+        std::fs::write(&base, vec![1u8; 1000]).unwrap();
+        std::fs::write(root.join("t.mmap.pad"), vec![2u8; 1000]).unwrap();
+        let dir = root.join("snap-0");
+        let room = |n: u64| move |_: &Path| Some(n);
+
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1999, &room(u64::MAX)),
+            Err(ErrorCode::TooLarge)
+        );
+        let short = 2000 + STAGING_HEADROOM_BYTES - 1;
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1 << 20, &room(short)),
+            Err(ErrorCode::Storage)
+        );
+        assert!(!dir.exists(), "a refusal copies nothing");
+
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1 << 20, &room(short + 1)),
+            Ok(())
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            stage_table_files_with(&base, &dir, 1 << 20, &|_: &Path| None),
+            Ok(()),
+            "unknown free space does not refuse"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn free_space_reads_the_real_filesystem() {
+        assert!(free_space(&std::env::temp_dir()).is_some_and(|n| n > 0));
+        assert_eq!(free_space(Path::new("/no/such/dir")), None);
+    }
 
     /// `MHTTP-FR-001`: neither default constructor opens an HTTP port;
     /// only the builder supplies a caller-owned listener.

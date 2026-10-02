@@ -282,6 +282,16 @@ impl ConnectionStore for ChangeLogged {
         })
     }
 
+    fn stage_snapshot(&self, dir: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>, ErrorCode> {
+        // Under the log's lock, as `fetch_snapshot_at`: no write between the
+        // copy and the position.
+        self.log.with_position(|position| {
+            self.inner
+                .stage_snapshot(dir, max_bytes)
+                .map(|_| Some((position.epoch, position.head)))
+        })
+    }
+
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.inner.get(id)
     }

@@ -1,7 +1,7 @@
-# ADR-0136: Chunked Snapshots — Lifting the 8 MiB Cap (Proposal)
+# ADR-0136: Chunked Snapshots — Lifting the 8 MiB Cap
 
-- Status: **Proposed — design only, no code. Forks for the owner at the end.**
-- Date: 2026-09-30
+- Status: **Accepted and implemented 2026-10-01** (protocol 35 → 36; the owner asked for it to be built: "incorporate the first" of two recommendations). The default ceiling is 1 GiB, not the 4 GiB first proposed — see "As built".
+- Date: 2026-09-30 (proposed), 2026-10-01 (built)
 - Deciders: baileyrd
 - Related: `ADR-0067` (`FetchSnapshot` and the 8 MiB ceiling), `ADR-0065`
   (`Backup`, which copies a table's files under the write lock),
@@ -71,7 +71,7 @@ So the lock is held for a local copy and never for a transfer.
 4. **Per-file fetch with no staging.** The standby asks for one file at a time.
    Same consistency problem as 3, plus a round trip per file.
 
-## Decision (proposed): option 2
+## Decision: option 2
 
 **Wire (protocol 36, appended, `Replication` token only, like `FetchSnapshot`):**
 
@@ -140,7 +140,27 @@ The Python client gains the three requests.
 - Not addressed: a table so large that even one local copy is unacceptable.
   That needs option 3 or a different design (a log-structured store).
 
-## Before it ships (if accepted)
+## As built (2026-10-01)
+
+The design above stands. What differs or was decided while building:
+
+- **Default ceiling 1 GiB** (`SERVER_SNAPSHOT_MAX_MB=1024`, `0` for none), not 4096. Measured with `examples/snapshot_stall_bench.rs` (one writer updating a field in a loop while a standby fetches the whole table; 4-core ext4 VM, release build; the slowest write is the stall):
+
+  | table | standby's fetch | slowest write | median write |
+  |---|---|---|---|
+  | 128 MiB | 3.9 s | 0.09 s | 0.06 ms |
+  | 512 MiB | 15–18 s | 0.19 s, 3.0 s (two runs) | 0.06 ms |
+  | 1024 MiB | 35–37 s | 4.4 s, 4.7 s (two runs) | 0.06 ms |
+
+  The stall is the staging copy and tracks how much the page cache absorbs, so 512 MiB varied by 15×; 1 GiB was steady at about 4.5 s, consistent with the 6 s/GiB estimate. Nothing above 1 GiB was measured (the host has 8 GiB free and the run needs 3× the table). 4 GiB would stall for roughly 20 s; an operator who accepts that raises the variable.
+- **One slot per table, expired lazily.** There is no timer thread: an untouched copy older than 300 s is freed when the next `BeginSnapshot` for that table, or the next request on its handle, finds it (`Busy` until then). A connection holds at most one staged snapshot (`Busy`); closing it frees the copy.
+- **Free-space check, before the copy.** `stage_table_files` refuses `Storage` when the disk holding the staging directory has less free than the table plus 64 MiB, using a new `rusty_libc::fs::statfs` (Linux; no new third-party dependency). It runs inside the exclusive section but is a few syscalls, so a refusal holds the lock for microseconds. Where free space cannot be read (not Linux, or the call fails) the check is skipped, not failed. A disk that fills during the copy anyway (another writer) still fails `Storage`, the partial directory is removed and the slot freed.
+- **The copy is `copy_table_files`**, so `Backup` and the staging copy share one enumeration (`table_files`); `ConnectionStore::stage_snapshot` is the new method, implemented by `Memory`, `Entity`, `Relation` and `Dog` and, with the log's lock held, by `ChangeLogged`. The SHA-256 of each file is computed after the lock is released, so hashing a large table does not stall writers.
+- **Client:** `fetch_snapshot_chunked(dir)` writes into an existing directory rather than a caller-supplied writer; it checks each chunk's size, the file's length and its SHA-256 (`ClientError::Snapshot`) and syncs each file. **File names are checked first, all of them, before any file is created or truncated**, by one portable rule decided on the text and not by the host's `Path` parser (`client::is_plain_file_name`; the Python client's mirror): one component with no `/`, `\\` or `:` (so no drive prefix such as `C:escape`, no absolute or UNC path, no stream), no `* ? " < > |` or control character, not `.`/`..`, no trailing `.` or space, at most 255 bytes, and not a Windows device name (`CON`, `NUL`, `COM1`, … with or without an extension). A first version rejected only separators and dot entries, which let `C:escape` through on Windows; found in review. `replica_refresh`'s legacy-snapshot check uses the same rule. `replica_refresh` tries `FetchSnapshot` first and falls back to chunks only on `TooLarge` at protocol 36, so a small table costs what it did; where the server has no staging directory the operator sees the original `TooLarge`, not `Unsupported`.
+- **Wire:** exactly as proposed, plus the golden vectors (`Request/BeginSnapshot`, `FetchChunk`, `EndSnapshot`, `Response/SnapshotManifest`, `Chunk`, `Err(NoSnapshot)`), `SERVER-001` v0.109.0 / FR-122 and `SERVER-002` 0.25.0. The Python client gains the five shapes, a fixed-length-bytes spec and `fetch_snapshot_chunked`.
+- **Not done:** the crash trials below (a kill during the staging copy, a kill mid-download) were not run as process-kill tests; the startup sweep and the failed-copy cleanup are unit-tested, and `replica_refresh` already installs by rename, so a partial download never takes a final name. A filesystem clone for the copy, resuming across connections, and a measurement above 1 GiB remain open.
+
+## Before it ships (as proposed; status in "As built")
 
 - Tests: a table over 8 MiB round-trips through `BeginSnapshot`/`FetchChunk`
   to an identical, reopenable directory; a corrupted chunk fails the SHA-256; a
@@ -156,7 +176,7 @@ The Python client gains the three requests.
 - A benchmark of the write stall against table size (1, 4, 16 GiB), so the
   ceiling default is a measurement.
 
-## Forks for the owner
+## Forks for the owner (as proposed)
 
 - Option 2, or leave the cap (a table over 8 MiB then has no standby).
 - The default ceiling (proposed 4 GiB, about 25 s of write stall on the measured

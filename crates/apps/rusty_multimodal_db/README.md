@@ -165,7 +165,8 @@ nullable columns as a wire view over sentinels (`ADR-0128`), sessions that
 stage record writes (`ADR-0130`) and commit strictly, all or nothing
 (`ADR-0133`), and a per-table change log a standby tails (`FetchSince`,
 `ADR-0131`; `examples/replica_refresh.rs --follow`, with a documented
-manual promotion).
+manual promotion; a table over 8 MiB bootstraps by chunked snapshot,
+`ADR-0136`).
 
 Seven domain adapters validate the protocol. Four are front-door, built as
 a real backend for the owner's `rusty_remind_me` memory service:
@@ -279,7 +280,7 @@ at the right file:
     group commit, read-your-writes, class-from-certificate, audit and
     access logs, rate limiting, stage-time validation, snapshot
     isolation, `ServeOptions`, and the SQL `SELECT`/`GROUP BY` subset
-  - `ADR-0053`–`ADR-0133` — everything after: the durable data directory,
+  - `ADR-0053`–`ADR-0136` — everything after: the durable data directory,
     guarded replace, ordered pages, `WriteBatch` and its crash atomicity,
     metrics, backup, restore and replication, real MVCC, the query
     planner steps, connection limits and exposure guards, the crash-safety
@@ -288,7 +289,8 @@ at the right file:
     graceful drain (`ADR-0127`), nullable columns (`ADR-0128`), equality
     intersection (`ADR-0129`), sessions over record writes (`ADR-0130`),
     continuous replication (`ADR-0131`), the planner cost-model decision
-    (`ADR-0132`), and strict commit (`ADR-0133`)
+    (`ADR-0132`), strict commit (`ADR-0133`), and chunked snapshots
+    (`ADR-0136`)
   - `ADR-0036`–`ADR-0052` — the `rusty_remind_me` line: the `Reminder`,
     `Entity`, and `Memory` domains; aliases and name lookup; the wire
     specification and Python client (`ADR-0043`); relation `JOIN`

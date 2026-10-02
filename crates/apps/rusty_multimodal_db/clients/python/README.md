@@ -2,7 +2,7 @@
 
 A standard-library-only Python 3 client for `rusty_multimodal_db`'s
 server/query layer, written against `SERVER-002` (the wire specification)
-at protocol version 35 (`PROTOCOL_VERSION` in `rusty_multimodal_db/protocol.py`). It exists to prove that specification is
+at protocol version 36 (`PROTOCOL_VERSION` in `rusty_multimodal_db/protocol.py`). It exists to prove that specification is
 sufficient (`ECO-FR-007`–`009`, ADR-0043); it is not a packaged product.
 
 ```python
@@ -36,6 +36,7 @@ with Client.connect("127.0.0.1", 7878) as c:
     c.backup("nightly")                # protocol 24: (files, bytes) copied under the server's backup root
     files = c.fetch_snapshot()         # protocol 25: replication token only
     c.fetch_since(epoch, after, 1000)  # protocol 34: change-log entries after `after`; ServerError Gone means re-fetch a snapshot
+    c.fetch_snapshot_chunked(dir)      # protocol 36: a table over 8 MiB, streamed in 4 MiB chunks with SHA-256 checks
 ```
 
 The client does not open transaction sessions (`Begin`/`BeginWith`/`Commit`);

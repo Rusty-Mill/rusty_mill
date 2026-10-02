@@ -13,7 +13,8 @@ use super::protocol::{
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::{
-    copy_table_files, read_table_files, BackupReport, ConnectionStore, ReadTableFilesError,
+    copy_table_files, read_table_files, stage_table_files, BackupReport, ConnectionStore,
+    ReadTableFilesError,
 };
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::durability::DurabilityError;
@@ -313,6 +314,13 @@ where
         let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
         TransactionalStore::with_exclusive(&self.store, |_| copy_table_files(base, target_dir))
             .map_err(|_| ErrorCode::Storage)
+    }
+
+    /// `CSN-FR-001` (ADR-0136): the staged copy [`ConnectionStore::backup`] makes.
+    fn stage_snapshot(&self, dir: &Path, max_bytes: u64) -> Result<Option<(u64, u64)>, ErrorCode> {
+        let base = self.backup_source.as_ref().ok_or(ErrorCode::Unsupported)?;
+        TransactionalStore::with_exclusive(&self.store, |_| stage_table_files(base, dir, max_bytes))
+            .map(|()| None)
     }
 
     /// `RPL-FR-003` (ADR-0067): [`ConnectionStore::backup`]'s reading
