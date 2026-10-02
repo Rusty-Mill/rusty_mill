@@ -148,9 +148,12 @@ version: `a245d35`).
    252), 19.083 s 30 (was 55). `RB-PHYSICS-001-FR-106` (ADR-0025) made
    the side ramps and corners the real collision mesh (repository now
    GPL-3.0-only): `test2` mean 1.78, corner/wall segment 6.0 (was 13.4).
-   Worst steps now: `test2` 8.958 s (173, the corner-wall impact tick),
-   `front` 25.967-25.975 s (~100-160), `test2` 5.758 s (~155, a ground
-   jump), `test2` 12.267 s (~107).
+   `RB-PHYSICS-001-FR-107` (ADR-0026) gave car-ball contacts RocketSim's
+   material and Psyonix's extra hit velocity: kickoff hit 21 uu/s (was
+   155), `test2` mean 1.67; `--self-onestep` now shows the ball too
+   (`RB-VERIFY-003-FR-007`). Worst steps now: `test2` 8.958 s (173 car,
+   corner-wall impact tick), `front` 25.967-25.975 s (~100-160 car),
+   ball-world bounces (`test2` 13.89 s ~1070, 7.95 s ~250 ball).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -159,7 +162,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (458 tests: 27 `rb_domain`, 390
+- `cargo test --workspace`: pass (462 tests: 27 `rb_domain`, 394
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 17 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

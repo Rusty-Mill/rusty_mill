@@ -1415,6 +1415,15 @@ pub enum StaticMaterial {
     Pair { restitution: f32, friction: f32 },
 }
 
+/// Restitution and friction fixed for a pair of dynamic bodies, used as
+/// they are instead of combining the bodies' own (`RB-PHYSICS-001-FR-107`):
+/// RocketSim's `CARBALL_COLLISION_*` and `CARCAR_COLLISION_*`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PairMaterial {
+    pub restitution: f32,
+    pub friction: f32,
+}
+
 impl StaticMaterial {
     /// `(restitution, friction)` for a contact between `body` and this
     /// material.
@@ -1460,9 +1469,10 @@ impl StaticMaterial {
 /// friction setup, just indexed into `bodies` instead of naming a single
 /// body directly; `material` says whether the shape's coefficients combine
 /// with the body's or are fixed for the pair (`StaticMaterial`).
-/// `dynamic_manifolds`
-/// is unchanged from `resolve_dynamic_manifolds` — `(index_a, index_b,
-/// contacts)` triples. Every body's own static contacts and dynamic
+/// `dynamic_manifolds` are `(index_a, index_b, material, contacts)`:
+/// `material` is `None` to combine the two bodies' own coefficients, as
+/// `resolve_dynamic_manifolds` does, or a `PairMaterial` fixed for the pair
+/// (RocketSim's car-ball and car-car overrides, `RB-PHYSICS-001-FR-107`). Every body's own static contacts and dynamic
 /// manifolds share one `DeltaVelocity`/push-delta accumulator (indexed by
 /// `body_index`) for the whole `SOLVER_ITERATIONS` loop, so an earlier
 /// static row's correction already influences a later dynamic row's `rhs`
@@ -1486,7 +1496,7 @@ impl StaticMaterial {
 pub fn resolve_manifolds(
     bodies: &mut [RigidBody],
     static_manifolds: &[(usize, StaticMaterial, Vec<Contact>)],
-    dynamic_manifolds: &[(usize, usize, Vec<Contact>)],
+    dynamic_manifolds: &[(usize, usize, Option<PairMaterial>, Vec<Contact>)],
     dt: f32,
     caches: &mut HashMap<(usize, usize), ContactCache>,
 ) {
@@ -1516,7 +1526,7 @@ pub fn resolve_manifolds(
     // behaves bit-for-bit like `resolve_dynamic_manifolds` with an empty
     // manifold list, same as before this requirement.
     let mut dynamic_manifold_count = vec![0u32; bodies.len()];
-    for (a, b, _) in dynamic_manifolds {
+    for (a, b, _, _) in dynamic_manifolds {
         dynamic_manifold_count[*a] += 1;
         dynamic_manifold_count[*b] += 1;
     }
@@ -1542,10 +1552,14 @@ pub fn resolve_manifolds(
 
     let mut solved_dynamic: Vec<DynamicManifold> = dynamic_manifolds
         .iter()
-        .map(|(a, b, contacts)| {
-            let combined_restitution =
-                combine_restitution(bodies[*a].restitution, bodies[*b].restitution);
-            let combined_friction = combine_friction(bodies[*a].friction, bodies[*b].friction);
+        .map(|(a, b, material, contacts)| {
+            let (combined_restitution, combined_friction) = match material {
+                Some(pair) => (pair.restitution, pair.friction),
+                None => (
+                    combine_restitution(bodies[*a].restitution, bodies[*b].restitution),
+                    combine_friction(bodies[*a].friction, bodies[*b].friction),
+                ),
+            };
             let rows = contacts
                 .iter()
                 .map(|c| setup_two_body_rows(&bodies[*a], &bodies[*b], c, combined_restitution, dt))
@@ -1890,7 +1904,7 @@ mod tests {
                 },
                 cxc,
             )],
-            &[(0, 1, cyc)],
+            &[(0, 1, None, cyc)],
             dt,
             &mut HashMap::new(),
         );
@@ -2591,6 +2605,45 @@ mod tests {
             "expected warm-starting call 2 from call 1's converged impulses to land closer to \
              the true zero-velocity equilibrium than repeating a cold call 2, warm={warm_speed} \
              cold={cold_speed}"
+        );
+    }
+
+    #[test]
+    fn a_pair_material_replaces_the_bodies_combined_coefficients() {
+        // RB-PHYSICS-001-FR-107: a ball dropped on a heavy box with a
+        // zero-restitution pair material does not bounce, though both
+        // bodies' own restitution would.
+        let dt = 1.0 / 120.0;
+        let mut ball = RigidBody::sphere(10.0, 1.0, Vec3::new(0.0, 0.0, 9.5));
+        ball.restitution = 0.9;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -500.0);
+        let mut heavy = RigidBody::car_box(
+            Vec3::new(100.0, 100.0, 10.0),
+            1.0e6,
+            Vec3::new(0.0, 0.0, -10.0),
+        );
+        heavy.restitution = 0.9;
+        let contacts = crate::collision::contacts_between(&ball, &heavy);
+        let mut bodies = vec![ball, heavy];
+        resolve_manifolds(
+            &mut bodies,
+            &[],
+            &[(
+                0,
+                1,
+                Some(PairMaterial {
+                    restitution: 0.0,
+                    friction: 2.0,
+                }),
+                contacts,
+            )],
+            dt,
+            &mut HashMap::new(),
+        );
+        assert!(
+            bodies[0].linear_velocity.z.abs() < 5.0,
+            "expected no bounce, got {:?}",
+            bodies[0].linear_velocity
         );
     }
 }

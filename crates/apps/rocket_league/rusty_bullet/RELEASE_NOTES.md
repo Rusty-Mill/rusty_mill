@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Ball hits follow the game
+**2026-10-02** · `RB-PHYSICS-001-FR-107`, `RB-VERIFY-003-FR-007` · ADR-0026
+
+- When a car hits the ball, the contact now uses the game's own grip and
+  bounce for car-ball hits, and the ball gets Psyonix's extra hit
+  velocity. The owner's kickoff hit now leaves the car within 21 uu/s of
+  the recording (was 155) and the ball within 129 (was ~1200).
+  `rb-verify --self-onestep` shows the ball's error too. 462 tests.
+
 ## Real arena ramps and corners; GPL-3.0
 **2026-10-02** · `RB-PHYSICS-001-FR-106` · ADR-0025
 

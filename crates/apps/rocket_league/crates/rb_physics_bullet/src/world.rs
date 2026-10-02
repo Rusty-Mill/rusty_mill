@@ -43,6 +43,70 @@ const CAR_WORLD_MATERIAL: solver::StaticMaterial = solver::StaticMaterial::Pair 
     friction: 0.3,
 };
 
+/// RocketSim's car-ball contact material (`CARBALL_COLLISION_*`,
+/// `Ball::_OnHit`), used as is (`RB-PHYSICS-001-FR-107`): `test2.jsonl`'s
+/// kickoff hit (5.758 s) and 12.267 s hit lose the car 155 and 107 uu/s
+/// less error with it.
+const CAR_BALL_MATERIAL: solver::PairMaterial = solver::PairMaterial {
+    restitution: 0.0,
+    friction: 2.0,
+};
+
+/// RocketSim's car-car contact material (`CARCAR_COLLISION_*`). Bumps and
+/// demolitions are not modeled.
+const CAR_CAR_MATERIAL: solver::PairMaterial = solver::PairMaterial {
+    restitution: 0.1,
+    friction: 0.09,
+};
+
+/// `BALL_CAR_EXTRA_IMPULSE_*` (`RLConst.h`).
+const BALL_HIT_Z_SCALE: f32 = 0.35;
+const BALL_HIT_FORWARD_SCALE: f32 = 0.65;
+const BALL_HIT_MAX_RELATIVE_SPEED: f32 = 4600.0;
+/// `BALL_CAR_EXTRA_IMPULSE_FACTOR_CURVE`: (relative speed, factor).
+const BALL_HIT_FACTOR_CURVE: [(f32, f32); 4] =
+    [(0.0, 0.65), (500.0, 0.65), (2300.0, 0.55), (4600.0, 0.30)];
+
+/// Psyonix's extra ball-hit velocity, `Ball::_OnHit` (`RB-PHYSICS-001-FR-107`):
+/// along the car-to-ball direction with its height scaled by 0.35 and its
+/// part along the car's forward axis by 0.65, sized by the relative speed
+/// times `BALL_HIT_FACTOR_CURVE`. Computed from the states at contact
+/// detection and added after the solve.
+fn extra_ball_hit_velocity(ball: &RigidBody, car: &RigidBody) -> Vec3 {
+    let relative_speed = (ball.linear_velocity - car.linear_velocity)
+        .length()
+        .min(BALL_HIT_MAX_RELATIVE_SPEED);
+    let offset = ball.position - car.position;
+    let Some(direction) = Vec3::new(offset.x, offset.y, offset.z * BALL_HIT_Z_SCALE).normalize()
+    else {
+        return Vec3::ZERO;
+    };
+    let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+    let adjusted = direction - forward * (direction.dot(&forward) * (1.0 - BALL_HIT_FORWARD_SCALE));
+    let Some(direction) = adjusted.normalize() else {
+        return Vec3::ZERO;
+    };
+    direction * (relative_speed * piecewise_linear(&BALL_HIT_FACTOR_CURVE, relative_speed))
+}
+
+/// RocketSim's `LinearPieceCurve::GetOutput`: linear between points,
+/// clamped to the end values.
+fn piecewise_linear(curve: &[(f32, f32)], input: f32) -> f32 {
+    let Some(&(first_x, first_y)) = curve.first() else {
+        return 0.0;
+    };
+    if input <= first_x {
+        return first_y;
+    }
+    for pair in curve.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        if input <= x1 {
+            return y0 + (y1 - y0) * (input - x0) / (x1 - x0);
+        }
+    }
+    curve.last().map_or(first_y, |&(_, y)| y)
+}
+
 /// Scales `ball.linear_velocity`/`ball.angular_velocity` back down to
 /// `BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` (preserving direction) if either is
 /// exceeded — a genuine clamp, the same kind `drive::clamp_velocity`
@@ -160,6 +224,10 @@ pub struct PhysicsWorld {
     pub nets: Vec<NetMesh>,
     pub gravity: Vec3,
     elapsed_secs: f32,
+    /// Steps taken, for the ball-hit cooldown (`RB-PHYSICS-001-FR-107`).
+    tick_count: u64,
+    /// Per car, the step its last extra ball-hit impulse was applied.
+    ball_hit_ticks: Vec<Option<u64>>,
     /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) for
     /// `solver::resolve_manifolds`'s own dynamic-manifold channel, keyed by
     /// (normalized) ball-vs-car/car-vs-car body-index pair — see
@@ -277,6 +345,8 @@ impl PhysicsWorld {
             nets: Vec::new(),
             gravity: Vec3::new(0.0, 0.0, -650.0),
             elapsed_secs: 0.0,
+            tick_count: 0,
+            ball_hit_ticks: Vec::new(),
             dynamic_manifold_caches: HashMap::new(),
             car_static_manifolds: Vec::new(),
         }
@@ -868,18 +938,31 @@ impl PhysicsWorld {
             }
         }
 
-        let mut dynamic_manifolds: Vec<(usize, usize, Vec<collision::Contact>)> = Vec::new();
+        let mut dynamic_manifolds: Vec<(
+            usize,
+            usize,
+            Option<solver::PairMaterial>,
+            Vec<collision::Contact>,
+        )> = Vec::new();
+        self.ball_hit_ticks.resize(self.cars.len(), None);
+        let mut ball_hit_velocity = Vec3::ZERO;
         for (car_index, car) in self.cars.iter().enumerate() {
             let contacts = collision::contacts_between(&self.ball, car);
-            if !contacts.is_empty() {
-                dynamic_manifolds.push((0, car_index + 1, contacts));
+            if contacts.is_empty() {
+                continue;
+            }
+            dynamic_manifolds.push((0, car_index + 1, Some(CAR_BALL_MATERIAL), contacts));
+            let last = &mut self.ball_hit_ticks[car_index];
+            if last.is_none_or(|tick| self.tick_count > tick + 1) {
+                *last = Some(self.tick_count);
+                ball_hit_velocity += extra_ball_hit_velocity(&self.ball, car);
             }
         }
         for i in 0..self.cars.len() {
             for j in (i + 1)..self.cars.len() {
                 let contacts = collision::contacts_between(&self.cars[i], &self.cars[j]);
                 if !contacts.is_empty() {
-                    dynamic_manifolds.push((i + 1, j + 1, contacts));
+                    dynamic_manifolds.push((i + 1, j + 1, Some(CAR_CAR_MATERIAL), contacts));
                 }
             }
         }
@@ -917,6 +1000,9 @@ impl PhysicsWorld {
         // applied right after this step's contact resolution (including
         // any net, just above), matching real RocketSim's own placement —
         // see `clamp_ball_velocity`'s own doc comment.
+        // RocketSim adds the extra hit velocity at the end of the tick
+        // (`Ball::_FinishPhysicsTick`), before the speed caps.
+        self.ball.linear_velocity += ball_hit_velocity;
         clamp_ball_velocity(&mut self.ball);
 
         // Sleeping (RB-PHYSICS-001-FR-037): evaluated once every other
@@ -942,6 +1028,7 @@ impl PhysicsWorld {
         }
 
         self.elapsed_secs += dt;
+        self.tick_count += 1;
     }
 
     /// Sets the ball's and every car's position, orientation and
@@ -1206,6 +1293,62 @@ mod tests {
             world.ball.position.z
         );
         assert!(world.ball.linear_velocity.length() < 1.0);
+    }
+
+    #[test]
+    fn piecewise_linear_interpolates_and_clamps() {
+        assert_eq!(piecewise_linear(&BALL_HIT_FACTOR_CURVE, -5.0), 0.65);
+        assert_eq!(piecewise_linear(&BALL_HIT_FACTOR_CURVE, 500.0), 0.65);
+        assert!((piecewise_linear(&BALL_HIT_FACTOR_CURVE, 1400.0) - 0.60).abs() < 1e-6);
+        assert!((piecewise_linear(&BALL_HIT_FACTOR_CURVE, 3450.0) - 0.425).abs() < 1e-6);
+        assert_eq!(piecewise_linear(&BALL_HIT_FACTOR_CURVE, 9000.0), 0.30);
+    }
+
+    #[test]
+    fn a_car_driving_into_the_ball_adds_psyonixs_extra_hit_velocity() {
+        // RB-PHYSICS-001-FR-107: a car at 1000 uu/s straight at a resting
+        // ball level with it: the hit direction is straight ahead, so the
+        // forward scale and the z scale cancel out of the normalized
+        // direction, and the size is 1000 * 0.65 * (curve at 1000 uu/s).
+        let car = RigidBody::standard_car(Vec3::new(-100.0, 0.0, 93.15));
+        let mut moving = car;
+        moving.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let added = extra_ball_hit_velocity(&ball, &moving);
+        let factor = 0.65 + (0.55 - 0.65) * (500.0 / 1800.0);
+        assert!(
+            (added - Vec3::new(1000.0 * factor, 0.0, 0.0)).length() < 1e-2,
+            "{added:?}"
+        );
+        // From above, the height is scaled down before normalizing.
+        let high = RigidBody::standard_ball(Vec3::new(-100.0, 0.0, 293.15));
+        let added = extra_ball_hit_velocity(&high, &moving);
+        assert!(added.z > 0.0 && added.x.abs() < 1e-3);
+        // No relative speed, no extra velocity.
+        assert_eq!(extra_ball_hit_velocity(&ball, &car), Vec3::ZERO);
+    }
+
+    #[test]
+    fn the_extra_ball_hit_velocity_applies_at_most_every_other_tick() {
+        // Resting car pressed against the ball, both weightless: the ball
+        // gets the extra velocity on the first contact tick, then waits a
+        // tick before the next, as RocketSim's tickCountWhenExtraImpulseApplied.
+        let mut car = RigidBody::standard_car(Vec3::ZERO);
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let front = CAR_HALF_EXTENTS.x + crate::body::CAR_HITBOX_OFFSET.x;
+        let ball_center = Vec3::new(
+            front + crate::body::BALL_RADIUS - 1.0,
+            0.0,
+            crate::body::CAR_HITBOX_OFFSET.z,
+        );
+        let mut world =
+            PhysicsWorld::new(RigidBody::standard_ball(ball_center), flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        assert_eq!(world.ball_hit_ticks, vec![Some(0)]);
+        world.ball.position = ball_center + Vec3::new(world.cars[0].position.x, 0.0, 0.0);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.ball_hit_ticks, vec![Some(0)], "tick 1 is in cooldown");
     }
 
     #[test]
@@ -2536,19 +2679,29 @@ mod tests {
         // two-call sequence (measurably biased, same as the two-static-wall
         // test's own pre-fix failure) before `step` was changed to route
         // both channels through one `solver::resolve_manifolds` call.
-        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+        //
+        // Since RB-PHYSICS-001-FR-107 a car-ball contact has RocketSim's own
+        // material (restitution 0, friction 2) and adds Psyonix's extra hit
+        // velocity, so the wall gets the same material and the extra
+        // velocity is taken back out of the car side before comparing.
         let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(
             ball_radius,
             1.0,
             Vec3::new(ball_radius, ball_radius, 1000.0),
         );
+        // The port averages a static shape's coefficients with the body's
+        // (`solver::combine_*`); these average to the car-ball material.
+        let mut wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+        wall_x.restitution = 2.0 * CAR_BALL_MATERIAL.restitution - ball.restitution;
+        wall_x.friction = 2.0 * CAR_BALL_MATERIAL.friction - ball.friction;
         ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
         let heavy_car = RigidBody::car_box(
             Vec3::new(1000.0, 1000.0, 1000.0),
             1.0e9,
             Vec3::new(ball_radius, -1000.0, 1000.0),
         );
+        let extra = extra_ball_hit_velocity(&ball, &heavy_car);
         let mut world = PhysicsWorld::new(ball, flat_ground())
             .with_wall(wall_x)
             .with_car(heavy_car);
@@ -2556,8 +2709,8 @@ mod tests {
 
         world.step(1.0 / 60.0);
 
-        let vx = world.ball.linear_velocity.x;
-        let vy = world.ball.linear_velocity.y;
+        let vx = world.ball.linear_velocity.x - extra.x;
+        let vy = world.ball.linear_velocity.y - extra.y;
         assert!(
             (vx - vy).abs() < 5.0,
             "expected a squarely-symmetric wall-and-heavy-car corner impact to leave the \
