@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.111.0
+- Version: 0.112.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -1956,10 +1956,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     into a separate channel changes nothing observable for them.
     `world.rs`'s existing curved-fillet "embedded past resting distance"
     live end-to-end proofs
-    (`a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
-    `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`,
-    `a_ball_embedded_in_a_goal_posts_fillet_footprint_is_pushed_toward_the_axis`,
-    `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`)
+    (`a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`,
+    `a_compound_corner_fillet_stops_a_ball_moving_into_its_corner`,
+    `a_goal_posts_fillet_stops_a_ball_moving_into_its_corner`,
+    `a_goal_corner_fillet_stops_a_ball_moving_into_its_corner`)
     had their own assertions tightened by this requirement: before it,
     each only checked the ball moved "meaningfully" toward the resting
     surface, since the old combined `rhs` term left residual velocity for
@@ -3279,7 +3279,7 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     pins the exact root-cause mechanism at the raw solver level (order
     dependence between the static and dynamic channel, and the combined
     solve's own much-closer-to-symmetric result);
-    `world::tests::a_ball_wedged_between_a_wall_and_a_heavy_car_settles_symmetrically_instead_of_favoring_one`
+    `world::tests::a_ball_wedged_between_a_wall_and_a_heavy_car_gets_each_sides_own_material_response`
     proves it at `PhysicsWorld::step`'s own public level, confirmed to
     fail under the old two-call sequence before the fix. All 286 of
     `rb_physics_bullet`'s pre-existing tests (as of `FR-051`) pass
@@ -5861,12 +5861,41 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `a_car_driving_into_the_ball_adds_psyonixs_extra_hit_velocity`,
     `the_extra_ball_hit_velocity_applies_at_most_every_other_tick`;
     `solver` test `a_pair_material_replaces_the_bodies_combined_coefficients`;
-    `a_ball_wedged_between_a_wall_and_a_heavy_car_settles_symmetrically_instead_of_favoring_one`
+    `a_ball_wedged_between_a_wall_and_a_heavy_car_gets_each_sides_own_material_response`
     now matches the wall to the car-ball material and removes the extra
     velocity. Real capture `--self-onestep`: car error 5.758 s 21 uu/s (was
     155), 12.267 s 15 (was 107), `test2` mean 1.67 (was 1.78); ball error
     on those hits 129 and 90 uu/s (1192 and 970 without the extra
     velocity); `front`/`side` unchanged.
+- `RB-PHYSICS-001-FR-108` (ball-world contacts follow RocketSim's special
+  resolution; no speculative term; implemented, verified by tests and the
+  owner's capture, ADR-0027): every ball-world contact in a tick folds into
+  one (`world::combined_ball_world_contact`, `convertContactSpecial`) at
+  the average normal (not renormalized) and average distance, solved for
+  velocity only, with `world::ball_world_material` (restitution
+  max(ball, 0.3), friction min(ball, 0.6)). `solver::setup_rows` and
+  `setup_two_body_rows` drop Bullet's speculative velocity term, as
+  RocketSim does. `friction_directions` normalizes the normal before
+  `plane_space`.
+  - Why: `test2.jsonl` 13.892 s, the ball on two ramp facets and the floor,
+    was 1072 uu/s off: each contact bounced it separately.
+  - **Verification**: `world` tests
+    `ball_world_contacts_fold_into_one_at_the_average_normal_and_distance`,
+    `opposite_ball_world_contacts_cancel_into_none`,
+    `no_ball_world_contacts_fold_into_none`,
+    `ball_world_material_takes_the_bouncier_restitution_and_the_lower_friction`,
+    `a_ball_dropped_into_a_v_rebounds_once_straight_up`; `solver` tests
+    `a_contact_still_clear_of_its_surface_stops_the_approach_without_the_speculative_term`,
+    `friction_directions_stay_finite_for_a_non_unit_averaged_normal`. The
+    six "embedded ball is pushed out" fillet/curve tests now drive the ball
+    into the surface (renamed `..._stops_a_ball_moving_into_its_corner`,
+    `a_ball_rolling_into_..._is_deflected_up...`); the goal-roof test
+    checks the peak height; the wall-and-heavy-car test, renamed
+    `a_ball_wedged_between_a_wall_and_a_heavy_car_gets_each_sides_own_material_response`,
+    checks each side's own response; the two settling-car tests allow
+    1 uu. Real capture `--self-onestep`: `test2` ball mean 0.41 uu/s (was
+    1.00), max 252 (was 1072); car mean 1.72 (was 1.67, 9.067-9.125 s up to
+    50); `front` car mean 0.302 (was 0.385); `side` 0.219.
 
 ## Architecture and interfaces
 
@@ -6514,7 +6543,7 @@ None beyond `THIRD_PARTY_NOTICES.md`'s zlib attribution obligations.
   arena-corner test already used. `PhysicsWorld::standard_arena` carries
   exactly 20 corner fillets (16 arena-corner plus 4 goal-corner). An
   end-to-end `PhysicsWorld` test,
-  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`,
+  `a_goal_corner_fillet_stops_a_ball_moving_into_its_corner`,
   gives the real live-physics proof: a ball embedded past a goal
   corner fillet's own radius, at a synthetic back-wall/post/crossbar
   3-plane fixture (not the real arena's own numbers, matching this test
@@ -7357,6 +7386,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.112.0 (2026-10-02): `RB-PHYSICS-001-FR-108` — ball-world contacts
+  fold into one velocity-only contact with the arena's material; no
+  speculative term (ADR-0027). 401 tests in `rb_physics_bullet`.
 - 0.111.0 (2026-10-02): `RB-PHYSICS-001-FR-107` — car-ball and car-car
   materials, Psyonix's extra ball-hit velocity (ADR-0026). 394 tests in
   `rb_physics_bullet`.
@@ -8658,10 +8690,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   measurably separate. This requirement also surfaced (via failing tests,
   not by design) that 4 pre-existing `world.rs` live end-to-end fillet
   tests
-  (`a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
-  `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`,
-  `a_ball_embedded_in_a_goal_posts_fillet_footprint_is_pushed_toward_the_axis`,
-  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`)
+  (`a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`,
+  `a_compound_corner_fillet_stops_a_ball_moving_into_its_corner`,
+  `a_goal_posts_fillet_stops_a_ball_moving_into_its_corner`,
+  `a_goal_corner_fillet_stops_a_ball_moving_into_its_corner`)
   had encoded the *old*, pre-split-impulse behavior in their own
   assertions — each expected the ball to keep coasting past its resting
   distance under residual velocity the old combined `rhs` term left
@@ -9121,7 +9153,7 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   `every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar`
   (the same "prove the real triple intersection, not an arbitrary point"
   style test FR-023's own arena-corner test used); `world.rs` gained
-  `a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center`
+  `a_goal_corner_fillet_stops_a_ball_moving_into_its_corner`
   (the same live-physics "ball embedded past the fillet's own radius gets
   pushed back toward the center" proof already given for every other
   fillet type in this port, using a synthetic back-wall/post/crossbar

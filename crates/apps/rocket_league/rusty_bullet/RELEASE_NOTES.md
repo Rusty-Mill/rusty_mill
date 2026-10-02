@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Ball bounces off the arena once
+**2026-10-02** · `RB-PHYSICS-001-FR-108`, `RB-VERIFY-003-FR-007` · ADR-0027
+
+- A ball touching several parts of the arena at once (two ramp triangles
+  and the floor) now bounces once, the way the game does, with the arena's
+  own bounce and grip. The owner's worst ball step went from 1072 uu/s
+  off to 252; the average halved (1.00 to 0.41). Car error moved slightly
+  (`test2` 1.67 to 1.72, `front` 0.385 to 0.302). 469 tests.
+
 ## Ball hits follow the game
 **2026-10-02** · `RB-PHYSICS-001-FR-107`, `RB-VERIFY-003-FR-007` · ADR-0026
 

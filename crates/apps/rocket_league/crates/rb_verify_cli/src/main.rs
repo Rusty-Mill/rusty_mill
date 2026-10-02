@@ -157,7 +157,7 @@ fn print_worst_steps(rows: &[TraceRow], count: usize) {
     worst.sort_by(|a, b| b.velocity_error().total_cmp(&a.velocity_error()));
     for row in worst.into_iter().take(count) {
         println!(
-            "t={t:>7.3}s car={id} | {input} | err vel {ev:>6.1} spin {es:.2} ball {eb:>6.1} | vel rec {rv} sim {cv} | spin rec {rs} sim {cs}",
+            "t={t:>7.3}s car={id} | {input} | err vel {ev:>6.1} spin {es:.2} ball {eb:>6.1} | vel rec {rv} sim {cv} | spin rec {rs} sim {cs} | ball vel rec {rb} sim {cb}",
             t = row.t_secs,
             id = row.recorded.player_id,
             input = fmt_input(row.input),
@@ -168,6 +168,8 @@ fn print_worst_steps(rows: &[TraceRow], count: usize) {
             cv = fmt_vec(&row.candidate.velocity),
             rs = fmt_spin(&row.recorded.angular_velocity),
             cs = fmt_spin(&row.candidate.angular_velocity),
+            rb = fmt_vec(&row.recorded_ball.velocity),
+            cb = fmt_vec(&row.candidate_ball.velocity),
         );
     }
 }

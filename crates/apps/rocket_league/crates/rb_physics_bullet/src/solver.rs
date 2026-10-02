@@ -309,7 +309,7 @@ fn plane_space(n: &Vec3) -> (Vec3, Vec3) {
 /// enough to `normal` itself that `dir1.cross(normal)` comes out
 /// degenerate. `plane_space` never subtracts two comparable vectors, so
 /// it's immune to that cancellation and always well-defined for any
-/// nonzero `normal`.
+/// nonzero `normal` once normalized.
 fn friction_directions(normal: &Vec3, relative_velocity: &Vec3) -> (Vec3, Vec3) {
     let rel_vel = normal.dot(relative_velocity);
     let tangential = *relative_velocity - *normal * rel_vel;
@@ -320,7 +320,12 @@ fn friction_directions(normal: &Vec3, relative_velocity: &Vec3) -> (Vec3, Vec3) 
             }
         }
     }
-    plane_space(normal)
+    // A combined ball-world normal is an average, not unit length
+    // (`RB-PHYSICS-001-FR-108`); `plane_space` needs a unit one.
+    match normal.normalize() {
+        Some(unit) => plane_space(&unit),
+        None => (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+    }
 }
 
 /// One constraint row: a contact normal or a friction direction, solved
@@ -392,7 +397,8 @@ impl DeltaVelocity {
 /// (`RB-PHYSICS-001-FR-048`, matching `RB-PHYSICS-001-FR-036`/`FR-042`/
 /// `FR-043`/`FR-045`/`FR-046`/`FR-047`'s own method): the normal row's
 /// `velocity_error`/`positional_error` split on `gap_with_slop > 0.0` here
-/// matches `setupContactConstraint`'s own identical split on
+/// matches (since `RB-PHYSICS-001-FR-108`, RocketSim's modified)
+/// `setupContactConstraint`'s own identical split on
 /// `penetration > 0` exactly (`penetration = cp.getDistance() +
 /// m_linearSlop` is exactly this crate's own `gap_with_slop`, given
 /// `Contact::penetration_depth = -getDistance()` — see `Contact`'s own doc
@@ -414,8 +420,12 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
     let restitution = restitution_curve(rel_vel, body.restitution, RESTITUTION_VELOCITY_THRESHOLD);
 
     let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
+    // RocketSim's Bullet drops vanilla Bullet's speculative
+    // `velocityError -= penetration * invTimeStep` for a contact still
+    // clear of its surface ("it ruins ball bounces at low velocities"), so
+    // such a contact acts as if touching (`RB-PHYSICS-001-FR-108`).
     let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
-        (0.0, restitution - rel_vel - gap_with_slop * inv_dt)
+        (0.0, restitution - rel_vel)
     } else {
         (-gap_with_slop * ERP2 * inv_dt, restitution - rel_vel)
     };
@@ -795,8 +805,12 @@ fn setup_two_body_rows(
     );
 
     let gap_with_slop = -contact.penetration_depth + LINEAR_SLOP;
+    // RocketSim's Bullet drops vanilla Bullet's speculative
+    // `velocityError -= penetration * invTimeStep` for a contact still
+    // clear of its surface ("it ruins ball bounces at low velocities"), so
+    // such a contact acts as if touching (`RB-PHYSICS-001-FR-108`).
     let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
-        (0.0, restitution - rel_vel - gap_with_slop * inv_dt)
+        (0.0, restitution - rel_vel)
     } else {
         (-gap_with_slop * ERP2 * inv_dt, restitution - rel_vel)
     };
@@ -2645,5 +2659,40 @@ mod tests {
             "expected no bounce, got {:?}",
             bodies[0].linear_velocity
         );
+    }
+
+    /// RB-PHYSICS-001-FR-108: RocketSim drops Bullet's speculative term, so
+    /// a contact still clear of its surface stops the approach outright
+    /// instead of letting the body close the gap this tick.
+    #[test]
+    fn a_contact_still_clear_of_its_surface_stops_the_approach_without_the_speculative_term() {
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 94.15));
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -100.0);
+        let gap = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(0.0, 0.0, 1.0),
+            penetration_depth: -1.0,
+        };
+        resolve_contacts(&mut ball, 0.0, 0.0, &[gap], 1.0 / 120.0);
+        assert!(
+            ball.linear_velocity.z.abs() < 1e-3,
+            "expected the approach stopped, got vz={}",
+            ball.linear_velocity.z
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-108: a combined ball-world normal is an average,
+    /// here exactly on `plane_space`'s branch boundary, with all velocity
+    /// along it; the fallback basis must still be finite and orthonormal.
+    #[test]
+    fn friction_directions_stay_finite_for_a_non_unit_averaged_normal() {
+        let normal = Vec3::new(0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2);
+        let (t1, t2) = friction_directions(&normal, &Vec3::new(0.0, 0.0, -1000.0));
+        for t in [t1, t2] {
+            assert!((t.length() - 1.0).abs() < 1e-5, "not unit: {t:?}");
+            assert!(t.dot(&normal).abs() < 1e-5, "not tangent: {t:?}");
+        }
+        assert!(t1.dot(&t2).abs() < 1e-5);
     }
 }

@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.16.0
+- Version: 0.17.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -178,7 +178,9 @@ them.
   carries the recorded and candidate ball (`recorded_ball`,
   `candidate_ball`, `ball_velocity_error`), and `rb-verify --self-onestep`
   prints the ball's velocity error on every row, so a car-ball hit's effect
-  on the ball shows next to the car's (`RB-PHYSICS-001-FR-107`).
+  on the ball shows next to the car's (`RB-PHYSICS-001-FR-107`). Since
+  0.17.0 each row also prints the ball's recorded and simulated velocity
+  (`RB-PHYSICS-001-FR-108`).
   - **Verification**: `rb_verify_cli` test
     `one_step_rows_cover_the_whole_capture_and_start_exact` checks the
     first row's ball matches exactly.
@@ -400,6 +402,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.17.0 (2026-10-02): `RB-VERIFY-003-FR-007` rows print the ball's
+  recorded and simulated velocity.
 - 0.16.0 (2026-10-02): `RB-VERIFY-003-FR-007` implemented — the ball in
   trace rows and `--self-onestep` output.
 - 0.15.0 (2026-10-02): `RB-VERIFY-003-FR-006` implemented — one-step

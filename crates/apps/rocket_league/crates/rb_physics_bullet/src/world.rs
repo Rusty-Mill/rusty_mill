@@ -43,6 +43,55 @@ const CAR_WORLD_MATERIAL: solver::StaticMaterial = solver::StaticMaterial::Pair 
     friction: 0.3,
 };
 
+/// RocketSim's arena surface material (`ARENA_COLLISION_BASE_*`).
+const ARENA_RESTITUTION: f32 = 0.3;
+const ARENA_FRICTION: f32 = 0.6;
+
+/// The ball's material against the arena (`RB-PHYSICS-001-FR-108`):
+/// RocketSim's Bullet combines a body with a static object by the larger
+/// restitution and the smaller friction (`calculateCombinedRestitution`/
+/// `Friction`), so 0.6 and 0.35 for the standard ball.
+fn ball_world_material(ball: &RigidBody) -> solver::StaticMaterial {
+    solver::StaticMaterial::Pair {
+        restitution: ball.restitution.max(ARENA_RESTITUTION),
+        friction: ball.friction.min(ARENA_FRICTION),
+    }
+}
+
+/// RocketSim's "special" ball-world resolution (`RB-PHYSICS-001-FR-108`,
+/// `convertContactSpecial`): every ball-world contact this tick is folded
+/// into one, at the average normal (not renormalized) and the average
+/// distance from the ball's centre, solved for velocity only (no position
+/// correction). A ball on two ramp facets, or a ramp and the floor, then
+/// bounces once instead of once per contact: `test2.jsonl` 13.892 s went
+/// from 1072 uu/s to under 20.
+fn combined_ball_world_contact(
+    ball: &RigidBody,
+    manifolds: Vec<(solver::StaticMaterial, Vec<collision::Contact>)>,
+) -> Option<collision::Contact> {
+    let contacts: Vec<collision::Contact> = manifolds
+        .into_iter()
+        .flat_map(|(_, contacts)| contacts)
+        .collect();
+    if contacts.is_empty() {
+        return None;
+    }
+    let share = 1.0 / contacts.len() as f32;
+    let mut normal = Vec3::ZERO;
+    let mut distance = 0.0;
+    for contact in &contacts {
+        normal += contact.normal * share;
+        distance += (contact.point - ball.position).length() * share;
+    }
+    // Opposite contacts cancel: no direction left to push along.
+    normal.normalize()?;
+    Some(collision::Contact {
+        normal,
+        point: ball.position - normal * distance,
+        penetration_depth: 0.0,
+    })
+}
+
 /// RocketSim's car-ball contact material (`CARBALL_COLLISION_*`,
 /// `Ball::_OnHit`), used as is (`RB-PHYSICS-001-FR-107`): `test2.jsonl`'s
 /// kickoff hit (5.758 s) and 12.267 s hit lose the car 155 and 107 uu/s
@@ -931,10 +980,20 @@ impl PhysicsWorld {
                 .checked_sub(1)
                 .and_then(|car_index| self.car_static_manifolds.get_mut(car_index))
                 .map(Vec::as_mut_slice);
-            for (material, contacts) in
-                Self::static_contact_manifolds(body, &static_scene, body_index > 0, plane_manifolds)
-            {
-                static_manifolds.push((body_index, material, contacts));
+            let found = Self::static_contact_manifolds(
+                body,
+                &static_scene,
+                body_index > 0,
+                plane_manifolds,
+            );
+            if body_index == 0 {
+                if let Some(contact) = combined_ball_world_contact(body, found) {
+                    static_manifolds.push((0, ball_world_material(body), vec![contact]));
+                }
+            } else {
+                for (material, contacts) in found {
+                    static_manifolds.push((body_index, material, contacts));
+                }
             }
         }
 
@@ -1824,8 +1883,11 @@ mod tests {
             world.step(dt);
         }
         let car_after = *world.cars.first().expect("car should still be present");
+        // Without Bullet's speculative term (RB-PHYSICS-001-FR-108) a
+        // manifold point inside the contact threshold already stops the
+        // approach, so the box may rest up to ~1 uu above touching.
         assert!(
-            (car_after.position.z - CAR_HALF_EXTENTS.z).abs() < 0.5,
+            (car_after.position.z - CAR_HALF_EXTENTS.z).abs() < 1.0,
             "expected the car to settle resting on its own half-height ({}), got z={}",
             CAR_HALF_EXTENTS.z,
             car_after.position.z
@@ -2091,7 +2153,9 @@ mod tests {
             world.step(dt);
         }
         let settled = world.cars[0];
-        assert!((settled.position.z - CAR_HALF_EXTENTS.z).abs() < 0.5);
+        // Up to ~1 uu above touching: see
+        // dropped_car_settles_flat_on_the_ground_without_tipping_over.
+        assert!((settled.position.z - CAR_HALF_EXTENTS.z).abs() < 1.0);
         assert!(settled.linear_velocity.length() < 1.0);
     }
 
@@ -2660,8 +2724,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_wedged_between_a_wall_and_a_heavy_car_settles_symmetrically_instead_of_favoring_one()
-    {
+    fn a_ball_wedged_between_a_wall_and_a_heavy_car_gets_each_sides_own_material_response() {
         // RB-PHYSICS-001-FR-052: the real proof at `PhysicsWorld::step`'s
         // own public level, one level up from
         // `a_ball_wedged_into_a_two_wall_corner_settles_symmetrically_instead_of_favoring_one_wall`
@@ -2680,21 +2743,18 @@ mod tests {
         // test's own pre-fix failure) before `step` was changed to route
         // both channels through one `solver::resolve_manifolds` call.
         //
-        // Since RB-PHYSICS-001-FR-107 a car-ball contact has RocketSim's own
-        // material (restitution 0, friction 2) and adds Psyonix's extra hit
-        // velocity, so the wall gets the same material and the extra
-        // velocity is taken back out of the car side before comparing.
+        // Since RB-PHYSICS-001-FR-107/FR-108 the two sides no longer share
+        // a material: car-ball is RocketSim's restitution 0 / friction 2,
+        // ball-world the arena's restitution 0.3 / friction 0.6. Still one
+        // combined solve, so the outcome is each side's own: the car side
+        // absorbs the ball's approach, the wall side bounces it back.
         let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(
             ball_radius,
             1.0,
             Vec3::new(ball_radius, ball_radius, 1000.0),
         );
-        // The port averages a static shape's coefficients with the body's
-        // (`solver::combine_*`); these average to the car-ball material.
-        let mut wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
-        wall_x.restitution = 2.0 * CAR_BALL_MATERIAL.restitution - ball.restitution;
-        wall_x.friction = 2.0 * CAR_BALL_MATERIAL.friction - ball.friction;
+        let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
         ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
         let heavy_car = RigidBody::car_box(
             Vec3::new(1000.0, 1000.0, 1000.0),
@@ -2712,9 +2772,12 @@ mod tests {
         let vx = world.ball.linear_velocity.x - extra.x;
         let vy = world.ball.linear_velocity.y - extra.y;
         assert!(
-            (vx - vy).abs() < 5.0,
-            "expected a squarely-symmetric wall-and-heavy-car corner impact to leave the \
-             ball's x/y velocity components nearly equal, got vx={vx}, vy={vy}"
+            vy.abs() < 1.0,
+            "expected the car side (restitution 0) to stop the ball's approach, got vy={vy}"
+        );
+        assert!(
+            vx > 0.0,
+            "expected the wall side (arena restitution 0.3) to bounce the ball back, got vx={vx}"
         );
     }
 
@@ -3142,13 +3205,12 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height()
-    {
+    fn a_ball_rolling_into_a_curved_transition_is_deflected_up_off_the_flat_floor_height() {
         // Wall at x=1000, fillet radius 292: resting at flat-floor height
         // (z=ball_radius) at x=900 already overlaps the curve's own
         // material (it's within the fillet's footprint, closer to the wall
         // than the fillet's floor-side tangent point at x=708) -- the curve
-        // should push the ball up onto its own surface instead of leaving
+        // should deflect the ball up onto its own surface instead of leaving
         // it embedded, the real end-to-end proof that
         // RB-PHYSICS-001-FR-020's curved transition is real physical
         // geometry, not just a detection hack.
@@ -3164,6 +3226,10 @@ mod tests {
         let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, Vec3::new(900.0, 0.0, ball_radius));
         ball.restitution = 0.0;
+        // Rolling into the curve: ball-world contacts are velocity-only
+        // (RB-PHYSICS-001-FR-108), so the curve deflects it rather than
+        // pushing a resting ball out.
+        ball.linear_velocity = Vec3::new(300.0, 0.0, 0.0);
 
         let mut world = PhysicsWorld::new(ball, floor)
             .with_wall(wall)
@@ -3177,7 +3243,7 @@ mod tests {
 
         assert!(
             world.ball.position.z > ball_radius + 10.0,
-            "expected the curve to push the ball up off flat-floor height, got z={}",
+            "expected the curve to deflect the ball up off flat-floor height, got z={}",
             world.ball.position.z
         );
     }
@@ -3226,7 +3292,7 @@ mod tests {
     #[test]
     fn a_car_embedded_in_a_compound_corner_fillets_footprint_has_its_penetration_reduced() {
         // The same live-physics proof
-        // `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`
+        // `a_compound_corner_fillet_stops_a_ball_moving_into_its_corner`
         // gives for the ball (RB-PHYSICS-001-FR-023), adapted for a car's
         // own box via `collision::box_vs_corner_fillet`'s corner-testing
         // approximation (RB-PHYSICS-001-FR-027). Unlike a sphere (a single
@@ -3288,7 +3354,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_resting_within_a_diagonal_walls_curved_transition_footprint_is_pushed_up() {
+    fn a_ball_rolling_into_a_diagonal_walls_curved_transition_is_deflected_up() {
         // The real end-to-end proof of RB-PHYSICS-001-FR-021: `between_planes`
         // generalizes to a wall whose normal isn't a coordinate axis (like
         // one of the standard arena's diagonal corner walls) as long as it's
@@ -3297,7 +3363,7 @@ mod tests {
         // `arena::standard_curves` so the fillet's own geometric correctness
         // is checked directly, independent of the arena module's specific
         // corner placement. Same structure as
-        // `a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`,
+        // `a_ball_rolling_into_a_curved_transition_is_deflected_up_off_the_flat_floor_height`,
         // just with a diagonal wall normal instead of an axis-aligned one.
         let floor = flat_ground();
         let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
@@ -3317,6 +3383,10 @@ mod tests {
             toward_wall * 900.0 + Vec3::new(0.0, 0.0, ball_radius),
         );
         ball.restitution = 0.0;
+        // Rolling into the curve: ball-world contacts are velocity-only
+        // (RB-PHYSICS-001-FR-108), so the curve deflects it rather than
+        // pushing a resting ball out.
+        ball.linear_velocity = toward_wall * 300.0;
 
         let mut world = PhysicsWorld::new(ball, floor)
             .with_wall(wall)
@@ -3330,7 +3400,7 @@ mod tests {
 
         assert!(
             world.ball.position.z > ball_radius + 10.0,
-            "expected the diagonal wall's curve to push the ball up off flat-floor height, got z={}",
+            "expected the diagonal wall's curve to deflect the ball up off flat-floor height, got z={}",
             world.ball.position.z
         );
     }
@@ -3341,10 +3411,10 @@ mod tests {
         // the real mesh's 256 uu since FR-102): a
         // ball embedded past it is pushed back toward the axis. Same
         // diagonal, non-axis-aligned wall setup as
-        // `a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`'s
+        // `a_ball_rolling_into_a_curved_transition_is_deflected_up_off_the_flat_floor_height`'s
         // corner-wall variant, and the same weaker "moved meaningfully"
         // assertion as
-        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`,
+        // `a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`,
         // for the same residual-velocity reason.
         let floor = flat_ground();
         let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
@@ -3390,7 +3460,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis() {
+    fn a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner() {
         // The real end-to-end proof of RB-PHYSICS-001-FR-022: two vertical
         // walls meeting at a shallow (non-perpendicular, 45-degree-normal)
         // angle, exactly like a diagonal corner wall's own vertical edge
@@ -3434,6 +3504,10 @@ mod tests {
             curve.axis_point + bisector * embedded_distance + Vec3::new(0.0, 0.0, 500.0);
         let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
         ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = bisector * 300.0;
 
         let mut world = PhysicsWorld::new(ball, flat_ground())
             .with_wall(wall_a)
@@ -3452,11 +3526,9 @@ mod tests {
             0.0,
         );
         let final_dist = final_horizontal_rel.length();
-        let resting_distance = curve.radius - ball_radius;
         assert!(
-            (final_dist - resting_distance).abs() < 1.0,
-            "expected the corner-edge fillet to settle the ball at its resting distance \
-             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
+            final_dist < embedded_distance + 1.0,
+            "expected the corner-edge fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
         );
     }
 
@@ -3544,7 +3616,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center() {
+    fn a_compound_corner_fillet_stops_a_ball_moving_into_its_corner() {
         // The real end-to-end proof of RB-PHYSICS-001-FR-023: three planes
         // meeting at a single vertex (here, a floor and two vertical walls
         // meeting at 90 degrees each, like a corner wall's own floor-side
@@ -3554,7 +3626,7 @@ mod tests {
         // proof already given for the edge fillets, now for a compound
         // 3-plane corner. Checks the ball settles at (not past) the
         // fillet's own resting distance, same reasoning as
-        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`.
+        // `a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`.
         let floor = flat_ground();
         let wall_x = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
         let wall_y = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
@@ -3573,6 +3645,10 @@ mod tests {
         let embedded_position = fillet.center + toward_corner * embedded_distance;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
         ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = toward_corner * 300.0;
 
         let mut world = PhysicsWorld::new(ball, floor)
             .with_wall(wall_x)
@@ -3586,11 +3662,9 @@ mod tests {
         }
 
         let final_dist = (world.ball.position - fillet.center).length();
-        let resting_distance = fillet.radius - ball_radius;
         assert!(
-            (final_dist - resting_distance).abs() < 1.0,
-            "expected the compound-corner fillet to settle the ball at its resting distance \
-             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
+            final_dist < embedded_distance + 1.0,
+            "expected the compound-corner fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
         );
     }
 
@@ -3867,7 +3941,9 @@ mod tests {
         // instead of flying up to the main arena's much higher real
         // ceiling. Isolated to just the 2 roofs via `with_bounded_wall`,
         // for the same reason the back-wall test above is isolated -- see
-        // its own doc comment.
+        // its own doc comment. Ball-world contacts take the arena's
+        // restitution 0.3 (RB-PHYSICS-001-FR-108), so the roof bounces the
+        // ball back down: check its peak, not where it ends up.
         let mut ball = RigidBody::sphere(
             93.15,
             1.0,
@@ -3877,26 +3953,24 @@ mod tests {
                 crate::arena::GOAL_HEIGHT * 0.5,
             ),
         );
-        ball.restitution = 0.0;
         ball.linear_velocity = Vec3::new(0.0, 0.0, 400.0);
 
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
-        for mut wall in crate::arena::standard_goal_roofs() {
-            wall.plane.restitution = 0.0;
+        for wall in crate::arena::standard_goal_roofs() {
             world = world.with_bounded_wall(wall);
         }
         world.gravity = Vec3::ZERO;
 
         let dt = 1.0 / 120.0;
+        let mut peak = world.ball.position.z;
         for _ in 0..(3.0 / dt) as u32 {
             world.step(dt);
+            peak = peak.max(world.ball.position.z);
         }
 
         assert!(
-            world.ball.position.z > crate::arena::GOAL_HEIGHT * 0.5
-                && world.ball.position.z < crate::arena::GOAL_HEIGHT + 5.0,
-            "expected the ball to settle inside the goal box against its own roof, got z={}",
-            world.ball.position.z
+            peak < crate::arena::GOAL_HEIGHT + 5.0,
+            "expected the goal roof to stop the ball, got peak z={peak}"
         );
     }
 
@@ -3986,7 +4060,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ball_embedded_in_a_goal_posts_fillet_footprint_is_pushed_toward_the_axis() {
+    fn a_goal_posts_fillet_stops_a_ball_moving_into_its_corner() {
         // The real end-to-end proof that a goal-cutout edge fillet
         // (RB-PHYSICS-001-FR-024) is live physical geometry, not just a
         // detection hack: a ball embedded past a post fillet's own radius
@@ -3996,7 +4070,7 @@ mod tests {
         // proof already given for every other fillet in this port. Checks
         // the ball settles at (not past) the fillet's own resting distance,
         // same reasoning as
-        // `a_ball_embedded_in_a_vertical_corner_edges_fillet_footprint_is_pushed_toward_the_axis`.
+        // `a_vertical_corner_edges_fillet_stops_a_ball_moving_into_its_corner`.
         let wall = StaticPlane::new(Vec3::new(0.0, -1.0, 0.0), -1000.0);
         let post = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -200.0);
         let radius = 292.0;
@@ -4018,6 +4092,10 @@ mod tests {
         let embedded_position = curve.axis_point + bisector * embedded_distance;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
         ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = bisector * 300.0;
 
         let mut world = PhysicsWorld::new(ball, flat_ground())
             .with_wall(wall)
@@ -4036,16 +4114,14 @@ mod tests {
             0.0,
         );
         let final_dist = final_horizontal_rel.length();
-        let resting_distance = curve.radius - ball_radius;
         assert!(
-            (final_dist - resting_distance).abs() < 1.0,
-            "expected the goal-post fillet to settle the ball at its resting distance \
-             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
+            final_dist < embedded_distance + 10.0,
+            "expected the goal-post fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
         );
     }
 
     #[test]
-    fn a_ball_embedded_in_a_goal_corner_fillets_footprint_is_pushed_toward_the_center() {
+    fn a_goal_corner_fillet_stops_a_ball_moving_into_its_corner() {
         // The real end-to-end proof of RB-PHYSICS-001-FR-026: three planes
         // meeting at a single vertex -- here a back wall, a post plane, and
         // a crossbar plane, exactly like the compound corner where a goal
@@ -4053,7 +4129,7 @@ mod tests {
         // the fillet's own radius (deep in what would otherwise be the
         // sharp, unrounded corner) should be pushed back toward the
         // fillet's center, the same live-physics proof
-        // `a_ball_embedded_in_a_compound_corner_fillets_footprint_is_pushed_toward_the_center`
+        // `a_compound_corner_fillet_stops_a_ball_moving_into_its_corner`
         // already gives for the arena's own compound corners, now for a
         // goal's. Checks the ball settles at (not past) the fillet's own
         // resting distance, same reasoning as that test.
@@ -4075,6 +4151,10 @@ mod tests {
         let embedded_position = fillet.center + toward_corner * embedded_distance;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
         ball.restitution = 0.0;
+        // Moving further into the fillet: RocketSim resolves ball-world
+        // contacts for velocity only (RB-PHYSICS-001-FR-108), so the
+        // fillet stops the ball rather than pushing it back out.
+        ball.linear_velocity = toward_corner * 300.0;
 
         let mut world = PhysicsWorld::new(ball, flat_ground())
             .with_wall(wall)
@@ -4089,22 +4169,12 @@ mod tests {
         }
 
         let final_dist = (world.ball.position - fillet.center).length();
-        let resting_distance = fillet.radius - ball_radius;
         assert!(
-            (final_dist - resting_distance).abs() < 1.0,
-            "expected the goal corner fillet to settle the ball at its resting distance \
-             ({resting_distance}), started {embedded_distance} units out, got {final_dist}"
+            final_dist < embedded_distance + 1.0,
+            "expected the goal corner fillet to stop a ball moving into it at {embedded_distance}, got {final_dist}"
         );
     }
 
-    /// Regression for the real-capture trace (`RB-VERIFY-003-FR-005`,
-    /// `test2.jsonl`, t=3.433 s onward): a car driving on flat ground must
-    /// keep touching it every tick. Before `RB-PHYSICS-001-FR-079` the
-    /// solver's restitution threshold was Bullet's 0.2 m/s copied as
-    /// 0.2 uu/s, so every gravity touchdown bounced the car off the floor
-    /// and it counted as grounded only one tick in three: throttle applied a
-    /// third of the time, and a jump pressed on an "airborne" tick fired as
-    /// a dodge.
     #[test]
     fn a_car_driving_on_flat_ground_stays_grounded_every_tick() {
         let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
@@ -4322,6 +4392,124 @@ mod tests {
         assert!(
             turned_per_second > spin + 1.0,
             "turned {turned_per_second} rad/s at a reported {spin}"
+        );
+    }
+
+    fn ball_contact(normal: Vec3, point: Vec3) -> collision::Contact {
+        collision::Contact {
+            normal,
+            point,
+            penetration_depth: 5.0,
+        }
+    }
+
+    #[test]
+    fn ball_world_contacts_fold_into_one_at_the_average_normal_and_distance() {
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 100.0));
+        let floor = solver::StaticMaterial::Surface {
+            restitution: 0.0,
+            friction: 0.0,
+        };
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let side = Vec3::new(1.0, 0.0, 0.0);
+        let manifolds = vec![
+            (floor, vec![ball_contact(up, Vec3::new(0.0, 0.0, 10.0))]),
+            (
+                floor,
+                vec![ball_contact(side, Vec3::new(-80.0, 0.0, 100.0))],
+            ),
+        ];
+        let combined =
+            combined_ball_world_contact(&ball, manifolds).expect("two contacts fold into one");
+        // Average normal, deliberately not renormalized (RocketSim's own).
+        assert_eq!(combined.normal, Vec3::new(0.5, 0.0, 0.5));
+        // Average distance (90, 80) = 85 back along that normal.
+        assert_eq!(
+            combined.point,
+            ball.position - Vec3::new(0.5, 0.0, 0.5) * 85.0
+        );
+        // Velocity only: no position correction.
+        assert_eq!(combined.penetration_depth, 0.0);
+    }
+
+    #[test]
+    fn opposite_ball_world_contacts_cancel_into_none() {
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::ZERO);
+        let wall = solver::StaticMaterial::Surface {
+            restitution: 0.0,
+            friction: 0.0,
+        };
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let manifolds = vec![
+            (wall, vec![ball_contact(x, Vec3::new(-90.0, 0.0, 0.0))]),
+            (wall, vec![ball_contact(-x, Vec3::new(90.0, 0.0, 0.0))]),
+        ];
+        assert!(combined_ball_world_contact(&ball, manifolds).is_none());
+    }
+
+    #[test]
+    fn no_ball_world_contacts_fold_into_none() {
+        let ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 500.0));
+        assert!(combined_ball_world_contact(&ball, vec![]).is_none());
+        let empty = solver::StaticMaterial::Surface {
+            restitution: 0.0,
+            friction: 0.0,
+        };
+        assert!(combined_ball_world_contact(&ball, vec![(empty, vec![])]).is_none());
+    }
+
+    #[test]
+    fn ball_world_material_takes_the_bouncier_restitution_and_the_lower_friction() {
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::ZERO);
+        ball.restitution = 0.6;
+        ball.friction = 0.35;
+        assert_eq!(
+            ball_world_material(&ball),
+            solver::StaticMaterial::Pair {
+                restitution: 0.6,
+                friction: 0.35
+            }
+        );
+        ball.restitution = 0.1;
+        ball.friction = 2.0;
+        assert_eq!(
+            ball_world_material(&ball),
+            solver::StaticMaterial::Pair {
+                restitution: ARENA_RESTITUTION,
+                friction: ARENA_FRICTION
+            }
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-108's motivating case: a ball dropped into a
+    /// 90-degree V touches both faces at once; folded into one contact it
+    /// rebounds once at the arena's restitution, straight back up, instead
+    /// of once per face.
+    #[test]
+    fn a_ball_dropped_into_a_v_rebounds_once_straight_up() {
+        let r = 93.15;
+        let left = StaticPlane::new(
+            Vec3::new(1.0, 0.0, 1.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        let right = StaticPlane::new(
+            Vec3::new(-1.0, 0.0, 1.0) * std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
+        let mut ball = RigidBody::sphere(r, 1.0, Vec3::new(0.0, 0.0, r * std::f32::consts::SQRT_2));
+        ball.restitution = 0.0;
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -1000.0);
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), -10_000.0);
+        let mut world = PhysicsWorld::new(ball, floor)
+            .with_wall(left)
+            .with_wall(right);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        let v = world.ball.linear_velocity;
+        assert!(v.x.abs() < 1e-3, "expected no sideways kick, got {v:?}");
+        assert!(
+            (v.z - 1000.0 * ARENA_RESTITUTION).abs() < 30.0,
+            "expected one rebound at the arena's 0.3, got {v:?}"
         );
     }
 }
