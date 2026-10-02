@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Flips no longer damp their own torque
+**2026-10-02** · `RB-PHYSICS-001-FR-097` · ADR-0015 amendment
+
+- Air control now runs before the flip torque each airborne tick, so its
+  damping acts on the spin the step started with, as in RocketSim and the
+  real game. A dedicated front-flip capture showed the old order losing
+  about 0.04 rad/s per flip tick, which tilted the car 0.03-0.04 rad by the
+  end of every flip. 441 tests.
+
 ## Boost already carries the air throttle
 **2026-10-01** · `RB-PHYSICS-001-FR-096` · ADR-0019 amendment
 

@@ -29,7 +29,7 @@ pub(super) const CAR_TORQUE_SCALE: f32 = 2.0 * std::f32::consts::PI / 65_536.0 *
 pub(super) const THROTTLE_AIR_ACCELERATION: f32 = 200.0 / 3.0;
 
 /// Air control and air throttle for one airborne tick. `pitch_scale` is the
-/// flip's pitch lock (`0` while locked, see `jump::apply_flip_torque`).
+/// flip's pitch lock (`0` while locked, see `jump::flip_pitch_scale`).
 /// Axes and signs are RocketSim's: pitch about -right (positive raises the
 /// nose), yaw about up, roll about -forward (`RB-PHYSICS-001-FR-082`).
 /// Damping acts even with the stick centered, so a free-spinning car slows

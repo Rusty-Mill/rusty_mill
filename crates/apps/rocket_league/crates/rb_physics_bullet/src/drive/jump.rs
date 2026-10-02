@@ -320,12 +320,20 @@ impl FlipState {
     }
 }
 
-/// Applies a flip's torque for one airborne tick, before the jump press is
-/// handled, and returns the scale on air control's pitch torque (RocketSim's
+/// The scale on air control's pitch torque under a dodge (RocketSim's
 /// `_UpdateAirTorque`): `0` while the flip spins the car at `FLIP_TORQUE_*`
-/// and through `FLIP_PITCHLOCK_EXTRA_TIME` after it, `1` otherwise. Holding
-/// pitch against the flip's forward direction scales the flip's pitch
-/// torque down by the stick amount: the flip cancel.
+/// and through `FLIP_PITCHLOCK_EXTRA_TIME` after it, `1` otherwise.
+pub(super) fn flip_pitch_scale(flip: Option<FlipState>) -> f32 {
+    match flip {
+        Some(flip) if before(flip.time, FLIP_TORQUE_TIME + FLIP_PITCHLOCK_EXTRA_TIME) => 0.0,
+        _ => 1.0,
+    }
+}
+
+/// Applies a flip's torque for one airborne tick, after air control has
+/// read the spin for its damping. Holding pitch against the flip's forward
+/// direction scales the flip's pitch torque down by the stick amount: the
+/// flip cancel.
 ///
 /// Air control itself (roll and yaw torque, and all three dampings) stays on
 /// through the flip (`RB-PHYSICS-001-FR-093`). RocketSim turns it off except
@@ -334,18 +342,18 @@ impl FlipState {
 /// the roll/pitch ratio 1.35 while roll -1 is held and settles at 1.12 once
 /// released, matching flip torque plus air control (1.35, 1.10), not the
 /// flip torque alone (1.16).
+///
+/// Bullet accumulates the flip torque and integrates it after the damping
+/// is computed from the step's starting spin, so the damping never sees
+/// this tick's flip spin (`RB-PHYSICS-001-FR-097`).
 pub(super) fn apply_flip_torque(
     car: &mut RigidBody,
     input: &ControllerInput,
     flip: Option<FlipState>,
-) -> f32 {
-    let Some(flip) = flip else {
-        return 1.0;
+) {
+    let Some(flip) = flip.filter(FlipState::is_flipping) else {
+        return;
     };
-    if !flip.is_flipping() {
-        let locked = before(flip.time, FLIP_TORQUE_TIME + FLIP_PITCHLOCK_EXTRA_TIME);
-        return if locked { 0.0 } else { 1.0 };
-    }
     let (mut forward_part, side_part) = flip.direction;
     // RocketSim compares the pitch stick with flipRelTorque.y, which is
     // the forward component: same sign means stick against the flip.
@@ -360,7 +368,6 @@ pub(super) fn apply_flip_torque(
     let spin = right_axis(car) * (forward_part * FLIP_TORQUE_FORWARD)
         - forward_axis(car) * (side_part * FLIP_TORQUE_SIDE);
     car.angular_velocity += spin * TICK_120;
-    0.0
 }
 
 /// Advances an airborne car's flip clock by `dt` and applies the flip's
