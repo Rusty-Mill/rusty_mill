@@ -52,7 +52,7 @@ pub fn open(pid: libc::pid_t) -> Result<OwnedFd> {
 /// `ESRCH` means the process associated with this stable descriptor has
 /// already terminated and is therefore success for the child API. No exit
 /// status is invented: the normal wait path remains responsible for reaping.
-pub fn send_signal(pidfd: BorrowedFd<'_>, signal: Signal) -> Result<()> {
+pub(crate) fn send_signal(pidfd: BorrowedFd<'_>, signal: Signal) -> Result<()> {
     let signum = match signal {
         Signal::Term => libc::SIGTERM,
         Signal::Int => libc::SIGINT,
@@ -86,4 +86,11 @@ pub fn send_signal(pidfd: BorrowedFd<'_>, signal: Signal) -> Result<()> {
         OsCode::Errno(code),
         "pidfd_send_signal",
     ))
+}
+
+#[cfg(test)]
+pub(crate) fn descriptor_flags(raw_fd: std::os::fd::RawFd) -> i32 {
+    // SAFETY: F_GETFD only reads descriptor-table metadata and has no pointer
+    // argument. Tests deliberately also pass a recently closed descriptor.
+    unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }
 }
