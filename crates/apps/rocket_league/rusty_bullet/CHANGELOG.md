@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0027 (`RB-PHYSICS-001-FR-108`): ball-world contacts fold into one
+  velocity-only contact (`world::combined_ball_world_contact`) with the
+  arena's material, restitution max(ball, 0.3) / friction min(ball, 0.6)
+  (`world::ball_world_material`).
+- `rb-verify --self-onestep` rows print the ball's recorded and simulated
+  velocity (`RB-VERIFY-003-FR-007`).
 - ADR-0026 (`RB-PHYSICS-001-FR-107`): car-ball contacts use RocketSim's
   material (restitution 0, friction 2) and add Psyonix's extra ball-hit
   velocity; car-car contacts 0.1 / 0.09; `solver::resolve_manifolds`'s
@@ -19,9 +25,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- The solver drops Bullet's speculative velocity term for contacts still
+  clear of their surface, as RocketSim does (`RB-PHYSICS-001-FR-108`); an
+  embedded ball is no longer pushed out of the arena.
 - **License: GPL-3.0-only** (was MIT OR Apache-2.0), to embed the GPL-3.0
   arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
   `LICENSE`.
+### Fixed
+- `solver::friction_directions` normalizes a non-unit normal before
+  `plane_space` (it returned NaN on the branch boundary).
 ### Removed
 - `body::StaticSweptFillet`, `arena::standard_corner_sweeps`,
   `SIDE_FLOOR_RADIUS`, `CORNER_FLOOR_RADIUS`, `CORNER_EDGE_RADIUS`, the
