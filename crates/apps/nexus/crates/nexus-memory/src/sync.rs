@@ -28,12 +28,14 @@
 //! address need the caller to opt in explicitly via `allow_private_hub`
 //! (arg) / `NEXUS_MEMORY_ALLOW_PRIVATE_HUB` (env) — off by default.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::db::{MemoryDb, PageOutcome, PulledEntry, RejectedRecord};
+use crate::db::{parse_memory_id, MemoryDb, PageOutcome, PulledEntry, RejectedRecord};
 use crate::model::Memory;
 
 /// Per-request HTTP timeout.
@@ -207,7 +209,8 @@ fn dns_pin(url: &reqwest::Url, validated_ip: IpAddr) -> Option<(String, SocketAd
 }
 
 /// Run one full sync cycle (push then pull) against the hub in `args`.
-/// Returns `{ pushed, pulled }`.
+/// Returns `{ pushed, push_refused, push_dead_letters, pulled, ... }`:
+/// `pushed` counts what the hub accepted.
 pub(crate) async fn sync(db: MemoryDb, args: &Value) -> Result<Value, String> {
     let cfg = parse_config(args)?;
     let parsed_url =
@@ -232,7 +235,9 @@ pub(crate) async fn sync(db: MemoryDb, args: &Value) -> Result<Value, String> {
     let pushed = push(&db, &client, &cfg).await?;
     let pulled = pull(&db, &client, &cfg).await?;
     Ok(json!({
-        "pushed": pushed,
+        "pushed": pushed.accepted,
+        "push_refused": pushed.refused,
+        "push_dead_letters": pushed.dead_letters,
         "pulled": pulled.received,
         "applied": pulled.page.applied,
         "unchanged": pulled.page.unchanged,
@@ -250,58 +255,200 @@ pub(crate) async fn sync(db: MemoryDb, args: &Value) -> Result<Value, String> {
 /// it merely pulled (no echo). The cursor still advances over the whole scanned
 /// page, so foreign rows are seen once and never re-scanned.
 ///
+/// The hub answers each page with the ids it took and those it refused, and
+/// why. A refused memory is dead-lettered in the same transaction that moves
+/// the cursor past it, and every push re-sends the dead letters first, so a
+/// refusal is never silent. The cursor never moves past the time this push
+/// started: a memory dated later (a skewed clock here, or a peer's pulled
+/// record) is looked at again next push instead of dragging the cursor ahead
+/// of every edit made meanwhile.
+///
 /// v1 limitation: edits *here* to a memory authored *elsewhere* are not pushed
 /// (its `node_id` stays foreign); whole-store authorship-agnostic sync would
 /// need an explicit change outbox.
-async fn push(db: &MemoryDb, client: &reqwest::Client, cfg: &HubConfig) -> Result<u64, String> {
-    let mut ts = db
-        .sync_state_get(PUSH_TS)
-        .map_err(de)?
-        .unwrap_or_else(|| EPOCH.to_string());
-    let mut id = db.sync_state_get(PUSH_ID).map_err(de)?.unwrap_or_default();
-    let mut total = 0_u64;
+async fn push(
+    db: &MemoryDb,
+    client: &reqwest::Client,
+    cfg: &HubConfig,
+) -> Result<PushReport, String> {
+    let started = Utc::now();
+    let mut report = PushReport::default();
+    let retried = retry_refused(db, client, cfg, &mut report).await?;
+    let (mut ts, mut id) = push_cursor(db, started)?;
     loop {
         let batch = db.list_since(&ts, &id, BATCH).map_err(de)?;
-        if batch.is_empty() {
+        let Some(last) = batch.last() else {
             break;
-        }
-        let records: Vec<Value> = batch
+        };
+        let records: Vec<(String, Value)> = batch
             .iter()
-            .filter(|m| m.node_id.as_deref().is_none_or(|n| n == cfg.node_id))
-            .filter_map(|m| {
-                let mut v = serde_json::to_value(m).ok()?;
-                v.as_object_mut()?
-                    .insert("node_id".to_string(), json!(cfg.node_id));
-                Some(v)
-            })
+            .filter_map(|m| own_record(m, cfg))
+            .filter(|(id, _)| !retried.contains(id))
             .collect();
-        if !records.is_empty() {
-            let sent = records.len() as u64;
-            let resp = client
-                .post(format!("{}/sync/push", cfg.url))
-                .bearer_auth(&cfg.secret)
-                .json(&json!({ "node_id": cfg.node_id, "records": records }))
-                .send()
-                .await
-                .map_err(|e| format!("sync push: {e}"))?;
-            if !resp.status().is_success() {
-                return Err(format!("sync push: HTTP {}", resp.status()));
-            }
-            total += sent;
-        }
-        // Advance the cursor over the whole scanned page (keyset order), so
-        // skipped foreign rows are not re-scanned next time.
-        if let Some(last) = batch.last() {
-            ts = last.updated_at.to_rfc3339();
-            id = last.id.to_string();
-            db.sync_state_set(PUSH_TS, &ts).map_err(de)?;
-            db.sync_state_set(PUSH_ID, &id).map_err(de)?;
-        }
-        if batch.len() < BATCH {
+        let (accepted, refused) = send(client, cfg, &records).await?;
+        report.add(records.len(), &accepted, &refused);
+        let capped = last.updated_at > started;
+        (ts, id) = if capped {
+            (started.to_rfc3339(), String::new())
+        } else {
+            (last.updated_at.to_rfc3339(), last.id.to_string())
+        };
+        db.record_push_page(&accepted, &refused, &[(PUSH_TS, &ts), (PUSH_ID, &id)])
+            .map_err(de)?;
+        // Everything after a capped page is dated after `started`.
+        if capped || batch.len() < BATCH {
             break;
         }
     }
-    Ok(total)
+    report.dead_letters = db.push_rejected_ids().map_err(de)?.len() as u64;
+    Ok(report)
+}
+
+/// The stored push cursor. One dated after `started` was moved there before
+/// pushes were capped at their start time, and every edit since sits behind
+/// it unsent: start over from the epoch once (the hub's last-write-wins
+/// makes re-sending harmless).
+fn push_cursor(db: &MemoryDb, started: chrono::DateTime<Utc>) -> Result<(String, String), String> {
+    let ts = db.sync_state_get(PUSH_TS).map_err(de)?;
+    let id = db.sync_state_get(PUSH_ID).map_err(de)?.unwrap_or_default();
+    let ahead = ts
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|t| t > started);
+    match ts {
+        Some(ts) if !ahead => Ok((ts, id)),
+        _ => Ok((EPOCH.to_string(), String::new())),
+    }
+}
+
+/// Re-send every memory the hub refused before, and return their ids so the
+/// scan that follows does not send them a second time. One that no longer
+/// exists, or is no longer authored here, leaves the dead letters unsent.
+async fn retry_refused(
+    db: &MemoryDb,
+    client: &reqwest::Client,
+    cfg: &HubConfig,
+    report: &mut PushReport,
+) -> Result<HashSet<String>, String> {
+    let ids = db.push_rejected_ids().map_err(de)?;
+    for chunk in ids.chunks(BATCH) {
+        let mut records = Vec::with_capacity(chunk.len());
+        let mut resolved = Vec::new();
+        for id in chunk {
+            let memory = parse_memory_id(id)
+                .ok()
+                .map(|mid| db.get(&mid))
+                .transpose()
+                .map_err(de)?
+                .flatten();
+            match memory.as_ref().and_then(|m| own_record(m, cfg)) {
+                Some(record) => records.push(record),
+                None => resolved.push(id.clone()),
+            }
+        }
+        let (mut accepted, refused) = send(client, cfg, &records).await?;
+        report.add(records.len(), &accepted, &refused);
+        accepted.append(&mut resolved);
+        db.record_push_page(&accepted, &refused, &[]).map_err(de)?;
+    }
+    Ok(ids.into_iter().collect())
+}
+
+/// `m` as a push record stamped with our node id, keyed by its id, if it is
+/// authored here.
+fn own_record(m: &Memory, cfg: &HubConfig) -> Option<(String, Value)> {
+    if m.node_id.as_deref().is_some_and(|n| n != cfg.node_id) {
+        return None;
+    }
+    let mut v = serde_json::to_value(m).ok()?;
+    v.as_object_mut()?
+        .insert("node_id".to_string(), json!(cfg.node_id));
+    Some((m.id.to_string(), v))
+}
+
+/// Push `records` and return which ids the hub accepted and which it refused,
+/// with why. Nothing to send sends nothing.
+async fn send(
+    client: &reqwest::Client,
+    cfg: &HubConfig,
+    records: &[(String, Value)],
+) -> Result<(Vec<String>, Vec<(String, String)>), String> {
+    if records.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let payload: Vec<&Value> = records.iter().map(|(_, v)| v).collect();
+    let resp = client
+        .post(format!("{}/sync/push", cfg.url))
+        .bearer_auth(&cfg.secret)
+        .json(&json!({ "node_id": cfg.node_id, "records": payload }))
+        .send()
+        .await
+        .map_err(|e| format!("sync push: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("sync push: HTTP {}", resp.status()));
+    }
+    let bytes = read_capped_body(resp, MAX_PULL_BODY_BYTES, "sync push").await?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("sync push: decode: {e}"))?;
+    let sent: Vec<&str> = records.iter().map(|(id, _)| id.as_str()).collect();
+    Ok(classify(&sent, &body))
+}
+
+/// Split the ids `sent` by the hub's push reply (`processed_ids`, and
+/// `rejected` with each id's reason). An id the reply names in neither is
+/// counted refused: a cursor never passes a memory the hub did not take.
+fn classify(sent: &[&str], reply: &Value) -> (Vec<String>, Vec<(String, String)>) {
+    let processed: HashSet<&str> = reply
+        .get("processed_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let reasons: HashMap<&str, &str> = reply
+        .get("rejected")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let id = r.get("id").and_then(Value::as_str)?;
+            let reason = r.get("reason").and_then(Value::as_str).unwrap_or("refused");
+            Some((id, reason))
+        })
+        .collect();
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    for &id in sent {
+        if let Some(reason) = reasons.get(id) {
+            refused.push((id.to_string(), (*reason).to_string()));
+        } else if processed.contains(id) {
+            accepted.push(id.to_string());
+        } else {
+            refused.push((id.to_string(), "the hub did not acknowledge it".to_string()));
+        }
+    }
+    (accepted, refused)
+}
+
+/// What one push did, retries included.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PushReport {
+    /// Memories sent.
+    sent: u64,
+    /// Memories the hub took.
+    accepted: u64,
+    /// Memories the hub refused; each is dead-lettered and retried.
+    refused: u64,
+    /// Refusals still dead-lettered when the push ended.
+    dead_letters: u64,
+}
+
+impl PushReport {
+    fn add(&mut self, sent: usize, accepted: &[String], refused: &[(String, String)]) {
+        self.sent += sent as u64;
+        self.accepted += accepted.len() as u64;
+        self.refused += refused.len() as u64;
+    }
 }
 
 /// Pull remote memories newer than the stored pull cursor, applying each with
@@ -338,7 +485,7 @@ async fn pull(
         if !resp.status().is_success() {
             return Err(format!("sync pull: HTTP {}", resp.status()));
         }
-        let bytes = read_capped_body(resp, MAX_PULL_BODY_BYTES).await?;
+        let bytes = read_capped_body(resp, MAX_PULL_BODY_BYTES, "sync pull").await?;
         let body: Value =
             serde_json::from_slice(&bytes).map_err(|e| format!("sync pull: decode: {e}"))?;
         let records = body
@@ -412,20 +559,22 @@ fn pulled_entry(rec: &Value) -> PulledEntry {
 /// `Content-Length` up front as a fast rejection, then still enforces the
 /// cap against the actual bytes streamed in case the header is absent or
 /// understates the real size.
-async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+async fn read_capped_body(
+    mut resp: reqwest::Response,
+    cap: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length() {
         if len > cap as u64 {
             return Err(format!(
-                "sync pull: response body too large ({len} bytes, cap {cap})"
+                "{what}: response body too large ({len} bytes, cap {cap})"
             ));
         }
     }
     let mut buf = Vec::with_capacity(cap.min(64 * 1024));
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("sync pull: {e}"))? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{what}: {e}"))? {
         if buf.len() + chunk.len() > cap {
-            return Err(format!(
-                "sync pull: response body exceeded cap of {cap} bytes"
-            ));
+            return Err(format!("{what}: response body exceeded cap of {cap} bytes"));
         }
         buf.extend_from_slice(&chunk);
     }
@@ -488,6 +637,38 @@ mod tests {
             err.contains("sync push") || err.contains("sync pull"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn classify_splits_a_push_reply_and_counts_the_unacknowledged_as_refused() {
+        let reply = json!({
+            "accepted": 1,
+            "processed_ids": ["a", "not-sent"],
+            "failed": 2,
+            "rejected": [
+                { "id": "b", "reason": "updated_at is too far in the future" },
+                { "reason": "missing string id or updated_at" },
+            ],
+        });
+        let (accepted, refused) = classify(&["a", "b", "c"], &reply);
+        assert_eq!(accepted, ["a"]);
+        assert_eq!(
+            refused,
+            [
+                (
+                    "b".to_string(),
+                    "updated_at is too far in the future".to_string()
+                ),
+                (
+                    "c".to_string(),
+                    "the hub did not acknowledge it".to_string()
+                ),
+            ]
+        );
+        // A reply naming nothing refuses everything it was sent.
+        let (accepted, refused) = classify(&["a"], &json!({}));
+        assert!(accepted.is_empty());
+        assert_eq!(refused.len(), 1);
     }
 
     #[test]

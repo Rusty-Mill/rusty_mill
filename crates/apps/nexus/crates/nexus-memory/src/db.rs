@@ -99,6 +99,16 @@ CREATE TABLE IF NOT EXISTS sync_rejected (
     rejected_at TEXT NOT NULL
 );
 
+-- Local memories the hub refused on push, kept so the push cursor never
+-- passes one silently; written in the same transaction as the cursor and
+-- retried by every push (design review 2.7 follow-up). Only the id: a
+-- retry sends the memory as it is then.
+CREATE TABLE IF NOT EXISTS sync_push_rejected (
+    memory_id   TEXT PRIMARY KEY,
+    reason      TEXT NOT NULL,
+    rejected_at TEXT NOT NULL
+);
+
 -- Phase 5 — durable backing for the three cognitive stores
 -- (EpisodicStore / SemanticStore / ProceduralStore). Same database file
 -- as the remind_me-parity `memories` table so `.forge/memory/` stays a
@@ -356,6 +366,63 @@ impl MemoryDb {
         }
         tx.commit()?;
         Ok((applied, remaining))
+    }
+
+    /// Record one pushed page's outcome atomically (design review 2.7
+    /// follow-up): each `refused` id with the hub's reason into the
+    /// `sync_push_rejected` dead-letter table, each `accepted` id out of it,
+    /// and the `cursor` key/values — in one transaction, so the push cursor
+    /// never moves past a memory the hub refused without keeping it.
+    ///
+    /// # Errors
+    /// Returns an error on a write failure; nothing of the page is kept.
+    pub fn record_push_page(
+        &self,
+        accepted: &[String],
+        refused: &[(String, String)],
+        cursor: &[(&str, &str)],
+    ) -> Result<()> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        for id in accepted {
+            tx.execute(
+                "DELETE FROM sync_push_rejected WHERE memory_id = ?1",
+                params![id],
+            )?;
+        }
+        let now = Utc::now().to_rfc3339();
+        for (id, reason) in refused {
+            tx.execute(
+                "INSERT INTO sync_push_rejected (memory_id, reason, rejected_at) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(memory_id) DO UPDATE SET \
+                     reason = excluded.reason, rejected_at = excluded.rejected_at",
+                params![id, reason, now],
+            )?;
+        }
+        for (key, value) in cursor {
+            tx.execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The ids of local memories the hub refused, oldest refusal first.
+    ///
+    /// # Errors
+    /// Returns an error on a query failure.
+    pub fn push_rejected_ids(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn
+            .prepare("SELECT memory_id FROM sync_push_rejected ORDER BY rejected_at, memory_id")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
     }
 
     /// Read a sync cursor/state value by key (`None` if unset).
