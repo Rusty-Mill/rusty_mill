@@ -166,7 +166,11 @@ version: `a245d35`).
    now scores quarter-second predictions: k = 30 baseline `test2` car
    3.29 uu / 26.27 uu/s, ball 0.56 uu; `front` 0.11 / 0.84; `side` 0.10 /
    0.52. Bullet's row order, ERP2 0.8 and turn ERP 0.1 were measured with
-   it and not adopted (no gain).
+   it and not adopted (no gain). `RB-VERIFY-003-FR-009`: snapping now
+   takes the recorded boost fuel (`test2` is unlimited-boost freeplay and
+   the candidate's tank had run dry): `test2` k = 30 car 0.68 uu / 5.78
+   uu/s, one-step car mean 0.90. Worst k = 30 windows now: the 5.5 s
+   kickoff (49 uu/s) and the 9.0 s corner impact (45), both hard contacts.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -175,7 +179,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (476 tests: 27 `rb_domain`, 406
+- `cargo test --workspace`: pass (477 tests: 27 `rb_domain`, 407
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 19 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

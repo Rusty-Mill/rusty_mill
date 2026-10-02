@@ -1093,11 +1093,13 @@ impl PhysicsWorld {
         self.tick_count += 1;
     }
 
-    /// Sets the ball's and every car's position, orientation and
-    /// velocities to `frame`'s (cars by `player_id`), keeping each car's
-    /// drive state (boost, jump and flip timers): the per-step reset of a
-    /// one-step prediction run (`simulate_recorded_one_step`). Cars
-    /// `frame` doesn't mention keep their state.
+    /// Sets the ball's and every car's position, orientation, velocities
+    /// and boost fuel to `frame`'s (cars by `player_id`), keeping the rest
+    /// of each car's drive state (jump and flip timers): the per-step reset
+    /// of a one-step prediction run (`simulate_recorded_one_step`). Cars
+    /// `frame` doesn't mention keep their state. Fuel is recorded state
+    /// like the rest (`RB-VERIFY-003-FR-009`): an unlimited-boost freeplay
+    /// capture holds it at 100 while the candidate's own tank would run dry.
     pub fn snap_to_frame(&mut self, frame: &PhysicsFrame) {
         snap_body(
             &mut self.ball,
@@ -1115,6 +1117,9 @@ impl PhysicsWorld {
                     car_state.velocity,
                     car_state.angular_velocity,
                 );
+            }
+            if let Some(drive) = self.car_drive.get_mut(car_state.player_id as usize) {
+                drive.boost_amount = car_state.boost_amount.clamp(0.0, drive::MAX_BOOST);
             }
         }
     }
@@ -1382,6 +1387,21 @@ mod tests {
             one_step
         );
         assert_eq!(simulate_recorded_k_step(fresh, &recorded, 0), one_step);
+    }
+
+    /// `RB-VERIFY-003-FR-009`: snapping takes the recorded boost fuel too,
+    /// clamped to the tank, so an unlimited-boost capture keeps boosting.
+    #[test]
+    fn snapping_to_a_frame_takes_its_boost_fuel() {
+        let (recorded, mut world) = candidate_run();
+        world.set_car_boost(0, 0.0);
+        let mut frame = recorded[0].clone();
+        frame.cars[0].boost_amount = 42.0;
+        world.snap_to_frame(&frame);
+        assert_eq!(world.frame().cars[0].boost_amount, 42.0);
+        frame.cars[0].boost_amount = 250.0;
+        world.snap_to_frame(&frame);
+        assert_eq!(world.frame().cars[0].boost_amount, drive::MAX_BOOST);
     }
 
     /// Frame `i` comes from recorded frame `i - k`: moving the recorded

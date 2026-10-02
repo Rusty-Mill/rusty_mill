@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.18.0
+- Version: 0.19.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -201,6 +201,30 @@ them.
       `a_k_step_prediction_starts_k_frames_back`.
     - `rb_verify_cli` tests `k_step_scores_every_frame_and_grows_with_k`
       and `k_step_missing_file_reports_io_error`.
+  - Since 0.19.0 `--self-kstep <capture-file> [k] [count]` also lists the
+    `count` frames with the largest car velocity error
+    (`k_step_capture`).
+- `RB-VERIFY-003-FR-009` (implemented): snapping takes the recorded boost
+  fuel. `PhysicsWorld::snap_to_frame` sets each car's fuel from the
+  frame's `boost_amount`, clamped to the tank, along with its position
+  and velocities.
+  - Why: `test2.jsonl` is an unlimited-boost freeplay capture (fuel stays
+    at 100). The candidate's own tank ran dry, so every boosting tick of a
+    one-step or k-step prediction lacked about 8 uu/s. 16.5-18.0 s, an
+    aerial on boost, was 250 uu/s off at k = 30.
+  - Results:
+
+    | `test2` | Before | After |
+    |---|---|---|
+    | k = 30 car position | 3.29 uu | 0.68 uu |
+    | k = 30 car velocity | 26.27 uu/s | 5.78 uu/s |
+    | One-step car mean | 1.59 | 0.90 |
+
+    `front` and `side` are unchanged.
+  - A free run (`--self`) still drains its own tank: unlimited boost is
+    not modelled.
+  - **Verification**: `rb_physics_bullet` test
+    `snapping_to_a_frame_takes_its_boost_fuel`.
 
 
 ## Architecture and interfaces
@@ -420,6 +444,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.19.0 (2026-10-02): `RB-VERIFY-003-FR-009` implemented — snapping
+  takes the recorded boost fuel; `--self-kstep` lists its worst frames.
 - 0.18.0 (2026-10-02): `RB-VERIFY-003-FR-008` implemented — k-step
   prediction scoring (`--self-kstep`).
 - 0.17.0 (2026-10-02): `RB-VERIFY-003-FR-007` rows print the ball's

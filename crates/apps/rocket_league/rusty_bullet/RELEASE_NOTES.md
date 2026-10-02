@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Predictions keep the recorded boost
+**2026-10-02** · `RB-VERIFY-003-FR-009`
+
+- `test2` was recorded with unlimited boost, but the predicted car used
+  its own tank and ran dry, so every boosting moment looked wrong. Each
+  prediction now takes the recorded fuel. The car's quarter-second error
+  on `test2` fell from 26 to 6 uu/s and its one-step error from 1.59 to
+  0.90. `--self-kstep` can list its worst frames. 477 tests.
+
 ## Quarter-second predictions as a yardstick
 **2026-10-02** · `RB-VERIFY-003-FR-008` · ADR-0030
 
