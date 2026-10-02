@@ -4,8 +4,8 @@
 
 | Piece | What |
 | ---- | ---- |
-| `CodexAgent { repo_root, timeout, model }` | `AgentRunner` for `Agent::Codex` only. Runs `codex exec --sandbox read-only --ephemeral --ignore-user-config -C <repo_root> --output-schema <f> --output-last-message <f> -` with the prompt on stdin, reads the reply from the last-message file, parses it with `orch_cli::parse`. Default timeout 10 minutes. |
-| `OUTPUT_SCHEMA` | The JSON Schema handed to `--output-schema`, mirroring what the parser accepts. |
+| `CodexAgent { repo_root, timeout, model }` | `AgentRunner` for `Agent::Codex` only. Runs `codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules -C <repo_root> --output-schema <f> --output-last-message <f> -` with the prompt on stdin, reads the reply from the last-message file, parses it with `orch_cli::parse`. Default timeout 10 minutes. |
+| `OUTPUT_SCHEMA` | The JSON Schema handed to `--output-schema`: strict Structured Outputs form, one fully-required `anyOf` variant per kind. The parser remains the authority on caps and roles. |
 | `render(task, board)` | The shared prompt core plus two Codex lines: read files under the working directory and cite them as `path:` refs; the sandbox is read-only and offline. |
 | `SCRUBBED_ENV` | `OPENAI_API_KEY` is removed from the child's environment on every run. Codex uses the ChatGPT subscription login, never a key. |
 
@@ -26,3 +26,8 @@ $env:ORCH_CODEX_REPO = (Get-Location).Path
 cargo test -p orch-codex --test real_codex -- --ignored --nocapture
 ```
 The ignored test puts a nonce in the instruction and passes only if a returned entry body carries it, which proves stdin delivery, the schema plus last-message path, `-C`, and the subscription login in one run.
+
+```powershell
+cargo test -p orch-codex --test rules -- --ignored --nocapture
+```
+Two rules tests. The first needs only the binary: it shows Codex's own `execpolicy check` deciding `allow` for a file write under a saved `sh -c` allow rule, the hazard `--ignore-rules` exists for. The second needs a login: an isolated `CODEX_HOME` (auth copied in, the allow rule saved as `rules/default.rules`), a model told to run exactly that write, and the adapter's argv; the file must not appear.

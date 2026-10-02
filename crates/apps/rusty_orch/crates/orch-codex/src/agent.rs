@@ -27,6 +27,10 @@ static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Serves only `Agent::Codex`; any other agent is an [`AgentError`]. The
 /// argv is a fixed vector with no shell and no interpolation; the model is
 /// Codex's default unless [`CodexAgent::model`] sets one.
+///
+/// `--ignore-rules` matters as much as `--sandbox read-only`: a saved
+/// execpolicy allow rule in the user's Codex home can run a matching command
+/// outside the sandbox, so user and project `.rules` files are never loaded.
 #[derive(Debug, Clone)]
 pub struct CodexAgent<C = StdCommand> {
     repo_root: PathBuf,
@@ -80,6 +84,7 @@ impl<C: CommandRunner> CodexAgent<C> {
             "read-only",
             "--ephemeral",
             "--ignore-user-config",
+            "--ignore-rules",
             "-C",
         ]
         .into_iter()
