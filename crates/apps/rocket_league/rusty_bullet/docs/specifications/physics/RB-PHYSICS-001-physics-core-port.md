@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.105.0
+- Version: 0.106.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -422,7 +422,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   that gap for the ball specifically with a real mass-spring `net::NetMesh`
   panel in front of that same solid back-of-net plane (a car still passes
   through the panel's own footprint, stopped by the pre-existing solid
-  volume instead — see FR-033's own entry). `FR-020`'s fillet
+  volume instead — see FR-033's own entry). **Superseded by
+  `RB-PHYSICS-001-FR-102` for the arena's own transitions**, whose radii
+  are now fitted to the real mesh; only the goal fillets keep the old
+  placeholder, as `arena::GOAL_FILLET_RADIUS`. Historical: `FR-020`'s fillet
   radius (`arena::FILLET_RADIUS`, also reused by FR-022's vertical-edge
   fillets, FR-024's goal-cutout fillets, and FR-026's goal post-crossbar
   compound-corner fillets; FR-021's corner-wall seams and
@@ -5709,6 +5712,42 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     at the recorded rate; `--self-growth` `test2.jsonl` window 4 s 0.64 uu
     / 1.33 uu/s (was 1.27 / 3.22), window 5 s 4.6 uu (was 7.3).
 
+- `RB-PHYSICS-001-FR-102` (real arena transition radii, swept corner
+  fillets, wheel rays against every static shape; implemented, verified by
+  tests and the owner's capture, ADR-0022): the arena's curved transitions
+  take the real soccar mesh's radii (RLUtilities' extracted mesh,
+  `samuelpmish/RLUtilities` `assets/soccar/`, MIT): side and corner floor
+  ramps 256 uu, back-wall floor ramp 160 uu, every ceiling ramp 512 uu,
+  and the vertical corner edges 864 uu. The floor and ceiling ramps wrap
+  each vertical edge as a torus section (`body::StaticSweptFillet`,
+  `arena::standard_corner_sweeps`); at the back-wall end the floor tube
+  blends from 256 to 160 uu across the edge, as the mesh does. These
+  replace FR-023's 16 corner spheres. A wheel ray now hits any static shape
+  (`collision::raycast` over the scene's deepest zero-radius contact),
+  not just the floor.
+  - Why: `--self-onestep` ranked `test2.jsonl` 8.86-8.95 s worst (about
+    1,390 uu/s): the recorded car flips through the air at z 186, 110-150
+    uu from the corner wall, where FR-025's 750 uu placeholder arch put
+    the surface 256 uu out, inside the car. The mesh's corner floor ramp is
+    256 uu, the vertical edges 864 uu (the placeholders had 750 and 292),
+    and its vertices fit those circles to within 0.5 uu (2 uu on the
+    edges). The recorded car then drives the corner and side wall
+    (8.97-10.2 s), where floor-only wheel rays gave the candidate no grip.
+  - **Verification**: `collision` tests for the swept fillet (contact,
+    sector and quadrant gating, box corners) and `raycast` (exact plane
+    hit, curved seam hit, misses); `arena` tests for the radii, the 16
+    sweeps' tangency to their walls at both ends, and the back-edge blend;
+    `world` tests `a_car_on_the_side_wall_has_all_four_wheels_on_it` and
+    `a_car_on_a_swept_corner_ramp_has_its_wheels_on_the_curve`. Real
+    captures, `--self-onestep`: `test2.jsonl` mean one-step velocity error
+    3.1 uu/s (was 15.2), 99th percentile 28.7 (was 222), the 8.9-10.2 s
+    corner and wall segment 13.4 (was 117.7), worst tick 432 at 6.058 s
+    (was 1,393 at 8.950 s); `front.jsonl` and `side.jsonl` unchanged (no
+    wall contact). One tick got worse: at 15.625 s, after a wall jump at
+    14.725 s that is now a real ground jump, the candidate double-jumps on
+    the 15.617 s press and the recorded car does not (292 uu/s). Still
+    open: why the real car has no double jump 0.9 s after a wall jump.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -5737,6 +5776,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   that frame directly, the opposite gate convention from
   `StaticGoalWall`'s window (collides only *inside* the bound, not
   everywhere *except* inside a window).
+  `StaticSweptFillet` (since `RB-PHYSICS-001-FR-102`) is a sixth: a floor
+  or ceiling seam swept around a curved vertical edge (a torus section
+  whose tube radius may blend across the sector), built by `around_edge`
+  from that edge's `StaticQuarterPipe` and the floor or ceiling plane.
 - `integrate`: force accumulation, velocity integration, transform
   integration — pure functions over `RigidBody`, shape-agnostic.
 - `collision`: `contacts_vs_plane` — analytic body-vs-static-plane contact
@@ -6965,7 +7008,11 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   and normalizes the result instead of picking whichever wall comes first.
 - Sourcing or verifying `arena::FILLET_RADIUS`/`CORNER_ARCH_RADIUS`
   against real field mesh data (see
-  FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — still open.
+  FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027) — **resolved
+  for the arena by `RB-PHYSICS-001-FR-102`**, from RLUtilities' extracted
+  soccar mesh (`assets/soccar/*.bin`, which FR-036 had already used for
+  the flat walls). Still open only for the goal mesh's own fillets
+  (`arena::GOAL_FILLET_RADIUS`). Historical text follows.
   `RB-PHYSICS-001-FR-040` looked, specifically, using this port's
   established reference tier (RocketSim/RLUtilities source, the RLBot
   wiki) and came back with no *reliable* reference for either constant —
@@ -7190,6 +7237,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.106.0 (2026-10-02): `RB-PHYSICS-001-FR-102` — real arena transition
+  radii, swept corner fillets, wheel rays against every static shape
+  (ADR-0022). 389 tests in `rb_physics_bullet`.
 - 0.105.0 (2026-10-02): `RB-PHYSICS-001-FR-101` — jumps push along the
   car's up axis, tires after the jump (ADR-0019 amendment). 379 tests in
   `rb_physics_bullet`.

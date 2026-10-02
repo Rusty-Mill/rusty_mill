@@ -21,28 +21,17 @@
 //! direction (the edge itself is vertical), differ from the floor/
 //! ceiling-seam case.
 //!
-//! `standard_corner_fillets` (`RB-PHYSICS-001-FR-023`) adds a small
-//! spherical patch at each of the 16 compound-corner vertices where a
-//! vertical-edge fillet meets a floor- or ceiling-seam fillet, near a
-//! corner wall's own top/bottom endpoint — built from
-//! `body::StaticCornerFillet::between_three_planes` on the same three flat
-//! planes (floor/ceiling, side/back wall, corner wall) that meet there,
-//! rather than the two `standard_curves`' own fillets each bridge.
+//! `standard_corner_sweeps` (`RB-PHYSICS-001-FR-102`, ADR-0022) rounds the
+//! floor and ceiling seams where they wrap each curved vertical corner
+//! edge: a torus section per seam per edge (`body::StaticSweptFillet`).
+//! It replaces FR-023's single-radius `StaticCornerFillet` spheres, which
+//! could not blend a 256 uu ramp into an 864 uu edge.
 //!
-//! Since `RB-PHYSICS-001-FR-025`, a corner wall's own floor/ceiling-seam
-//! arches (the 8 of `standard_curves`' 24 fillets bridging a corner wall to
-//! the floor or ceiling) use the distinctly larger `CORNER_ARCH_RADIUS`
-//! rather than the cardinal walls' `FILLET_RADIUS`, matching real Rocket
-//! League's bigger, more swept corner-boost curve. All 16
-//! `standard_corner_fillets` also switch to `CORNER_ARCH_RADIUS`, since each
-//! one touches one of those arches and `between_three_planes` needs one
-//! shared radius across all three planes it blends to still meet the arch
-//! exactly where their axes cross (see `CORNER_ARCH_RADIUS`'s own doc
-//! comment). The 8 vertical-edge fillets where a corner wall meets its
-//! neighboring side/back wall are unaffected — they're independent,
-//! additive contact sources next to these arches, not blended with them,
-//! same as every other adjoining-fillet pair in this module — and keep
-//! `FILLET_RADIUS`.
+//! Since FR-102 every transition radius is the real mesh's
+//! (`SIDE_FLOOR_RADIUS`, `BACK_FLOOR_RADIUS`, `CORNER_FLOOR_RADIUS`,
+//! `CEILING_RADIUS`, `CORNER_EDGE_RADIUS`), superseding FR-025's 292 and
+//! 750 uu placeholders. The real corner arch is no bigger than a side
+//! wall's ramp; it is the vertical corner edge that is broad.
 //!
 //! `standard_goal_walls`/`standard_goal_cutout_fillets`
 //! (`RB-PHYSICS-001-FR-024`) open an actual goal-mouth window in each back
@@ -65,7 +54,7 @@
 //! `RB-PHYSICS-001-FR-023` used for the arena's own compound corners —
 //! `body::StaticCornerFillet::between_three_planes` directly on the three
 //! real flat planes that meet there (the back wall, that post's plane, and
-//! the crossbar) — reusing `FILLET_RADIUS` unchanged, since (unlike
+//! the crossbar) — reusing `GOAL_FILLET_RADIUS` unchanged, since (unlike
 //! `FR-025`'s arena corners) both edge fillets meeting here already share
 //! one radius. The goal's other two corners, where a post meets the floor,
 //! aren't compound corners needing this treatment: the window's own bottom
@@ -109,13 +98,14 @@
 //! (a car's own contact against the net, a full 3D "sock" shape, bending
 //! stiffness).
 //!
-//! **Still not modeled**: any geometry finer than a single flat plane,
-//! single-radius edge fillet, or single-radius corner fillet per boundary
-//! segment (the real field mesh's corners and transitions are more complex
-//! than this). See `RB-PHYSICS-001`'s Non-goals.
+//! **Still not modeled**: the goal mesh's own shape (its fillets keep the
+//! `GOAL_FILLET_RADIUS` placeholder), and any detail of the real field
+//! mesh finer than these planes, cylinders and tori. See `RB-PHYSICS-001`'s
+//! Non-goals.
 
 use crate::body::{
     StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
+    StaticSweptFillet,
 };
 use crate::net::NetMesh;
 use rb_domain::Vec3;
@@ -159,72 +149,32 @@ pub const CEILING_Z: f32 = 2048.0;
 /// model either), but the flat corner-wall plane itself is exact.
 pub const CORNER_LENGTH: f32 = 1152.0;
 
-/// Uncalibrated placeholder: the radius of the curved fillet connecting a
-/// cardinal wall to the floor or ceiling (`standard_curves`). This port has
-/// no *reliable* reference for Rocket League's actual transition radius —
-/// chosen only to be small relative to the field's own dimensions (a
-/// visibly local rounding of the corner, not a wall-length-scale ramp), not
-/// measured from real field mesh data.
+/// Radii of the arena's curved transitions (`RB-PHYSICS-001-FR-102`,
+/// ADR-0022), fitted to the real soccar collision mesh as extracted in
+/// RLUtilities (`samuelpmish/RLUtilities`, `assets/soccar/`, MIT): its
+/// floor-ramp, ceiling-ramp and corner vertices lie on circles of these
+/// radii to within 0.5 uu (the 864 uu edges to within 2 uu). They replace
+/// FR-025's uncalibrated 292/750 uu placeholders. The flat walls they join
+/// (`SIDE_WALL_X`, `BACK_WALL_Y`, `CORNER_LENGTH`, `CEILING_Z`) are
+/// tangent to them exactly in that mesh too.
 ///
-/// `RB-PHYSICS-001-FR-040` looked for one and came back empty-handed, not
-/// for lack of trying: the only candidate found anywhere in this port's
-/// established reference tier (RocketSim/RLUtilities source, the RLBot
-/// wiki) is the RLBot wiki's "Useful Game Values" page, which states "Wall
-/// bottom ramp radius: Aprox. 256 (but they are not circular)" with no
-/// citation, no distinction between a cardinal wall's small rounding and a
-/// corner wall's own bigger arch (`CORNER_ARCH_RADIUS`), and an explicit
-/// admission the real geometry isn't a single circular arc at all — a much
-/// weaker source than the named, source-code-level constants
-/// `RB-PHYSICS-001-FR-036` was able to confirm for the ball radius and
-/// `arena::CEILING_Z` (RocketSim's own `ARENA_HEIGHT = 2048.f`, read
-/// directly from source). Worse, that same `256` is suspiciously identical
-/// to RLGym's own documented `RAMP_HEIGHT` constant — the vertical height
-/// of the corner boost-pad ramp *from the ground*, a completely different
-/// geometric quantity from a floor-seam curve's radius — raising real doubt
-/// that the wiki's "ramp radius" entry is an independent measurement at all
-/// rather than a mixed-up cross-reference to that unrelated height value.
-/// Adopting `256` here would trade one honestly-labeled uncalibrated
-/// placeholder for a differently-uncertain number dressed up as a real
-/// citation, so this port doesn't. Genuinely closing this gap needs actual
-/// extracted collision-mesh geometry (e.g. via `ZealanL/RLArenaCollisionDumper`,
-/// which dumps Rocket League's real triangle mesh, not a parameterized
-/// radius) — the same "requires the owner's own Windows/Rocket League
-/// environment" blocker `RB-VERIFY-002-FR-001` already documents, not
-/// something a wiki search alone can resolve. See `CORNER_ARCH_RADIUS`'s
-/// own doc comment for the same finding applied to that constant.
-pub const FILLET_RADIUS: f32 = 292.0;
+/// Side wall to floor.
+pub const SIDE_FLOOR_RADIUS: f32 = 256.0;
+/// Back wall to floor: tighter than every other floor ramp.
+pub const BACK_FLOOR_RADIUS: f32 = 160.0;
+/// Diagonal corner wall to floor.
+pub const CORNER_FLOOR_RADIUS: f32 = 256.0;
+/// Every wall to the ceiling.
+pub const CEILING_RADIUS: f32 = 512.0;
+/// The vertical curve joining a corner wall to its side or back wall:
+/// the real corner is a broad 864 uu bend, not a sharp 135-degree edge.
+pub const CORNER_EDGE_RADIUS: f32 = 864.0;
 
-/// Uncalibrated placeholder: the radius of the curved arch connecting a
-/// diagonal *corner* wall to the floor or ceiling — distinctly larger than
-/// the cardinal walls' own `FILLET_RADIUS` transition, since real Rocket
-/// League's corner-boost area is a noticeably bigger, more swept curve than
-/// a cardinal wall's small rounding, not just a scaled-down version of the
-/// same shape. This port has no *reliable* reference for the real arch's
-/// actual radius either — chosen only to read as visibly larger than
-/// `FILLET_RADIUS` in tests, not measured from real field mesh data. Also
-/// governs the 16 compound-corner fillets (`standard_corner_fillets`),
-/// since every one of them touches a corner wall's own floor- or
-/// ceiling-seam arch and needs to share its radius to still meet it exactly
-/// where their axes cross (see `StaticCornerFillet::between_three_planes`'s
-/// own doc comment for why a mismatched radius there wouldn't blend
-/// cleanly).
-///
-/// `RB-PHYSICS-001-FR-040`'s research (see `FILLET_RADIUS`'s own doc
-/// comment for the full finding) found no reference for this constant
-/// specifically at all — the one wiki value it did turn up doesn't even
-/// claim to describe a corner wall's own distinctly bigger arch, only "wall
-/// bottom ramp radius" undifferentiated by wall type, so it isn't even a
-/// weak candidate for this constant the way it arguably is for
-/// `FILLET_RADIUS`. Still genuinely uncalibrated; still needs real
-/// extracted mesh data to close for real.
-pub const CORNER_ARCH_RADIUS: f32 = 750.0;
-
-// The whole point of RB-PHYSICS-001-FR-025: a corner wall's own
-// floor/ceiling arch should read as visibly bigger than a cardinal wall's
-// small rounding, not just a scaled-down copy of the same shape. Enforced at
-// compile time rather than as a runtime test, since it's a relationship
-// between two constants.
-const _: () = assert!(CORNER_ARCH_RADIUS > FILLET_RADIUS);
+/// Uncalibrated placeholder: the radius rounding the goal mouth's posts and
+/// crossbar (`standard_goal_cutout_fillets`, `standard_goal_corner_fillets`).
+/// Kept at the arena's old 292 uu fillet value: FR-102 calibrated only the
+/// arena's own transitions, not the goal mesh.
+pub const GOAL_FILLET_RADIUS: f32 = 292.0;
 
 /// Half-width of the goal-mouth window cut into each back wall — a
 /// commonly-cited community-measured Rocket League dimension (same
@@ -414,14 +364,14 @@ pub fn standard_goal_cutout_fillets() -> Vec<StaticQuarterPipe> {
             fillets.push(StaticQuarterPipe::between_planes(
                 &wall,
                 &post,
-                FILLET_RADIUS,
+                GOAL_FILLET_RADIUS,
                 Vec3::new(0.0, 0.0, 1.0),
             ));
         }
         fillets.push(StaticQuarterPipe::between_planes(
             &wall,
             &crossbar,
-            FILLET_RADIUS,
+            GOAL_FILLET_RADIUS,
             Vec3::new(1.0, 0.0, 0.0),
         ));
     }
@@ -441,7 +391,7 @@ pub fn standard_goal_cutout_fillets() -> Vec<StaticQuarterPipe> {
 /// plane, and the crossbar), rather than from the two edge fillets
 /// `standard_goal_cutout_fillets` builds at that vertex, since a corner
 /// fillet's center is already exactly their common axis intersection (see
-/// `between_three_planes`'s own doc comment). Reuses `FILLET_RADIUS`
+/// `between_three_planes`'s own doc comment). Reuses `GOAL_FILLET_RADIUS`
 /// unchanged — unlike the arena's own diagonal-corner fillets
 /// (`RB-PHYSICS-001-FR-025`), both edge fillets meeting here already share
 /// one radius, so there's no mismatched-radius concern requiring a
@@ -462,7 +412,7 @@ pub fn standard_goal_corner_fillets() -> Vec<StaticCornerFillet> {
                 &wall,
                 &post,
                 &crossbar,
-                FILLET_RADIUS,
+                GOAL_FILLET_RADIUS,
             ));
         }
     }
@@ -610,168 +560,119 @@ pub fn standard_nets() -> Vec<NetMesh> {
 /// `axis_direction` is simply `(0, 0, 1)`, since the edge itself is
 /// vertical.
 ///
-/// Since `RB-PHYSICS-001-FR-025`, the 8 floor/ceiling-seam fillets that
-/// bridge a *corner* wall (as opposed to a cardinal side/back wall) use
-/// `CORNER_ARCH_RADIUS` rather than `FILLET_RADIUS` — see that constant's
-/// own doc comment. The other 16 fillets (8 cardinal-wall floor/ceiling
-/// seams, 8 vertical corner edges) are unaffected and still use
-/// `FILLET_RADIUS`.
+/// Since `RB-PHYSICS-001-FR-102`, every radius comes from the real mesh:
+/// `SIDE_FLOOR_RADIUS`, `BACK_FLOOR_RADIUS` and `CORNER_FLOOR_RADIUS` for
+/// the floor seams, `CEILING_RADIUS` for every ceiling seam, and
+/// `CORNER_EDGE_RADIUS` for the 8 vertical edges.
 pub fn standard_curves() -> Vec<StaticQuarterPipe> {
     let floor = standard_ground();
     let ceiling = ceiling_plane();
     let mut curves = Vec::with_capacity(24);
-
-    for &sign in &[1.0f32, -1.0] {
-        let wall = side_wall_plane(sign);
-        let axis_direction = Vec3::new(0.0, 1.0, 0.0);
+    let mut seams = |wall: &StaticPlane, floor_radius: f32, axis_direction: Vec3| {
         curves.push(StaticQuarterPipe::between_planes(
             &floor,
-            &wall,
-            FILLET_RADIUS,
+            wall,
+            floor_radius,
             axis_direction,
         ));
         curves.push(StaticQuarterPipe::between_planes(
             &ceiling,
-            &wall,
-            FILLET_RADIUS,
+            wall,
+            CEILING_RADIUS,
             axis_direction,
         ));
+    };
+    for sign in [1.0f32, -1.0] {
+        seams(
+            &side_wall_plane(sign),
+            SIDE_FLOOR_RADIUS,
+            Vec3::new(0.0, 1.0, 0.0),
+        );
     }
-
-    for &sign in &[1.0f32, -1.0] {
-        let wall = back_wall_plane(sign);
-        let axis_direction = Vec3::new(1.0, 0.0, 0.0);
-        curves.push(StaticQuarterPipe::between_planes(
-            &floor,
-            &wall,
-            FILLET_RADIUS,
-            axis_direction,
-        ));
-        curves.push(StaticQuarterPipe::between_planes(
-            &ceiling,
-            &wall,
-            FILLET_RADIUS,
-            axis_direction,
-        ));
+    for sign in [1.0f32, -1.0] {
+        seams(
+            &back_wall_plane(sign),
+            BACK_FLOOR_RADIUS,
+            Vec3::new(1.0, 0.0, 0.0),
+        );
     }
-
-    for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+    for (sx, sy) in QUADRANTS {
         let wall = corner_wall_plane(sx, sy);
-        // A vertical wall's normal always has zero Z component while the
-        // floor/ceiling's is purely Z, so this cross product is already
-        // exactly unit length (the two normals are always perpendicular,
-        // regardless of the wall's own horizontal rotation) — no
-        // `.normalize()`/`.unwrap()` needed.
-        //
-        // These two seams use CORNER_ARCH_RADIUS, not FILLET_RADIUS
-        // (RB-PHYSICS-001-FR-025) — see that constant's own doc comment for
-        // why a corner wall's floor/ceiling arch is distinctly bigger than a
-        // cardinal wall's.
-        let floor_axis_direction = floor.normal.cross(&wall.normal);
-        curves.push(StaticQuarterPipe::between_planes(
-            &floor,
-            &wall,
-            CORNER_ARCH_RADIUS,
-            floor_axis_direction,
-        ));
-        let ceiling_axis_direction = ceiling.normal.cross(&wall.normal);
-        curves.push(StaticQuarterPipe::between_planes(
-            &ceiling,
-            &wall,
-            CORNER_ARCH_RADIUS,
-            ceiling_axis_direction,
-        ));
+        // A vertical wall's normal is perpendicular to the floor's, so
+        // this cross product is already unit length.
+        let axis_direction = floor.normal.cross(&wall.normal);
+        seams(&wall, CORNER_FLOOR_RADIUS, axis_direction);
     }
-
-    // The 8 vertical-edge fillets (`RB-PHYSICS-001-FR-022`), one per corner
-    // wall's two endpoints, where it meets its neighboring side or back
-    // wall. Both bridged planes are vertical, so the edge itself -- and
-    // therefore this fillet's axis -- runs along Z; `between_planes` derives
-    // whatever sector angle actually results (a shallow ~45 degrees here,
-    // not the 90 the floor/ceiling-seam fillets get, since these two planes
-    // meet at 135 degrees rather than a right angle) with no help needed
-    // from this call site beyond passing the two planes.
-    let vertical = Vec3::new(0.0, 0.0, 1.0);
-    for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
-        let side = side_wall_plane(sx);
-        let back = back_wall_plane(sy);
-        let corner = corner_wall_plane(sx, sy);
-        curves.push(StaticQuarterPipe::between_planes(
-            &side,
-            &corner,
-            FILLET_RADIUS,
-            vertical,
-        ));
-        curves.push(StaticQuarterPipe::between_planes(
-            &corner,
-            &back,
-            FILLET_RADIUS,
-            vertical,
-        ));
+    for (sx, sy) in QUADRANTS {
+        curves.extend(corner_edges(sx, sy));
     }
-
     curves
 }
 
-/// Compound-corner fillets for the standard arena (`RB-PHYSICS-001-FR-023`):
-/// a small spherical patch at each of the 16 vertices where a corner wall's
-/// own vertical-edge fillet (`standard_curves`) would otherwise meet a
-/// floor- or ceiling-seam fillet at a single sharp point — 4 per corner wall
-/// (floor+side, floor+back, ceiling+side, ceiling+back) times 4 corner
-/// walls (one per quadrant). Each is built by
-/// `StaticCornerFillet::between_three_planes` directly from the same three
-/// flat planes `standard_walls` already builds (floor or ceiling, the
-/// neighboring side or back wall, and the corner wall itself) — not from
-/// the two fillets `standard_curves` builds at that vertex, since a
-/// corner-fillet's center is already exactly their common axis
-/// intersection (see `StaticCornerFillet::between_three_planes`'s own doc
-/// comment).
-///
-/// All 16 fillets use `CORNER_ARCH_RADIUS` (`RB-PHYSICS-001-FR-025`), not
-/// `FILLET_RADIUS` — every one of them touches one of a corner wall's own
-/// floor/ceiling-seam arches (`standard_curves`), which since FR-025 use the
-/// larger `CORNER_ARCH_RADIUS`, and `between_three_planes` needs one shared
-/// radius across all three planes it blends to still meet that arch exactly
-/// where their axes cross.
-pub fn standard_corner_fillets() -> Vec<StaticCornerFillet> {
+const QUADRANTS: [(f32, f32); 4] = [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)];
+
+/// The two vertical edges of the corner wall in quadrant `(sx, sy)`:
+/// side wall to corner wall, then corner wall to back wall. Each sector
+/// sweeps in that order (`StaticQuarterPipe::between_planes`).
+fn corner_edges(sx: f32, sy: f32) -> [StaticQuarterPipe; 2] {
+    let corner = corner_wall_plane(sx, sy);
+    let vertical = Vec3::new(0.0, 0.0, 1.0);
+    [
+        StaticQuarterPipe::between_planes(
+            &side_wall_plane(sx),
+            &corner,
+            CORNER_EDGE_RADIUS,
+            vertical,
+        ),
+        StaticQuarterPipe::between_planes(
+            &corner,
+            &back_wall_plane(sy),
+            CORNER_EDGE_RADIUS,
+            vertical,
+        ),
+    ]
+}
+
+/// The floor and ceiling ramps swept around each of the 8 vertical corner
+/// edges (`RB-PHYSICS-001-FR-102`): 16 `StaticSweptFillet`s, replacing
+/// FR-023's 16 `StaticCornerFillet` spheres. Per quadrant: floor at the
+/// side edge, floor at the back edge, ceiling at the side edge, ceiling at
+/// the back edge. A floor tube blends between the two walls' own floor
+/// radii across its edge, as the real mesh does: constant 256 uu at the
+/// side end, 256 to 160 uu toward the back wall. Every ceiling tube is a
+/// constant `CEILING_RADIUS`.
+pub fn standard_corner_sweeps() -> Vec<StaticSweptFillet> {
     let floor = standard_ground();
     let ceiling = ceiling_plane();
-    let mut fillets = Vec::with_capacity(16);
-
-    for &(sx, sy) in &[(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
-        let side = side_wall_plane(sx);
-        let back = back_wall_plane(sy);
-        let corner = corner_wall_plane(sx, sy);
-        fillets.push(StaticCornerFillet::between_three_planes(
+    let mut sweeps = Vec::with_capacity(16);
+    for (sx, sy) in QUADRANTS {
+        let [side_edge, back_edge] = corner_edges(sx, sy);
+        sweeps.push(StaticSweptFillet::around_edge(
+            &side_edge,
             &floor,
-            &side,
-            &corner,
-            CORNER_ARCH_RADIUS,
+            SIDE_FLOOR_RADIUS,
+            CORNER_FLOOR_RADIUS,
         ));
-        fillets.push(StaticCornerFillet::between_three_planes(
+        sweeps.push(StaticSweptFillet::around_edge(
+            &back_edge,
             &floor,
-            &corner,
-            &back,
-            CORNER_ARCH_RADIUS,
+            CORNER_FLOOR_RADIUS,
+            BACK_FLOOR_RADIUS,
         ));
-        fillets.push(StaticCornerFillet::between_three_planes(
-            &ceiling,
-            &side,
-            &corner,
-            CORNER_ARCH_RADIUS,
-        ));
-        fillets.push(StaticCornerFillet::between_three_planes(
-            &ceiling,
-            &corner,
-            &back,
-            CORNER_ARCH_RADIUS,
-        ));
+        for edge in [side_edge, back_edge] {
+            sweeps.push(StaticSweptFillet::around_edge(
+                &edge,
+                &ceiling,
+                CEILING_RADIUS,
+                CEILING_RADIUS,
+            ));
+        }
     }
-
-    fillets
+    sweeps
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -860,30 +761,24 @@ mod tests {
         // (RB-PHYSICS-001-FR-022), which don't bridge to the floor or
         // ceiling at all -- see `every_corner_edge_curve_runs_vertically`.
         //
-        // Since RB-PHYSICS-001-FR-025, the first 8 (cardinal side/back
-        // walls) use FILLET_RADIUS while the next 8 (diagonal corner walls)
-        // use the larger CORNER_ARCH_RADIUS -- see
-        // `standard_curves`'s own doc comment for the construction order
-        // this indexing relies on.
-        for curve in &standard_curves()[0..8] {
-            let near_floor = (curve.axis_point.z - FILLET_RADIUS).abs() < 1e-3;
-            let near_ceiling = (curve.axis_point.z - (CEILING_Z - FILLET_RADIUS)).abs() < 1e-3;
-            assert!(
-                near_floor || near_ceiling,
-                "expected every cardinal-wall floor/ceiling-seam curve's axis to sit \
-                 FILLET_RADIUS-in from the floor or ceiling, got z={}",
-                curve.axis_point.z
-            );
-        }
-        for curve in &standard_curves()[8..16] {
-            let near_floor = (curve.axis_point.z - CORNER_ARCH_RADIUS).abs() < 1e-3;
-            let near_ceiling = (curve.axis_point.z - (CEILING_Z - CORNER_ARCH_RADIUS)).abs() < 1e-3;
-            assert!(
-                near_floor || near_ceiling,
-                "expected every corner-wall floor/ceiling-seam curve's axis to sit \
-                 CORNER_ARCH_RADIUS-in from the floor or ceiling, got z={}",
-                curve.axis_point.z
-            );
+        // Since RB-PHYSICS-001-FR-102 the radii are the real mesh's: in
+        // construction order, side walls, back walls, then corner walls,
+        // each a floor seam followed by a ceiling seam.
+        let floor_radii = [
+            SIDE_FLOOR_RADIUS,
+            SIDE_FLOOR_RADIUS,
+            BACK_FLOOR_RADIUS,
+            BACK_FLOOR_RADIUS,
+            CORNER_FLOOR_RADIUS,
+            CORNER_FLOOR_RADIUS,
+            CORNER_FLOOR_RADIUS,
+            CORNER_FLOOR_RADIUS,
+        ];
+        for (seams, floor_radius) in standard_curves()[0..16].chunks(2).zip(floor_radii) {
+            assert!((seams[0].radius - floor_radius).abs() < 1e-6);
+            assert!((seams[0].axis_point.z - floor_radius).abs() < 1e-3);
+            assert!((seams[1].radius - CEILING_RADIUS).abs() < 1e-6);
+            assert!((seams[1].axis_point.z - (CEILING_Z - CEILING_RADIUS)).abs() < 1e-3);
         }
     }
 
@@ -909,9 +804,7 @@ mod tests {
         // `between_planes` places its axis exactly `radius` from *each*
         // bridged plane (see `StaticQuarterPipe::between_planes`'s doc
         // comment), so every curve's axis must sit exactly its own radius
-        // -- `FILLET_RADIUS` for a cardinal wall or vertical corner edge,
-        // `CORNER_ARCH_RADIUS` for a corner wall's own floor/ceiling seam
-        // (RB-PHYSICS-001-FR-025) -- from some vertical wall -- a side
+        // -- from some vertical wall -- a side
         // wall, a back wall, or (since FR-021) a diagonal corner wall. The
         // back walls aren't in `standard_walls()` itself since
         // RB-PHYSICS-001-FR-024 (they're `StaticGoalWall`s now), so
@@ -925,11 +818,9 @@ mod tests {
         vertical_walls.push(back_wall_plane(1.0));
         vertical_walls.push(back_wall_plane(-1.0));
         for curve in standard_curves() {
-            let sits_radius_in_from_some_wall = vertical_walls.iter().any(|wall| {
-                let distance = wall.signed_distance(&curve.axis_point);
-                (distance - FILLET_RADIUS).abs() < 1e-3
-                    || (distance - CORNER_ARCH_RADIUS).abs() < 1e-3
-            });
+            let sits_radius_in_from_some_wall = vertical_walls
+                .iter()
+                .any(|wall| (wall.signed_distance(&curve.axis_point) - curve.radius).abs() < 1e-2);
             assert!(
                 sits_radius_in_from_some_wall,
                 "expected every curve's axis to sit radius-in from some vertical wall, got {:?}",
@@ -945,11 +836,11 @@ mod tests {
         let pipe = StaticQuarterPipe::between_planes(
             &floor,
             &wall,
-            FILLET_RADIUS,
+            CORNER_FLOOR_RADIUS,
             Vec3::new(1.0, -1.0, 0.0),
         );
-        assert!((wall.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
-        assert!((floor.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
+        assert!((wall.signed_distance(&pipe.axis_point) - CORNER_FLOOR_RADIUS).abs() < 1e-3);
+        assert!((floor.signed_distance(&pipe.axis_point) - CORNER_FLOOR_RADIUS).abs() < 1e-3);
     }
 
     #[test]
@@ -957,7 +848,8 @@ mod tests {
         let wall = corner_wall_plane(1.0, 1.0);
         let floor = standard_ground();
         let axis_direction = floor.normal.cross(&wall.normal);
-        let pipe = StaticQuarterPipe::between_planes(&floor, &wall, FILLET_RADIUS, axis_direction);
+        let pipe =
+            StaticQuarterPipe::between_planes(&floor, &wall, CORNER_FLOOR_RADIUS, axis_direction);
         assert!((pipe.sector_start.length() - 1.0).abs() < 1e-4);
         assert!((pipe.sector_end.length() - 1.0).abs() < 1e-4);
         assert!(pipe.sector_start.dot(&pipe.sector_end).abs() < 1e-4);
@@ -970,11 +862,11 @@ mod tests {
         let pipe = StaticQuarterPipe::between_planes(
             &side,
             &corner,
-            FILLET_RADIUS,
+            CORNER_EDGE_RADIUS,
             Vec3::new(0.0, 0.0, 1.0),
         );
-        assert!((side.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
-        assert!((corner.signed_distance(&pipe.axis_point) - FILLET_RADIUS).abs() < 1e-3);
+        assert!((side.signed_distance(&pipe.axis_point) - CORNER_EDGE_RADIUS).abs() < 1e-2);
+        assert!((corner.signed_distance(&pipe.axis_point) - CORNER_EDGE_RADIUS).abs() < 1e-2);
     }
 
     #[test]
@@ -990,7 +882,7 @@ mod tests {
         let pipe = StaticQuarterPipe::between_planes(
             &side,
             &corner,
-            FILLET_RADIUS,
+            CORNER_EDGE_RADIUS,
             Vec3::new(0.0, 0.0, 1.0),
         );
         let angle = pipe.sector_start.dot(&pipe.sector_end).acos();
@@ -1018,51 +910,50 @@ mod tests {
     }
 
     #[test]
-    fn standard_corner_fillets_has_sixteen_fillets() {
-        assert_eq!(standard_corner_fillets().len(), 16);
+    fn standard_corner_sweeps_has_sixteen_fillets() {
+        assert_eq!(standard_corner_sweeps().len(), 16);
     }
 
     #[test]
-    fn every_standard_corner_fillets_center_sits_radius_in_from_a_floor_or_ceiling_a_side_or_back_wall_and_a_corner_wall(
-    ) {
-        // Each of the 16 fillets should sit exactly CORNER_ARCH_RADIUS
-        // (RB-PHYSICS-001-FR-025 -- all 16 switched from FILLET_RADIUS
-        // since each touches a corner wall's own floor/ceiling-seam arch,
-        // which now uses that larger radius too) from *some* floor/ceiling
-        // plane, *some* side/back wall, and *some* corner wall -- proving
-        // `between_three_planes` actually solved for the real triple
-        // intersection this arena's geometry produces, not just some
-        // arbitrary point.
-        let floor_and_ceiling = [standard_ground(), ceiling_plane()];
-        let side_and_back_walls: Vec<StaticPlane> = [1.0f32, -1.0]
-            .iter()
-            .flat_map(|&s| [side_wall_plane(s), back_wall_plane(s)])
+    fn every_corner_sweeps_tube_is_tangent_to_its_floor_or_ceiling_and_wall_at_both_ends() {
+        // At each sector end the swept tube must meet that wall's own seam
+        // fillet: its center sits one tube radius from the floor/ceiling
+        // and from the wall the end faces (FR-102).
+        let mut vertical_walls: Vec<StaticPlane> = standard_walls()
+            .into_iter()
+            .filter(|wall| wall.normal.z == 0.0)
             .collect();
-        let corner_walls: Vec<StaticPlane> = [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)]
-            .iter()
-            .map(|&(sx, sy)| corner_wall_plane(sx, sy))
-            .collect();
-
-        for fillet in standard_corner_fillets() {
-            let sits_radius_in = |plane: &StaticPlane| {
-                (plane.signed_distance(&fillet.center) - CORNER_ARCH_RADIUS).abs() < 1e-2
-            };
-            assert!(
-                floor_and_ceiling.iter().any(sits_radius_in),
-                "expected {:?} to sit radius-in from the floor or ceiling",
-                fillet.center
-            );
-            assert!(
-                side_and_back_walls.iter().any(sits_radius_in),
-                "expected {:?} to sit radius-in from a side or back wall",
-                fillet.center
-            );
-            assert!(
-                corner_walls.iter().any(sits_radius_in),
-                "expected {:?} to sit radius-in from a corner wall",
-                fillet.center
-            );
+        vertical_walls.extend([back_wall_plane(1.0), back_wall_plane(-1.0)]);
+        for sweep in standard_corner_sweeps() {
+            for (dir, tube) in [
+                (sweep.sector_start, sweep.tube_radius_start),
+                (sweep.sector_end, sweep.tube_radius_end),
+            ] {
+                assert!((sweep.tube_radius_at(&dir) - tube).abs() < 1e-3);
+                let center =
+                    sweep.axis_point + dir * (sweep.wall_radius - tube) + sweep.inward * tube;
+                let wall = vertical_walls
+                    .iter()
+                    .find(|wall| wall.normal.dot(&dir) < -0.999)
+                    .expect("every sector end faces a vertical wall");
+                assert!(
+                    (wall.signed_distance(&center) - tube).abs() < 1e-2,
+                    "{sweep:?} end {dir:?}: tube center {center:?} is not {tube} from {wall:?}"
+                );
+                let height = sweep.inward.dot(&(center - sweep.axis_point));
+                assert!((height - tube).abs() < 1e-3);
+            }
         }
+    }
+
+    #[test]
+    fn a_back_edge_floor_sweep_blends_the_corner_ramp_into_the_back_ramp() {
+        let sweep = standard_corner_sweeps()[1];
+        let mid = (sweep.sector_start + sweep.sector_end)
+            .normalize()
+            .expect("the sector spans 45 degrees");
+        let expected = 0.5 * (CORNER_FLOOR_RADIUS + BACK_FLOOR_RADIUS);
+        assert!((sweep.tube_radius_at(&mid) - expected).abs() < 1e-2);
     }
 
     #[test]
@@ -1102,7 +993,7 @@ mod tests {
         // gives for the arena's other fillets: `between_planes` places its
         // axis exactly `radius` in from *each* of the two planes it
         // bridges, so every goal-cutout fillet's axis must sit exactly
-        // `FILLET_RADIUS` from some back wall, and also from some
+        // `GOAL_FILLET_RADIUS` from some back wall, and also from some
         // post/crossbar plane -- proof these fillets were actually derived
         // from real geometry, not just built with plausible-looking
         // numbers.
@@ -1113,7 +1004,7 @@ mod tests {
             goal_crossbar_plane(),
         ];
         let sits_radius_in = |plane: &StaticPlane, point: &Vec3| {
-            (plane.signed_distance(point) - FILLET_RADIUS).abs() < 1e-2
+            (plane.signed_distance(point) - GOAL_FILLET_RADIUS).abs() < 1e-2
         };
 
         for fillet in standard_goal_cutout_fillets() {
@@ -1141,18 +1032,18 @@ mod tests {
 
     #[test]
     fn every_goal_corner_fillets_center_sits_radius_in_from_a_back_wall_a_post_and_the_crossbar() {
-        // Each of the 4 fillets should sit exactly FILLET_RADIUS from
+        // Each of the 4 fillets should sit exactly GOAL_FILLET_RADIUS from
         // *some* back wall, *some* post plane, and the crossbar plane
         // simultaneously -- proving `between_three_planes` actually solved
         // for the real triple intersection this goal's geometry produces,
         // not just some arbitrary point (the same proof
-        // `every_standard_corner_fillets_center_sits_radius_in_from_a_floor_or_ceiling_a_side_or_back_wall_and_a_corner_wall`
-        // gives for the arena's own compound corners).
+        // once gave for the arena's own compound corners, before FR-102
+        // replaced them with swept fillets).
         let back_walls = [back_wall_plane(1.0), back_wall_plane(-1.0)];
         let post_planes = [goal_post_plane(1.0), goal_post_plane(-1.0)];
         let crossbar = goal_crossbar_plane();
         let sits_radius_in = |plane: &StaticPlane, point: &Vec3| {
-            (plane.signed_distance(point) - FILLET_RADIUS).abs() < 1e-2
+            (plane.signed_distance(point) - GOAL_FILLET_RADIUS).abs() < 1e-2
         };
 
         for fillet in standard_goal_corner_fillets() {
