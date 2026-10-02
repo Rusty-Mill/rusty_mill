@@ -363,14 +363,11 @@ pub const SNAPSHOT_PREFIX: &str = "refresh-";
 /// small number that happens to parse (an ISO date's year) never does.
 const EARLIEST_STAMP: u64 = 1_000_000_000;
 
-/// `RGM-FR-008`: exactly one normal path component — no separator, no
-/// `..`, no root, nothing empty.
+/// `RGM-FR-008`: one plain file name — the client library's portable rule
+/// (`is_plain_file_name`), which also refuses a Windows drive prefix, device
+/// names and the other spellings a host's `Path` parser would let through.
 pub fn is_plain_file_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    ) && !name.contains(['/', '\\'])
+    rusty_multimodal_db::server::client::is_plain_file_name(name)
 }
 
 /// `RRF-FR-004`: the snapshot directories under `root`, oldest first —

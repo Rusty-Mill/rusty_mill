@@ -893,6 +893,45 @@ pub struct SnapshotAt {
     pub position: Option<(u64, u64)>,
 }
 
+/// Whether a file name a server sent is safe to join under any directory on any
+/// platform (`CSN-FR-005`, `RGM-FR-008`): one plain component that no operating
+/// system's path syntax can turn into something else. Decided on the text, not by
+/// the host's `Path` parser, so a Windows-style name is refused on Linux too and
+/// the answer is the same everywhere. Refused: the empty name, `.` and `..`; the
+/// separators `/` and `\\`; `:` (a drive prefix such as `C:escape`, or a
+/// stream); the wildcards and reserved characters `* ? " < > |`; control
+/// characters; a trailing `.` or space (Windows strips them, so `..` is not the
+/// only dot entry); a name over 255 bytes; and a Windows device name (`CON`,
+/// `NUL`, `COM1`, ... with or without an extension).
+pub fn is_plain_file_name(name: &str) -> bool {
+    const RESERVED: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    const DEVICES: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
+    if name.is_empty() || name == "." || name == ".." || name.len() > 255 {
+        return false;
+    }
+    if name
+        .chars()
+        .any(|c| c.is_control() || RESERVED.contains(&c))
+        || name.ends_with(['.', ' '])
+    {
+        return false;
+    }
+    // Windows reads `CON.txt` and `CON .txt` as the device too.
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let numbered = |prefix: &str| {
+        let Some((head, digit)) = stem.split_at_checked(prefix.len()) else {
+            return false;
+        };
+        let mut digit = digit.chars();
+        head.eq_ignore_ascii_case(prefix)
+            && matches!(
+                (digit.next(), digit.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+    };
+    !(DEVICES.iter().any(|d| stem.eq_ignore_ascii_case(d)) || numbered("COM") || numbered("LPT"))
+}
+
 /// [`SchemaDrivenClient::fetch_snapshot_chunked`]'s answer (`CSN-FR-005`,
 /// ADR-0136): what was written, and the change log's `(epoch, seq)` the copy
 /// agrees with (`None` for a table with no log).
@@ -2825,13 +2864,15 @@ impl SchemaDrivenClient {
         dir: &Path,
     ) -> Result<u64, ClientError> {
         let local = |e: std::io::Error| ClientError::Snapshot(e.to_string());
+        // Every name is checked before the first file is created or truncated:
+        // the manifest is the server's word and decides where bytes land.
+        if let Some((name, _, _)) = files.iter().find(|(name, _, _)| !is_plain_file_name(name)) {
+            return Err(ClientError::Snapshot(format!(
+                "the manifest names {name:?}, which is not a plain file name"
+            )));
+        }
         let mut total = 0u64;
         for (index, (name, len, digest)) in files.iter().enumerate() {
-            if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-                return Err(ClientError::Snapshot(format!(
-                    "the manifest names {name:?}, which is not a plain file name"
-                )));
-            }
             let mut file = std::fs::File::create(dir.join(name)).map_err(local)?;
             let mut hasher = Sha256::new();
             let mut offset = 0u64;
@@ -3163,6 +3204,71 @@ fn carries_null(req: &Request) -> bool {
 mod carries_null_tests {
     use super::*;
     use crate::server::protocol::{CompareOp, TransactionOp};
+
+    /// `CSN-FR-005`/`RGM-FR-008`: a server-sent file name is one plain name on
+    /// every platform, decided on the text — a Windows-style name is refused on
+    /// Linux too — and every ordinary snapshot name passes.
+    #[test]
+    fn a_plain_file_name_is_portable() {
+        for ok in [
+            "memories.mmap",
+            "memories.mmap.records",
+            "memories.mmap.inserts",
+            "memories.mmap.relations",
+            "memories.mmap.works-with_2.edges",
+            "entities.mmap.mentioned_with.edges",
+            "a b.c",
+            "x.pad",
+            "CONSOLE",
+            "COM10",
+            "Ünïcode.mmap",
+            &"a".repeat(255),
+        ] {
+            assert!(is_plain_file_name(ok), "{ok:?}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "...",
+            "C:escape",
+            "C:",
+            "c:x",
+            "C:\\escape",
+            "\\\\server\\share\\x",
+            "\\\\?\\C:\\x",
+            "/abs",
+            "a/b",
+            "a\\b",
+            "../x",
+            "..\\x",
+            "x/",
+            "x:stream",
+            "a*b",
+            "a?b",
+            "a\"b",
+            "a<b",
+            "a>b",
+            "a|b",
+            "nul\0",
+            "tab\t",
+            "trail.",
+            "trail ",
+            "CON",
+            "con",
+            "Nul.txt",
+            "AUX .log",
+            "COM1",
+            "com9.x",
+            "LPT0",
+            "COM\u{b9}",
+            "CONIN$",
+            "CONOUT$.x",
+            &"a".repeat(256),
+        ] {
+            assert!(!is_plain_file_name(bad), "{bad:?}");
+        }
+    }
 
     /// `RGM-FR-005` (ADR-0121): the gate sees a `Null` wherever a value
     /// can sit, and nothing else.

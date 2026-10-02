@@ -163,6 +163,15 @@ fn only_plain_file_names_are_accepted_from_a_snapshot() {
         "dir/memories.mmap",
         "dir\\memories.mmap",
         "memories.mmap/",
+        "C:escape",
+        "C:\\escape",
+        "\\\\server\\share",
+        "x:stream",
+        "NUL",
+        "COM1.txt",
+        "trailing.",
+        "trailing ",
+        "wild*card",
     ] {
         assert!(!is_plain_file_name(bad), "{bad:?}");
     }

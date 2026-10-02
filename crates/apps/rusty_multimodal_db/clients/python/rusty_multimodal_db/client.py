@@ -24,6 +24,34 @@ from . import protocol as p
 from .protocol import PROTOCOL_VERSION
 
 
+_RESERVED_CHARS = frozenset('/\\:*?"<>|')
+_DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"})
+_DEVICE_DIGITS = frozenset("0123456789\u00b9\u00b2\u00b3")
+
+
+def is_plain_file_name(name: str) -> bool:
+    """Whether a file name a server sent is safe to join under any directory
+    on any platform (CSN-FR-005, RGM-FR-008): one plain component that no
+    operating system's path syntax can turn into something else. Decided on
+    the text, not by ``os.path`` (which would let a Windows-style name through
+    on Linux), so the answer is the same everywhere. Refused: the empty name,
+    ``.`` and ``..``; ``/`` and ``\\``; ``:`` (a drive prefix such as
+    ``C:escape``, or a stream); ``* ? " < > |``; control characters; a trailing
+    ``.`` or space; a name over 255 bytes; and a Windows device name (``CON``,
+    ``NUL``, ``COM1``, ... with or without an extension). Mirrors the Rust
+    client's ``is_plain_file_name``."""
+    if not name or name in (".", "..") or len(name.encode("utf-8")) > 255:
+        return False
+    if any(c in _RESERVED_CHARS or ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in name):
+        return False
+    if name.endswith((".", " ")):
+        return False
+    stem = name.split(".", 1)[0].rstrip(" ").upper()
+    if stem in _DEVICE_NAMES:
+        return False
+    return not (len(stem) == 4 and stem[:3] in ("COM", "LPT") and stem[3] in _DEVICE_DIGITS)
+
+
 class ClientError(Exception):
     pass
 
@@ -666,10 +694,13 @@ class Client:
         return written, manifest.position
 
     def _download_staged(self, manifest: p.SnapshotManifest, directory: str) -> int:
+        # Every name is checked before the first file is created or truncated:
+        # the manifest is the server's word and decides where bytes land.
+        for name, _length, _digest in manifest.files:
+            if not is_plain_file_name(name):
+                raise ProtocolError(f"manifest file name {name!r} is not a plain file name")
         total = 0
         for index, (name, length, digest) in enumerate(manifest.files):
-            if name in ("", ".", "..") or "/" in name or "\\" in name:
-                raise ProtocolError(f"manifest file name {name!r} is not a plain file name")
             hasher = hashlib.sha256()
             offset = 0
             with open(os.path.join(directory, name), "wb") as out:

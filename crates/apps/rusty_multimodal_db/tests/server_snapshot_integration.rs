@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::io::{BufReader, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -285,23 +285,24 @@ fn a_connection_negotiated_below_36_cannot_ask() {
     assert!(!staging.join("snap-0").exists());
 }
 
-/// A server that answers a manifest whose digest is wrong: the client must
-/// refuse the download rather than install bytes it cannot vouch for.
-#[test]
-fn the_client_rejects_a_chunk_stream_that_does_not_match_the_manifest() {
+/// A scripted server: answers `files` as the manifest, every chunk as the
+/// bytes `chunk`, and reports each request it sees (after the handshake) on
+/// the returned channel, so a test can tell what the client did and did not ask.
+fn fake_snapshot_server(
+    files: Vec<(String, u64, [u8; 32])>,
+    chunk: Vec<u8>,
+) -> (SocketAddr, mpsc::Receiver<Request>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let (seen, requests) = mpsc::channel();
     thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         let mut conn = (
             BufReader::new(stream.try_clone().unwrap()),
             BufWriter::new(stream),
         );
-        loop {
-            let Ok(request) = read_message::<_, Request>(&mut conn.0) else {
-                return;
-            };
-            let response = match request {
+        while let Ok(request) = read_message::<_, Request>(&mut conn.0) {
+            let response = match &request {
                 Request::Hello { .. } => Response::Hello {
                     protocol_version: PROTOCOL_VERSION,
                 },
@@ -316,22 +317,115 @@ fn the_client_rejects_a_chunk_stream_that_does_not_match_the_manifest() {
                 Request::BeginSnapshot => Response::SnapshotManifest {
                     snapshot: 1,
                     position: None,
-                    files: vec![("t".into(), 3, <[u8; 32]>::from(Sha256::digest(b"abc")))],
+                    files: files.clone(),
                 },
                 Request::FetchChunk { .. } => Response::Chunk {
-                    bytes: b"abd".to_vec(),
+                    bytes: chunk.clone(),
                 },
                 _ => Response::Ok,
             };
+            let _ = seen.send(request);
             write_message(&mut conn.1, &response).unwrap();
             conn.1.flush().unwrap();
         }
     });
+    (addr, requests)
+}
+
+fn digest(bytes: &[u8]) -> [u8; 32] {
+    <[u8; 32]>::from(Sha256::digest(bytes))
+}
+
+/// A server that answers a manifest whose digest is wrong: the client must
+/// refuse the download rather than install bytes it cannot vouch for.
+#[test]
+fn the_client_rejects_a_chunk_stream_that_does_not_match_the_manifest() {
+    let (addr, _) = fake_snapshot_server(vec![("t".into(), 3, digest(b"abc"))], b"abd".to_vec());
     let target = unique_dir("snapshot_target");
     std::fs::create_dir_all(&target).unwrap();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
     match client.fetch_snapshot_chunked(&target) {
         Err(ClientError::Snapshot(message)) => assert!(message.contains("SHA-256"), "{message}"),
         other => panic!("expected a Snapshot error, got {other:?}"),
+    }
+}
+
+/// The manifest is the server's word, so a name that is not one plain file name
+/// on every platform — a drive-relative `C:escape`, an absolute or UNC path, a
+/// separator, a dot entry — is refused before any file is created or truncated
+/// (even a good name listed first), no chunk is fetched, and the staged copy
+/// is still released.
+#[test]
+fn a_hostile_manifest_name_is_refused_before_anything_is_written() {
+    for bad in [
+        "C:escape",
+        "c:\\windows\\x",
+        "\\\\server\\share\\x",
+        "/etc/passwd",
+        "..\\x",
+        "sub/x",
+        "..",
+        "x:stream",
+        "NUL",
+        "con.txt",
+    ] {
+        let good = b"abc";
+        let files = vec![
+            ("good".to_string(), 3, digest(good)),
+            (bad.to_string(), 3, digest(good)),
+        ];
+        let (addr, requests) = fake_snapshot_server(files, good.to_vec());
+        let target = unique_dir("snapshot_target");
+        std::fs::create_dir_all(&target).unwrap();
+        let mut client = SchemaDrivenClient::connect(addr).unwrap();
+        match client.fetch_snapshot_chunked(&target) {
+            Err(ClientError::Snapshot(message)) => {
+                assert!(
+                    message.contains("not a plain file name"),
+                    "{bad}: {message}"
+                )
+            }
+            other => panic!("{bad}: expected a Snapshot error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "{bad}");
+        drop(client);
+        let asked: Vec<_> = requests.try_iter().collect();
+        assert!(
+            asked
+                .iter()
+                .all(|r| !matches!(r, Request::FetchChunk { .. })),
+            "{bad}: no chunk is fetched for a refused manifest"
+        );
+        assert!(
+            asked
+                .iter()
+                .any(|r| matches!(r, Request::EndSnapshot { snapshot: 1 })),
+            "{bad}: the staged copy is still released"
+        );
+    }
+}
+
+/// The same server, an ordinary manifest: the download works and lands every
+/// file under the target directory.
+#[test]
+fn ordinary_snapshot_names_still_download() {
+    let names = [
+        "memories.mmap",
+        "memories.mmap.records",
+        "memories.mmap.knows.edges",
+        "a b.c",
+    ];
+    let files = names
+        .iter()
+        .map(|n| (n.to_string(), 3, digest(b"abc")))
+        .collect();
+    let (addr, _) = fake_snapshot_server(files, b"abc".to_vec());
+    let target = unique_dir("snapshot_target");
+    std::fs::create_dir_all(&target).unwrap();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let done = client.fetch_snapshot_chunked(&target).unwrap();
+    assert_eq!((done.files, done.bytes), (4, 12));
+    for name in names {
+        assert_eq!(std::fs::read(target.join(name)).unwrap(), b"abc", "{name}");
     }
 }
