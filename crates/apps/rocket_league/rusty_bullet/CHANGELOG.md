@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0028 (`RB-PHYSICS-001-FR-109`): `mesh::StaticMesh` classifies its
+  triangle edges (convex, smooth, open), and sphere contacts on an edge
+  follow Bullet's `btAdjustInternalEdgeContacts`.
 - ADR-0027 (`RB-PHYSICS-001-FR-108`): ball-world contacts fold into one
   velocity-only contact (`world::combined_ball_world_contact`) with the
   arena's material, restitution max(ball, 0.3) / friction min(ball, 0.6)
@@ -32,6 +35,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
   `LICENSE`.
 ### Fixed
+- `world::combined_ball_world_contact` averages the distance to the ball's
+  own contact point, as Bullet's `rel_pos1` does (was the surface point).
 - `solver::friction_directions` normalizes a non-unit normal before
   `plane_space` (it returned NaN on the branch boundary).
 ### Removed

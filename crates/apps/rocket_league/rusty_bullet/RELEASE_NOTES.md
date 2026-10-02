@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Ball bounces off the arena's real faces
+**2026-10-02** · `RB-PHYSICS-001-FR-109` · ADR-0028
+
+- Where the ball touches the seam between two arena triangles, the bounce
+  now follows the triangle's own face, as the game does, instead of
+  leaning toward the seam. Average ball error on the owner's capture
+  more than halved again (0.41 to 0.17 uu/s); the worst corner bounce
+  went from 201 to 32. 472 tests.
+
 ## Ball bounces off the arena once
 **2026-10-02** · `RB-PHYSICS-001-FR-108`, `RB-VERIFY-003-FR-007` · ADR-0027
 

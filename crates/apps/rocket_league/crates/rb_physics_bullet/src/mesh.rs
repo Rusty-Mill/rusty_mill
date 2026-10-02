@@ -25,6 +25,33 @@ const CELL_SIZE: f32 = 256.0;
 const EDGE_TOLERANCE: f32 = 0.5;
 const EDGE_TOLERANCE_PER_DEPTH: f32 = 0.25;
 
+/// Vertices this close (uu) are shared (Bullet's `btTriangleInfoMap`
+/// `m_equalVertexThreshold`, 0.0001 BT^2).
+const EQUAL_VERTEX_DISTANCE: f32 = 0.5;
+
+/// A contact this close (uu) to an edge is on it (`m_edgeDistanceThreshold`,
+/// 0.1 BT).
+const EDGE_DISTANCE_THRESHOLD: f32 = 5.0;
+
+/// Neighbouring faces closer than this (`sin^2` of the angle between their
+/// normals, `m_planarEpsilon`) are flat.
+const PLANAR_EPSILON: f32 = 0.0001;
+
+/// How a contact on one triangle edge is adjusted, Bullet's
+/// `btAdjustInternalEdgeContacts` (`RB-PHYSICS-001-FR-109`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EdgeKind {
+    /// Unshared: left alone (its Bullet edge angle stays at 2 pi, past
+    /// `m_maxEdgeAngleThreshold`).
+    Open,
+    /// Concave or flat: a contact here takes the face's normal, since the
+    /// neighbouring face already covers the rest.
+    Smooth,
+    /// Convex: the normal may turn from the face's toward `neighbor`'s, no
+    /// further.
+    Convex { neighbor: Vec3 },
+}
+
 /// One triangle, wound so that `(b - a) x (c - a)` points along `normal`,
 /// the side facing the arena.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -166,6 +193,8 @@ impl Triangle {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticMesh {
     triangles: Vec<Triangle>,
+    /// Per triangle, edge `i` runs from vertex `i` to `i + 1`.
+    edges: Vec<[EdgeKind; 3]>,
     cells: HashMap<(i32, i32, i32), Vec<u32>>,
     pub restitution: f32,
     pub friction: f32,
@@ -190,12 +219,41 @@ impl StaticMesh {
                 }
             }
         }
-        StaticMesh {
+        let mut mesh = StaticMesh {
             triangles,
+            edges: Vec::new(),
             cells,
             restitution: 0.5,
             friction: 0.5,
+        };
+        mesh.edges = (0..mesh.triangles.len())
+            .map(|index| mesh.edge_kinds(index))
+            .collect();
+        mesh
+    }
+
+    /// Classifies triangle `index`'s edges against the neighbours sharing
+    /// them (Bullet's `btGenerateInternalEdgeInfo`).
+    fn edge_kinds(&self, index: usize) -> [EdgeKind; 3] {
+        let mut kinds = [EdgeKind::Open; 3];
+        let Some(triangle) = self.triangles.get(index) else {
+            return kinds;
+        };
+        let (min, max) = triangle.bounds();
+        for other in self.near_indices(min, max) {
+            if other as usize == index {
+                continue;
+            }
+            let Some(neighbor) = self.triangles.get(other as usize) else {
+                continue;
+            };
+            for (edge, kind) in kinds.iter_mut().enumerate() {
+                if let Some(found) = edge_kind(triangle, edge, neighbor) {
+                    *kind = found;
+                }
+            }
         }
+        kinds
     }
 
     /// Builds a mesh from little-endian `f32` vertex triples and `i32`
@@ -236,6 +294,12 @@ impl StaticMesh {
 
     /// Triangles whose grid cells overlap the box `min..max`.
     pub fn near(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = &Triangle> {
+        self.near_indices(min, max)
+            .into_iter()
+            .filter_map(|index| self.triangles.get(index as usize))
+    }
+
+    fn near_indices(&self, min: Vec3, max: Vec3) -> Vec<u32> {
         let mut indices: Vec<u32> = Vec::new();
         for x in cell_of(min.x)..=cell_of(max.x) {
             for y in cell_of(min.y)..=cell_of(max.y) {
@@ -249,8 +313,6 @@ impl StaticMesh {
         indices.sort_unstable();
         indices.dedup();
         indices
-            .into_iter()
-            .filter_map(|index| self.triangles.get(index as usize))
     }
 
     /// The nearest front-facing triangle along the ray, if within `length`.
@@ -280,12 +342,17 @@ impl StaticMesh {
 
     /// A sphere's contacts, one per triangle it reaches, as Bullet's
     /// `btSphereTriangleCollisionAlgorithm` makes them, deepest first and
-    /// at most 4 (one persistent manifold's worth).
+    /// at most 4 (one persistent manifold's worth). A contact on an edge
+    /// is adjusted as `btAdjustInternalEdgeContacts` does
+    /// (`RB-PHYSICS-001-FR-109`), its point moved to keep the sphere's
+    /// own contact point.
     pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<Contact> {
         let reach = Vec3::new(radius, radius, radius);
         let mut contacts: Vec<Contact> = self
-            .near(center - reach, center + reach)
-            .filter_map(|triangle| {
+            .near_indices(center - reach, center + reach)
+            .into_iter()
+            .filter_map(|index| {
+                let triangle = self.triangles.get(index as usize)?;
                 let height = triangle.signed_distance(&center);
                 if height < -radius {
                     return None;
@@ -300,9 +367,13 @@ impl StaticMesh {
                 } else {
                     return None;
                 };
-                (depth >= -CONTACT_PROCESSING_THRESHOLD).then_some(Contact {
-                    normal,
-                    point: closest,
+                if depth < -CONTACT_PROCESSING_THRESHOLD {
+                    return None;
+                }
+                let adjusted = self.adjust_edge_normal(index as usize, &closest, normal);
+                Some(Contact {
+                    normal: adjusted,
+                    point: center - normal * radius + adjusted * depth,
                     penetration_depth: depth,
                 })
             })
@@ -310,6 +381,112 @@ impl StaticMesh {
         contacts.sort_by(|a, b| b.penetration_depth.total_cmp(&a.penetration_depth));
         contacts.truncate(4);
         contacts
+    }
+}
+
+impl StaticMesh {
+    /// `normal` for a contact at `point` on triangle `index`, adjusted for
+    /// the edge nearest `point` if one is within `EDGE_DISTANCE_THRESHOLD`.
+    fn adjust_edge_normal(&self, index: usize, point: &Vec3, normal: Vec3) -> Vec3 {
+        let (Some(triangle), Some(kinds)) = (self.triangles.get(index), self.edges.get(index))
+        else {
+            return normal;
+        };
+        let nearest = (0..3)
+            .map(|edge| {
+                let (start, end) = edge_vertices(triangle, edge);
+                (edge, segment_distance(point, &start, &end))
+            })
+            .filter(|(edge, distance)| {
+                *distance < EDGE_DISTANCE_THRESHOLD && kinds[*edge] != EdgeKind::Open
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((edge, _)) = nearest else {
+            return normal;
+        };
+        let face = triangle.normal;
+        match kinds[edge] {
+            EdgeKind::Open => normal,
+            EdgeKind::Smooth if face.dot(&normal) >= 0.0 => face,
+            EdgeKind::Smooth => normal,
+            EdgeKind::Convex { neighbor } => {
+                let (start, end) = edge_vertices(triangle, edge);
+                clamp_to_wedge(normal, face, neighbor, &(end - start))
+            }
+        }
+    }
+}
+
+fn edge_vertices(triangle: &Triangle, edge: usize) -> (Vec3, Vec3) {
+    let [a, b, c] = triangle.vertices;
+    match edge {
+        0 => (a, b),
+        1 => (b, c),
+        _ => (c, a),
+    }
+}
+
+fn segment_distance(point: &Vec3, start: &Vec3, end: &Vec3) -> f32 {
+    let along = *end - *start;
+    let length_sq = along.length_squared();
+    let t = if length_sq > 0.0 {
+        ((*point - *start).dot(&along) / length_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (*point - (*start + along * t)).length()
+}
+
+/// The kind of `triangle`'s edge `edge` if `neighbor` shares it.
+fn edge_kind(triangle: &Triangle, edge: usize, neighbor: &Triangle) -> Option<EdgeKind> {
+    let (start, end) = edge_vertices(triangle, edge);
+    let shares = |p: &Vec3| {
+        neighbor
+            .vertices
+            .iter()
+            .any(|v| (*v - *p).length_squared() < EQUAL_VERTEX_DISTANCE * EQUAL_VERTEX_DISTANCE)
+    };
+    if !shares(&start) || !shares(&end) {
+        return None;
+    }
+    let far = neighbor.vertices.iter().copied().max_by(|a, b| {
+        segment_distance(a, &start, &end).total_cmp(&segment_distance(b, &start, &end))
+    })?;
+    let bent = triangle.normal.cross(&neighbor.normal).length_squared() >= PLANAR_EPSILON;
+    Some(if bent && triangle.signed_distance(&far) < 0.0 {
+        EdgeKind::Convex {
+            neighbor: neighbor.normal,
+        }
+    } else {
+        EdgeKind::Smooth
+    })
+}
+
+/// `normal` turned about `axis` back into the wedge from `face` to
+/// `neighbor` if it has turned past `neighbor` (Bullet's `btClampNormal`),
+/// unless that would face away from `face`.
+fn clamp_to_wedge(normal: Vec3, face: Vec3, neighbor: Vec3, axis: &Vec3) -> Vec3 {
+    let Some(axis) = axis.normalize() else {
+        return normal;
+    };
+    // `across` points from the face over the edge, the way it bends.
+    let across = axis.cross(&face);
+    let across = if across.dot(&neighbor) < 0.0 {
+        -across
+    } else {
+        across
+    };
+    let limit = neighbor.dot(&across).atan2(neighbor.dot(&face));
+    let (along_face, along_across) = (normal.dot(&face), normal.dot(&across));
+    if along_across.atan2(along_face) <= limit {
+        return normal;
+    }
+    let radial = (along_face * along_face + along_across * along_across).sqrt();
+    let clamped = (face * limit.cos() + across * limit.sin()) * radial + axis * normal.dot(&axis);
+    if clamped.dot(&face) > 0.0 {
+        clamped
+    } else {
+        normal
     }
 }
 
@@ -396,5 +573,69 @@ mod tests {
         assert!((on_edge - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
         let inside = triangle.closest_point(&Vec3::new(2.0, 2.0, 7.0));
         assert!((inside - Vec3::new(2.0, 2.0, 0.0)).length() < 1e-5);
+    }
+
+    /// A floor for `x <= 0` meeting a second face along `x = 0` that rises
+    /// (`rise` > 0, a concave valley) or falls (a convex ridge) at 30
+    /// degrees.
+    fn bent_mesh(rise: f32) -> StaticMesh {
+        let inside = Vec3::new(0.0, 0.0, 100.0);
+        let (back, near, far) = (
+            Vec3::new(-100.0, -100.0, 0.0),
+            Vec3::new(0.0, -100.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+        );
+        let tip = Vec3::new(100.0, 0.0, rise * 100.0 * (30.0f32).to_radians().tan());
+        StaticMesh::new(vec![
+            Triangle::facing(back, near, far, inside).expect("has area"),
+            Triangle::facing(near, far, tip, inside).expect("has area"),
+        ])
+    }
+
+    fn contact_with_depth(contacts: &[Contact], depth: f32) -> Contact {
+        *contacts
+            .iter()
+            .find(|c| (c.penetration_depth - depth).abs() < 1e-3)
+            .expect("a contact at that depth")
+    }
+
+    #[test]
+    fn a_contact_on_a_concave_edge_takes_the_face_normal() {
+        // Past the floor's edge, its closest point is the edge itself;
+        // raw, the contact would lean toward the rising face.
+        let center = Vec3::new(5.0, 0.0, 8.0);
+        let contacts = bent_mesh(1.0).sphere_contacts(center, 10.0);
+        let edge = contact_with_depth(&contacts, 10.0 - center.length());
+        assert!((edge.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        // The point moves with the normal; the sphere's own point stays.
+        let on_sphere = edge.point - edge.normal * edge.penetration_depth;
+        let raw_normal = center.normalize().expect("nonzero");
+        assert!((on_sphere - (center - raw_normal * 10.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn a_contact_on_a_convex_edge_turns_no_further_than_the_next_face() {
+        let ridge = bent_mesh(-1.0);
+        let slope = Vec3::new(0.5, 0.0, 0.75f32.sqrt());
+        // Over the ridge at 60 degrees: clamped to the slope's normal.
+        let past = Vec3::new(60f32.to_radians().sin(), 0.0, 0.5) * 10.0;
+        let contacts = ridge.sphere_contacts(past, 10.5);
+        let edge = contact_with_depth(&contacts, 0.5);
+        assert!((edge.normal - slope).length() < 1e-4, "{:?}", edge.normal);
+        // At 20 degrees, inside the wedge: kept.
+        let within = Vec3::new(20f32.to_radians().sin(), 0.0, 20f32.to_radians().cos()) * 10.0;
+        let contacts = ridge.sphere_contacts(within, 10.5);
+        let edge = contact_with_depth(&contacts, 0.5);
+        let raw = within.normalize().expect("nonzero");
+        assert!((edge.normal - raw).length() < 1e-4, "{:?}", edge.normal);
+    }
+
+    #[test]
+    fn a_contact_on_an_open_edge_keeps_its_own_normal() {
+        let center = Vec3::new(105.0, 0.0, 5.0);
+        let contacts = floor_quad().sphere_contacts(center, 10.0);
+        let raw = Vec3::new(1.0, 0.0, 1.0).normalize().expect("nonzero");
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].normal - raw).length() < 1e-5);
     }
 }
