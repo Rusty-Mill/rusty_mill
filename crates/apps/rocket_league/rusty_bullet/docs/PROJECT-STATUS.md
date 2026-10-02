@@ -128,7 +128,11 @@ version: `a245d35`).
    error after the 19.083 s impact 13-27 uu/s (was 35-78). Still open
    there: the candidate's impact is symmetric and 1.46x too strong while
    the recorded car rolls and yaws (possibly the real triangle-mesh
-   floor). Then the side-flip capture.
+   floor). The side-flip capture (`side.jsonl`) confirms the roll axis:
+   first flip tick, mid-flip rate and landing match, rotation error 0.00.
+   Next, the ~3 uu/s sideways offset after `test2.jsonl`'s 4.142 s
+   takeoff while driving, and the ~0.9 uu/s horizontal drift the recorded
+   car gains while jump is held.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).

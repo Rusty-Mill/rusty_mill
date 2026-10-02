@@ -102,4 +102,7 @@ flip torque (`jump::flip_pitch_scale` gives it the pitch lock).
 
 Real capture, 2026-10-02: confirmed. Rotation error 0.00 through the front
 flip (was 0.03) and through `test2.jsonl`'s diagonal flip to 5.0 s (was
-0.04).
+0.04). A pure side-flip capture (`side.jsonl`, 13.775 s) confirms the roll
+axis too: first tick -2.17 rad/s (`FLIP_TORQUE_X` 260 / 120) as recorded,
+mid-flip orientation rate 7.37 vs 7.36, rotation error 0.00 through the
+flip and its landing.
