@@ -5,7 +5,7 @@
 
 use crate::body::{
     RigidBody, StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane,
-    StaticQuarterPipe,
+    StaticQuarterPipe, StaticSweptFillet,
 };
 use crate::collision;
 use crate::net::NetMesh;
@@ -127,6 +127,10 @@ pub struct PhysicsWorld {
     /// `RB-PHYSICS-001-FR-027` (`collision::box_vs_corner_fillet`), and
     /// empty by default.
     pub corner_fillets: Vec<StaticCornerFillet>,
+    /// Floor and ceiling ramps swept around the curved vertical corner
+    /// edges (`RB-PHYSICS-001-FR-102`), added via `with_swept_fillet`;
+    /// empty by default. Deflect the ball and every car.
+    pub swept_fillets: Vec<StaticSweptFillet>,
     /// Windowed back walls with an actual goal-mouth opening
     /// (`RB-PHYSICS-001-FR-024`), added via `with_goal_wall` — empty by
     /// default. Both the ball and every car are resolved against these;
@@ -174,11 +178,64 @@ struct StaticScene<'a> {
     walls: &'a [StaticPlane],
     curves: &'a [StaticQuarterPipe],
     corner_fillets: &'a [StaticCornerFillet],
+    swept_fillets: &'a [StaticSweptFillet],
     goal_walls: &'a [StaticGoalWall],
     bounded_walls: &'a [StaticBoundedWall],
 }
 
+impl StaticScene<'_> {
+    /// The deepest contact a zero-radius probe at `point` makes with any
+    /// static shape (`RB-PHYSICS-001-FR-102`): what a wheel ray tests each
+    /// sample against (`collision::raycast`). The net is soft and not a
+    /// drivable surface, so it is left out.
+    fn point_contact(&self, point: Vec3) -> Option<collision::Contact> {
+        let planes = std::iter::once(self.ground)
+            .chain(self.walls)
+            .map(|plane| collision::sphere_vs_plane(point, 0.0, plane));
+        let curves = self
+            .curves
+            .iter()
+            .map(|curve| collision::sphere_vs_quarter_pipe(point, 0.0, curve));
+        let corners = self
+            .corner_fillets
+            .iter()
+            .map(|fillet| collision::sphere_vs_corner_fillet(point, 0.0, fillet));
+        let sweeps = self
+            .swept_fillets
+            .iter()
+            .map(|fillet| collision::sphere_vs_swept_fillet(point, 0.0, fillet));
+        let goal_walls = self
+            .goal_walls
+            .iter()
+            .map(|wall| collision::sphere_vs_goal_wall(point, 0.0, wall));
+        let bounded_walls = self
+            .bounded_walls
+            .iter()
+            .map(|wall| collision::sphere_vs_bounded_wall(point, 0.0, wall));
+        planes
+            .chain(curves)
+            .chain(corners)
+            .chain(sweeps)
+            .chain(goal_walls)
+            .chain(bounded_walls)
+            .flatten()
+            .max_by(|a, b| a.penetration_depth.total_cmp(&b.penetration_depth))
+    }
+}
+
 impl PhysicsWorld {
+    fn static_scene(&self) -> StaticScene<'_> {
+        StaticScene {
+            ground: &self.ground,
+            walls: &self.walls,
+            curves: &self.curves,
+            corner_fillets: &self.corner_fillets,
+            swept_fillets: &self.swept_fillets,
+            goal_walls: &self.goal_walls,
+            bounded_walls: &self.bounded_walls,
+        }
+    }
+
     /// `gravity` defaults to -650 Unreal units/s^2 on Z, a commonly-cited
     /// community-measured approximation of Rocket League's ball gravity —
     /// not a value this project has independently confirmed, and not
@@ -198,6 +255,7 @@ impl PhysicsWorld {
             walls: Vec::new(),
             curves: Vec::new(),
             corner_fillets: Vec::new(),
+            swept_fillets: Vec::new(),
             goal_walls: Vec::new(),
             bounded_walls: Vec::new(),
             nets: Vec::new(),
@@ -214,8 +272,9 @@ impl PhysicsWorld {
     /// `arena::standard_walls`, the curved wall-to-floor/wall-to-ceiling,
     /// corner-wall vertical-edge, and goal-cutout-edge fillets from
     /// `arena::standard_curves`/`standard_goal_cutout_fillets`, the
-    /// compound-corner fillets from `arena::standard_corner_fillets`/
-    /// `standard_goal_corner_fillets`, the windowed goal walls from
+    /// goal compound-corner fillets from `arena::standard_goal_corner_fillets`,
+    /// the swept corner fillets from `arena::standard_corner_sweeps`
+    /// (`RB-PHYSICS-001-FR-102`), the windowed goal walls from
     /// `arena::standard_goal_walls`, and the same flat ground
     /// (`arena::standard_ground`) every scene already used.
     /// Equivalent to `PhysicsWorld::new(ball, arena::standard_ground())`
@@ -223,8 +282,8 @@ impl PhysicsWorld {
     /// 7 planes, a `with_curve` call for each of `arena::standard_curves()`'s
     /// 24 fillets and `arena::standard_goal_cutout_fillets()`'s 6, a
     /// `with_corner_fillet` call for each of
-    /// `arena::standard_corner_fillets()`'s 16 fillets and
-    /// `arena::standard_goal_corner_fillets()`'s 4, a `with_goal_wall`
+    /// `arena::standard_goal_corner_fillets()`'s 4, a `with_swept_fillet`
+    /// call for each of `arena::standard_corner_sweeps()`'s 16, a `with_goal_wall`
     /// call for each of `arena::standard_goal_walls()`'s 2 windowed walls,
     /// and, since `RB-PHYSICS-001-FR-029`, a modeled goal interior behind
     /// each window: a `with_wall` call for each of
@@ -246,8 +305,8 @@ impl PhysicsWorld {
         for curve in crate::arena::standard_goal_cutout_fillets() {
             world = world.with_curve(curve);
         }
-        for corner_fillet in crate::arena::standard_corner_fillets() {
-            world = world.with_corner_fillet(corner_fillet);
+        for swept_fillet in crate::arena::standard_corner_sweeps() {
+            world = world.with_swept_fillet(swept_fillet);
         }
         for corner_fillet in crate::arena::standard_goal_corner_fillets() {
             world = world.with_corner_fillet(corner_fillet);
@@ -362,6 +421,13 @@ impl PhysicsWorld {
     /// car — see `corner_fillets`' own doc comment.
     pub fn with_corner_fillet(mut self, corner_fillet: StaticCornerFillet) -> PhysicsWorld {
         self.corner_fillets.push(corner_fillet);
+        self
+    }
+
+    /// Adds one swept corner fillet to the scene (`RB-PHYSICS-001-FR-102`),
+    /// same pattern as `with_corner_fillet`.
+    pub fn with_swept_fillet(mut self, swept_fillet: StaticSweptFillet) -> PhysicsWorld {
+        self.swept_fillets.push(swept_fillet);
         self
     }
 
@@ -565,6 +631,13 @@ impl PhysicsWorld {
                 collision::contacts_vs_corner_fillet(body, fillet),
             );
         }
+        for fillet in scene.swept_fillets {
+            push(
+                fillet.restitution,
+                fillet.friction,
+                collision::contacts_vs_swept_fillet(body, fillet),
+            );
+        }
         for goal_wall in scene.goal_walls {
             push(
                 goal_wall.plane.restitution,
@@ -660,7 +733,9 @@ impl PhysicsWorld {
         let car_wheels: Vec<drive::WheelContacts> = self
             .cars
             .iter()
-            .map(|car| drive::cast_wheels(car, &self.ground, dt))
+            .map(|car| {
+                drive::cast_wheels(car, |point| self.static_scene().point_contact(point), dt)
+            })
             .collect();
         // Same idea as car_wheels, but for walls: the outward push-off
         // direction for a wall jump. Since `RB-PHYSICS-001-FR-039`, a car
@@ -719,14 +794,7 @@ impl PhysicsWorld {
             );
         }
 
-        let static_scene = StaticScene {
-            ground: &self.ground,
-            walls: &self.walls,
-            curves: &self.curves,
-            corner_fillets: &self.corner_fillets,
-            goal_walls: &self.goal_walls,
-            bounded_walls: &self.bounded_walls,
-        };
+        let static_scene = self.static_scene();
         // Combined static-and-dynamic solve (RB-PHYSICS-001-FR-052): every
         // body's own static-shape contacts (`static_manifolds`) and every
         // ball-vs-car/car-vs-car manifold (`dynamic_manifolds`) are gathered
@@ -3069,14 +3137,9 @@ mod tests {
 
     #[test]
     fn a_ball_embedded_in_a_corner_walls_floor_arch_footprint_is_pushed_toward_the_axis() {
-        // The real end-to-end proof of RB-PHYSICS-001-FR-025: a corner
-        // wall's own floor-seam arch now uses the larger
-        // `arena::CORNER_ARCH_RADIUS`, not the cardinal walls'
-        // `arena::FILLET_RADIUS` -- a ball embedded past *that* larger
-        // radius (deep enough that it would sit outside a plain
-        // `FILLET_RADIUS` fillet's own footprint entirely) should still get
-        // pushed back toward the axis, proving the bigger radius is live
-        // collision geometry, not just a number in a doc comment. Same
+        // A corner wall's own floor-seam arch (RB-PHYSICS-001-FR-025, at
+        // the real mesh's `arena::CORNER_FLOOR_RADIUS` since FR-102): a
+        // ball embedded past it is pushed back toward the axis. Same
         // diagonal, non-axis-aligned wall setup as
         // `a_ball_resting_within_a_curved_transitions_footprint_is_pushed_up_off_the_flat_floor_height`'s
         // corner-wall variant, and the same weaker "moved meaningfully"
@@ -3087,8 +3150,7 @@ mod tests {
         let wall_normal = Vec3::new(-1.0, -1.0, 0.0) * std::f32::consts::FRAC_1_SQRT_2;
         let wall = StaticPlane::new(wall_normal, -1000.0);
         let axis_direction = floor.normal.cross(&wall.normal);
-        let radius = crate::arena::CORNER_ARCH_RADIUS;
-        assert!(radius > crate::arena::FILLET_RADIUS);
+        let radius = crate::arena::CORNER_FLOOR_RADIUS;
         let curve =
             crate::body::StaticQuarterPipe::between_planes(&floor, &wall, radius, axis_direction);
 
@@ -3098,11 +3160,8 @@ mod tests {
             .expect("sector_start and sector_end aren't exactly opposite, so their sum is nonzero");
         // Overlapping the arch's own material by 10 units (further from the
         // axis than the resting distance, toward the sharp corner the arch
-        // replaces) -- well past where a plain FILLET_RADIUS fillet's own
-        // footprint would have ended, proving the larger radius is what's
-        // actually governing this contact.
+        // replaces).
         let embedded_distance = radius - ball_radius + 10.0;
-        assert!(embedded_distance > crate::arena::FILLET_RADIUS);
         let embedded_position = curve.axis_point + bisector * embedded_distance;
         let mut ball = RigidBody::sphere(ball_radius, 1.0, embedded_position);
         ball.restitution = 0.0;
@@ -3201,13 +3260,72 @@ mod tests {
         );
     }
 
+    /// A standard car with its up axis along `normal`, its origin 17 uu
+    /// off `surface_point`: resting on its wheels there.
+    fn car_resting_on(surface_point: Vec3, normal: Vec3) -> RigidBody {
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let half_angle = 0.5 * up.dot(&normal).clamp(-1.0, 1.0).acos();
+        let axis = up
+            .cross(&normal)
+            .normalize()
+            .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
+        let sin = half_angle.sin();
+        let mut car = RigidBody::standard_car(surface_point + normal * 17.0);
+        car.orientation = Quat::new(axis.x * sin, axis.y * sin, axis.z * sin, half_angle.cos());
+        car.update_inertia_tensor();
+        car
+    }
+
+    fn arena_wheels(car: &RigidBody) -> drive::WheelContacts {
+        let world = PhysicsWorld::standard_arena(RigidBody::standard_ball(Vec3::ZERO));
+        drive::cast_wheels(
+            car,
+            |point| world.static_scene().point_contact(point),
+            1.0 / 120.0,
+        )
+    }
+
     #[test]
-    fn standard_arena_has_twenty_compound_corner_fillets() {
-        // 16 arena corners (RB-PHYSICS-001-FR-023) plus 4 goal post-crossbar
-        // corners (RB-PHYSICS-001-FR-026, 2 posts times 2 goals).
+    fn a_car_on_the_side_wall_has_all_four_wheels_on_it() {
+        // RB-PHYSICS-001-FR-102: wheel rays hit walls, not just the floor.
+        let normal = Vec3::new(-1.0, 0.0, 0.0);
+        let car = car_resting_on(Vec3::new(crate::arena::SIDE_WALL_X, 0.0, 1000.0), normal);
+        let wheels = arena_wheels(&car);
+        assert!(wheels.iter().all(Option::is_some), "{wheels:?}");
+        for contact in wheels.iter().flatten() {
+            assert!((contact.normal - normal).length() < 1e-4);
+            assert!((contact.point.x - crate::arena::SIDE_WALL_X).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn a_car_on_a_swept_corner_ramp_has_its_wheels_on_the_curve() {
+        let sweep = crate::arena::standard_corner_sweeps()[0];
+        let dir = (sweep.sector_start + sweep.sector_end)
+            .normalize()
+            .expect("the sector spans 45 degrees");
+        let tube = sweep.tube_radius_at(&dir);
+        let center = sweep.axis_point + dir * (sweep.wall_radius - tube) + sweep.inward * tube;
+        let out = (dir - sweep.inward).normalize().expect("dir is horizontal");
+        let car = car_resting_on(center + out * tube, -out);
+        let wheels = arena_wheels(&car);
+        assert!(drive::is_on_ground(&wheels), "{wheels:?}");
+        for contact in wheels.iter().flatten() {
+            // Every wheel lands on the tube itself: its normal is within
+            // the ~13 degrees a 60 uu wheel offset turns on a 256 uu tube
+            // of the 45-degree normal under the car's center.
+            assert!(contact.normal.dot(&-out) > 0.95, "{contact:?}");
+        }
+    }
+
+    #[test]
+    fn standard_arena_has_four_goal_corner_fillets_and_sixteen_swept_corners() {
+        // The 4 goal post-crossbar corners (RB-PHYSICS-001-FR-026); since
+        // FR-102 the 16 arena corners are swept fillets instead.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.corner_fillets.len(), 20);
+        assert_eq!(world.corner_fillets.len(), 4);
+        assert_eq!(world.swept_fillets.len(), 16);
     }
 
     #[test]
@@ -3345,15 +3463,11 @@ mod tests {
         // line that's `StaticQuarterPipe`-documented as infinite along its
         // own length, not clipped to the corner wall's real, finite span, so
         // a ball flying dead down the arena's own center line eventually
-        // re-enters *some* corner arch's resting shell far past the goal --
-        // already true before RB-PHYSICS-001-FR-025 (verified against this
-        // same test with the old, smaller FILLET_RADIUS, where it lands
-        // around y=~7650-7930 instead), and unrelated to the goal cutout
-        // this test actually exercises. 3.0s used to clear that zone by
-        // luck at the old radius; FR-025's bigger CORNER_ARCH_RADIUS moves
-        // it closer in (~6300-7700) and turns the same brush from a gentle
-        // bounce into a much sharper one, so this test now stops well
-        // before reaching it instead of relying on outrunning it.
+        // re-enters *some* corner arch's resting shell far past the goal,
+        // unrelated to the goal cutout this test exercises; this test
+        // stops well before reaching it instead of relying on outrunning
+        // it (the zone's position has moved with every arch radius, last
+        // in RB-PHYSICS-001-FR-102).
         let ball_radius = 93.15;
         let mut ball = RigidBody::sphere(
             ball_radius,
@@ -3792,7 +3906,11 @@ mod tests {
             world.step(dt);
             let car = &world.cars[0];
             assert!(
-                drive::is_on_ground(&drive::cast_wheels(car, &world.ground, dt)),
+                drive::is_on_ground(&drive::cast_wheels(
+                    car,
+                    |point| world.static_scene().point_contact(point),
+                    dt
+                )),
                 "car left the ground on tick {tick}: z={}, vz={}",
                 car.position.z,
                 car.linear_velocity.z

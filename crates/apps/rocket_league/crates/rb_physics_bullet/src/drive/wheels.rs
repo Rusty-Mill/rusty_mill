@@ -6,7 +6,8 @@
 
 use super::ground::{FRONT_AXLE_X, REAR_AXLE_X};
 use super::{forward_axis, up_axis};
-use crate::body::{RigidBody, StaticPlane};
+use crate::body::RigidBody;
+use crate::collision::{raycast, Contact};
 use rb_domain::Vec3;
 
 /// Octane wheels in the car's local frame (uu): RocketSim `CarConfig.cpp`
@@ -106,43 +107,54 @@ pub struct WheelContact {
 /// The four wheels' hits, in `WHEELS` order.
 pub type WheelContacts = [Option<WheelContact>; 4];
 
-/// Casts the four wheel rays down the car's own axis against `plane`, from
-/// `car`'s current state (`btVehicleRL::rayCast`). A ray reaches
-/// `rest_length + MAX_SUSPENSION_TRAVEL + radius`, the fully extended wheel
-/// (51.255 uu front, 52.055 back, so a level car touches up to an origin
-/// height of 30.5 / 31.3 uu), and only hits the plane's front side.
+/// Casts the four wheel rays down the car's own axis against the static
+/// geometry `contact_at` describes (`btVehicleRL::rayCast`): the deepest
+/// zero-radius contact at a point, so a ray hits walls, curves and the
+/// floor alike (`RB-PHYSICS-001-FR-102`; floor only before that). A ray
+/// reaches `rest_length + MAX_SUSPENSION_TRAVEL + radius`, the fully
+/// extended wheel (51.255 uu front, 52.055 back, so a level car touches up
+/// to an origin height of 30.5 / 31.3 uu), and only hits a surface from
+/// its front side.
 ///
 /// RocketSim takes `SUSPENSION_SUBTRACTION` (2.5 uu) off that reach; the
 /// owner's capture does not (`RB-PHYSICS-001-FR-092`): after the 4.142 s
 /// jump the recorded wheels still grip in the step from origin height 29.7
 /// and stop in the step from 32.3, where RocketSim's reach ends at 28.0.
-pub fn cast_wheels(car: &RigidBody, plane: &StaticPlane, dt: f32) -> WheelContacts {
-    WHEELS
-        .map(|(x, y, front)| cast_wheel(car, plane, Vec3::new(x, y, WHEEL_RAY_START_Z), front, dt))
+pub fn cast_wheels(
+    car: &RigidBody,
+    contact_at: impl Fn(Vec3) -> Option<Contact>,
+    dt: f32,
+) -> WheelContacts {
+    WHEELS.map(|(x, y, front)| {
+        cast_wheel(
+            car,
+            &contact_at,
+            Vec3::new(x, y, WHEEL_RAY_START_Z),
+            front,
+            dt,
+        )
+    })
 }
 
 fn cast_wheel(
     car: &RigidBody,
-    plane: &StaticPlane,
+    contact_at: &impl Fn(Vec3) -> Option<Contact>,
     start_local: Vec3,
     front: bool,
     dt: f32,
 ) -> Option<WheelContact> {
     let wheel = spec(front);
     let up = up_axis(car);
-    let approach = plane.normal.dot(&up);
+    let hard_point = car.position + car.orientation.rotate(&start_local);
+    let reach = wheel.rest_length + MAX_SUSPENSION_TRAVEL + wheel.radius;
+    let hit = raycast(contact_at, hard_point, -up, reach)?;
+    let normal = hit.normal;
+    let approach = normal.dot(&up);
     if approach <= 0.0 {
         return None;
     }
-    let hard_point = car.position + car.orientation.rotate(&start_local);
-    let height = plane.signed_distance(&hard_point);
-    let reach = wheel.rest_length + MAX_SUSPENSION_TRAVEL + wheel.radius;
-    let trace = height / approach;
-    if height < 0.0 || trace > reach {
-        return None;
-    }
+    let trace = hit.distance;
     let point = hard_point - up * trace;
-    let normal = plane.normal;
     let suspension_length = (trace - wheel.radius).clamp(
         wheel.rest_length - MAX_SUSPENSION_TRAVEL,
         wheel.rest_length + MAX_SUSPENSION_TRAVEL,

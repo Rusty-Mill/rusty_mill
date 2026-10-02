@@ -2823,7 +2823,12 @@ fn floor() -> StaticPlane {
 }
 
 fn wheels_on_ground(car: &RigidBody, plane: &StaticPlane) -> bool {
-    is_on_ground(&cast_wheels(car, plane, TICK))
+    is_on_ground(&cast_wheels(car, plane_contact(plane), TICK))
+}
+
+/// The point probe `cast_wheels` takes, for a scene of just `plane`.
+fn plane_contact(plane: &StaticPlane) -> impl Fn(Vec3) -> Option<crate::Contact> + '_ {
+    move |point| crate::collision::sphere_vs_plane(point, 0.0, plane)
 }
 
 fn level_car_at_height(z: f32) -> RigidBody {
@@ -3028,9 +3033,9 @@ fn wheel_rays_reach_the_fully_extended_wheel() {
     // RB-PHYSICS-001-FR-092: no RocketSim `SUSPENSION_SUBTRACTION` on the
     // reach, which ended at origin height 28.0 (front) / 28.8 (back).
     let floor = floor();
-    let at_old_limit = cast_wheels(&level_car_at_height(29.7), &floor, TICK);
+    let at_old_limit = cast_wheels(&level_car_at_height(29.7), plane_contact(&floor), TICK);
     assert_eq!(at_old_limit.iter().flatten().count(), 4);
-    let back_only = cast_wheels(&level_car_at_height(31.0), &floor, TICK);
+    let back_only = cast_wheels(&level_car_at_height(31.0), plane_contact(&floor), TICK);
     assert_eq!(back_only.iter().flatten().count(), 2);
 }
 
@@ -3038,7 +3043,7 @@ fn wheel_rays_reach_the_fully_extended_wheel() {
 fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
     let floor = floor();
     let mut low = level_car_at_height(14.0);
-    let low_wheels = cast_wheels(&low, &floor, TICK);
+    let low_wheels = cast_wheels(&low, plane_contact(&floor), TICK);
     apply_wheel_forces(
         &mut low,
         &ControllerInput::default(),
@@ -3053,7 +3058,7 @@ fn a_compressed_suspension_pushes_up_and_an_extended_one_never_pulls() {
     );
 
     let mut high = level_car_at_height(27.0);
-    let high_wheels = cast_wheels(&high, &floor, TICK);
+    let high_wheels = cast_wheels(&high, plane_contact(&floor), TICK);
     assert!(is_on_ground(&high_wheels));
     apply_wheel_forces(
         &mut high,

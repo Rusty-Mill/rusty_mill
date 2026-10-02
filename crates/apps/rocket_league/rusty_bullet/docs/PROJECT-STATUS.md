@@ -135,12 +135,14 @@ version: `a245d35`).
    5 s 4.6 uu (was 7.3). The 5.575 s landing was investigated: what is
    left is a few uu/s of lateral tire friction on a tilted two-wheel
    landing that the side-flip capture contradicts; parked.
-   `rb-verify --self-onestep` (`RB-VERIFY-003-FR-006`) now ranks the
-   model's worst single steps: by far the largest are `test2.jsonl`
-   8.86-8.95 s (~1,200 uu/s), the car driving along a corner transition,
-   which needs wheel rays against walls and curves (they only cast
-   against the floor) and the arena's curve geometry checked (the
-   candidate's corner surface sits ~30 uu inside the recorded car).
+   `rb-verify --self-onestep` (`RB-VERIFY-003-FR-006`) ranks the model's
+   worst single steps. Its first finding, the `test2.jsonl` corner at
+   8.9 s (~1,390 uu/s), is fixed by `RB-PHYSICS-001-FR-102` (real mesh
+   radii, swept corners, wheel rays on every surface, ADR-0022): `test2`
+   mean one-step error 3.1 uu/s (was 15.2). Worst steps now: `test2`
+   6.058 s and 12.55 s (~400-430 uu/s, jump presses), 15.6-15.8 s (~290,
+   a double jump after a wall jump the real car doesn't get, then a
+   ceiling-ramp touch), `front` 25.967 s (~250).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -149,9 +151,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (448 tests: 27 `rb_domain`, 380
+- `cargo test --workspace`: pass (457 tests: 27 `rb_domain`, 389
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 17 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`

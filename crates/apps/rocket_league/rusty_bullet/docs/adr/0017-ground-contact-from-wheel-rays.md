@@ -85,3 +85,6 @@ floor plane from its front side. Walls keep box contact for wall jumps.
   floor 2 ticks early, which option 2 addresses.
 - Revisit when suspension forces or surface driving are added. Option 2
   was adopted by ADR-0018 (FR-090).
+- Amended by ADR-0022 (FR-102, 2026-10-02): the rays now hit every static
+  shape (walls, curves, swept corners, the ceiling), not just the floor
+  plane, so surface driving is in.

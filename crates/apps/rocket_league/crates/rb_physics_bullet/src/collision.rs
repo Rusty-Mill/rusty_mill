@@ -41,6 +41,7 @@ const CONTACT_PROCESSING_THRESHOLD: f32 = 0.01;
 
 use crate::body::{
     StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane, StaticQuarterPipe,
+    StaticSweptFillet,
 };
 
 /// Analytic sphere-vs-plane contact: the sphere's closest point to the
@@ -55,7 +56,7 @@ use crate::body::{
 /// approximation of it — same `distance`/`pOnB`/`normalOnSurfaceB`
 /// (`= plane.getWorldTransform().getBasis() * planeNormal`, matching this
 /// function's own `normal: plane.normal`) conventions confirmed exact.
-fn sphere_vs_plane(position: Vec3, radius: f32, plane: &StaticPlane) -> Option<Contact> {
+pub(crate) fn sphere_vs_plane(position: Vec3, radius: f32, plane: &StaticPlane) -> Option<Contact> {
     let center_distance = plane.signed_distance(&position);
     let gap = center_distance - radius;
 
@@ -160,7 +161,11 @@ pub fn contacts_vs_plane(body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> 
 /// approximation every other static shape in this crate already makes
 /// (see e.g. `sphere_vs_quarter_pipe`'s sector test, which has the same
 /// property at a sector boundary).
-fn sphere_vs_goal_wall(position: Vec3, radius: f32, wall: &StaticGoalWall) -> Option<Contact> {
+pub(crate) fn sphere_vs_goal_wall(
+    position: Vec3,
+    radius: f32,
+    wall: &StaticGoalWall,
+) -> Option<Contact> {
     if wall.contains_in_window(&position) {
         return None;
     }
@@ -267,7 +272,7 @@ pub fn contacts_vs_goal_wall(body: &RigidBody, wall: &StaticGoalWall) -> Vec<Con
 /// (`RB-PHYSICS-001-FR-029`) — the opposite gate from `sphere_vs_goal_wall`:
 /// a sphere whose *center* falls outside the bound gets no contact at all,
 /// rather than one whose center falls inside it.
-fn sphere_vs_bounded_wall(
+pub(crate) fn sphere_vs_bounded_wall(
     position: Vec3,
     radius: f32,
     wall: &StaticBoundedWall,
@@ -369,7 +374,7 @@ pub fn contacts_vs_bounded_wall(body: &RigidBody, wall: &StaticBoundedWall) -> V
 /// contact fires as the sphere's surface approaches or crosses the
 /// cylinder's own radius from the inside, and the correction pushes the
 /// sphere back *toward* the axis, not away from it.
-fn sphere_vs_quarter_pipe(
+pub(crate) fn sphere_vs_quarter_pipe(
     position: Vec3,
     radius: f32,
     pipe: &StaticQuarterPipe,
@@ -508,7 +513,7 @@ pub fn contacts_vs_quarter_pipe(body: &RigidBody, pipe: &StaticQuarterPipe) -> V
 /// generalized from a cylinder to a sphere — contact fires as the sphere's
 /// surface approaches or crosses `fillet.radius` from inside `fillet`'s
 /// own sphere, pushing back toward `fillet.center`.
-fn sphere_vs_corner_fillet(
+pub(crate) fn sphere_vs_corner_fillet(
     position: Vec3,
     radius: f32,
     fillet: &StaticCornerFillet,
@@ -597,6 +602,143 @@ pub fn contacts_vs_corner_fillet(body: &RigidBody, fillet: &StaticCornerFillet) 
     }
 }
 
+/// Analytic sphere-vs-swept-fillet contact (`RB-PHYSICS-001-FR-102`): the
+/// "ride the concave inside" test of `sphere_vs_quarter_pipe`, done in the
+/// meridian plane through `position`. That plane holds the closest surface
+/// point for a torus. Gated to the edge's sector, and within the meridian
+/// to the quadrant between the floor/ceiling and the edge's own cylinder.
+/// Outside that region the plane or the edge cylinder governs instead.
+pub(crate) fn sphere_vs_swept_fillet(
+    position: Vec3,
+    radius: f32,
+    fillet: &StaticSweptFillet,
+) -> Option<Contact> {
+    let rel = position - fillet.axis_point;
+    let radial = rel - fillet.axis_direction * rel.dot(&fillet.axis_direction);
+    let dist = radial.length();
+    if dist < 1e-6 {
+        return None;
+    }
+    let dir = radial * (1.0 / dist);
+    if fillet.sector_start.cross(&dir).dot(&fillet.axis_direction) < 0.0
+        || dir.cross(&fillet.sector_end).dot(&fillet.axis_direction) < 0.0
+    {
+        return None;
+    }
+    let tube = fillet.tube_radius_at(&dir);
+    let center = fillet.axis_point + dir * (fillet.wall_radius - tube) + fillet.inward * tube;
+    let offset = position - center;
+    if offset.dot(&dir) < 0.0 || offset.dot(&fillet.inward) > 0.0 {
+        return None;
+    }
+    let offset_length = offset.length();
+    let gap = (tube - radius) - offset_length;
+    if gap > CONTACT_PROCESSING_THRESHOLD || offset_length < 1e-6 {
+        return None;
+    }
+    let out = offset * (1.0 / offset_length);
+    Some(Contact {
+        normal: -out,
+        point: center + out * tube,
+        penetration_depth: -gap,
+    })
+}
+
+/// Dispatches a contact test against a swept fillet: a sphere directly, a
+/// box by its 8 corners as zero-radius spheres, the same technique as
+/// `box_vs_quarter_pipe`. Distance from the tube's center circle is only
+/// locally convex, so unlike the cylinder this is an approximation, exact
+/// whenever the box is small next to the tube (a car's 60 uu half-length
+/// against a 160 to 512 uu tube).
+pub fn contacts_vs_swept_fillet(body: &RigidBody, fillet: &StaticSweptFillet) -> Vec<Contact> {
+    match body.shape {
+        Shape::Sphere { radius } => sphere_vs_swept_fillet(body.position, radius, fillet)
+            .into_iter()
+            .collect(),
+        Shape::Box { half_extents } => {
+            box_corners(body.shape_center(), body.orientation, half_extents)
+                .into_iter()
+                .filter_map(|corner| {
+                    sphere_vs_swept_fillet(corner, 0.0, fillet).map(|contact| Contact {
+                        point: corner,
+                        ..contact
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+fn box_corners(position: Vec3, orientation: Quat, half_extents: Vec3) -> [Vec3; 8] {
+    let corner = |i: usize| {
+        let sign = |bit: usize| if i & bit == 0 { -1.0 } else { 1.0 };
+        let local = Vec3::new(
+            sign(1) * half_extents.x,
+            sign(2) * half_extents.y,
+            sign(4) * half_extents.z,
+        );
+        position + orientation.rotate(&local)
+    };
+    std::array::from_fn(corner)
+}
+
+/// A ray's first hit against a static surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    /// Distance along the ray.
+    pub distance: f32,
+    /// Surface normal at the hit, pointing back toward the ray's start side.
+    pub normal: Vec3,
+}
+
+/// Bisection steps of `raycast`: brackets the surface to `length / 2^16`
+/// (under 0.001 uu for a 52 uu wheel ray) before the final Newton step.
+const RAY_BISECTION_STEPS: usize = 16;
+
+/// Casts a ray from `origin` along unit `direction` for up to `length`,
+/// against whatever static geometry `contact_at` reports a point as being
+/// behind (`RB-PHYSICS-001-FR-102`). `contact_at(p)` must return the
+/// deepest zero-radius contact at `p`, if any, so one function covers every
+/// static shape at once.
+///
+/// The playable volume is convex at a wheel ray's scale, so the ray
+/// crosses the surface at most once: no hit when the start is already
+/// behind a surface (Bullet's front-face-only rule) or the end is still in
+/// the open. Otherwise bisection brackets the crossing, and one Newton
+/// step along the contact normal lands it exactly on a plane and within
+/// float error on a curve.
+pub fn raycast(
+    contact_at: impl Fn(Vec3) -> Option<Contact>,
+    origin: Vec3,
+    direction: Vec3,
+    length: f32,
+) -> Option<RayHit> {
+    let behind = |t: f32| {
+        contact_at(origin + direction * t).filter(|contact| contact.penetration_depth > 0.0)
+    };
+    if behind(0.0).is_some() {
+        return None;
+    }
+    let mut hit = behind(length)?;
+    let (mut open, mut solid) = (0.0, length);
+    for _ in 0..RAY_BISECTION_STEPS {
+        let mid = 0.5 * (open + solid);
+        match behind(mid) {
+            Some(contact) => (solid, hit) = (mid, contact),
+            None => open = mid,
+        }
+    }
+    let approach = -hit.normal.dot(&direction);
+    let distance = if approach > 1e-6 {
+        (solid - hit.penetration_depth / approach).clamp(open, solid)
+    } else {
+        solid
+    };
+    Some(RayHit {
+        distance,
+        normal: hit.normal,
+    })
+}
 /// Analytic sphere-vs-box contact: the box's closest point to the sphere
 /// center is found by clamping the sphere center (transformed into the
 /// box's local frame) to `[-half_extents, half_extents]` per axis — a
@@ -2070,5 +2212,103 @@ mod tests {
             Vec3::new(19.5, 110.0, 30.0),
         );
         assert!(contacts_vs_bounded_wall(&car, &wall).is_empty());
+    }
+
+    /// The standard arena's first swept fillet (the +X/+Y side edge's
+    /// floor ramp), and the outward unit direction to the 45-degree point
+    /// of its tube in the middle of its sector, plus that surface point.
+    fn swept_fillet_midpoint() -> (StaticSweptFillet, Vec3, Vec3) {
+        let fillet = crate::arena::standard_corner_sweeps()[0];
+        let dir = (fillet.sector_start + fillet.sector_end)
+            .normalize()
+            .unwrap();
+        let tube = fillet.tube_radius_at(&dir);
+        let center = fillet.axis_point + dir * (fillet.wall_radius - tube) + fillet.inward * tube;
+        let out = (dir - fillet.inward).normalize().unwrap();
+        (fillet, out, center + out * tube)
+    }
+
+    #[test]
+    fn a_point_past_a_swept_fillets_surface_is_pushed_back_toward_the_tube_center() {
+        let (fillet, out, surface) = swept_fillet_midpoint();
+        let contact = sphere_vs_swept_fillet(surface + out * 5.0, 0.0, &fillet).unwrap();
+        assert!((contact.penetration_depth - 5.0).abs() < 1e-2);
+        assert!((contact.normal + out).length() < 1e-4);
+        assert!(sphere_vs_swept_fillet(surface - out * 5.0, 0.0, &fillet).is_none());
+    }
+
+    #[test]
+    fn a_swept_fillet_ignores_points_outside_its_sector_or_tube_quadrant() {
+        let (fillet, out, surface) = swept_fillet_midpoint();
+        let past = surface + out * 5.0;
+        // Mirrored across the edge axis: outside the sector.
+        let mirrored = fillet.axis_point * 2.0 - Vec3::new(past.x, past.y, -past.z);
+        assert!(sphere_vs_swept_fillet(mirrored, 0.0, &fillet).is_none());
+        // Above the tube center: the vertical edge cylinder governs there.
+        let above = past + fillet.inward * 400.0;
+        assert!(sphere_vs_swept_fillet(above, 0.0, &fillet).is_none());
+    }
+
+    #[test]
+    fn a_box_corner_past_a_swept_fillet_makes_a_contact_at_that_corner() {
+        let (fillet, out, surface) = swept_fillet_midpoint();
+        let half_extents = Vec3::new(20.0, 20.0, 20.0);
+        let corner_offset = half_extents.length();
+        // Unrotated, so the corner toward `out` is the one nearest the
+        // surface; placed 3 uu past it along the corner's own diagonal.
+        let corner_dir =
+            Vec3::new(out.x.signum(), out.y.signum(), out.z.signum()) * (1.0 / 3f32.sqrt());
+        let car = RigidBody::car_box(
+            half_extents,
+            1.0,
+            surface + out * 3.0 - corner_dir * corner_offset,
+        );
+        let contacts = contacts_vs_swept_fillet(&car, &fillet);
+        assert!(!contacts.is_empty());
+        let far = contacts_vs_swept_fillet(
+            &RigidBody::car_box(half_extents, 1.0, surface - out * 200.0),
+            &fillet,
+        );
+        assert!(far.is_empty());
+    }
+
+    fn floor_probe(point: Vec3) -> Option<Contact> {
+        sphere_vs_plane(point, 0.0, &StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0))
+    }
+
+    #[test]
+    fn a_ray_hits_a_plane_at_its_exact_distance_and_normal() {
+        let direction = Vec3::new(0.6, 0.0, -0.8);
+        let hit = raycast(floor_probe, Vec3::new(0.0, 0.0, 30.0), direction, 50.0).unwrap();
+        assert!((hit.distance - 37.5).abs() < 1e-4, "got {}", hit.distance);
+        assert_eq!(hit.normal, Vec3::new(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn a_ray_misses_when_too_short_or_starting_behind_the_surface() {
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        assert!(raycast(floor_probe, Vec3::new(0.0, 0.0, 30.0), down, 29.0).is_none());
+        assert!(raycast(floor_probe, Vec3::new(0.0, 0.0, -1.0), down, 50.0).is_none());
+    }
+
+    #[test]
+    fn a_ray_hits_a_curved_seam_where_the_cylinder_says() {
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let wall = StaticPlane::new(Vec3::new(-1.0, 0.0, 0.0), -1000.0);
+        let pipe =
+            StaticQuarterPipe::between_planes(&floor, &wall, 256.0, Vec3::new(0.0, 1.0, 0.0));
+        let probe = |point: Vec3| sphere_vs_quarter_pipe(point, 0.0, &pipe);
+        // Straight down at x = 1000 - 256 + 128: the arc is at
+        // z = 256 - sqrt(256^2 - 128^2).
+        let origin = Vec3::new(1000.0 - 128.0, 0.0, 60.0);
+        let hit = raycast(probe, origin, Vec3::new(0.0, 0.0, -1.0), 50.0).unwrap();
+        let arc_z = 256.0 - (256.0f32 * 256.0 - 128.0 * 128.0).sqrt();
+        assert!(
+            (hit.distance - (60.0 - arc_z)).abs() < 1e-2,
+            "got {}",
+            hit.distance
+        );
+        let expected_normal = Vec3::new(-128.0, 0.0, 256.0 - arc_z) * (1.0 / 256.0);
+        assert!((hit.normal - expected_normal).length() < 1e-3);
     }
 }

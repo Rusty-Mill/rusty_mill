@@ -5,6 +5,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0022 (`RB-PHYSICS-001-FR-102`): arena curves take the real soccar
+  mesh's radii (floor ramps 256 uu, 160 uu at the back walls, ceiling
+  ramps 512 uu, vertical corner edges 864 uu); `body::StaticSweptFillet`
+  and `arena::standard_corner_sweeps` replace the 16 corner spheres; wheel
+  rays hit every static shape (`collision::raycast`), not just the floor.
+  Removes `arena::FILLET_RADIUS`, `CORNER_ARCH_RADIUS` and
+  `standard_corner_fillets`; the goal fillets keep 292 uu as
+  `GOAL_FILLET_RADIUS`. `drive::cast_wheels` takes a point-contact
+  function instead of a plane.
 - `rb-verify --self-onestep <capture> [count]` (`RB-VERIFY-003-FR-006`):
   one-step prediction error, each frame predicted from the recorded frame
   before it, listing the model's worst single steps.

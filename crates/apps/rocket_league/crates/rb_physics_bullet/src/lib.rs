@@ -115,7 +115,7 @@ pub mod world;
 
 pub use body::{
     RigidBody, Shape, StaticBoundedWall, StaticCornerFillet, StaticGoalWall, StaticPlane,
-    StaticQuarterPipe,
+    StaticQuarterPipe, StaticSweptFillet,
 };
 pub use collision::Contact;
 pub use mat3::Mat3;

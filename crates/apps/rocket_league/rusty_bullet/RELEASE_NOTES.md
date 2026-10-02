@@ -8,6 +8,18 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Real arena curves; wheels grip walls
+**2026-10-02** · `RB-PHYSICS-001-FR-102` · ADR-0022
+
+- The arena's curved transitions now have the real game's radii, measured
+  from its extracted collision mesh: 256 uu floor ramps (160 uu at the
+  back walls), 512 uu ceiling ramps, and 864 uu vertical corner bends,
+  with the ramps swept around those bends. The old corner arch was three
+  times too big and reached into the air where the owner's car flips past
+  a corner. Wheels now touch walls, curves and the ceiling, so a car can
+  drive up a wall. One-step error on the owner's main capture falls from
+  15.2 to 3.1 uu/s on average. 457 tests.
+
 ## One-step prediction error
 **2026-10-02** · `RB-VERIFY-003-FR-006`
 
