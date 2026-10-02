@@ -1,0 +1,128 @@
+//! Layer 2: the adapter over a fake runner.
+
+mod common;
+
+use std::time::Duration;
+
+use common::{exit, fixture, task, ReplyFile, REPLY_ONE};
+use orch_cli::ExecError;
+use orch_codex::CodexAgent;
+use orch_core::task::Agent;
+use orch_dispatch::AgentRunner;
+
+fn agent(fake: ReplyFile) -> CodexAgent<ReplyFile> {
+    CodexAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
+}
+
+#[test]
+fn success_reads_the_last_message_file_and_scrubs_the_api_key() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::ok(REPLY_ONE));
+
+    let out = a.run(Agent::Codex, task(&plan), &board).expect("ok");
+
+    assert_eq!(out.len(), 1);
+    let calls = a.runner().inner.calls.lock().expect("lock");
+    let (argv, stdin, timeout) = &calls[0];
+    assert_eq!(argv[0..4], ["codex", "exec", "--sandbox", "read-only"]);
+    assert_eq!(*timeout, Duration::from_secs(30));
+    let prompt = String::from_utf8(stdin.clone()).expect("utf8");
+    assert!(prompt.contains("OUTPUT FORMAT"));
+    assert!(prompt.contains("Plan::start rejects the author."));
+    let scrubbed = a.runner().inner.scrubbed.lock().expect("lock");
+    assert_eq!(scrubbed[0], ["OPENAI_API_KEY"]);
+    // Scratch files are gone after the run.
+    let reply_path = &argv[argv.len() - 2];
+    assert!(!std::path::Path::new(reply_path).exists());
+}
+
+#[test]
+fn wrong_agent_is_refused_without_running() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::ok(REPLY_ONE));
+    let err = a
+        .run(Agent::Local, task(&plan), &board)
+        .expect_err("refused");
+    assert!(err.0.contains("serves Codex, not Local"));
+    assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
+}
+
+#[test]
+fn not_logged_in_is_named() {
+    let (plan, board, _, _) = fixture();
+    let stderr = "ERROR: Reconnecting... 5/5\nERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses\n";
+    let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
+    let err = a.run(Agent::Codex, task(&plan), &board).expect_err("401");
+    assert!(err.0.starts_with("codex: not logged in"), "{}", err.0);
+    assert!(err.0.contains("codex login"));
+    assert!(!err.0.contains('\n'));
+}
+
+#[test]
+fn rate_limit_is_named_and_distinct_from_login() {
+    let (plan, board, _, _) = fixture();
+    for stderr in [
+        "ERROR: unexpected status 429 Too Many Requests",
+        "ERROR: rate_limit_reached: weekly limit hit",
+        "ERROR: usage_limit_reached",
+    ] {
+        let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
+        let err = a.run(Agent::Codex, task(&plan), &board).expect_err("429");
+        assert!(err.0.starts_with("codex: rate limited"), "{}", err.0);
+        assert!(!err.0.contains("not logged in"));
+    }
+}
+
+#[test]
+fn sandbox_refusal_is_a_normal_reply_not_an_error() {
+    // Codex returns a denied command to the model; the model reports it.
+    let (plan, board, _, _) = fixture();
+    let reply = r#"{"entries":[{"kind":"assumption","body":"Could not run `git log`: the sandbox denied it, so history is unverified.","refs":[]}]}"#;
+    let mut a = agent(ReplyFile::ok(reply));
+    let out = a.run(Agent::Codex, task(&plan), &board).expect("parses");
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
+fn other_non_zero_exit_keeps_the_status() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::failing(Ok(exit(
+        2,
+        "",
+        "error: unexpected argument",
+    ))));
+    let err = a
+        .run(Agent::Codex, task(&plan), &board)
+        .expect_err("exit 2");
+    assert!(err.0.starts_with("codex exited with status 2"), "{}", err.0);
+}
+
+#[test]
+fn timeout_maps_to_agent_error() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::failing(Err(ExecError::Timeout(
+        Duration::from_secs(30),
+    ))));
+    let err = a
+        .run(Agent::Codex, task(&plan), &board)
+        .expect_err("timeout");
+    assert!(err.0.contains("exceeded 30s"));
+}
+
+#[test]
+fn malformed_reply_is_a_parse_error() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::ok("Sure! Here is what I found."));
+    let err = a.run(Agent::Codex, task(&plan), &board).expect_err("prose");
+    assert!(err.0.contains("not JSON"));
+}
+
+#[test]
+fn missing_last_message_file_is_an_error() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::silent());
+    let err = a
+        .run(Agent::Codex, task(&plan), &board)
+        .expect_err("no file");
+    assert!(err.0.contains("wrote no last message"));
+}

@@ -149,6 +149,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-dispatch",
     "crates/apps/rusty_orch/crates/orch-cli",
     "crates/apps/rusty_orch/crates/orch-ollama",
+    "crates/apps/rusty_orch/crates/orch-codex",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
     "crates/apps/rusty_key/crates/constrain",
@@ -502,6 +503,7 @@ skillopt-envs = { path = "crates/apps/rusty_skillopt/crates/skillopt-envs" }
 orch-core = { path = "crates/apps/rusty_orch/crates/orch-core" }
 orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
 orch-cli = { path = "crates/apps/rusty_orch/crates/orch-cli" }
+orch-ollama = { path = "crates/apps/rusty_orch/crates/orch-ollama" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [

@@ -10,7 +10,7 @@ Ports-and-adapters. `orch-core` holds all invariants and does no I/O; everything
 
 | Port | Adapter(s) | Notes |
 | ---- | ---------- | ----- |
-| Agent runner | `orch-dispatch::AgentRunner`; `orch-ollama::OllamaAgent` (`ollama run --format json`, prompt on stdin) and `FakeAgent` today; `claude -p`, `codex exec`, `gemini -p` planned | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
+| Agent runner | `orch-dispatch::AgentRunner`; `orch-ollama::OllamaAgent` (`ollama run --format json`), `orch-codex::CodexAgent` (`codex exec --sandbox read-only`, [ADR-0006](./docs/adr/0006-codex-adapter.md)) and `FakeAgent` today; `claude -p`, `gemini -p` planned. Shared core in `orch-cli`. | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
 | Board store | remind-me MCP (`board:<project>`) or SQLite | Planned. Persists `Board`/`Plan`; the domain assigns ids. |
 | Goal intake | CLI / JSON → `GoalDraft` | Planned. Parsing and serde live here, not in the core. |
 | Call meter | `orch-dispatch::Ledger` | Caller-owned; counts calls against `Budget::max_calls` and each card's `TaskSpec::max_calls`, checked before every call. Wall-clock is still planned (needs a clock adapter). |

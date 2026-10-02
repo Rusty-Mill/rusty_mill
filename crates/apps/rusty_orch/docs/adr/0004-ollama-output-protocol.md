@@ -20,7 +20,7 @@ The model replies with exactly one JSON object:
 {"entries":[{"kind":"finding","confidence":"high","body":"...","refs":["E-1","path:src/x.rs"]}]}
 ```
 
-- `kind` is a function of the card's `Role`: Research, Triage and Design may write `finding`, `question`, `assumption`; Implement and Review are not served by this adapter. `decision` is never offered: agents propose decisions as findings and the board refuses unreviewed ones (ADR-0005; Design briefly had `decision` before that ADR).
+- `kind` is a function of the card's `Role`: Research, Triage and Design may write `finding`, `question`, `assumption`; Review writes exactly one `review` (with `verdict`: `approve` or `changes_requested`, parsed to `EntryKind::Review { of: <target>, verdict }`) and may add findings beside it (added by ADR-0006); Implement is not served. `decision` is never offered: agents propose decisions as findings and the board refuses unreviewed ones (ADR-0005; Design briefly had `decision` before that ADR).
 - `finding` requires `confidence` in `low`, `medium`, `high`. Other kinds omit it.
 - `body` is non-blank and at most 500 characters. Detail belongs behind refs.
 - `refs` is an array of strings: `E-<n>` for a board entry, or `path:`, `commit:`, `url:` followed by non-blank text. `parse` checks syntax only; existence of `E-<n>` is left to `Board::append`, which already validates it.

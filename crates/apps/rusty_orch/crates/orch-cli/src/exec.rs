@@ -20,6 +20,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Longest slice of model output or stderr an error message carries.
+pub const EXCERPT_CHARS: usize = 200;
+
+/// A bounded, single-line excerpt for error messages; never the whole output.
+pub fn excerpt(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out: String = text.chars().take(EXCERPT_CHARS).collect();
+    if text.chars().count() > EXCERPT_CHARS {
+        out.push('…');
+    }
+    out.replace('\n', " ").trim().to_owned()
+}
+
 /// Captured stdout is cut off here; a reply this long is never valid.
 pub const MAX_STDOUT_BYTES: usize = 1 << 20;
 

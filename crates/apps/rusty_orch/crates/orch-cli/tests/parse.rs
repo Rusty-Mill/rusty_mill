@@ -1,6 +1,6 @@
 use orch_cli::fake::{REPLY_ONE, REPLY_TWO};
 use orch_cli::{parse, MAX_BODY_CHARS, MAX_ENTRIES};
-use orch_core::board::{Confidence, EntryKind};
+use orch_core::board::{Confidence, EntryKind, Verdict};
 use orch_core::task::Role;
 use orch_core::{EntryId, Ref, TaskId};
 
@@ -63,13 +63,62 @@ fn rejects_unknown_kind_and_kind_not_allowed_for_role() {
 #[test]
 fn rejects_unserved_roles() {
     assert!(parse(REPLY_ONE, Role::Implement).is_err());
-    assert!(parse(
-        REPLY_ONE,
-        Role::Review {
-            target: TaskId::from_raw(1)
+}
+
+fn review_role() -> Role {
+    Role::Review {
+        target: TaskId::from_raw(1),
+    }
+}
+
+#[test]
+fn review_card_accepts_one_review_with_a_verdict() {
+    let approve =
+        r#"{"entries":[{"kind":"review","verdict":"approve","body":"Sound.","refs":["E-1"]}]}"#;
+    let out = parse(approve, review_role()).expect("valid");
+    assert_eq!(
+        out[0].kind,
+        EntryKind::Review {
+            of: TaskId::from_raw(1),
+            verdict: Verdict::Approve
         }
-    )
-    .is_err());
+    );
+    let changes = r#"{"entries":[{"kind":"finding","confidence":"low","body":"Missing test.","refs":[]},{"kind":"review","verdict":"changes_requested","body":"Add a test.","refs":["E-1"]}]}"#;
+    let out = parse(changes, review_role()).expect("valid");
+    assert_eq!(out.len(), 2);
+    assert!(matches!(
+        out[1].kind,
+        EntryKind::Review {
+            verdict: Verdict::ChangesRequested,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn review_card_rejects_missing_bad_or_duplicate_verdicts() {
+    let no_verdict = r#"{"entries":[{"kind":"review","body":"x","refs":[]}]}"#;
+    assert!(parse(no_verdict, review_role())
+        .expect_err("no verdict")
+        .0
+        .contains("verdict"));
+    let bad = r#"{"entries":[{"kind":"review","verdict":"lgtm","body":"x","refs":[]}]}"#;
+    assert!(parse(bad, review_role())
+        .expect_err("bad verdict")
+        .0
+        .contains("not approve"));
+    // Findings alone are not a review: the card must deliver its verdict.
+    assert!(parse(REPLY_ONE, review_role())
+        .expect_err("no review")
+        .0
+        .contains("must include one review"));
+    let two = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]},{"kind":"review","verdict":"approve","body":"y","refs":[]}]}"#;
+    assert!(parse(two, review_role())
+        .expect_err("two")
+        .0
+        .contains("exactly one"));
+    let research = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]}]}"#;
+    assert!(err(research).contains("not allowed"));
 }
 
 #[test]

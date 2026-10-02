@@ -6,6 +6,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 ### Added
 - `orch-cli` crate: the CLI-adapter core extracted from `orch-ollama` (process seam, JSON reply parser, prompt core with a per-adapter footer, `fake` test doubles). `CommandRunner::run_scrubbed` removes named variables from the child environment. ADR-0004 amended.
+- `orch-codex` crate: `Agent::Codex` over `codex exec --sandbox read-only --ephemeral --ignore-user-config -C <root> --output-schema --output-last-message -`, prompt on stdin, `OPENAI_API_KEY` scrubbed, `not logged in` and `rate limited` told apart by stderr. `research_review` example (Codex researches, Local reviews). ADR-0006.
+- `orch-cli`: the `review` kind for `Role::Review` cards (`verdict`: approve or changes_requested; exactly one per reply). Shared `excerpt` helper.
 ### Changed
 - `orch-ollama` is a thin adapter on `orch-cli`; behaviour and tests unchanged.
 - `orch-core`: an agent-authored `Decision` must cite a live approving `Review` by a different author; self-approval is rejected with the existing `DecisionNeedsApproval`. ADR-0005 updated.

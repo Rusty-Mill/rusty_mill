@@ -22,6 +22,9 @@ pub mod fake;
 mod parse;
 mod prompt;
 
-pub use exec::{CommandRunner, ExecError, Exit, StdCommand, JOIN_GRACE, MAX_STDOUT_BYTES};
+pub use exec::{
+    excerpt, CommandRunner, ExecError, Exit, StdCommand, EXCERPT_CHARS, JOIN_GRACE,
+    MAX_STDOUT_BYTES,
+};
 pub use parse::{allowed_kinds, parse, MAX_BODY_CHARS, MAX_ENTRIES};
 pub use prompt::{format_spec, render};

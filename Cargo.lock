@@ -10217,6 +10217,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-codex"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "orch-ollama",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-core"
 version = "0.1.0"
 
