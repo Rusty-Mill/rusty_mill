@@ -137,7 +137,20 @@ throttle -1 over 4.99-5.18 s, gains the full 3175/3 (about 8.7 uu/s per
 tick against the candidate's 8.2), so the candidate applies no air
 throttle while boost fires (`drive::air_throttle`). The 4.9-5.6 s
 re-trace confirms it: the velocity error at the end of that boost (5.175 s)
-fell from 17.0 to 8.0 uu/s. So the
+fell from 17.0 to 8.0 uu/s.
+
+## Amendment (FR-101): jumps push along the car's up axis, tires after
+
+RocketSim's `_UpdateJump` and double jump push along `GetUpDir()`; the
+candidate pushed along world up. The car rides pitched ~0.01 rad on its
+suspension, so `test2.jsonl`'s 4.142 s jump on throttle gains 2.9 uu/s
+forward on its press tick, as an up-axis push does, and `front.jsonl`'s
+jump from rest gains ~0.1 uu/s per tick once airborne, the hold force
+along the pitched up axis. But that jump from rest keeps under 1 uu/s on
+its press tick, where the up-axis push alone gives 3.3: the brake already
+cancels it in that tick. RocketSim computes the tire impulses before the
+jump; the capture says the tires act after it, so the candidate now jumps
+first on the ground. So the
 real game keeps the car "grounded" for one step after its wheels let go,
 for both the sticky force and air control (`DriveState::was_on_ground`).
 The 4.15-4.35 s re-trace confirms it: the candidate's yaw rate now holds at

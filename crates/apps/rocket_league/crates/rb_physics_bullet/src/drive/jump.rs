@@ -3,7 +3,7 @@
 //! and the dodge's flip (torque, cancel, vertical damping). See the parent
 //! module doc comment for the full rule set.
 
-use super::{forward_axis, right_axis, MAX_CAR_SPEED};
+use super::{forward_axis, right_axis, up_axis, MAX_CAR_SPEED};
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
 
@@ -453,9 +453,10 @@ pub(super) fn apply_jump_hold(
     }
 }
 
-/// One tick of `JUMP_HOLD_ACCELERATION`, spending `dt` of the hold window.
+/// One tick of `JUMP_HOLD_ACCELERATION` along the car's up axis, spending
+/// `dt` of the hold window.
 fn push_jump_hold(car: &mut RigidBody, jump_hold_time_remaining: &mut f32, dt: f32) {
-    car.apply_central_force(Vec3::new(0.0, 0.0, JUMP_HOLD_ACCELERATION * car.mass()));
+    car.apply_central_force(up_axis(car) * (JUMP_HOLD_ACCELERATION * car.mass()));
     *jump_hold_time_remaining = (*jump_hold_time_remaining - dt).max(0.0);
 }
 
@@ -468,7 +469,9 @@ pub(super) fn ground_jump(car: &mut RigidBody, jump_hold_time_remaining: &mut f3
     // apply_impulse divides by mass internally, so scaling by
     // car.mass() here cancels that out and yields a flat
     // JUMP_SPEED velocity change regardless of the car's mass.
-    car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+    // RB-PHYSICS-001-FR-101: along the car's up axis, as RocketSim's
+    // `_UpdateJump` (`GetUpDir() * JUMP_IMMEDIATE_FORCE`).
+    car.apply_impulse(up_axis(car) * (JUMP_SPEED * car.mass()), Vec3::ZERO);
     // This call's own apply_jump_hold already ran against the *previous*
     // value (0, since no ground jump was in flight yet), so the press tick's
     // hold force comes from here.
@@ -582,7 +585,8 @@ pub(super) fn airborne_jump_press(
             // JUMP_SPEED rather than a second, separately-calibrated
             // constant, since this port has no public reference for a
             // distinct double-jump speed either.
-            car.apply_impulse(Vec3::new(0.0, 0.0, JUMP_SPEED * car.mass()), Vec3::ZERO);
+            // Along the car's up axis, as RocketSim's double jump.
+            car.apply_impulse(up_axis(car) * (JUMP_SPEED * car.mass()), Vec3::ZERO);
         }
         *double_jump_available = false;
     }

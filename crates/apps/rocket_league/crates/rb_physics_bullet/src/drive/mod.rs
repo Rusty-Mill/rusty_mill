@@ -508,6 +508,14 @@ pub fn apply_driven_forces(
         // regardless of this step's input.
         state.double_jump_available = true;
         state.flip = None;
+        // RB-PHYSICS-001-FR-101: the jump first, so the tires already see
+        // its velocity: the jump pushes along the car's up axis, and the
+        // owner's captures show the brake cancelling that push's in-plane
+        // part on the press tick (a jump from rest stays put), while a car
+        // on throttle keeps it (`test2.jsonl`, 4.133 s: +2.9 uu/s forward).
+        if jump_pressed {
+            jump::ground_jump(car, &mut state.jump_hold_time_remaining, dt);
+        }
         ground::apply_ground_control(
             car,
             wheels,
@@ -517,9 +525,6 @@ pub fn apply_driven_forces(
             state.handbrake_amount,
             dt,
         );
-        if jump_pressed {
-            jump::ground_jump(car, &mut state.jump_hold_time_remaining, dt);
-        }
     } else {
         // RB-PHYSICS-001-FR-099: one or two wheels still grip and brake,
         // and keep air control off (RocketSim's `_UpdateAirTorque` with

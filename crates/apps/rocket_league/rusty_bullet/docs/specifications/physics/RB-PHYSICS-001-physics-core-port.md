@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.104.0
+- Version: 0.105.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5689,6 +5689,21 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     candidate's impact is symmetric and takes a 1.46x larger normal
     impulse (forward -45 vs recorded -28.5 uu/s, vertical +175 vs +120)
     while the recorded car rolls (-2.9 rad/s) and yaws (-1.8).
+- `RB-PHYSICS-001-FR-101` (jumps push along the car's up axis, the tires
+  after the jump, implemented, verified by tests, ADR-0019 amendment): the
+  ground jump, its hold force and the plain double jump act along the
+  car's up axis (RocketSim's `GetUpDir()`), not world up; on the ground the
+  jump comes before the tire forces.
+  - Why: `test2.jsonl`'s 4.142 s jump on throttle gains 2.9 uu/s forward on
+    its press tick that the candidate's world-up jump lacked: 292 uu/s
+    along an up axis pitched ~0.01 rad on the suspension. A jump from rest
+    (`front.jsonl`, 12.008 s) keeps under 1 uu/s on the press tick, so
+    there the brake cancels that in-plane part in the same tick, and the
+    hold force along the pitched up axis then adds ~0.1 uu/s per airborne
+    tick, as recorded (candidate 0.137).
+  - **Verification**: `drive` test
+    `a_ground_jump_pushes_along_the_cars_up_axis`; `world` test
+    `a_jump_from_rest_goes_straight_up` (now under 1 uu/s).
 
 ## Architecture and interfaces
 
@@ -7171,6 +7186,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.105.0 (2026-10-02): `RB-PHYSICS-001-FR-101` — jumps push along the
+  car's up axis, tires after the jump (ADR-0019 amendment). 379 tests in
+  `rb_physics_bullet`.
 - 0.104.0 (2026-10-02): `RB-PHYSICS-001-FR-100` — car body uses
   RocketSim's car-vs-world material (ADR-0021). 378 tests in
   `rb_physics_bullet`.
