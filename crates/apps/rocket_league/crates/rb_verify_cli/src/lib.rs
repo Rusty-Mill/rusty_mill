@@ -293,6 +293,18 @@ pub fn k_step_score(
     ))
 }
 
+/// Every car at every frame of a capture against the candidate's k-step
+/// prediction of that frame (`RB-VERIFY-003-FR-008`): the rows behind
+/// [`k_step_score`], for finding where the quarter-second error peaks.
+pub fn k_step_capture(
+    capture_path: impl AsRef<Path>,
+    k: usize,
+) -> Result<Vec<TraceRow>, IngestError> {
+    let (recorded, world) = seed(capture_path)?;
+    let candidate = simulate_recorded_k_step(world, &recorded, k);
+    Ok(trace_rows(&recorded, &candidate, 0.0, f32::INFINITY))
+}
+
 /// Pairs recorded and candidate frames by index and cars by `player_id`,
 /// keeping frames whose time since the first recorded frame falls in
 /// `[from_secs, to_secs]`.

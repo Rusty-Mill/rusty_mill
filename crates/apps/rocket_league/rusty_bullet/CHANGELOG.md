@@ -5,7 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
-- `rb-verify --self-kstep <capture> [k]` (`RB-VERIFY-003-FR-008`,
+- `rb-verify --self-kstep <capture> [k] [count]` (`RB-VERIFY-003-FR-008`,
   ADR-0030): every frame predicted `k` ticks ahead from the recording
   (`k_step_score`, `world::simulate_recorded_k_step`); `PhysicsWorld` and
   `NetMesh` are `Clone`.
@@ -42,6 +42,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
   `LICENSE`.
 ### Fixed
+- `PhysicsWorld::snap_to_frame` takes the recorded boost fuel
+  (`RB-VERIFY-003-FR-009`): one-step and k-step predictions of an
+  unlimited-boost capture no longer run out of boost.
 - `world::combined_ball_world_contact` averages the distance to the ball's
   own contact point, as Bullet's `rel_pos1` does (was the surface point).
 - `solver::friction_directions` normalizes a non-unit normal before
