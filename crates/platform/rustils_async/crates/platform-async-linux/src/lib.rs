@@ -18,7 +18,7 @@ pub mod sys;
 
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,8 +52,16 @@ impl AsyncLinuxSpawner {
 impl AsyncSpawner for AsyncLinuxSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn AsyncChild>> {
         let child = self.inner.spawn(cmd)?;
+        let signal_pidfd = match sys::pidfd::open(child.id() as libc::pid_t) {
+            Ok(pidfd) => pidfd,
+            Err(acquisition_error) => {
+                cleanup_unexposed_child(child)?;
+                return Err(acquisition_error);
+            }
+        };
         Ok(Box::new(AsyncLinuxChild {
             inner: child,
+            signal_pidfd,
             reactor: Arc::clone(&self.reactor),
             reaped: Arc::new(Mutex::new(None)),
         }))
@@ -76,8 +84,31 @@ impl AsyncSpawner for AsyncLinuxSpawner {
     }
 }
 
+/// Dispose of a child whose signaling pidfd could not be acquired.
+///
+/// The child has not been exposed and no helper can have reaped it, so its
+/// numeric PID still belongs to this operation under the spawn ownership
+/// assumptions documented in the crate README. `ESRCH` is harmless here: an
+/// immediately exited child remains waitable. Other signal failures are
+/// returned rather than risking an unbounded blocking wait.
+fn cleanup_unexposed_child(mut child: Box<dyn Child>) -> Result<()> {
+    match child.kill_single(Signal::Kill) {
+        Ok(()) => {}
+        Err(error) if error.os == OsCode::Errno(libc::ESRCH) => {}
+        Err(error) => return Err(error),
+    }
+    child.take_stdin();
+    child.take_stdout();
+    child.take_stderr();
+    child.wait().map(|_| ())
+}
+
 struct AsyncLinuxChild {
     inner: Box<dyn Child>,
+    /// Dedicated identity handle for every `kill_single` call. Readiness uses
+    /// independently opened pidfds so reactor deregistration keeps its
+    /// existing open-file-description lifetime.
+    signal_pidfd: OwnedFd,
     reactor: Arc<EpollReactor>,
     /// The single authoritative "already reaped" cache for this child,
     /// consulted and updated by every reaping path below (`wait`,
@@ -141,7 +172,7 @@ impl AsyncChild for AsyncLinuxChild {
         {
             return Ok(());
         }
-        self.inner.kill_single(sig)
+        sys::pidfd::send_signal(self.signal_pidfd.as_fd(), sig)
     }
 
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
@@ -369,10 +400,16 @@ impl Future for WaitJob {
                 .name("rustils-async-waitjob".to_owned())
                 .spawn(move || {
                     let outcome = platform_linux::sys::spawn::wait_job(pid);
+                    #[cfg(test)]
+                    let published = wait_job_test_hook::after_waitpid(pid);
                     if let Ok(status) = &outcome {
                         if !matches!(status, ExitStatus::Stopped(_) | ExitStatus::Continued) {
                             *reaped.lock().unwrap_or_else(|p| p.into_inner()) = Some(*status);
                         }
+                    }
+                    #[cfg(test)]
+                    if let Some(published) = published {
+                        published.wait();
                     }
                     *result_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
                     waker.wake();
@@ -386,6 +423,47 @@ impl Future for WaitJob {
             }
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod wait_job_test_hook {
+    use std::sync::{Arc, Barrier, Mutex};
+
+    struct Hook {
+        pid: libc::pid_t,
+        reaped: Arc<Barrier>,
+        publish: Arc<Barrier>,
+        published: Arc<Barrier>,
+    }
+
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    pub(super) fn install(
+        pid: libc::pid_t,
+        reaped: Arc<Barrier>,
+        publish: Arc<Barrier>,
+        published: Arc<Barrier>,
+    ) {
+        *HOOK.lock().unwrap_or_else(|p| p.into_inner()) = Some(Hook {
+            pid,
+            reaped,
+            publish,
+            published,
+        });
+    }
+
+    pub(super) fn after_waitpid(pid: libc::pid_t) -> Option<Arc<Barrier>> {
+        let mut slot = HOOK.lock().unwrap_or_else(|p| p.into_inner());
+        let hook = (slot.as_ref().is_some_and(|hook| hook.pid == pid))
+            .then(|| slot.take().expect("matching hook exists"));
+        drop(slot);
+        if let Some(hook) = hook {
+            hook.reaped.wait();
+            hook.publish.wait();
+            return Some(hook.published);
+        }
+        None
     }
 }
 
@@ -509,6 +587,46 @@ mod wait_any_leak_tests {
         child
             .kill_single(Signal::Kill)
             .expect("no signal to a reaped pid");
+    }
+
+    /// The helper has successfully reaped the child but has not published the
+    /// shared cache yet. Numeric-PID signaling returned `ESRCH` in this exact
+    /// interval (and could target a recycled PID); the retained pidfd instead
+    /// identifies only the original process and treats its termination as
+    /// success.
+    #[test]
+    fn kill_single_is_safe_between_helper_reap_and_cache_publication() {
+        use std::sync::Barrier;
+
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let mut child = spawner
+            .spawn(&Command::new("/bin/true", "/"))
+            .expect("spawn");
+        let reaped = Arc::new(Barrier::new(2));
+        let publish = Arc::new(Barrier::new(2));
+        let published = Arc::new(Barrier::new(2));
+        wait_job_test_hook::install(
+            child.id() as libc::pid_t,
+            Arc::clone(&reaped),
+            Arc::clone(&publish),
+            Arc::clone(&published),
+        );
+        {
+            let waker = std::task::Waker::from(Arc::new(CountingWaker(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut abandoned = child.wait_job();
+            assert!(abandoned.as_mut().poll(&mut cx).is_pending());
+        }
+
+        reaped.wait();
+        let signal_result = child.kill_single(Signal::Kill);
+        publish.wait();
+        published.wait();
+        signal_result.expect("terminated process behind stable pidfd is success");
+        assert_eq!(
+            child.try_wait().expect("helper published cached status"),
+            Some(ExitStatus::Code(0))
+        );
     }
 
     /// Waits until `counter` is non-zero, up to 5 s.
