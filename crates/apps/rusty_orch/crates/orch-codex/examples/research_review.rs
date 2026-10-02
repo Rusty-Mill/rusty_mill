@@ -25,6 +25,14 @@ struct Agents {
 }
 
 impl AgentRunner for Agents {
+    fn supports(&self, agent: Agent, role: Role) -> bool {
+        match agent {
+            Agent::Codex => self.codex.supports(agent, role),
+            Agent::Local => self.local.supports(agent, role),
+            _ => false,
+        }
+    }
+
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
         match agent {
             Agent::Codex => self.codex.run(agent, task, board),

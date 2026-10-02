@@ -3,7 +3,7 @@
 use std::fmt;
 
 use orch_core::board::{Board, EntryKind};
-use orch_core::task::{Agent, Task};
+use orch_core::task::{Agent, Role, Task};
 use orch_core::{EntryId, Ref, Text};
 
 /// One entry an agent wants on the board. The dispatcher stamps the task
@@ -35,6 +35,16 @@ impl std::error::Error for AgentError {}
 /// not loop internally. The agent reads context from `board` and the card's
 /// refs, and returns what it wrote; it never appends to the board itself.
 pub trait AgentRunner {
+    /// Whether this runner can serve `role` through `agent`.
+    ///
+    /// The default preserves compatibility for runners that can serve every
+    /// route. Adapters with narrower capabilities must override it so the
+    /// dispatcher can reject unsupported cards before counting or invoking a
+    /// call.
+    fn supports(&self, _agent: Agent, _role: Role) -> bool {
+        true
+    }
+
     /// Run `task` on `agent` and return the entries it produced.
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError>;
 }
