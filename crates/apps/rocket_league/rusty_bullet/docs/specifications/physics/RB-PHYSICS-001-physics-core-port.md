@@ -5683,7 +5683,12 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   - **Verification**: `world` tests
     `an_upside_down_car_slides_to_a_stop_under_car_world_friction` and
     `a_coasting_car_loses_only_the_tires_coasting_speed_not_box_friction`
-    (rewritten to ride on the suspension).
+    (rewritten to ride on the suspension); real capture `front.jsonl`:
+    velocity error after the 19.083 s body impact 13-27 uu/s (was 35-78),
+    growth windows 19/20 s 9.9/17.3 uu (were 11.3/26.8). Still open: the
+    candidate's impact is symmetric and takes a 1.46x larger normal
+    impulse (forward -45 vs recorded -28.5 uu/s, vertical +175 vs +120)
+    while the recorded car rolls (-2.9 rad/s) and yaws (-1.8).
 
 ## Architecture and interfaces
 

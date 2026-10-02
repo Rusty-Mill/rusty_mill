@@ -40,3 +40,9 @@ every car-vs-world manifold with `CARWORLD_COLLISION_FRICTION = 0.3` and
 - Grip on four wheels is unchanged: the body is clear of the floor.
 - The roll and yaw the recorded car picks up at 19.083 s may also need the
   real arena's triangle-mesh floor; this decision does not model that.
+
+Real capture, 2026-10-02: confirmed as an improvement. Velocity error after
+the 19.083 s impact 13-27 uu/s (was 35-78); `--self-growth` windows 19/20 s
+9.9/17.3 uu (were 11.3/26.8). The impact tick itself now overshoots
+(forward -45 vs -28.5 uu/s, vertical +175 vs +120): the candidate's car
+hits flat on two corners while the recorded one rolls and yaws.

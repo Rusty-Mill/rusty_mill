@@ -123,13 +123,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <front.jsonl> 19.05 19.3` and
-   `--self-growth` on `front.jsonl` and `test2.jsonl` to confirm
-   `RB-PHYSICS-001-FR-100` (car body uses RocketSim's car-vs-world
-   friction and bounce, 0.3/0.3, ADR-0021): at the 19.083 s body impact
-   the candidate should lose ~28 uu/s of forward speed as recorded (was 2).
-   Still open there: the roll and yaw the recorded car picks up. Then the
-   side-flip capture.
+1. `RB-PHYSICS-001-FR-100` (car body uses RocketSim's car-vs-world
+   friction and bounce, ADR-0021) is confirmed as an improvement: velocity
+   error after the 19.083 s impact 13-27 uu/s (was 35-78). Still open
+   there: the candidate's impact is symmetric and 1.46x too strong while
+   the recorded car rolls and yaws (possibly the real triangle-mesh
+   floor). Then the side-flip capture.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
