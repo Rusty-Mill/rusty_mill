@@ -710,6 +710,84 @@ mod wait_any_leak_tests {
 
     struct OwnedPid(libc::pid_t);
 
+    /// Test-only decorator at the wrapped [`Child::kill_single`] boundary.
+    /// Unlike the acquisition-cleanup hook, this observes any accidental
+    /// numeric-PID signal made through an exposed `AsyncLinuxChild`'s actual
+    /// inner child.
+    struct ObservedChild {
+        inner: Box<dyn Child>,
+        kill_single_calls: Arc<AtomicUsize>,
+    }
+
+    impl Child for ObservedChild {
+        fn wait(self: Box<Self>) -> Result<ExitStatus> {
+            self.inner.wait()
+        }
+
+        fn id(&self) -> u32 {
+            self.inner.id()
+        }
+
+        fn kill_tree(&self, sig: Signal) -> Result<()> {
+            self.inner.kill_tree(sig)
+        }
+
+        fn kill_single(&self, sig: Signal) -> Result<()> {
+            self.kill_single_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.kill_single(sig)
+        }
+
+        fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+            self.inner.try_wait()
+        }
+
+        fn wait_job(&mut self) -> Result<ExitStatus> {
+            self.inner.wait_job()
+        }
+
+        fn try_wait_job(&mut self) -> Result<Option<ExitStatus>> {
+            self.inner.try_wait_job()
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn platform::fs::File>> {
+            self.inner.take_stdin()
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn platform::fs::File>> {
+            self.inner.take_stdout()
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn platform::fs::File>> {
+            self.inner.take_stderr()
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    fn observed_child(
+        reactor: Arc<EpollReactor>,
+        command: &Command,
+    ) -> (Box<AsyncLinuxChild>, Arc<AtomicUsize>) {
+        let inner = LinuxSpawner.spawn(command).expect("spawn observed child");
+        let signal_pidfd = sys::pidfd::open(inner.id() as libc::pid_t).expect("open signal pidfd");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inner = Box::new(ObservedChild {
+            inner,
+            kill_single_calls: Arc::clone(&calls),
+        });
+        (
+            Box::new(AsyncLinuxChild {
+                inner,
+                signal_pidfd,
+                reactor,
+                reaped: Arc::new(Mutex::new(None)),
+            }),
+            calls,
+        )
+    }
+
     impl Drop for OwnedPid {
         fn drop(&mut self) {
             let _ = platform_linux::sys::spawn::kill_single(self.0, Signal::Kill);
@@ -864,9 +942,17 @@ mod wait_any_leak_tests {
     #[test]
     fn exposed_child_routes_signal_to_retained_fd_and_preserves_error() {
         let spawner = AsyncLinuxSpawner::new().expect("spawner");
-        let mut child = spawner
-            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
-            .expect("spawn");
+        let (mut child, numeric_calls) = observed_child(
+            Arc::clone(&spawner.reactor),
+            &Command::new("/bin/sleep", "/").arg("30"),
+        );
+        // Positive control: the decorator observes a call made directly at
+        // the wrapped-child boundary that the exposed path must not use.
+        child
+            .inner
+            .kill_single(Signal::Cont)
+            .expect("direct inner signal control");
+        assert_eq!(numeric_calls.swap(0, Ordering::SeqCst), 1);
         let (result, state) = syscall_test_hook::with(
             syscall_test_hook::State {
                 signal_error: Some(injected(libc::EIO, "injected pidfd_send_signal")),
@@ -885,6 +971,7 @@ mod wait_any_leak_tests {
             "the pidfd boundary is used exactly once"
         );
         assert_eq!(state.numeric_signal_calls, 0);
+        assert_eq!(numeric_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             child.try_wait().expect("status check"),
             None,
@@ -1000,12 +1087,31 @@ mod wait_any_leak_tests {
 
         let spawner = AsyncLinuxSpawner::new().expect("spawner");
         let child = spawner
-            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+            .spawn(&Command::new("/bin/true", "/"))
             .expect("spawn");
         let pid = child.id() as libc::pid_t;
-        let stale_number = retained_fd(&*child);
-        assert_ne!(sys::pidfd::descriptor_flags(stale_number), -1);
-        drop(child);
+        let reservation = std::fs::File::open("/dev/null").expect("reserve descriptor number");
+        let stale_number = reservation.as_raw_fd();
+        sys::pidfd::close_descriptor(stale_number);
+        std::mem::forget(reservation);
+        let mut original_activity = child.ready();
+        let waker = std::task::Waker::from(Arc::new(CountingWaker(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        assert!(original_activity.as_mut().poll(&mut cx).is_pending());
+        assert_ne!(
+            sys::pidfd::descriptor_flags(stale_number),
+            -1,
+            "original readiness activity must own the reserved descriptor"
+        );
+        loop {
+            match original_activity.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => {
+                    result.expect("original child readiness");
+                    break;
+                }
+                Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
         assert_eq!(sys::pidfd::descriptor_flags(stale_number), -1);
 
         let replacement = std::fs::File::open("/dev/null").expect("replacement descriptor");
@@ -1014,6 +1120,12 @@ mod wait_any_leak_tests {
             sys::pidfd::replace_descriptor(replacement.as_fd(), stale_number),
             stale_number
         );
+        assert_ne!(sys::pidfd::descriptor_flags(stale_number), -1);
+
+        // The completed future still belongs to the original child. Dropping
+        // it after its readiness pidfd legitimately closed must not perform a
+        // stale close on a descriptor that now belongs to the replacement.
+        drop(original_activity);
         assert_ne!(sys::pidfd::descriptor_flags(stale_number), -1);
 
         // Exercise both signaling and owner-drop paths on another child. A
@@ -1029,6 +1141,7 @@ mod wait_any_leak_tests {
             sys::pidfd::close_descriptor(stale_number);
         }
         drop(replacement);
+        drop(child);
         drop(OwnedPid(pid));
         drop(OwnedPid(other_pid));
     }
@@ -1156,9 +1269,10 @@ mod wait_any_leak_tests {
         use std::sync::mpsc;
 
         let spawner = AsyncLinuxSpawner::new().expect("spawner");
-        let mut child = spawner
-            .spawn(&Command::new("/bin/true", "/"))
-            .expect("spawn");
+        let (mut child, numeric_calls) = observed_child(
+            Arc::clone(&spawner.reactor),
+            &Command::new("/bin/true", "/"),
+        );
         let (reaped_tx, reaped) = mpsc::sync_channel(1);
         let (publish, publish_rx) = mpsc::sync_channel(1);
         let (published_tx, published) = mpsc::sync_channel(1);
@@ -1185,6 +1299,11 @@ mod wait_any_leak_tests {
         assert_eq!(
             signal_state.numeric_signal_calls, 0,
             "exposed child must never fall back to numeric signaling"
+        );
+        assert_eq!(
+            numeric_calls.load(Ordering::SeqCst),
+            0,
+            "the actual wrapped-child boundary must remain unused"
         );
         hook_guard.release();
         assert!(
