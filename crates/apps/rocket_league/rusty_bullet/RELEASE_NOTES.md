@@ -8,6 +8,17 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Friction works like the game's
+**2026-10-02** · `RB-PHYSICS-001-FR-110` · ADR-0029
+
+- Every contact now has one friction direction (along the slide), as the
+  game's physics engine does by default, instead of two. This fixed the
+  two oldest open car errors: the corner-wall impact (`test2` 8.958 s, was
+  173 uu/s) and the `front` nose landing (25.967 s, was 156). Ball error
+  after car hits fell from 129 to 23 (kickoff) and 90 to 27. A full
+  free-running replay of `front` now stays within 34 uu of the recording
+  (was over 1000). 472 tests.
+
 ## Ball bounces off the arena's real faces
 **2026-10-02** · `RB-PHYSICS-001-FR-109` · ADR-0028
 

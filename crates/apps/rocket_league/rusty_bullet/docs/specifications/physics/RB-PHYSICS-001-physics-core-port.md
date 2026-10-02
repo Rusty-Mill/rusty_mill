@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.113.0
+- Version: 0.114.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5922,6 +5922,37 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - Real capture `--self-onestep`: `test2` ball mean 0.17 uu/s (was
       0.41); 7.95 s 32 (was 201); 13.967 s out of the top steps; car
       errors unchanged.
+- `RB-PHYSICS-001-FR-110` (one friction row per contact; implemented,
+  verified by tests and the owner's captures, ADR-0029):
+  - `solver::setup_rows` and `setup_two_body_rows` build a normal row and
+    one friction row, along `friction_direction`: the slip direction, or
+    `plane_space`'s first axis when there is no slip.
+  - This is Bullet's default solver mode, which RocketSim keeps. The
+    second row, which FR-049 added along `slip x normal`, exists only
+    under `SOLVER_USE_2_FRICTION_DIRECTIONS`.
+  - `ContactCache` warm-starts `[normal, friction]`.
+  - Why: at `test2.jsonl`'s kickoff hit (5.758 s) the extra hit velocity
+    matched RocketSim exactly, but the solve gave the ball the wrong
+    sideways velocity and spin.
+  - **Verification**:
+    - `solver` tests
+      `friction_direction_aligns_with_the_tangential_component_of_relative_velocity`,
+      `friction_direction_falls_back_to_plane_space_with_no_tangential_velocity`,
+      `friction_direction_stays_finite_for_a_non_unit_averaged_normal`, and
+      `friction_deceleration_is_isotropic_regardless_of_slide_direction`
+      (unchanged, still passes).
+    - The net's symmetric-catch bound is 0.15 uu/s (now ~0.08).
+    - Real captures, `--self-onestep`:
+      - `test2` car mean 1.59 (was 1.72); 8.958 s out of the top steps
+        (was 173).
+      - Ball mean 0.11 (was 0.17); 5.758 s 23 (was 129); 12.267 s 27
+        (was 90).
+      - `front` car mean 0.192 (was 0.302); 25.967 s out of the top steps
+        (was 156).
+    - Real captures, `--self`: `front` mean car position error 34 uu
+      (was 1026).
+- `RB-PHYSICS-001-FR-049` is amended by FR-110: its second direction is
+  gone.
 
 
 ## Architecture and interfaces
@@ -7413,6 +7444,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.114.0 (2026-10-02): `RB-PHYSICS-001-FR-110` — one friction row per
+  contact, Bullet's default (ADR-0029). 404 tests in `rb_physics_bullet`.
 - 0.113.0 (2026-10-02): `RB-PHYSICS-001-FR-109` — mesh edge contacts
   follow Bullet's internal-edge adjustment (ADR-0028). 404 tests in
   `rb_physics_bullet`.

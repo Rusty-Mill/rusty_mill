@@ -143,11 +143,14 @@
 //!   catastrophic-cancellation edge case in the near-head-on-collision
 //!   direction computation that real Bullet's own unguarded `normalize()`
 //!   doesn't need to handle but this crate's own panic-free
-//!   `Vec3::normalize()` does — see `friction_directions`'s own doc
+//!   `Vec3::normalize()` does — see `friction_direction`'s own doc
 //!   comment). Confirmed the fix makes friction deceleration isotropic
 //!   (independent of which way a body happens to be sliding in world
 //!   space) via a dedicated regression test that fails under the old
-//!   fixed-basis behavior.
+//!   fixed-basis behavior. Since `RB-PHYSICS-001-FR-110` there is only
+//!   direction 1 (`friction_direction`): Bullet adds direction 2 only
+//!   under `SOLVER_USE_2_FRICTION_DIRECTIONS`, which its default mode, and
+//!   RocketSim, leave off.
 
 use crate::body::RigidBody;
 use crate::collision::Contact;
@@ -283,48 +286,38 @@ fn plane_space(n: &Vec3) -> (Vec3, Vec3) {
     }
 }
 
-/// Picks the two friction-tangent directions for one contact, matching real
-/// Bullet's actual default friction-direction selection
-/// (`RB-PHYSICS-001-FR-049`, adopting the divergence
-/// `RB-PHYSICS-001-FR-048` found and left open): direction 1 aligns with
-/// the tangential component of the current relative sliding velocity
-/// (`relative_velocity` minus its own component along `normal`), so a
-/// friction row's own `[-mu * N, +mu * N]` clamp acts along the body's
-/// actual slide direction instead of an arbitrary fixed axis — direction 2
-/// completes a right-handed orthonormal basis via `dir1.cross(normal)`,
-/// matching real Bullet's own `lateralFrictionDir1.cross(normalWorldOnB)`.
+/// The one friction direction for a contact, as real Bullet picks it by
+/// default (`RB-PHYSICS-001-FR-049`, one row since `RB-PHYSICS-001-FR-110`):
+/// the tangential part of the relative sliding velocity
+/// (`relative_velocity` minus its component along `normal`), so the
+/// friction row's `[-mu * N, +mu * N]` clamp acts along the actual slide.
+/// Bullet only adds a second row, `dir1 x normal`, under
+/// `SOLVER_USE_2_FRICTION_DIRECTIONS`, which RocketSim leaves off.
 ///
-/// Falls back to `plane_space`'s own fixed basis whenever that tangential
-/// direction can't be trusted: either its squared length is at or below
-/// `f32::EPSILON` (matching real Bullet's own `SIMD_EPSILON` threshold —
-/// negligible sliding to align with, e.g. a body resting with zero
-/// tangential velocity), or — found empirically fixing this crate's own
-/// test suite, not something real Bullet's unguarded `normalize()` needs to
-/// handle — the near-head-on case where `relative_velocity` is almost
-/// entirely along `normal`: subtracting two nearly-equal-magnitude vectors
-/// (`relative_velocity` and `normal * rel_vel`) is a textbook catastrophic
-/// cancellation, so the tiny residual `tangential` can pass the length
-/// check while its *direction* is dominated by rounding error rather than
-/// the true (near-zero) tangential velocity, occasionally landing close
-/// enough to `normal` itself that `dir1.cross(normal)` comes out
-/// degenerate. `plane_space` never subtracts two comparable vectors, so
-/// it's immune to that cancellation and always well-defined for any
-/// nonzero `normal` once normalized.
-fn friction_directions(normal: &Vec3, relative_velocity: &Vec3) -> (Vec3, Vec3) {
+/// Falls back to `plane_space`'s first axis whenever that direction can't
+/// be trusted: its squared length is at or below `f32::EPSILON` (Bullet's
+/// `SIMD_EPSILON`: no sliding to align with), or — found empirically, not
+/// something Bullet's unguarded `normalize()` handles — the near-head-on
+/// case where `relative_velocity` is almost entirely along `normal`, whose
+/// tiny residual can pass the length check while its direction is
+/// rounding error close enough to `normal` that it is no tangent at all.
+/// `plane_space` never subtracts two comparable vectors, so it's well
+/// defined for any nonzero `normal` once normalized.
+fn friction_direction(normal: &Vec3, relative_velocity: &Vec3) -> Vec3 {
     let rel_vel = normal.dot(relative_velocity);
     let tangential = *relative_velocity - *normal * rel_vel;
     if tangential.length_squared() > f32::EPSILON {
-        if let Some(dir1) = tangential.normalize() {
-            if let Some(dir2) = dir1.cross(normal).normalize() {
-                return (dir1, dir2);
+        if let Some(dir) = tangential.normalize() {
+            if dir.cross(normal).normalize().is_some() {
+                return dir;
             }
         }
     }
     // A combined ball-world normal is an average, not unit length
     // (`RB-PHYSICS-001-FR-108`); `plane_space` needs a unit one.
     match normal.normalize() {
-        Some(unit) => plane_space(&unit),
-        None => (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+        Some(unit) => plane_space(&unit).0,
+        None => Vec3::new(1.0, 0.0, 0.0),
     }
 }
 
@@ -407,7 +400,7 @@ impl DeltaVelocity {
 /// rel_vel) * jacDiagABInv` exactly at the real default `desiredVelocity =
 /// 0` (this crate has no conveyor-belt/friction-anchor feature, so this is
 /// its only reachable case).
-fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3] {
+fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 2] {
     let rel_pos = contact.point - body.position;
     let inv_dt = 1.0 / dt;
 
@@ -444,7 +437,7 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
         applied_push_impulse: 0.0,
     };
 
-    let (t1, t2) = friction_directions(&contact.normal, &relative_velocity);
+    let tangent = friction_direction(&contact.normal, &relative_velocity);
     // Port of `setupFrictionConstraint`: target zero relative velocity
     // along the tangent direction (Bullet's `desiredVelocity` parameter is
     // 0 in the default no-conveyor-belt case) — a friction row needs a
@@ -468,7 +461,7 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 3
         }
     };
 
-    [normal_row, friction_row(t1), friction_row(t2)]
+    [normal_row, friction_row(tangent)]
 }
 
 /// Port of `resolveSingleConstraintRowGeneric`/`...LowerLimit`: one
@@ -603,7 +596,7 @@ pub fn resolve_contacts(
     let mut effective_body = *body;
     effective_body.restitution = combined_restitution;
 
-    let mut manifold: Vec<[ConstraintRow; 3]> = contacts
+    let mut manifold: Vec<[ConstraintRow; 2]> = contacts
         .iter()
         .map(|c| setup_rows(&effective_body, c, dt))
         .collect();
@@ -619,11 +612,8 @@ pub fn resolve_contacts(
             let friction_limit = combined_friction * rows[0].applied_impulse;
             rows[1].lower_limit = -friction_limit;
             rows[1].upper_limit = friction_limit;
-            rows[2].lower_limit = -friction_limit;
-            rows[2].upper_limit = friction_limit;
 
             resolve_row(&mut rows[1], inv_mass, &mut delta);
-            resolve_row(&mut rows[2], inv_mass, &mut delta);
         }
     }
 
@@ -672,7 +662,7 @@ pub fn resolve_static_manifolds(
 
     struct Manifold {
         combined_friction: f32,
-        rows: Vec<[ConstraintRow; 3]>,
+        rows: Vec<[ConstraintRow; 2]>,
     }
 
     let mut solved: Vec<Manifold> = manifolds
@@ -706,11 +696,8 @@ pub fn resolve_static_manifolds(
                 let friction_limit = m.combined_friction * rows[0].applied_impulse;
                 rows[1].lower_limit = -friction_limit;
                 rows[1].upper_limit = friction_limit;
-                rows[2].lower_limit = -friction_limit;
-                rows[2].upper_limit = friction_limit;
 
                 resolve_row(&mut rows[1], inv_mass, &mut delta);
-                resolve_row(&mut rows[2], inv_mass, &mut delta);
             }
         }
     }
@@ -780,7 +767,7 @@ fn setup_two_body_rows(
     contact: &Contact,
     combined_restitution: f32,
     dt: f32,
-) -> [TwoBodyRow; 3] {
+) -> [TwoBodyRow; 2] {
     let rel_pos_a = contact.point - a.position;
     let rel_pos_b = contact.point - b.position;
     let inv_dt = 1.0 / dt;
@@ -831,7 +818,7 @@ fn setup_two_body_rows(
         applied_push_impulse: 0.0,
     };
 
-    let (t1, t2) = friction_directions(&contact.normal, &relative_velocity);
+    let tangent = friction_direction(&contact.normal, &relative_velocity);
     let friction_row = |dir: Vec3| -> TwoBodyRow {
         let (torque_axis_a, angular_component_a, torque_axis_b, angular_component_b, denom) =
             effective_mass_denom_two_body(a, b, &rel_pos_a, &rel_pos_b, &dir);
@@ -854,7 +841,7 @@ fn setup_two_body_rows(
         }
     };
 
-    [normal_row, friction_row(t1), friction_row(t2)]
+    [normal_row, friction_row(tangent)]
 }
 
 /// Two-body version of `resolve_row`: the relative-velocity term along a
@@ -973,7 +960,7 @@ pub fn resolve_contacts_between(
     let combined_restitution = combine_restitution(a.restitution, b.restitution);
     let combined_friction = combine_friction(a.friction, b.friction);
 
-    let mut manifold: Vec<[TwoBodyRow; 3]> = contacts
+    let mut manifold: Vec<[TwoBodyRow; 2]> = contacts
         .iter()
         .map(|c| setup_two_body_rows(a, b, c, combined_restitution, dt))
         .collect();
@@ -1004,18 +991,9 @@ pub fn resolve_contacts_between(
             let friction_limit = combined_friction * rows[0].applied_impulse;
             rows[1].lower_limit = -friction_limit;
             rows[1].upper_limit = friction_limit;
-            rows[2].lower_limit = -friction_limit;
-            rows[2].upper_limit = friction_limit;
 
             resolve_two_body_row(
                 &mut rows[1],
-                inv_mass_a,
-                inv_mass_b,
-                &mut delta_a,
-                &mut delta_b,
-            );
-            resolve_two_body_row(
-                &mut rows[2],
                 inv_mass_a,
                 inv_mass_b,
                 &mut delta_a,
@@ -1072,9 +1050,9 @@ const CONTACT_MATCH_DISTANCE: f32 = 4.0;
 #[derive(Clone, Copy)]
 struct CachedContact {
     position: Vec3,
-    /// `[normal, friction_0, friction_1]`, in the same row order
+    /// `[normal, friction]`, in the same row order
     /// `setup_two_body_rows`/`setup_rows` always produce.
-    impulses: [f32; 3],
+    impulses: [f32; 2],
 }
 
 /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) — the
@@ -1098,10 +1076,10 @@ impl ContactCache {
     }
 
     /// The closest cached entry's impulses within `CONTACT_MATCH_DISTANCE`
-    /// of `position`, or `(0.0, 0.0, 0.0)` — an ordinary cold start — if
+    /// of `position`, or `(0.0, 0.0)` — an ordinary cold start — if
     /// none is close enough (a genuinely new contact, or the old one moved
     /// too far to trust).
-    fn seed_for(&self, position: Vec3) -> (f32, f32, f32) {
+    fn seed_for(&self, position: Vec3) -> (f32, f32) {
         self.entries
             .iter()
             .filter(|entry| (entry.position - position).length() < CONTACT_MATCH_DISTANCE)
@@ -1110,8 +1088,8 @@ impl ContactCache {
                     .length()
                     .total_cmp(&(b.position - position).length())
             })
-            .map(|entry| (entry.impulses[0], entry.impulses[1], entry.impulses[2]))
-            .unwrap_or((0.0, 0.0, 0.0))
+            .map(|entry| (entry.impulses[0], entry.impulses[1]))
+            .unwrap_or((0.0, 0.0))
     }
 }
 
@@ -1180,7 +1158,7 @@ fn warm_start_two_body_row(
 /// there before: a pair no longer touching is naturally dropped (no
 /// separate eviction pass needed), and `seed_for`'s own position-based
 /// matching already handles a manifold's point count changing between
-/// calls (a brand-new point simply gets a cold `(0.0, 0.0, 0.0)` seed).
+/// calls (a brand-new point simply gets a cold `(0.0, 0.0)` seed).
 /// Pass an empty `HashMap` for a purely cold-started call (e.g. a one-shot
 /// test); `PhysicsWorld` instead keeps one across its own lifetime so a
 /// manifold under-converged at this port's fixed `SOLVER_ITERATIONS` (like
@@ -1246,7 +1224,7 @@ pub fn resolve_dynamic_manifolds(
         b: usize,
         combined_friction: f32,
         positions: Vec<Vec3>,
-        rows: Vec<[TwoBodyRow; 3]>,
+        rows: Vec<[TwoBodyRow; 2]>,
         impulse_scale: f32,
     }
 
@@ -1327,14 +1305,6 @@ pub fn resolve_dynamic_manifolds(
                 delta_a,
                 delta_b,
             );
-            warm_start_two_body_row(
-                &mut rows[2],
-                seed.2,
-                inv_mass_a,
-                inv_mass_b,
-                delta_a,
-                delta_b,
-            );
         }
     }
 
@@ -1364,19 +1334,9 @@ pub fn resolve_dynamic_manifolds(
                 let friction_limit = m.combined_friction * rows[0].applied_impulse;
                 rows[1].lower_limit = -friction_limit;
                 rows[1].upper_limit = friction_limit;
-                rows[2].lower_limit = -friction_limit;
-                rows[2].upper_limit = friction_limit;
 
                 resolve_two_body_row_relaxed(
                     &mut rows[1],
-                    inv_mass_a,
-                    inv_mass_b,
-                    delta_a,
-                    delta_b,
-                    m.impulse_scale,
-                );
-                resolve_two_body_row_relaxed(
-                    &mut rows[2],
                     inv_mass_a,
                     inv_mass_b,
                     delta_a,
@@ -1406,11 +1366,7 @@ pub fn resolve_dynamic_manifolds(
                 .zip(&m.rows)
                 .map(|(position, rows)| CachedContact {
                     position,
-                    impulses: [
-                        rows[0].applied_impulse,
-                        rows[1].applied_impulse,
-                        rows[2].applied_impulse,
-                    ],
+                    impulses: [rows[0].applied_impulse, rows[1].applied_impulse],
                 })
                 .collect();
             ((m.a.min(m.b), m.a.max(m.b)), ContactCache { entries })
@@ -1522,7 +1478,7 @@ pub fn resolve_manifolds(
     struct StaticManifold {
         body_index: usize,
         combined_friction: f32,
-        rows: Vec<[ConstraintRow; 3]>,
+        rows: Vec<[ConstraintRow; 2]>,
     }
 
     struct DynamicManifold {
@@ -1530,7 +1486,7 @@ pub fn resolve_manifolds(
         b: usize,
         combined_friction: f32,
         positions: Vec<Vec3>,
-        rows: Vec<[TwoBodyRow; 3]>,
+        rows: Vec<[TwoBodyRow; 2]>,
         impulse_scale: f32,
     }
 
@@ -1623,14 +1579,6 @@ pub fn resolve_manifolds(
                 delta_a,
                 delta_b,
             );
-            warm_start_two_body_row(
-                &mut rows[2],
-                seed.2,
-                inv_mass_a,
-                inv_mass_b,
-                delta_a,
-                delta_b,
-            );
         }
     }
 
@@ -1646,11 +1594,8 @@ pub fn resolve_manifolds(
                 let friction_limit = m.combined_friction * rows[0].applied_impulse;
                 rows[1].lower_limit = -friction_limit;
                 rows[1].upper_limit = friction_limit;
-                rows[2].lower_limit = -friction_limit;
-                rows[2].upper_limit = friction_limit;
 
                 resolve_row(&mut rows[1], inv_mass, delta);
-                resolve_row(&mut rows[2], inv_mass, delta);
             }
         }
 
@@ -1679,19 +1624,9 @@ pub fn resolve_manifolds(
                 let friction_limit = m.combined_friction * rows[0].applied_impulse;
                 rows[1].lower_limit = -friction_limit;
                 rows[1].upper_limit = friction_limit;
-                rows[2].lower_limit = -friction_limit;
-                rows[2].upper_limit = friction_limit;
 
                 resolve_two_body_row_relaxed(
                     &mut rows[1],
-                    inv_mass_a,
-                    inv_mass_b,
-                    delta_a,
-                    delta_b,
-                    m.impulse_scale,
-                );
-                resolve_two_body_row_relaxed(
-                    &mut rows[2],
                     inv_mass_a,
                     inv_mass_b,
                     delta_a,
@@ -1721,11 +1656,7 @@ pub fn resolve_manifolds(
                 .zip(&m.rows)
                 .map(|(position, rows)| CachedContact {
                     position,
-                    impulses: [
-                        rows[0].applied_impulse,
-                        rows[1].applied_impulse,
-                        rows[2].applied_impulse,
-                    ],
+                    impulses: [rows[0].applied_impulse, rows[1].applied_impulse],
                 })
                 .collect();
             ((m.a.min(m.b), m.a.max(m.b)), ContactCache { entries })
@@ -2045,37 +1976,31 @@ mod tests {
     }
 
     #[test]
-    fn friction_directions_aligns_with_the_tangential_component_of_relative_velocity() {
-        // RB-PHYSICS-001-FR-049: direction 1 must equal the normalized
+    fn friction_direction_aligns_with_the_tangential_component_of_relative_velocity() {
+        // RB-PHYSICS-001-FR-049: the direction must equal the normalized
         // tangential (non-normal) component of the sliding velocity, not
         // one of `plane_space`'s own fixed axes.
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let velocity = Vec3::new(3.0, 4.0, -2.0); // tangential component: (3, 4, 0)
-        let (dir1, dir2) = friction_directions(&normal, &velocity);
-        let expected_dir1 = Vec3::new(3.0, 4.0, 0.0).normalize().unwrap();
+        let dir = friction_direction(&normal, &velocity);
+        let expected = Vec3::new(3.0, 4.0, 0.0).normalize().unwrap();
         assert!(
-            (dir1 - expected_dir1).length() < 1e-5,
-            "expected dir1 aligned with the tangential velocity, got {dir1:?}"
+            (dir - expected).length() < 1e-5,
+            "expected the direction aligned with the tangential velocity, got {dir:?}"
         );
-        assert!((dir1.length() - 1.0).abs() < 1e-5);
-        assert!((dir2.length() - 1.0).abs() < 1e-5);
-        assert!(dir1.dot(&normal).abs() < 1e-5);
-        assert!(dir2.dot(&normal).abs() < 1e-5);
-        assert!(dir1.dot(&dir2).abs() < 1e-5);
     }
 
     #[test]
-    fn friction_directions_falls_back_to_plane_space_with_no_tangential_velocity() {
+    fn friction_direction_falls_back_to_plane_space_with_no_tangential_velocity() {
         // RB-PHYSICS-001-FR-049: a purely normal-direction relative velocity
-        // (no sliding to align with) must reproduce `plane_space`'s own
-        // fixed basis exactly, matching real Bullet's own degenerate-case
-        // fallback.
+        // (no sliding to align with) must reproduce `plane_space`'s first
+        // axis exactly, matching real Bullet's degenerate-case fallback.
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let velocity = Vec3::new(0.0, 0.0, -5.0);
-        let (dir1, dir2) = friction_directions(&normal, &velocity);
-        let (expected1, expected2) = plane_space(&normal);
-        assert_eq!(dir1, expected1);
-        assert_eq!(dir2, expected2);
+        assert_eq!(
+            friction_direction(&normal, &velocity),
+            plane_space(&normal).0
+        );
     }
 
     #[test]
@@ -2684,15 +2609,12 @@ mod tests {
 
     /// RB-PHYSICS-001-FR-108: a combined ball-world normal is an average,
     /// here exactly on `plane_space`'s branch boundary, with all velocity
-    /// along it; the fallback basis must still be finite and orthonormal.
+    /// along it; the fallback direction must still be a finite unit tangent.
     #[test]
-    fn friction_directions_stay_finite_for_a_non_unit_averaged_normal() {
+    fn friction_direction_stays_finite_for_a_non_unit_averaged_normal() {
         let normal = Vec3::new(0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2);
-        let (t1, t2) = friction_directions(&normal, &Vec3::new(0.0, 0.0, -1000.0));
-        for t in [t1, t2] {
-            assert!((t.length() - 1.0).abs() < 1e-5, "not unit: {t:?}");
-            assert!(t.dot(&normal).abs() < 1e-5, "not tangent: {t:?}");
-        }
-        assert!(t1.dot(&t2).abs() < 1e-5);
+        let t = friction_direction(&normal, &Vec3::new(0.0, 0.0, -1000.0));
+        assert!((t.length() - 1.0).abs() < 1e-5, "not unit: {t:?}");
+        assert!(t.dot(&normal).abs() < 1e-5, "not tangent: {t:?}");
     }
 }

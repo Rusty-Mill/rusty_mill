@@ -157,9 +157,12 @@ version: `a245d35`).
    max 252 (was 1072); car mean 1.72 (was 1.67); `front` 0.302.
    `RB-PHYSICS-001-FR-109` (ADR-0028) gives mesh edge contacts Bullet's
    internal-edge adjustment: `test2` ball mean 0.17 (7.95 s 32, was 201).
-   Worst steps now: `test2` 8.958 s (173 car, corner-wall impact tick),
-   `front` 25.967-25.975 s (~100-160 car), `test2` ball on car hits
-   5.758 s (129) and 12.267 s (90).
+   `RB-PHYSICS-001-FR-110` (ADR-0029) gives each contact one friction row,
+   Bullet's default: `test2` car mean 1.59, ball 0.11; `front` 0.192, and
+   free-running `front` stays within 34 uu (was 1026). The 8.958 s corner
+   impact and `front` 25.967 s landing are gone from the worst steps.
+   Worst steps now: `test2` car 14.408 s (42), 14.292 s (33); ball 7.95 s
+   (32), 12.267 s (27).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
