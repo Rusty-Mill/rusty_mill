@@ -12,6 +12,12 @@ lives in the git log and in `docs/0.1.2/audits/`.
 - **The bundled shell is now the workspace's `rush` (`crates/apps/rush`); `nexus-rush` is removed** (RFC 0002). The vendored copy had drifted behind rush. `nexus-terminal` looks for a `rush` binary beside the executable instead of `nexus-rush`, and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell a session leader with the PTY as its controlling terminal, so rush's job control (`fg`, `bg`, Ctrl-Z) works, where nexus-rush had disabled it.
 
 ### Fixed
+- **Memory sync no longer loses a memory the hub refuses** (`nexus-memory`, design review 2.7 follow-up).
+  - `push` ignored the hub's reply and advanced its cursor over the whole page, so a refused memory was never sent again. The sync report also counted it as pushed.
+  - A refusal for a timestamp too far ahead of the hub's clock was worse: the cursor jumped to that future time, and every edit made since sat behind it, unsent. A pulled memory from a peer whose clock runs ahead did the same.
+  - Refused memories now go to a `sync_push_rejected` dead-letter table in the same transaction that moves the cursor, and every push re-sends them first, as they are then. A memory deleted since is re-sent as its tombstone and kept until the hub takes it; one with no row at all, or no longer authored here, leaves the table.
+  - The push cursor never moves past the time the push started. A cursor an older build left in the future restarts from the epoch once; the hub's last-write-wins makes re-sending harmless.
+  - The sync report's `pushed` now counts what the hub accepted, and gains `push_refused` and `push_dead_letters`.
 - **nexus-rush: `&&`/`||` short-circuit in `$(( ))`, and `[[:class:]]` globs work** (design review 4, shared rush fixtures).
   - `0 && 1 / 0` failed with "division by zero" instead of giving 0, so a guard like `(( n != 0 && total / n > 2 ))` broke when `n` was 0. The skipped side is still parsed, so a syntax error there is still an error.
   - POSIX named classes (`[[:digit:]]`, `[![:alpha:]]`, ...) matched nothing. They are ported from rush, with its bash-verified edge cases.
