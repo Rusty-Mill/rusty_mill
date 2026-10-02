@@ -37,7 +37,7 @@ impl AgentRunner for Agents {
         match agent {
             Agent::Codex => self.codex.run(agent, task, board),
             Agent::Local => self.local.run(agent, task, board),
-            other => Err(AgentError(format!("no adapter for {other:?}"))),
+            other => Err(AgentError::Permanent(format!("no adapter for {other:?}"))),
         }
     }
 }

@@ -5,7 +5,10 @@ use orch_core::task::Role;
 use orch_core::{EntryId, Ref, TaskId};
 
 fn err(reply: &str) -> String {
-    parse(reply, Role::Research).expect_err("rejected").0
+    parse(reply, Role::Research)
+        .expect_err("rejected")
+        .message()
+        .to_owned()
 }
 
 #[test]
@@ -56,13 +59,17 @@ fn rejects_unknown_kind_and_kind_not_allowed_for_role() {
     let design = r#"{"entries":[{"kind":"decision","body":"x","refs":[]}]}"#;
     assert!(parse(design, Role::Design)
         .expect_err("agents never settle decisions")
-        .0
+        .message()
         .contains("not allowed"));
 }
 
 #[test]
 fn rejects_unserved_roles() {
-    assert!(parse(REPLY_ONE, Role::Implement).is_err());
+    let unserved = parse(REPLY_ONE, Role::Implement).expect_err("unserved role");
+    assert!(
+        unserved.is_permanent(),
+        "no reply can make Implement servable"
+    );
 }
 
 fn review_role() -> Role {
@@ -100,22 +107,22 @@ fn review_card_rejects_missing_bad_or_duplicate_verdicts() {
     let no_verdict = r#"{"entries":[{"kind":"review","body":"x","refs":[]}]}"#;
     assert!(parse(no_verdict, review_role())
         .expect_err("no verdict")
-        .0
+        .message()
         .contains("verdict"));
     let bad = r#"{"entries":[{"kind":"review","verdict":"lgtm","body":"x","refs":[]}]}"#;
     assert!(parse(bad, review_role())
         .expect_err("bad verdict")
-        .0
+        .message()
         .contains("not approve"));
     // Findings alone are not a review: the card must deliver its verdict.
     assert!(parse(REPLY_ONE, review_role())
         .expect_err("no review")
-        .0
+        .message()
         .contains("must include one review"));
     let two = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]},{"kind":"review","verdict":"approve","body":"y","refs":[]}]}"#;
     assert!(parse(two, review_role())
         .expect_err("two")
-        .0
+        .message()
         .contains("exactly one"));
     let research = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]}]}"#;
     assert!(err(research).contains("not allowed"));

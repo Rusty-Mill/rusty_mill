@@ -35,7 +35,9 @@ condition is known before adapter setup.
   by `run`. Direct calls to each CLI adapter retain a guard before process or
   scratch-file setup.
 - `AgentError` remains retryable. Its representation and the `orch-core` API
-  and persisted plan/board shapes do not change.
+  and persisted plan/board shapes do not change. *Amended by ADR-0008:
+  `AgentError` now carries a `Permanent` variant for refusals that are only
+  detectable at call time.*
 
 ## Consequences
 

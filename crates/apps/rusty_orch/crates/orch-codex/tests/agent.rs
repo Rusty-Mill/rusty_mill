@@ -45,7 +45,10 @@ fn wrong_agent_is_refused_without_running() {
     let err = a
         .run(Agent::Local, task(&plan), &board)
         .expect_err("refused");
-    assert!(err.0.contains("cannot serve Research through Local"));
+    assert!(err
+        .message()
+        .contains("cannot serve Research through Local"));
+    assert!(err.is_permanent(), "a wrong agent never clears on retry");
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
@@ -69,7 +72,9 @@ fn implement_is_refused_before_scratch_or_process_work() {
         .run(Agent::Codex, plan.get(id).expect("task"), &board)
         .expect_err("unsupported");
 
-    assert!(err.0.contains("cannot serve Implement through Codex"));
+    assert!(err
+        .message()
+        .contains("cannot serve Implement through Codex"));
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
@@ -79,9 +84,14 @@ fn not_logged_in_is_named() {
     let stderr = "ERROR: Reconnecting... 5/5\nERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses\n";
     let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
     let err = a.run(Agent::Codex, task(&plan), &board).expect_err("401");
-    assert!(err.0.starts_with("codex: not logged in"), "{}", err.0);
-    assert!(err.0.contains("codex login"));
-    assert!(!err.0.contains('\n'));
+    assert!(
+        err.message().starts_with("codex: not logged in"),
+        "{}",
+        err.message()
+    );
+    assert!(err.message().contains("codex login"));
+    assert!(!err.message().contains('\n'));
+    assert!(err.is_permanent(), "retrying cannot log the user in");
 }
 
 #[test]
@@ -94,8 +104,13 @@ fn rate_limit_is_named_and_distinct_from_login() {
     ] {
         let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
         let err = a.run(Agent::Codex, task(&plan), &board).expect_err("429");
-        assert!(err.0.starts_with("codex: rate limited"), "{}", err.0);
-        assert!(!err.0.contains("not logged in"));
+        assert!(
+            err.message().starts_with("codex: rate limited"),
+            "{}",
+            err.message()
+        );
+        assert!(!err.message().contains("not logged in"));
+        assert!(!err.is_permanent(), "a quota clears with time");
     }
 }
 
@@ -120,7 +135,11 @@ fn other_non_zero_exit_keeps_the_status() {
     let err = a
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("exit 2");
-    assert!(err.0.starts_with("codex exited with status 2"), "{}", err.0);
+    assert!(
+        err.message().starts_with("codex exited with status 2"),
+        "{}",
+        err.message()
+    );
 }
 
 #[test]
@@ -132,7 +151,7 @@ fn timeout_maps_to_agent_error() {
     let err = a
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("timeout");
-    assert!(err.0.contains("exceeded 30s"));
+    assert!(err.message().contains("exceeded 30s"));
 }
 
 #[test]
@@ -140,7 +159,7 @@ fn malformed_reply_is_a_parse_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(ReplyFile::ok("Sure! Here is what I found."));
     let err = a.run(Agent::Codex, task(&plan), &board).expect_err("prose");
-    assert!(err.0.contains("not JSON"));
+    assert!(err.message().contains("not JSON"));
 }
 
 #[test]
@@ -150,7 +169,7 @@ fn missing_last_message_file_is_an_error() {
     let err = a
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("no file");
-    assert!(err.0.contains("wrote no last message"));
+    assert!(err.message().contains("wrote no last message"));
 }
 
 #[test]

@@ -17,13 +17,38 @@ pub struct Output {
     pub supersedes: Option<EntryId>,
 }
 
-/// Why an agent could not complete a call.
+/// Why an agent could not complete a call, and whether trying again can help.
+///
+/// The dispatcher keys retry policy on the variant alone, never on the
+/// message (ADR-0008). Adapters pick `Permanent` only for conditions that
+/// no later call on the same card can clear: a missing login, a card the
+/// adapter cannot serve. Everything else, including malformed model output,
+/// is `Transient`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentError(pub String);
+pub enum AgentError {
+    /// May succeed on retry. The card stays `Running` under its ceilings.
+    Transient(String),
+    /// Will not succeed on retry. The dispatcher fails the card at once.
+    Permanent(String),
+}
+
+impl AgentError {
+    /// The human-readable reason, without the retry classification.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Transient(m) | Self::Permanent(m) => m,
+        }
+    }
+
+    /// Whether retrying the call is pointless.
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Permanent(_))
+    }
+}
 
 impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.message())
     }
 }
 

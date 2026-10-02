@@ -15,8 +15,10 @@ use crate::{AgentError, AgentRunner, Output};
 pub enum Reply {
     /// Write one entry per kind, with a generated body and no refs.
     Write(Vec<EntryKind>),
-    /// Fail the call.
+    /// Fail the call with a [`AgentError::Transient`].
     Fail(String),
+    /// Fail the call with a [`AgentError::Permanent`].
+    Refuse(String),
 }
 
 /// Scripted agent. An exhausted script fails the call rather than panicking.
@@ -45,8 +47,11 @@ impl AgentRunner for FakeAgent {
     fn run(&mut self, agent: Agent, task: &Task, _: &Board) -> Result<Vec<Output>, AgentError> {
         self.calls.push((agent, task.id()));
         match self.script.pop_front() {
-            None => Err(AgentError("fake agent: script exhausted".to_owned())),
-            Some(Reply::Fail(reason)) => Err(AgentError(reason)),
+            None => Err(AgentError::Transient(
+                "fake agent: script exhausted".to_owned(),
+            )),
+            Some(Reply::Fail(reason)) => Err(AgentError::Transient(reason)),
+            Some(Reply::Refuse(reason)) => Err(AgentError::Permanent(reason)),
             Some(Reply::Write(kinds)) => kinds.into_iter().map(output).collect(),
         }
     }
@@ -54,7 +59,7 @@ impl AgentRunner for FakeAgent {
 
 fn output(kind: EntryKind) -> Result<Output, AgentError> {
     let body = Text::new(&format!("fake {kind:?}"))
-        .ok_or_else(|| AgentError("fake agent: blank body".to_owned()))?;
+        .ok_or_else(|| AgentError::Transient("fake agent: blank body".to_owned()))?;
     Ok(Output {
         kind,
         body,

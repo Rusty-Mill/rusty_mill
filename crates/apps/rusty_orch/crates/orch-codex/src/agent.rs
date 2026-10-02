@@ -112,7 +112,7 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
 
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
         if !self.supports(agent, task.spec().role) {
-            return Err(AgentError(format!(
+            return Err(AgentError::Permanent(format!(
                 "codex adapter cannot serve {:?} through {agent:?}",
                 task.spec().role
             )));
@@ -132,13 +132,15 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
             return Err(classify(exit.status, &exit.stderr));
         }
         let reply = fs::read_to_string(&scratch.reply).map_err(|e| {
-            AgentError(format!(
+            AgentError::Transient(format!(
                 "codex wrote no last message ({e}): {}",
                 excerpt(&exit.stderr)
             ))
         })?;
         if reply.trim().is_empty() {
-            return Err(AgentError("codex wrote an empty last message".to_owned()));
+            return Err(AgentError::Transient(
+                "codex wrote an empty last message".to_owned(),
+            ));
         }
         parse(&reply, task.spec().role)
     }
@@ -155,7 +157,8 @@ fn classify(status: i32, stderr: &[u8]) -> AgentError {
         || text.contains("not logged in")
         || text.contains("codex login")
     {
-        return AgentError(format!("codex: not logged in (run `codex login`): {short}"));
+        // No call on this card can succeed until a human runs `codex login`.
+        return AgentError::Permanent(format!("codex: not logged in (run `codex login`): {short}"));
     }
     if text.contains("429")
         || text.contains("rate limit")
@@ -163,13 +166,13 @@ fn classify(status: i32, stderr: &[u8]) -> AgentError {
         || text.contains("usage_limit")
         || text.contains("too many requests")
     {
-        return AgentError(format!("codex: rate limited: {short}"));
+        return AgentError::Transient(format!("codex: rate limited: {short}"));
     }
-    AgentError(format!("codex exited with status {status}: {short}"))
+    AgentError::Transient(format!("codex exited with status {status}: {short}"))
 }
 
 fn exec_error(e: ExecError) -> AgentError {
-    AgentError(format!("codex: {e}"))
+    AgentError::Transient(format!("codex: {e}"))
 }
 
 /// The schema file Codex reads and the last-message file it writes, both
@@ -187,7 +190,7 @@ impl Scratch {
         let schema = dir.join(format!("{stem}.schema.json"));
         let reply = dir.join(format!("{stem}.reply.json"));
         fs::write(&schema, OUTPUT_SCHEMA)
-            .map_err(|e| AgentError(format!("codex: cannot write schema file: {e}")))?;
+            .map_err(|e| AgentError::Transient(format!("codex: cannot write schema file: {e}")))?;
         Ok(Self { schema, reply })
     }
 }

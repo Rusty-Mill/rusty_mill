@@ -4,6 +4,8 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `orch-dispatch`: `AgentError` is now an enum, `Transient(String)` or `Permanent(String)`, with `message()` and `is_permanent()`. The dispatcher fails a card at once on a permanent error instead of retrying it to its ceiling; the call is still metered. `FakeAgent` gains `Reply::Refuse`. Adapters mark a wrong agent, an unserved role, and Codex `not logged in` as permanent. ADR-0008. **Breaking** for code constructing `AgentError(..)` or reading `.0`.
 ### Fixed
 - `orch-dispatch`: adapters now declare agent/role capability, so a routed but unsupported role fails its card once before call accounting or backend setup instead of consuming its retry budget (#440). ADR-0007.
 - `orch-ollama` real-binary test asserts a per-run nonce appears in an entry body instead of merely a non-empty reply, matching `orch-codex` (#441).

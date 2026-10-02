@@ -363,6 +363,52 @@ impl AgentRunner for NoImplement {
 }
 
 #[test]
+fn permanent_agent_failure_fails_the_card_once_and_strands_dependents() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 3)).expect("add");
+    let dependent = plan.add(spec(Role::Design, vec![task], 3)).expect("add");
+    let mut board = Board::new(plan.goal());
+    // A second reply is scripted so a wrongful retry would be visible.
+    let fake = FakeAgent::new([
+        Reply::Refuse("not logged in".into()),
+        Reply::Write(vec![finding()]),
+    ]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        fake,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(10);
+
+    let err = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("permanent agent error");
+    assert!(matches!(
+        &err,
+        DispatchError::Agent { task: t, agent: Agent::Claude, source: AgentError::Permanent(m) }
+            if *t == task && m == "not logged in"
+    ));
+    assert_eq!(
+        plan.get(task).expect("task").state().status(),
+        Status::Failed
+    );
+    assert_eq!(ledger.calls(), 1, "the failing call is still metered");
+
+    // Nothing is retried: the card is failed, its dependent can never run.
+    assert_eq!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger),
+        Err(DispatchError::Stuck)
+    );
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(d.runner().calls().len(), 1);
+    assert_eq!(
+        plan.get(dependent).expect("task").state().status(),
+        Status::Pending
+    );
+    assert!(board.entries().is_empty());
+}
+
+#[test]
 fn unsupported_role_fails_once_without_call_or_fabricated_output() {
     let mut plan = Plan::new(GoalId::from_raw(1));
     let task = plan.add(spec(Role::Implement, vec![], 5)).expect("add");

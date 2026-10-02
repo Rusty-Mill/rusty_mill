@@ -60,7 +60,7 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
 
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
         if !self.supports(agent, task.spec().role) {
-            return Err(AgentError(format!(
+            return Err(AgentError::Permanent(format!(
                 "ollama adapter cannot serve {:?} through {agent:?}",
                 task.spec().role
             )));
@@ -72,7 +72,7 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
             .run_scrubbed(&self.argv(), prompt.as_bytes(), self.timeout, &[])
             .map_err(exec_error)?;
         if exit.status != 0 {
-            return Err(AgentError(format!(
+            return Err(AgentError::Transient(format!(
                 "ollama exited with status {}: {}",
                 exit.status,
                 excerpt(&exit.stderr)
@@ -80,12 +80,14 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
         }
         let stdout = String::from_utf8_lossy(&exit.stdout);
         if stdout.trim().is_empty() {
-            return Err(AgentError("ollama wrote nothing to stdout".to_owned()));
+            return Err(AgentError::Transient(
+                "ollama wrote nothing to stdout".to_owned(),
+            ));
         }
         parse(&stdout, task.spec().role)
     }
 }
 
 fn exec_error(e: ExecError) -> AgentError {
-    AgentError(format!("ollama: {e}"))
+    AgentError::Transient(format!("ollama: {e}"))
 }

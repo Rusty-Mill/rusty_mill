@@ -26,8 +26,10 @@ pub enum DispatchError {
     /// An output failed board validation. Nothing from that call was
     /// appended; the card stays `Running` and the call is still counted.
     Board(BoardError),
-    /// The agent failed. The card stays `Running`, so a later `run` retries
-    /// it under the same ceilings.
+    /// The agent failed. On a [`AgentError::Transient`] the card stays
+    /// `Running`, so a later `run` retries it under the same ceilings. On a
+    /// [`AgentError::Permanent`] the card is marked `Failed` first: retrying
+    /// cannot help, so its remaining budget is not spent.
     Agent {
         task: TaskId,
         agent: Agent,
@@ -200,14 +202,21 @@ impl<R: AgentRunner> Dispatcher<R> {
         }
         ledger.count(id);
         let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
-        let outputs =
-            self.runner
-                .run(agent, task, board)
-                .map_err(|source| DispatchError::Agent {
+        let outputs = match self.runner.run(agent, task, board) {
+            Ok(outputs) => outputs,
+            Err(source) => {
+                let permanent = source.is_permanent();
+                let failed = DispatchError::Agent {
                     task: id,
                     agent,
                     source,
-                })?;
+                };
+                if permanent {
+                    fail_terminal(plan, id, &failed)?;
+                }
+                return Err(failed);
+            }
+        };
         let ids = append_atomically(board, id, agent, outputs)?;
         match first_question(board, &ids) {
             Some(question) => plan.block(id, question)?,
