@@ -84,7 +84,13 @@ pub(crate) fn sphere_vs_plane(position: Vec3, radius: f32, plane: &StaticPlane) 
 /// and the solver needs the true contact-to-center offset (`rel_pos`) to
 /// compute torque correctly.
 ///
-/// **One genuine, deliberate divergence from real Bullet, found and not
+/// **Superseded for the world's solve by `RB-PHYSICS-001-FR-105`
+/// (ADR-0024):** a car against the ground and walls now goes through
+/// `PlaneManifold`, Bullet's one-corner-a-tick persistent manifold, since
+/// the owner's nose-first landings show its off-centre first contact. This
+/// stateless all-corner query remains for touch detection (wall jumps) and
+/// the windowed and bounded walls. The FR-047 reasoning below is kept as
+/// history: **One genuine, deliberate divergence from real Bullet, found and not
 /// adopted (`RB-PHYSICS-001-FR-047`).** Real
 /// `btConvexPlaneCollisionAlgorithm::processCollision` does NOT compute
 /// every extreme corner in one pass: it calls a single GJK
@@ -150,6 +156,118 @@ pub fn contacts_vs_plane(body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> 
     }
 }
 
+/// Bullet's `gContactBreakingThreshold`: a shape's contact breaking
+/// threshold is this times its angular motion disc (bounding radius plus
+/// offset from its body's origin).
+const CONTACT_BREAKING_FACTOR: f32 = 0.02;
+
+/// `MANIFOLD_CACHE_SIZE`: points a Bullet persistent manifold keeps.
+const MANIFOLD_CAPACITY: usize = 4;
+
+/// One stored contact: the box corner (shape frame) and where it touched
+/// the plane when last detected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ManifoldPoint {
+    local_corner: Vec3,
+    on_plane: Vec3,
+}
+
+/// A box's contact with one static plane as Bullet keeps it
+/// (`RB-PHYSICS-001-FR-105`, ADR-0024): `btConvexPlaneCollisionAlgorithm`
+/// adds one support corner per tick (the multi-point perturbation is off
+/// by default), and the `btPersistentManifold` keeps earlier corners until
+/// they separate or slide past the breaking threshold, up to 4. A box
+/// landing on a corner therefore gets one off-centre contact on its first
+/// tick, which the owner's nose-first landings show as yaw and roll
+/// (`front.jsonl` 19.083 s and 25.967 s); a box lying flat collects all 4
+/// corners within a few ticks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlaneManifold {
+    points: Vec<ManifoldPoint>,
+}
+
+impl PlaneManifold {
+    /// Runs one tick of collision against `plane` and returns the contacts
+    /// to solve. A sphere has a single support point anyway and keeps
+    /// `contacts_vs_plane`.
+    pub fn update(&mut self, body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> {
+        let Shape::Box { half_extents } = body.shape else {
+            self.points.clear();
+            return contacts_vs_plane(body, plane);
+        };
+        let center = body.shape_center();
+        let world = |local: &Vec3| center + body.orientation.rotate(local);
+        let breaking =
+            CONTACT_BREAKING_FACTOR * (half_extents.length() + body.shape_offset.length());
+
+        let toward = body.orientation.conjugate().rotate(&(-plane.normal));
+        let pick = |direction: f32, half: f32| if direction >= 0.0 { half } else { -half };
+        let local_corner = Vec3::new(
+            pick(toward.x, half_extents.x),
+            pick(toward.y, half_extents.y),
+            pick(toward.z, half_extents.z),
+        );
+        let corner = world(&local_corner);
+        let gap = plane.signed_distance(&corner);
+        if gap < breaking {
+            self.add(ManifoldPoint {
+                local_corner,
+                on_plane: corner - plane.normal * gap,
+            });
+        }
+
+        self.points.retain(|point| {
+            let corner = world(&point.local_corner);
+            let gap = plane.signed_distance(&corner);
+            let drift = corner - plane.normal * gap - point.on_plane;
+            gap <= breaking && drift.length() <= breaking
+        });
+
+        self.points
+            .iter()
+            .filter_map(|point| {
+                let corner = world(&point.local_corner);
+                let gap = plane.signed_distance(&corner);
+                (gap <= CONTACT_PROCESSING_THRESHOLD).then_some(Contact {
+                    normal: plane.normal,
+                    point: corner,
+                    penetration_depth: -gap,
+                })
+            })
+            .collect()
+    }
+
+    /// Bullet's `getCacheEntry`/`replaceContactPoint`: the same corner
+    /// refreshes its entry. When full, this replaces the stored point
+    /// farthest from the plane at its last detection, a simpler stand-in
+    /// for Bullet's area-maximizing `sortCachedPoints` (a box against a
+    /// plane rarely has more than 4 corners within 2 uu of it).
+    fn add(&mut self, point: ManifoldPoint) {
+        if let Some(existing) = self
+            .points
+            .iter_mut()
+            .find(|existing| existing.local_corner == point.local_corner)
+        {
+            *existing = point;
+            return;
+        }
+        if self.points.len() < MANIFOLD_CAPACITY {
+            self.points.push(point);
+            return;
+        }
+        self.points[0] = point;
+    }
+
+    /// Number of stored points, touching or not.
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    /// Whether no point is stored.
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+}
 /// Like `sphere_vs_plane`, but against a `StaticGoalWall`'s window
 /// (`RB-PHYSICS-001-FR-024`): a sphere whose *center* falls inside the
 /// window gets no contact at all, letting it pass straight through into
@@ -2310,5 +2428,70 @@ mod tests {
         );
         let expected_normal = Vec3::new(-128.0, 0.0, 256.0 - arc_z) * (1.0 / 256.0);
         assert!((hit.normal - expected_normal).length() < 1e-3);
+    }
+
+    /// A car box with its nose tipped `pitch` rad down and rolled `roll`
+    /// rad, its lowest corner `gap` uu above the floor.
+    fn tipped_box(pitch: f32, roll: f32, gap: f32) -> RigidBody {
+        let half = |angle: f32| (angle * 0.5).sin_cos();
+        let (sp, cp) = half(pitch);
+        let (sr, cr) = half(roll);
+        let pitch_q = Quat::new(0.0, sp, 0.0, cp);
+        let roll_q = Quat::new(sr, 0.0, 0.0, cr);
+        let mut car = RigidBody::car_box(CAR_HALF_EXTENTS, 1.0, Vec3::ZERO);
+        car.orientation = pitch_q.mul(&roll_q);
+        let corners = [-1.0f32, 1.0];
+        let mut min_z = f32::MAX;
+        for sx in corners {
+            for sy in corners {
+                for sz in corners {
+                    let local = Vec3::new(
+                        sx * CAR_HALF_EXTENTS.x,
+                        sy * CAR_HALF_EXTENTS.y,
+                        sz * CAR_HALF_EXTENTS.z,
+                    );
+                    min_z = min_z.min(car.orientation.rotate(&local).z);
+                }
+            }
+        }
+        car.position = Vec3::new(0.0, 0.0, gap - min_z);
+        car
+    }
+
+    #[test]
+    fn a_box_landing_on_a_corner_gets_one_contact_at_that_corner() {
+        // RB-PHYSICS-001-FR-105: Bullet's one support corner a tick.
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let car = tipped_box(0.6, 0.2, -1.0);
+        let mut manifold = PlaneManifold::default();
+        let contacts = manifold.update(&car, &floor);
+        assert_eq!(contacts.len(), 1);
+        assert!((contacts[0].penetration_depth - 1.0).abs() < 1e-3);
+        // The stateless query still sees the same single corner here.
+        assert_eq!(contacts_vs_plane(&car, &floor).len(), 1);
+    }
+
+    #[test]
+    fn a_manifold_keeps_earlier_corners_until_they_lift_or_slide_off() {
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let mut manifold = PlaneManifold::default();
+        // Settling flat: first the nose corner, then (rolled the other
+        // way) its opposite side; both stay while within ~2 uu.
+        manifold.update(&tipped_box(0.002, 0.002, -0.5), &floor);
+        let level = tipped_box(0.002, -0.002, -0.5);
+        let contacts = manifold.update(&level, &floor);
+        assert_eq!(manifold.len(), 2);
+        assert_eq!(contacts.len(), 2);
+        // Slid 5 uu along the floor: both drop, the new support corner
+        // alone remains.
+        let mut slid = level;
+        slid.position.x += 5.0;
+        manifold.update(&slid, &floor);
+        assert_eq!(manifold.len(), 1);
+        // Lifted clear: nothing left.
+        let mut lifted = slid;
+        lifted.position.z += 10.0;
+        assert!(manifold.update(&lifted, &floor).is_empty());
+        assert!(manifold.is_empty());
     }
 }

@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0024 (`RB-PHYSICS-001-FR-105`): `collision::PlaneManifold`, Bullet's
+  one-corner-a-tick persistent manifold, for every car against the ground
+  and walls; supersedes FR-047's all-corner box-vs-plane contact in the
+  world's solve.
 - Stalls (`RB-PHYSICS-001-FR-104`, ADR-0023 amendment): an airborne jump
   press flips once `|yaw| + |pitch| + |roll| >= 0.5`
   (`drive::jump::FLIP_INPUT_DEADZONE`); yaw against air roll is a
