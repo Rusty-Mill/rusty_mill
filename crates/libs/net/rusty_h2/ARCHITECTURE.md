@@ -30,15 +30,14 @@ protocol and connection layers form the inside of a ports-and-adapters
 boundary; a future I/O adapter remains outside that boundary.
 
 ## Data flow
-The existing caller-driven flow is:
-
-```
-raw bytes -> FrameHeader::decode + Frame::decode
-          -> (HEADERS/CONTINUATION only) hpack::Decoder::decode
-          -> connect::Connection::receive_frame
-          -> stream::Stream::apply (state transitions)
-          -> response/control frames returned to the caller for transport
-```
+Callers decode raw bytes into `Frame` values and pass each incoming frame to
+`connect::Connection::apply_frame` (or its `apply` alias). The connection
+driver dispatches by frame type. For `HEADERS` and `PUSH_PROMISE`, it assembles
+and validates any required `CONTINUATION` sequence, waiting for `END_HEADERS`
+before HPACK decoding and the relevant stream-state transitions. `SETTINGS`,
+`PING`, and other control frames use their own handlers. Any response/control
+frames are returned for caller-owned transport; application-level request or
+push delivery is not implemented.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and
