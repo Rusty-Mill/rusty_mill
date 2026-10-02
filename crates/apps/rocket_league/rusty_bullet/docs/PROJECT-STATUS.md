@@ -123,11 +123,12 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <front.jsonl> 11.95 12.2` and
-   `--self-growth <front.jsonl>` to confirm `RB-PHYSICS-001-FR-098` (the
-   brake acts along the surface): the jump from rest at 12.008 s should
-   gain under 1 uu/s horizontally, as recorded (was 3.3). Then the 5.575 s
-   landing in `test2.jsonl`, the side-flip capture, and braking per wheel.
+1. `RB-PHYSICS-001-FR-098` (the brake acts along the surface) is
+   confirmed on `front.jsonl`: jump from rest 0.0 vs 0.3 uu/s horizontal
+   (was 3.3); `--self-growth` stays under 3 uu through 18 s. Next, the
+   front flip's landing (`front.jsonl` ~18.6-19.2 s: growth window 19 s
+   jumps to 24 uu / 0.05 rad / 61 uu/s), a clean case of the `test2.jsonl`
+   5.575 s landing; then the side-flip capture and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).

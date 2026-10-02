@@ -5653,7 +5653,10 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     friction acts along each wheel's in-plane forward direction. The
     owner's `front.jsonl` jump from rest (12.008 s) gains under 1 uu/s
     horizontally; the candidate gained 3.3.
-  - **Verification**: `world` test `a_jump_from_rest_goes_straight_up`.
+  - **Verification**: `world` test `a_jump_from_rest_goes_straight_up`;
+    real capture `front.jsonl`: horizontal velocity 0.0 vs recorded 0.3
+    uu/s at 12.025 s (was 3.3). The recorded car then drifts to 0.9 uu/s
+    while jump is held, which the candidate does not model (open).
 
 ## Architecture and interfaces
 
