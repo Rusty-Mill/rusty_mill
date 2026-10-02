@@ -16,7 +16,7 @@ use rusty_multimodal_db_engine::generic::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Gap between appended tasks, leaving room to drop one in between.
@@ -35,10 +35,17 @@ pub enum TickError {
     NotFound(Uuid),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("unreadable pending batch {0}: {1}")]
+    Pending(PathBuf, String),
 }
+
+/// A batch of whole-task writes not yet known to have landed (see
+/// [`TaskStore::replace_all`]).
+const PENDING: &str = "tasks.pending.json";
 
 pub struct TaskStore {
     stack: Stack,
+    pending: PathBuf,
     search: FullTextIndex<Uuid, 2>,
     tags: BTreeMap<String, BTreeSet<Uuid>>,
 }
@@ -56,6 +63,7 @@ impl TaskStore {
         let stack = Ordered::new(Ordered::new(core));
         let mut store = Self {
             stack,
+            pending: dir.join(PENDING),
             search: FullTextIndex::new(),
             tags: BTreeMap::new(),
         };
@@ -64,7 +72,32 @@ impl TaskStore {
                 store.index(&task);
             }
         }
+        store.finish_pending()?;
         Ok(store)
+    }
+
+    /// Complete a batch a crash interrupted. A task whose version moved on
+    /// since (a later write landed and the batch file outlived it) or that is
+    /// gone is left alone, so replaying never rolls anything back.
+    fn finish_pending(&mut self) -> Result<(), TickError> {
+        let text = match std::fs::read_to_string(&self.pending) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        let batch: Vec<Task> = rusty_json::from_str(&text)
+            .map_err(|e| TickError::Pending(self.pending.clone(), e.to_string()))?;
+        let unfinished: Vec<Task> = batch
+            .into_iter()
+            .filter(|task| {
+                self.stack
+                    .get(task.id)
+                    .is_some_and(|stored| stored.version == task.version.wrapping_sub(1))
+            })
+            .collect();
+        self.apply(&unfinished)?;
+        std::fs::remove_file(&self.pending)?;
+        Ok(())
     }
 
     /// Trashed tasks are searchable and taggable nowhere: they drop out of both
@@ -109,6 +142,36 @@ impl TaskStore {
         }
         self.unindex(&old);
         self.index(&task);
+        Ok(())
+    }
+
+    /// Replace several tasks as one write: after a crash, either none landed
+    /// or the next [`open`](Self::open) lands the rest. The batch is saved
+    /// (fsynced) beside the store first and removed once every task is in.
+    /// Each task's `version` must be one past the stored one, as a save
+    /// leaves it; that is how a replay tells an unfinished write from one a
+    /// later write superseded.
+    pub fn replace_all(&mut self, tasks: &[Task]) -> Result<(), TickError> {
+        match tasks {
+            [] => return Ok(()),
+            [task] => return self.replace(task.clone()),
+            _ => {}
+        }
+        if let Some(missing) = tasks.iter().find(|t| self.stack.get(t.id).is_none()) {
+            return Err(TickError::NotFound(missing.id));
+        }
+        let json = rusty_json::to_string(&tasks)
+            .map_err(|e| TickError::Pending(self.pending.clone(), e.to_string()))?;
+        rusty_atomic_file::write(&self.pending, json.as_bytes())?;
+        self.apply(tasks)?;
+        std::fs::remove_file(&self.pending)?;
+        Ok(())
+    }
+
+    fn apply(&mut self, tasks: &[Task]) -> Result<(), TickError> {
+        for task in tasks {
+            self.replace(task.clone())?;
+        }
         Ok(())
     }
 
@@ -199,5 +262,113 @@ impl TaskStore {
             .get(tag)
             .map(|ids| ids.iter().copied().collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(title: &str) -> Task {
+        Task::new(Uuid::now_v7(), Uuid::nil(), title, 0, 0)
+    }
+
+    /// `tasks` as a save leaves them: trashed, one version on.
+    fn trashed(tasks: &[Task]) -> Vec<Task> {
+        tasks
+            .iter()
+            .cloned()
+            .map(|mut t| {
+                t.deleted_ms = Some(7);
+                t.version += 1;
+                t
+            })
+            .collect()
+    }
+
+    /// What a crash inside `replace_all` leaves: the batch file written and
+    /// only the first `landed` tasks in.
+    fn crash_mid_batch(store: &mut TaskStore, batch: &[Task], landed: usize) {
+        let json = rusty_json::to_string(&batch).unwrap();
+        rusty_atomic_file::write(&store.pending, json.as_bytes()).unwrap();
+        store.apply(&batch[..landed]).unwrap();
+    }
+
+    fn seeded(dir: &Path, n: usize) -> (TaskStore, Vec<Task>) {
+        let mut store = TaskStore::open(dir).unwrap();
+        let tasks: Vec<Task> = (0..n).map(|i| task(&format!("t{i}"))).collect();
+        for t in &tasks {
+            store.insert(t.clone()).unwrap();
+        }
+        (store, tasks)
+    }
+
+    #[test]
+    fn a_batch_lands_whole_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, tasks) = seeded(dir.path(), 3);
+        store.replace_all(&trashed(&tasks)).unwrap();
+        assert!(store.all().iter().all(Task::is_deleted));
+        assert!(!dir.path().join(PENDING).exists());
+    }
+
+    #[test]
+    fn an_interrupted_batch_is_finished_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, tasks) = seeded(dir.path(), 3);
+        crash_mid_batch(&mut store, &trashed(&tasks), 1);
+        drop(store);
+
+        let store = TaskStore::open(dir.path()).unwrap();
+        assert!(
+            store.all().iter().all(Task::is_deleted),
+            "every task trashed, not just the first"
+        );
+        assert!(!dir.path().join(PENDING).exists());
+    }
+
+    #[test]
+    fn a_batch_file_left_behind_never_rolls_back_a_later_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, tasks) = seeded(dir.path(), 2);
+        let batch = trashed(&tasks);
+        // Every task landed, but the file was not removed.
+        crash_mid_batch(&mut store, &batch, batch.len());
+        let mut later = batch[0].clone();
+        later.deleted_ms = None;
+        later.version += 1;
+        store.replace(later.clone()).unwrap();
+        store.delete(batch[1].id).unwrap();
+        drop(store);
+
+        let store = TaskStore::open(dir.path()).unwrap();
+        assert_eq!(store.get(later.id), Some(later), "the later restore stands");
+        assert_eq!(store.get(batch[1].id), None, "the later delete stands");
+        assert!(!dir.path().join(PENDING).exists());
+    }
+
+    #[test]
+    fn a_batch_naming_a_missing_task_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, tasks) = seeded(dir.path(), 1);
+        let mut batch = trashed(&tasks);
+        batch.push(task("never inserted"));
+        assert!(matches!(
+            store.replace_all(&batch),
+            Err(TickError::NotFound(_))
+        ));
+        assert_eq!(store.get(tasks[0].id), Some(tasks[0].clone()));
+        assert!(!dir.path().join(PENDING).exists());
+    }
+
+    #[test]
+    fn an_unreadable_batch_file_fails_the_open() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(seeded(dir.path(), 1));
+        std::fs::write(dir.path().join(PENDING), "{not json").unwrap();
+        assert!(matches!(
+            TaskStore::open(dir.path()),
+            Err(TickError::Pending(..))
+        ));
     }
 }

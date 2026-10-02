@@ -170,11 +170,12 @@ impl Service {
     }
 
     /// A subtask always lives in its parent's list (`patch_task` refuses to
-    /// move one alone). A move saves the children, then the parent, one
-    /// record at a time, so a crash between them leaves some children in the
-    /// new list and the parent in the old. Put every such child back in its
-    /// parent's list: the parent is the record of truth, and an interrupted
-    /// move was never acknowledged (design review 2.9).
+    /// move one alone). A move is now one batch write, but older versions
+    /// saved the children, then the parent, one record at a time, so a crash
+    /// between them could leave some children in the new list and the parent
+    /// in the old. Put every such child back in its parent's list: the parent
+    /// is the record of truth, and an interrupted move was never acknowledged
+    /// (design review 2.9).
     fn realign_subtasks(&mut self) -> Result<()> {
         let stray: Vec<Task> = self
             .tasks
@@ -386,24 +387,20 @@ impl Service {
             task.sort_order = order;
         }
         let moved_to = patch.list_id.filter(|l| *l != task.list_id);
+        let mut batch = Vec::new();
         if let Some(list) = moved_to {
             self.live_list(list)?;
             if task.parent_id.is_some() {
                 return invalid("a subtask moves with its parent");
             }
-            self.move_with_children(&task, list)?;
+            for mut child in self.children(&task) {
+                child.list_id = list;
+                batch.push(child);
+            }
             task.list_id = list;
         }
-        self.save_task(task)
-    }
-
-    /// Move `parent`'s subtasks to `list`; the parent itself is saved by the caller.
-    fn move_with_children(&mut self, parent: &Task, list: Uuid) -> Result<()> {
-        for mut child in self.children(parent) {
-            child.list_id = list;
-            self.save_task(child)?;
-        }
-        Ok(())
+        batch.push(task);
+        self.save_with(batch)
     }
 
     fn children(&self, parent: &Task) -> Vec<Task> {
@@ -414,11 +411,22 @@ impl Service {
             .collect()
     }
 
-    fn save_task(&mut self, mut task: Task) -> Result<Task> {
-        task.updated_ms = self.now();
-        task.version = task.version.wrapping_add(1);
-        self.tasks.replace(task.clone())?;
-        Ok(task)
+    fn save_task(&mut self, task: Task) -> Result<Task> {
+        self.save_with(vec![task])
+    }
+
+    /// Save `batch` as one write (a task with its subtasks), returning the
+    /// last task saved: the one the caller acted on.
+    fn save_with(&mut self, mut batch: Vec<Task>) -> Result<Task> {
+        let now = self.now();
+        for task in &mut batch {
+            task.updated_ms = now;
+            task.version = task.version.wrapping_add(1);
+        }
+        self.tasks.replace_all(&batch)?;
+        batch
+            .pop()
+            .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))
     }
 
     pub fn set_status(&mut self, id: Uuid, status: Status) -> Result<Task> {
@@ -431,39 +439,46 @@ impl Service {
         )
     }
 
-    /// Move a task and its subtasks to the trash.
+    /// Move a task and its subtasks to the trash, in one write: a crash never
+    /// leaves some of them trashed and the rest not.
     pub fn trash_task(&mut self, id: Uuid) -> Result<Task> {
-        let mut task = self.task(id)?;
+        let task = self.task(id)?;
         let now = self.now();
-        for mut child in self.children(&task) {
-            child.deleted_ms.get_or_insert(now);
-            self.save_task(child)?;
+        let mut batch = self.children(&task);
+        batch.push(task);
+        for t in &mut batch {
+            t.deleted_ms.get_or_insert(now);
         }
-        task.deleted_ms.get_or_insert(now);
-        self.save_task(task)
+        self.save_with(batch)
     }
 
-    /// Bring a task and the subtasks trashed with it back. A task whose list
-    /// is gone (or itself trashed) is restored into the Inbox.
+    /// Bring a task and the subtasks trashed with it back, in one write. A
+    /// task whose list is gone (or itself trashed) is restored into the
+    /// Inbox, its subtasks with it.
     pub fn restore_task(&mut self, id: Uuid) -> Result<Task> {
         let mut task = self.task(id)?;
         let trashed_at = task.deleted_ms;
-        if self.live_list(task.list_id).is_err() {
-            let target = INBOX_ID;
-            for mut child in self.children(&task) {
-                child.list_id = target;
-                self.save_task(child)?;
-            }
-            task.list_id = target;
-        }
+        let rehome = self.live_list(task.list_id).is_err().then_some(INBOX_ID);
+        let mut batch = Vec::new();
         for mut child in self.children(&task) {
-            if child.deleted_ms == trashed_at {
-                child.deleted_ms = None;
-                self.save_task(child)?;
+            let revive = child.deleted_ms == trashed_at;
+            if !revive && rehome.is_none() {
+                continue;
             }
+            if revive {
+                child.deleted_ms = None;
+            }
+            if let Some(list) = rehome {
+                child.list_id = list;
+            }
+            batch.push(child);
+        }
+        if let Some(list) = rehome {
+            task.list_id = list;
         }
         task.deleted_ms = None;
-        self.save_task(task)
+        batch.push(task);
+        self.save_with(batch)
     }
 
     /// Delete a task and its subtasks for good.
