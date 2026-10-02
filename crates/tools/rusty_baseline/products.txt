@@ -1,6 +1,10 @@
 # The products rusty_baseline measures: each app's shipped binaries.
 #
-#   <package>[:<features>] <bin> <exit|idle> [KEY=value...] [args...]
+#   <package>[:<features>] <bin> <exit|idle> [@platform=<os>] [KEY=value...] [args...]
+#
+# `@platform=linux`, `@platform=windows`, or `@platform=macos` immediately
+# after the mode restricts a product to that OS. With no declaration a product
+# remains unrestricted.
 #
 # `exit`: a cheap command that runs to completion; startup is its wall time.
 # `idle`: a server or daemon, started with no real config (dummy secrets,
@@ -24,7 +28,7 @@ sessionmgr-daemon     sessionmgr           exit  --help
 nexus-cli             nexus                exit  --help
 rusty-meshed-cli      meshed               exit  --help
 rusty_homelab_mcp     rusty_homelab_mcp    exit  --help
-rusty_fedora_agent    rusty_fedora_agent   exit  --help
+rusty_fedora_agent    rusty_fedora_agent   exit  @platform=linux  --help
 agentgateway          agentgateway         exit  --help
 ts-cli                ts-cli               exit  --help
 ts-daemon             ts-daemon            exit  --help

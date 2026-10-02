@@ -86,15 +86,47 @@ fn baseline(options: &Options) -> Result<String, String> {
     if products.is_empty() {
         return Err("no products selected".to_owned());
     }
-    let entry_points = cargo::entry_points(&products)?;
+    let eligible: Vec<Product> = products
+        .iter()
+        .filter(|product| product.supports_os(std::env::consts::OS))
+        .cloned()
+        .collect();
+    let entry_points = if eligible.is_empty() {
+        Vec::new()
+    } else {
+        cargo::entry_points(&eligible)?
+    };
     let home = options.work.join("home");
-    std::fs::create_dir_all(&home)
-        .map_err(|error| format!("creating {}: {error}", home.display()))?;
+    if !eligible.is_empty() {
+        std::fs::create_dir_all(&home)
+            .map_err(|error| format!("creating {}: {error}", home.display()))?;
+    }
 
     let mut rows = Vec::with_capacity(products.len());
-    for (product, entry_point) in products.iter().zip(&entry_points) {
-        eprintln!("rusty_baseline: measuring {}", product.bin);
-        rows.push(measure_one(options, product, entry_point, &home));
+    let mut entry_points = entry_points.iter();
+    for product in &products {
+        let Some(platform) = product
+            .platform
+            .filter(|_| !product.supports_os(std::env::consts::OS))
+        else {
+            let entry_point = entry_points
+                .next()
+                .expect("one entry point per eligible product");
+            eprintln!("rusty_baseline: measuring {}", product.bin);
+            rows.push(measure_one(options, product, entry_point, &home));
+            continue;
+        };
+        eprintln!(
+            "rusty_baseline: skipping {}: unsupported on {} (allowed: {})",
+            product.bin,
+            std::env::consts::OS,
+            platform.name()
+        );
+        rows.push(Row::Unsupported {
+            bin: product.bin.clone(),
+            current: std::env::consts::OS.to_owned(),
+            allowed: platform.name().to_owned(),
+        });
     }
     let floor = sys::floor();
     Ok(format!(
@@ -127,7 +159,7 @@ fn measure_one(options: &Options, product: &Product, entry_point: &Path, home: &
             eprintln!("rusty_baseline: leaving {}: {error}", target_dir.display());
         }
     }
-    Row {
+    Row::Measured {
         bin: product.bin.clone(),
         closure,
         build,

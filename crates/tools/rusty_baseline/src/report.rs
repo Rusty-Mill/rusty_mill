@@ -11,12 +11,19 @@ use crate::sys::Ended;
 /// build failure still reports the dependency closure. `build` is `Ok(None)`
 /// when the binary was prebuilt rather than timed here.
 #[derive(Debug)]
-pub struct Row {
-    pub bin: String,
-    pub closure: Result<Closure, String>,
-    pub build: Result<Option<BuildTimes>, String>,
-    pub size: Option<u64>,
-    pub run: Result<Run, String>,
+pub enum Row {
+    Measured {
+        bin: String,
+        closure: Result<Closure, String>,
+        build: Result<Option<BuildTimes>, String>,
+        size: Option<u64>,
+        run: Result<Run, String>,
+    },
+    Unsupported {
+        bin: String,
+        current: String,
+        allowed: String,
+    },
 }
 
 const HEADER: &str = "| Product | Binary | Deps (workspace + external) | Clean build | Incremental | Startup | Idle RSS | Peak RSS | Notes |\n|---|--:|--:|--:|--:|--:|--:|--:|---|\n";
@@ -33,17 +40,37 @@ pub fn render(rows: &[Row], floor: Option<u64>) -> String {
 }
 
 fn render_row(row: &Row, floor: Option<u64>) -> String {
+    if let Row::Unsupported {
+        bin,
+        current,
+        allowed,
+    } = row
+    {
+        return format!(
+            "| `{bin}` | — | — | — | — | — | — | — | unsupported on {current} (allowed: {allowed}); skipped |"
+        );
+    }
+    let Row::Measured {
+        bin,
+        closure,
+        build,
+        size,
+        run,
+    } = row
+    else {
+        unreachable!("unsupported rows returned above")
+    };
     let mut notes = Vec::new();
-    let deps = match &row.closure {
+    let deps = match closure {
         Ok(closure) => format!("{} + {}", closure.workspace, closure.external),
         Err(error) => note(&mut notes, "deps", error),
     };
-    let (clean, incremental) = match &row.build {
+    let (clean, incremental) = match build {
         Ok(Some(times)) => (seconds(times.clean), seconds(times.incremental)),
         Ok(None) => (DASH.to_owned(), DASH.to_owned()),
         Err(error) => (note(&mut notes, "build", error), DASH.to_owned()),
     };
-    let (startup, idle, peak) = match &row.run {
+    let (startup, idle, peak) = match run {
         Ok(Run::Exit {
             startup,
             peak_rss,
@@ -61,7 +88,7 @@ fn render_row(row: &Row, floor: Option<u64>) -> String {
         Ok(Run::Idle { idle_rss, peak_rss }) => {
             (DASH.to_owned(), bytes(*idle_rss), bytes(*peak_rss))
         }
-        Err(error) if row.build.is_ok() => (
+        Err(error) if build.is_ok() => (
             note(&mut notes, "run", error),
             DASH.to_owned(),
             DASH.to_owned(),
@@ -70,8 +97,8 @@ fn render_row(row: &Row, floor: Option<u64>) -> String {
     };
     format!(
         "| `{}` | {} | {deps} | {clean} | {incremental} | {startup} | {idle} | {peak} | {} |",
-        row.bin,
-        bytes(row.size),
+        bin,
+        bytes(*size),
         notes.join("; ").replace('|', "\\|"),
     )
 }
@@ -112,7 +139,7 @@ mod tests {
 
     #[test]
     fn renders_an_exit_row_and_flags_a_nonzero_exit() {
-        let row = Row {
+        let row = Row::Measured {
             bin: "rush".into(),
             closure: Ok(Closure {
                 workspace: 12,
@@ -136,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_failed_build_is_noted_once_and_dashes_the_rest() {
-        let row = Row {
+        let row = Row::Measured {
             bin: "hub".into(),
             closure: Ok(Closure {
                 workspace: 1,
@@ -154,7 +181,7 @@ mod tests {
 
     #[test]
     fn renders_a_prebuilt_idle_row() {
-        let row = Row {
+        let row = Row::Measured {
             bin: "ts-daemon".into(),
             closure: Ok(Closure {
                 workspace: 4,
@@ -170,6 +197,19 @@ mod tests {
         assert_eq!(
             render_row(&row, None),
             "| `ts-daemon` | 1.0 MiB | 4 + 0 | — | — | — | 2.0 MiB | — |  |"
+        );
+    }
+
+    #[test]
+    fn renders_an_explicit_unsupported_row() {
+        let row = Row::Unsupported {
+            bin: "fedora".into(),
+            current: "windows".into(),
+            allowed: "linux".into(),
+        };
+        assert_eq!(
+            render_row(&row, None),
+            "| `fedora` | — | — | — | — | — | — | — | unsupported on windows (allowed: linux); skipped |"
         );
     }
 }

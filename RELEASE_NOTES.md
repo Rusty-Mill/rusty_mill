@@ -13,6 +13,12 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_baseline: explicit platform eligibility
+**2026-10-02** · [Issue #428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
+
+- **Fixed:** `products.txt` can mark a product with `@platform=linux`, `@platform=windows`, or `@platform=macos`. A selected product that is unsupported on the current OS is kept in its original report position as an explicit skipped row with unmeasured cells, and it is filtered before any Cargo query, build, binary lookup, or process launch. Existing entries without a declaration remain unrestricted; only the already Linux-only `rusty_fedora_agent` is restricted.
+- Known limitations: this does not change aggregate exit status, expected-exit handling, Ubuntu baseline prerequisites, or the unresolved Windows `ts-daemon` product policy.
+
 ## rusty_multimodal_db: chunked snapshots, a standby for a table over 8 MiB (ADR-0136)
 **2026-10-01** · [ADR-0136](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0136-chunked-snapshots.md) · wire protocol 35 → 36
 
