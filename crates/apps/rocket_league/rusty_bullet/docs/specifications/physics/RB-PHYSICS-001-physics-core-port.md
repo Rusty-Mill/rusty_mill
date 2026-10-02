@@ -5666,7 +5666,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     brake, as RocketSim brakes per touching wheel; the candidate lost none
     and air-damped the pitch RocketSim leaves alone there.
   - **Verification**: `drive` test
-    `two_touching_wheels_brake_at_half_strength_without_air_control`.
+    `two_touching_wheels_brake_at_half_strength_without_air_control`; real
+    capture re-trace: `front.jsonl` loses 2.2 uu/s per tick on two wheels
+    from 19.058 s as recorded (was 0); `--self-growth` window 19 s 11 uu /
+    34 uu/s (was 24 / 61), `test2.jsonl` window 5 s 7.3 uu / 0.05 rad /
+    39 uu/s (was 12.1 / 0.14 / 76).
 
 ## Architecture and interfaces
 

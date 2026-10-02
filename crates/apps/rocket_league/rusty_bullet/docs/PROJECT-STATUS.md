@@ -123,11 +123,8 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <front.jsonl> 19.0 19.3` and
-   `--self-growth` on `front.jsonl` and `test2.jsonl` to confirm
-   `RB-PHYSICS-001-FR-099` (wheels grip and brake whenever they touch,
-   ADR-0020): from 19.058 s the candidate should lose ~2.2 uu/s per tick
-   on two wheels, as recorded. Then the body impact at 19.083 s (the
+1. `RB-PHYSICS-001-FR-099` (wheels grip and brake whenever they touch,
+   ADR-0020) is confirmed. Next, the body impact at 19.083 s (the
    candidate's body has no floor friction, RocketSim's has 0.3, and the
    recorded car picks up roll and yaw), and the side-flip capture.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay

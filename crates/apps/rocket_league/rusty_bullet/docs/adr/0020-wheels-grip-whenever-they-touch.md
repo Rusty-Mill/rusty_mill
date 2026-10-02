@@ -46,3 +46,8 @@ extra pitch loss is air control's damping, which RocketSim skips here.
 - The brake now acts at the wheels, so uneven contact yaws the car.
 - The car body itself is still frictionless against the floor (FR-081);
   the body impact at 19.083 s in `front.jsonl` is a separate, open issue.
+
+Real capture, 2026-10-02: confirmed. `front.jsonl` loses 2.2 uu/s per tick
+on two wheels from 19.058 s, as recorded; growth window 19 s 11 uu / 34
+uu/s (was 24 / 61); `test2.jsonl` window 5 s 7.3 uu / 0.05 rad / 39 uu/s
+(was 12.1 / 0.14 / 76).
