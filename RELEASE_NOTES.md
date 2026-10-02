@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_h2: remove dormant connection sources
+**2026-10-02** · [#418](https://github.com/Rusty-Mill/rusty_mill/issues/418)
+
+- **Removed:** three uncompiled, undeclared `connect` source files that duplicated live settings and PING responsibilities and contained an incorrect server-preface model. Compiled behavior and public API are unchanged.
+- **Docs:** architecture now describes the existing connection driver and thin client/server wrappers while retaining the crate's no-I/O boundary.
+- Known limitations: byte-level connection-preface validation and scheduled keepalive are not implemented by this cleanup.
+
+---
+
 ## rusty_multimodal_db: chunked snapshots, a standby for a table over 8 MiB (ADR-0136)
 **2026-10-01** · [ADR-0136](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0136-chunked-snapshots.md) · wire protocol 35 → 36
 

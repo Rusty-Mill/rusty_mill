@@ -14,6 +14,13 @@
 > inventory below (module structure, per-symbol "Stub" table) is kept as
 > a historical record of what this file originally described — it no
 > longer reflects the current source.
+>
+> **Dormant-source cleanup (2026-10-02):** the uncompiled
+> `connect/config.rs`, `connect/ping.rs`, and `connect/preface.rs` files
+> named in the historical inventory were removed. They were never declared
+> in the module tree and provided no executed coverage or public API. Their
+> removal did not add byte-level connection-preface validation or scheduled
+> keepalive; those remain separately scoped design work.
 
 ## Architecture Overview
 

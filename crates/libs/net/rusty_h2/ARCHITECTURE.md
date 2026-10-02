@@ -2,43 +2,42 @@
 
 ## Overview
 `rusty_h2` is a from-scratch HTTP/2 implementation, built directly from
-RFC 9113 (HTTP/2) and RFC 7541 (HPACK). Today it provides the wire-format
-layer only — frame codec, HPACK header compression, and the per-stream
-state machine. There is no connection driver, async I/O integration, or
-client/server API yet, so this document describes what actually exists,
-not an aspirational end state.
+RFC 9113 (HTTP/2) and RFC 7541 (HPACK). It provides a frame codec, HPACK
+header compression, a per-stream state machine, a connection driver, and
+thin client/server wrappers. The crate deliberately owns no I/O: callers
+feed decoded frames into the connection and write the frames it returns.
 
 ## Boundaries
-No I/O adapters exist yet: everything in the crate operates on in-memory
-byte slices (`&[u8]` in, `Vec<u8>` out), so a literal ports-and-adapters
-table would be empty scaffolding. The real boundary today is between the
-protocol layers, each depending only on the ones below it:
+No I/O adapters exist: everything in the crate operates on in-memory frame
+values and byte buffers. The client and server APIs build frames but do not
+read from or write to sockets. The protocol layers depend only on the ones
+below them:
 
 | Layer | Depends on | Notes |
 | ----- | ---------- | ----- |
-| `stream` (RFC 9113 §5.1 state machine) | `error` | Pure state transitions driven by `Event`s; doesn't touch frame bytes — a connection driver will translate decoded frames into events. |
+| `stream` (RFC 9113 §5.1 state machine) | `error` | Pure state transitions driven by `Event`s; the connection driver translates decoded frames into events. |
 | `frame` (frame header + 10 frame types) | `error` | Encodes/decodes complete frames from byte slices; no knowledge of streams or HPACK. A `HEADERS`/`CONTINUATION` frame's header block is passed through as opaque bytes. |
 | `hpack` (static table, Huffman, dynamic table, `Encoder`/`Decoder`) | `error` | Header compression only; turns a frame's `header_block_fragment` into/from a `Vec<HeaderField>`. |
+| `connect` (connection driver) | `error`, `frame`, `hpack`, `stream` | Owns negotiated settings, stream state, flow control, header-block assembly, frame dispatch, and immediate PING acknowledgements. |
+| `client` / `server` | `connect`, `frame`, `hpack` | Thin request/response frame-building APIs over the connection driver; transport I/O remains the caller's responsibility. |
 
-When a connection driver is added, `frame` and `hpack` become the ports an
-async I/O adapter (e.g. a `tokio::net::TcpStream` reader/writer) sits
-behind — noting that now so this split doesn't need to be redesigned later.
+An eventual sync or async I/O adapter can sit outside these layers without
+moving socket ownership into the protocol core.
 
 ## Structure
-Modular monolith — a single crate, no workspace split. Ports-and-adapters
-is the target pattern once I/O is introduced (see Boundaries above); today
-the crate is pure protocol logic with nothing to adapt to, which reflects
-where the project actually is rather than a gap to fill in.
+Modular monolith — a single crate, no workspace split. The in-memory
+protocol and connection layers form the inside of a ports-and-adapters
+boundary; a future I/O adapter remains outside that boundary.
 
 ## Data flow
-Today: none — the crate exposes encode/decode functions, not a running
-connection. Once a connection driver exists, the intended flow is:
+The existing caller-driven flow is:
 
 ```
 raw bytes -> FrameHeader::decode + Frame::decode
           -> (HEADERS/CONTINUATION only) hpack::Decoder::decode
+          -> connect::Connection::receive_frame
           -> stream::Stream::apply (state transitions)
-          -> application-level headers/data delivered to the caller
+          -> response/control frames returned to the caller for transport
 ```
 
 ## Key decisions
@@ -46,8 +45,11 @@ See [docs/adr/](./docs/adr/) for the record of individual decisions and
 their tradeoffs.
 
 ## Non-goals (for now)
-- No connection driver, async I/O integration, or client/server API (see
-  README roadmap) — this is the next major body of work, not an oversight.
+- No sync or async I/O integration; callers own transport reads and writes.
+- No byte-level connection-preface validation. The crate exports the client
+  `CONNECTION_PREFACE` bytes, but does not parse either peer's preface.
+- No scheduled keepalive policy or outstanding-PING timeout tracking. The
+  connection driver only acknowledges received non-ACK PING frames.
 - No HTTP/1.1-to-HTTP/2 upgrade or ALPN negotiation handling.
 - Flow control is enforced by `connect::Connection` alone: receive windows
   refuse overruns and are replenished by `release_capacity`; outgoing
