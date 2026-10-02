@@ -28,7 +28,7 @@ Modular monolith inside the `rusty_mill` workspace. `orch-dispatch` is the appli
 2. Dispatcher adds cards to a `Plan` and loops on `Plan::ready()`.
 3. For each ready card, lowest id first: route role → agent (reviews take the first configured reviewer that is not the target's author), verify the runner supports that agent/role pair, check both ceilings in the `Ledger`, `Plan::start`, count the call, run the adapter with the card and the board. An unsupported pair fails the card before start/count/invocation (ADR-0007).
 4. Dispatcher appends the agent's entries to the `Board` atomically (all or none) and calls `Plan::complete` with their ids, or `block` on a `Question`.
-5. The loop returns `Blocked` with the waiting cards; once a human appends an `Answer`, the next `run` resumes them. Hitting a ceiling, an agent failure, or zero outputs stops the loop with a typed error; an agent failure is retried on the next run until the card's own ceiling fails it.
+5. The loop returns `Blocked` with the waiting cards; once a human appends an `Answer`, the next `run` resumes them. Hitting a ceiling, an agent failure, or zero outputs stops the loop with a typed error; a transient agent failure is retried on the next run until the card's own ceiling fails it, while a permanent one ([ADR-0008](./docs/adr/0008-permanent-agent-errors.md)) or an unsupported agent/role pair ([ADR-0007](./docs/adr/0007-explicit-runner-capabilities.md)) fails the card at once.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/).
