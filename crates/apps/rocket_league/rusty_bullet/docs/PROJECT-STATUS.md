@@ -162,7 +162,11 @@ version: `a245d35`).
    free-running `front` stays within 34 uu (was 1026). The 8.958 s corner
    impact and `front` 25.967 s landing are gone from the worst steps.
    Worst steps now: `test2` car 14.408 s (42), 14.292 s (33); ball 7.95 s
-   (32), 12.267 s (27).
+   (32), 12.267 s (27). `--self-kstep` (`RB-VERIFY-003-FR-008`, ADR-0030)
+   now scores quarter-second predictions: k = 30 baseline `test2` car
+   3.29 uu / 26.27 uu/s, ball 0.56 uu; `front` 0.11 / 0.84; `side` 0.10 /
+   0.52. Bullet's row order, ERP2 0.8 and turn ERP 0.1 were measured with
+   it and not adopted (no gain).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -171,9 +175,9 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (472 tests: 27 `rb_domain`, 404
+- `cargo test --workspace`: pass (476 tests: 27 `rb_domain`, 406
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
-  integration test), 10 `rb_capture_ingest`, 17 `rb_verify_cli`)
+  integration test), 10 `rb_capture_ingest`, 19 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
   40/40 real owner replays parsed cleanly, 2026-08-28
 - `cargo run -p rb_verify_cli --bin rb-verify -- <replay> <capture>`

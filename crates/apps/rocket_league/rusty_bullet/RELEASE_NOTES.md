@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Quarter-second predictions as a yardstick
+**2026-10-02** · `RB-VERIFY-003-FR-008` · ADR-0030
+
+- `rb-verify --self-kstep` predicts every moment of a recording a quarter
+  second ahead and scores it, a steadier measure than one long run, which
+  goes chaotic after the kickoff. Used to test three remaining solver
+  differences from RocketSim; none helped, so none was adopted. 476 tests.
+
 ## Friction works like the game's
 **2026-10-02** · `RB-PHYSICS-001-FR-110` · ADR-0029
 
