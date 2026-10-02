@@ -6,11 +6,9 @@ use orch_core::board::Board;
 use orch_core::task::{Agent, Task};
 use orch_dispatch::{AgentError, AgentRunner, Output};
 
-use crate::exec::{CommandRunner, ExecError, StdCommand};
-use crate::{parse, render};
+use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
 
-/// Longest slice of model output or stderr an error message carries.
-const EXCERPT_CHARS: usize = 200;
+use crate::render;
 
 /// [`Agent::Local`] over `ollama run <model> --format json`, prompt on stdin.
 ///
@@ -62,9 +60,10 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
             )));
         }
         let prompt = render(task, board);
+        // Ollama has no API-key path, so nothing is scrubbed from the child.
         let exit = self
             .runner
-            .run(&self.argv(), prompt.as_bytes(), self.timeout)
+            .run_scrubbed(&self.argv(), prompt.as_bytes(), self.timeout, &[])
             .map_err(exec_error)?;
         if exit.status != 0 {
             return Err(AgentError(format!(
@@ -83,14 +82,4 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
 
 fn exec_error(e: ExecError) -> AgentError {
     AgentError(format!("ollama: {e}"))
-}
-
-/// A bounded, single-line excerpt for error messages; never the whole output.
-fn excerpt(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    let mut out: String = text.chars().take(EXCERPT_CHARS).collect();
-    if text.chars().count() > EXCERPT_CHARS {
-        out.push('…');
-    }
-    out.replace('\n', " ").trim().to_owned()
 }

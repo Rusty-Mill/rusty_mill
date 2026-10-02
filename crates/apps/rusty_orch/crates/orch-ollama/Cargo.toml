@@ -12,9 +12,7 @@ layer = "apps"
 [dependencies]
 orch-core = { workspace = true }
 orch-dispatch = { workspace = true }
-# Sovereign JSON parser (foundation layer). Default features off keeps serde
-# out, as rusty_request and rusty_oauth do; see ADR-0004 and root ADR-0002.
-rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
+orch-cli = { workspace = true }
 
 [dev-dependencies]
-orch-dispatch = { workspace = true, features = ["fake"] }
+orch-cli = { workspace = true, features = ["fake"] }

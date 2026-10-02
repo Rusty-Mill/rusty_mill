@@ -4,7 +4,7 @@
 //! errors, never guesses. Ref *syntax* is checked here; whether `E-<n>`
 //! exists is left to `Board::append`, which already validates it.
 
-use orch_core::board::{Confidence, EntryKind};
+use orch_core::board::{Confidence, EntryKind, Verdict};
 use orch_core::task::Role;
 use orch_core::{EntryId, Ref, Text};
 use orch_dispatch::{AgentError, Output};
@@ -17,12 +17,14 @@ pub const MAX_BODY_CHARS: usize = 500;
 
 /// Entry kinds a card of `role` may write. Empty means the adapter does
 /// not serve that role. Never `decision`: agents propose decisions as
-/// findings and the board refuses unreviewed ones (ADR-0005).
+/// findings and the board refuses unreviewed ones (ADR-0005). A review
+/// card writes exactly one `review`, optionally with findings beside it.
 pub fn allowed_kinds(role: Role) -> &'static [&'static str] {
     match role {
         Role::Research | Role::Triage => &["finding", "question", "assumption"],
         Role::Design => &["finding", "question", "assumption"],
-        Role::Implement | Role::Review { .. } => &[],
+        Role::Review { .. } => &["review", "finding"],
+        Role::Implement => &[],
     }
 }
 
@@ -51,8 +53,28 @@ pub fn parse(stdout: &str, role: Role) -> Result<Vec<Output>, AgentError> {
     entries
         .iter()
         .enumerate()
-        .map(|(i, e)| entry(e, allowed).map_err(|m| fail(format!("entry {i}: {m}"))))
-        .collect()
+        .map(|(i, e)| entry(e, role, allowed).map_err(|m| fail(format!("entry {i}: {m}"))))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|outputs| exactly_one_review(role, outputs))
+}
+
+/// A review card must deliver its verdict once: no review entry means the
+/// reviewer dodged, two means the verdict is ambiguous.
+fn exactly_one_review(role: Role, outputs: Vec<Output>) -> Result<Vec<Output>, AgentError> {
+    if !matches!(role, Role::Review { .. }) {
+        return Ok(outputs);
+    }
+    let reviews = outputs
+        .iter()
+        .filter(|o| matches!(o.kind, EntryKind::Review { .. }))
+        .count();
+    match reviews {
+        1 => Ok(outputs),
+        0 => Err(fail(
+            "a review card must include one review entry".to_owned(),
+        )),
+        n => Err(fail(format!("{n} review entries; exactly one is allowed"))),
+    }
 }
 
 fn unfence(s: &str) -> &str {
@@ -64,18 +86,22 @@ fn unfence(s: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
-fn entry(v: &Value, allowed: &[&str]) -> Result<Output, String> {
+fn entry(v: &Value, role: Role, allowed: &[&str]) -> Result<Output, String> {
     let kind_name = string(v, "kind")?;
     if !allowed.contains(&kind_name) {
         return Err(format!("kind {kind_name:?} is not allowed here"));
     }
-    let kind = match kind_name {
-        "finding" => EntryKind::Finding {
+    let kind = match (kind_name, role) {
+        ("finding", _) => EntryKind::Finding {
             confidence: confidence(v)?,
         },
-        "question" => EntryKind::Question,
-        "assumption" => EntryKind::Assumption,
-        other => return Err(format!("kind {other:?} is unknown")),
+        ("question", _) => EntryKind::Question,
+        ("assumption", _) => EntryKind::Assumption,
+        ("review", Role::Review { target }) => EntryKind::Review {
+            of: target,
+            verdict: verdict(v)?,
+        },
+        (other, _) => return Err(format!("kind {other:?} is unknown")),
     };
     let body = string(v, "body")?;
     if body.chars().count() > MAX_BODY_CHARS {
@@ -113,6 +139,16 @@ fn confidence(v: &Value) -> Result<Confidence, String> {
         "medium" => Ok(Confidence::Medium),
         "high" => Ok(Confidence::High),
         other => Err(format!("confidence {other:?} is not low, medium, or high")),
+    }
+}
+
+fn verdict(v: &Value) -> Result<Verdict, String> {
+    match string(v, "verdict")? {
+        "approve" => Ok(Verdict::Approve),
+        "changes_requested" => Ok(Verdict::ChangesRequested),
+        other => Err(format!(
+            "verdict {other:?} is not approve or changes_requested"
+        )),
     }
 }
 

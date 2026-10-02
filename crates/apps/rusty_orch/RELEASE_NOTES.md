@@ -4,6 +4,28 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Second real agent — orch-codex
+**2026-10-02** · (link once pushed)
+
+- **Added:** `orch-codex`, `Agent::Codex` over the Codex CLI, read-only. Fixed argv `codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules -C <repo_root> [-m <model>] --output-schema <f> --output-last-message <f> -`, prompt on stdin; the reply is read from the last-message file, constrained by `OUTPUT_SCHEMA` in strict Structured Outputs form (one fully-required `anyOf` variant per kind; caps left to the parser), and parsed by the shared parser. `--ignore-rules` keeps a saved execpolicy allow rule from running a command outside the sandbox. Default timeout 10 minutes. Every flag verified against codex-cli 0.160.0.
+- **Added:** `OPENAI_API_KEY` is scrubbed from Codex's environment on every run, so the subscription login is the only path. Failures map to typed `AgentError`s: `codex: not logged in` (stderr `401 Unauthorized`), `codex: rate limited` (`429`, `rate_limit_reached`, `usage_limit_reached`), generic exit status otherwise, plus the shared timeout and overflow. A sandbox refusal is a normal reply, not an error.
+- **Added:** the `review` kind in the shared protocol: a `Role::Review` card writes exactly one `{"kind":"review","verdict":...}` entry and may add findings. Lets a local model review Codex's finding in the `research_review` example, the first run where two real adapters share one board.
+- **Added:** tests: argv pinned; schema is strict-compatible (recursive check: every object fully required, no additional properties, no keywords outside the strict subset) and agrees with the parser on both ADR-0004 example replies; two ignored rules tests (offline `execpolicy check` shows the allow-rule hazard; end-to-end isolated `CODEX_HOME` with a saved allow rule must not write a file); render keeps `path:` refs as refs; fake-runner cases for success (with scrub and scratch-file cleanup), wrong agent, not logged in, three rate-limit shapes, sandbox refusal, other exit status, timeout, malformed reply, missing last-message file; parser tests for the review kind. One `#[ignore]` test runs the real binary with a nonce that must appear in an entry body.
+- **Added:** ADR-0006 recording the invocation, sandbox, schema path, env scrub, failure mapping, and the review-kind amendment to ADR-0004.
+- Out of scope, by choice: write access or the Implement role for Codex, worktrees, Claude and Gemini adapters, MCP access to the board, a non-retryable error variant.
+
+---
+
+## Shared CLI-adapter core — orch-cli
+**2026-10-02** · (link once pushed)
+
+- **Added:** `orch-cli`, extracted from `orch-ollama` now that Codex is the second CLI adapter. It holds the process seam (`CommandRunner`, `StdCommand`, `Exit`, `ExecError`, `JOIN_GRACE`, `MAX_STDOUT_BYTES`), the JSON reply protocol (`parse`, `allowed_kinds`, caps), the prompt core (`render(task, board, footer)`, `format_spec(role)`), and the `fake` module (`FakeCommand`, board fixtures, the ADR-0004 example replies). Files moved with `git mv`; no logic changed.
+- **Added:** `CommandRunner::run_scrubbed(argv, stdin, timeout, remove_env)`. `run` is now the provided method calling it with an empty list. `StdCommand` removes the named variables from the child's environment. Motivated by Codex picking up a stray `OPENAI_API_KEY`; Ollama passes an empty list. One new seam test.
+- **Changed:** `orch-ollama` is a thin adapter: argv, footer, and error mapping. Every existing test passes with only import paths changed; the one render-core test now runs in `orch-cli`, and the Ollama footer assertion stays in `orch-ollama`.
+- **Changed:** ADR-0004 retitled to cover CLI adapters generally and amended to point at the new home.
+
+---
+
 ## No self-approval, and the deadline is a hard bound
 **2026-10-01** · (link once pushed)
 
