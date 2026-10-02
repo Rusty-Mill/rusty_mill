@@ -3791,11 +3791,11 @@ mod tests {
         }
     }
 
-    /// `RB-PHYSICS-001-FR-098`: a jump from rest goes straight up. The
-    /// owner's capture (`front.jsonl`, 12.008 s) gains under 1 uu/s of
-    /// horizontal speed; braking along the car's slightly pitched forward
-    /// axis instead of the floor turned the jump's vertical speed into
-    /// 3.3 uu/s forward on the tick after the press.
+    /// `RB-PHYSICS-001-FR-098`/`FR-101`: a jump from rest goes (nearly)
+    /// straight up. The owner's capture (`front.jsonl`, 12.008 s) gains
+    /// under 1 uu/s of horizontal speed over the jump's first ten ticks:
+    /// the brake, acting along the floor after the jump, cancels the
+    /// in-plane part of the push along the car's slightly pitched up axis.
     #[test]
     fn a_jump_from_rest_goes_straight_up() {
         let ball = RigidBody::standard_ball(Vec3::new(3000.0, 3000.0, crate::body::BALL_RADIUS));
@@ -3816,7 +3816,7 @@ mod tests {
             world.step(dt);
             let velocity = world.cars[0].linear_velocity;
             let horizontal = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
-            assert!(horizontal < 0.1, "tick {tick}: {velocity:?}");
+            assert!(horizontal < 1.0, "tick {tick}: {velocity:?}");
         }
     }
 

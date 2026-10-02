@@ -940,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Jumps push along the car's up axis, and the tires act after a ground
+  jump (`RB-PHYSICS-001-FR-101`, ADR-0019 amendment), per the owner's
+  captures of a jump on throttle and a jump from rest.
 - The car body uses RocketSim's car-vs-world friction and restitution
   (0.3 / 0.3) against every static shape, floor included
   (`RB-PHYSICS-001-FR-100`, ADR-0021, superseding FR-081's frictionless

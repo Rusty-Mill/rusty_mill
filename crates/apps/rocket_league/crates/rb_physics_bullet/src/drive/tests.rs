@@ -3262,3 +3262,20 @@ fn two_touching_wheels_brake_at_half_strength_without_air_control() {
         c.angular_velocity
     );
 }
+
+#[test]
+fn a_ground_jump_pushes_along_the_cars_up_axis() {
+    // RB-PHYSICS-001-FR-101: RocketSim's `_UpdateJump` pushes along
+    // `GetUpDir()`; a car pitched on its suspension jumps slightly forward.
+    let mut c = car();
+    let half = 0.05_f32;
+    c.orientation = rb_domain::Quat::new(0.0, half.sin(), 0.0, half.cos());
+    c.update_inertia_tensor();
+    let up = up_axis(&c);
+    let mut remaining = 0.0;
+    ground_jump(&mut c, &mut remaining, TICK);
+    assert_close(c.linear_velocity.dot(&up), JUMP_SPEED, "speed along up");
+    assert!(c.linear_velocity.x > 1.0, "{:?}", c.linear_velocity);
+    let force_along_up = c.total_force().dot(&up) / c.mass();
+    assert_close(force_along_up, JUMP_HOLD_ACCELERATION, "hold along up");
+}

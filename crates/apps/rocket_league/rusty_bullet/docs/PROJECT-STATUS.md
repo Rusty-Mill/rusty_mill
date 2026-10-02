@@ -130,9 +130,10 @@ version: `a245d35`).
    the recorded car rolls and yaws (possibly the real triangle-mesh
    floor). The side-flip capture (`side.jsonl`) confirms the roll axis:
    first flip tick, mid-flip rate and landing match, rotation error 0.00.
-   Next, the ~3 uu/s sideways offset after `test2.jsonl`'s 4.142 s
-   takeoff while driving, and the ~0.9 uu/s horizontal drift the recorded
-   car gains while jump is held.
+   `RB-PHYSICS-001-FR-101` (jumps along the car's up axis, tires after the
+   jump) is confirmed: `test2.jsonl` growth window 4 s 0.64 uu (was 1.27),
+   5 s 4.6 uu (was 7.3). Next, the largest early error left: `test2.jsonl`
+   window 5 s (37 uu/s), the 5.575 s landing.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -141,7 +142,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (444 tests: 27 `rb_domain`, 378
+- `cargo test --workspace`: pass (445 tests: 27 `rb_domain`, 379
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

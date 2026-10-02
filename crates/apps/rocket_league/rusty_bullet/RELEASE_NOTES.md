@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Jumps push along the car's up axis
+**2026-10-02** · `RB-PHYSICS-001-FR-101` · ADR-0019 amendment
+
+- The ground jump, its hold force and the double jump now push along the
+  car's own up axis, which tilts about 0.01 rad on the suspension, and on
+  the ground the tires act after the jump. The owner's jump on throttle
+  gains 2.9 uu/s forward on its press tick; a jump from rest stays put
+  because the brake cancels that push. 445 tests.
+
 ## Car bodies slide with friction
 **2026-10-02** · `RB-PHYSICS-001-FR-100` · ADR-0021
 
