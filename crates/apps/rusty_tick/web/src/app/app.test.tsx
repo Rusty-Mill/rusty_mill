@@ -581,12 +581,20 @@ describe('keyboard shortcuts', () => {
 
   it('Delete moves the selected task to the Trash and lands on a neighbour', async () => {
     const user = userEvent.setup()
-    const { api } = await renderApp('/p/inbox/tasks', seed)
+    const { api, router } = await renderApp('/p/inbox/tasks', seed)
     await user.click(screen.getByText('two'))
     await screen.findByLabelText('Title')
     await user.keyboard('{Delete}')
     await waitFor(async () => expect((await api.snapshot()).tasks.find((t) => t.title === 'two')?.deletedMs).not.toBeNull())
     await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('three'))
+
+    await user.keyboard('{Delete}')
+    await waitFor(async () => expect((await api.snapshot()).tasks.find((t) => t.title === 'three')?.deletedMs).not.toBeNull())
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('one'))
+
+    await user.keyboard('{Delete}')
+    await waitFor(async () => expect((await api.snapshot()).tasks.find((t) => t.title === 'one')?.deletedMs).not.toBeNull())
+    await waitFor(() => expect(router.state.location.pathname).toBe('/p/inbox/tasks'))
   })
 
   it('does not act on keys typed into a field', async () => {

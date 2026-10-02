@@ -68,7 +68,8 @@ function TaskShortcuts({ spec, selectedId }: { spec: ViewSpec; selectedId: strin
           e.preventDefault()
           taskActions.remove(selectedId)
           // Land on a neighbour so J/K and Delete can be chained.
-          return navigate(ids[at + 1] || ids[at - 1] ? taskPath(spec, (ids[at + 1] ?? ids[at - 1])!) : viewPath(spec))
+          navigate(ids[at + 1] || ids[at - 1] ? taskPath(spec, (ids[at + 1] ?? ids[at - 1])!) : viewPath(spec))
+          return
         case 'priority':
           return taskActions.setPriority(selectedId, action.value)
       }
