@@ -42,14 +42,23 @@ pre-operation read view and refuses every later mutation until reopen; thus a
 later operation can neither retire an earlier redo nor be overwritten by it.
 An ordinary task insert, replacement, or deletion durability error is fenced
 for the same reason: its append may have left an ambiguous partial frame.
+The engine's core and `Ordered` layers publish their in-memory record and
+index changes only after the fallible persistence call succeeds. Ordinary
+writes therefore capture the retained full-store view only on an error;
+successful single-record writes remain proportional to that record and do not
+clone or scan unrelated tasks. Batch operations still capture their complete
+pre-operation view before journal acceptance because a batch may partially
+apply after that point.
 Compound service operations check this readiness before their first side
 effect, so they cannot mutate the tag or list registries before discovering a
 task-store fence. Duplicate and missing-record validation refusals remain
 definite and do not poison the store.
-The derived indexes are not changed until checkpoint succeeds. Tests simulate
-process loss by dropping isolated synthetic stores at
-each apply prefix; this verifies redo/reopen behavior, not physical power-loss
-properties of a particular filesystem or device.
+The derived indexes are not changed until checkpoint succeeds. Deterministic
+tests exercise the real operation path at a partial journal frame, journal
+sync, mid-apply, store group-sync, and checkpoint post-rename boundary, plus a
+torn ordinary append. These process/syscall experiments verify redo/reopen
+behavior, not physical power-loss properties of a particular filesystem or
+device.
 
 Opening inspects the journal before the task store. When authoritative redo is
 pending, it may remove an empty insert log or an exact, incomplete prefix of

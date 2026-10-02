@@ -293,8 +293,23 @@ fn try_write_entry(
     image.push(kind);
     image.extend_from_slice(&len.to_le_bytes());
     image.extend_from_slice(payload);
+    #[cfg(feature = "test-support")]
+    if let Some(crate::test_support::Fault::InsertWritePrefix(prefix)) =
+        crate::test_support::take_fault(|fault| {
+            matches!(fault, crate::test_support::Fault::InsertWritePrefix(_))
+        })
+    {
+        file.write_all(&image[..prefix.min(image.len())])?;
+        return Err(io::Error::other("injected insert-log partial write").into());
+    }
     file.write_all(&image)?;
     if when == LogSync::Now {
+        #[cfg(feature = "test-support")]
+        if crate::test_support::take_fault(|fault| fault == crate::test_support::Fault::InsertSync)
+            .is_some()
+        {
+            return Err(io::Error::other("injected insert-log sync failure").into());
+        }
         file.sync_data()?;
     }
     if created {
