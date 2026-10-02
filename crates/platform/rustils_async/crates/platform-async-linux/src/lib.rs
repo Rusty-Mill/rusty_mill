@@ -1103,13 +1103,20 @@ mod wait_any_leak_tests {
             -1,
             "original readiness activity must own the reserved descriptor"
         );
+        let readiness_deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match original_activity.as_mut().poll(&mut cx) {
                 Poll::Ready(result) => {
                     result.expect("original child readiness");
                     break;
                 }
-                Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+                Poll::Pending => {
+                    assert!(
+                        std::time::Instant::now() < readiness_deadline,
+                        "original child readiness did not complete before the deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
         }
         assert_eq!(sys::pidfd::descriptor_flags(stale_number), -1);
