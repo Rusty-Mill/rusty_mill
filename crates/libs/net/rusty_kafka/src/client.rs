@@ -1056,6 +1056,9 @@ mod tests {
     /// for the duration of this test. There is deliberately no default: a
     /// documentation address, immediate refusal, or unexpected success is a
     /// fixture failure and must not count as timeout coverage.
+    ///
+    /// Run this ignored test explicitly with:
+    /// `cargo test -p rusty_kafka --all-features client::tests::connect_with_timeout_against_controlled_syn_drop_fixture -- --ignored --exact`.
     #[rusty_tokio::test]
     #[ignore = "requires an authorized RUSTY_KAFKA_SYN_DROP_ADDR fixture"]
     async fn connect_with_timeout_against_controlled_syn_drop_fixture() {
