@@ -495,6 +495,29 @@ fn stick_past_deadzone(pitch: f32, roll: f32) -> bool {
     pitch.abs() > DODGE_DEADZONE || roll.abs() > DODGE_DEADZONE
 }
 
+/// The dodge a jump press makes, if the stick asks for one: `dodge_stick`
+/// past the deadzone, with the forward part taken from the throttle when
+/// pitch is centred (`RB-PHYSICS-001-FR-103`, ADR-0023). In the owner's
+/// keyboard captures, a yaw-only press with throttle held dodges
+/// diagonally (forward 354, side 354 scaled: `test2.jsonl` 6.058 s and
+/// 12.55 s), and one without throttle dodges purely sideways. Rocket
+/// League dodges from its own `DodgeForward` input, which the captures do
+/// not record; for them it follows the throttle. The throttle never starts
+/// a dodge on its own: no capture shows a neutral-stick press with
+/// throttle held.
+pub(super) fn dodge_direction(input: &ControllerInput) -> Option<(f32, f32)> {
+    let (forward, side) = dodge_stick(input);
+    if !stick_past_deadzone(forward, side) {
+        return None;
+    }
+    let forward = if forward.abs() > DODGE_DEADZONE {
+        forward
+    } else {
+        input.throttle.clamp(-1.0, 1.0)
+    };
+    Some((forward, side))
+}
+
 /// Applies a directional dodge on top of `base_impulse` (a velocity change,
 /// scaled by mass here): translate along `forward_axis` and spin about
 /// `right_axis` from the forward component, translate along `right_axis`
@@ -558,8 +581,7 @@ pub(super) fn airborne_jump_press(
         // off outward along the wall's normal, plus the same upward
         // JUMP_SPEED every jump variant uses.
         let push = wall_normal * WALL_JUMP_HORIZONTAL_SPEED + Vec3::new(0.0, 0.0, JUMP_SPEED);
-        let stick = dodge_stick(input);
-        if stick_past_deadzone(stick.0, stick.1) {
+        if let Some(stick) = dodge_direction(input) {
             // Wall-jump dodge: unlike the plain wall jump below, this
             // *does* consume double_jump_available — the same resource a
             // ground dodge spends — a deliberate simplification (see the
@@ -574,8 +596,7 @@ pub(super) fn airborne_jump_press(
             car.apply_impulse(push * car.mass(), Vec3::ZERO);
         }
     } else if *double_jump_available {
-        let stick = dodge_stick(input);
-        if stick_past_deadzone(stick.0, stick.1) {
+        if let Some(stick) = dodge_direction(input) {
             // Dodge: a directional flip instead of a plain vertical double
             // jump. Purely horizontal, with no vertical JUMP_SPEED
             // component — see the parent module doc comment.

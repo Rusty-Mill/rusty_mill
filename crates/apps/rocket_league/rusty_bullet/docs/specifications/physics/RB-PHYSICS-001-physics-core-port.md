@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.106.0
+- Version: 0.107.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5748,6 +5748,27 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     the 15.617 s press and the recorded car does not (292 uu/s). Still
     open: why the real car has no double jump 0.9 s after a wall jump.
 
+- `RB-PHYSICS-001-FR-103` (a dodge's forward part follows throttle when
+  pitch is centred; car speed capped; implemented, verified by tests and
+  the owner's capture, ADR-0023): `drive::jump::dodge_direction` takes the
+  forward part from `-pitch` past the deadzone, else from the throttle; the
+  stick alone still decides whether a press dodges. `drive::clamp_velocity`
+  (was `clamp_angular_speed`) also caps linear speed at `MAX_CAR_SPEED` at
+  the end of the step.
+  - Why: `test2.jsonl` 6.058 s and 12.55 s, yaw-only dodges with throttle
+    held, gained 354 uu/s forward: a diagonal dodge. All 15 airborne
+    dodges in the three captures fit the rule. At 12.55 s the recorded car
+    leaves the dodge at exactly 2300 uu/s along the uncapped direction;
+    RocketSim caps `CAR_MAX_SPEED` every tick.
+  - **Verification**: `drive` tests
+    `a_side_dodge_with_throttle_held_goes_diagonally_forward`,
+    `pitch_still_sets_the_dodge_and_throttle_alone_never_starts_one`,
+    `clamp_velocity_scales_an_over_cap_linear_velocity_back_along_its_direction`;
+    real capture `--self-onestep`: 6.058 s 0.0 uu/s (was 432), 12.55 s 0.5
+    (was 396), spin 0.00 on both; `test2.jsonl` mean 2.72 uu/s (was 3.10);
+    `front`/`side` unchanged. Open: recording `DodgeForward`/`DodgeStrafe`
+    in the capture plugin would replace the inference.
+
 ## Architecture and interfaces
 
 `rb_physics_bullet` (new crate, depends only on `rb_domain`):
@@ -7237,6 +7258,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.107.0 (2026-10-02): `RB-PHYSICS-001-FR-103` — dodge forward follows
+  throttle when pitch is centred; car speed capped (ADR-0023). 392 tests
+  in `rb_physics_bullet`.
 - 0.106.0 (2026-10-02): `RB-PHYSICS-001-FR-102` — real arena transition
   radii, swept corner fillets, wheel rays against every static shape
   (ADR-0022). 389 tests in `rb_physics_bullet`.

@@ -171,7 +171,7 @@ fn step_with_input_and_dodge_flip(
     *jump_hold_time_remaining = state.jump_hold_time_remaining;
     *flip = state.flip;
     integrate::integrate_velocities(car, dt);
-    clamp_angular_speed(car);
+    clamp_velocity(car);
 }
 
 fn full_throttle() -> ControllerInput {
@@ -1457,7 +1457,9 @@ fn a_forward_dodge_does_not_scale_with_current_forward_speed() {
     let mut boost = MAX_BOOST;
     let mut jump_held = false;
     let mut double_jump_available = true;
-    c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
+    // Half speed, so the result stays under the MAX_CAR_SPEED cap
+    // (RB-PHYSICS-001-FR-103).
+    c.linear_velocity = Vec3::new(MAX_CAR_SPEED * 0.5, 0.0, 0.0);
     let before = c.linear_velocity.x;
     let input = ControllerInput {
         jump: true,
@@ -1492,7 +1494,9 @@ fn a_side_dodge_scales_up_with_current_forward_speed() {
     let mut boost = MAX_BOOST;
     let mut jump_held = false;
     let mut double_jump_available = true;
-    c.linear_velocity = Vec3::new(MAX_CAR_SPEED, 0.0, 0.0);
+    // Half speed, so the result stays under the MAX_CAR_SPEED cap
+    // (RB-PHYSICS-001-FR-103).
+    c.linear_velocity = Vec3::new(MAX_CAR_SPEED * 0.5, 0.0, 0.0);
     let input = ControllerInput {
         jump: true,
         roll: Some(1.0),
@@ -1508,8 +1512,9 @@ fn a_side_dodge_scales_up_with_current_forward_speed() {
         1.0 / 60.0,
     );
     assert!(
-        (c.linear_velocity.y - DODGE_SPEED * DODGE_SIDE_SPEED_SCALE).abs() < 1.0,
-        "expected a side dodge at max speed to scale to DODGE_SPEED * \
+        (c.linear_velocity.y - DODGE_SPEED * (1.0 + (DODGE_SIDE_SPEED_SCALE - 1.0) * 0.5)).abs()
+            < 1.0,
+        "expected a side dodge at half max speed to scale halfway to \
          DODGE_SIDE_SPEED_SCALE, got {}",
         c.linear_velocity.y
     );
@@ -2322,10 +2327,10 @@ fn landing_assistance_does_not_apply_while_grounded() {
 }
 
 #[test]
-fn clamp_angular_speed_is_a_no_op_below_the_cap() {
+fn clamp_velocity_is_a_no_op_below_the_cap() {
     let mut c = car();
     c.angular_velocity = Vec3::new(1.0, 2.0, 0.0);
-    clamp_angular_speed(&mut c);
+    clamp_velocity(&mut c);
     assert_eq!(
         c.angular_velocity,
         Vec3::new(1.0, 2.0, 0.0),
@@ -2335,10 +2340,10 @@ fn clamp_angular_speed_is_a_no_op_below_the_cap() {
 }
 
 #[test]
-fn clamp_angular_speed_scales_an_over_cap_velocity_down_to_the_cap_preserving_direction() {
+fn clamp_velocity_scales_an_over_cap_velocity_down_to_the_cap_preserving_direction() {
     let mut c = car();
     c.angular_velocity = Vec3::new(0.0, 0.0, 20.0);
-    clamp_angular_speed(&mut c);
+    clamp_velocity(&mut c);
     assert!(
         (c.angular_velocity.length() - MAX_CAR_ANGULAR_SPEED).abs() < 1e-4,
         "expected the clamp to scale magnitude down to exactly MAX_CAR_ANGULAR_SPEED, got \
@@ -2370,7 +2375,7 @@ fn sustained_full_roll_input_never_exceeds_the_hard_angular_speed_cap() {
     // arbitrarily fast. Two real seconds of full roll at this car's own
     // mass/inertia gains far more than MAX_CAR_ANGULAR_SPEED (5.5
     // rad/s) worth of angular velocity if nothing clamps it, so this
-    // test would fail without `clamp_angular_speed` in `step_with_input`'s
+    // test would fail without `clamp_velocity` in `step_with_input`'s
     // own step helper.
     let mut c = car();
     let mut boost = MAX_BOOST;
@@ -3096,7 +3101,7 @@ fn diagonal_flip_roll_and_pitch(input: &ControllerInput, ticks: usize) -> (f32, 
         c.position = position;
         c.orientation = orientation;
         c.update_inertia_tensor();
-        clamp_angular_speed(&mut c);
+        clamp_velocity(&mut c);
     }
     (
         c.angular_velocity.dot(&forward_axis(&c)).abs(),
@@ -3283,4 +3288,56 @@ fn a_ground_jump_pushes_along_the_cars_up_axis() {
     assert!(c.linear_velocity.x > 1.0, "{:?}", c.linear_velocity);
     let force_along_up = c.total_force().dot(&up) / c.mass();
     assert_close(force_along_up, JUMP_HOLD_ACCELERATION, "hold along up");
+}
+
+fn stick_input(throttle: f32, pitch: f32, yaw: f32) -> ControllerInput {
+    ControllerInput {
+        throttle,
+        steer: yaw,
+        pitch: Some(pitch),
+        yaw: Some(yaw),
+        roll: Some(0.0),
+        jump: true,
+        boost: false,
+        handbrake: false,
+    }
+}
+
+#[test]
+fn a_side_dodge_with_throttle_held_goes_diagonally_forward() {
+    // RB-PHYSICS-001-FR-103: test2.jsonl 6.058 s and 12.55 s.
+    assert_eq!(
+        dodge_direction(&stick_input(1.0, 0.0, 1.0)),
+        Some((1.0, 1.0))
+    );
+    assert_eq!(
+        dodge_direction(&stick_input(0.0, 0.0, -1.0)),
+        Some((0.0, -1.0))
+    );
+    assert_eq!(
+        dodge_direction(&stick_input(-1.0, 0.0, 1.0)),
+        Some((-1.0, 1.0))
+    );
+}
+
+#[test]
+fn pitch_still_sets_the_dodge_and_throttle_alone_never_starts_one() {
+    assert_eq!(
+        dodge_direction(&stick_input(-1.0, -1.0, 0.0)),
+        Some((1.0, 0.0))
+    );
+    assert_eq!(dodge_direction(&stick_input(1.0, 0.0, 0.0)), None);
+}
+
+#[test]
+fn clamp_velocity_scales_an_over_cap_linear_velocity_back_along_its_direction() {
+    // RB-PHYSICS-001-FR-103: test2.jsonl 12.55 s, a dodge past 2300 uu/s.
+    let mut c = car();
+    c.linear_velocity = Vec3::new(-2062.0, 1319.0, 308.0);
+    clamp_velocity(&mut c);
+    assert!((c.linear_velocity.length() - MAX_CAR_SPEED).abs() < 1e-2);
+    assert!((c.linear_velocity.x / c.linear_velocity.y + 2062.0 / 1319.0).abs() < 1e-4);
+    c.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+    clamp_velocity(&mut c);
+    assert_eq!(c.linear_velocity, Vec3::new(1000.0, 0.0, 0.0));
 }

@@ -311,7 +311,7 @@ use rb_domain::{ControllerInput, Vec3};
 pub const MAX_CAR_SPEED: f32 = 2300.0;
 
 /// Hard cap (rad/s) on a car's angular speed, enforced by
-/// `clamp_angular_speed` once per step, right after
+/// `clamp_velocity` once per step, right after
 /// `integrate::integrate_velocities` — a genuine clamp that scales
 /// `angular_velocity` back down if it's exceeded, unlike `MAX_CAR_SPEED`/
 /// `UNBOOSTED_MAX_CAR_SPEED` above (which only gate *new* throttle/boost
@@ -330,8 +330,8 @@ pub const MAX_CAR_SPEED: f32 = 2300.0;
 /// imparting spin) isn't re-clamped until the *next* step's call, so it
 /// could in principle transiently exceed this for one step, unlike
 /// RocketSim's own "can never exceed" phrasing suggests for its engine.
-/// Closing that remaining gap would mean clamping again after the solver
-/// too, which this port doesn't do — out of scope for FR-057.
+/// Since `RB-PHYSICS-001-FR-087` the clamp runs at the end of the step,
+/// after the solver, closing that gap.
 pub const MAX_CAR_ANGULAR_SPEED: f32 = 5.5;
 
 /// Commonly-cited *unboosted* top speed (uu/s) — throttle's own speed cap,
@@ -472,7 +472,7 @@ impl Default for DriveState {
 /// `body::RigidBody::wake` doc comment for why a velocity-only wake check
 /// isn't enough here. Call once per step, before
 /// `integrate::integrate_velocities`, alongside `apply_gravity`; follow it
-/// with `clamp_angular_speed` right *after* that same
+/// with `clamp_velocity` right *after* that same
 /// `integrate_velocities` call, so `MAX_CAR_ANGULAR_SPEED` sees this step's
 /// fully-integrated angular velocity, torque contributions included.
 pub fn apply_driven_forces(
@@ -639,14 +639,22 @@ pub fn apply_wheel_forces(
         wheels::apply_wheel_forces(car, wheels, state.sticky_surface_up, throttle_engaged, dt);
 }
 
-/// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED` if
-/// its length exceeds it, preserving direction — a no-op otherwise. Call
+/// Scales `car.angular_velocity` back down to `MAX_CAR_ANGULAR_SPEED`, and
+/// since `RB-PHYSICS-001-FR-103` `car.linear_velocity` to `MAX_CAR_SPEED`,
+/// if either length exceeds its cap, preserving direction. RocketSim caps
+/// both in the same place; the owner's captures peak at exactly 2300 uu/s
+/// and 5.5 rad/s, and at `test2.jsonl` 12.55 s a dodge that would reach
+/// 2465 uu/s comes out at 2300 along the same direction. Call
 /// once per step at its very end, after the transform has integrated
 /// (`RB-PHYSICS-001-FR-087`): RocketSim clamps in `Car::_PostTickUpdate`,
 /// after Bullet's step, so a step's orientation moves with the unclamped
 /// spin. The real capture confirms it: a flipping car turns at ~7.6 rad/s
 /// (5.5 plus one tick of flip torque) while reporting 5.5.
-pub fn clamp_angular_speed(car: &mut RigidBody) {
+pub fn clamp_velocity(car: &mut RigidBody) {
+    let linear_speed = car.linear_velocity.length();
+    if linear_speed > MAX_CAR_SPEED {
+        car.linear_velocity *= MAX_CAR_SPEED / linear_speed;
+    }
     let speed = car.angular_velocity.length();
     if speed > MAX_CAR_ANGULAR_SPEED {
         car.angular_velocity *= MAX_CAR_ANGULAR_SPEED / speed;

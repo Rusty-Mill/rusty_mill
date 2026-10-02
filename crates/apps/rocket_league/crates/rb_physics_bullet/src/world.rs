@@ -44,7 +44,7 @@ const CAR_WORLD_MATERIAL: solver::StaticMaterial = solver::StaticMaterial::Pair 
 
 /// Scales `ball.linear_velocity`/`ball.angular_velocity` back down to
 /// `BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` (preserving direction) if either is
-/// exceeded — a genuine clamp, the same kind `drive::clamp_angular_speed`
+/// exceeded — a genuine clamp, the same kind `drive::clamp_velocity`
 /// already applies to a car's own angular speed, generalized here to both
 /// linear and angular speed since the ball has no drive-input-gated
 /// mechanic of its own to house a car-specific version of this in
@@ -53,7 +53,7 @@ const CAR_WORLD_MATERIAL: solver::StaticMaterial = solver::StaticMaterial::Pair 
 /// transform integrates — matching real RocketSim's own `_FinishPhysicsTick`
 /// placement (fetched and confirmed during `RB-PHYSICS-001-FR-061`'s
 /// audit: enforced after collision resolution, at the end of the physics
-/// tick) more precisely than `drive::clamp_angular_speed`'s own placement
+/// tick) more precisely than `drive::clamp_velocity`'s own placement
 /// managed for the car (mid-pipeline, before this step's own contact
 /// resolution — see that function's own doc comment for why). Like that
 /// function, a same-step contact-solver impulse is clamped this same call
@@ -888,7 +888,7 @@ impl PhysicsWorld {
             // `Car::_PostTickUpdate` does after Bullet's step. The owner's
             // capture shows a flipping car turning at ~7.6 rad/s while its
             // reported spin stays at the 5.5 cap.
-            drive::clamp_angular_speed(car);
+            drive::clamp_velocity(car);
         }
 
         self.elapsed_secs += dt;
@@ -3507,8 +3507,9 @@ mod tests {
         // real dimensions (`GOAL_HALF_WIDTH`/`GOAL_HEIGHT`) mean it clears
         // the window with room to spare either way.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(0.0, -3000.0, 1000.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, crate::arena::GOAL_HEIGHT * 0.5));
-        car.linear_velocity = Vec3::new(0.0, 3000.0, 0.0);
+        // Started 2000 uu out at the 2300 uu/s cap (RB-PHYSICS-001-FR-103).
+        let mut car = some_car(Vec3::new(0.0, 2000.0, crate::arena::GOAL_HEIGHT * 0.5));
+        car.linear_velocity = Vec3::new(0.0, crate::drive::MAX_CAR_SPEED, 0.0);
 
         let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
         world.gravity = Vec3::ZERO;

@@ -139,10 +139,12 @@ version: `a245d35`).
    worst single steps. Its first finding, the `test2.jsonl` corner at
    8.9 s (~1,390 uu/s), is fixed by `RB-PHYSICS-001-FR-102` (real mesh
    radii, swept corners, wheel rays on every surface, ADR-0022): `test2`
-   mean one-step error 3.1 uu/s (was 15.2). Worst steps now: `test2`
-   6.058 s and 12.55 s (~400-430 uu/s, jump presses), 15.6-15.8 s (~290,
-   a double jump after a wall jump the real car doesn't get, then a
-   ceiling-ramp touch), `front` 25.967 s (~250).
+   mean one-step error 3.1 uu/s (was 15.2). `RB-PHYSICS-001-FR-103`
+   (ADR-0023) fixed the next two, keyboard dodges whose forward part
+   follows throttle plus the 2300 uu/s car speed cap: `test2` mean 2.72.
+   Worst steps now: `test2` 15.6-15.8 s (~290, a double jump after a wall
+   jump the real car doesn't get, then a ceiling-ramp touch), `front`
+   25.967 s (~250), `test2` 8.958 s (~220, the corner-wall impact).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -151,7 +153,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (457 tests: 27 `rb_domain`, 389
+- `cargo test --workspace`: pass (460 tests: 27 `rb_domain`, 392
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 17 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
