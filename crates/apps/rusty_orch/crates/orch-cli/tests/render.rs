@@ -1,5 +1,7 @@
-use orch_cli::fake::{fixture, task};
+use orch_cli::fake::{fixture, task, text};
 use orch_cli::{format_spec, render};
+use orch_core::board::{Author, EntryKind, NewEntry};
+use orch_core::task::Agent;
 
 #[test]
 fn render_includes_instruction_acceptance_refs_and_referenced_bodies() {
@@ -34,4 +36,52 @@ fn render_ends_with_the_format_spec_for_the_role() {
     assert!(prompt.contains("Never settle a decision"));
     assert!(!prompt.contains("decision,") && !prompt.contains(", decision"));
     assert!(prompt.trim_end().ends_with("At least one."));
+}
+
+/// Issue #448: a card resumed after a Question must see the human Answer,
+/// even though neither entry is in the card's immutable refs.
+#[test]
+fn render_includes_the_cards_own_question_and_its_answer() {
+    let (plan, mut board, _, unreferenced) = fixture();
+    let card = task(&plan);
+    let question = board
+        .append(NewEntry {
+            task: Some(card.id()),
+            author: Author::Agent(Agent::Local),
+            kind: EntryKind::Question,
+            body: text("Which branch is the baseline?"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("question");
+    // The human's answer is not tagged with the task; it is found via `to`.
+    board
+        .append(NewEntry {
+            task: None,
+            author: Author::Human,
+            kind: EntryKind::Answer { to: question },
+            body: text("Use main as of this morning."),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("answer");
+
+    let prompt = render(card, &board, &format_spec(card.spec().role));
+
+    assert!(prompt.contains("THIS CARD SO FAR"));
+    assert!(prompt.contains("Which branch is the baseline?"));
+    assert!(prompt.contains("Use main as of this morning."));
+    assert!(
+        !prompt.contains("Unrelated note."),
+        "other cards' entries stay out"
+    );
+    assert!(!prompt.contains(&format!("{unreferenced} [")));
+}
+
+#[test]
+fn render_omits_the_history_block_when_the_card_has_no_entries() {
+    let (plan, board, _, _) = fixture();
+    let card = task(&plan);
+    let prompt = render(card, &board, &format_spec(card.spec().role));
+    assert!(!prompt.contains("THIS CARD SO FAR"));
 }

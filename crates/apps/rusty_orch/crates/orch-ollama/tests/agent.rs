@@ -2,8 +2,9 @@ mod common;
 
 use std::time::Duration;
 
-use common::{exit, fixture, task, Call, FakeCommand, REPLY_ONE};
+use common::{exit, fixture, task, text, Call, FakeCommand, REPLY_ONE};
 use orch_cli::ExecError;
+use orch_core::board::{Author, EntryKind, NewEntry};
 use orch_core::task::Agent;
 use orch_dispatch::AgentRunner;
 use orch_ollama::OllamaAgent;
@@ -122,4 +123,39 @@ fn garbage_stdout_is_a_parse_error() {
 
 fn a_calls(a: &OllamaAgent<FakeCommand>) -> Vec<Call> {
     a.runner().calls.lock().expect("lock").clone()
+}
+
+/// Issue #448, through the adapter: the prompt a resumed card sends carries
+/// the answer to its earlier question.
+#[test]
+fn resumed_card_prompt_carries_the_answer() {
+    let (plan, mut board, _, _) = fixture();
+    let card = task(&plan);
+    let question = board
+        .append(NewEntry {
+            task: Some(card.id()),
+            author: Author::Agent(Agent::Local),
+            kind: EntryKind::Question,
+            body: text("Which branch is the baseline?"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("question");
+    board
+        .append(NewEntry {
+            task: None,
+            author: Author::Human,
+            kind: EntryKind::Answer { to: question },
+            body: text("Use main as of this morning."),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("answer");
+    let mut a = agent(FakeCommand::ok(REPLY_ONE));
+
+    a.run(Agent::Local, card, &board).expect("ok");
+
+    let calls = a_calls(&a);
+    let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
+    assert!(prompt.contains("Use main as of this morning."));
 }

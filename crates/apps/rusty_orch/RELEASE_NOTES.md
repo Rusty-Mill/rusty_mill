@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Resumed cards see their answers (#448)
+**2026-10-02** · (link once pushed)
+
+- **Fixed:** `orch_cli::render` only inlined entries the card's immutable refs pointed at, so a card resumed after a `Question` was re-run with no sign its question had been answered. The prompt now ends its context with the card's own live entries and any live `Answer` to them, minus what the refs already show, under a "THIS CARD SO FAR" heading that appears only when there is something to show. Every adapter inherits it. Found by the repository audit; the dispatcher test proved the state transition and the second call but never looked at the prompt.
+- **Added:** render test with a Question tagged to the card and an untagged human Answer, plus an `orch-ollama` adapter test asserting the resumed prompt on the fake's stdin carries the answer.
+
+---
+
 ## Second real agent — orch-codex
 **2026-10-02** · (link once pushed)
 
