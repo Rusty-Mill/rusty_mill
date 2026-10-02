@@ -4,6 +4,13 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Ollama real-binary test proves stdin delivery (#441)
+**2026-10-02** · (link once pushed)
+
+- **Fixed:** `orch-ollama`'s ignored `real_ollama` test only checked that the reply was non-empty, which a model ignoring stdin could satisfy. It now builds a Research card whose instruction carries a per-run nonce and asserts some entry body contains it, mirroring `orch-codex`'s `real_codex` test. Test only; no library change.
+
+---
+
 ## Superseded refs resolve to their live successors (#439)
 **2026-10-02** · (link once pushed)
 
