@@ -120,14 +120,16 @@ fn unwinding_releases_both_locks_without_rolling_back_mutation() {
     let sync_lock = SpinLock::new(0usize);
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            *std_lock.lock() = 1;
+            let mut guard = std_lock.lock();
+            *guard = 1;
             panic!("canonical guard unwinds");
         }))
         .is_err()
     );
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            *sync_lock.lock() = 1;
+            let mut guard = sync_lock.lock();
+            *guard = 1;
             panic!("facade guard unwinds");
         }))
         .is_err()

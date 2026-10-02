@@ -33,13 +33,24 @@ use rusty_std::sync::{Mutex, MutexGuard};
 /// A lock containing a non-`Send` value is neither `Send` nor `Sync`:
 ///
 /// ```compile_fail
+/// # extern crate alloc;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<rusty_sync::SpinLock<alloc::rc::Rc<()>>>();
 /// ```
 ///
 /// ```compile_fail
+/// # extern crate alloc;
 /// fn assert_sync<T: Sync>() {}
 /// assert_sync::<rusty_sync::SpinLock<alloc::rc::Rc<()>>>();
+/// ```
+///
+/// A `Send + !Sync` payload still permits both traits on the lock:
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// fn assert_sync<T: Sync>() {}
+/// assert_send::<rusty_sync::SpinLock<core::cell::Cell<u32>>>();
+/// assert_sync::<rusty_sync::SpinLock<core::cell::Cell<u32>>>();
 /// ```
 pub struct SpinLock<T> {
     inner: Mutex<T>,
@@ -73,8 +84,21 @@ impl<T> SpinLock<T> {
 /// A guard is `Send` only when its payload is `Send`:
 ///
 /// ```compile_fail
+/// # extern crate alloc;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<rusty_sync::SpinLockGuard<'static, alloc::rc::Rc<()>>>();
+/// ```
+///
+/// The corresponding positive bounds remain `T: Send` for `Send` and
+/// `T: Sync` for `Sync` (including a `Sync + !Send` payload):
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// fn assert_sync<T: Sync>() {}
+/// assert_send::<rusty_sync::SpinLockGuard<'static, core::cell::Cell<u32>>>();
+/// assert_sync::<
+///     rusty_sync::SpinLockGuard<'static, std::sync::MutexGuard<'static, ()>>,
+/// >();
 /// ```
 pub struct SpinLockGuard<'a, T> {
     inner: MutexGuard<'a, T>,

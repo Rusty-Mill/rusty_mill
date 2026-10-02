@@ -18,13 +18,24 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// A lock containing a non-`Send` value is neither `Send` nor `Sync`:
 ///
 /// ```compile_fail
+/// # extern crate alloc;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<rusty_std::sync::Mutex<alloc::rc::Rc<()>>>();
 /// ```
 ///
 /// ```compile_fail
+/// # extern crate alloc;
 /// fn assert_sync<T: Sync>() {}
 /// assert_sync::<rusty_std::sync::Mutex<alloc::rc::Rc<()>>>();
+/// ```
+///
+/// A `Send + !Sync` payload still permits both traits on the lock:
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// fn assert_sync<T: Sync>() {}
+/// assert_send::<rusty_std::sync::Mutex<core::cell::Cell<u32>>>();
+/// assert_sync::<rusty_std::sync::Mutex<core::cell::Cell<u32>>>();
 /// ```
 pub struct Mutex<T> {
     locked: AtomicBool,
@@ -65,8 +76,21 @@ impl<T> Mutex<T> {
 /// A guard is `Send` only when its payload is `Send`:
 ///
 /// ```compile_fail
+/// # extern crate alloc;
 /// fn assert_send<T: Send>() {}
 /// assert_send::<rusty_std::sync::MutexGuard<'static, alloc::rc::Rc<()>>>();
+/// ```
+///
+/// The corresponding positive bounds remain `T: Send` for `Send` and
+/// `T: Sync` for `Sync` (including a `Sync + !Send` payload):
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// fn assert_sync<T: Sync>() {}
+/// assert_send::<rusty_std::sync::MutexGuard<'static, core::cell::Cell<u32>>>();
+/// assert_sync::<
+///     rusty_std::sync::MutexGuard<'static, std::sync::MutexGuard<'static, ()>>,
+/// >();
 /// ```
 pub struct MutexGuard<'a, T> {
     lock: &'a Mutex<T>,
@@ -154,7 +178,8 @@ mod tests {
     fn unwind_releases_without_poisoning_or_rollback() {
         let lock = Mutex::new(1usize);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            *lock.lock() = 2;
+            let mut guard = lock.lock();
+            *guard = 2;
             panic!("release the guard while unwinding");
         }));
         assert!(result.is_err());
