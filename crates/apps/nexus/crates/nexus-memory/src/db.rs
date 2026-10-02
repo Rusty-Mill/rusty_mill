@@ -470,6 +470,22 @@ impl MemoryDb {
         }
     }
 
+    /// Fetch a memory by id for sync, tombstones included: a deleted
+    /// (`status = 'deleted'`, C36) row is a change to push like any other,
+    /// unlike [`Self::get`], where it reads as absent.
+    ///
+    /// # Errors
+    /// Returns an error on a query or decode failure.
+    pub fn get_for_sync(&self, id: &MemoryId) -> Result<Option<Memory>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM memories m WHERE m.id = ?1"))?;
+        let mut rows = stmt.query(params![id.as_str()])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_to_memory(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Fetch a memory by id **and record the access** — bumps `access_count`
     /// and sets `accessed_at` to now (the ACT-R vitality input). The bump is
     /// best-effort: a read-only or contended database still returns the memory,

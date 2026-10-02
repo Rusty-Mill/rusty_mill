@@ -39,6 +39,10 @@ async fn spawn_hub() -> (String, HubStore) {
 }
 
 async fn run_sync(db: &MemoryDb, hub: &str) -> Value {
+    run_sync_as(db, hub, NODE).await
+}
+
+async fn run_sync_as(db: &MemoryDb, hub: &str, node: &str) -> Value {
     let mut plugin = MemoryCorePlugin::with_db(db.clone());
     let fut = plugin
         .dispatch_async(
@@ -46,7 +50,7 @@ async fn run_sync(db: &MemoryDb, hub: &str) -> Value {
             &json!({
                 "hub_url": hub,
                 "secret": SECRET,
-                "node_id": NODE,
+                "node_id": node,
                 // The hub runs on loopback; opt out of the SSRF guard.
                 "allow_private_hub": true,
             }),
@@ -98,7 +102,7 @@ async fn a_dead_letter_the_hub_now_accepts_is_sent_and_cleared() {
         &[],
         &[
             (kept.id.to_string(), "an earlier refusal".to_string()),
-            ("mem_gone".to_string(), "deleted since".to_string()),
+            ("mem_never_existed".to_string(), "no such row".to_string()),
         ],
         &[("sync.push.updated_at", &Utc::now().to_rfc3339())],
     )
@@ -109,7 +113,7 @@ async fn a_dead_letter_the_hub_now_accepts_is_sent_and_cleared() {
     assert_eq!(report["push_refused"], 0, "{report}");
     assert_eq!(
         report["push_dead_letters"], 0,
-        "accepted, and the missing one dropped: {report}"
+        "accepted, and the one with no row dropped: {report}"
     );
     assert_eq!(store.count().unwrap(), 1);
     assert!(db.push_rejected_ids().unwrap().is_empty());
@@ -128,4 +132,74 @@ async fn a_cursor_left_in_the_future_starts_over() {
     let report = run_sync(&db, &hub).await;
     assert_eq!(report["pushed"], 1, "{report}");
     assert_eq!(store.count().unwrap(), 1);
+}
+
+/// The hub's stored copy of `id`, as a peer would pull it.
+fn hub_copy(store: &HubStore, id: &str) -> Value {
+    store
+        .pull("1970-01-01T00:00:00+00:00", None, None, 100)
+        .unwrap()
+        .into_iter()
+        .find(|r| r["id"] == id)
+        .expect("the hub holds the record")
+}
+
+#[tokio::test]
+async fn a_deletion_after_a_refusal_reaches_the_hub_and_peers() {
+    let (hub, store) = spawn_hub().await;
+    let a = MemoryDb::open_in_memory().unwrap();
+    let b = MemoryDb::open_in_memory().unwrap();
+    let m = Memory::new("synced, refused, then deleted");
+    a.insert(&m).unwrap();
+    run_sync_as(&a, &hub, "node-a").await;
+    run_sync_as(&b, &hub, "node-b").await;
+    assert!(b.get(&m.id).unwrap().is_some(), "the peer has it");
+
+    // An update from a clock running a day fast: refused, dead-lettered.
+    let mut fast = m.clone();
+    fast.content = "edited on a fast clock".to_string();
+    fast.updated_at = Utc::now() + Duration::days(1);
+    assert!(a.upsert_lww(&fast).unwrap());
+    let refused = run_sync_as(&a, &hub, "node-a").await;
+    assert_eq!(refused["push_refused"], 1, "{refused}");
+
+    // Deleted before the next sync: the retry sends the tombstone.
+    assert!(a.delete(&m.id).unwrap());
+    let report = run_sync_as(&a, &hub, "node-a").await;
+    assert_eq!(report["pushed"], 1, "the tombstone went out: {report}");
+    assert_eq!(
+        report["push_dead_letters"], 0,
+        "cleared once taken: {report}"
+    );
+    assert_eq!(hub_copy(&store, m.id.as_str())["status"], "deleted");
+
+    run_sync_as(&b, &hub, "node-b").await;
+    assert!(b.get(&m.id).unwrap().is_none(), "the peer hides it");
+}
+
+#[tokio::test]
+async fn a_refused_tombstone_behind_the_cursor_is_retried() {
+    let (hub, store) = spawn_hub().await;
+    let a = MemoryDb::open_in_memory().unwrap();
+    let b = MemoryDb::open_in_memory().unwrap();
+    let m = Memory::new("deleted, and its tombstone refused");
+    a.insert(&m).unwrap();
+    run_sync_as(&a, &hub, "node-a").await;
+    run_sync_as(&b, &hub, "node-b").await;
+    assert!(a.delete(&m.id).unwrap());
+    // As left by a refusal of the tombstone, with the cursor past it.
+    a.record_push_page(
+        &[],
+        &[(m.id.to_string(), "an earlier refusal".to_string())],
+        &[("sync.push.updated_at", &Utc::now().to_rfc3339())],
+    )
+    .unwrap();
+
+    let report = run_sync_as(&a, &hub, "node-a").await;
+    assert_eq!(report["pushed"], 1, "the retry sent it: {report}");
+    assert_eq!(report["push_dead_letters"], 0, "{report}");
+    assert_eq!(hub_copy(&store, m.id.as_str())["status"], "deleted");
+
+    run_sync_as(&b, &hub, "node-b").await;
+    assert!(b.get(&m.id).unwrap().is_none(), "the peer hides it");
 }

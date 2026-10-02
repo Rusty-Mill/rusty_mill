@@ -321,9 +321,11 @@ fn push_cursor(db: &MemoryDb, started: chrono::DateTime<Utc>) -> Result<(String,
     }
 }
 
-/// Re-send every memory the hub refused before, and return their ids so the
-/// scan that follows does not send them a second time. One that no longer
-/// exists, or is no longer authored here, leaves the dead letters unsent.
+/// Re-send every memory the hub refused before, as it is now: a memory
+/// deleted since is sent as its tombstone and kept until the hub takes it.
+/// Returns the ids it sent, so the scan that follows does not send them a
+/// second time. One that no longer exists at all, or is no longer authored
+/// here, leaves the dead letters unsent.
 async fn retry_refused(
     db: &MemoryDb,
     client: &reqwest::Client,
@@ -331,13 +333,14 @@ async fn retry_refused(
     report: &mut PushReport,
 ) -> Result<HashSet<String>, String> {
     let ids = db.push_rejected_ids().map_err(de)?;
+    let mut sent = HashSet::new();
     for chunk in ids.chunks(BATCH) {
         let mut records = Vec::with_capacity(chunk.len());
         let mut resolved = Vec::new();
         for id in chunk {
             let memory = parse_memory_id(id)
                 .ok()
-                .map(|mid| db.get(&mid))
+                .map(|mid| db.get_for_sync(&mid))
                 .transpose()
                 .map_err(de)?
                 .flatten();
@@ -348,10 +351,11 @@ async fn retry_refused(
         }
         let (mut accepted, refused) = send(client, cfg, &records).await?;
         report.add(records.len(), &accepted, &refused);
+        sent.extend(records.into_iter().map(|(id, _)| id));
         accepted.append(&mut resolved);
         db.record_push_page(&accepted, &refused, &[]).map_err(de)?;
     }
-    Ok(ids.into_iter().collect())
+    Ok(sent)
 }
 
 /// `m` as a push record stamped with our node id, keyed by its id, if it is
