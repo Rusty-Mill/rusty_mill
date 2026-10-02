@@ -123,10 +123,9 @@ version: `a245d35`).
 
 ## Next
 
-1. Re-run `rb-verify --self-trace <front.jsonl> 17.75 18.5` and
-   `<test2.jsonl> 4.3 5.0` to confirm `RB-PHYSICS-001-FR-097` (air
-   damping before flip torque): rotation error should stay ~0.00 through
-   both flips. Then the ~3 uu/s horizontal velocity a plain jump from rest
+1. `RB-PHYSICS-001-FR-097` (air damping before flip torque) is confirmed:
+   rotation error 0.00 through both captured flips. Next, the ~3 uu/s
+   horizontal velocity a plain jump from rest
    gains on its second tick (`front.jsonl`, 12.025 s: 3.3 vs 0.3 uu/s),
    the 5.575 s landing, the side-flip capture, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay

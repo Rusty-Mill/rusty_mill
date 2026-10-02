@@ -5637,7 +5637,11 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     4.317 s flip in `test2.jsonl` (first-tick gap 0.06 roll, 0.03 pitch,
     as predicted).
   - **Verification**: `drive` test
-    `air_damping_reads_the_spin_before_the_flip_torque`.
+    `air_damping_reads_the_spin_before_the_flip_torque`; real capture
+    re-traces: the front flip's first tick 3.89 rad/s as recorded, and
+    rotation error 0.00 through it (was 0.03) and through `test2.jsonl`'s
+    diagonal flip to 5.0 s (was 0.04; velocity error there 3.2 uu/s, was
+    4.1).
 
 ## Architecture and interfaces
 

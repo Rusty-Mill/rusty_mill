@@ -99,3 +99,7 @@ rate 7.23 rad/s (predicted 7.235; the candidate 7.19). A 3.5% stronger flip
 torque, the alternative considered, fit the diagonal flip only roughly and
 the pure front flip not at all (2.2%). So air control now runs before the
 flip torque (`jump::flip_pitch_scale` gives it the pitch lock).
+
+Real capture, 2026-10-02: confirmed. Rotation error 0.00 through the front
+flip (was 0.03) and through `test2.jsonl`'s diagonal flip to 5.0 s (was
+0.04).
