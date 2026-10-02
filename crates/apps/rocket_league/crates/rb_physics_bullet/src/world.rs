@@ -220,6 +220,7 @@ fn clamp_ball_velocity(ball: &mut RigidBody) {
 /// (added via `with_net`) gives the ball a real mass-spring net to be
 /// caught by, resolved after every other contact each step, and since
 /// `RB-PHYSICS-001-FR-038`, every car too — see `nets`' own doc comment.
+#[derive(Clone)]
 pub struct PhysicsWorld {
     pub ball: RigidBody,
     pub cars: Vec<RigidBody>,
@@ -1246,6 +1247,40 @@ pub fn simulate_recorded_one_step(
     frames
 }
 
+/// k-step predictions of a recording (`RB-VERIFY-003-FR-008`): frame `i`
+/// of the result is the candidate's prediction of `recorded[i]` from
+/// `recorded[i - k]` (from `recorded[0]` for `i < k`), stepping the
+/// recorded inputs in between. Each prediction starts from a copy of a
+/// world kept on the recording by `simulate_recorded_one_step`'s per-step
+/// snapping, so drive state runs on as there. `k = 1` is one-step
+/// prediction; a larger `k` shows how error compounds over `k` ticks
+/// without the chaos of one free run. `k = 0` counts as 1.
+pub fn simulate_recorded_k_step(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+    k: usize,
+) -> Vec<PhysicsFrame> {
+    let k = k.max(1);
+    let last = recorded.len().saturating_sub(1);
+    let mut frames = Vec::with_capacity(recorded.len());
+    frames.push(world.frame());
+    for start in 0..last {
+        world.snap_to_frame(&recorded[start]);
+        let first_target = if start == 0 { 1 } else { start + k };
+        if first_target <= last {
+            let mut ahead = world.clone();
+            for step in start..(start + k).min(last) {
+                step_recorded(&mut ahead, &recorded[step], &recorded[step + 1]);
+                if step + 1 >= first_target {
+                    frames.push(ahead.frame());
+                }
+            }
+        }
+        step_recorded(&mut world, &recorded[start], &recorded[start + 1]);
+    }
+    frames
+}
+
 /// Applies `prev`'s recorded inputs and steps `world` to `next`'s time.
 fn step_recorded(world: &mut PhysicsWorld, prev: &PhysicsFrame, next: &PhysicsFrame) {
     for car_state in &prev.cars {
@@ -1303,6 +1338,71 @@ mod tests {
             let ball_error = rec.ball.position.distance(&pred.ball.position);
             assert!(ball_error < 1e-3, "ball t={}", rec.timestamp_secs);
         }
+    }
+
+    /// A driven car on flat ground and a falling ball, 60 ticks, and a
+    /// fresh world to predict that run from.
+    fn candidate_run() -> (Vec<PhysicsFrame>, PhysicsWorld) {
+        let fresh = || {
+            let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+            let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+            PhysicsWorld::new(ball, flat_ground()).with_car(car)
+        };
+        let mut world = fresh();
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                steer: 0.5,
+                ..ControllerInput::default()
+            },
+        );
+        let mut recorded = vec![world.frame()];
+        for _ in 0..60 {
+            world.step(1.0 / 120.0);
+            recorded.push(world.frame());
+        }
+        (recorded, fresh())
+    }
+
+    /// `RB-VERIFY-003-FR-008`: k-step predictions of the candidate's own
+    /// run reproduce it, and `k = 1` (or 0) is one-step prediction.
+    #[test]
+    fn k_step_predictions_of_a_candidate_run_reproduce_it() {
+        let (recorded, fresh) = candidate_run();
+        let predicted = simulate_recorded_k_step(fresh.clone(), &recorded, 10);
+        assert_eq!(predicted.len(), recorded.len());
+        for (rec, pred) in recorded.iter().zip(&predicted).skip(1) {
+            let error = rec.cars[0].velocity.distance(&pred.cars[0].velocity);
+            assert!(error < 1e-2, "t={}: {error}", rec.timestamp_secs);
+        }
+        let one_step = simulate_recorded_one_step(fresh.clone(), &recorded);
+        assert_eq!(
+            simulate_recorded_k_step(fresh.clone(), &recorded, 1),
+            one_step
+        );
+        assert_eq!(simulate_recorded_k_step(fresh, &recorded, 0), one_step);
+    }
+
+    /// Frame `i` comes from recorded frame `i - k`: moving the recorded
+    /// ball at frame 5 moves the prediction of frame 15 (k = 10), not 14.
+    #[test]
+    fn a_k_step_prediction_starts_k_frames_back() {
+        let (mut recorded, fresh) = candidate_run();
+        recorded[5].ball.position.x += 100.0;
+        let predicted = simulate_recorded_k_step(fresh, &recorded, 10);
+        let off = |i: usize| {
+            recorded[i]
+                .ball
+                .position
+                .distance(&predicted[i].ball.position)
+        };
+        assert!(off(14) < 1e-3, "frame 14 is from frame 4: {}", off(14));
+        assert!(
+            (off(15) - 100.0).abs() < 1.0,
+            "frame 15 is from frame 5: {}",
+            off(15)
+        );
     }
 
     #[test]

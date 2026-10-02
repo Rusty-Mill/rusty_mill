@@ -8,7 +8,9 @@ use rb_domain::{
     BallState, CarState, ControllerInput, IngestError, PhysicsFrame, PhysicsStateSource, Quat, Vec3,
 };
 use rb_physics_bullet::body::CAR_HALF_EXTENTS;
-use rb_physics_bullet::world::{simulate_recorded, simulate_recorded_one_step};
+use rb_physics_bullet::world::{
+    simulate_recorded, simulate_recorded_k_step, simulate_recorded_one_step,
+};
 use rb_physics_bullet::PhysicsWorld;
 use rb_replay_ingest::ReplayFileSource;
 use std::path::Path;
@@ -267,6 +269,30 @@ pub fn one_step_capture(capture_path: impl AsRef<Path>) -> Result<Vec<TraceRow>,
     Ok(trace_rows(&recorded, &candidate, 0.0, f32::INFINITY))
 }
 
+/// Default horizon (ticks) for `rb-verify --self-kstep`: a quarter second
+/// at 120 Hz, long enough for position-level effects (contact correction,
+/// suspension) to show, short enough that the chaos of a free run doesn't.
+pub const DEFAULT_K_STEP: usize = 30;
+
+/// A capture scored against the candidate's k-step predictions
+/// (`RB-VERIFY-003-FR-008`, `simulate_recorded_k_step`): each frame is
+/// predicted `k` ticks ahead from the recorded frame `k` before it, then
+/// scored like `--self`. Steadier than one free run for comparing model
+/// changes, and it sees positions, which one-step barely moves.
+pub fn k_step_score(
+    capture_path: impl AsRef<Path>,
+    k: usize,
+    max_timestamp_delta_secs: f32,
+) -> Result<DivergenceScore, IngestError> {
+    let (recorded, world) = seed(capture_path)?;
+    let candidate = simulate_recorded_k_step(world, &recorded, k);
+    Ok(rb_domain::divergence::score(
+        &recorded,
+        &candidate,
+        max_timestamp_delta_secs,
+    ))
+}
+
 /// Pairs recorded and candidate frames by index and cars by `player_id`,
 /// keeping frames whose time since the first recorded frame falls in
 /// `[from_secs, to_secs]`.
@@ -512,6 +538,24 @@ mod tests {
     #[test]
     fn one_step_missing_file_reports_io_error() {
         let result = one_step_capture("does-not-exist.capture.jsonl");
+        assert!(matches!(result, Err(IngestError::Io(_))));
+    }
+
+    /// RB-VERIFY-003-FR-008: every frame is scored, and predicting from
+    /// further back can only let more error build up on this fixture.
+    #[test]
+    fn k_step_scores_every_frame_and_grows_with_k() {
+        let frames = one_step_capture(capture_fixture()).unwrap().len();
+        let one = k_step_score(capture_fixture(), 1, DEFAULT_MAX_TIMESTAMP_DELTA_SECS).unwrap();
+        let thirty = k_step_score(capture_fixture(), 30, DEFAULT_MAX_TIMESTAMP_DELTA_SECS).unwrap();
+        assert_eq!(one.frames_compared, frames);
+        assert_eq!(thirty.frames_compared, frames);
+        assert!(thirty.cars.mean_position_distance >= one.cars.mean_position_distance);
+    }
+
+    #[test]
+    fn k_step_missing_file_reports_io_error() {
+        let result = k_step_score("does-not-exist.capture.jsonl", 30, 0.02);
         assert!(matches!(result, Err(IngestError::Io(_))));
     }
 

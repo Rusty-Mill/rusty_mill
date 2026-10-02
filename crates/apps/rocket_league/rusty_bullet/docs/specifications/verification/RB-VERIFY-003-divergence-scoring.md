@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.17.0
+- Version: 0.18.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -184,6 +184,24 @@ them.
   - **Verification**: `rb_verify_cli` test
     `one_step_rows_cover_the_whole_capture_and_start_exact` checks the
     first row's ball matches exactly.
+- `RB-VERIFY-003-FR-008` (implemented): k-step prediction scoring.
+  - `rb-verify --self-kstep <capture-file> [k]` (`k_step_score`,
+    `rb_physics_bullet::world::simulate_recorded_k_step`) predicts every
+    frame `k` ticks ahead (default `DEFAULT_K_STEP` = 30) from the
+    recorded frame `k` before it and scores it with
+    `rb_domain::divergence::score`.
+  - Each prediction starts from a clone of a world kept on the recording
+    by one-step snapping, so drive state carries on. `k = 1` is one-step
+    prediction.
+  - It sees position-level effects that one-step barely moves, without a
+    free run's chaos (ADR-0030).
+  - **Verification**:
+    - `rb_physics_bullet` tests
+      `k_step_predictions_of_a_candidate_run_reproduce_it` and
+      `a_k_step_prediction_starts_k_frames_back`.
+    - `rb_verify_cli` tests `k_step_scores_every_frame_and_grows_with_k`
+      and `k_step_missing_file_reports_io_error`.
+
 
 ## Architecture and interfaces
 
@@ -402,6 +420,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.18.0 (2026-10-02): `RB-VERIFY-003-FR-008` implemented — k-step
+  prediction scoring (`--self-kstep`).
 - 0.17.0 (2026-10-02): `RB-VERIFY-003-FR-007` rows print the ball's
   recorded and simulated velocity.
 - 0.16.0 (2026-10-02): `RB-VERIFY-003-FR-007` implemented — the ball in

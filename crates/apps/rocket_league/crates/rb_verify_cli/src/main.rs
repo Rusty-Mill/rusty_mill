@@ -29,13 +29,16 @@
 //!   at every frame in that window, with the recorded input and the
 //!   recorded vs. simulated state side by side, on the same time axis
 //!   `--self-growth` prints.
+//! - `rb-verify --self-kstep <capture-file> [k]`: every frame predicted
+//!   `k` ticks ahead (default 30) from the recorded frame `k` before it,
+//!   scored like `--self` (`k_step_score`, `RB-VERIFY-003-FR-008`).
 
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{ControllerInput, Vec3};
 use rb_verify_cli::{
-    car_frame_spin, one_step_capture, rotation_rate, score_capture_against_candidate,
+    car_frame_spin, k_step_score, one_step_capture, rotation_rate, score_capture_against_candidate,
     score_capture_growth, score_replay_against_capture, trace_capture, TraceRow,
-    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::process::ExitCode;
@@ -199,7 +202,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]"
+    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k]"
 }
 
 fn main() -> ExitCode {
@@ -230,6 +233,31 @@ fn main() -> ExitCode {
             }
             Ok(rows) => {
                 print_trace(&rows);
+                ExitCode::SUCCESS
+            }
+        };
+    }
+
+    if first == "--self-kstep" {
+        let Some(capture_path) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let k = match args.next().map(|raw| raw.parse::<usize>()) {
+            None => DEFAULT_K_STEP,
+            Some(Ok(k)) if k > 0 => k,
+            Some(_) => {
+                eprintln!("invalid k (a positive tick count)\n{}", usage());
+                return ExitCode::FAILURE;
+            }
+        };
+        return match k_step_score(capture_path, k, DEFAULT_MAX_TIMESTAMP_DELTA_SECS) {
+            Err(e) => {
+                eprintln!("ingestion failed: {e}");
+                ExitCode::FAILURE
+            }
+            Ok(score) => {
+                print_score(&score);
                 ExitCode::SUCCESS
             }
         };

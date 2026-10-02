@@ -117,6 +117,7 @@ pub const NET_SUBSTEPS: u32 = 8;
 /// built (`rest_length`) — always the flat, undeformed grid spacing for
 /// `NetMesh::rectangular_grid`, since every spring is measured at
 /// construction time before anything can have moved.
+#[derive(Clone)]
 struct Spring {
     a: usize,
     b: usize,
@@ -128,6 +129,7 @@ struct Spring {
 /// fields (set once at construction to `NET_RESTITUTION`/`NET_FRICTION`)
 /// are what `solver::resolve_contacts_between` actually reads when the ball
 /// touches that point; `NetMesh` itself carries no separate copy of either.
+#[derive(Clone)]
 pub struct NetMesh {
     pub points: Vec<RigidBody>,
     anchored: Vec<bool>,

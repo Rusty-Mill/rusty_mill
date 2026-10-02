@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-kstep <capture> [k]` (`RB-VERIFY-003-FR-008`,
+  ADR-0030): every frame predicted `k` ticks ahead from the recording
+  (`k_step_score`, `world::simulate_recorded_k_step`); `PhysicsWorld` and
+  `NetMesh` are `Clone`.
 - ADR-0028 (`RB-PHYSICS-001-FR-109`): `mesh::StaticMesh` classifies its
   triangle edges (convex, smooth, open), and sphere contacts on an edge
   follow Bullet's `btAdjustInternalEdgeContacts`.
