@@ -78,11 +78,37 @@ where
     W: FnMut(&mut File, &[u8]) -> io::Result<()>,
     S: FnMut(&File) -> io::Result<()>,
 {
+    replace_with_create(
+        path,
+        bytes,
+        permissions,
+        &mut candidate,
+        create_new,
+        &mut write_file,
+        &mut sync_file,
+    )
+}
+
+fn replace_with_create<C, O, W, S>(
+    path: &Path,
+    bytes: &[u8],
+    permissions: Permissions,
+    mut candidate: C,
+    mut open_candidate: O,
+    mut write_file: W,
+    mut sync_file: S,
+) -> io::Result<()>
+where
+    C: FnMut(&Path) -> io::Result<PathBuf>,
+    O: FnMut(&Path, Permissions) -> io::Result<File>,
+    W: FnMut(&mut File, &[u8]) -> io::Result<()>,
+    S: FnMut(&File) -> io::Result<()>,
+{
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let tmp = candidate(path)?;
-        let mut file = match create_new(&tmp, permissions) {
+        let mut file = match open_candidate(&tmp, permissions) {
             Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) if candidate_already_exists(&tmp, &err) => continue,
             Err(err) => return Err(err),
         };
 
@@ -103,6 +129,18 @@ where
         io::ErrorKind::AlreadyExists,
         format!("could not create an atomic-write temp file after {MAX_TEMP_ATTEMPTS} attempts"),
     ))
+}
+
+fn candidate_already_exists(tmp: &Path, create_error: &io::Error) -> bool {
+    if create_error.kind() == io::ErrorKind::AlreadyExists {
+        return true;
+    }
+
+    // On Windows, CreateFileW can report ERROR_ACCESS_DENIED when CREATE_NEW
+    // encounters a directory. Confirm that special case without following a
+    // symlink; an unconfirmed access failure remains the caller's error.
+    create_error.kind() == io::ErrorKind::PermissionDenied
+        && fs::symlink_metadata(tmp).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// A name in `path`'s directory that no other writer uses: hidden, and
@@ -258,6 +296,71 @@ mod tests {
             fs::read(collision.join("sentinel")).expect("read sentinel"),
             b"keep"
         );
+    }
+
+    #[test]
+    fn permission_denied_for_a_confirmed_directory_collision_is_retried() {
+        let dir = Scratch::new("permission-denied-directory-collision");
+        let target = dir.0.join("target");
+        let collision = dir.0.join("collision");
+        fs::create_dir(&collision).expect("seed collision");
+        fs::write(collision.join("sentinel"), b"keep").expect("populate collision");
+        let candidate = dir.0.join("candidate");
+        let mut candidates = [collision.clone(), candidate].into_iter();
+        let mut create_attempts = 0;
+
+        replace_with_create(
+            &target,
+            b"new",
+            Permissions::Default,
+            |_| Ok(candidates.next().expect("enough candidates")),
+            |path, permissions| {
+                create_attempts += 1;
+                if path == collision {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else {
+                    create_new(path, permissions)
+                }
+            },
+            |file, contents| file.write_all(contents),
+            File::sync_all,
+        )
+        .expect("retry succeeds");
+
+        assert_eq!(create_attempts, 2);
+        assert_eq!(
+            fs::read(collision.join("sentinel")).expect("read sentinel"),
+            b"keep"
+        );
+        assert_eq!(fs::read(&target).expect("read target"), b"new");
+    }
+
+    #[test]
+    fn permission_denied_without_a_confirmed_collision_is_returned() {
+        let dir = Scratch::new("permission-denied-no-collision");
+        let target = dir.0.join("target");
+        fs::write(&target, b"old target").expect("seed target");
+        let candidate = dir.0.join("absent-candidate");
+        let mut create_attempts = 0;
+
+        let err = replace_with_create(
+            &target,
+            b"new",
+            Permissions::Default,
+            |_| Ok(candidate.clone()),
+            |_, _| {
+                create_attempts += 1;
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            |file, contents| file.write_all(contents),
+            File::sync_all,
+        )
+        .expect_err("permission failure is preserved");
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(create_attempts, 1);
+        assert_eq!(fs::read(&target).expect("read target"), b"old target");
+        assert!(!candidate.exists());
     }
 
     #[cfg(unix)]
