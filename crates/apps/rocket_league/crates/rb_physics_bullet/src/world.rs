@@ -31,6 +31,17 @@ pub const BALL_MAX_SPEED: f32 = 6000.0;
 /// `BALL_MAX_SPEED` is.
 pub const BALL_MAX_ANG_SPEED: f32 = 6.0;
 
+/// A car body's contact with any static shape: RocketSim's fixed
+/// `CARWORLD_COLLISION_FRICTION = 0.3` and `CARWORLD_COLLISION_RESTITUTION =
+/// 0.3`, which override the two surfaces' own coefficients
+/// (`RB-PHYSICS-001-FR-100`, ADR-0021). Only the body touches here: a car
+/// on its wheels rides above the floor on its suspension, and its tires
+/// grip through `drive`.
+const CAR_WORLD_MATERIAL: solver::StaticMaterial = solver::StaticMaterial::Pair {
+    restitution: 0.3,
+    friction: 0.3,
+};
+
 /// Scales `ball.linear_velocity`/`ball.angular_velocity` back down to
 /// `BALL_MAX_SPEED`/`BALL_MAX_ANG_SPEED` (preserving direction) if either is
 /// exceeded — a genuine clamp, the same kind `drive::clamp_angular_speed`
@@ -503,65 +514,71 @@ impl PhysicsWorld {
     /// the same six `PhysicsWorld` fields directly, same as before
     /// `RB-PHYSICS-001-FR-051`).
     ///
-    /// `is_car` makes the ground manifold frictionless (`None`): a car's
-    /// floor grip comes from `drive`'s tire model, not its box's contact
-    /// friction (`RB-PHYSICS-001-FR-081`). Every other manifold carries
-    /// its shape's own friction.
+    /// `is_car` gives every manifold RocketSim's fixed car-vs-world
+    /// coefficients (`CAR_WORLD_MATERIAL`, `RB-PHYSICS-001-FR-100`); every
+    /// other body's manifolds carry the shape's own coefficients.
     fn static_contact_manifolds(
         body: &RigidBody,
         scene: &StaticScene,
         is_car: bool,
-    ) -> Vec<(f32, Option<f32>, Vec<collision::Contact>)> {
-        let mut manifolds: Vec<(f32, Option<f32>, Vec<collision::Contact>)> = Vec::new();
-
-        let ground_contacts = collision::contacts_vs_plane(body, scene.ground);
-        if !ground_contacts.is_empty() {
-            let friction = (!is_car).then_some(scene.ground.friction);
-            manifolds.push((scene.ground.restitution, friction, ground_contacts));
-        }
-        for wall in scene.walls {
-            let contacts = collision::contacts_vs_plane(body, wall);
-            if !contacts.is_empty() {
-                manifolds.push((wall.restitution, Some(wall.friction), contacts));
+    ) -> Vec<(solver::StaticMaterial, Vec<collision::Contact>)> {
+        let material = |restitution: f32, friction: f32| {
+            if is_car {
+                CAR_WORLD_MATERIAL
+            } else {
+                solver::StaticMaterial::Surface {
+                    restitution,
+                    friction,
+                }
             }
+        };
+        let mut manifolds = Vec::new();
+        let mut push = |restitution: f32, friction: f32, contacts: Vec<collision::Contact>| {
+            if !contacts.is_empty() {
+                manifolds.push((material(restitution, friction), contacts));
+            }
+        };
+        let ground = scene.ground;
+        push(
+            ground.restitution,
+            ground.friction,
+            collision::contacts_vs_plane(body, ground),
+        );
+        for wall in scene.walls {
+            push(
+                wall.restitution,
+                wall.friction,
+                collision::contacts_vs_plane(body, wall),
+            );
         }
         for curve in scene.curves {
-            let contacts = collision::contacts_vs_quarter_pipe(body, curve);
-            if !contacts.is_empty() {
-                manifolds.push((curve.restitution, Some(curve.friction), contacts));
-            }
+            push(
+                curve.restitution,
+                curve.friction,
+                collision::contacts_vs_quarter_pipe(body, curve),
+            );
         }
-        for corner_fillet in scene.corner_fillets {
-            let contacts = collision::contacts_vs_corner_fillet(body, corner_fillet);
-            if !contacts.is_empty() {
-                manifolds.push((
-                    corner_fillet.restitution,
-                    Some(corner_fillet.friction),
-                    contacts,
-                ));
-            }
+        for fillet in scene.corner_fillets {
+            push(
+                fillet.restitution,
+                fillet.friction,
+                collision::contacts_vs_corner_fillet(body, fillet),
+            );
         }
         for goal_wall in scene.goal_walls {
-            let contacts = collision::contacts_vs_goal_wall(body, goal_wall);
-            if !contacts.is_empty() {
-                manifolds.push((
-                    goal_wall.plane.restitution,
-                    Some(goal_wall.plane.friction),
-                    contacts,
-                ));
-            }
+            push(
+                goal_wall.plane.restitution,
+                goal_wall.plane.friction,
+                collision::contacts_vs_goal_wall(body, goal_wall),
+            );
         }
         for bounded_wall in scene.bounded_walls {
-            let contacts = collision::contacts_vs_bounded_wall(body, bounded_wall);
-            if !contacts.is_empty() {
-                manifolds.push((
-                    bounded_wall.plane.restitution,
-                    Some(bounded_wall.plane.friction),
-                    contacts,
-                ));
-            }
+            push(
+                bounded_wall.plane.restitution,
+                bounded_wall.plane.friction,
+                collision::contacts_vs_bounded_wall(body, bounded_wall),
+            );
         }
-
         manifolds
     }
 
@@ -723,13 +740,13 @@ impl PhysicsWorld {
         bodies.push(self.ball);
         bodies.extend(self.cars.iter().copied());
 
-        let mut static_manifolds: Vec<(usize, f32, Option<f32>, Vec<collision::Contact>)> =
+        let mut static_manifolds: Vec<(usize, solver::StaticMaterial, Vec<collision::Contact>)> =
             Vec::new();
         for (body_index, body) in bodies.iter().enumerate() {
-            for (restitution, friction, contacts) in
+            for (material, contacts) in
                 Self::static_contact_manifolds(body, &static_scene, body_index > 0)
             {
-                static_manifolds.push((body_index, restitution, friction, contacts));
+                static_manifolds.push((body_index, material, contacts));
             }
         }
 
@@ -1768,23 +1785,44 @@ mod tests {
         assert_eq!(world.frame().cars[0].boost_amount, crate::drive::MAX_BOOST);
     }
 
+    /// `RB-PHYSICS-001-FR-100`: a car body sliding on the floor (here
+    /// upside down, no wheel touching) slows under RocketSim's car-vs-world
+    /// friction, 0.3 g; it used to slide frictionlessly.
+    #[test]
+    fn an_upside_down_car_slides_to_a_stop_under_car_world_friction() {
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 1000.0, 93.0));
+        let height = crate::body::CAR_HITBOX_OFFSET.z + CAR_HALF_EXTENTS.z;
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, height));
+        car.orientation = rb_domain::Quat::new(1.0, 0.0, 0.0, 0.0);
+        car.update_inertia_tensor();
+        car.linear_velocity = Vec3::new(500.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let dt = 1.0 / 120.0;
+        for _ in 0..60 {
+            world.step(dt);
+        }
+        let expected = 500.0 - 0.3 * 650.0 * 0.5;
+        let got = world.cars[0].linear_velocity.x;
+        assert!(
+            (got - expected).abs() < 15.0,
+            "expected about {expected} uu/s after 0.5 s of sliding, got {got}"
+        );
+    }
+
     #[test]
     fn a_coasting_car_loses_only_the_tires_coasting_speed_not_box_friction() {
-        // RB-PHYSICS-001-FR-081: the box's floor contact is frictionless, so
-        // a car rolling straight with no input slows at COASTING_DECELERATION
-        // (525 uu/s^2), not the box's Coulomb friction (~0.5 g, ~325 uu/s
-        // lost in half a second on its own). Restitutions are zeroed so the
-        // car stays in continuous ground contact.
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 0.0, 93.0));
-        let mut car = some_car(Vec3::new(0.0, 0.0, CAR_HALF_EXTENTS.z));
-        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
-        car.restitution = 0.0;
-        let ground = StaticPlane {
-            restitution: 0.0,
-            ..flat_ground()
-        };
-        let mut world = PhysicsWorld::new(ball, ground).with_car(car);
+        // RB-PHYSICS-001-FR-081/FR-100: a car on its wheels rides above the
+        // floor on its suspension, so its body's car-vs-world friction never
+        // touches and a car rolling straight with no input slows at
+        // COASTING_DECELERATION (525 uu/s^2) alone.
+        let ball = RigidBody::sphere(1.0, 1.0, Vec3::new(1000.0, 1000.0, 93.0));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
         let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            world.step(dt);
+        }
+        world.cars[0].linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
         for _ in 0..60 {
             world.step(dt);
         }

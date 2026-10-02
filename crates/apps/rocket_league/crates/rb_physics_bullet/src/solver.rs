@@ -228,8 +228,9 @@ fn combine_restitution(a: f32, b: f32) -> f32 {
 /// `CARCAR_COLLISION_FRICTION = 0.09f`, and
 /// `CARBALL_COLLISION_FRICTION = 2.0f` — a car-vs-ball friction coefficient
 /// *above* `1.0`, something no combine of two bodies' own per-material
-/// friction values bounded to a sane range could ever produce. Not
-/// adopted, same reason as `combine_restitution`'s own finding.
+/// friction values bounded to a sane range could ever produce. The
+/// car-vs-world pair is adopted through `StaticMaterial::Pair`
+/// (`RB-PHYSICS-001-FR-100`); the dynamic pairs are not yet.
 fn combine_friction(a: f32, b: f32) -> f32 {
     ((a + b) * 0.5).clamp(-10.0, 10.0)
 }
@@ -1403,6 +1404,37 @@ pub fn resolve_dynamic_manifolds(
         .collect();
 }
 
+/// What a static manifold's contacts bounce and slide with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StaticMaterial {
+    /// The shape's own coefficients, combined with the body's own
+    /// (`combine_restitution`, `combine_friction`).
+    Surface { restitution: f32, friction: f32 },
+    /// Coefficients fixed for the pair, used as they are: RocketSim's
+    /// car-vs-world override (`RB-PHYSICS-001-FR-100`).
+    Pair { restitution: f32, friction: f32 },
+}
+
+impl StaticMaterial {
+    /// `(restitution, friction)` for a contact between `body` and this
+    /// material.
+    fn combined_with(self, body: &RigidBody) -> (f32, f32) {
+        match self {
+            Self::Surface {
+                restitution,
+                friction,
+            } => (
+                combine_restitution(body.restitution, restitution),
+                combine_friction(body.friction, friction),
+            ),
+            Self::Pair {
+                restitution,
+                friction,
+            } => (restitution, friction),
+        }
+    }
+}
+
 /// Resolves every static-shape manifold and every dynamic-vs-dynamic
 /// manifold touching any of `bodies` together, in one combined solve
 /// (`RB-PHYSICS-001-FR-052`) — the same "share one accumulator instead of
@@ -1422,14 +1454,13 @@ pub fn resolve_dynamic_manifolds(
 /// symmetric two-wall corner setup, with one wall replaced by a very-heavy
 /// dynamic body standing in for it).
 ///
-/// `static_manifolds` is `(body_index, static_restitution, static_friction,
-/// contacts)` tuples, one per static shape some `bodies[body_index]`
-/// currently touches — mirroring `resolve_static_manifolds`'s own
-/// per-manifold combined-restitution/friction setup, just indexed into
-/// `bodies` instead of naming a single body directly. A `None`
-/// `static_friction` makes that manifold frictionless whatever the body's
-/// own friction: a grounded car's floor contact, whose grip comes from its
-/// tires instead (`RB-PHYSICS-001-FR-081`). `dynamic_manifolds`
+/// `static_manifolds` is `(body_index, material, contacts)` tuples, one per
+/// static shape some `bodies[body_index]` currently touches — mirroring
+/// `resolve_static_manifolds`'s own per-manifold combined-restitution/
+/// friction setup, just indexed into `bodies` instead of naming a single
+/// body directly; `material` says whether the shape's coefficients combine
+/// with the body's or are fixed for the pair (`StaticMaterial`).
+/// `dynamic_manifolds`
 /// is unchanged from `resolve_dynamic_manifolds` — `(index_a, index_b,
 /// contacts)` triples. Every body's own static contacts and dynamic
 /// manifolds share one `DeltaVelocity`/push-delta accumulator (indexed by
@@ -1454,7 +1485,7 @@ pub fn resolve_dynamic_manifolds(
 /// already left open as separate future work.
 pub fn resolve_manifolds(
     bodies: &mut [RigidBody],
-    static_manifolds: &[(usize, f32, Option<f32>, Vec<Contact>)],
+    static_manifolds: &[(usize, StaticMaterial, Vec<Contact>)],
     dynamic_manifolds: &[(usize, usize, Vec<Contact>)],
     dt: f32,
     caches: &mut HashMap<(usize, usize), ContactCache>,
@@ -1492,26 +1523,21 @@ pub fn resolve_manifolds(
 
     let mut solved_static: Vec<StaticManifold> = static_manifolds
         .iter()
-        .map(
-            |(body_index, static_restitution, static_friction, contacts)| {
-                let body = bodies[*body_index];
-                let combined_restitution =
-                    combine_restitution(body.restitution, *static_restitution);
-                let combined_friction =
-                    static_friction.map_or(0.0, |f| combine_friction(body.friction, f));
-                let mut effective_body = body;
-                effective_body.restitution = combined_restitution;
-                let rows = contacts
-                    .iter()
-                    .map(|c| setup_rows(&effective_body, c, dt))
-                    .collect();
-                StaticManifold {
-                    body_index: *body_index,
-                    combined_friction,
-                    rows,
-                }
-            },
-        )
+        .map(|(body_index, material, contacts)| {
+            let body = bodies[*body_index];
+            let (combined_restitution, combined_friction) = material.combined_with(&body);
+            let mut effective_body = body;
+            effective_body.restitution = combined_restitution;
+            let rows = contacts
+                .iter()
+                .map(|c| setup_rows(&effective_body, c, dt))
+                .collect();
+            StaticManifold {
+                body_index: *body_index,
+                combined_friction,
+                rows,
+            }
+        })
         .collect();
 
     let mut solved_dynamic: Vec<DynamicManifold> = dynamic_manifolds
@@ -1856,7 +1882,14 @@ mod tests {
         let mut bodies_c = vec![ball_c, heavy_c];
         resolve_manifolds(
             &mut bodies_c,
-            &[(0, plane_x_c.restitution, Some(plane_x_c.friction), cxc)],
+            &[(
+                0,
+                StaticMaterial::Surface {
+                    restitution: plane_x_c.restitution,
+                    friction: plane_x_c.friction,
+                },
+                cxc,
+            )],
             &[(0, 1, cyc)],
             dt,
             &mut HashMap::new(),

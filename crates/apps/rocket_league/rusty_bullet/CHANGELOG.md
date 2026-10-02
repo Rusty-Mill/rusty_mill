@@ -940,6 +940,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- The car body uses RocketSim's car-vs-world friction and restitution
+  (0.3 / 0.3) against every static shape, floor included
+  (`RB-PHYSICS-001-FR-100`, ADR-0021, superseding FR-081's frictionless
+  floor); per the owner's front-flip body impact.
 - Wheels grip and brake whenever they touch (`RB-PHYSICS-001-FR-099`,
   ADR-0020): per-wheel brake, engine quartered below three wheels, no air
   control while any wheel touches; per the owner's front-flip landing.

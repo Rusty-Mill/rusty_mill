@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Car bodies slide with friction
+**2026-10-02** · `RB-PHYSICS-001-FR-100` · ADR-0021
+
+- A car's body now meets the floor, walls and curves with RocketSim's
+  car-vs-world friction and bounce (0.3 each) instead of a frictionless
+  floor and averaged placeholders. The owner's front flip loses 28 uu/s
+  when its body hits the floor; the port lost 2. Grip on four wheels is
+  unchanged, since the body rides above the floor. 444 tests.
+
 ## Wheels grip as soon as they touch
 **2026-10-02** · `RB-PHYSICS-001-FR-099` · ADR-0020
 

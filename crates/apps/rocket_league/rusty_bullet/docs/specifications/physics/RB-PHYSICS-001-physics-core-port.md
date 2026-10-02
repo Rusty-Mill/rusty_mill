@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.103.0
+- Version: 0.104.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5671,6 +5671,19 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     from 19.058 s as recorded (was 0); `--self-growth` window 19 s 11 uu /
     34 uu/s (was 24 / 61), `test2.jsonl` window 5 s 7.3 uu / 0.05 rad /
     39 uu/s (was 12.1 / 0.14 / 76).
+- `RB-PHYSICS-001-FR-100` (the car body uses RocketSim's car-vs-world
+  material, implemented, verified by tests, ADR-0021): every car-vs-static
+  contact, floor included, uses friction 0.3 and restitution 0.3 as fixed
+  pair values (`solver::StaticMaterial::Pair`, `CAR_WORLD_MATERIAL`),
+  superseding FR-081's frictionless floor.
+  - Why: the owner's front flip's body hits the floor at 19.083 s
+    (`front.jsonl`) and loses 28 uu/s of forward speed in that tick; the
+    candidate's frictionless body lost 2. RocketSim overrides car-world
+    manifolds with `CARWORLD_COLLISION_FRICTION`/`_RESTITUTION` = 0.3.
+  - **Verification**: `world` tests
+    `an_upside_down_car_slides_to_a_stop_under_car_world_friction` and
+    `a_coasting_car_loses_only_the_tires_coasting_speed_not_box_friction`
+    (rewritten to ride on the suspension).
 
 ## Architecture and interfaces
 
@@ -7153,6 +7166,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.104.0 (2026-10-02): `RB-PHYSICS-001-FR-100` — car body uses
+  RocketSim's car-vs-world material (ADR-0021). 378 tests in
+  `rb_physics_bullet`.
 - 0.103.0 (2026-10-02): `RB-PHYSICS-001-FR-099` — wheels grip and brake
   whenever they touch (ADR-0020). 377 tests in `rb_physics_bullet`.
 - 0.102.0 (2026-10-02): `RB-PHYSICS-001-FR-098` — the brake acts along
