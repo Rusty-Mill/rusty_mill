@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rb-verify --self-onestep <capture> [count]` (`RB-VERIFY-003-FR-006`):
+  one-step prediction error, each frame predicted from the recorded frame
+  before it, listing the model's worst single steps.
 - `rb-verify --self-trace` prints each car's spin in its own
   `(forward, side, up)` frame (`RB-VERIFY-003` 0.14.0), to read a spin
   change as roll, pitch or yaw.

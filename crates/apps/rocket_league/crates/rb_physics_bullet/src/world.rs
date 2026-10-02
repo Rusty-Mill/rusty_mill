@@ -11,7 +11,7 @@ use crate::collision;
 use crate::net::NetMesh;
 use crate::solver::ContactCache;
 use crate::{drive, integrate, solver};
-use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Vec3};
+use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
 use std::collections::HashMap;
 
 /// Hard cap (uu/s) on the ball's linear speed — confirmed exact against
@@ -826,6 +826,32 @@ impl PhysicsWorld {
         self.elapsed_secs += dt;
     }
 
+    /// Sets the ball's and every car's position, orientation and
+    /// velocities to `frame`'s (cars by `player_id`), keeping each car's
+    /// drive state (boost, jump and flip timers): the per-step reset of a
+    /// one-step prediction run (`simulate_recorded_one_step`). Cars
+    /// `frame` doesn't mention keep their state.
+    pub fn snap_to_frame(&mut self, frame: &PhysicsFrame) {
+        snap_body(
+            &mut self.ball,
+            frame.ball.position,
+            frame.ball.rotation,
+            frame.ball.velocity,
+            frame.ball.angular_velocity,
+        );
+        for car_state in &frame.cars {
+            if let Some(car) = self.cars.get_mut(car_state.player_id as usize) {
+                snap_body(
+                    car,
+                    car_state.position,
+                    car_state.rotation,
+                    car_state.velocity,
+                    car_state.angular_velocity,
+                );
+            }
+        }
+    }
+
     /// The scene's current state as a `PhysicsFrame`, for consumption by
     /// `RB-VERIFY-003`'s divergence scorer. One `CarState` per car in
     /// `self.cars`, `player_id` set to each car's index, `input` set to
@@ -918,21 +944,54 @@ pub fn simulate_recorded(mut world: PhysicsWorld, recorded: &[PhysicsFrame]) -> 
     let mut frames = Vec::with_capacity(recorded.len());
     frames.push(world.frame());
     for pair in recorded.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        for car_state in &prev.cars {
-            let Some(input) = car_state.input else {
-                continue;
-            };
-            let index = car_state.player_id as usize;
-            if index < world.cars.len() {
-                world.set_car_input(index, input);
-            }
-        }
-        let dt = next.timestamp_secs - prev.timestamp_secs;
-        world.step(dt);
+        step_recorded(&mut world, &pair[0], &pair[1]);
         frames.push(world.frame());
     }
     frames
+}
+
+fn snap_body(body: &mut RigidBody, position: Vec3, rotation: Quat, velocity: Vec3, spin: Vec3) {
+    body.position = position;
+    body.orientation = rotation;
+    body.linear_velocity = velocity;
+    body.angular_velocity = spin;
+    body.update_inertia_tensor();
+    body.wake();
+}
+
+/// One-step predictions of `recorded` (`RB-VERIFY-003-FR-006`): before each
+/// step `world`'s bodies are snapped to the recorded frame
+/// (`PhysicsWorld::snap_to_frame`), so frame `i` of the result is the
+/// candidate's prediction of `recorded[i]` from `recorded[i - 1]` alone,
+/// free of the divergence earlier steps would otherwise carry forward.
+/// Each car's drive state (boost, jump, flip, ...) still runs on across
+/// steps. Frame `0` is `world`'s own starting frame.
+pub fn simulate_recorded_one_step(
+    mut world: PhysicsWorld,
+    recorded: &[PhysicsFrame],
+) -> Vec<PhysicsFrame> {
+    let mut frames = Vec::with_capacity(recorded.len());
+    frames.push(world.frame());
+    for pair in recorded.windows(2) {
+        world.snap_to_frame(&pair[0]);
+        step_recorded(&mut world, &pair[0], &pair[1]);
+        frames.push(world.frame());
+    }
+    frames
+}
+
+/// Applies `prev`'s recorded inputs and steps `world` to `next`'s time.
+fn step_recorded(world: &mut PhysicsWorld, prev: &PhysicsFrame, next: &PhysicsFrame) {
+    for car_state in &prev.cars {
+        let Some(input) = car_state.input else {
+            continue;
+        };
+        let index = car_state.player_id as usize;
+        if index < world.cars.len() {
+            world.set_car_input(index, input);
+        }
+    }
+    world.step(next.timestamp_secs - prev.timestamp_secs);
 }
 
 #[cfg(test)]
@@ -944,6 +1003,40 @@ mod tests {
 
     fn flat_ground() -> StaticPlane {
         StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0)
+    }
+
+    /// `RB-VERIFY-003-FR-006`: predicting each frame of the candidate's
+    /// own run from the frame before it reproduces that run, since
+    /// snapping a body to its own state changes nothing.
+    #[test]
+    fn one_step_predictions_of_a_candidate_run_reproduce_it() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.set_car_input(
+            0,
+            ControllerInput {
+                throttle: 1.0,
+                steer: 0.5,
+                ..ControllerInput::default()
+            },
+        );
+        let mut recorded = vec![world.frame()];
+        for _ in 0..60 {
+            world.step(1.0 / 120.0);
+            recorded.push(world.frame());
+        }
+        let car = RigidBody::standard_car(Vec3::new(500.0, 0.0, 17.0));
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 300.0));
+        let fresh = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        let predicted = simulate_recorded_one_step(fresh, &recorded);
+        assert_eq!(predicted.len(), recorded.len());
+        for (rec, pred) in recorded.iter().zip(&predicted).skip(1) {
+            let error = rec.cars[0].velocity.distance(&pred.cars[0].velocity);
+            assert!(error < 1e-2, "t={}: {error}", rec.timestamp_secs);
+            let ball_error = rec.ball.position.distance(&pred.ball.position);
+            assert!(ball_error < 1e-3, "ball t={}", rec.timestamp_secs);
+        }
     }
 
     #[test]

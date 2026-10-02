@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## One-step prediction error
+**2026-10-02** · `RB-VERIFY-003-FR-006`
+
+- `rb-verify --self-onestep <capture> [count]` snaps the simulation to the
+  recorded state before every step and lists the steps with the largest
+  prediction error, so a model error shows up where it happens instead of
+  being buried in divergence carried from earlier. Its first run points at
+  driving on curved walls. 448 tests.
+
 ## Jumps push along the car's up axis
 **2026-10-02** · `RB-PHYSICS-001-FR-101` · ADR-0019 amendment
 

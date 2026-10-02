@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.14.0
+- Version: 0.15.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -121,6 +121,28 @@ them.
     diagnostics stay out of scope until a multi-car capture exists, the
     same limit `FR-077` already carries.
 
+- `RB-VERIFY-003-FR-006` (implemented): One-step prediction error. The
+  continuous run (FR-004/FR-005) diverges after any early error, so every
+  later frame mixes model error with inherited divergence. Here each frame
+  is predicted from the recorded frame before it alone, ranking the
+  model's worst single steps across a whole capture.
+  - **Design, as implemented**: `PhysicsWorld::snap_to_frame` sets the
+    ball's and every car's position, orientation and velocities to a
+    recorded frame, keeping each car's drive state (boost, jump, flip);
+    `world::simulate_recorded_one_step` snaps before every step.
+    `rb_verify_cli::one_step_capture(capture_path) -> Result<Vec<TraceRow>,
+    IngestError>` pairs its frames with the recording as `trace_capture`
+    does. Exposed as `rb-verify --self-onestep <capture-file> [count]`,
+    listing the `count` (default 20) rows with the largest velocity error,
+    worst first.
+  - **Verification**: `world` test
+    `one_step_predictions_of_a_candidate_run_reproduce_it`; `rb_verify_cli`
+    tests `one_step_rows_cover_the_whole_capture_and_start_exact`,
+    `one_step_missing_file_reports_io_error`. First real run (owner's
+    `test2.jsonl`): one-step errors of ~1,200 uu/s at 8.86-8.95 s, where the
+    recorded car drives along a corner transition the candidate's arena
+    places ~30 uu inside the car body, and its wheels only cast against the
+    floor.
 - `RB-VERIFY-003-FR-005` (implemented): A per-frame trace of a capture
   against the candidate simulated from it. Needed because FR-004's real
   run (`test2.jsonl`, 2026-10-01) showed an abrupt derailment: car error
@@ -369,6 +391,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.15.0 (2026-10-02): `RB-VERIFY-003-FR-006` implemented — one-step
+  prediction error (`simulate_recorded_one_step`, `one_step_capture`,
+  `rb-verify --self-onestep`).
 - 0.14.0 (2026-10-01): `--self-trace` prints car-frame spin
   (`car_frame_spin`) for the recorded and simulated cars.
 - 0.13.0 (2026-10-01): `--self-trace` prints orientation-implied spin
