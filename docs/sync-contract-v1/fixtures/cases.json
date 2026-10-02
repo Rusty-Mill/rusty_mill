@@ -1,0 +1,26 @@
+{
+  "compatible": {
+    "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status", "field.lineage"],
+    "record": {
+      "id": "synthetic-001", "content": "Synthetic compatible memory", "category": "general",
+      "tags": ["fixture"], "source": "synthetic", "metadata": {"fixture": true},
+      "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:06Z",
+      "client": "fixture", "node_id": "node-a", "capture_id": null,
+      "source_capture_id": null, "memory_type": "semantic", "status": "active",
+      "deleted_at": null, "sensitive": false, "remind_at": null,
+      "superseded_by": null, "subject": null, "predicate": null, "object": null,
+      "accessed_at": null, "access_count": 0, "decay_rate": 0.1, "vitality": 1.0,
+      "base_weight": 1.0
+    }
+  },
+  "negative": [
+    {"name": "status tombstone sent to deleted-at peer", "mutate": {"status": "deleted"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.deleted-at"], "error": "tombstone_capability_mismatch"},
+    {"name": "deleted-at tombstone sent to status peer", "mutate": {"deleted_at": "2026-01-02T03:04:07Z"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status"], "error": "tombstone_capability_mismatch"},
+    {"name": "open type sent to closed peer", "mutate": {"memory_type": "fact"}, "error": "unsupported_memory_type"},
+    {"name": "sensitivity not preserved", "mutate": {"sensitive": true}, "error": "unsupported_sensitive"},
+    {"name": "reminder not preserved", "mutate": {"remind_at": "2026-02-01T00:00:00Z"}, "error": "unsupported_reminder"},
+    {"name": "lineage not preserved", "mutate": {"source_capture_id": "capture-1"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status"], "error": "unsupported_lineage"},
+    {"name": "malformed timestamp", "mutate": {"updated_at": "tomorrow"}, "error": "invalid_timestamp"},
+    {"name": "unsupported id", "mutate": {"id": "contains spaces"}, "error": "invalid_id"}
+  ]
+}
