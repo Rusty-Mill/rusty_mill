@@ -6,8 +6,9 @@ use orch_core::board::Board;
 use orch_core::task::{Agent, Task};
 use orch_dispatch::{AgentError, AgentRunner, Output};
 
-use crate::exec::{CommandRunner, ExecError, StdCommand};
-use crate::{parse, render};
+use orch_cli::{parse, CommandRunner, ExecError, StdCommand};
+
+use crate::render;
 
 /// Longest slice of model output or stderr an error message carries.
 const EXCERPT_CHARS: usize = 200;
@@ -62,9 +63,10 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
             )));
         }
         let prompt = render(task, board);
+        // Ollama has no API-key path, so nothing is scrubbed from the child.
         let exit = self
             .runner
-            .run(&self.argv(), prompt.as_bytes(), self.timeout)
+            .run_scrubbed(&self.argv(), prompt.as_bytes(), self.timeout, &[])
             .map_err(exec_error)?;
         if exit.status != 0 {
             return Err(AgentError(format!(

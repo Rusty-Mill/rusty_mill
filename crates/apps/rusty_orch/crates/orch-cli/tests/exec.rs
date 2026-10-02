@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use orch_ollama::{CommandRunner, ExecError, StdCommand, JOIN_GRACE, MAX_STDOUT_BYTES};
+use orch_cli::{CommandRunner, ExecError, StdCommand, JOIN_GRACE, MAX_STDOUT_BYTES};
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_owned()).collect()
@@ -173,4 +173,20 @@ fn grandchild_holding_stdout_after_exit_is_bounded_by_the_grace_period() {
         elapsed < JOIN_GRACE + Duration::from_secs(2),
         "took {elapsed:?}"
     );
+}
+
+#[test]
+fn scrubbed_variables_are_removed_from_the_child_environment() {
+    std::env::set_var("ORCH_TEST_SECRET", "leaked");
+    let argv = argv(&["sh", "-c", "echo ${ORCH_TEST_SECRET:-unset}"]);
+
+    let visible = StdCommand
+        .run(&argv, b"", Duration::from_secs(5))
+        .expect("sh runs");
+    let scrubbed = StdCommand
+        .run_scrubbed(&argv, b"", Duration::from_secs(5), &["ORCH_TEST_SECRET"])
+        .expect("sh runs");
+
+    assert_eq!(String::from_utf8_lossy(&visible.stdout).trim(), "leaked");
+    assert_eq!(String::from_utf8_lossy(&scrubbed.stdout).trim(), "unset");
 }

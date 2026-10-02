@@ -66,8 +66,21 @@ impl std::error::Error for ExecError {}
 
 /// Runs one non-interactive command: fixed argv, bytes on stdin, deadline.
 pub trait CommandRunner {
-    /// `argv[0]` is the program. Never a shell.
-    fn run(&self, argv: &[String], stdin: &[u8], timeout: Duration) -> Result<Exit, ExecError>;
+    /// `argv[0]` is the program. Never a shell. `remove_env` names variables
+    /// the child must not see, e.g. a vendor API key that would otherwise
+    /// route a subscription CLI onto a paid API path.
+    fn run_scrubbed(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+        timeout: Duration,
+        remove_env: &[&str],
+    ) -> Result<Exit, ExecError>;
+
+    /// [`CommandRunner::run_scrubbed`] with the child's environment untouched.
+    fn run(&self, argv: &[String], stdin: &[u8], timeout: Duration) -> Result<Exit, ExecError> {
+        self.run_scrubbed(argv, stdin, timeout, &[])
+    }
 }
 
 /// The real thing, over `std::process`.
@@ -75,7 +88,13 @@ pub trait CommandRunner {
 pub struct StdCommand;
 
 impl CommandRunner for StdCommand {
-    fn run(&self, argv: &[String], stdin: &[u8], timeout: Duration) -> Result<Exit, ExecError> {
+    fn run_scrubbed(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+        timeout: Duration,
+        remove_env: &[&str],
+    ) -> Result<Exit, ExecError> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| ExecError::Spawn("empty argv".to_owned()))?;
@@ -84,6 +103,9 @@ impl CommandRunner for StdCommand {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for name in remove_env {
+            cmd.env_remove(name);
+        }
         own_process_group(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| ExecError::Spawn(e.to_string()))?;
         let pipes = Pipes::take(&mut child, stdin);

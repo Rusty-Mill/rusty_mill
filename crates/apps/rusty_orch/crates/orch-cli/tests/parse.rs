@@ -1,10 +1,8 @@
-mod common;
-
-use common::{REPLY_ONE, REPLY_TWO};
+use orch_cli::fake::{REPLY_ONE, REPLY_TWO};
+use orch_cli::{parse, MAX_BODY_CHARS, MAX_ENTRIES};
 use orch_core::board::{Confidence, EntryKind};
 use orch_core::task::Role;
 use orch_core::{EntryId, Ref, TaskId};
-use orch_ollama::{parse, MAX_BODY_CHARS, MAX_ENTRIES};
 
 fn err(reply: &str) -> String {
     parse(reply, Role::Research).expect_err("rejected").0
