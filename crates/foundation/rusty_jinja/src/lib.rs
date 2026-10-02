@@ -143,6 +143,56 @@ impl TemplateEnvironment {
 mod tests {
     use super::*;
 
+    fn render(source: &str) -> Result<String, JinjaError> {
+        Template::compile(source)?.render(&Value::Object(Map::new()))
+    }
+
+    #[test]
+    fn quoted_closing_delimiters_render_as_literal_content() {
+        assert_eq!(render(r#"{{ "}}" }}"#).unwrap(), "}}");
+        assert_eq!(render("{{ '}}' }}").unwrap(), "}}");
+    }
+
+    #[test]
+    fn quoted_statement_delimiters_do_not_end_tags() {
+        assert_eq!(render("{% set marker = '%}' %}{{ marker }}").unwrap(), "%}");
+        assert_eq!(
+            render(r#"{% if "%}" == '%}' %}yes{% else %}no{% endif %}"#).unwrap(),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn delimiter_lookalikes_stay_literal_while_exterior_trim_markers_work() {
+        assert_eq!(render(r#"A {{ "-}}" -}}   B"#).unwrap(), "A -}}B");
+        assert_eq!(
+            render("A {% set marker = '-%}' -%}   {{ marker }}").unwrap(),
+            "A -%}"
+        );
+    }
+
+    #[test]
+    fn quoted_delimiters_preserve_adjacent_tags_braces_quotes_and_unicode() {
+        assert_eq!(
+            render(r#"前{{ "a'}}b" }}{{ 'c"}}d' }}{plain}後"#).unwrap(),
+            "前a'}}bc\"}}d{plain}後"
+        );
+    }
+
+    #[test]
+    fn unterminated_quoted_tags_and_malformed_input_return_errors() {
+        assert_eq!(
+            Template::compile(r#"{{ "unterminated }}"#).err(),
+            Some(JinjaError::Syntax("unterminated tag"))
+        );
+        assert_eq!(
+            Template::compile("{% set value = 'unterminated %}").err(),
+            Some(JinjaError::Syntax("unterminated tag"))
+        );
+        assert!(Template::compile(r#"{{ "ok" }} }}"#).is_ok());
+        assert!(Template::compile("{% if true %}missing end").is_err());
+    }
+
     #[test]
     fn default_chatml_template_renders_via_the_real_engine() {
         let env = TemplateEnvironment::new("<|bos|>", "<|eos|>");
