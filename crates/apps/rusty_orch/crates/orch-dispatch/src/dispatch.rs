@@ -33,6 +33,13 @@ pub enum DispatchError {
         agent: Agent,
         source: AgentError,
     },
+    /// The selected adapter cannot serve this role. The card is failed
+    /// without counting or invoking a model call.
+    UnsupportedRole {
+        task: TaskId,
+        agent: Agent,
+        role: Role,
+    },
     /// Running `task` would exceed `ceiling`. No call was made. For the
     /// task ceiling on a card already `Running`, the card is marked
     /// `Failed` first: its retries are exhausted.
@@ -61,6 +68,9 @@ impl fmt::Display for DispatchError {
                 agent,
                 source,
             } => write!(f, "{agent:?} failed {task}: {source}"),
+            Self::UnsupportedRole { task, agent, role } => {
+                write!(f, "{agent:?} cannot serve {role:?} for {task}")
+            }
             Self::CeilingReached {
                 ceiling,
                 task,
@@ -169,6 +179,19 @@ impl<R: AgentRunner> Dispatcher<R> {
             }
         };
         let status = task.state().status();
+        let role = task.spec().role;
+        if !self.runner.supports(agent, role) {
+            let refused = DispatchError::UnsupportedRole {
+                task: id,
+                agent,
+                role,
+            };
+            if status == Status::Pending {
+                plan.start(id, agent)?;
+            }
+            fail_terminal(plan, id, &refused)?;
+            return Err(refused);
+        }
         if let Err(refused) = ledger.check(goal, task) {
             return Err(exhaust(plan, id, status, refused)?);
         }
@@ -204,6 +227,19 @@ impl<R: AgentRunner> Dispatcher<R> {
         };
         self.routing.reviewer(author).ok_or(unroutable)
     }
+}
+
+/// Fail a card for a deterministic refusal that retrying cannot change.
+fn fail_terminal(
+    plan: &mut Plan,
+    task: TaskId,
+    refused: &DispatchError,
+) -> Result<(), DispatchError> {
+    // Every dispatcher error has a non-blank Display representation.
+    if let Some(reason) = Text::new(&refused.to_string()) {
+        plan.fail(task, reason)?;
+    }
+    Ok(())
 }
 
 /// A `Running` card refused by its own ceiling has exhausted its retries:

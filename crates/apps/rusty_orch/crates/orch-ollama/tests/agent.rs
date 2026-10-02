@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use common::{exit, fixture, task, text, Call, FakeCommand, REPLY_ONE};
 use orch_cli::ExecError;
-use orch_core::board::{Author, EntryKind, NewEntry};
-use orch_core::task::Agent;
+use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
+use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::GoalId;
 use orch_dispatch::AgentRunner;
 use orch_ollama::OllamaAgent;
 
@@ -47,7 +48,31 @@ fn wrong_agent_is_refused_without_running_anything() {
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("refused");
 
-    assert!(err.0.contains("serves Local, not Codex"));
+    assert!(err.0.contains("cannot serve Research through Codex"));
+    assert!(a_calls(&a).is_empty());
+}
+
+#[test]
+fn implement_is_refused_without_running_anything() {
+    let (_, board, _, _) = fixture();
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan
+        .add(TaskSpec {
+            role: Role::Implement,
+            instruction: text("implement it"),
+            acceptance: vec![text("done")],
+            refs: vec![],
+            depends_on: vec![],
+            max_calls: std::num::NonZeroU32::new(3).expect("non-zero"),
+        })
+        .expect("add");
+    let mut a = agent(FakeCommand::ok(REPLY_ONE));
+
+    let err = a
+        .run(Agent::Local, plan.get(id).expect("task"), &board)
+        .expect_err("unsupported");
+
+    assert!(err.0.contains("cannot serve Implement through Local"));
     assert!(a_calls(&a).is_empty());
 }
 
@@ -129,8 +154,20 @@ fn a_calls(a: &OllamaAgent<FakeCommand>) -> Vec<Call> {
 /// the answer to its earlier question.
 #[test]
 fn resumed_card_prompt_carries_the_answer() {
-    let (plan, mut board, _, _) = fixture();
+    let (plan, mut board, referenced, _) = fixture();
     let card = task(&plan);
+    let successor = board
+        .append(NewEntry {
+            task: None,
+            author: Author::Human,
+            kind: EntryKind::Finding {
+                confidence: Confidence::High,
+            },
+            body: text("The live referenced finding."),
+            refs: vec![],
+            supersedes: Some(referenced),
+        })
+        .expect("successor");
     let question = board
         .append(NewEntry {
             task: Some(card.id()),
@@ -158,4 +195,7 @@ fn resumed_card_prompt_carries_the_answer() {
     let calls = a_calls(&a);
     let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
     assert!(prompt.contains("Use main as of this morning."));
+    assert!(prompt.contains(&format!("{successor} [Finding")));
+    assert!(prompt.contains("The live referenced finding."));
+    assert!(!prompt.contains("Plan::start rejects the author."));
 }

@@ -7,7 +7,10 @@ use orch_core::goal::{Goal, GoalDraft, StopRule};
 use orch_core::task::{Agent, Plan, PlanError, Role, Status, TaskSpec, TaskState};
 use orch_core::{GoalId, TaskId, Text};
 use orch_dispatch::fake::{FakeAgent, Reply};
-use orch_dispatch::{Ceiling, DispatchError, Dispatcher, Ledger, Outcome, Routing, RoutingConfig};
+use orch_dispatch::{
+    AgentError, AgentRunner, Ceiling, DispatchError, Dispatcher, Ledger, Outcome, Output, Routing,
+    RoutingConfig,
+};
 
 fn text(s: &str) -> Text {
     Text::new(s).expect("non-blank")
@@ -337,6 +340,75 @@ fn agent_failure_is_typed_and_leaves_the_card_running() {
         Outcome::Finished
     );
     assert_eq!(ledger.calls(), 2);
+    assert_eq!(ledger.task_calls(task), 2);
+    assert_eq!(board.entries().len(), 1);
+}
+
+#[derive(Debug)]
+struct NoImplement(FakeAgent);
+
+impl AgentRunner for NoImplement {
+    fn supports(&self, _agent: Agent, role: Role) -> bool {
+        role != Role::Implement
+    }
+
+    fn run(
+        &mut self,
+        agent: Agent,
+        task: &orch_core::task::Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentError> {
+        self.0.run(agent, task, board)
+    }
+}
+
+#[test]
+fn unsupported_role_fails_once_without_call_or_fabricated_output() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Implement, vec![], 5)).expect("add");
+    let dependent = plan.add(spec(Role::Research, vec![task], 2)).expect("add");
+    let mut board = Board::new(plan.goal());
+    let runner = NoImplement(FakeAgent::new([Reply::Write(vec![finding()])]));
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        runner,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(10);
+
+    let err = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("unsupported");
+    assert_eq!(
+        err,
+        DispatchError::UnsupportedRole {
+            task,
+            agent: Agent::Codex,
+            role: Role::Implement,
+        }
+    );
+    assert!(matches!(
+        plan.get(task).expect("task").state(),
+        TaskState::Failed { reason, .. }
+            if reason.as_str().contains("cannot serve Implement")
+    ));
+    assert_eq!(
+        plan.get(dependent).expect("dependent").state(),
+        &TaskState::Pending
+    );
+    assert_eq!(ledger.calls(), 0);
+    assert_eq!(ledger.task_calls(task), 0);
+    assert!(board.entries().is_empty());
+    assert!(d.runner().0.calls().is_empty());
+
+    assert_eq!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect_err("terminal card is not retried"),
+        DispatchError::Stuck
+    );
+    assert_eq!(ledger.calls(), 0);
+    assert!(d.runner().0.calls().is_empty());
+    assert!(board.entries().is_empty());
 }
 
 fn answer(board: &mut Board, task: TaskId) {
