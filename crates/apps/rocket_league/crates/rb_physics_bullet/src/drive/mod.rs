@@ -521,6 +521,21 @@ pub fn apply_driven_forces(
             jump::ground_jump(car, &mut state.jump_hold_time_remaining, dt);
         }
     } else {
+        // RB-PHYSICS-001-FR-099: one or two wheels still grip and brake,
+        // and keep air control off (RocketSim's `_UpdateAirTorque` with
+        // `numWheelsInContact == 0` false); flip torque still acts.
+        let touching = wheels.iter().any(Option::is_some);
+        if touching {
+            ground::apply_ground_control(
+                car,
+                wheels,
+                input,
+                throttle,
+                forward,
+                state.handbrake_amount,
+                dt,
+            );
+        }
         if wall_normal.is_some() {
             // Touching a wall restores the double jump unconditionally —
             // the same "any surface contact refills your second jump"
@@ -552,8 +567,10 @@ pub fn apply_driven_forces(
         // (FR-092): the capture's car neither grips nor air-controls in the
         // step from 4.183 s, after its 4.142 s jump.
         if !state.was_on_ground {
-            let pitch_scale = jump::flip_pitch_scale(state.flip);
-            air::apply_air_control(car, input, pitch_scale, dt);
+            if !touching {
+                let pitch_scale = jump::flip_pitch_scale(state.flip);
+                air::apply_air_control(car, input, pitch_scale, dt);
+            }
             air::apply_air_throttle(car, air_throttle(input, state), forward);
         }
         // RB-PHYSICS-001-FR-097: after air control, whose damping reads the

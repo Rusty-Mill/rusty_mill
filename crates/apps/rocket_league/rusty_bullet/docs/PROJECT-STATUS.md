@@ -123,12 +123,10 @@ version: `a245d35`).
 
 ## Next
 
-1. `RB-PHYSICS-001-FR-098` (the brake acts along the surface) is
-   confirmed on `front.jsonl`: jump from rest 0.0 vs 0.3 uu/s horizontal
-   (was 3.3); `--self-growth` stays under 3 uu through 18 s. Next, the
-   front flip's landing (`front.jsonl` ~18.6-19.2 s: growth window 19 s
-   jumps to 24 uu / 0.05 rad / 61 uu/s), a clean case of the `test2.jsonl`
-   5.575 s landing; then the side-flip capture and braking per wheel.
+1. `RB-PHYSICS-001-FR-099` (wheels grip and brake whenever they touch,
+   ADR-0020) is confirmed. Next, the body impact at 19.083 s (the
+   candidate's body has no floor friction, RocketSim's has 0.3, and the
+   recorded car picks up roll and yaw), and the side-flip capture.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -137,7 +135,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (442 tests: 27 `rb_domain`, 376
+- `cargo test --workspace`: pass (443 tests: 27 `rb_domain`, 377
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

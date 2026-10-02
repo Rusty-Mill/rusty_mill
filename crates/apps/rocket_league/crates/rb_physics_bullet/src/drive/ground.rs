@@ -3,7 +3,7 @@
 //! function here assumes the car is on the ground;
 //! `super::apply_driven_forces` does the gating.
 
-use super::wheels::{average_normal, WheelContacts, WHEELS, WHEEL_RAY_START_Z};
+use super::wheels::{WheelContacts, WHEELS, WHEEL_RAY_START_Z};
 use super::{forward_axis, right_axis, up_axis, UNBOOSTED_MAX_CAR_SPEED};
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -231,6 +231,10 @@ pub(super) fn tire_grip(slip: f32, handbrake_amount: f32) -> (f32, f32) {
 /// - **Engine** (`RB-PHYSICS-001-FR-089`): a quarter of
 ///   `engine_acceleration` along the wheel's heading, so the steered front
 ///   wheels' push turns the car as well.
+/// - **Brake** (`RB-PHYSICS-001-FR-099`): a quarter of
+///   `brake_deceleration` against the contact point's speed along the
+///   wheel's heading, never reversing it, as RocketSim's per-wheel rolling
+///   friction. So a car landing on two wheels brakes at half strength.
 ///
 /// Returns `(impulse, point)` pairs, all from the same pre-impulse state as
 /// RocketSim, with the ray's contact point (`RB-PHYSICS-001-FR-090`)
@@ -242,6 +246,7 @@ fn wheel_impulses(
     steer: f32,
     handbrake_amount: f32,
     engine_acceleration: f32,
+    brake_deceleration: f32,
     dt: f32,
 ) -> Vec<(Vec3, Vec3)> {
     let forward = forward_axis(car);
@@ -272,8 +277,14 @@ fn wheel_impulses(
                 * lateral_grip
                 * FRICTION_SCALE
                 * dt;
-            let drive = engine_acceleration * car.mass() / WHEELS.len() as f32 * dt;
-            Some((axle * impulse + rolling * drive, flat))
+            let quarter_mass = car.mass() / WHEELS.len() as f32;
+            let drive = engine_acceleration * quarter_mass * dt;
+            let rolling_speed = car.velocity_at_point(&point).dot(&rolling);
+            let brake = (brake_deceleration * dt).min(rolling_speed.abs()) * quarter_mass;
+            Some((
+                axle * impulse + rolling * (drive - rolling_speed.signum() * brake),
+                flat,
+            ))
         })
         .collect()
 }
@@ -285,7 +296,10 @@ fn on_surface(direction: Vec3, normal: Vec3) -> Vec3 {
     projected.normalize().unwrap_or(direction)
 }
 
-/// Throttle, steering and tire grip for a grounded car
+/// Throttle, steering and tire grip for a car with any wheel touching
+/// (`RB-PHYSICS-001-FR-099`: RocketSim's wheels grip and brake whether or
+/// not the car counts as on the ground; the engine is quartered below three
+/// wheels)
 /// (`RB-PHYSICS-001-FR-081`, `FR-086`; ADR-0012, ADR-0016). `throttle` is
 /// the effective throttle (boosting forces it to `1`, as in RocketSim).
 ///
@@ -297,8 +311,8 @@ fn on_surface(direction: Vec3, normal: Vec3) -> Vec3 {
 ///   split over the four wheels along each wheel's heading
 ///   (`wheel_impulses`), so throttle through steered front wheels turns
 ///   the car too.
-/// - **Brake**: `pedals`' brake at `BRAKE_DECELERATION`, never reversing
-///   the car, applied at the centre of mass.
+/// - **Brake**: `pedals`' brake at `BRAKE_DECELERATION`, a quarter per
+///   touching wheel (`wheel_impulses`), never reversing the car.
 /// - **Sideways and steering**: each wheel's side impulse
 ///   (`wheel_impulses`) at its contact point. The steered front wheels'
 ///   impulses yaw the car; the rear wheels' resist it, so the turn rate
@@ -319,8 +333,12 @@ pub(super) fn apply_ground_control(
         tire_grip(slip_ratio(forward_speed, lateral_speed), handbrake_amount);
     let (engine, brake) = pedals(throttle, forward_speed, input.handbrake);
 
-    let taper = drive_speed_taper(engine.signum() * forward_speed);
+    // RocketSim quarters the engine with fewer than three wheels touching.
+    let touching = contacts.iter().flatten().count();
+    let partial_contact = if touching < 3 { 0.25 } else { 1.0 };
+    let taper = drive_speed_taper(engine.signum() * forward_speed) * partial_contact;
     let acceleration = engine * THROTTLE_ACCELERATION * taper * longitudinal_grip;
+    let deceleration = BRAKE_DECELERATION * brake * longitudinal_grip;
 
     // RB-PHYSICS-001-FR-086/FR-089: steering, sideways grip and the engine
     // are per-wheel impulses; the steered front wheels' impulses turn the car.
@@ -330,17 +348,9 @@ pub(super) fn apply_ground_control(
         input.steer,
         handbrake_amount,
         acceleration,
+        deceleration,
         dt,
     ) {
         car.apply_impulse(impulse, point);
     }
-
-    // RB-PHYSICS-001-FR-098: the brake acts along the surface, as
-    // RocketSim's rolling friction does along each wheel's in-plane
-    // forward direction, so it never bleeds a jump's vertical speed into
-    // the car's slightly pitched forward axis.
-    let rolling = average_normal(contacts).map_or(forward, |normal| on_surface(forward, normal));
-    let rolling_speed = car.linear_velocity.dot(&rolling);
-    let speed_drop = (BRAKE_DECELERATION * brake * dt).min(rolling_speed.abs());
-    car.linear_velocity -= rolling * (rolling_speed.signum() * speed_drop);
 }

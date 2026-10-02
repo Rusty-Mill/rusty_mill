@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Wheels grip as soon as they touch
+**2026-10-02** · `RB-PHYSICS-001-FR-099` · ADR-0020
+
+- The tire model now runs whenever any wheel touches, not only with three
+  or more, braking per wheel; air control waits until no wheel touches.
+  The owner's front flip lands on two wheels and loses 2.2 uu/s per tick,
+  half the coasting brake; the port lost none. 443 tests.
+
 ## Jumps from rest go straight up
 **2026-10-02** · `RB-PHYSICS-001-FR-098`
 

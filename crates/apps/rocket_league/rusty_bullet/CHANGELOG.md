@@ -940,6 +940,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_physics_bullet::PhysicsWorld::frame()` now reports each car's
   current `ControllerInput` as `Some(input)` instead of always `None`.
 ### Fixed
+- Wheels grip and brake whenever they touch (`RB-PHYSICS-001-FR-099`,
+  ADR-0020): per-wheel brake, engine quartered below three wheels, no air
+  control while any wheel touches; per the owner's front-flip landing.
 - The brake acts along the surface (`RB-PHYSICS-001-FR-098`), not the car's
   slightly pitched forward axis, so a jump from rest no longer gains
   3.3 uu/s forward, per the owner's `front.jsonl` capture.

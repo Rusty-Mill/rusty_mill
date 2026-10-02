@@ -3233,3 +3233,32 @@ fn air_damping_reads_the_spin_before_the_flip_torque() {
         "pitch spin after one flip tick",
     );
 }
+
+#[test]
+fn two_touching_wheels_brake_at_half_strength_without_air_control() {
+    // RB-PHYSICS-001-FR-099: the owner's front flip lands nose first
+    // (front.jsonl, 19.058 s) and, coasting on its two front wheels, loses
+    // 2.2 uu/s per tick: half the four-wheel coasting brake, as RocketSim
+    // brakes per touching wheel. Air control stays off meanwhile.
+    let mut c = car();
+    c.linear_velocity = Vec3::new(520.0, 0.0, 0.0);
+    let mut wheels = resting_contacts(&c);
+    for (contact, &(_, _, front)) in wheels.iter_mut().zip(super::wheels::WHEELS.iter()) {
+        if !front {
+            *contact = None;
+        }
+    }
+    let mut state = DriveState::new();
+    let input = ControllerInput {
+        yaw: Some(-1.0),
+        ..Default::default()
+    };
+    apply_driven_forces(&mut c, &input, &wheels, None, &mut state, TICK);
+    let coasting = COASTING_BRAKE_FACTOR * BRAKE_DECELERATION * TICK;
+    assert_close(c.linear_velocity.x, 520.0 - coasting / 2.0, "forward speed");
+    assert!(
+        c.angular_velocity.length() < 1e-4,
+        "no air control: {:?}",
+        c.angular_velocity
+    );
+}
