@@ -3,7 +3,7 @@
 //! function here assumes the car is on the ground;
 //! `super::apply_driven_forces` does the gating.
 
-use super::wheels::{WheelContacts, WHEELS, WHEEL_RAY_START_Z};
+use super::wheels::{average_normal, WheelContacts, WHEELS, WHEEL_RAY_START_Z};
 use super::{forward_axis, right_axis, up_axis, UNBOOSTED_MAX_CAR_SPEED};
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -335,6 +335,12 @@ pub(super) fn apply_ground_control(
         car.apply_impulse(impulse, point);
     }
 
-    let speed_drop = (BRAKE_DECELERATION * brake * dt).min(forward_speed.abs());
-    car.linear_velocity -= forward * (forward_speed.signum() * speed_drop);
+    // RB-PHYSICS-001-FR-098: the brake acts along the surface, as
+    // RocketSim's rolling friction does along each wheel's in-plane
+    // forward direction, so it never bleeds a jump's vertical speed into
+    // the car's slightly pitched forward axis.
+    let rolling = average_normal(contacts).map_or(forward, |normal| on_surface(forward, normal));
+    let rolling_speed = car.linear_velocity.dot(&rolling);
+    let speed_drop = (BRAKE_DECELERATION * brake * dt).min(rolling_speed.abs());
+    car.linear_velocity -= rolling * (rolling_speed.signum() * speed_drop);
 }

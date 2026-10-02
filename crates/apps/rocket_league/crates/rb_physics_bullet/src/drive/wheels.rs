@@ -213,15 +213,22 @@ pub fn apply_wheel_forces(
     throttle_engaged: bool,
     dt: f32,
 ) -> Option<Vec3> {
-    let mut normal_sum = Vec3::ZERO;
     for contact in contacts.iter().flatten() {
-        normal_sum += contact.normal;
         apply_suspension(car, contact, dt);
     }
     if let Some(surface_up) = previous_surface_up {
         apply_sticky_force(car, surface_up, throttle_engaged);
     }
-    normal_sum.normalize()
+    average_normal(contacts)
+}
+
+/// The touching wheels' average contact normal, `None` with none touching.
+pub(super) fn average_normal(contacts: &WheelContacts) -> Option<Vec3> {
+    contacts
+        .iter()
+        .flatten()
+        .fold(Vec3::ZERO, |sum, contact| sum + contact.normal)
+        .normalize()
 }
 
 fn apply_sticky_force(car: &mut RigidBody, surface_up: Vec3, throttle_engaged: bool) {

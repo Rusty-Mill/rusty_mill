@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Jumps from rest go straight up
+**2026-10-02** · `RB-PHYSICS-001-FR-098`
+
+- The zero-throttle brake now acts along the floor instead of the car's
+  forward axis, which tilts slightly on the suspension. On the tick after
+  a jump press it read the jump's vertical speed as backward motion and
+  pushed the car 3.3 uu/s forward; the owner's capture shows no such
+  drift. 442 tests.
+
 ## Flips no longer damp their own torque
 **2026-10-02** · `RB-PHYSICS-001-FR-097` · ADR-0015 amendment
 

@@ -123,11 +123,11 @@ version: `a245d35`).
 
 ## Next
 
-1. `RB-PHYSICS-001-FR-097` (air damping before flip torque) is confirmed:
-   rotation error 0.00 through both captured flips. Next, the ~3 uu/s
-   horizontal velocity a plain jump from rest
-   gains on its second tick (`front.jsonl`, 12.025 s: 3.3 vs 0.3 uu/s),
-   the 5.575 s landing, the side-flip capture, and braking per wheel.
+1. Re-run `rb-verify --self-trace <front.jsonl> 11.95 12.2` and
+   `--self-growth <front.jsonl>` to confirm `RB-PHYSICS-001-FR-098` (the
+   brake acts along the surface): the jump from rest at 12.008 s should
+   gain under 1 uu/s horizontally, as recorded (was 3.3). Then the 5.575 s
+   landing in `test2.jsonl`, the side-flip capture, and braking per wheel.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -136,7 +136,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (441 tests: 27 `rb_domain`, 375
+- `cargo test --workspace`: pass (442 tests: 27 `rb_domain`, 376
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 15 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
