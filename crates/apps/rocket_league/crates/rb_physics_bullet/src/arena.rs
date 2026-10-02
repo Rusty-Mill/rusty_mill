@@ -151,7 +151,8 @@ pub const CORNER_LENGTH: f32 = 1152.0;
 
 /// Radii of the arena's curved transitions (`RB-PHYSICS-001-FR-102`,
 /// ADR-0022), fitted to the real soccar collision mesh as extracted in
-/// RLUtilities (`samuelpmish/RLUtilities`, `assets/soccar/`, MIT): its
+/// RLUtilities (`samuelpmish/RLUtilities`, `assets/soccar/`, GPL-3.0; only measured
+/// dimensions are taken, no data is copied): its
 /// floor-ramp, ceiling-ramp and corner vertices lie on circles of these
 /// radii to within 0.5 uu (the 864 uu edges to within 2 uu). They replace
 /// FR-025's uncalibrated 292/750 uu placeholders. The flat walls they join

@@ -5716,7 +5716,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   fillets, wheel rays against every static shape; implemented, verified by
   tests and the owner's capture, ADR-0022): the arena's curved transitions
   take the real soccar mesh's radii (RLUtilities' extracted mesh,
-  `samuelpmish/RLUtilities` `assets/soccar/`, MIT): side and corner floor
+  `samuelpmish/RLUtilities` `assets/soccar/`, GPL-3.0; measured dimensions only, no
+  data copied): side and corner floor
   ramps 256 uu, back-wall floor ramp 160 uu, every ceiling ramp 512 uu,
   and the vertical corner edges 864 uu. The floor and ceiling ramps wrap
   each vertical edge as a torus section (`body::StaticSweptFillet`,
