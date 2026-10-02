@@ -435,12 +435,19 @@ impl Service {
     pub fn trash_task(&mut self, id: Uuid) -> Result<Task> {
         let mut task = self.task(id)?;
         let now = self.now();
+        let mut changed = Vec::new();
         for mut child in self.children(&task) {
             child.deleted_ms.get_or_insert(now);
-            self.save_task(child)?;
+            child.updated_ms = self.now();
+            child.version = child.version.wrapping_add(1);
+            changed.push(child);
         }
         task.deleted_ms.get_or_insert(now);
-        self.save_task(task)
+        task.updated_ms = self.now();
+        task.version = task.version.wrapping_add(1);
+        changed.push(task.clone());
+        self.tasks.replace_batch(changed)?;
+        Ok(task)
     }
 
     /// Bring a task and the subtasks trashed with it back. A task whose list
