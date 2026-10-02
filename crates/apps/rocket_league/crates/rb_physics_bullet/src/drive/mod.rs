@@ -208,8 +208,7 @@
 //! multi-source-confirmed community-reverse-engineered approximations (the
 //! same body of public research `PhysicsWorld::new`'s gravity constant
 //! comes from);
-//! `BOOST_CONSUMPTION_RATE` is a simplified constant standing in for Rocket
-//! League's real boost-drain behavior; `THROTTLE_ACCELERATION`'s own peak
+//! `BOOST_USED_PER_SECOND` is RocketSim's default boost-drain rate; `THROTTLE_ACCELERATION`'s own peak
 //! magnitude is likewise a simplified, uncalibrated placeholder, but since
 //! `RB-PHYSICS-001-FR-058` it's no longer applied flat — `drive_speed_taper`
 //! scales it by RocketSim's own confirmed real curve shape as speed rises,
@@ -283,7 +282,7 @@ mod jump;
 mod tests;
 mod wheels;
 
-pub use boost::MAX_BOOST;
+pub use boost::{BOOST_USED_PER_SECOND, MAX_BOOST};
 pub use wheels::{cast_wheels, is_on_ground, WheelContact, WheelContacts, NO_WHEEL_CONTACTS};
 
 /// The no-slip bicycle-model yaw rate for `ground::steer_angle` over the
@@ -426,6 +425,9 @@ pub struct DriveState {
     /// Whether the car was on the ground last step. Air control waits one
     /// step after the wheels let go (`RB-PHYSICS-001-FR-095`).
     pub was_on_ground: bool,
+    /// Fuel drained per second of held boost: `BOOST_USED_PER_SECOND`, or
+    /// 0 with unlimited boost (`RB-PHYSICS-001-FR-111`).
+    pub boost_used_per_second: f32,
 }
 
 impl DriveState {
@@ -440,6 +442,7 @@ impl DriveState {
             handbrake_amount: 0.0,
             sticky_surface_up: None,
             was_on_ground: false,
+            boost_used_per_second: BOOST_USED_PER_SECOND,
         }
     }
 }
@@ -595,6 +598,7 @@ pub fn apply_driven_forces(
         on_ground,
         forward,
         &mut state.boost_amount,
+        state.boost_used_per_second,
         dt,
     );
 }

@@ -155,6 +155,7 @@ fn step_with_input_and_dodge_flip(
         handbrake_amount: 0.0,
         sticky_surface_up: None,
         was_on_ground: false,
+        boost_used_per_second: BOOST_USED_PER_SECOND,
     };
     car.clear_forces();
     apply_driven_forces(
@@ -2423,6 +2424,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             handbrake_amount: 0.0,
             sticky_surface_up: None,
             was_on_ground: false,
+            boost_used_per_second: BOOST_USED_PER_SECOND,
         }
     );
 }
