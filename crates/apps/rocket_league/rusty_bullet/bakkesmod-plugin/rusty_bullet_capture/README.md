@@ -88,3 +88,27 @@ cl /LD /std:c++17 -I <sdk>\include RustyBulletCapturePlugin.cpp <sdk>\lib\plugin
 - No format-version field in the output, matching ADR-0005/`RB-RESEARCH-O003`'s
   "default to the smaller option" resolution.
 - `player_id` is a per-session ordinal, not a stable identity (see above).
+
+## If Rocket League crashes
+
+1. **Rebuild after every Rocket League or BakkesMod update.** A DLL built
+   against an older BakkesMod SDK can crash once the game updates, even
+   with unchanged source. Delete `build/` and rerun both `cmake` commands
+   against the current `%appdata%\bakkesmod\bakkesmod\bakkesmodsdk`, then
+   copy the new DLL over the old one with Rocket League closed.
+2. **Check whether it is already loaded.** If `rusty_bullet_capture` is
+   listed in `%appdata%\bakkesmod\bakkesmod\cfg\plugins.cfg`, don't run
+   `plugin load` again.
+3. **Find out when it crashes:** on `plugin load`, on `rb_capture_start`,
+   while driving, or on `rb_capture_stop`. BakkesMod's log
+   (`%appdata%\bakkesmod\bakkesmod\bakkesmod.log`) shows the last command
+   before the crash.
+
+Fixed in source (1.2): a freeplay reset (Backspace) destroys and respawns
+the ball, and 1.0 crashed reading the dying ball (`Launch.log` showed the
+call stack inside this DLL). The plugin now reads only live actors
+(`bDeleteMe` unset), takes the first live ball from `GetGameBalls()`,
+skips a tick with none, and keeps timestamps increasing across a respawn.
+It also reads boost fuel only when the car has a boost component, and
+removes its per-tick hook on unload. BakkesMod's console prints the loaded
+plugin's version on `plugin load`; it should say 1.2.

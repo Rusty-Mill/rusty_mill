@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Capture plugin survives freeplay resets
+**2026-10-03** · `RB-VERIFY-002-FR-001`
+
+- The BakkesMod capture plugin (now 1.2) crashed Rocket League when the
+  ball was reset in freeplay: it read the ball the reset had just
+  destroyed. It now reads only live objects, so recordings can use
+  Backspace resets. Verified in-game by the owner.
+
 ## Unlimited boost
 **2026-10-02** · `RB-PHYSICS-001-FR-111` · ADR-0031
 

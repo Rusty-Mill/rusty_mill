@@ -47,6 +47,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
   `LICENSE`.
 ### Fixed
+- BakkesMod capture plugin 1.2 no longer crashes Rocket League on a
+  freeplay reset: it reads only live actors (`bDeleteMe` unset), takes the
+  first live ball from `GetGameBalls()`, keeps timestamps increasing across
+  a ball respawn, null-checks the boost component and unhooks on unload.
 - `PhysicsWorld::snap_to_frame` takes the recorded boost fuel
   (`RB-VERIFY-003-FR-009`): one-step and k-step predictions of an
   unlimited-boost capture no longer run out of boost.

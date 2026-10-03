@@ -41,4 +41,6 @@ private:
     int lastPhysicsFrame_ = -1;
     bool haveStartTime_ = false;
     float startPhysicsTime_ = 0.0f;
+    // Last timestamp written, so a ball respawn can't make time jump back.
+    float lastTimestampSecs_ = -1.0f;
 };
