@@ -7,7 +7,8 @@ use orch_core::{EntryId, Ref, TaskId};
 fn err(reply: &str) -> String {
     parse(reply, Role::Research)
         .expect_err("rejected")
-        .message()
+        .0
+        .as_str()
         .to_owned()
 }
 
@@ -59,17 +60,15 @@ fn rejects_unknown_kind_and_kind_not_allowed_for_role() {
     let design = r#"{"entries":[{"kind":"decision","body":"x","refs":[]}]}"#;
     assert!(parse(design, Role::Design)
         .expect_err("agents never settle decisions")
-        .message()
+        .0
+        .as_str()
         .contains("not allowed"));
 }
 
 #[test]
 fn rejects_unserved_roles() {
     let unserved = parse(REPLY_ONE, Role::Implement).expect_err("unserved role");
-    assert!(
-        unserved.is_permanent(),
-        "no reply can make Implement servable"
-    );
+    assert!(unserved.0.contains("role Implement is not served"));
 }
 
 fn review_role() -> Role {
@@ -107,22 +106,26 @@ fn review_card_rejects_missing_bad_or_duplicate_verdicts() {
     let no_verdict = r#"{"entries":[{"kind":"review","body":"x","refs":[]}]}"#;
     assert!(parse(no_verdict, review_role())
         .expect_err("no verdict")
-        .message()
+        .0
+        .as_str()
         .contains("verdict"));
     let bad = r#"{"entries":[{"kind":"review","verdict":"lgtm","body":"x","refs":[]}]}"#;
     assert!(parse(bad, review_role())
         .expect_err("bad verdict")
-        .message()
+        .0
+        .as_str()
         .contains("not approve"));
     // Findings alone are not a review: the card must deliver its verdict.
     assert!(parse(REPLY_ONE, review_role())
         .expect_err("no review")
-        .message()
+        .0
+        .as_str()
         .contains("must include one review"));
     let two = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]},{"kind":"review","verdict":"approve","body":"y","refs":[]}]}"#;
     assert!(parse(two, review_role())
         .expect_err("two")
-        .message()
+        .0
+        .as_str()
         .contains("exactly one"));
     let research = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]}]}"#;
     assert!(err(research).contains("not allowed"));

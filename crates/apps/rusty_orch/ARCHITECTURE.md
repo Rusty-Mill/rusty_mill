@@ -13,7 +13,7 @@ Ports-and-adapters. `orch-core` holds all invariants and does no I/O; everything
 | Agent runner | `orch-dispatch::AgentRunner`; `orch-ollama::OllamaAgent` (`ollama run --format json`), `orch-codex::CodexAgent` (`codex exec --sandbox read-only`, [ADR-0006](./docs/adr/0006-codex-adapter.md)) and `FakeAgent` today; `claude -p`, `gemini -p` planned. Shared core in `orch-cli`. | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
 | Board store | remind-me MCP (`board:<project>`) or SQLite | Planned. Persists `Board`/`Plan`; the domain assigns ids. |
 | Goal intake | CLI / JSON → `GoalDraft` | Planned. Parsing and serde live here, not in the core. |
-| Call meter | `orch-dispatch::Ledger` | Caller-owned; counts calls against `Budget::max_calls` and each card's `TaskSpec::max_calls`, checked before every call. Wall-clock is still planned (needs a clock adapter). |
+| Call meter | `orch-dispatch::Ledger` | Caller-owned; counts usable calls against `Budget::max_calls` and each card's `TaskSpec::max_calls`, checked before every call. An adapter-classified unavailable prerequisite (such as a missing CLI login) is not charged, so the same card can resume after it is restored. Wall-clock is still planned (needs a clock adapter). |
 | Process | `orch-cli::CommandRunner` | Fixed argv, stdin bytes, deadline, env scrub. `StdCommand` is real; `orch_cli::fake::FakeCommand` for tests. Own seam because `contract::ProcessRunner` lacks stdin and timeout ([ADR-0004](./docs/adr/0004-ollama-output-protocol.md)). |
 
 ## Structure

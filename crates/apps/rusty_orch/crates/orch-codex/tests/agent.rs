@@ -10,7 +10,7 @@ use orch_codex::CodexAgent;
 use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
 use orch_core::task::{Agent, Plan, Role, TaskSpec};
 use orch_core::GoalId;
-use orch_dispatch::AgentRunner;
+use orch_dispatch::{AgentFailure, AgentRunner};
 
 fn agent(fake: ReplyFile) -> CodexAgent<ReplyFile> {
     CodexAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
@@ -46,9 +46,9 @@ fn wrong_agent_is_refused_without_running() {
         .run(Agent::Local, task(&plan), &board)
         .expect_err("refused");
     assert!(err
-        .message()
+        .0
+        .as_str()
         .contains("cannot serve Research through Local"));
-    assert!(err.is_permanent(), "a wrong agent never clears on retry");
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
@@ -73,7 +73,8 @@ fn implement_is_refused_before_scratch_or_process_work() {
         .expect_err("unsupported");
 
     assert!(err
-        .message()
+        .0
+        .as_str()
         .contains("cannot serve Implement through Codex"));
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
@@ -85,13 +86,28 @@ fn not_logged_in_is_named() {
     let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
     let err = a.run(Agent::Codex, task(&plan), &board).expect_err("401");
     assert!(
-        err.message().starts_with("codex: not logged in"),
+        err.0.as_str().starts_with("codex: not logged in"),
         "{}",
-        err.message()
+        err.0.as_str()
     );
-    assert!(err.message().contains("codex login"));
-    assert!(!err.message().contains('\n'));
-    assert!(err.is_permanent(), "retrying cannot log the user in");
+    assert!(err.0.as_str().contains("codex login"));
+    assert!(!err.0.as_str().contains('\n'));
+}
+
+#[test]
+fn not_logged_in_is_an_unavailable_prerequisite() {
+    let (plan, board, _, _) = fixture();
+    let mut a = agent(ReplyFile::failing(Ok(exit(
+        1,
+        "",
+        "ERROR: unexpected status 401 Unauthorized",
+    ))));
+
+    let failure = a
+        .run_classified(Agent::Codex, task(&plan), &board)
+        .expect_err("401");
+
+    assert!(matches!(failure, AgentFailure::Unavailable(_)));
 }
 
 #[test]
@@ -105,12 +121,11 @@ fn rate_limit_is_named_and_distinct_from_login() {
         let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
         let err = a.run(Agent::Codex, task(&plan), &board).expect_err("429");
         assert!(
-            err.message().starts_with("codex: rate limited"),
+            err.0.as_str().starts_with("codex: rate limited"),
             "{}",
-            err.message()
+            err.0.as_str()
         );
-        assert!(!err.message().contains("not logged in"));
-        assert!(!err.is_permanent(), "a quota clears with time");
+        assert!(!err.0.as_str().contains("not logged in"));
     }
 }
 
@@ -136,9 +151,9 @@ fn other_non_zero_exit_keeps_the_status() {
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("exit 2");
     assert!(
-        err.message().starts_with("codex exited with status 2"),
+        err.0.as_str().starts_with("codex exited with status 2"),
         "{}",
-        err.message()
+        err.0.as_str()
     );
 }
 
@@ -151,7 +166,7 @@ fn timeout_maps_to_agent_error() {
     let err = a
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("timeout");
-    assert!(err.message().contains("exceeded 30s"));
+    assert!(err.0.as_str().contains("exceeded 30s"));
 }
 
 #[test]
@@ -159,7 +174,7 @@ fn malformed_reply_is_a_parse_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(ReplyFile::ok("Sure! Here is what I found."));
     let err = a.run(Agent::Codex, task(&plan), &board).expect_err("prose");
-    assert!(err.message().contains("not JSON"));
+    assert!(err.0.as_str().contains("not JSON"));
 }
 
 #[test]
@@ -169,7 +184,7 @@ fn missing_last_message_file_is_an_error() {
     let err = a
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("no file");
-    assert!(err.message().contains("wrote no last message"));
+    assert!(err.0.as_str().contains("wrote no last message"));
 }
 
 #[test]

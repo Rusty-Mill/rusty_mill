@@ -9,7 +9,7 @@
 | `render(task, board)` | The shared prompt core plus two Codex lines: read files under the working directory and cite them as `path:` refs; the sandbox is read-only and offline. |
 | `SCRUBBED_ENV` | `OPENAI_API_KEY` is removed from the child's environment on every run. Codex uses the ChatGPT subscription login, never a key. |
 
-Failures are typed `AgentError`s whose messages tell "not logged in" from "rate limited"; both are exit 1 from Codex and are told apart by stderr. "Not logged in" is `Permanent`, so the dispatcher fails the card instead of retrying it; "rate limited" is `Transient`.
+Failures are typed `AgentError`s whose messages tell "not logged in" from "rate limited"; both are exit 1 from Codex and are told apart by stderr. "Not logged in" is classified as an unavailable prerequisite: the card remains resumable and the attempt does not spend call budget. Rate limits are counted transient failures.
 
 ## Run it
 Needs `codex` on `PATH` and `codex login status` reporting a login, plus `ollama` for the reviewer.

@@ -17,42 +17,41 @@ pub struct Output {
     pub supersedes: Option<EntryId>,
 }
 
-/// Why an agent could not complete a call, and whether trying again can help.
-///
-/// The dispatcher keys retry policy on the variant alone, never on the
-/// message (ADR-0008). Adapters pick `Permanent` only for conditions that
-/// no later call on the same card can clear: a missing login, a card the
-/// adapter cannot serve. Everything else, including malformed model output,
-/// is `Transient`.
+/// Why an agent could not complete a call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentError {
-    /// May succeed on retry. The card stays `Running` under its ceilings.
-    Transient(String),
-    /// Will not succeed on retry. The dispatcher fails the card at once.
-    Permanent(String),
-}
-
-impl AgentError {
-    /// The human-readable reason, without the retry classification.
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Transient(m) | Self::Permanent(m) => m,
-        }
-    }
-
-    /// Whether retrying the call is pointless.
-    pub fn is_permanent(&self) -> bool {
-        matches!(self, Self::Permanent(_))
-    }
-}
+pub struct AgentError(pub String);
 
 impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.message())
+        f.write_str(&self.0)
     }
 }
 
 impl std::error::Error for AgentError {}
+
+/// Dispatcher policy attached to an [`AgentError`] by an adapter.
+///
+/// This is separate from `AgentError` to preserve its tuple constructor and
+/// field while allowing adapters to report consequential lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentFailure {
+    /// The attempted call counts and the running card may be retried.
+    Transient(AgentError),
+    /// The attempted call counts and the card is failed immediately.
+    Permanent(AgentError),
+    /// A prerequisite outside the plan is absent. The card remains running
+    /// and no call is charged, so restoring the prerequisite can resume it.
+    Unavailable(AgentError),
+}
+
+impl AgentFailure {
+    /// Remove the dispatcher policy and return the compatible agent error.
+    pub fn into_error(self) -> AgentError {
+        match self {
+            Self::Transient(error) | Self::Permanent(error) | Self::Unavailable(error) => error,
+        }
+    }
+}
 
 /// Port for anything that can run a task card on a model backend.
 ///
@@ -72,4 +71,18 @@ pub trait AgentRunner {
 
     /// Run `task` on `agent` and return the entries it produced.
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError>;
+
+    /// Run with explicit dispatcher policy for failures.
+    ///
+    /// Existing runners need not implement this: ordinary `AgentError`s keep
+    /// their historical transient, counted behavior.
+    fn run_classified(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentFailure> {
+        self.run(agent, task, board)
+            .map_err(AgentFailure::Transient)
+    }
 }

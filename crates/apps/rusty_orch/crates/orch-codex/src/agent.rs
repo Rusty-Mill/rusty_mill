@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use orch_core::board::Board;
 use orch_core::task::{Agent, Role, Task};
-use orch_dispatch::{AgentError, AgentRunner, Output};
+use orch_dispatch::{AgentError, AgentFailure, AgentRunner, Output};
 
 use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
 
@@ -111,13 +111,34 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
     }
 
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+        self.run_with_policy(agent, task, board)
+            .map_err(AgentFailure::into_error)
+    }
+
+    fn run_classified(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentFailure> {
+        self.run_with_policy(agent, task, board)
+    }
+}
+
+impl<C: CommandRunner> CodexAgent<C> {
+    fn run_with_policy(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentFailure> {
         if !self.supports(agent, task.spec().role) {
-            return Err(AgentError::Permanent(format!(
+            return Err(AgentFailure::Permanent(AgentError(format!(
                 "codex adapter cannot serve {:?} through {agent:?}",
                 task.spec().role
-            )));
+            ))));
         }
-        let scratch = Scratch::create()?;
+        let scratch = Scratch::create().map_err(AgentFailure::Transient)?;
         let prompt = render(task, board);
         let exit = self
             .runner
@@ -127,22 +148,23 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
                 self.timeout,
                 SCRUBBED_ENV,
             )
-            .map_err(exec_error)?;
+            .map_err(exec_error)
+            .map_err(AgentFailure::Transient)?;
         if exit.status != 0 {
             return Err(classify(exit.status, &exit.stderr));
         }
         let reply = fs::read_to_string(&scratch.reply).map_err(|e| {
-            AgentError::Transient(format!(
+            AgentFailure::Transient(AgentError(format!(
                 "codex wrote no last message ({e}): {}",
                 excerpt(&exit.stderr)
-            ))
+            )))
         })?;
         if reply.trim().is_empty() {
-            return Err(AgentError::Transient(
+            return Err(AgentFailure::Transient(AgentError(
                 "codex wrote an empty last message".to_owned(),
-            ));
+            )));
         }
-        parse(&reply, task.spec().role)
+        parse(&reply, task.spec().role).map_err(AgentFailure::Transient)
     }
 }
 
@@ -150,15 +172,16 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
 /// (both exit 1). Verified against codex-cli 0.160.0: a missing login ends
 /// with `401 Unauthorized`; quota exhaustion carries `429`,
 /// `rate_limit_reached` or `usage_limit_reached`.
-fn classify(status: i32, stderr: &[u8]) -> AgentError {
+fn classify(status: i32, stderr: &[u8]) -> AgentFailure {
     let text = String::from_utf8_lossy(stderr).to_lowercase();
     let short = excerpt(stderr);
     if text.contains("401 unauthorized")
         || text.contains("not logged in")
         || text.contains("codex login")
     {
-        // No call on this card can succeed until a human runs `codex login`.
-        return AgentError::Permanent(format!("codex: not logged in (run `codex login`): {short}"));
+        return AgentFailure::Unavailable(AgentError(format!(
+            "codex: not logged in (run `codex login`): {short}"
+        )));
     }
     if text.contains("429")
         || text.contains("rate limit")
@@ -166,13 +189,15 @@ fn classify(status: i32, stderr: &[u8]) -> AgentError {
         || text.contains("usage_limit")
         || text.contains("too many requests")
     {
-        return AgentError::Transient(format!("codex: rate limited: {short}"));
+        return AgentFailure::Transient(AgentError(format!("codex: rate limited: {short}")));
     }
-    AgentError::Transient(format!("codex exited with status {status}: {short}"))
+    AgentFailure::Transient(AgentError(format!(
+        "codex exited with status {status}: {short}"
+    )))
 }
 
 fn exec_error(e: ExecError) -> AgentError {
-    AgentError::Transient(format!("codex: {e}"))
+    AgentError(format!("codex: {e}"))
 }
 
 /// The schema file Codex reads and the last-message file it writes, both
@@ -190,7 +215,7 @@ impl Scratch {
         let schema = dir.join(format!("{stem}.schema.json"));
         let reply = dir.join(format!("{stem}.reply.json"));
         fs::write(&schema, OUTPUT_SCHEMA)
-            .map_err(|e| AgentError::Transient(format!("codex: cannot write schema file: {e}")))?;
+            .map_err(|e| AgentError(format!("codex: cannot write schema file: {e}")))?;
         Ok(Self { schema, reply })
     }
 }

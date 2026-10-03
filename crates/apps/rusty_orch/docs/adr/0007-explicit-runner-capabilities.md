@@ -36,8 +36,8 @@ condition is known before adapter setup.
   scratch-file setup.
 - `AgentError` remains retryable. Its representation and the `orch-core` API
   and persisted plan/board shapes do not change. *Amended by ADR-0008:
-  `AgentError` now carries a `Permanent` variant for refusals that are only
-  detectable at call time.*
+  adapters may attach dispatcher policy through the additive `AgentFailure`
+  result of `run_classified`; `AgentError` itself remains compatible.*
 
 ## Consequences
 

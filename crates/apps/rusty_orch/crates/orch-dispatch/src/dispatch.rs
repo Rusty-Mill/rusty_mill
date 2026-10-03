@@ -8,7 +8,7 @@ use orch_core::goal::Goal;
 use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskState};
 use orch_core::{EntryId, TaskId, Text};
 
-use crate::{AgentError, AgentRunner, Ledger, Output, Routing};
+use crate::{AgentError, AgentFailure, AgentRunner, Ledger, Output, Routing};
 
 /// Which call ceiling was hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,10 +26,8 @@ pub enum DispatchError {
     /// An output failed board validation. Nothing from that call was
     /// appended; the card stays `Running` and the call is still counted.
     Board(BoardError),
-    /// The agent failed. On a [`AgentError::Transient`] the card stays
-    /// `Running`, so a later `run` retries it under the same ceilings. On a
-    /// [`AgentError::Permanent`] the card is marked `Failed` first: retrying
-    /// cannot help, so its remaining budget is not spent.
+    /// The agent failed. Its [`AgentFailure`] classification determines
+    /// metering and whether the card remains `Running` or becomes `Failed`.
     Agent {
         task: TaskId,
         agent: Agent,
@@ -200,16 +198,19 @@ impl<R: AgentRunner> Dispatcher<R> {
         if status == Status::Pending {
             plan.start(id, agent)?;
         }
-        ledger.count(id);
         let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
-        let outputs = match self.runner.run(agent, task, board) {
+        let outputs = match self.runner.run_classified(agent, task, board) {
             Ok(outputs) => outputs,
-            Err(source) => {
-                let permanent = source.is_permanent();
+            Err(failure) => {
+                let permanent = matches!(failure, AgentFailure::Permanent(_));
+                let unavailable = matches!(failure, AgentFailure::Unavailable(_));
+                if !unavailable {
+                    ledger.count(id);
+                }
                 let failed = DispatchError::Agent {
                     task: id,
                     agent,
-                    source,
+                    source: failure.into_error(),
                 };
                 if permanent {
                     fail_terminal(plan, id, &failed)?;
@@ -217,6 +218,7 @@ impl<R: AgentRunner> Dispatcher<R> {
                 return Err(failed);
             }
         };
+        ledger.count(id);
         let ids = append_atomically(board, id, agent, outputs)?;
         match first_question(board, &ids) {
             Some(question) => plan.block(id, question)?,

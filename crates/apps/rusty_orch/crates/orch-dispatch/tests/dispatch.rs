@@ -385,7 +385,7 @@ fn permanent_agent_failure_fails_the_card_once_and_strands_dependents() {
         .expect_err("permanent agent error");
     assert!(matches!(
         &err,
-        DispatchError::Agent { task: t, agent: Agent::Claude, source: AgentError::Permanent(m) }
+        DispatchError::Agent { task: t, agent: Agent::Claude, source: AgentError(m) }
             if *t == task && m == "not logged in"
     ));
     assert_eq!(
@@ -406,6 +406,53 @@ fn permanent_agent_failure_fails_the_card_once_and_strands_dependents() {
         Status::Pending
     );
     assert!(board.entries().is_empty());
+}
+
+#[test]
+fn unavailable_prerequisite_can_repeat_then_resume_at_max_calls() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 1)).expect("add");
+    let mut board = Board::new(plan.goal());
+    let fake = FakeAgent::new([
+        Reply::Unavailable("not logged in".into()),
+        Reply::Unavailable("still not logged in".into()),
+        Reply::Write(vec![finding()]),
+    ]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        fake,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(1);
+
+    for reason in ["not logged in", "still not logged in"] {
+        let err = d
+            .run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect_err("external prerequisite is absent");
+        assert!(matches!(
+            err,
+            DispatchError::Agent { source: AgentError(message), .. } if message == reason
+        ));
+        assert_eq!(
+            plan.get(task).expect("task").state().status(),
+            Status::Running
+        );
+        assert_eq!(
+            ledger.calls(),
+            0,
+            "unavailable attempts do not consume budget"
+        );
+        assert!(board.entries().is_empty());
+    }
+
+    assert_eq!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect("same card resumes after the prerequisite is restored"),
+        Outcome::Finished
+    );
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(ledger.task_calls(task), 1);
+    assert_eq!(d.runner().calls().len(), 3);
 }
 
 #[test]

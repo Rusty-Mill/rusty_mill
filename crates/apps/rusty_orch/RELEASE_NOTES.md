@@ -4,12 +4,12 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
-## Permanent agent errors stop retrying
-**2026-10-02** · (link once pushed)
+## Classified agent failures preserve login recovery
+**2026-10-03** · (link once pushed)
 
-- **Changed:** `AgentError` is an enum with `Transient` and `Permanent` variants. ADR-0007 covered refusals known before the call; this covers the ones found by making it. A `Permanent` error fails the card after that one counted call, so Codex `not logged in` no longer burns `max_calls` process spawns, and its dependents stay `Pending` with the loop reporting `Stuck`. `Transient` keeps the existing retry behaviour. Classification: wrong agent or unserved role at the adapter guard, Codex `401`/`not logged in`, and the parser refusing a role are permanent; rate limits, process failures, timeouts, overflow, and malformed output are transient.
-- **Breaking:** `AgentError(String)` and `.0` are gone; use `AgentError::Transient(..)`, `AgentError::Permanent(..)`, `message()`, `is_permanent()`. `FakeAgent` scripts a permanent failure with `Reply::Refuse`. No `orch-core` change.
-- **Added:** dispatcher test (permanent failure fails once, strands the dependent, meters one call), classification asserts in the Codex, Ollama, and parser suites. ADR-0008 amends ADR-0007.
+- **Fixed:** Codex `401` / `not logged in` is an unavailable external prerequisite, not a permanent card failure. Repeated explicit runs leave the same card `Running` and do not consume call budget; after login, that card can succeed normally, including with `max_calls = 1`. No internal retry, partial output, or fabricated success is introduced.
+- **Changed:** the additive `AgentFailure` policy returned by `AgentRunner::run_classified` distinguishes transient, permanent, and unavailable failures. Counted transient errors retain ceiling behavior and true permanent failures still fail immediately. The dispatcher never classifies message text.
+- **Compatibility:** `AgentError(String)`, its `.0` field, existing `AgentRunner::run` implementations, `DispatchError::Agent`, and persisted core state are preserved. Existing runners default to counted transient behavior. `FakeAgent` adds controlled permanent and unavailable fixtures. ADR-0008 amends ADR-0007.
 
 ---
 
