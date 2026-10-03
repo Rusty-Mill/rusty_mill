@@ -277,10 +277,10 @@ impl McpClient {
             .and_then(|r| r.authorization.clone())
             .or_else(|| spec.auth_header.clone());
         if let Some(auth) = auth_header {
-            // rmcp 2.x accepts a bearer token here and supplies the scheme.
-            // Nexus historically accepted both `Bearer token` and `token`,
-            // so remove exactly one existing Bearer prefix to preserve both
-            // configuration forms without producing `Bearer Bearer token`.
+            // Nexus accepts both `Bearer token` and bare `token` forms.
+            // Remove exactly one case-insensitive Bearer prefix before rmcp
+            // supplies the scheme, preserving that compatibility without
+            // producing `Bearer Bearer token`.
             let token = auth
                 .split_once(' ')
                 .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
@@ -415,7 +415,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     const TEST_API_KEY: &str = "synthetic-api-key";
-    const TEST_BEARER: &str = "Bearer synthetic-bearer";
+    const TEST_BEARER_TOKEN: &str = "synthetic-bearer";
 
     async fn read_http_request(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
@@ -465,13 +465,13 @@ mod tests {
             .expect("response write failed");
     }
 
-    fn http_spec(url: String) -> McpServerSpec {
+    fn http_spec(url: String, auth_header: &str) -> McpServerSpec {
         let mut headers = std::collections::BTreeMap::new();
         headers.insert("X-Nexus-Test-Key".to_string(), TEST_API_KEY.to_string());
         McpServerSpec {
             transport: McpTransport::Http,
             url: Some(url),
-            auth_header: Some(TEST_BEARER.to_string()),
+            auth_header: Some(auth_header.to_string()),
             headers,
             ..McpServerSpec::default()
         }
@@ -627,60 +627,62 @@ mod tests {
 
     #[tokio::test]
     async fn http_transport_delivers_custom_and_bearer_headers_directly() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (mut initialize, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut initialize).await;
-            assert!(
-                request
-                    .to_ascii_lowercase()
-                    .contains("x-nexus-test-key: synthetic-api-key"),
-                "custom header missing from direct request: {request}"
-            );
-            assert!(
-                request
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer synthetic-bearer"),
-                "bearer header missing from direct request: {request}"
-            );
-            let id = serde_json::from_str::<serde_json::Value>(
-                request.split_once("\r\n\r\n").unwrap().1,
-            )
-            .unwrap()["id"]
-                .clone();
-            let body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "serverInfo": { "name": "synthetic", "version": "1.0.0" }
-                }
-            })
-            .to_string();
-            write_http_response(
-                &mut initialize,
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                &body,
-            )
-            .await;
+        for auth_header in [TEST_BEARER_TOKEN, "bEaReR synthetic-bearer"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut initialize, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut initialize).await;
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("x-nexus-test-key: synthetic-api-key"),
+                    "custom header missing from direct request: {request}"
+                );
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer synthetic-bearer"),
+                    "bearer header missing from direct request: {request}"
+                );
+                let id = serde_json::from_str::<serde_json::Value>(
+                    request.split_once("\r\n\r\n").unwrap().1,
+                )
+                .unwrap()["id"]
+                    .clone();
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "serverInfo": { "name": "synthetic", "version": "1.0.0" }
+                    }
+                })
+                .to_string();
+                write_http_response(
+                    &mut initialize,
+                    "200 OK",
+                    "Content-Type: application/json\r\n",
+                    &body,
+                )
+                .await;
 
-            let (mut initialized, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut initialized).await;
-            assert!(request.contains("notifications/initialized"));
-            write_http_response(&mut initialized, "202 Accepted", "", "").await;
-        });
+                let (mut initialized, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut initialized).await;
+                assert!(request.contains("notifications/initialized"));
+                write_http_response(&mut initialized, "202 Accepted", "", "").await;
+            });
 
-        let client = McpClient::connect("direct", &http_spec(url))
-            .await
-            .expect("synthetic MCP handshake should succeed");
-        client.shutdown().await.expect("shutdown should succeed");
-        tokio::time::timeout(Duration::from_secs(2), server)
-            .await
-            .expect("synthetic server did not finish")
-            .expect("synthetic server panicked");
+            let client = McpClient::connect("direct", &http_spec(url, auth_header))
+                .await
+                .expect("synthetic MCP handshake should succeed");
+            client.shutdown().await.expect("shutdown should succeed");
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("synthetic server did not finish")
+                .expect("synthetic server panicked");
+        }
     }
 
     #[tokio::test]
@@ -706,7 +708,11 @@ mod tests {
                 .await;
             });
 
-            let result = McpClient::connect("redirect", &http_spec(url)).await;
+            let result = McpClient::connect(
+                "redirect",
+                &http_spec(url, &format!("Bearer {TEST_BEARER_TOKEN}")),
+            )
+            .await;
             assert!(
                 matches!(result, Err(McpClientError::Handshake { .. })),
                 "redirect must fail closed instead of completing a handshake: {result:?}"
