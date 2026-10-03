@@ -13,6 +13,20 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Foundation spinlocks share one implementation
+**2026-10-02** · [#411](https://github.com/Rusty-Mill/rusty_mill/issues/411)
+
+- **Changed:** `rusty_std::sync::Mutex` is the sole synchronous atomic spinlock
+  mechanism. The existing `rusty_sync::SpinLock` and guard safely delegate to
+  it through private fields.
+- **Compatibility:** both public paths remain available as nominally distinct
+  lock and guard types, so downstream local-trait implementations remain
+  separate. Acquisition, release, auto-trait bounds, and non-poisoning behavior
+  are unchanged; no fairness, async-awareness, or interrupt-safety guarantee
+  was added.
+
+---
+
 ## rusty_h2: remove dormant connection sources
 **2026-10-02** · [#418](https://github.com/Rusty-Mill/rusty_mill/issues/418)
 

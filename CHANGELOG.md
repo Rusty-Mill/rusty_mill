@@ -32,6 +32,11 @@ Removed / Fixed / Security, newest first.
   - `rusty_remind_me`'s hub applies each push through it.
 
 ### Changed
+- **One synchronous spinlock authority:** `rusty_std::sync::Mutex` now owns the
+  atomic acquisition and release mechanism used by `rusty_sync::SpinLock`.
+  `SpinLock` and `SpinLockGuard` remain distinct compatibility types, preserving
+  their public paths, trait coherence, and behavior while delegating through
+  private canonical lock and guard fields (#411).
 - **`rusty_multimodal_db_engine`: inserts and replaces no longer reopen their files.** The Tranche 5 storage comparison (#428) found every insert opening the insert log twice and the slot file twice. The store now keeps the log open through `insert_log::Appender`, which `compact` closes before removing the log; the slot file keeps its append and mapping handles. On `vs_sqlite` (two runs, µs per write): unsynced inserts 11.6–13.3 → 4.8–7.6, now about 2× faster than SQLite's; unsynced replaces 5.4–5.6 → 1.1–1.6; group-commit inserts 18.7–20.0 → 8.5–11.0, now level with SQLite; group-commit replaces 10.3–15.8 → 3.6–5.0. Durable writes are unchanged (the fsync). On-disk bytes are unchanged. The per-insert re-map of the slot file remains; avoiding it means growing the file ahead of its slots, a format change.
 - **Nexus's bundled shell is now the workspace's own `rush`; the vendored `nexus-rush` copy is removed** (about 3,000 lines). The copy had drifted behind rush. `nexus-terminal` launches the `rush` binary for sandboxed sessions (RFC 0002) and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell its own session leader, so rush's normal job control applies, where nexus-rush had switched it off. Nexus also drops nexus-rush's `rustyline` dependency for the shell (rush uses `rusty_lines`).
 - rush: an interactive shell no longer aliases 21 standard commands (`ls`, `git`, `ssh`, ...) to Rusty Mill tools that may not be installed; `ls` ran rustup's `rls` proxy wherever rustup was installed. The aliases are an opt-in block in `crates/apps/rush/examples/rushrc.example`.
