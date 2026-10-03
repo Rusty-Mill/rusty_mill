@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The ball reads rounded corners better
+**2026-10-03** · `RB-PHYSICS-001-FR-115` · ADR-0035
+
+- When the ball pressed into a rounded corner, the simulator took the 4
+  deepest touch points, and these bunched up on one side of the corner.
+  It now keeps them as the game engine does: near-duplicates merge, and
+  the 4 kept are spread as widely as possible. The worst ball error on
+  the goal recording, at a goal's back corner, fell from 1,036 to 225
+  uu/s. The next one to look at is the crossbar edge. 484 tests.
+
 ## Car hits land on the right tick
 **2026-10-03** · `RB-PHYSICS-001-FR-114` · ADR-0034
 

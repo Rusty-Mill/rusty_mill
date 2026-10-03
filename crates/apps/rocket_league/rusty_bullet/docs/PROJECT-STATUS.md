@@ -184,6 +184,10 @@ version: `a245d35`).
    `hitjump` one-step car 0.58 uu/s, ball 0.75 (resets excluded; were
    2.06 and 2.35). `RB-PHYSICS-001-FR-114` (ADR-0034) calibrates the
    car-ball contact radius to 92.3 uu from 28 recorded hits: ball 0.62.
+   `RB-PHYSICS-001-FR-115` (ADR-0035) keeps ball-mesh contacts as
+   Bullet's manifold does (near points merge, a full manifold keeps the
+   largest area): ball 0.595. Next worst ball frame: 127.633 s, the
+   crossbar bevel vertex (988 uu/s).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -192,7 +196,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (480 tests: 27 `rb_domain`, 409
+- `cargo test --workspace`: pass (484 tests: 27 `rb_domain`, 413
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

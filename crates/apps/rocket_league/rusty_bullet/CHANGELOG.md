@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0035 (`RB-PHYSICS-001-FR-115`): `collision::replacement_slot`
+  (Bullet's `sortCachedPoints`) and `mesh::add_manifold_point`.
 - ADR-0033 (`RB-PHYSICS-001-FR-113`): the goals and back walls are
   Rocket League's collision mesh (`arena::standard_goal_meshes`,
   RLUtilities' `soccar_goal`, GPL-3.0, under `assets/soccar/`), loaded as
@@ -41,6 +43,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- `StaticMesh::sphere_contacts` keeps contacts as Bullet's manifold
+  does: a point within 0.02 × radius of a kept one replaces it, and a full
+  manifold keeps the largest area and its deepest point, instead of the 4
+  deepest (`RB-PHYSICS-001-FR-115`, ADR-0035).
 - Car-ball contacts use `body::BALL_CAR_CONTACT_RADIUS` (92.3 uu,
   calibrated from 28 recorded hits) instead of the ball's 93.15 world
   radius (`RB-PHYSICS-001-FR-114`, ADR-0034).

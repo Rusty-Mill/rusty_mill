@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.118.0
+- Version: 0.119.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6033,6 +6033,31 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       (was 696).
     - `hitjump` one-step ball mean, resets excluded: 0.62 (was 0.75).
     - `test2`, `front` and `side` are unchanged.
+- `RB-PHYSICS-001-FR-115` (ball-mesh contacts kept as Bullet's manifold
+  keeps them; implemented and verified on the owner's captures, ADR-0035):
+  - `StaticMesh::sphere_contacts` adds each triangle's contact through
+    `mesh::add_manifold_point`. A point within 0.02 × radius of a kept one
+    replaces it (`getCacheEntry`). A full manifold gives up the slot
+    `collision::replacement_slot` picks (`sortCachedPoints`), never the
+    deepest.
+  - Why: at `hitjump.jsonl` 97.9 s the 4 deepest of 48 contacts in the
+    goal's rounded back corner sat on the sloped back, in near-duplicate
+    pairs, so the averaged normal (FR-108) pointed too far back.
+  - **Verification**:
+    - `collision` tests
+      `a_manifold_short_of_full_has_no_slot_to_give_up` and
+      `a_full_manifold_gives_up_the_slot_leaving_the_largest_area`.
+    - `mesh` tests
+      `a_point_within_the_breaking_threshold_refreshes_the_kept_one` and
+      `a_full_ball_manifold_never_gives_up_its_deepest_point`.
+    - `a_sphere_touching_the_mesh_gets_one_contact_per_triangle_it_reaches`
+      now expects one contact on the shared diagonal.
+    - `hitjump` 97.9 s: 225 uu/s (was 1,036).
+    - `hitjump` one-step ball mean, resets excluded: 0.595 (was 0.615).
+    - `hitjump` k = 30 ball, resets excluded: 22.43 (was 22.65).
+    - `test2`, `front` and `side` are unchanged.
+    - Open: 127.633 s (crossbar bevel vertex) is now the worst ball frame
+      at 988 uu/s (was 1).
 
 
 ## Architecture and interfaces
@@ -7524,6 +7549,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.119.0 (2026-10-03): `RB-PHYSICS-001-FR-115` — ball-mesh contacts
+  are kept as Bullet's manifold keeps them (ADR-0035). 413 tests in
+  `rb_physics_bullet`.
 - 0.118.0 (2026-10-03): `RB-PHYSICS-001-FR-114` — car-ball contacts use
   a 92.3 uu ball, calibrated from 28 recorded hits (ADR-0034). 409 tests
   in `rb_physics_bullet`.

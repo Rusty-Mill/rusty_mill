@@ -11,7 +11,10 @@
 //! manifold) lives in `collision::ContactManifold`; the ball and wheel
 //! rays query the mesh directly here.
 
-use crate::collision::{Contact, RayHit, CONTACT_PROCESSING_THRESHOLD};
+use crate::collision::{
+    replacement_slot, Contact, RayHit, CONTACT_BREAKING_FACTOR, CONTACT_PROCESSING_THRESHOLD,
+    MANIFOLD_CAPACITY,
+};
 use rb_domain::Vec3;
 use std::collections::HashMap;
 
@@ -358,14 +361,15 @@ impl StaticMesh {
     }
 
     /// A sphere's contacts, one per triangle it reaches, as Bullet's
-    /// `btSphereTriangleCollisionAlgorithm` makes them, deepest first and
-    /// at most 4 (one persistent manifold's worth). A contact on an edge
+    /// `btSphereTriangleCollisionAlgorithm` makes them, gathered into at
+    /// most 4 as a persistent manifold keeps them (`add_manifold_point`,
+    /// `RB-PHYSICS-001-FR-115`). A contact on an edge
     /// is adjusted as `btAdjustInternalEdgeContacts` does
     /// (`RB-PHYSICS-001-FR-109`), its point moved to keep the sphere's
     /// own contact point.
     pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<Contact> {
         let reach = Vec3::new(radius, radius, radius);
-        let mut contacts: Vec<Contact> = self
+        let contacts: Vec<Contact> = self
             .near_indices(center - reach, center + reach)
             .into_iter()
             .filter_map(|index| {
@@ -395,9 +399,33 @@ impl StaticMesh {
                 })
             })
             .collect();
-        contacts.sort_by(|a, b| b.penetration_depth.total_cmp(&a.penetration_depth));
-        contacts.truncate(4);
-        contacts
+        let mut kept: Vec<Contact> = Vec::with_capacity(MANIFOLD_CAPACITY);
+        for contact in contacts {
+            add_manifold_point(&mut kept, contact, CONTACT_BREAKING_FACTOR * radius);
+        }
+        kept
+    }
+}
+
+/// Adds `contact` to a ball's per-tick manifold `kept` the way Bullet's
+/// `btPersistentManifold::addManifoldPoint` does as each triangle reports
+/// (`RB-PHYSICS-001-FR-115`, ADR-0035): a point within `breaking` (uu) of a
+/// kept one replaces it (`getCacheEntry`); a full manifold gives up the
+/// slot `replacement_slot` picks (`sortCachedPoints`), never the deepest.
+/// Taking the 4 deepest instead clusters them on the fan of facets nearest
+/// the ball's center, tilting the averaged normal of a ball wedged in a
+/// rounded corner (`hitjump.jsonl` 97.9 s).
+fn add_manifold_point(kept: &mut Vec<Contact>, contact: Contact, breaking: f32) {
+    let limit = breaking * breaking;
+    let near = kept
+        .iter()
+        .position(|k| (k.point - contact.point).length_squared() < limit);
+    if let Some(slot) = near {
+        kept[slot] = contact;
+    } else if kept.len() < MANIFOLD_CAPACITY {
+        kept.push(contact);
+    } else if let Some(slot) = replacement_slot(kept, &contact) {
+        kept[slot] = contact;
     }
 }
 
@@ -587,10 +615,11 @@ mod tests {
         assert_eq!(contacts.len(), 1);
         assert!((contacts[0].penetration_depth - 2.0).abs() < 1e-4);
         assert!((contacts[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-4);
-        // On the shared diagonal both triangles report it.
+        // On the shared diagonal both triangles report the same point,
+        // which the manifold keeps once (FR-115).
         assert_eq!(
             mesh.sphere_contacts(Vec3::new(0.0, 0.0, 8.0), 10.0).len(),
-            2
+            1
         );
         assert!(mesh
             .sphere_contacts(Vec3::new(30.0, -40.0, 12.0), 10.0)
@@ -678,5 +707,42 @@ mod tests {
         let raw = Vec3::new(1.0, 0.0, 1.0).normalize().expect("nonzero");
         assert_eq!(contacts.len(), 1);
         assert!((contacts[0].normal - raw).length() < 1e-5);
+    }
+
+    fn touch(x: f32, depth: f32) -> Contact {
+        Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(x, x * x / 40.0, 0.0),
+            penetration_depth: depth,
+        }
+    }
+
+    #[test]
+    fn a_point_within_the_breaking_threshold_refreshes_the_kept_one() {
+        let mut kept = vec![touch(0.0, 5.0)];
+        add_manifold_point(&mut kept, touch(1.0, 2.0), 1.8);
+        assert_eq!(kept, vec![touch(1.0, 2.0)]);
+        add_manifold_point(&mut kept, touch(3.0, 2.0), 1.8);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn a_full_ball_manifold_never_gives_up_its_deepest_point() {
+        let mut kept = Vec::new();
+        for (x, depth) in [
+            (0.0, 9.0),
+            (10.0, 1.0),
+            (20.0, 1.0),
+            (30.0, 1.0),
+            (40.0, 1.0),
+        ] {
+            add_manifold_point(&mut kept, touch(x, depth), 1.8);
+        }
+        assert_eq!(kept.len(), MANIFOLD_CAPACITY);
+        assert!(kept.contains(&touch(0.0, 9.0)));
+        assert!(
+            kept.contains(&touch(40.0, 1.0)),
+            "the newest point always enters"
+        );
     }
 }
