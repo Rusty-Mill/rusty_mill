@@ -4,6 +4,18 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## The command: `rusty_orch run`
+**2026-10-03** · (link once pushed)
+
+- **Added:** the `rusty_orch` binary. A JSON goal file carries the goal contract by `GoalDraft` field name, a human-authored `tasks` array (`depends_on` and a review's `target` as indices into earlier tasks, refs in the adapter protocol's `path:`/`commit:`/`url:`/`E-n` syntax), and an optional `routing` object defaulting to Codex for research, design, and implement, the local model for triage, reviewers `local` then `codex`. Every rejection names the JSON path; goal-contract problems are reported together.
+- **Added:** the run loop checks the goal's wall clock before each dispatcher run, prints one progress line per run to stderr (never prompt or model text), and on a block either stops with exit status 3 or, with `--interactive`, offers each open question on stdout, appends the stdin answer as a Human `Answer`, and runs again. Dispatcher errors end the run with the state intact for the report (exit 4).
+- **Added:** text report (goal, ended, calls, cards, live board) and `--json` (one object with `goal`, `ended`, `calls`, `tasks`, every entry with a `superseded` flag). The composite runner forwards `run_classified` so Codex's recoverable login reaches the dispatcher.
+- **Changed:** `orch_cli::parse_ref` is public; `orch-codex` gets a `[workspace.dependencies]` entry; `docs/WORKSPACE-MAP.md` regenerated.
+- **Tests:** argument parser (defaults, env, flags, every usage error); goal file (example parses and builds a plan, defaults, grouped goal problems, twelve path-named rejections, forward and self references refused at plan build); run loop over `FakeAgent` (finished with both reports, blocked without answers, answer resumes, blank answer ignored, wall clock before the second run, dispatcher failure keeps state). No real binary run. ADR-0009.
+- Out of scope, by choice: persistence and cross-process resume, `StopRule::BestEffort` behaviour, Claude and Gemini adapters, the Implement role.
+
+---
+
 ## Classified agent failures preserve login recovery
 **2026-10-03** · (link once pushed)
 

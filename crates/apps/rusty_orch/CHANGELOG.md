@@ -4,6 +4,8 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- `rusty_orch` binary crate: `rusty_orch run <goal.json> [--ollama-model] [--codex-repo] [--codex-model] [--interactive] [--json]`. Parses one JSON goal file (goal contract, human-authored tasks with index-based `depends_on`/`target`, optional routing) with `rusty_json`, runs it through the dispatcher over a composite of the Codex and Ollama adapters, enforces the wall-clock budget between runs, answers blocked questions from stdin when asked, and prints a text or JSON report. Std-only argument parsing. Exit codes 0/3/4/2/1. `orch_cli::parse_ref` is now public. ADR-0009.
 ### Changed
 - `orch-dispatch`: the additive `ClassifiedError` classification lets runners distinguish counted transient failures, counted permanent failures, and unmetered unavailable prerequisites without changing `AgentError(String)`. Missing Codex login now leaves the same card resumable without consuming `max_calls`; true permanent failures still fail it immediately. ADR-0008.
 ### Fixed

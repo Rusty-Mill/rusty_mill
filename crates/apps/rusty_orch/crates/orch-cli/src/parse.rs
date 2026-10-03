@@ -155,7 +155,9 @@ fn verdict(v: &Value) -> Result<Verdict, String> {
 }
 
 /// `E-<n>`, or `path:`, `commit:`, `url:` followed by non-blank text.
-fn parse_ref(s: &str) -> Result<Ref, String> {
+/// Parse one ref in the protocol's syntax: `E-<n>`, `path:<p>`, `commit:<c>`,
+/// `url:<u>`. Syntax only; whether `E-<n>` exists is the board's call.
+pub fn parse_ref(s: &str) -> Result<Ref, String> {
     if let Some(n) = s.strip_prefix("E-") {
         return n
             .parse::<u64>()
