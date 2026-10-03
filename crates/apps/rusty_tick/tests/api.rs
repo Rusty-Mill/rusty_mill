@@ -444,6 +444,49 @@ fn subtasks_are_one_level_and_follow_their_parent() {
 }
 
 #[test]
+fn trash_family_preserves_pretrashed_children_and_restore_ownership() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let parent = h.task(&list, r#""title":"parent""#);
+    let pid = parent["id"].as_str().unwrap();
+    let first = h.task(&list, &format!(r#""title":"first","parentId":"{pid}""#));
+    let first_id = first["id"].as_str().unwrap();
+    let old = h.task(&list, &format!(r#""title":"old","parentId":"{pid}""#));
+    let old_id = old["id"].as_str().unwrap();
+
+    h.clock.store(NOW - HOUR, Ordering::SeqCst);
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/tasks/{old_id}"), "")
+            .0,
+        204
+    );
+    let (_, old_before) = h.call(Method::Get, &format!("/api/v1/tasks/{old_id}"), "");
+    h.clock.store(NOW, Ordering::SeqCst);
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/tasks/{pid}"), "")
+            .0,
+        204
+    );
+
+    let (_, first_trashed) = h.call(Method::Get, &format!("/api/v1/tasks/{first_id}"), "");
+    let (_, old_trashed) = h.call(Method::Get, &format!("/api/v1/tasks/{old_id}"), "");
+    assert_eq!(first_trashed["deletedMs"].as_i64(), Some(NOW));
+    assert_eq!(old_trashed["deletedMs"], old_before["deletedMs"]);
+    assert_eq!(first_trashed["etag"].as_str(), Some("2"));
+    assert_eq!(old_trashed["etag"].as_str(), Some("3"));
+
+    assert_eq!(
+        h.call(Method::Post, &format!("/api/v1/tasks/{pid}/restore"), "")
+            .0,
+        200
+    );
+    let (_, first_back) = h.call(Method::Get, &format!("/api/v1/tasks/{first_id}"), "");
+    let (_, old_still_trashed) = h.call(Method::Get, &format!("/api/v1/tasks/{old_id}"), "");
+    assert!(first_back["deletedMs"].is_null());
+    assert_eq!(old_still_trashed["deletedMs"], old_before["deletedMs"]);
+}
+
+#[test]
 fn unknown_routes_and_bad_ids() {
     let (_d, mut h) = harness();
     assert_eq!(h.call(Method::Get, "/api/v1/nope", "").0, 404);

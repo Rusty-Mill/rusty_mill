@@ -3,7 +3,7 @@
 //! hand-rolled bignum arithmetic was near-identical duplication --
 //! extracted into `rusty_rsa` (see that crate's own docs for the
 //! mechanism/policy split behind what moved and what didn't). This
-//! crate's own RSA public/private key wrappers ([`RsaPublicKey`],
+//! crate's own RSA public/private key wrappers ([`RsaPublicKey`](crate::security::RsaPublicKey),
 //! [`RsaPrivateKey`](crate::security::RsaPrivateKey) in
 //! [`crate::security`]) stay local -- they wrap little-endian bytes for
 //! RDP's own wire format, unlike `rusty_oauth`'s big-endian JWK-sourced
