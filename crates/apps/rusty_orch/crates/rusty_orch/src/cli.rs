@@ -1,6 +1,10 @@
 //! The entry point behind `main`, over injectable streams so the whole
 //! path from goal text to exit status is testable in-process.
 //!
+//! With `--state <dir>` the plan, board, and ledger are saved there after
+//! every dispatcher run and answer round, and a later run on the same
+//! directory and goal file continues from them (ADR-0010).
+//!
 //! Channel discipline: stdout carries the report and nothing else, so
 //! `--json` always yields one parseable object. stderr carries two kinds
 //! of line: progress, built only from fixed categories, ids, and counts;
@@ -15,7 +19,7 @@ use std::time::Instant;
 use orch_dispatch::AgentRunner;
 
 use crate::args::Args;
-use crate::run::{self, Console, Ended};
+use crate::run::{self, Console, Ended, Resume};
 use crate::{input, report};
 
 /// Exit status for a finished run.
@@ -47,7 +51,15 @@ pub fn run<R: AgentRunner>(
         stdin: streams.stdin,
         stderr: streams.stderr,
     };
-    let summary = run::execute(spec, runner, &mut console, Instant::now)?;
+    let mut store = match &args.state {
+        Some(dir) => Some(orch_store::Store::open(dir)?),
+        None => None,
+    };
+    let resume = store.as_mut().map(|store| Resume {
+        store,
+        fingerprint: orch_store::fingerprint(goal_json),
+    });
+    let summary = run::execute(spec, runner, &mut console, Instant::now, resume)?;
     if args.json {
         writeln!(
             streams.stdout,

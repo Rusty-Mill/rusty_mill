@@ -19,6 +19,7 @@ orch-dispatch = { workspace = true }
 orch-cli = { workspace = true }
 orch-ollama = { workspace = true }
 orch-codex = { workspace = true }
+orch-store = { workspace = true }
 rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [dev-dependencies]

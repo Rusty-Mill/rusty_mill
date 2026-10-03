@@ -26,6 +26,19 @@ impl Ledger {
         Self::default()
     }
 
+    /// Rebuild a ledger from counts an earlier process saved, so a resumed
+    /// goal keeps honouring what it already spent. Zero task counts are
+    /// dropped; `goal_calls` is taken as given.
+    pub fn from_counts(
+        goal_calls: u32,
+        task_calls: impl IntoIterator<Item = (TaskId, u32)>,
+    ) -> Self {
+        Self {
+            goal_calls,
+            task_calls: task_calls.into_iter().filter(|(_, n)| *n > 0).collect(),
+        }
+    }
+
     /// Calls made against the goal budget.
     pub fn calls(&self) -> u32 {
         self.goal_calls
@@ -73,5 +86,21 @@ fn ceiling(ceiling: Ceiling, task: TaskId, limit: NonZeroU32) -> DispatchError {
         ceiling,
         task,
         limit,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_counts_round_trips_and_drops_zero_rows() {
+        let t1 = TaskId::from_raw(1);
+        let t2 = TaskId::from_raw(2);
+        let ledger = Ledger::from_counts(3, [(t1, 2), (t2, 0)]);
+        assert_eq!(ledger.calls(), 3);
+        assert_eq!(ledger.task_calls(t1), 2);
+        assert_eq!(ledger.task_calls(t2), 0);
+        assert_eq!(ledger, Ledger::from_counts(3, [(t1, 2)]));
     }
 }

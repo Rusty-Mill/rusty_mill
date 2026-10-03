@@ -1,6 +1,9 @@
 //! The loop around the dispatcher: enforce the goal's wall clock between
 //! runs, surface blocked questions, and, when a console is willing, take
-//! the human's answers and keep going.
+//! the human's answers and keep going. With a [`Resume`], the plan, board,
+//! and ledger are loaded from the store first and saved after every
+//! dispatcher run and every answer round, so the next process continues
+//! where this one stopped (ADR-0010).
 
 use std::fmt;
 use std::io;
@@ -13,6 +16,7 @@ use orch_core::{EntryId, GoalId, TaskId, Text};
 use orch_dispatch::{
     AgentRunner, DispatchError, Dispatcher, Ledger, Outcome, Routing, RoutingError,
 };
+use orch_store::{GoalState, Store, StoreError};
 
 use crate::input::{build_plan, InputError, Spec};
 
@@ -65,12 +69,15 @@ pub struct Summary {
     pub ledger: Ledger,
 }
 
-/// Why a run could not even start, or lost its console.
+/// Why a run could not even start, lost its console, or lost its store.
 #[derive(Debug)]
 pub enum RunError {
     Input(InputError),
     Routing(RoutingError),
     Io(io::Error),
+    Store(StoreError),
+    /// The store holds state for a different goal file.
+    GoalChanged,
 }
 
 impl fmt::Display for RunError {
@@ -79,24 +86,75 @@ impl fmt::Display for RunError {
             Self::Input(e) => write!(f, "{e}"),
             Self::Routing(e) => write!(f, "routing: {e}"),
             Self::Io(e) => write!(f, "console: {e}"),
+            Self::Store(e) => write!(f, "{e}"),
+            Self::GoalChanged => f.write_str(
+                "the goal file differs from the one the saved state was built from; \
+                 use a fresh --state directory",
+            ),
         }
+    }
+}
+
+impl From<StoreError> for RunError {
+    fn from(e: StoreError) -> Self {
+        Self::Store(e)
+    }
+}
+
+/// Where a run continues from and checkpoints to.
+pub struct Resume<'a> {
+    pub store: &'a mut Store,
+    /// Of the goal file this run was given; see [`orch_store::fingerprint`].
+    pub fingerprint: u64,
+}
+
+impl Resume<'_> {
+    /// The saved state for `goal`, if any, refusing one built from another
+    /// goal file.
+    fn load(&self, goal: GoalId) -> Result<Option<GoalState>, RunError> {
+        match self.store.load(goal)? {
+            Some(state) if state.fingerprint != self.fingerprint => Err(RunError::GoalChanged),
+            other => Ok(other),
+        }
+    }
+
+    fn save(&mut self, plan: &Plan, board: &Board, ledger: &Ledger) -> Result<(), RunError> {
+        let state = GoalState {
+            fingerprint: self.fingerprint,
+            plan: plan.clone(),
+            board: board.clone(),
+            ledger: ledger.clone(),
+        };
+        Ok(self.store.save(&state)?)
     }
 }
 
 impl std::error::Error for RunError {}
 
 /// Run `spec` to completion, a block, a failure, or the wall clock. `now`
-/// is injected so tests can move time.
+/// is injected so tests can move time. With `resume`, saved state replaces
+/// the fresh plan and every run and answer round is saved. The wall clock
+/// is per process: a goal waiting on a human does not spend it.
 pub fn execute<R: AgentRunner>(
     spec: Spec,
     runner: R,
     console: &mut dyn Console,
     now: impl Fn() -> Instant,
+    mut resume: Option<Resume<'_>>,
 ) -> Result<Summary, RunError> {
     let goal_id = GoalId::from_raw(1);
-    let mut plan = build_plan(&spec, goal_id).map_err(RunError::Input)?;
-    let mut board = Board::new(goal_id);
-    let mut ledger = Ledger::new();
+    let saved = match &resume {
+        Some(r) => r.load(goal_id)?,
+        None => None,
+    };
+    let (mut plan, mut board, mut ledger) = match saved {
+        Some(s) => (s.plan, s.board, s.ledger),
+        None => (
+            build_plan(&spec, goal_id).map_err(RunError::Input)?,
+            Board::new(goal_id),
+            Ledger::new(),
+        ),
+    };
     let routing = Routing::try_from(spec.routing).map_err(RunError::Routing)?;
     let mut dispatcher = Dispatcher::new(routing, runner);
     let goal = spec.goal;
@@ -108,6 +166,7 @@ pub fn execute<R: AgentRunner>(
             break Ended::WallClock(budget);
         }
         let outcome = dispatcher.run(&goal, &mut plan, &mut board, &mut ledger);
+        checkpoint(&mut resume, &plan, &board, &ledger)?;
         console.note(&format!(
             "run: {} after {} call(s)",
             progress(&outcome),
@@ -115,11 +174,13 @@ pub fn execute<R: AgentRunner>(
         ));
         match outcome {
             Ok(Outcome::Finished) => break Ended::Finished,
-            Ok(Outcome::Blocked(ids)) => match answer_questions(&mut board, console) {
-                Ok(Answers::Recorded) => {}
-                Ok(Answers::Stop) => break Ended::Blocked(ids),
-                Err(e) => return Err(RunError::Io(e)),
-            },
+            Ok(Outcome::Blocked(ids)) => {
+                let answers = answer_questions(&mut board, console).map_err(RunError::Io)?;
+                checkpoint(&mut resume, &plan, &board, &ledger)?;
+                if answers == Answers::Stop {
+                    break Ended::Blocked(ids);
+                }
+            }
             Err(e) => break Ended::Failed(e),
         }
     };
@@ -130,6 +191,19 @@ pub fn execute<R: AgentRunner>(
         board,
         ledger,
     })
+}
+
+/// Save when there is somewhere to save to.
+fn checkpoint(
+    resume: &mut Option<Resume<'_>>,
+    plan: &Plan,
+    board: &Board,
+    ledger: &Ledger,
+) -> Result<(), RunError> {
+    match resume {
+        Some(r) => r.save(plan, board, ledger),
+        None => Ok(()),
+    }
 }
 
 /// The progress wording for one dispatcher run. Exhaustive over
@@ -160,6 +234,7 @@ fn progress(outcome: &Result<Outcome, DispatchError>) -> String {
 }
 
 /// What the question round decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answers {
     /// Every open question was offered and at least one answer landed on
     /// the board: run the dispatcher again.

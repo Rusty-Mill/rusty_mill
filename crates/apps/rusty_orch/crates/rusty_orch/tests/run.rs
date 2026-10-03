@@ -64,7 +64,7 @@ fn frozen() -> impl Fn() -> Instant {
 fn a_plan_runs_to_finished_and_reports_both_ways() {
     let fake = FakeAgent::new([Reply::Write(vec![finding()])]);
     let mut console = Scripted::default();
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
 
     assert_eq!(s.ended, Ended::Finished);
     assert_eq!(s.ledger.calls(), 1);
@@ -110,7 +110,7 @@ fn a_plan_runs_to_finished_and_reports_both_ways() {
 fn a_question_blocks_when_nobody_answers() {
     let fake = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
     let mut console = Scripted::answering(&[None]);
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
 
     let task = s.plan.tasks()[0].id();
     assert_eq!(s.ended, Ended::Blocked(vec![task]));
@@ -131,7 +131,7 @@ fn an_answer_resumes_the_card_on_the_same_run() {
         Reply::Write(vec![finding()]),
     ]);
     let mut console = Scripted::answering(&[Some("yes, go ahead")]);
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
 
     assert_eq!(s.ended, Ended::Finished);
     assert_eq!(s.ledger.calls(), 2);
@@ -154,7 +154,7 @@ fn an_answer_resumes_the_card_on_the_same_run() {
 fn a_blank_answer_is_ignored_and_the_run_stays_blocked() {
     let fake = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
     let mut console = Scripted::answering(&[Some("   ")]);
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
 
     assert!(matches!(s.ended, Ended::Blocked(_)));
     assert!(
@@ -187,7 +187,7 @@ fn the_wall_clock_is_checked_before_every_run() {
             start + Duration::from_secs(60)
         }
     };
-    let s = execute(spec(3, RESEARCH), fake, &mut console, now).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, now, None).expect("run");
 
     assert_eq!(s.ended, Ended::WallClock(Duration::from_secs(60)));
     assert_eq!(s.ledger.calls(), 1, "the second run never started");
@@ -198,7 +198,7 @@ fn the_wall_clock_is_checked_before_every_run() {
 fn a_dispatcher_error_ends_the_run_with_the_state_intact() {
     let fake = FakeAgent::new([Reply::Fail("boom".into()), Reply::Fail("boom".into())]);
     let mut console = Scripted::default();
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
 
     assert!(
         matches!(s.ended, Ended::Failed(DispatchError::Agent { .. })),
@@ -228,7 +228,7 @@ fn the_goal_ceiling_stops_the_second_card_as_a_typed_failure() {
                   {"role":"research","instruction":"j","acceptance":["a"],"max_calls":1}]"#;
     let fake = FakeAgent::new([Reply::Write(vec![finding()]), Reply::Write(vec![finding()])]);
     let mut console = Scripted::default();
-    let s = execute(spec(1, two), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(1, two), fake, &mut console, frozen(), None).expect("run");
 
     let second = s.plan.tasks()[1].id();
     assert_eq!(
@@ -255,7 +255,7 @@ fn a_blank_after_an_earlier_answer_stops_without_another_model_call() {
         Reply::Write(vec![finding()]),
     ]);
     let mut console = Scripted::answering(&[Some("first answer"), None]);
-    let s = execute(spec(10, two), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(10, two), fake, &mut console, frozen(), None).expect("run");
 
     assert!(
         matches!(&s.ended, Ended::Blocked(ids) if ids.len() == 2),
@@ -278,7 +278,7 @@ fn progress_notes_name_the_category_and_never_the_agents_message() {
     const SENTINEL: &str = "SENTINEL-2b9d-must-not-leak";
     let fake = FakeAgent::new([Reply::Fail(format!("model said {SENTINEL}"))]);
     let mut console = Scripted::default();
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
 
     assert!(matches!(
         s.ended,

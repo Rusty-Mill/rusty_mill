@@ -15,10 +15,20 @@ cargo run -p rusty_orch -- --help
 | `--codex-model <name>` | model for `Agent::Codex`; default: Codex's own |
 | `--interactive` | when a card blocks on a question, read the answer from stdin and keep going |
 | `--json` | print the report as one JSON object instead of text |
+| `--state <dir>` | save the plan, board, and ledger there after every dispatcher run and answer round, and resume from it on the next run; env `RUSTY_ORCH_STATE`; default: in memory only |
 
 Exit status: `0` finished, `3` blocked on unanswered questions, `4` budget or agent failure, `2` usage, `1` any other error.
 
 Channels: stdout carries the report and nothing else, so `--json` is always one parseable object even through a blocked-and-answered run. Questions, the answer prompt, and progress lines go to stderr; answers are read from stdin. A progress line is built only from a fixed outcome category, task ids, agent names, and counts; adapter or model error text appears only in the report. The questions shown under `--interactive` are model text by nature. A blank line or end of input stops the question round at once: answers already given stay on the board, no further model call is made, and the run exits `3`.
+
+## Resuming
+
+`--state <dir>` keeps the goal's plan, board, and ledger in that directory ([ADR-0010](../../docs/adr/0010-persistence-on-multimodal-db.md)). A run that exits `3` can be continued later with the same goal file and directory, typically with `--interactive` to answer what blocked it; the calls already spent still count against the ceilings. The goal file is fingerprinted: a different file against saved state is refused with exit `1`, so use a fresh directory per goal. One process holds a directory at a time. The wall clock is per invocation.
+
+```sh
+rusty_orch run goal.json --state .orch            # exit 3: a card asked a question
+rusty_orch run goal.json --state .orch --interactive   # answer, continue, finish
+```
 
 ## Goal file
 
@@ -34,4 +44,4 @@ A review card needs no `refs` to see what it reviews: the shared renderer resolv
 cargo test -p rusty_orch
 ```
 
-Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection and the run loop through finished, blocked, answered, blank answer, wall clock, and dispatcher failure, over `orch_dispatch::fake::FakeAgent`. No real binary is run.
+Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection, the run loop through finished, blocked, answered, blank answer, wall clock, and dispatcher failure, and the entry point through a blocked run resumed in a second and third process with its ledger, a saved answer, and a changed goal file refused, over `orch_dispatch::fake::FakeAgent`. No real binary is run.

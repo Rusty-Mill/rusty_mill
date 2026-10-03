@@ -4,6 +4,18 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Resume a blocked run: `--state <dir>`
+**2026-10-03** · (link once pushed)
+
+- **Added:** `orch-store`, persistence over the embedded `rusty_multimodal_db_engine` (libs layer, the allowed edge). One snapshot record per goal holds the plan, the board, the ledger, and a fingerprint of the goal file; a save is one durable `replace`, so no journal is needed. `load` rebuilds the state through `Plan::add` and the lifecycle transitions, `Board::append`, and the new `Ledger::from_counts`, so every `orch-core` invariant is checked again and a bad snapshot is refused as corrupt. The directory is locked per process.
+- **Added:** `rusty_orch run <goal.json> --state <dir>` (env `RUSTY_ORCH_STATE`). The state is saved after every dispatcher run and every answer round; the next run on the same directory and goal file continues from it, and the calls already spent still count against both ceilings. A goal file that no longer matches the saved fingerprint is refused (exit 1). Without the flag the run stays in memory as before. The wall clock is per invocation, so a goal waiting on a human does not spend it.
+- **Changed:** `orch-dispatch`: additive `Ledger::from_counts`. ARCHITECTURE's board-store row and ADR-0003's `rusty_sqlite` row are superseded. Root manifest gains the `orch-store` member and entry; `docs/WORKSPACE-MAP.md` regenerated.
+- **Deviation, stated:** `orch-store` depends on `serde` (the engine's record bound) and carries the engine's pinned registry crates transitively; its `rust-version` is 1.89. Snapshot rows are bincode-encoded, so field and variant order is the on-disk format.
+- **Tests:** store round trip through a reopen covering every `TaskState` and `EntryKind` plus a supersession; replace bumps the revision; a second open of a held directory is refused; plan/board goal mismatch refused; goals kept apart by id; fingerprint follows the text. Entry point: a blocked run (exit 3) resumes in a second process that answers and finishes with the ledger at two calls and no replayed call, and a third process has nothing to do; a changed goal file is refused by name; an answer given before a transient failure is on the board when the next process finishes. Argument parser: `--state` from flag and environment, missing value is a usage error. `Ledger::from_counts` unit test. Verified locally on rustc 1.97; CI pins 1.98.1. No real engine crash testing. ADR-0010.
+- Out of scope, by choice: per-step saving (needs a dispatcher seam), multi-goal directories, a separate answer command, Claude and Gemini adapters, `StopRule::BestEffort`.
+
+---
+
 ## The command: `rusty_orch run`
 **2026-10-03** · (link once pushed)
 
