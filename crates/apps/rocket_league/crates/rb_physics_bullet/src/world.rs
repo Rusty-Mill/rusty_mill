@@ -445,14 +445,8 @@ impl PhysicsWorld {
         for curve in crate::arena::standard_curves() {
             world = world.with_curve(curve);
         }
-        for curve in crate::arena::standard_goal_cutout_fillets() {
-            world = world.with_curve(curve);
-        }
         for mesh in crate::arena::standard_meshes() {
             world = world.with_mesh(mesh);
-        }
-        for corner_fillet in crate::arena::standard_goal_corner_fillets() {
-            world = world.with_corner_fillet(corner_fillet);
         }
         for goal_wall in crate::arena::standard_goal_walls() {
             world = world.with_goal_wall(goal_wall);
@@ -3358,13 +3352,14 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_ten_curved_transitions() {
-        // The back walls' 4 floor/ceiling seams (the rest are mesh since
-        // RB-PHYSICS-001-FR-106) plus 6 goal-cutout-edge fillets
-        // (RB-PHYSICS-001-FR-024).
+    fn standard_arena_has_six_curved_transitions() {
+        // Per back wall a ceiling seam and a floor seam either side of the
+        // goal mouth (the rest are mesh since RB-PHYSICS-001-FR-106). The
+        // goal-cutout fillets (FR-024) are out since FR-112: concave, they
+        // filled the goal mouth.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.curves.len(), 10);
+        assert_eq!(world.curves.len(), 6);
     }
 
     #[test]
@@ -3793,13 +3788,48 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_four_goal_corner_fillets_and_eight_meshes() {
-        // The 4 goal post-crossbar corners (RB-PHYSICS-001-FR-026); since
-        // FR-106 the arena's corners and side ramps are 8 meshes.
+    fn standard_arena_has_no_goal_corner_fillets_and_eight_meshes() {
+        // The goal post-crossbar corner fillets (RB-PHYSICS-001-FR-026)
+        // are out since FR-112, like the cutout fillets; since FR-106 the
+        // arena's corners and side ramps are 8 meshes.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.corner_fillets.len(), 4);
+        assert!(world.corner_fillets.is_empty());
         assert_eq!(world.meshes.len(), 8);
+    }
+
+    /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 56.3 s: a ball shot into
+    /// the goal mouth at half the crossbar's height goes in, instead of
+    /// bouncing off a fillet filling the mouth.
+    #[test]
+    fn a_ball_shot_into_the_goal_mouth_goes_in() {
+        let mut ball = RigidBody::standard_ball(Vec3::new(0.0, 5065.0, 355.0));
+        ball.linear_velocity = Vec3::new(0.0, 2919.0, -391.0);
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        assert!(
+            world.ball.linear_velocity.y > 2900.0,
+            "expected the ball to keep going in, got {:?}",
+            world.ball.linear_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 277.0 s: a car driving
+    /// inside the goal meets no back-wall floor seam.
+    #[test]
+    fn a_car_inside_the_goal_meets_no_back_wall_seam() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let car = RigidBody::standard_car(Vec3::new(0.0, 5325.0, 17.0));
+        let world = PhysicsWorld::standard_arena(ball).with_car(car);
+        let scene = world.static_scene();
+        let deep = PhysicsWorld::static_contact_manifolds(&world.cars[0], &scene, true, None)
+            .into_iter()
+            .flat_map(|(_, contacts)| contacts)
+            .any(|contact| contact.penetration_depth > 5.0);
+        assert!(
+            !deep,
+            "the car should rest on the goal floor, not be buried in a seam"
+        );
     }
 
     #[test]

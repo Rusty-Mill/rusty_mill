@@ -31,6 +31,14 @@
 //! FR-102's measured radii survive for the back seams
 //! (`BACK_FLOOR_RADIUS`, `CEILING_RADIUS`).
 //!
+//! Since `RB-PHYSICS-001-FR-112` (ADR-0032) `PhysicsWorld::standard_arena`
+//! leaves out `standard_goal_cutout_fillets` and
+//! `standard_goal_corner_fillets`: built concave between the back wall and
+//! the post/crossbar planes, they filled the goal mouth itself, and a ball
+//! shot into the goal bounced out (`hitjump.jsonl` 56.3 s). The back-wall
+//! floor seam stops at the goal posts for the same reason. Both functions
+//! remain, described below as built.
+//!
 //! `standard_goal_walls`/`standard_goal_cutout_fillets`
 //! (`RB-PHYSICS-001-FR-024`) open an actual goal-mouth window in each back
 //! wall — until now, `standard_walls`' two back walls were solid, flat
@@ -515,8 +523,14 @@ pub fn standard_curves() -> Vec<StaticQuarterPipe> {
         .into_iter()
         .flat_map(|sign| {
             let wall = back_wall_plane(sign);
+            let seam = StaticQuarterPipe::between_planes(&floor, &wall, BACK_FLOOR_RADIUS, along);
+            // The goal floor runs flat into the goal: no seam across its
+            // mouth (`RB-PHYSICS-001-FR-112`).
+            let far = Vec3::new(SIDE_WALL_X, 0.0, 0.0);
+            let post = Vec3::new(GOAL_HALF_WIDTH, 0.0, 0.0);
             [
-                StaticQuarterPipe::between_planes(&floor, &wall, BACK_FLOOR_RADIUS, along),
+                seam.with_span(-far, -post),
+                seam.with_span(post, far),
                 StaticQuarterPipe::between_planes(&ceiling, &wall, CEILING_RADIUS, along),
             ]
         })
@@ -611,16 +625,42 @@ mod tests {
 
     #[test]
     fn standard_curves_are_the_back_walls_floor_and_ceiling_seams() {
+        // Per back wall: the floor seam either side of the goal mouth
+        // (RB-PHYSICS-001-FR-112), then the ceiling seam.
         let curves = standard_curves();
-        assert_eq!(curves.len(), 4);
-        for seams in curves.chunks(2) {
-            assert!((seams[0].radius - BACK_FLOOR_RADIUS).abs() < 1e-6);
-            assert!((seams[0].axis_point.z - BACK_FLOOR_RADIUS).abs() < 1e-3);
-            assert!((seams[1].radius - CEILING_RADIUS).abs() < 1e-6);
-            assert!((seams[1].axis_point.z - (CEILING_Z - CEILING_RADIUS)).abs() < 1e-3);
-            let wall_distance = BACK_WALL_Y - seams[0].axis_point.y.abs();
-            assert!((wall_distance - BACK_FLOOR_RADIUS).abs() < 1e-2);
+        assert_eq!(curves.len(), 6);
+        for seams in curves.chunks(3) {
+            for floor in &seams[..2] {
+                assert!((floor.radius - BACK_FLOOR_RADIUS).abs() < 1e-6);
+                assert!((floor.axis_point.z - BACK_FLOOR_RADIUS).abs() < 1e-3);
+                let wall_distance = BACK_WALL_Y - floor.axis_point.y.abs();
+                assert!((wall_distance - BACK_FLOOR_RADIUS).abs() < 1e-2);
+            }
+            assert!((seams[2].radius - CEILING_RADIUS).abs() < 1e-6);
+            assert!((seams[2].axis_point.z - (CEILING_Z - CEILING_RADIUS)).abs() < 1e-3);
+            assert!(seams[2].span.0.is_infinite() && seams[2].span.1.is_infinite());
         }
+    }
+
+    /// RB-PHYSICS-001-FR-112: the back-wall floor seam stops at the goal
+    /// posts, so a point in the goal mouth meets no seam, and one beside
+    /// the goal still does.
+    #[test]
+    fn the_back_wall_floor_seam_stops_at_the_goal_mouth() {
+        let seams: Vec<_> = standard_curves()
+            .into_iter()
+            .filter(|c| (c.radius - BACK_FLOOR_RADIUS).abs() < 1e-6 && c.axis_point.y > 0.0)
+            .collect();
+        let corner_of_seam = |x: f32| Vec3::new(x, BACK_WALL_Y - 5.0, 5.0);
+        let touched = |x: f32| {
+            seams.iter().any(|s| {
+                crate::collision::sphere_vs_quarter_pipe(corner_of_seam(x), 0.0, s).is_some()
+            })
+        };
+        assert!(!touched(0.0), "the goal mouth has no seam");
+        assert!(!touched(GOAL_HALF_WIDTH - 1.0));
+        assert!(touched(GOAL_HALF_WIDTH + 1.0), "beside the goal it does");
+        assert!(touched(-(GOAL_HALF_WIDTH + 1.0)));
     }
 
     #[test]
