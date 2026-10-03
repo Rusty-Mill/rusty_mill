@@ -18,7 +18,7 @@ pub mod sys;
 
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,8 +52,16 @@ impl AsyncLinuxSpawner {
 impl AsyncSpawner for AsyncLinuxSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn AsyncChild>> {
         let child = self.inner.spawn(cmd)?;
+        let signal_pidfd = match pidfd_open(child.id() as libc::pid_t) {
+            Ok(pidfd) => pidfd,
+            Err(acquisition_error) => {
+                cleanup_unexposed_child(child)?;
+                return Err(acquisition_error);
+            }
+        };
         Ok(Box::new(AsyncLinuxChild {
             inner: child,
+            signal_pidfd,
             reactor: Arc::clone(&self.reactor),
             reaped: Arc::new(Mutex::new(None)),
         }))
@@ -76,8 +84,228 @@ impl AsyncSpawner for AsyncLinuxSpawner {
     }
 }
 
+/// Dispose of a child whose signaling pidfd could not be acquired.
+///
+/// The child has not been exposed and no helper can have reaped it, so its
+/// numeric PID still belongs to this operation under the spawn ownership
+/// assumptions documented in the crate README. `ESRCH` is harmless here: an
+/// immediately exited child remains waitable. Other signal failures are
+/// returned rather than risking an unbounded blocking wait.
+fn cleanup_unexposed_child(mut child: Box<dyn Child>) -> Result<()> {
+    match cleanup_kill(&*child) {
+        Ok(()) => {}
+        Err(error) if error.os == OsCode::Errno(libc::ESRCH) => {}
+        Err(error) => return Err(error),
+    }
+    #[cfg(test)]
+    syscall_test_hook::pipes_released((
+        child.take_stdin().is_some(),
+        child.take_stdout().is_some(),
+        child.take_stderr().is_some(),
+    ));
+    #[cfg(not(test))]
+    {
+        child.take_stdin();
+        child.take_stdout();
+        child.take_stderr();
+    }
+    cleanup_wait(child).map(|_| ())
+}
+
+#[cfg(not(test))]
+fn pidfd_open(pid: libc::pid_t) -> Result<OwnedFd> {
+    sys::pidfd::open(pid)
+}
+
+#[cfg(not(test))]
+fn cleanup_kill(child: &dyn Child) -> Result<()> {
+    child.kill_single(Signal::Kill)
+}
+
+#[cfg(not(test))]
+fn cleanup_wait(child: Box<dyn Child>) -> Result<ExitStatus> {
+    child.wait()
+}
+
+#[cfg(not(test))]
+fn pidfd_send_signal(pidfd: std::os::fd::BorrowedFd<'_>, signal: Signal) -> Result<()> {
+    sys::pidfd::send_signal(pidfd, signal)
+}
+
+#[cfg(test)]
+mod syscall_test_hook {
+    use super::*;
+    use std::cell::RefCell;
+    use std::os::fd::BorrowedFd;
+
+    #[derive(Clone, Copy)]
+    pub(super) struct ErrorSpec {
+        pub(super) kind: ErrorKind,
+        pub(super) errno: i32,
+        pub(super) op: &'static str,
+    }
+
+    impl ErrorSpec {
+        fn make(self) -> PlatformError {
+            PlatformError::new(self.kind, OsCode::Errno(self.errno), self.op)
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct State {
+        pub(super) open_error: Option<ErrorSpec>,
+        pub(super) kill_error: Option<ErrorSpec>,
+        pub(super) wait_error: Option<ErrorSpec>,
+        pub(super) signal_error: Option<ErrorSpec>,
+        pub(super) opened_pid: Option<libc::pid_t>,
+        pub(super) open_calls: usize,
+        pub(super) kill_calls: usize,
+        pub(super) wait_calls: usize,
+        pub(super) signal_fds: Vec<i32>,
+        pub(super) numeric_signal_calls: usize,
+        pub(super) released_pipes: Option<(bool, bool, bool)>,
+        pub(super) wait_helper_starts: usize,
+        pub(super) before_open: Option<fn(libc::pid_t)>,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn with<R>(state: State, f: impl FnOnce() -> R) -> (R, State) {
+        STATE.with(|slot| {
+            assert!(slot.borrow().is_none(), "nested syscall test hook");
+            *slot.borrow_mut() = Some(state);
+        });
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                STATE.with(|slot| {
+                    slot.borrow_mut().take();
+                });
+            }
+        }
+        let clear = Clear;
+        let result = f();
+        let state = STATE.with(|slot| slot.borrow_mut().take().expect("hook installed"));
+        std::mem::forget(clear);
+        (result, state)
+    }
+
+    pub(super) fn open(pid: libc::pid_t) -> Result<OwnedFd> {
+        let before = STATE.with(|slot| slot.borrow().as_ref().and_then(|state| state.before_open));
+        if let Some(before) = before {
+            // The callback is deliberately allowed to panic. Own the spawned
+            // PID until it returns so test failures cannot leak a child or
+            // zombie before `spawn` gets a chance to run normal cleanup.
+            struct CallbackChild(libc::pid_t);
+            impl Drop for CallbackChild {
+                fn drop(&mut self) {
+                    let _ = platform_linux::sys::spawn::kill_single(self.0, Signal::Kill);
+                    let _ = platform_linux::sys::spawn::wait(self.0);
+                }
+            }
+            let owned = CallbackChild(pid);
+            before(pid);
+            std::mem::forget(owned);
+        }
+        let injected = STATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            slot.as_mut().and_then(|state| {
+                state.open_calls += 1;
+                state.opened_pid = Some(pid);
+                state.open_error
+            })
+        });
+        match injected {
+            Some(error) => Err(error.make()),
+            None => sys::pidfd::open(pid),
+        }
+    }
+
+    pub(super) fn kill(child: &dyn Child) -> Result<()> {
+        let injected = STATE.with(|slot| {
+            slot.borrow_mut().as_mut().and_then(|state| {
+                state.kill_calls += 1;
+                state.numeric_signal_calls += 1;
+                state.kill_error
+            })
+        });
+        match injected {
+            Some(error) => Err(error.make()),
+            None => child.kill_single(Signal::Kill),
+        }
+    }
+
+    pub(super) fn pipes_released(pipes: (bool, bool, bool)) {
+        STATE.with(|slot| {
+            if let Some(state) = slot.borrow_mut().as_mut() {
+                state.released_pipes = Some(pipes);
+            }
+        });
+    }
+
+    pub(super) fn wait_helper_started() {
+        STATE.with(|slot| {
+            if let Some(state) = slot.borrow_mut().as_mut() {
+                state.wait_helper_starts += 1;
+            }
+        });
+    }
+
+    pub(super) fn wait(child: Box<dyn Child>) -> Result<ExitStatus> {
+        let injected = STATE.with(|slot| {
+            slot.borrow_mut().as_mut().and_then(|state| {
+                state.wait_calls += 1;
+                state.wait_error
+            })
+        });
+        match injected {
+            Some(error) => Err(error.make()),
+            None => child.wait(),
+        }
+    }
+
+    pub(super) fn send_signal(pidfd: BorrowedFd<'_>, signal: Signal) -> Result<()> {
+        let injected = STATE.with(|slot| {
+            slot.borrow_mut().as_mut().and_then(|state| {
+                state.signal_fds.push(pidfd.as_raw_fd());
+                state.signal_error
+            })
+        });
+        match injected {
+            Some(error) => Err(error.make()),
+            None => sys::pidfd::send_signal(pidfd, signal),
+        }
+    }
+}
+
+#[cfg(test)]
+fn pidfd_open(pid: libc::pid_t) -> Result<OwnedFd> {
+    syscall_test_hook::open(pid)
+}
+
+#[cfg(test)]
+fn cleanup_kill(child: &dyn Child) -> Result<()> {
+    syscall_test_hook::kill(child)
+}
+
+#[cfg(test)]
+fn cleanup_wait(child: Box<dyn Child>) -> Result<ExitStatus> {
+    syscall_test_hook::wait(child)
+}
+
+#[cfg(test)]
+fn pidfd_send_signal(pidfd: std::os::fd::BorrowedFd<'_>, signal: Signal) -> Result<()> {
+    syscall_test_hook::send_signal(pidfd, signal)
+}
+
 struct AsyncLinuxChild {
     inner: Box<dyn Child>,
+    /// Dedicated identity handle for every `kill_single` call. Readiness uses
+    /// independently opened pidfds so reactor deregistration keeps its
+    /// existing open-file-description lifetime.
+    signal_pidfd: OwnedFd,
     reactor: Arc<EpollReactor>,
     /// The single authoritative "already reaped" cache for this child,
     /// consulted and updated by every reaping path below (`wait`,
@@ -141,7 +369,7 @@ impl AsyncChild for AsyncLinuxChild {
         {
             return Ok(());
         }
-        self.inner.kill_single(sig)
+        pidfd_send_signal(self.signal_pidfd.as_fd(), sig)
     }
 
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
@@ -361,6 +589,8 @@ impl Future for WaitJob {
         }
         if !this.spawned {
             this.spawned = true;
+            #[cfg(test)]
+            syscall_test_hook::wait_helper_started();
             let result_slot = Arc::clone(&this.result);
             let reaped = Arc::clone(&this.reaped);
             let waker = this.waker.clone();
@@ -369,10 +599,22 @@ impl Future for WaitJob {
                 .name("rustils-async-waitjob".to_owned())
                 .spawn(move || {
                     let outcome = platform_linux::sys::spawn::wait_job(pid);
-                    if let Ok(status) = &outcome {
-                        if !matches!(status, ExitStatus::Stopped(_) | ExitStatus::Continued) {
-                            *reaped.lock().unwrap_or_else(|p| p.into_inner()) = Some(*status);
+                    #[cfg(test)]
+                    let publication = wait_job_test_hook::after_waitpid(pid);
+                    #[cfg(test)]
+                    let may_publish = publication.as_ref().is_none_or(|(allowed, _)| *allowed);
+                    #[cfg(not(test))]
+                    let may_publish = true;
+                    if may_publish {
+                        if let Ok(status) = &outcome {
+                            if !matches!(status, ExitStatus::Stopped(_) | ExitStatus::Continued) {
+                                *reaped.lock().unwrap_or_else(|p| p.into_inner()) = Some(*status);
+                            }
                         }
+                    }
+                    #[cfg(test)]
+                    if let Some((allowed, published)) = publication {
+                        let _ = published.send(allowed);
                     }
                     *result_slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
                     waker.wake();
@@ -390,13 +632,526 @@ impl Future for WaitJob {
 }
 
 #[cfg(test)]
+mod wait_job_test_hook {
+    use std::sync::{mpsc, Mutex};
+
+    struct Hook {
+        pid: libc::pid_t,
+        reaped: mpsc::SyncSender<()>,
+        publish: mpsc::Receiver<()>,
+        published: mpsc::SyncSender<bool>,
+    }
+
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    pub(super) struct Guard {
+        pid: libc::pid_t,
+        release: mpsc::SyncSender<()>,
+    }
+
+    impl Guard {
+        pub(super) fn release(&self) {
+            let _ = self.release.try_send(());
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.release.try_send(());
+            let mut slot = HOOK.lock().unwrap_or_else(|p| p.into_inner());
+            if slot.as_ref().is_some_and(|hook| hook.pid == self.pid) {
+                slot.take();
+            }
+        }
+    }
+
+    pub(super) fn install(
+        pid: libc::pid_t,
+        reaped: mpsc::SyncSender<()>,
+        release: mpsc::SyncSender<()>,
+        publish: mpsc::Receiver<()>,
+        published: mpsc::SyncSender<bool>,
+    ) -> Guard {
+        *HOOK.lock().unwrap_or_else(|p| p.into_inner()) = Some(Hook {
+            pid,
+            reaped,
+            publish,
+            published,
+        });
+        Guard { pid, release }
+    }
+
+    pub(super) fn after_waitpid(pid: libc::pid_t) -> Option<(bool, mpsc::SyncSender<bool>)> {
+        let mut slot = HOOK.lock().unwrap_or_else(|p| p.into_inner());
+        let hook = (slot.as_ref().is_some_and(|hook| hook.pid == pid))
+            .then(|| slot.take().expect("matching hook exists"));
+        drop(slot);
+        if let Some(hook) = hook {
+            let _ = hook.reaped.send(());
+            let allowed = hook
+                .publish
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok();
+            return Some((allowed, hook.published));
+        }
+        None
+    }
+}
+
+#[cfg(test)]
 mod wait_any_leak_tests {
     use super::*;
+    use platform::process::Stdio;
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
     use std::time::Duration;
 
     struct CountingWaker(AtomicUsize);
+
+    struct OwnedPid(libc::pid_t);
+
+    /// Test-only decorator at the wrapped [`Child::kill_single`] boundary.
+    /// Unlike the acquisition-cleanup hook, this observes any accidental
+    /// numeric-PID signal made through an exposed `AsyncLinuxChild`'s actual
+    /// inner child.
+    struct ObservedChild {
+        inner: Box<dyn Child>,
+        kill_single_calls: Arc<AtomicUsize>,
+    }
+
+    impl Child for ObservedChild {
+        fn wait(self: Box<Self>) -> Result<ExitStatus> {
+            self.inner.wait()
+        }
+
+        fn id(&self) -> u32 {
+            self.inner.id()
+        }
+
+        fn kill_tree(&self, sig: Signal) -> Result<()> {
+            self.inner.kill_tree(sig)
+        }
+
+        fn kill_single(&self, sig: Signal) -> Result<()> {
+            self.kill_single_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.kill_single(sig)
+        }
+
+        fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+            self.inner.try_wait()
+        }
+
+        fn wait_job(&mut self) -> Result<ExitStatus> {
+            self.inner.wait_job()
+        }
+
+        fn try_wait_job(&mut self) -> Result<Option<ExitStatus>> {
+            self.inner.try_wait_job()
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn platform::fs::File>> {
+            self.inner.take_stdin()
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn platform::fs::File>> {
+            self.inner.take_stdout()
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn platform::fs::File>> {
+            self.inner.take_stderr()
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    fn observed_child(
+        reactor: Arc<EpollReactor>,
+        command: &Command,
+    ) -> (Box<AsyncLinuxChild>, Arc<AtomicUsize>) {
+        let inner = LinuxSpawner.spawn(command).expect("spawn observed child");
+        let signal_pidfd = sys::pidfd::open(inner.id() as libc::pid_t).expect("open signal pidfd");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inner = Box::new(ObservedChild {
+            inner,
+            kill_single_calls: Arc::clone(&calls),
+        });
+        (
+            Box::new(AsyncLinuxChild {
+                inner,
+                signal_pidfd,
+                reactor,
+                reaped: Arc::new(Mutex::new(None)),
+            }),
+            calls,
+        )
+    }
+
+    impl Drop for OwnedPid {
+        fn drop(&mut self) {
+            let _ = platform_linux::sys::spawn::kill_single(self.0, Signal::Kill);
+            let _ = platform_linux::sys::spawn::wait(self.0);
+        }
+    }
+
+    fn injected(errno: i32, op: &'static str) -> syscall_test_hook::ErrorSpec {
+        syscall_test_hook::ErrorSpec {
+            kind: ErrorKind::Other,
+            errno,
+            op,
+        }
+    }
+
+    fn isolated(marker: &str, test: &str) -> bool {
+        if std::env::var_os(marker).is_some() {
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg(test)
+            .arg("--nocapture")
+            .env(marker, "1")
+            .status()
+            .expect("run isolated descriptor test");
+        assert!(status.success(), "isolated descriptor test failed");
+        false
+    }
+
+    fn wait_until_zombie(pid: libc::pid_t) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .expect("owned child remains present until it is reaped");
+            if status.lines().any(|line| line.starts_with("State:\tZ")) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn spawn_acquisition_errors_clean_running_and_exited_children() {
+        for (program, args, before_open) in [
+            ("/bin/sleep", vec!["30"], None),
+            (
+                "/bin/true",
+                Vec::new(),
+                Some(wait_until_zombie as fn(libc::pid_t)),
+            ),
+        ] {
+            for errno in [libc::ENOSYS, libc::EMFILE] {
+                let spawner = AsyncLinuxSpawner::new().expect("spawner");
+                let mut cmd = Command::new(program, "/");
+                for arg in &args {
+                    cmd = cmd.arg(arg);
+                }
+                cmd.stdin = Stdio::Pipe;
+                cmd.stdout = Stdio::Pipe;
+                cmd.stderr = Stdio::Pipe;
+                let (result, state) = syscall_test_hook::with(
+                    syscall_test_hook::State {
+                        open_error: Some(syscall_test_hook::ErrorSpec {
+                            kind: if errno == libc::ENOSYS {
+                                ErrorKind::Unsupported
+                            } else {
+                                ErrorKind::Other
+                            },
+                            errno,
+                            op: "injected pidfd_open",
+                        }),
+                        before_open,
+                        ..Default::default()
+                    },
+                    || spawner.spawn(&cmd),
+                );
+                let error = result.err().expect("acquisition must fail");
+                assert_eq!(error.os, OsCode::Errno(errno));
+                assert_eq!(error.op, "injected pidfd_open");
+                assert_eq!(
+                    (state.open_calls, state.kill_calls, state.wait_calls),
+                    (1, 1, 1)
+                );
+                assert_eq!(state.numeric_signal_calls, 1, "numeric-signal spy control");
+                assert_eq!(state.released_pipes, Some((true, true, true)));
+                assert_eq!(state.wait_helper_starts, 0);
+                let pid = state.opened_pid.expect("spawn happened before acquisition");
+                assert_eq!(
+                    platform_linux::sys::spawn::try_wait(pid).unwrap_err().os,
+                    OsCode::Errno(libc::ECHILD),
+                    "cleanup must reap the owned child"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_failure_is_contextual_and_never_waits_after_failed_termination() {
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let (result, state) = syscall_test_hook::with(
+            syscall_test_hook::State {
+                open_error: Some(injected(libc::EMFILE, "injected pidfd_open")),
+                kill_error: Some(injected(libc::EPERM, "cleanup SIGKILL")),
+                ..Default::default()
+            },
+            || spawner.spawn(&Command::new("/bin/sleep", "/").arg("30")),
+        );
+        let owned = OwnedPid(state.opened_pid.expect("child was created"));
+        let error = result.err().expect("cleanup termination must fail");
+        assert_eq!(
+            (error.op, error.os),
+            ("cleanup SIGKILL", OsCode::Errno(libc::EPERM))
+        );
+        assert_eq!((state.kill_calls, state.wait_calls), (1, 0));
+        drop(owned);
+    }
+
+    #[test]
+    fn cleanup_wait_failure_is_returned_and_owned_child_can_still_be_reaped() {
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let (result, state) = syscall_test_hook::with(
+            syscall_test_hook::State {
+                open_error: Some(injected(libc::EMFILE, "injected pidfd_open")),
+                wait_error: Some(injected(libc::EIO, "cleanup wait")),
+                ..Default::default()
+            },
+            || spawner.spawn(&Command::new("/bin/sleep", "/").arg("30")),
+        );
+        let owned = OwnedPid(state.opened_pid.expect("child was created"));
+        let error = result.err().expect("cleanup wait must fail");
+        assert_eq!(
+            (error.op, error.os),
+            ("cleanup wait", OsCode::Errno(libc::EIO))
+        );
+        assert_eq!((state.kill_calls, state.wait_calls), (1, 1));
+        drop(owned);
+    }
+
+    #[test]
+    fn creation_failure_never_attempts_pidfd_acquisition() {
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let (result, state) = syscall_test_hook::with(Default::default(), || {
+            spawner.spawn(&Command::new("/definitely/not/a/program", "/"))
+        });
+        assert!(result.is_err());
+        assert_eq!(state.open_calls, 0);
+        assert!(state.opened_pid.is_none());
+    }
+
+    #[test]
+    fn exposed_child_routes_signal_to_retained_fd_and_preserves_error() {
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let (mut child, numeric_calls) = observed_child(
+            Arc::clone(&spawner.reactor),
+            &Command::new("/bin/sleep", "/").arg("30"),
+        );
+        // Positive control: the decorator observes a call made directly at
+        // the wrapped-child boundary that the exposed path must not use.
+        child
+            .inner
+            .kill_single(Signal::Cont)
+            .expect("direct inner signal control");
+        assert_eq!(numeric_calls.swap(0, Ordering::SeqCst), 1);
+        let (result, state) = syscall_test_hook::with(
+            syscall_test_hook::State {
+                signal_error: Some(injected(libc::EIO, "injected pidfd_send_signal")),
+                ..Default::default()
+            },
+            || child.kill_single(Signal::Term),
+        );
+        let error = result.expect_err("non-ESRCH pidfd failure must be preserved");
+        assert_eq!(
+            (error.op, error.os),
+            ("injected pidfd_send_signal", OsCode::Errno(libc::EIO))
+        );
+        assert_eq!(
+            state.signal_fds.len(),
+            1,
+            "the pidfd boundary is used exactly once"
+        );
+        assert_eq!(state.numeric_signal_calls, 0);
+        assert_eq!(numeric_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            child.try_wait().expect("status check"),
+            None,
+            "no status is fabricated"
+        );
+        child
+            .kill_single(Signal::Kill)
+            .expect("real pidfd cleanup signal");
+        block_on(child.wait()).expect("reap owned child");
+    }
+
+    #[test]
+    fn retained_pidfd_is_cloexec_and_closes_when_child_is_dropped() {
+        if !isolated(
+            "RUSTY_MILL_PIDFD_CLOEXEC_CHILD",
+            "wait_any_leak_tests::retained_pidfd_is_cloexec_and_closes_when_child_is_dropped",
+        ) {
+            return;
+        }
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let child = spawner
+            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+            .expect("spawn");
+        let pid = child.id() as libc::pid_t;
+        let (_, state) = syscall_test_hook::with(
+            syscall_test_hook::State {
+                signal_error: Some(injected(libc::EIO, "inspect retained pidfd")),
+                ..Default::default()
+            },
+            || child.kill_single(Signal::Term),
+        );
+        let fd = state.signal_fds[0];
+        let flags = sys::pidfd::descriptor_flags(fd);
+        assert_ne!(flags, -1, "retained pidfd must be valid before inspection");
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        drop(child);
+        assert_eq!(sys::pidfd::descriptor_flags(fd), -1);
+        drop(OwnedPid(pid));
+    }
+
+    fn retained_fd(child: &dyn AsyncChild) -> i32 {
+        let (_, state) = syscall_test_hook::with(
+            syscall_test_hook::State {
+                signal_error: Some(injected(libc::EIO, "inspect retained pidfd")),
+                ..Default::default()
+            },
+            || child.kill_single(Signal::Term),
+        );
+        state.signal_fds[0]
+    }
+
+    #[test]
+    fn consuming_wait_and_cancelled_wait_release_the_retained_pidfd() {
+        if !isolated(
+            "RUSTY_MILL_PIDFD_WAIT_LIFETIME_CHILD",
+            "wait_any_leak_tests::consuming_wait_and_cancelled_wait_release_the_retained_pidfd",
+        ) {
+            return;
+        }
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let child = spawner
+            .spawn(&Command::new("/bin/true", "/"))
+            .expect("spawn exiting child");
+        let fd = retained_fd(&*child);
+        block_on(child.wait()).expect("consume wait");
+        assert_eq!(sys::pidfd::descriptor_flags(fd), -1);
+
+        let child = spawner
+            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+            .expect("spawn running child");
+        let pid = child.id() as libc::pid_t;
+        let fd = retained_fd(&*child);
+        let mut wait = child.wait();
+        let waker = std::task::Waker::from(Arc::new(CountingWaker(AtomicUsize::new(0))));
+        assert!(wait
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(wait);
+        assert_eq!(sys::pidfd::descriptor_flags(fd), -1);
+        drop(OwnedPid(pid));
+    }
+
+    #[test]
+    fn retained_pidfd_can_be_descriptor_zero_in_an_isolated_process() {
+        const MARKER: &str = "RUSTY_MILL_PIDFD_ZERO_CHILD";
+        if !isolated(
+            MARKER,
+            "wait_any_leak_tests::retained_pidfd_can_be_descriptor_zero_in_an_isolated_process",
+        ) {
+            return;
+        }
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        sys::pidfd::close_descriptor(0);
+        let child = spawner
+            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+            .expect("spawn");
+        let pid = child.id() as libc::pid_t;
+        assert_eq!(retained_fd(&*child), 0, "fd zero is valid, not a sentinel");
+        drop(child);
+        drop(OwnedPid(pid));
+    }
+
+    #[test]
+    fn stale_owner_paths_do_not_close_a_reused_descriptor_number() {
+        if !isolated(
+            "RUSTY_MILL_PIDFD_REUSE_CHILD",
+            "wait_any_leak_tests::stale_owner_paths_do_not_close_a_reused_descriptor_number",
+        ) {
+            return;
+        }
+        use std::os::fd::{AsFd, AsRawFd};
+
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let child = spawner
+            .spawn(&Command::new("/bin/true", "/"))
+            .expect("spawn");
+        let pid = child.id() as libc::pid_t;
+        let reservation = std::fs::File::open("/dev/null").expect("reserve descriptor number");
+        let stale_number = reservation.as_raw_fd();
+        sys::pidfd::close_descriptor(stale_number);
+        std::mem::forget(reservation);
+        let mut original_activity = child.ready();
+        let waker = std::task::Waker::from(Arc::new(CountingWaker(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        assert!(original_activity.as_mut().poll(&mut cx).is_pending());
+        assert_ne!(
+            sys::pidfd::descriptor_flags(stale_number),
+            -1,
+            "original readiness activity must own the reserved descriptor"
+        );
+        let readiness_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match original_activity.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => {
+                    result.expect("original child readiness");
+                    break;
+                }
+                Poll::Pending => {
+                    assert!(
+                        std::time::Instant::now() < readiness_deadline,
+                        "original child readiness did not complete before the deadline"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        assert_eq!(sys::pidfd::descriptor_flags(stale_number), -1);
+
+        let replacement = std::fs::File::open("/dev/null").expect("replacement descriptor");
+        let replacement_number = replacement.as_raw_fd();
+        assert_eq!(
+            sys::pidfd::replace_descriptor(replacement.as_fd(), stale_number),
+            stale_number
+        );
+        assert_ne!(sys::pidfd::descriptor_flags(stale_number), -1);
+
+        // The completed future still belongs to the original child. Dropping
+        // it after its readiness pidfd legitimately closed must not perform a
+        // stale close on a descriptor that now belongs to the replacement.
+        drop(original_activity);
+        assert_ne!(sys::pidfd::descriptor_flags(stale_number), -1);
+
+        // Exercise both signaling and owner-drop paths on another child. A
+        // stale owner of `stale_number` would incorrectly affect replacement.
+        let other = spawner
+            .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+            .expect("spawn control child");
+        let other_pid = other.id() as libc::pid_t;
+        other.kill_single(Signal::Kill).expect("pidfd signal path");
+        drop(other);
+        assert_ne!(sys::pidfd::descriptor_flags(stale_number), -1);
+        if replacement_number != stale_number {
+            sys::pidfd::close_descriptor(stale_number);
+        }
+        drop(replacement);
+        drop(child);
+        drop(OwnedPid(pid));
+        drop(OwnedPid(other_pid));
+    }
 
     impl Wake for CountingWaker {
         fn wake(self: Arc<Self>) {
@@ -509,6 +1264,66 @@ mod wait_any_leak_tests {
         child
             .kill_single(Signal::Kill)
             .expect("no signal to a reaped pid");
+    }
+
+    /// The helper has successfully reaped the child but has not published the
+    /// shared cache yet. Numeric-PID signaling returned `ESRCH` in this exact
+    /// interval (and could target a recycled PID); the retained pidfd instead
+    /// identifies only the original process and treats its termination as
+    /// success.
+    #[test]
+    fn kill_single_is_safe_between_helper_reap_and_cache_publication() {
+        use std::sync::mpsc;
+
+        let spawner = AsyncLinuxSpawner::new().expect("spawner");
+        let (mut child, numeric_calls) = observed_child(
+            Arc::clone(&spawner.reactor),
+            &Command::new("/bin/true", "/"),
+        );
+        let (reaped_tx, reaped) = mpsc::sync_channel(1);
+        let (publish, publish_rx) = mpsc::sync_channel(1);
+        let (published_tx, published) = mpsc::sync_channel(1);
+        let hook_guard = wait_job_test_hook::install(
+            child.id() as libc::pid_t,
+            reaped_tx,
+            publish.clone(),
+            publish_rx,
+            published_tx,
+        );
+        {
+            let waker = std::task::Waker::from(Arc::new(CountingWaker(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut abandoned = child.wait_job();
+            assert!(abandoned.as_mut().poll(&mut cx).is_pending());
+        }
+
+        reaped
+            .recv_timeout(Duration::from_secs(5))
+            .expect("helper did not reap child");
+        let (signal_result, signal_state) =
+            syscall_test_hook::with(Default::default(), || child.kill_single(Signal::Kill));
+        assert_eq!(signal_state.signal_fds.len(), 1);
+        assert_eq!(
+            signal_state.numeric_signal_calls, 0,
+            "exposed child must never fall back to numeric signaling"
+        );
+        assert_eq!(
+            numeric_calls.load(Ordering::SeqCst),
+            0,
+            "the actual wrapped-child boundary must remain unused"
+        );
+        hook_guard.release();
+        assert!(
+            published
+                .recv_timeout(Duration::from_secs(5))
+                .expect("helper did not report publication"),
+            "helper timed out before explicit publication release"
+        );
+        signal_result.expect("terminated process behind stable pidfd is success");
+        assert_eq!(
+            child.try_wait().expect("helper published cached status"),
+            Some(ExitStatus::Code(0))
+        );
     }
 
     /// Waits until `counter` is non-zero, up to 5 s.

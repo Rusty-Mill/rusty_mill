@@ -15,7 +15,9 @@ use orch_core::board::Board;
 use orch_core::goal::{Goal, GoalDraft, StopRule};
 use orch_core::task::{Agent, Plan, Role, Task, TaskSpec, TaskState};
 use orch_core::{GoalId, Ref, Text};
-use orch_dispatch::{AgentError, AgentRunner, Dispatcher, Ledger, Output, Routing, RoutingConfig};
+use orch_dispatch::{
+    AgentError, AgentRunner, ClassifiedError, Dispatcher, Ledger, Output, Routing, RoutingConfig,
+};
 use orch_ollama::OllamaAgent;
 
 /// One runner per agent; the dispatcher only ever hands us the agent it routed.
@@ -38,6 +40,21 @@ impl AgentRunner for Agents {
             Agent::Codex => self.codex.run(agent, task, board),
             Agent::Local => self.local.run(agent, task, board),
             other => Err(AgentError(format!("no adapter for {other:?}"))),
+        }
+    }
+
+    fn run_classified(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, ClassifiedError> {
+        match agent {
+            Agent::Codex => self.codex.run_classified(agent, task, board),
+            Agent::Local => self.local.run_classified(agent, task, board),
+            other => Err(ClassifiedError::Permanent(AgentError(format!(
+                "no adapter for {other:?}"
+            )))),
         }
     }
 }

@@ -78,14 +78,29 @@ impl KafkaClient<TcpStream> {
         client_id: Option<String>,
         connect_timeout: Duration,
     ) -> Result<Self, ClientError> {
-        let io = rusty_tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
-            .await
-            .map_err(|_| ClientError::ConnectTimeout(connect_timeout))??;
-        Ok(KafkaClient::new(io, client_id))
+        Self::connect_from_future(TcpStream::connect(addr), client_id, connect_timeout).await
     }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> KafkaClient<S> {
+    /// Shared production path for bounding the complete connector future.
+    /// Keeping the future as the seam (rather than an established transport)
+    /// ensures address resolution and every connection candidate remain inside
+    /// the public method's deadline.
+    async fn connect_from_future<F>(
+        connector: F,
+        client_id: Option<String>,
+        connect_timeout: Duration,
+    ) -> Result<Self, ClientError>
+    where
+        F: std::future::Future<Output = std::io::Result<S>>,
+    {
+        let io = rusty_tokio::time::timeout(connect_timeout, connector)
+            .await
+            .map_err(|_| ClientError::ConnectTimeout(connect_timeout))??;
+        Ok(KafkaClient::new(io, client_id))
+    }
+
     /// Wraps an already-connected transport -- the seam this crate's own
     /// tests use (an in-memory [`rusty_tokio::io::duplex`] pair) instead
     /// of a real TCP connection.
@@ -349,6 +364,10 @@ mod tests {
     use crate::protocol::create_topics::{CreatableTopic, CreatableTopicResult};
     use crate::wire::{write_i16, write_i32, write_string};
     use rusty_tokio::io::duplex;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     /// Reads one framed request off `peer` and returns its decoded
     /// header plus the raw (still-encoded) body bytes that followed it
@@ -916,32 +935,151 @@ mod tests {
         assert!(matches!(err, ClientError::CorrelationMismatch(_, _)));
     }
 
-    /// `192.0.2.0/24` is TEST-NET-1 (RFC 5737): reserved for
-    /// documentation/examples, guaranteed never to be assigned to a
-    /// real host, so nothing ever answers the SYN and the connect
-    /// genuinely stays pending rather than racing a fast loopback
-    /// handshake that could complete synchronously on the very first
-    /// poll (a real, actively-accepting local listener isn't a safe
-    /// stand-in here for exactly that reason). Confirmed in this
-    /// environment to block for multiple seconds with no ICMP
-    /// unreachable, so the short `connect_timeout` below is what ends
-    /// the wait, not the network stack. Before the fix, `connect` had
-    /// no timeout at all and this would hang until the test runner's
-    /// own deadline killed it.
+    struct PendingConnector {
+        polled: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl std::future::Future for PendingConnector {
+        type Output = std::io::Result<rusty_tokio::io::DuplexStream>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polled.store(true, AtomicOrdering::SeqCst);
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingConnector {
+        fn drop(&mut self) {
+            self.dropped.store(true, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn pending_connector_is_polled_timed_out_and_cancelled() {
+        let runtime = rusty_tokio::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(async {
+            rusty_tokio::time::pause();
+            let requested = Duration::from_secs(17);
+            let polled = Arc::new(AtomicBool::new(false));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (tx, rx) = rusty_tokio::sync::oneshot::channel();
+            let connector = PendingConnector {
+                polled: polled.clone(),
+                dropped: dropped.clone(),
+            };
+
+            rusty_tokio::spawn(async move {
+                let result = KafkaClient::connect_from_future(connector, None, requested).await;
+                let _ = tx.send(result);
+            });
+            rusty_tokio::task::yield_now().await;
+            assert!(polled.load(AtomicOrdering::SeqCst));
+            assert!(!dropped.load(AtomicOrdering::SeqCst));
+
+            // The outer deadline is a bounded negative control: temporarily
+            // removing the production timeout makes this assertion fail rather
+            // than hang the suite.
+            let bounded =
+                rusty_tokio::spawn(
+                    async move { rusty_tokio::time::timeout(requested * 2, rx).await },
+                );
+            rusty_tokio::task::yield_now().await;
+            rusty_tokio::time::advance(requested * 2).await;
+            let result = bounded
+                .await
+                .unwrap()
+                .expect("production timeout was removed or did not fire")
+                .unwrap();
+            let err = match result {
+                Ok(_) => panic!("pending connector unexpectedly completed"),
+                Err(error) => error,
+            };
+            assert!(matches!(err, ClientError::ConnectTimeout(d) if d == requested));
+            assert!(dropped.load(AtomicOrdering::SeqCst));
+        });
+    }
+
     #[rusty_tokio::test]
-    async fn connect_with_timeout_times_out_when_nothing_answers_the_syn() {
+    async fn immediate_connector_success_initializes_the_client() {
+        let (io, _peer) = duplex(64);
+        let client = KafkaClient::connect_from_future(
+            std::future::ready(Ok(io)),
+            Some("deterministic-client".to_string()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(client.client_id.as_deref(), Some("deterministic-client"));
+        assert_eq!(client.next_correlation_id.load(Ordering::Relaxed), 0);
+        assert_eq!(client.max_frame_len, DEFAULT_MAX_FRAME_LEN);
+        assert_eq!(client.call_timeout, DEFAULT_CALL_TIMEOUT);
+        assert!(!client.poisoned);
+    }
+
+    #[rusty_tokio::test]
+    async fn immediate_connector_io_failure_is_not_a_timeout() {
+        let error = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "fixture refusal");
+        let result = KafkaClient::<rusty_tokio::io::DuplexStream>::connect_from_future(
+            std::future::ready(Err(error)),
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ClientError::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused
+        ));
+    }
+
+    #[rusty_tokio::test]
+    async fn connect_with_timeout_succeeds_over_loopback() {
+        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = rusty_tokio::spawn(async move { listener.accept().await.unwrap() });
+
+        let client = KafkaClient::connect_with_timeout(
+            &addr.to_string(),
+            Some("loopback-client".to_string()),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let (_peer, _) = accept.await.unwrap();
+        assert_eq!(client.client_id.as_deref(), Some("loopback-client"));
+    }
+
+    /// Opt-in end-to-end fixture for a controlled TCP SYN-drop endpoint.
+    ///
+    /// Set `RUSTY_KAFKA_SYN_DROP_ADDR` to an operator-provisioned and
+    /// authorized dedicated `IP:PORT` whose firewall silently drops TCP SYNs
+    /// for the duration of this test. There is deliberately no default: a
+    /// documentation address, immediate refusal, or unexpected success is a
+    /// fixture failure and must not count as timeout coverage.
+    ///
+    /// Run this ignored test explicitly with:
+    /// `cargo test -p rusty_kafka --all-features client::tests::connect_with_timeout_against_controlled_syn_drop_fixture -- --ignored --exact`.
+    #[rusty_tokio::test]
+    #[ignore = "requires an authorized RUSTY_KAFKA_SYN_DROP_ADDR fixture"]
+    async fn connect_with_timeout_against_controlled_syn_drop_fixture() {
+        let addr = std::env::var("RUSTY_KAFKA_SYN_DROP_ADDR")
+            .expect("set RUSTY_KAFKA_SYN_DROP_ADDR to an authorized silent SYN-drop IP:PORT");
+        let addr: std::net::SocketAddr = addr
+            .parse()
+            .expect("RUSTY_KAFKA_SYN_DROP_ADDR must be a numeric IP:PORT");
+        let timeout = Duration::from_millis(250);
         let start = std::time::Instant::now();
-        let result =
-            KafkaClient::connect_with_timeout("192.0.2.1:65000", None, Duration::from_millis(200))
-                .await;
-        let err = match result {
-            Ok(_) => panic!("connect to a TEST-NET-1 address must not succeed"),
-            Err(err) => err,
-        };
-        assert!(matches!(err, ClientError::ConnectTimeout(_)));
+        let result = KafkaClient::connect_with_timeout(&addr.to_string(), None, timeout).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ClientError::ConnectTimeout(actual)) => assert_eq!(actual, timeout),
+            Err(error) => panic!("SYN-drop fixture refused or failed immediately: {error}"),
+            Ok(_) => panic!("SYN-drop fixture unexpectedly accepted the connection"),
+        }
         assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "connect must time out promptly instead of hanging"
+            elapsed >= timeout && elapsed < Duration::from_secs(5),
+            "fixture timeout elapsed outside the bounded window: {elapsed:?}"
         );
     }
 

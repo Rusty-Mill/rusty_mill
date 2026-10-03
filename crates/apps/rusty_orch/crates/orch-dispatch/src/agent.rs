@@ -29,6 +29,30 @@ impl fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {}
 
+/// Dispatcher policy attached to an [`AgentError`] by an adapter.
+///
+/// This is separate from `AgentError` to preserve its tuple constructor and
+/// field while allowing adapters to report consequential lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassifiedError {
+    /// The attempted call counts and the running card may be retried.
+    Transient(AgentError),
+    /// The attempted call counts and the card is failed immediately.
+    Permanent(AgentError),
+    /// A prerequisite outside the plan is absent. The card remains running
+    /// and no call is charged, so restoring the prerequisite can resume it.
+    Unavailable(AgentError),
+}
+
+impl ClassifiedError {
+    /// Remove the dispatcher policy and return the compatible agent error.
+    pub fn into_error(self) -> AgentError {
+        match self {
+            Self::Transient(error) | Self::Permanent(error) | Self::Unavailable(error) => error,
+        }
+    }
+}
+
 /// Port for anything that can run a task card on a model backend.
 ///
 /// One call per invocation: the dispatcher meters calls, so an adapter must
@@ -47,4 +71,18 @@ pub trait AgentRunner {
 
     /// Run `task` on `agent` and return the entries it produced.
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError>;
+
+    /// Run with explicit dispatcher policy for failures.
+    ///
+    /// Existing runners need not implement this: ordinary `AgentError`s keep
+    /// their historical transient, counted behavior.
+    fn run_classified(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, ClassifiedError> {
+        self.run(agent, task, board)
+            .map_err(ClassifiedError::Transient)
+    }
 }

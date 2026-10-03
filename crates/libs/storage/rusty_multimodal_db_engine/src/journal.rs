@@ -272,6 +272,30 @@ impl Journal {
             sequences: self.sequences.clone(),
             batch: batch.clone(),
         })?;
+        #[cfg(feature = "test-support")]
+        let injected_prefix = crate::test_support::take_fault(|fault| {
+            matches!(fault, crate::test_support::Fault::JournalWritePrefix(_))
+        });
+        #[cfg(feature = "test-support")]
+        let written =
+            if let Some(crate::test_support::Fault::JournalWritePrefix(prefix)) = injected_prefix {
+                self.file
+                    .write_all(&frame[..prefix.min(frame.len())])
+                    .and_then(|()| Err(io::Error::other("injected journal partial write")))
+            } else {
+                self.file.write_all(&frame).and_then(|()| {
+                    if crate::test_support::take_fault(|fault| {
+                        fault == crate::test_support::Fault::JournalSync
+                    })
+                    .is_some()
+                    {
+                        Err(io::Error::other("injected journal sync failure"))
+                    } else {
+                        self.file.sync_data()
+                    }
+                })
+            };
+        #[cfg(not(feature = "test-support"))]
         let written = self
             .file
             .write_all(&frame)
@@ -391,6 +415,16 @@ fn write_fresh(path: &Path, entry: &Entry) -> Result<u64, JournalError> {
     file.sync_all().map_err(io)?;
     drop(file);
     std::fs::rename(&staging, path).map_err(io)?;
+    #[cfg(feature = "test-support")]
+    if crate::test_support::take_fault(|fault| {
+        fault == crate::test_support::Fault::CheckpointAfterRename
+    })
+    .is_some()
+    {
+        return Err(io(io::Error::other(
+            "injected checkpoint post-rename failure",
+        )));
+    }
     sync_parent_dir(path).map_err(io)?;
     Ok(contents.len() as u64)
 }

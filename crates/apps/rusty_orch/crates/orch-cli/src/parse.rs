@@ -33,7 +33,9 @@ pub fn allowed_kinds(role: Role) -> &'static [&'static str] {
 pub fn parse(stdout: &str, role: Role) -> Result<Vec<Output>, AgentError> {
     let allowed = allowed_kinds(role);
     if allowed.is_empty() {
-        return Err(fail(format!("role {role:?} is not served by this adapter")));
+        return Err(AgentError(format!(
+            "role {role:?} is not served by this adapter"
+        )));
     }
     let json =
         Value::parse(unfence(stdout)).map_err(|e| fail(format!("reply is not JSON: {e}")))?;
