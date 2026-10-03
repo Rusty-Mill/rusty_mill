@@ -14205,6 +14205,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_orch"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-codex",
+ "orch-core",
+ "orch-dispatch",
+ "orch-ollama",
+ "rusty_json",
+]
+
+[[package]]
 name = "rusty_proxmox"
 version = "0.1.0"
 dependencies = [

@@ -26,5 +26,5 @@ pub use exec::{
     excerpt, CommandRunner, ExecError, Exit, StdCommand, EXCERPT_CHARS, JOIN_GRACE,
     MAX_STDOUT_BYTES,
 };
-pub use parse::{allowed_kinds, parse, MAX_BODY_CHARS, MAX_ENTRIES};
+pub use parse::{allowed_kinds, parse, parse_ref, MAX_BODY_CHARS, MAX_ENTRIES};
 pub use prompt::{format_spec, render};

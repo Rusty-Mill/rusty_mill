@@ -4,6 +4,19 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## The command: `rusty_orch run`
+**2026-10-03** · (link once pushed)
+
+- **Added:** the `rusty_orch` binary. A JSON goal file carries the goal contract by `GoalDraft` field name, a human-authored `tasks` array (`depends_on` and a review's `target` as indices into earlier tasks, refs in the adapter protocol's `path:`/`commit:`/`url:`/`E-n` syntax), and an optional `routing` object defaulting to Codex for research, design, and implement, the local model for triage, reviewers `local` then `codex`. Every rejection names the JSON path; goal-contract problems are reported together.
+- **Added:** the run loop checks the goal's wall clock before each dispatcher run, prints one progress line per run to stderr (a fixed outcome category plus task id, agent, and call count; adapter and model error text stays in the report), and on a block either stops with exit status 3 or, with `--interactive`, offers each open question on stderr, appends the stdin answer as a Human `Answer`, and runs again. A blank line or end of input stops the round at once, keeping earlier answers and making no further model call. stdout carries only the report, so `--json` stays one parseable object. Dispatcher errors end the run with the state intact for the report (exit 4).
+- **Changed (`orch-cli`):** `render` gives a `Role::Review` card the reviewed task's live entries and the answers to them under `UNDER REVIEW`, resolved at render time, so a review verdict is always given on the actual output (including findings written after a question/answer/resume) without the author naming entry ids.
+- **Added:** text report (goal, ended, calls, cards, live board) and `--json` (one object with `goal`, `ended`, `calls`, `tasks`, every entry with a `superseded` flag). The composite runner forwards `run_classified` so Codex's recoverable login reaches the dispatcher.
+- **Changed:** `orch_cli::parse_ref` is public; `orch-codex` gets a `[workspace.dependencies]` entry; `docs/WORKSPACE-MAP.md` regenerated.
+- **Tests:** progress lines exclude adapter and model text (sentinel strings in a synthetic agent error, a child's stderr, and a malformed reply reach the report but never stderr progress, with exit status 4 intact); argument parser (defaults, env, flags, every usage error); goal file (example parses and builds a plan, defaults, grouped goal problems, twelve path-named rejections, forward and self references refused at plan build, non-object `routing` rejected for string/null/array/number/boolean while omitted and partial objects keep defaults); run loop over `FakeAgent` (finished with both reports, blocked without answers, answer resumes, blank answer ignored, a stop after an earlier answer makes no further call and keeps the answer, wall clock before the second run, dispatcher failure keeps state, goal ceiling); entry point over captured streams (`--interactive --json` through a blocked-and-answered run yields one parseable JSON object on stdout with the question on stderr; blank stdin exits 3; non-interactive never reads stdin); renderer (review card sees multi-entry target output, sees the target's question, answer, and resumed finding once, says `(none)` for a silent target). No real binary run. ADR-0009.
+- Out of scope, by choice: persistence and cross-process resume, `StopRule::BestEffort` behaviour, Claude and Gemini adapters, the Implement role.
+
+---
+
 ## Classified agent failures preserve login recovery
 **2026-10-03** · (link once pushed)
 

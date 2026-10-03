@@ -1,0 +1,26 @@
+{
+  "goal": "Find how Plan::start prevents an agent from reviewing its own work",
+  "done_when": ["one finding that cites the file", "one review verdict on that finding"],
+  "out_of_scope": ["code changes"],
+  "wall_clock_secs": 1200,
+  "max_calls": 4,
+  "stop": "checkpoint",
+  "routing": { "research": "codex", "triage": "local", "reviewers": ["local", "codex"] },
+  "tasks": [
+    {
+      "role": "research",
+      "instruction": "Read orch-core's task.rs and state how Plan::start rejects the author of the reviewed task.",
+      "acceptance": ["one finding with a path: ref"],
+      "refs": ["path:crates/apps/rusty_orch/crates/orch-core/src/task.rs"],
+      "max_calls": 2
+    },
+    {
+      "role": "review",
+      "target": 0,
+      "instruction": "Review the referenced findings for accuracy against the code. Approve or request changes.",
+      "acceptance": ["one review entry with a verdict"],
+      "depends_on": [0],
+      "max_calls": 2
+    }
+  ]
+}
