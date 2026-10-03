@@ -48,7 +48,10 @@ fn wrong_agent_is_refused_without_running_anything() {
         .run(Agent::Codex, task(&plan), &board)
         .expect_err("refused");
 
-    assert!(err.0.contains("cannot serve Research through Codex"));
+    assert!(err
+        .0
+        .as_str()
+        .contains("cannot serve Research through Codex"));
     assert!(a_calls(&a).is_empty());
 }
 
@@ -72,7 +75,10 @@ fn implement_is_refused_without_running_anything() {
         .run(Agent::Local, plan.get(id).expect("task"), &board)
         .expect_err("unsupported");
 
-    assert!(err.0.contains("cannot serve Implement through Local"));
+    assert!(err
+        .0
+        .as_str()
+        .contains("cannot serve Implement through Local"));
     assert!(a_calls(&a).is_empty());
 }
 
@@ -86,10 +92,13 @@ fn non_zero_exit_maps_to_agent_error_with_truncated_stderr() {
         .run(Agent::Local, task(&plan), &board)
         .expect_err("exit 1");
 
-    assert!(err.0.starts_with("ollama exited with status 1"));
-    assert!(err.0.contains("model not found"));
-    assert!(err.0.chars().count() < 300, "stderr must be truncated");
-    assert!(!err.0.contains('\n'));
+    assert!(err.0.as_str().starts_with("ollama exited with status 1"));
+    assert!(err.0.as_str().contains("model not found"));
+    assert!(
+        err.0.as_str().chars().count() < 300,
+        "stderr must be truncated"
+    );
+    assert!(!err.0.as_str().contains('\n'));
 }
 
 #[test]
@@ -101,7 +110,7 @@ fn timeout_maps_to_agent_error() {
         .run(Agent::Local, task(&plan), &board)
         .expect_err("timeout");
 
-    assert!(err.0.contains("exceeded 30s"));
+    assert!(err.0.as_str().contains("exceeded 30s"));
 }
 
 #[test]
@@ -112,6 +121,7 @@ fn overflow_and_spawn_failure_map_to_agent_errors() {
         .run(Agent::Local, task(&plan), &board)
         .expect_err("overflow")
         .0
+        .as_str()
         .contains("more than"));
 
     let mut a = agent(FakeCommand::new(Err(ExecError::Spawn(
@@ -121,6 +131,7 @@ fn overflow_and_spawn_failure_map_to_agent_errors() {
         .run(Agent::Local, task(&plan), &board)
         .expect_err("spawn")
         .0
+        .as_str()
         .contains("could not start"));
 }
 
@@ -131,7 +142,7 @@ fn empty_stdout_is_an_error() {
 
     let err = a.run(Agent::Local, task(&plan), &board).expect_err("empty");
 
-    assert!(err.0.contains("wrote nothing"));
+    assert!(err.0.as_str().contains("wrote nothing"));
 }
 
 #[test]
@@ -143,7 +154,7 @@ fn garbage_stdout_is_a_parse_error() {
         .run(Agent::Local, task(&plan), &board)
         .expect_err("garbage");
 
-    assert!(err.0.contains("not JSON"));
+    assert!(err.0.as_str().contains("not JSON"));
 }
 
 fn a_calls(a: &OllamaAgent<FakeCommand>) -> Vec<Call> {
