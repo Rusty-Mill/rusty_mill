@@ -369,63 +369,88 @@ impl StaticMesh {
     /// own contact point.
     pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<Contact> {
         let reach = Vec3::new(radius, radius, radius);
-        let contacts: Vec<Contact> = self
-            .near_indices(center - reach, center + reach)
-            .into_iter()
-            .filter_map(|index| {
-                let triangle = self.triangles.get(index as usize)?;
-                let height = triangle.signed_distance(&center);
-                if height < -radius {
-                    return None;
-                }
-                let closest = triangle.closest_point(&center);
-                let offset = center - closest;
-                let distance = offset.length();
-                let (normal, depth) = if height > 0.0 && distance > 1e-6 {
-                    (offset * (1.0 / distance), radius - distance)
-                } else if triangle.covers_at_depth(&center, height) {
-                    (triangle.normal, radius - height)
-                } else {
-                    return None;
-                };
-                if depth < -CONTACT_PROCESSING_THRESHOLD {
-                    return None;
-                }
-                let adjusted = self.adjust_edge_normal(index as usize, &closest, normal);
-                Some(Contact {
-                    normal: adjusted,
-                    point: center - normal * radius + adjusted * depth,
-                    penetration_depth: depth,
-                })
-            })
-            .collect();
-        let mut kept: Vec<Contact> = Vec::with_capacity(MANIFOLD_CAPACITY);
-        for contact in contacts {
-            add_manifold_point(&mut kept, contact, CONTACT_BREAKING_FACTOR * radius);
+        let breaking = CONTACT_BREAKING_FACTOR * radius;
+        let mut kept: Vec<ManifoldEntry> = Vec::with_capacity(MANIFOLD_CAPACITY);
+        for index in self.near_indices(center - reach, center + reach) {
+            if let Some(entry) = self.sphere_triangle_contact(index as usize, center, radius) {
+                add_manifold_point(&mut kept, entry, breaking);
+            }
         }
-        kept
+        kept.into_iter().map(|entry| entry.contact).collect()
+    }
+
+    /// `btSphereTriangleCollisionAlgorithm`'s contact between the sphere
+    /// and triangle `index`, if within the processing threshold, with its
+    /// normal edge-adjusted afterwards (`btAdjustInternalEdgeContacts`).
+    fn sphere_triangle_contact(
+        &self,
+        index: usize,
+        center: Vec3,
+        radius: f32,
+    ) -> Option<ManifoldEntry> {
+        let triangle = self.triangles.get(index)?;
+        let height = triangle.signed_distance(&center);
+        if height < -radius {
+            return None;
+        }
+        let closest = triangle.closest_point(&center);
+        let offset = center - closest;
+        let distance = offset.length();
+        let (normal, depth) = if height > 0.0 && distance > 1e-6 {
+            (offset * (1.0 / distance), radius - distance)
+        } else if triangle.covers_at_depth(&center, height) {
+            (triangle.normal, radius - height)
+        } else {
+            return None;
+        };
+        if depth < -CONTACT_PROCESSING_THRESHOLD {
+            return None;
+        }
+        let adjusted = self.adjust_edge_normal(index, &closest, normal);
+        let on_ball = center - normal * radius;
+        Some(ManifoldEntry {
+            on_ball,
+            contact: Contact {
+                normal: adjusted,
+                point: on_ball + adjusted * depth,
+                penetration_depth: depth,
+            },
+        })
     }
 }
 
-/// Adds `contact` to a ball's per-tick manifold `kept` the way Bullet's
-/// `btPersistentManifold::addManifoldPoint` does as each triangle reports
-/// (`RB-PHYSICS-001-FR-115`, ADR-0035): a point within `breaking` (uu) of a
+/// A ball-mesh contact as a Bullet manifold point: `on_ball` is where the
+/// ball's surface meets the triangle along the *unadjusted* normal
+/// (`m_localPointA`), which Bullet matches and sorts points by; the edge
+/// adjustment, applied after, changes only `contact`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ManifoldEntry {
+    on_ball: Vec3,
+    contact: Contact,
+}
+
+/// Adds `entry` to a ball's per-tick manifold `kept` the way Bullet's
+/// `btManifoldResult::addContactPoint` does as each triangle reports
+/// (`RB-PHYSICS-001-FR-115`, ADR-0035; ball-side matching since FR-116,
+/// ADR-0036): an entry whose `on_ball` is within `breaking` (uu) of a
 /// kept one replaces it (`getCacheEntry`); a full manifold gives up the
 /// slot `replacement_slot` picks (`sortCachedPoints`), never the deepest.
-/// Taking the 4 deepest instead clusters them on the fan of facets nearest
-/// the ball's center, tilting the averaged normal of a ball wedged in a
-/// rounded corner (`hitjump.jsonl` 97.9 s).
-fn add_manifold_point(kept: &mut Vec<Contact>, contact: Contact, breaking: f32) {
+/// Every triangle meeting the ball at one shared vertex reports the same
+/// ball point, so they fold into one contact, the last one reported.
+fn add_manifold_point(kept: &mut Vec<ManifoldEntry>, entry: ManifoldEntry, breaking: f32) {
     let limit = breaking * breaking;
     let near = kept
         .iter()
-        .position(|k| (k.point - contact.point).length_squared() < limit);
+        .position(|k| (k.on_ball - entry.on_ball).length_squared() < limit);
+    let sorted = |e: &ManifoldEntry| (e.on_ball, e.contact.penetration_depth);
     if let Some(slot) = near {
-        kept[slot] = contact;
+        kept[slot] = entry;
     } else if kept.len() < MANIFOLD_CAPACITY {
-        kept.push(contact);
-    } else if let Some(slot) = replacement_slot(kept, &contact) {
-        kept[slot] = contact;
+        kept.push(entry);
+    } else if let Some(slot) =
+        replacement_slot(&kept.iter().map(sorted).collect::<Vec<_>>(), sorted(&entry))
+    {
+        kept[slot] = entry;
     }
 }
 
@@ -709,11 +734,15 @@ mod tests {
         assert!((contacts[0].normal - raw).length() < 1e-5);
     }
 
-    fn touch(x: f32, depth: f32) -> Contact {
-        Contact {
-            normal: Vec3::new(0.0, 0.0, 1.0),
-            point: Vec3::new(x, x * x / 40.0, 0.0),
-            penetration_depth: depth,
+    fn touch(x: f32, depth: f32) -> ManifoldEntry {
+        let point = Vec3::new(x, x * x / 40.0, 0.0);
+        ManifoldEntry {
+            on_ball: point,
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point,
+                penetration_depth: depth,
+            },
         }
     }
 
@@ -744,5 +773,21 @@ mod tests {
             kept.contains(&touch(40.0, 1.0)),
             "the newest point always enters"
         );
+    }
+
+    #[test]
+    fn triangles_meeting_the_ball_at_one_ball_point_fold_into_the_last() {
+        let at = |mesh_x: f32, normal_z: f32| ManifoldEntry {
+            on_ball: Vec3::new(0.0, 0.0, -93.15),
+            contact: Contact {
+                normal: Vec3::new(0.0, (1.0 - normal_z * normal_z).sqrt(), normal_z),
+                point: Vec3::new(mesh_x, 0.0, 0.0),
+                penetration_depth: 3.0,
+            },
+        };
+        let mut kept = Vec::new();
+        add_manifold_point(&mut kept, at(0.0, 1.0), 1.8);
+        add_manifold_point(&mut kept, at(5.0, 0.7), 1.8);
+        assert_eq!(kept, vec![at(5.0, 0.7)]);
     }
 }

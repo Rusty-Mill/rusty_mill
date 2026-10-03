@@ -186,8 +186,10 @@ version: `a245d35`).
    car-ball contact radius to 92.3 uu from 28 recorded hits: ball 0.62.
    `RB-PHYSICS-001-FR-115` (ADR-0035) keeps ball-mesh contacts as
    Bullet's manifold does (near points merge, a full manifold keeps the
-   largest area): ball 0.595. Next worst ball frame: 127.633 s, the
-   crossbar bevel vertex (988 uu/s).
+   largest area): ball 0.595. `RB-PHYSICS-001-FR-116` (ADR-0036)
+   matches those points on the ball, as Bullet does: ball 0.589. Worst
+   ball frame: 127.633 s, the crossbar bevel vertex (988 uu/s), which
+   hinges on Bullet's BVH triangle order (not ported).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -196,7 +198,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (484 tests: 27 `rb_domain`, 413
+- `cargo test --workspace`: pass (485 tests: 27 `rb_domain`, 414
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

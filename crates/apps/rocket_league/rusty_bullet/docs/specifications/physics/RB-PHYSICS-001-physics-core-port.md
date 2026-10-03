@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.119.0
+- Version: 0.120.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6058,6 +6058,23 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `test2`, `front` and `side` are unchanged.
     - Open: 127.633 s (crossbar bevel vertex) is now the worst ball frame
       at 988 uu/s (was 1).
+- `RB-PHYSICS-001-FR-116` (ball manifold points matched on the ball;
+  implemented and verified on the owner's captures, ADR-0036):
+  - `mesh::add_manifold_point` matches and sorts entries by their
+    ball-side point along the unadjusted normal (`m_localPointA`), as
+    `btManifoldResult::addContactPoint` does. The FR-109 edge adjustment
+    applies only to the stored contact. Triangles meeting the ball at one
+    vertex fold into one contact, the last one reported.
+  - Triangles are reported in mesh index order. Bullet's BVH order is not
+    ported.
+  - **Verification**:
+    - `mesh` test
+      `triangles_meeting_the_ball_at_one_ball_point_fold_into_the_last`.
+    - `hitjump` one-step ball mean, resets excluded: 0.589 (was 0.595).
+    - `hitjump` k = 30 ball: 22.47 (was 22.43).
+    - `test2`, `front` and `side` are unchanged.
+    - Open: 127.633 s is still 988 uu/s. Which triangle wins at the
+      crossbar vertex depends on triangle order.
 
 
 ## Architecture and interfaces
@@ -7549,6 +7566,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.120.0 (2026-10-03): `RB-PHYSICS-001-FR-116` — ball manifold points
+  are matched on the ball (ADR-0036). 414 tests in `rb_physics_bullet`.
 - 0.119.0 (2026-10-03): `RB-PHYSICS-001-FR-115` — ball-mesh contacts
   are kept as Bullet's manifold keeps them (ADR-0035). 413 tests in
   `rb_physics_bullet`.

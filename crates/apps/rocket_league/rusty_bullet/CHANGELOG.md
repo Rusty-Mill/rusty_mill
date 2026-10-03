@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0036 (`RB-PHYSICS-001-FR-116`): `mesh::ManifoldEntry`.
 - ADR-0035 (`RB-PHYSICS-001-FR-115`): `collision::replacement_slot`
   (Bullet's `sortCachedPoints`) and `mesh::add_manifold_point`.
 - ADR-0033 (`RB-PHYSICS-001-FR-113`): the goals and back walls are
@@ -43,6 +44,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- Ball-mesh manifold points are matched and sorted by their ball-side
+  point along the unadjusted normal, as Bullet does; triangles meeting
+  the ball at one vertex fold into one contact (`RB-PHYSICS-001-FR-116`,
+  ADR-0036). `collision::replacement_slot` takes (point, depth) pairs.
 - `StaticMesh::sphere_contacts` keeps contacts as Bullet's manifold
   does: a point within 0.02 × radius of a kept one replaces it, and a full
   manifold keeps the largest area and its deepest point, instead of the 4

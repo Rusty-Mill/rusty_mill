@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Corner touches count once
+**2026-10-03** · `RB-PHYSICS-001-FR-116` · ADR-0036
+
+- When the ball touches several triangles at one shared corner point,
+  the game engine counts that as a single touch, not one per triangle.
+  The simulator now does the same, which trims the ball's error on the
+  goal recording a little (0.595 to 0.589). The crossbar bounce is still
+  off: which triangle "wins" at the corner depends on the engine's
+  internal triangle order, which isn't reproduced yet. 485 tests.
+
 ## The ball reads rounded corners better
 **2026-10-03** · `RB-PHYSICS-001-FR-115` · ADR-0035
 
