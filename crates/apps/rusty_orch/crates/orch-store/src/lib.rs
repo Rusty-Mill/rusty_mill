@@ -28,7 +28,7 @@ use orch_dispatch::Ledger;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
-use rusty_multimodal_db_engine::generic::query::{GetById, Insert, Replace};
+use rusty_multimodal_db_engine::generic::query::GetById;
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use record::{ById, GoalRecord, Revision};
