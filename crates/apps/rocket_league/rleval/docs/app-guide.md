@@ -251,9 +251,18 @@ The secret is read from the environment, never a flag.
   `--oidc-jwks-url` and `--oidc-issuer`, provided it signs ID tokens with RS256.
 
 The protocol code is Rusty-Mill's `rusty_oauth`; the HTTPS transport is
-`rusty_http` + `rusty_tls`. This path was exercised end to end against a local
-mock provider, **not against Google itself** — try it with a test OAuth client
-before relying on it.
+`rusty_http` + `rusty_tls`. A manual sign-in against **Google itself** (a test OAuth
+client in Testing mode, `http://localhost:8080/auth/callback`, an allow-listed account)
+succeeded end to end, on top of the earlier run against a local mock provider.
+Not yet exercised against Google: refusing a verified account that is *not* on the
+`--oidc-users` list, and the https (`Secure` cookie) deployment — try both before
+exposing it beyond localhost.
+
+**Setting up a test client in Google Cloud:** create a project, then in Google Auth
+Platform set the audience to External (Testing) and add your account as a test user;
+create a **Web application** client with the redirect URI above. Copy the client secret
+when it is shown — Google does not show it again — and pass it only through
+`RLEVAL_OIDC_CLIENT_SECRET`.
 
 ## 3. Calibrate
 
