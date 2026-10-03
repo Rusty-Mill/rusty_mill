@@ -18,5 +18,5 @@ pub mod fulltext;
 pub mod generic;
 pub mod journal;
 
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;

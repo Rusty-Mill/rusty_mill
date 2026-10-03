@@ -170,12 +170,9 @@ impl Service {
     }
 
     /// A subtask always lives in its parent's list (`patch_task` refuses to
-    /// move one alone). A move is now one batch write, but older versions
-    /// saved the children, then the parent, one record at a time, so a crash
-    /// between them could leave some children in the new list and the parent
-    /// in the old. Put every such child back in its parent's list: the parent
-    /// is the record of truth, and an interrupted move was never acknowledged
-    /// (design review 2.9).
+    /// move one alone). Current moves are journaled, but older versions saved
+    /// children and then the parent one record at a time. Put children left by
+    /// such an interrupted move back in the parent's list (design review 2.9).
     fn realign_subtasks(&mut self) -> Result<()> {
         let stray: Vec<Task> = self
             .tasks
@@ -278,6 +275,7 @@ impl Service {
 
     /// Delete a list; its tasks go to the trash.
     pub fn delete_list(&mut self, id: Uuid) -> Result<()> {
+        self.tasks.require_writable()?;
         if id == INBOX_ID {
             return invalid("the Inbox cannot be deleted");
         }
@@ -296,6 +294,7 @@ impl Service {
     // ---- tasks -------------------------------------------------------
 
     pub fn create_task(&mut self, new: NewTask) -> Result<Task> {
+        self.tasks.require_writable()?;
         self.live_list(new.list_id)?;
         if let Some(parent) = new.parent_id {
             let parent = self.task(parent)?;
@@ -337,6 +336,7 @@ impl Service {
     }
 
     pub fn patch_task(&mut self, id: Uuid, patch: TaskPatch) -> Result<Task> {
+        self.tasks.require_writable()?;
         let mut task = self.task(id)?;
         if let Some(title) = patch.title {
             task.title = clean_title(&title)?;
@@ -387,20 +387,20 @@ impl Service {
             task.sort_order = order;
         }
         let moved_to = patch.list_id.filter(|l| *l != task.list_id);
-        let mut batch = Vec::new();
         if let Some(list) = moved_to {
             self.live_list(list)?;
             if task.parent_id.is_some() {
                 return invalid("a subtask moves with its parent");
             }
-            for mut child in self.children(&task) {
+            let mut changed = self.children(&task);
+            for child in &mut changed {
                 child.list_id = list;
-                batch.push(child);
             }
             task.list_id = list;
+            changed.push(task);
+            return self.save_batch(changed);
         }
-        batch.push(task);
-        self.save_with(batch)
+        self.save_task(task)
     }
 
     fn children(&self, parent: &Task) -> Vec<Task> {
@@ -411,22 +411,26 @@ impl Service {
             .collect()
     }
 
-    fn save_task(&mut self, task: Task) -> Result<Task> {
-        self.save_with(vec![task])
+    fn save_task(&mut self, mut task: Task) -> Result<Task> {
+        task.updated_ms = self.now();
+        task.version = task.version.wrapping_add(1);
+        self.tasks.replace(task.clone())?;
+        Ok(task)
     }
 
-    /// Save `batch` as one write (a task with its subtasks), returning the
-    /// last task saved: the one the caller acted on.
-    fn save_with(&mut self, mut batch: Vec<Task>) -> Result<Task> {
+    /// Save a task and its children under the task store's durable redo seam.
+    fn save_batch(&mut self, mut tasks: Vec<Task>) -> Result<Task> {
         let now = self.now();
-        for task in &mut batch {
+        for task in &mut tasks {
             task.updated_ms = now;
             task.version = task.version.wrapping_add(1);
         }
-        self.tasks.replace_all(&batch)?;
-        batch
-            .pop()
-            .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))
+        let result = tasks
+            .last()
+            .cloned()
+            .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))?;
+        self.tasks.replace_batch(tasks)?;
+        Ok(result)
     }
 
     pub fn set_status(&mut self, id: Uuid, status: Status) -> Result<Task> {
@@ -439,46 +443,50 @@ impl Service {
         )
     }
 
-    /// Move a task and its subtasks to the trash, in one write: a crash never
-    /// leaves some of them trashed and the rest not.
+    /// Move a task and its subtasks to the trash.
     pub fn trash_task(&mut self, id: Uuid) -> Result<Task> {
-        let task = self.task(id)?;
+        let mut task = self.task(id)?;
         let now = self.now();
-        let mut batch = self.children(&task);
-        batch.push(task);
-        for t in &mut batch {
-            t.deleted_ms.get_or_insert(now);
+        let mut changed = Vec::new();
+        for mut child in self.children(&task) {
+            child.deleted_ms.get_or_insert(now);
+            child.updated_ms = self.now();
+            child.version = child.version.wrapping_add(1);
+            changed.push(child);
         }
-        self.save_with(batch)
+        task.deleted_ms.get_or_insert(now);
+        task.updated_ms = self.now();
+        task.version = task.version.wrapping_add(1);
+        changed.push(task.clone());
+        self.tasks.replace_batch(changed)?;
+        Ok(task)
     }
 
-    /// Bring a task and the subtasks trashed with it back, in one write. A
-    /// task whose list is gone (or itself trashed) is restored into the
-    /// Inbox, its subtasks with it.
+    /// Bring a task and the subtasks trashed with it back. A task whose list
+    /// is gone (or itself trashed) is restored into the Inbox.
     pub fn restore_task(&mut self, id: Uuid) -> Result<Task> {
         let mut task = self.task(id)?;
         let trashed_at = task.deleted_ms;
         let rehome = self.live_list(task.list_id).is_err().then_some(INBOX_ID);
-        let mut batch = Vec::new();
+        let mut changed = Vec::new();
         for mut child in self.children(&task) {
-            let revive = child.deleted_ms == trashed_at;
-            if !revive && rehome.is_none() {
-                continue;
+            let restore = child.deleted_ms == trashed_at;
+            if let Some(target) = rehome {
+                child.list_id = target;
             }
-            if revive {
+            if restore {
                 child.deleted_ms = None;
             }
-            if let Some(list) = rehome {
-                child.list_id = list;
+            if restore || rehome.is_some() {
+                changed.push(child);
             }
-            batch.push(child);
         }
-        if let Some(list) = rehome {
-            task.list_id = list;
+        if let Some(target) = rehome {
+            task.list_id = target;
         }
         task.deleted_ms = None;
-        batch.push(task);
-        self.save_with(batch)
+        changed.push(task);
+        self.save_batch(changed)
     }
 
     /// Delete a task and its subtasks for good.
@@ -659,6 +667,7 @@ impl Service {
     /// Rename a tag everywhere: the entity, its children's `parent`, and every
     /// task that carries it.
     pub fn rename_tag(&mut self, name: &str, new_label: &str) -> Result<Tag> {
+        self.tasks.require_writable()?;
         let old = self.tag(name)?;
         let label = clean_tag_label(new_label)?;
         let new_name = tag_name(&label);
@@ -692,6 +701,7 @@ impl Service {
 
     /// Delete a tag and take it off every task.
     pub fn delete_tag(&mut self, name: &str) -> Result<()> {
+        self.tasks.require_writable()?;
         let tag = self.tag(name)?;
         self.tags.delete(&tag.name)?;
         for mut child in self
@@ -940,6 +950,77 @@ fn clean_items(items: Vec<ChecklistItem>) -> Result<Vec<ChecklistItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn is_recovery_required<T>(result: Result<T>) {
+        assert!(matches!(
+            result,
+            Err(ServiceError::Storage(TickError::RecoveryRequired))
+        ));
+    }
+
+    #[test]
+    fn task_fence_precedes_every_compound_registry_side_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = Service::open(dir.path(), Box::new(|| 1_000)).unwrap();
+        let parent = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                title: "parent".into(),
+                tags: vec!["Original".into()],
+                ..NewTask::default()
+            })
+            .unwrap();
+        let child = service
+            .create_task(NewTask {
+                list_id: INBOX_ID,
+                parent_id: Some(parent.id),
+                title: "child".into(),
+                tags: vec!["Original".into()],
+                ..NewTask::default()
+            })
+            .unwrap();
+        let mut tasks_before = service.snapshot().tasks;
+        tasks_before.sort_by_key(|task| task.id);
+        let tags_before = service.tags();
+
+        // Force the real trash operation to reach checkpoint and fail there.
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert!(matches!(
+            service.trash_task(parent.id),
+            Err(ServiceError::Storage(TickError::Journal(_)))
+        ));
+
+        is_recovery_required(service.rename_tag("original", "renamed"));
+        is_recovery_required(service.delete_tag("original"));
+        is_recovery_required(service.create_task(NewTask {
+            list_id: INBOX_ID,
+            title: "refused".into(),
+            tags: vec!["created-by-refused-request".into()],
+            ..NewTask::default()
+        }));
+        is_recovery_required(service.patch_task(
+            child.id,
+            TaskPatch {
+                tags: Some(vec!["created-by-refused-patch".into()]),
+                ..TaskPatch::default()
+            },
+        ));
+
+        let mut tasks_after = service.snapshot().tasks;
+        tasks_after.sort_by_key(|task| task.id);
+        assert_eq!(tasks_after, tasks_before);
+        assert_eq!(service.tags(), tags_before);
+        assert!(service.tag("renamed").is_err());
+        assert!(service.tag("created-by-refused-request").is_err());
+        assert!(service.tag("created-by-refused-patch").is_err());
+
+        drop(service);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        let reopened = Service::open(dir.path(), Box::new(|| 2_000)).unwrap();
+        assert!(reopened.task(parent.id).unwrap().is_deleted());
+        assert!(reopened.task(child.id).unwrap().is_deleted());
+        assert_eq!(reopened.tags(), tags_before);
+    }
 
     #[test]
     fn day_bounds_follow_the_callers_offset() {

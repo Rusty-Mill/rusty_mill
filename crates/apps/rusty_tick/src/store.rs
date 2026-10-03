@@ -5,19 +5,27 @@
 //! and tags are derived in memory at open, as `rusty_remind_me` does.
 
 use crate::task::{ByList, DueAt, SortOrder, Task};
+use rusty_multimodal_db_engine::codec;
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::fulltext::{FullTextIndex, Query};
 use rusty_multimodal_db_engine::generic::query::{
     AllIds, Delete, FilterEq, GetById, Insert, RangeBy, Replace, UpdateField,
 };
+use rusty_multimodal_db_engine::generic::store::GroupCommit;
 use rusty_multimodal_db_engine::generic::store::Ordered;
 use rusty_multimodal_db_engine::generic::{
-    DeleteError, GenericMmapStore, InsertError, ReplaceError,
+    insert_log, DeleteError, GenericMmapStore, InsertError, ReplaceError,
 };
+use rusty_multimodal_db_engine::journal::{Batch, Journal, JournalError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Gap between appended tasks, leaving room to drop one in between.
 pub const SORT_STEP: i64 = 1024;
@@ -35,69 +43,61 @@ pub enum TickError {
     NotFound(Uuid),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unreadable pending batch {0}: {1}")]
-    Pending(PathBuf, String),
+    #[error("task journal: {0}")]
+    Journal(#[from] JournalError),
+    #[error("task store requires reopen after an interrupted atomic trash operation")]
+    RecoveryRequired,
 }
-
-/// A batch of whole-task writes not yet known to have landed (see
-/// [`TaskStore::replace_all`]).
-const PENDING: &str = "tasks.pending.json";
 
 pub struct TaskStore {
     stack: Stack,
-    pending: PathBuf,
     search: FullTextIndex<Uuid, 2>,
     tags: BTreeMap<String, BTreeSet<Uuid>>,
+    journal: Journal,
+    // A complete pre-operation view retained after an ambiguous failure. It
+    // prevents reads from observing a partly applied redo; all writes are
+    // refused until the owner reopens and replays the journal.
+    recovery_view: Option<BTreeMap<Uuid, Task>>,
 }
+
+const TASKS: &str = "tasks";
 
 impl TaskStore {
     /// Open the store in `dir`, creating it when absent.
     pub fn open(dir: &Path) -> Result<Self, TickError> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("tasks.mmap");
+        let opened = Journal::open(&dir.join("tasks.journal"))?;
+        if !opened.replay.is_empty() {
+            insert_log::clear_interrupted_creation::<Task>(&path)?;
+        }
         let core: Core = if path.exists() {
             GenericMmapStore::open_portable(&path)?
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
-        let stack = Ordered::new(Ordered::new(core));
+        let mut stack = Ordered::new(Ordered::new(core));
+        for batch in &opened.replay {
+            Self::apply_batch(&mut stack, batch, usize::MAX)?;
+        }
+        if !opened.replay.is_empty() {
+            stack.commit()?;
+        }
+        let mut journal = opened.journal;
+        journal.checkpoint()?;
         let mut store = Self {
             stack,
-            pending: dir.join(PENDING),
             search: FullTextIndex::new(),
             tags: BTreeMap::new(),
+            journal,
+            recovery_view: None,
         };
         for id in store.stack.all_ids() {
             if let Some(task) = store.stack.get(id) {
                 store.index(&task);
             }
         }
-        store.finish_pending()?;
         Ok(store)
-    }
-
-    /// Complete a batch a crash interrupted. A task whose version moved on
-    /// since (a later write landed and the batch file outlived it) or that is
-    /// gone is left alone, so replaying never rolls anything back.
-    fn finish_pending(&mut self) -> Result<(), TickError> {
-        let text = match std::fs::read_to_string(&self.pending) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
-        };
-        let batch: Vec<Task> = rusty_json::from_str(&text)
-            .map_err(|e| TickError::Pending(self.pending.clone(), e.to_string()))?;
-        let unfinished: Vec<Task> = batch
-            .into_iter()
-            .filter(|task| {
-                self.stack
-                    .get(task.id)
-                    .is_some_and(|stored| stored.version == task.version.wrapping_sub(1))
-            })
-            .collect();
-        self.apply(&unfinished)?;
-        std::fs::remove_file(&self.pending)?;
-        Ok(())
     }
 
     /// Trashed tasks are searchable and taggable nowhere: they drop out of both
@@ -122,76 +122,199 @@ impl TaskStore {
     }
 
     pub fn insert(&mut self, task: Task) -> Result<(), TickError> {
+        self.require_writable()?;
         let id = task.id;
         match self.stack.insert(task.clone()) {
             Ok(()) => {}
             Err(InsertError::Duplicate(_)) => return Err(TickError::Duplicate(id)),
-            Err(InsertError::Durability(e)) => return Err(TickError::Storage(e)),
+            Err(InsertError::Durability(e)) => {
+                // GenericMmapStore and each Ordered wrapper publish their
+                // in-memory record/index changes only after the fallible
+                // append has succeeded.  Therefore the live view still is
+                // the complete pre-operation view and can be captured only
+                // on this exceptional path, rather than cloning the whole
+                // store before every successful ordinary write.
+                self.recovery_view = Some(self.snapshot());
+                return Err(TickError::Storage(e));
+            }
         }
         self.index(&task);
         Ok(())
     }
 
     pub fn replace(&mut self, task: Task) -> Result<(), TickError> {
+        self.require_writable()?;
         let id = task.id;
         let old = self.stack.get(id).ok_or(TickError::NotFound(id))?;
         match self.stack.replace(task.clone()) {
             Ok(()) => {}
             Err(ReplaceError::NotFound(_)) => return Err(TickError::NotFound(id)),
-            Err(ReplaceError::Durability(e)) => return Err(TickError::Storage(e)),
+            Err(ReplaceError::Durability(e)) => {
+                self.recovery_view = Some(self.snapshot());
+                return Err(TickError::Storage(e));
+            }
         }
         self.unindex(&old);
         self.index(&task);
         Ok(())
     }
 
-    /// Replace several tasks as one write: after a crash, either none landed
-    /// or the next [`open`](Self::open) lands the rest. The batch is saved
-    /// (fsynced) beside the store first and removed once every task is in.
-    /// Each task's `version` must be one past the stored one, as a save
-    /// leaves it; that is how a replay tells an unfinished write from one a
-    /// later write superseded.
-    pub fn replace_all(&mut self, tasks: &[Task]) -> Result<(), TickError> {
-        match tasks {
-            [] => return Ok(()),
-            [task] => return self.replace(task.clone()),
-            _ => {}
+    /// Durably replace a related set of tasks as one crash-atomic operation.
+    ///
+    /// The redo entry is synced before any record changes. Derived indexes are
+    /// published only after all record writes are durable; an interruption
+    /// before the checkpoint replays the complete set on the next open.
+    pub(crate) fn replace_batch(&mut self, tasks: Vec<Task>) -> Result<(), TickError> {
+        self.require_writable()?;
+        let mut ids = BTreeSet::new();
+        for task in &tasks {
+            if !ids.insert(task.id) {
+                return Err(TickError::Duplicate(task.id));
+            }
         }
-        if let Some(missing) = tasks.iter().find(|t| self.stack.get(t.id).is_none()) {
-            return Err(TickError::NotFound(missing.id));
+        let before = self.snapshot();
+        let mut old = Vec::with_capacity(tasks.len());
+        let mut batch = Batch::default();
+        for task in &tasks {
+            let previous = self
+                .stack
+                .get(task.id)
+                .ok_or(TickError::NotFound(task.id))?;
+            old.push(previous);
+            batch.put(
+                TASKS,
+                task.id.as_bytes().to_vec(),
+                codec::encode(task).map_err(|e| JournalError::Encode(e.to_string()))?,
+            );
         }
-        let json = rusty_json::to_string(&tasks)
-            .map_err(|e| TickError::Pending(self.pending.clone(), e.to_string()))?;
-        rusty_atomic_file::write(&self.pending, json.as_bytes())?;
-        self.apply(tasks)?;
-        std::fs::remove_file(&self.pending)?;
+
+        if let Err(error) = self.journal.commit(&batch) {
+            self.recovery_view = Some(before);
+            return Err(error.into());
+        }
+        self.stack.defer_sync();
+        if let Err(error) = Self::apply_batch(&mut self.stack, &batch, usize::MAX) {
+            self.recovery_view = Some(before);
+            return Err(error);
+        }
+        if let Err(error) = self.stack.commit() {
+            self.recovery_view = Some(before);
+            return Err(error.into());
+        }
+        // Do not publish derived indexes until both the records and retirement
+        // of their redo are known to have completed.
+        if let Err(error) = self.journal.checkpoint() {
+            self.recovery_view = Some(before);
+            return Err(error.into());
+        }
+        for task in &old {
+            self.unindex(task);
+        }
+        for task in &tasks {
+            self.index(task);
+        }
         Ok(())
     }
 
-    fn apply(&mut self, tasks: &[Task]) -> Result<(), TickError> {
-        for task in tasks {
-            self.replace(task.clone())?;
+    pub(crate) fn require_writable(&self) -> Result<(), TickError> {
+        if self.recovery_view.is_some() {
+            Err(TickError::RecoveryRequired)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn snapshot(&self) -> BTreeMap<Uuid, Task> {
+        #[cfg(test)]
+        SNAPSHOT_WORK.with(|work| work.set(work.get() + self.stack.all_ids().len()));
+        self.stack
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| self.stack.get(id).map(|task| (id, task)))
+            .collect()
+    }
+
+    fn apply_batch(stack: &mut Stack, batch: &Batch, limit: usize) -> Result<(), TickError> {
+        for (position, change) in batch.changes.iter().take(limit).enumerate() {
+            #[cfg(not(test))]
+            let _ = position;
+            #[cfg(test)]
+            let tear_this_append = rusty_multimodal_db_engine::test_support::take_fault(|fault| {
+                fault == rusty_multimodal_db_engine::test_support::Fault::BatchApply(position)
+            })
+            .is_some();
+            #[cfg(test)]
+            if tear_this_append {
+                // The first replacement established the insert-log header.
+                // Tear the upcoming real frame after three bytes rather than
+                // returning a synthetic error before persistence is attempted.
+                rusty_multimodal_db_engine::test_support::arm_fault(
+                    rusty_multimodal_db_engine::test_support::Fault::InsertWritePrefix(3),
+                );
+            }
+            if change.store != TASKS {
+                return Err(JournalError::Encode(format!(
+                    "unexpected store {:?} in task journal",
+                    change.store
+                ))
+                .into());
+            }
+            let id = Uuid::from_slice(&change.key)
+                .map_err(|e| JournalError::Encode(format!("invalid task id: {e}")))?;
+            let bytes = change.value.as_ref().ok_or_else(|| {
+                JournalError::Encode("task journal contains a deletion".to_string())
+            })?;
+            let task: Task = codec::decode(bytes)
+                .map_err(|e| JournalError::Encode(format!("invalid task value: {e}")))?;
+            if task.id != id {
+                return Err(
+                    JournalError::Encode("task journal key/value mismatch".to_string()).into(),
+                );
+            }
+            let result = stack.replace(task);
+            #[cfg(test)]
+            if tear_this_append {
+                assert!(
+                    rusty_multimodal_db_engine::test_support::take_fault(|_| true).is_none(),
+                    "batch-apply tear must be consumed by the real insert-log append"
+                );
+            }
+            match result {
+                Ok(()) => {}
+                Err(ReplaceError::NotFound(_)) => return Err(TickError::NotFound(id)),
+                Err(ReplaceError::Durability(e)) => return Err(TickError::Storage(e)),
+            }
         }
         Ok(())
     }
 
     pub fn delete(&mut self, id: Uuid) -> Result<(), TickError> {
+        self.require_writable()?;
         let old = self.stack.get(id).ok_or(TickError::NotFound(id))?;
         match self.stack.delete(id) {
             Ok(()) => {}
             Err(DeleteError::NotFound(_)) => return Err(TickError::NotFound(id)),
-            Err(DeleteError::Durability(e)) => return Err(TickError::Storage(e)),
+            Err(DeleteError::Durability(e)) => {
+                self.recovery_view = Some(self.snapshot());
+                return Err(TickError::Storage(e));
+            }
         }
         self.unindex(&old);
         Ok(())
     }
 
     pub fn get(&self, id: Uuid) -> Option<Task> {
+        if let Some(view) = &self.recovery_view {
+            return view.get(&id).cloned();
+        }
         self.stack.get(id)
     }
 
     /// Every task, trashed ones included, unspecified order.
     pub fn all(&self) -> Vec<Task> {
+        if let Some(view) = &self.recovery_view {
+            return view.values().cloned().collect();
+        }
         self.stack
             .all_ids()
             .into_iter()
@@ -201,6 +324,13 @@ impl TaskStore {
 
     /// Every task in `list`, in the store's own (unspecified) order.
     pub fn in_list(&self, list: Uuid) -> Vec<Task> {
+        if self.recovery_view.is_some() {
+            return self
+                .all()
+                .into_iter()
+                .filter(|task| task.list_id == list)
+                .collect();
+        }
         FilterEq::<Task, ByList>::filter_eq(&self.stack, &list)
             .into_iter()
             .filter_map(|id| self.stack.get(id))
@@ -209,6 +339,17 @@ impl TaskStore {
 
     /// Tasks of `list` due within `[from, to)`, soonest first (a smart list).
     pub fn due_between(&self, list: Uuid, from: i64, to: i64) -> Vec<Task> {
+        if self.recovery_view.is_some() {
+            let mut tasks: Vec<_> = self
+                .all()
+                .into_iter()
+                .filter(|task| {
+                    task.list_id == list && task.due_ms.is_some_and(|due| due >= from && due < to)
+                })
+                .collect();
+            tasks.sort_by_key(|task| (task.due_ms, task.id));
+            return tasks;
+        }
         RangeBy::<Task, DueAt>::range_by(
             &self.stack,
             Bound::Included(((list, from), Uuid::nil())),
@@ -221,6 +362,11 @@ impl TaskStore {
 
     /// Tasks of `list` in manual order.
     pub fn in_manual_order(&self, list: Uuid) -> Vec<Task> {
+        if self.recovery_view.is_some() {
+            let mut tasks = self.in_list(list);
+            tasks.sort_by_key(|task| (task.sort_order, task.id));
+            return tasks;
+        }
         // Only the outermost `Ordered` answers `RangeBy`; the inner layer's
         // index is reached through `inner()` (finding F2 in SPIKE-FINDINGS.md).
         RangeBy::<Task, SortOrder>::range_by(
@@ -242,6 +388,7 @@ impl TaskStore {
 
     /// Move one task to `sort_order`: rewrites one 8-byte slot, not the record.
     pub fn reorder(&mut self, id: Uuid, sort_order: i64) -> Result<(), TickError> {
+        self.require_writable()?;
         UpdateField::<Task, SortOrder>::update(&mut self.stack, id, sort_order)
             .map_err(|_| TickError::NotFound(id))
     }
@@ -268,107 +415,482 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::Task;
+    use rusty_multimodal_db_engine::test_support::{arm_fault, Fault};
+    use tempfile::TempDir;
 
-    fn task(title: &str) -> Task {
-        Task::new(Uuid::now_v7(), Uuid::nil(), title, 0, 0)
+    fn task(n: u128, list: Uuid, title: &str) -> Task {
+        let mut task = Task::new(Uuid::from_u128(n), list, title, n as i64 * SORT_STEP, 10);
+        task.tags = vec![format!("tag-{n}")];
+        task
     }
 
-    /// `tasks` as a save leaves them: trashed, one version on.
-    fn trashed(tasks: &[Task]) -> Vec<Task> {
-        tasks
+    fn trash_batch(tasks: &[Task], at: i64) -> (Vec<Task>, Batch) {
+        let changed: Vec<Task> = tasks
             .iter()
             .cloned()
-            .map(|mut t| {
-                t.deleted_ms = Some(7);
-                t.version += 1;
-                t
+            .map(|mut task| {
+                task.deleted_ms.get_or_insert(at);
+                task.updated_ms = at;
+                task.version += 1;
+                task
             })
-            .collect()
-    }
-
-    /// What a crash inside `replace_all` leaves: the batch file written and
-    /// only the first `landed` tasks in.
-    fn crash_mid_batch(store: &mut TaskStore, batch: &[Task], landed: usize) {
-        let json = rusty_json::to_string(&batch).unwrap();
-        rusty_atomic_file::write(&store.pending, json.as_bytes()).unwrap();
-        store.apply(&batch[..landed]).unwrap();
-    }
-
-    fn seeded(dir: &Path, n: usize) -> (TaskStore, Vec<Task>) {
-        let mut store = TaskStore::open(dir).unwrap();
-        let tasks: Vec<Task> = (0..n).map(|i| task(&format!("t{i}"))).collect();
-        for t in &tasks {
-            store.insert(t.clone()).unwrap();
+            .collect();
+        let mut batch = Batch::default();
+        for task in &changed {
+            batch.put(
+                TASKS,
+                task.id.as_bytes().to_vec(),
+                codec::encode(task).unwrap(),
+            );
         }
-        (store, tasks)
+        (changed, batch)
     }
 
-    #[test]
-    fn a_batch_lands_whole_and_leaves_no_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, tasks) = seeded(dir.path(), 3);
-        store.replace_all(&trashed(&tasks)).unwrap();
-        assert!(store.all().iter().all(Task::is_deleted));
-        assert!(!dir.path().join(PENDING).exists());
-    }
-
-    #[test]
-    fn an_interrupted_batch_is_finished_on_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, tasks) = seeded(dir.path(), 3);
-        crash_mid_batch(&mut store, &trashed(&tasks), 1);
+    fn fixture() -> (TempDir, Vec<Task>, Task) {
+        let dir = TempDir::new().unwrap();
+        let list = Uuid::from_u128(99);
+        let mut parent = task(1, list, "parent needle");
+        let mut child = task(2, list, "first child");
+        child.parent_id = Some(parent.id);
+        child.due_ms = Some(200);
+        let mut already_trashed = task(3, list, "old child");
+        already_trashed.parent_id = Some(parent.id);
+        already_trashed.deleted_ms = Some(7);
+        already_trashed.due_ms = Some(100);
+        parent.due_ms = Some(100);
+        let mut unrelated = task(4, list, "unrelated needle");
+        unrelated.due_ms = Some(300);
+        parent.notes = "parent notes".into();
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        for task in [&parent, &child, &already_trashed, &unrelated] {
+            store.insert(task.clone()).unwrap();
+        }
         drop(store);
+        (dir, vec![child, already_trashed, parent], unrelated)
+    }
 
-        let store = TaskStore::open(dir.path()).unwrap();
-        assert!(
-            store.all().iter().all(Task::is_deleted),
-            "every task trashed, not just the first"
-        );
-        assert!(!dir.path().join(PENDING).exists());
+    fn assert_replayed(dir: &Path, originals: &[Task], unrelated: &Task, at: i64) {
+        let store = TaskStore::open(dir).unwrap();
+        let expected: Vec<_> = originals
+            .iter()
+            .cloned()
+            .map(|mut task| {
+                task.deleted_ms.get_or_insert(at);
+                task.updated_ms = at;
+                task.version += 1;
+                task
+            })
+            .chain(std::iter::once(unrelated.clone()))
+            .collect();
+        assert_complete_view(&store, &expected);
+    }
+
+    fn assert_complete_view(store: &TaskStore, expected: &[Task]) {
+        let mut actual = store.all();
+        actual.sort_by_key(|task| task.id);
+        let mut expected_all = expected.to_vec();
+        expected_all.sort_by_key(|task| task.id);
+        assert_eq!(actual, expected_all);
+        for task in expected {
+            assert_eq!(store.get(task.id).as_ref(), Some(task));
+            let expected_search = if task.is_deleted() {
+                vec![]
+            } else {
+                vec![task.id]
+            };
+            assert_eq!(store.search(&[&task.title]), expected_search);
+            for tag in &task.tags {
+                assert_eq!(store.with_tag(tag), expected_search);
+            }
+        }
+        let lists: BTreeSet<_> = expected.iter().map(|task| task.list_id).collect();
+        for list in lists {
+            let mut in_list = store.in_list(list);
+            in_list.sort_by_key(|task| task.id);
+            let mut expected_in_list: Vec<_> = expected
+                .iter()
+                .filter(|task| task.list_id == list)
+                .cloned()
+                .collect();
+            expected_in_list.sort_by_key(|task| task.id);
+            assert_eq!(in_list, expected_in_list);
+
+            let mut manual = expected_in_list.clone();
+            manual.sort_by_key(|task| (task.sort_order, task.id));
+            assert_eq!(store.in_manual_order(list), manual);
+            assert_eq!(
+                store.next_sort_order(list),
+                manual.last().unwrap().sort_order.saturating_add(SORT_STEP)
+            );
+            let mut due: Vec<_> = expected_in_list
+                .into_iter()
+                .filter(|task| task.due_ms.is_some())
+                .collect();
+            due.sort_by_key(|task| (task.due_ms, task.id));
+            assert_eq!(store.due_between(list, i64::MIN, i64::MAX), due);
+        }
     }
 
     #[test]
-    fn a_batch_file_left_behind_never_rolls_back_a_later_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, tasks) = seeded(dir.path(), 2);
-        let batch = trashed(&tasks);
-        // Every task landed, but the file was not removed.
-        crash_mid_batch(&mut store, &batch, batch.len());
-        let mut later = batch[0].clone();
-        later.deleted_ms = None;
-        later.version += 1;
-        store.replace(later.clone()).unwrap();
-        store.delete(batch[1].id).unwrap();
-        drop(store);
-
-        let store = TaskStore::open(dir.path()).unwrap();
-        assert_eq!(store.get(later.id), Some(later), "the later restore stands");
-        assert_eq!(store.get(batch[1].id), None, "the later delete stands");
-        assert!(!dir.path().join(PENDING).exists());
+    fn real_batch_fault_boundaries_fence_complete_views_and_recover() {
+        for (name, fault, accepted) in [
+            ("journal-partial", Fault::JournalWritePrefix(5), false),
+            ("journal-sync", Fault::JournalSync, true),
+            ("second-apply", Fault::BatchApply(1), true),
+            ("group-sync", Fault::GroupSync, true),
+            ("checkpoint-post-rename", Fault::CheckpointAfterRename, true),
+        ] {
+            let (dir, originals, unrelated) = fixture();
+            let (changed, _) = trash_batch(&originals, 50);
+            let prior: Vec<_> = originals
+                .iter()
+                .cloned()
+                .chain(std::iter::once(unrelated.clone()))
+                .collect();
+            let after: Vec<_> = changed
+                .iter()
+                .cloned()
+                .chain(std::iter::once(unrelated.clone()))
+                .collect();
+            let mut store = TaskStore::open(dir.path()).unwrap();
+            arm_fault(fault);
+            assert!(store.replace_batch(changed.clone()).is_err(), "{name}");
+            assert_complete_view(&store, &prior);
+            assert!(matches!(
+                store.insert(task(10, unrelated.list_id, "refused")),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.replace(unrelated.clone()),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.delete(unrelated.id),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.reorder(unrelated.id, 1),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.replace_batch(changed),
+                Err(TickError::RecoveryRequired)
+            ));
+            drop(store);
+            let reopened = TaskStore::open(dir.path()).unwrap();
+            assert_complete_view(&reopened, if accepted { &after } else { &prior });
+        }
     }
 
     #[test]
-    fn a_batch_naming_a_missing_task_changes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, tasks) = seeded(dir.path(), 1);
-        let mut batch = trashed(&tasks);
-        batch.push(task("never inserted"));
+    fn move_and_sort_replay_survives_record_slot_and_retirement_interruptions() {
+        for (name, fault) in [
+            ("after-record-append", Fault::ReplaceAfterLog),
+            ("slot-flush", Fault::SlotFlush),
+            ("journal-retirement", Fault::CheckpointAfterRename),
+        ] {
+            let (dir, originals, unrelated) = fixture();
+            let destination = Uuid::from_u128(100);
+            let mut changed = originals.clone();
+            for task in &mut changed {
+                task.list_id = destination;
+                task.updated_ms = 50;
+                task.version += 1;
+            }
+            changed.last_mut().unwrap().sort_order = 17;
+            let prior: Vec<_> = originals
+                .iter()
+                .cloned()
+                .chain(std::iter::once(unrelated.clone()))
+                .collect();
+            let after: Vec<_> = changed
+                .iter()
+                .cloned()
+                .chain(std::iter::once(unrelated.clone()))
+                .collect();
+
+            let mut store = TaskStore::open(dir.path()).unwrap();
+            arm_fault(fault);
+            assert!(store.replace_batch(changed.clone()).is_err(), "{name}");
+            assert_complete_view(&store, &prior);
+            assert!(matches!(
+                store.replace_batch(changed),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.replace(unrelated.clone()),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.delete(unrelated.id),
+                Err(TickError::RecoveryRequired)
+            ));
+            drop(store);
+
+            let reopened = TaskStore::open(dir.path()).unwrap();
+            assert_complete_view(&reopened, &after);
+        }
+    }
+
+    #[test]
+    fn ordinary_partial_append_fences_trash_and_reopens_prior_state() {
+        let (dir, originals, unrelated) = fixture();
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        let prior: Vec<_> = originals
+            .iter()
+            .cloned()
+            .chain(std::iter::once(unrelated.clone()))
+            .collect();
+        let (changed, _) = trash_batch(&originals, 50);
+        let mut edit = unrelated.clone();
+        edit.title = "unacknowledged edit".into();
+        // The complete 28-byte header plus a three-byte frame prefix is a
+        // genuine torn ordinary append that reopen can safely discard.
+        arm_fault(Fault::InsertWritePrefix(31));
+        assert!(matches!(store.replace(edit), Err(TickError::Storage(_))));
+        assert_complete_view(&store, &prior);
         assert!(matches!(
-            store.replace_all(&batch),
+            store.replace_batch(changed),
+            Err(TickError::RecoveryRequired)
+        ));
+        drop(store);
+        let reopened = TaskStore::open(dir.path()).unwrap();
+        assert_complete_view(&reopened, &prior);
+    }
+
+    #[test]
+    fn assert_replayed_checks_complete_state() {
+        let (dir, originals, unrelated) = fixture();
+        let (changed, _) = trash_batch(&originals, 50);
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        store.replace_batch(changed).unwrap();
+        drop(store);
+        assert_replayed(dir.path(), &originals, &unrelated, 50);
+    }
+
+    #[test]
+    fn every_accepted_crash_prefix_replays_the_whole_trash_batch() {
+        for applied in 0..=3 {
+            let (dir, originals, unrelated) = fixture();
+            let (changed, batch) = trash_batch(&originals, 50);
+            let mut store = TaskStore::open(dir.path()).unwrap();
+            store.journal.commit(&batch).unwrap();
+            store.stack.defer_sync();
+            TaskStore::apply_batch(&mut store.stack, &batch, applied).unwrap();
+            if applied == changed.len() {
+                store.stack.commit().unwrap();
+            }
+            // Crash before checkpoint: no derived-index publication is
+            // simulated, and the accepted redo entry remains authoritative.
+            drop(store);
+            assert_replayed(dir.path(), &originals, &unrelated, 50);
+        }
+    }
+
+    #[test]
+    fn an_injected_precommit_refusal_leaves_the_previous_state() {
+        let (dir, originals, unrelated) = fixture();
+        let (changed, _) = trash_batch(&originals, 50);
+        let mut duplicate = changed.clone();
+        duplicate.push(changed[0].clone());
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            store.replace_batch(duplicate),
+            Err(TickError::Duplicate(id)) if id == changed[0].id
+        ));
+        for original in &originals {
+            assert_eq!(store.get(original.id).unwrap(), *original);
+            if !original.is_deleted() {
+                assert_eq!(store.search(&[&original.title]), vec![original.id]);
+            }
+        }
+        assert_eq!(store.get(unrelated.id).unwrap(), unrelated);
+        drop(store);
+        let reopened = TaskStore::open(dir.path()).unwrap();
+        for original in &originals {
+            assert_eq!(reopened.get(original.id).unwrap(), *original);
+        }
+    }
+
+    #[test]
+    fn checkpoint_failure_fences_follow_up_writes_and_preserves_a_consistent_view() {
+        let (dir, originals, unrelated) = fixture();
+        let (changed, _) = trash_batch(&originals, 50);
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert!(matches!(
+            store.replace_batch(changed.clone()),
+            Err(TickError::Journal(_))
+        ));
+
+        // Reads retain the complete view from before acceptance, never a
+        // prefix, while every kind of later mutation is explicitly refused.
+        for original in &originals {
+            assert_eq!(store.get(original.id).unwrap(), *original);
+        }
+        assert!(matches!(
+            store.replace(unrelated.clone()),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.delete(unrelated.id),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.reorder(unrelated.id, 7),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.replace_batch(changed),
+            Err(TickError::RecoveryRequired)
+        ));
+
+        drop(store);
+        std::fs::remove_dir(dir.path().join("tasks.journal.tmp")).unwrap();
+        assert_replayed(dir.path(), &originals, &unrelated, 50);
+    }
+
+    #[test]
+    fn ordinary_persistence_failure_fences_the_store_without_poisoning_not_found() {
+        let (dir, originals, unrelated) = fixture();
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            store.replace(task(999, unrelated.list_id, "missing")),
             Err(TickError::NotFound(_))
         ));
-        assert_eq!(store.get(tasks[0].id), Some(tasks[0].clone()));
-        assert!(!dir.path().join(PENDING).exists());
+        assert!(
+            store.get(unrelated.id).is_some(),
+            "validation is non-poisoning"
+        );
+
+        let log = insert_log::log_path(&dir.path().join("tasks.mmap"));
+        std::fs::create_dir(&log).unwrap();
+        let mut changed = unrelated.clone();
+        changed.title = "must not become visible".into();
+        assert!(matches!(store.replace(changed), Err(TickError::Storage(_))));
+        assert_eq!(store.get(unrelated.id).unwrap(), unrelated);
+        assert!(matches!(
+            store.insert(task(5, unrelated.list_id, "refused")),
+            Err(TickError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            store.delete(originals[0].id),
+            Err(TickError::RecoveryRequired)
+        ));
+
+        drop(store);
+        std::fs::remove_dir(log).unwrap();
+        let reopened = TaskStore::open(dir.path()).unwrap();
+        assert_eq!(reopened.get(unrelated.id).unwrap(), unrelated);
+        for original in originals {
+            assert_eq!(reopened.get(original.id).unwrap(), original);
+        }
     }
 
     #[test]
-    fn an_unreadable_batch_file_fails_the_open() {
-        let dir = tempfile::tempdir().unwrap();
-        drop(seeded(dir.path(), 1));
-        std::fs::write(dir.path().join(PENDING), "{not json").unwrap();
-        assert!(matches!(
-            TaskStore::open(dir.path()),
-            Err(TickError::Pending(..))
-        ));
+    fn successful_ordinary_writes_do_not_snapshot_unrelated_tasks() {
+        let dir = TempDir::new().unwrap();
+        let list = Uuid::from_u128(99);
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        for n in 1..=128 {
+            store.insert(task(n, list, "seed")).unwrap();
+        }
+        SNAPSHOT_WORK.with(|work| work.set(0));
+
+        let mut changed = store.get(Uuid::from_u128(64)).unwrap();
+        changed.title = "changed".into();
+        store.replace(changed).unwrap();
+        store.delete(Uuid::from_u128(128)).unwrap();
+        store.insert(task(129, list, "new")).unwrap();
+
+        assert_eq!(
+            SNAPSHOT_WORK.with(std::cell::Cell::get),
+            0,
+            "successful single-record writes must not scan or clone the store"
+        );
+    }
+
+    #[test]
+    fn accepted_redo_recovers_recognized_insert_log_creation_prefixes_only() {
+        for prefix_len in [0, 1, 7, 8, 11, 27] {
+            let (dir, originals, unrelated) = fixture();
+            let (_, batch) = trash_batch(&originals, 50);
+            let mut store = TaskStore::open(dir.path()).unwrap();
+            store.journal.commit(&batch).unwrap();
+            drop(store);
+
+            let mmap = dir.path().join("tasks.mmap");
+            let log = insert_log::log_path(&mmap);
+            insert_log::append(&log, &unrelated).unwrap();
+            let header = std::fs::read(&log).unwrap();
+            std::fs::write(&log, &header[..prefix_len]).unwrap();
+            assert_replayed(dir.path(), &originals, &unrelated, 50);
+        }
+
+        let (dir, originals, _) = fixture();
+        let (_, batch) = trash_batch(&originals, 50);
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        store.journal.commit(&batch).unwrap();
+        drop(store);
+        std::fs::write(
+            insert_log::log_path(&dir.path().join("tasks.mmap")),
+            b"not a header",
+        )
+        .unwrap();
+        assert!(TaskStore::open(dir.path()).is_err());
+    }
+
+    #[test]
+    fn insert_log_header_repair_has_narrow_controls() {
+        // The narrow repair primitive leaves an established valid log byte
+        // for byte untouched.
+        let (dir, _, _) = fixture();
+        let mmap = dir.path().join("tasks.mmap");
+        let log = insert_log::log_path(&mmap);
+        let established = std::fs::read(&log).unwrap();
+        assert!(!insert_log::clear_interrupted_creation::<Task>(&mmap).unwrap());
+        assert_eq!(std::fs::read(&log).unwrap(), established);
+
+        // A foreign or otherwise malformed header remains an error and is
+        // never treated as an interrupted creation prefix.
+        for bytes in [b"FOREIGN! malformed".as_slice(), b"not a header".as_slice()] {
+            let (dir, _, _) = fixture();
+            let log = insert_log::log_path(&dir.path().join("tasks.mmap"));
+            std::fs::write(&log, bytes).unwrap();
+            assert!(TaskStore::open(dir.path()).is_err());
+            assert_eq!(std::fs::read(&log).unwrap(), bytes);
+        }
+
+        // Even a recognizable creation prefix requires authoritative redo;
+        // without it, open refuses and leaves the evidence untouched.
+        let (dir, _, _) = fixture();
+        let log = insert_log::log_path(&dir.path().join("tasks.mmap"));
+        let header = std::fs::read(&log).unwrap();
+        let prefix = header[..11].to_vec();
+        std::fs::write(&log, &prefix).unwrap();
+        assert!(TaskStore::open(dir.path()).is_err());
+        assert_eq!(std::fs::read(&log).unwrap(), prefix);
+    }
+
+    #[test]
+    fn committed_batches_are_replay_idempotent_and_support_no_children() {
+        let dir = TempDir::new().unwrap();
+        let list = Uuid::from_u128(99);
+        let parent = task(1, list, "only task");
+        let mut store = TaskStore::open(dir.path()).unwrap();
+        store.insert(parent.clone()).unwrap();
+        let (changed, batch) = trash_batch(std::slice::from_ref(&parent), 50);
+        store.journal.commit(&batch).unwrap();
+        store.stack.defer_sync();
+        TaskStore::apply_batch(&mut store.stack, &batch, usize::MAX).unwrap();
+        store.stack.commit().unwrap();
+        // Leave the entry for replay after every change already landed.
+        drop(store);
+        let once = TaskStore::open(dir.path()).unwrap();
+        assert_eq!(once.get(parent.id).unwrap(), changed[0]);
+        drop(once);
+        let twice = TaskStore::open(dir.path()).unwrap();
+        assert_eq!(twice.get(parent.id).unwrap(), changed[0]);
     }
 }

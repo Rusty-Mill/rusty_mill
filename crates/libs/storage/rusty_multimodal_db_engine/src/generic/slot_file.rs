@@ -171,6 +171,12 @@ where
     ///
     /// Returns [`DurabilityError::Io`] if the `msync` fails.
     pub fn flush(&self) -> Result<(), DurabilityError> {
+        #[cfg(feature = "test-support")]
+        if crate::test_support::take_fault(|fault| fault == crate::test_support::Fault::SlotFlush)
+            .is_some()
+        {
+            return Err(std::io::Error::other("injected slot flush failure").into());
+        }
         self.mmap.flush()?;
         Ok(())
     }
