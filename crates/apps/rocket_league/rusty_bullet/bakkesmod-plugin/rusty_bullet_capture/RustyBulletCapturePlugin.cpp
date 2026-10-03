@@ -69,17 +69,26 @@ std::string carJson(int playerId, CarWrapper car)
     // rather than nesting it, since CarState's wire shape is flat plus
     // `boost_amount`/`input`, not `{"actor": {...}, ...}`.
     out << actor.substr(1, actor.size() - 2);
-    out << ",\"boost_amount\":" << (car.GetBoostComponent().GetCurrentBoostAmount() * 100.0f);
+    // A car mid-spawn, mid-reset or demolished can have no boost component;
+    // reading through a null wrapper crashes the game. Record 0 instead.
+    BoostWrapper boost = car.GetBoostComponent();
+    float boostAmount = boost.IsNull() ? 0.0f : boost.GetCurrentBoostAmount() * 100.0f;
+    out << ",\"boost_amount\":" << boostAmount;
     out << ",\"input\":" << inputJson(car.GetInput());
     out << "}";
     return out.str();
 }
 } // namespace
 
+namespace
+{
+const char *VEHICLE_INPUT_EVENT = "Function TAGame.Car_TA.SetVehicleInput";
+} // namespace
+
 void RustyBulletCapturePlugin::onLoad()
 {
     gameWrapper->HookEventWithCallerPost<CarWrapper>(
-        "Function TAGame.Car_TA.SetVehicleInput",
+        VEHICLE_INPUT_EVENT,
         [this](CarWrapper car, void *params, std::string eventName) { onVehicleInput(car, params, eventName); });
 
     cvarManager->registerNotifier(
@@ -97,6 +106,9 @@ void RustyBulletCapturePlugin::onLoad()
 
 void RustyBulletCapturePlugin::onUnload()
 {
+    // Remove the per-tick hook before this plugin's memory goes away: a
+    // hook left behind calls into a freed `this` on the next tick.
+    gameWrapper->UnhookEventPost(VEHICLE_INPUT_EVENT);
     stopCapture({});
 }
 
