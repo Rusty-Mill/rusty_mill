@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.117.0
+- Version: 0.118.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6015,6 +6015,24 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `test2`, `front` and `side` are unchanged.
 - `RB-PHYSICS-001-FR-020` (back seams), `FR-024`, `FR-026`, `FR-029` and
   `FR-033`: their shapes are out of `standard_arena` since FR-113.
+- `RB-PHYSICS-001-FR-114` (car-ball contacts use a 92.3 uu ball;
+  implemented, calibrated and verified on the owner's captures, ADR-0034):
+  - `body::BALL_CAR_CONTACT_RADIUS = 92.3`. `PhysicsWorld::step` computes
+    car-ball contacts with a copy of the ball at that radius. Everything
+    else keeps `BALL_RADIUS`.
+  - Why: at `hitjump.jsonl` 83.19 s the simulator hit the ball one tick
+    early, at 0.57 uu overlap with a 93.15 sphere. Across all 28 recorded
+    hits, the game registers a hit only from 1.13 uu overlap. The band the
+    data allows is 92.02–92.58; this is the middle.
+  - **Verification**:
+    - `world` test
+      `a_car_hits_the_ball_only_inside_the_car_contact_radius`.
+    - `a_ball_wedged_between_a_wall_and_a_heavy_car_gets_each_sides_own_material_response`
+      places the car at the new reach.
+    - `hitjump` summed over hit frames: ball 821 uu/s (was 5,368), car 440
+      (was 696).
+    - `hitjump` one-step ball mean, resets excluded: 0.62 (was 0.75).
+    - `test2`, `front` and `side` are unchanged.
 
 
 ## Architecture and interfaces
@@ -7506,6 +7524,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.118.0 (2026-10-03): `RB-PHYSICS-001-FR-114` — car-ball contacts use
+  a 92.3 uu ball, calibrated from 28 recorded hits (ADR-0034). 409 tests
+  in `rb_physics_bullet`.
 - 0.117.0 (2026-10-03): `RB-PHYSICS-001-FR-113` — the goals and back
   walls are the real collision mesh (ADR-0033). 408 tests in
   `rb_physics_bullet`.

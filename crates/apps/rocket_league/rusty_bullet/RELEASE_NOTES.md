@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Car hits land on the right tick
+**2026-10-03** · `RB-PHYSICS-001-FR-114` · ADR-0034
+
+- The simulator sometimes registered a car hitting the ball one tick
+  before the game did. Measured across all 28 hits in the owner's
+  recordings, the game needs the car slightly deeper into the ball than we
+  assumed, so car-ball contacts now use a 92.3 uu ball instead of 93.15.
+  The ball's error at hits fell sixfold on the goal recording; nothing
+  else changed. 480 tests.
+
 ## The real goals
 **2026-10-03** · `RB-PHYSICS-001-FR-113` · ADR-0033
 

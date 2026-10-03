@@ -41,6 +41,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- Car-ball contacts use `body::BALL_CAR_CONTACT_RADIUS` (92.3 uu,
+  calibrated from 28 recorded hits) instead of the ball's 93.15 world
+  radius (`RB-PHYSICS-001-FR-114`, ADR-0034).
 - `PhysicsWorld::standard_arena` is RLUtilities' soccar arena: ground,
   side walls and ceiling as planes plus 10 meshes. The back-wall seams,
   goal walls, goal boxes and soft nets are no longer part of it
