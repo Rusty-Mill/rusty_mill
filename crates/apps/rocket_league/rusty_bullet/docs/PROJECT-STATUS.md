@@ -146,8 +146,8 @@ version: `a245d35`).
    roll): `test2` mean 2.25. `RB-PHYSICS-001-FR-105` (ADR-0024) gave cars
    Bullet's one-corner-a-tick plane contact: `front` 25.967 s 156 (was
    252), 19.083 s 30 (was 55). `RB-PHYSICS-001-FR-106` (ADR-0025) made
-   the side ramps and corners the real collision mesh (repository now
-   GPL-3.0-only): `test2` mean 1.78, corner/wall segment 6.0 (was 13.4).
+   the side ramps and corners the real collision mesh (repository
+   GPL-3.0-only until FR-117): `test2` mean 1.78, corner/wall segment 6.0 (was 13.4).
    `RB-PHYSICS-001-FR-107` (ADR-0026) gave car-ball contacts RocketSim's
    material and Psyonix's extra hit velocity: kickoff hit 21 uu/s (was
    155), `test2` mean 1.67; `--self-onestep` now shows the ball too
@@ -187,9 +187,11 @@ version: `a245d35`).
    `RB-PHYSICS-001-FR-115` (ADR-0035) keeps ball-mesh contacts as
    Bullet's manifold does (near points merge, a full manifold keeps the
    largest area): ball 0.595. `RB-PHYSICS-001-FR-116` (ADR-0036)
-   matches those points on the ball, as Bullet does: ball 0.589. Worst
-   ball frame: 127.633 s, the crossbar bevel vertex (988 uu/s), which
-   hinges on Bullet's BVH triangle order (not ported).
+   matches those points on the ball, as Bullet does: ball 0.589.
+   `RB-PHYSICS-001-FR-117` (ADR-0037) switches the arena to RocketSim's
+   16 mesh files (Apache-2.0; the repository is MIT OR Apache-2.0 again)
+   and reports their triangles in Bullet's BVH order: ball 0.513, worst
+   frame 208 uu/s (was 988, the crossbar bevel vertex).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -198,7 +200,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (485 tests: 27 `rb_domain`, 414
+- `cargo test --workspace`: pass (491 tests: 27 `rb_domain`, 420
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

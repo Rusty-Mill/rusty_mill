@@ -75,5 +75,24 @@ math is derived from it.
 Rocket League's own modified/forked Bullet integration is **not** available
 publicly and is not used, referenced, or reverse-engineered by this port —
 see `docs/architecture/SYSTEM-ARCHITECTURE.md`'s "Legal and IP boundary".
-Everything in this file concerns the public, zlib-licensed upstream Bullet3
-project only.
+Everything in this section concerns the public, zlib-licensed upstream
+Bullet3 project only.
+
+## Soccar arena collision meshes — vendored data
+
+`crates/rb_physics_bullet/assets/soccar/mesh_0.cmf` .. `mesh_15.cmf` are
+the 16 standard-arena collision mesh files that
+[RocketSim](https://github.com/ZealanL/RocketSim) (MIT) loads, copied
+unmodified from the `rlgym_rocket_league` 2.0.1 source distribution on
+PyPI (`rlgym/rocket_league/sim/collision_meshes/soccar/`), which
+redistributes them under the Apache License 2.0 (`LICENSE-APACHE` holds
+the license text). The file format and the BVH triangle order this
+repository reproduces over them are RocketSim's and Bullet3's
+respectively (`RB-PHYSICS-001-FR-117`, ADR-0037). The geometry itself is
+Rocket League's, dumped from the game by RocketSim's authors; Rocket
+League is a trademark of Psyonix / Epic Games, and this project is not
+affiliated with them.
+
+Earlier commits (ADR-0025 to ADR-0036) embedded RLUtilities'
+(`samuelpmish/RLUtilities`, GPL-3.0) soccar assets instead, and the
+repository was GPL-3.0-only for that span.

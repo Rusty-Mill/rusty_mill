@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.120.0
+- Version: 0.121.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6073,8 +6073,44 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `hitjump` one-step ball mean, resets excluded: 0.589 (was 0.595).
     - `hitjump` k = 30 ball: 22.47 (was 22.43).
     - `test2`, `front` and `side` are unchanged.
-    - Open: 127.633 s is still 988 uu/s. Which triangle wins at the
-      crossbar vertex depends on triangle order.
+    - 127.633 s was still 988 uu/s: which triangle wins at the crossbar
+      vertex depends on triangle order (resolved by FR-117).
+- `RB-PHYSICS-001-FR-117` (the arena is RocketSim's 16 meshes, reported in
+  Bullet's BVH order; implemented and verified on the owner's captures,
+  ADR-0037):
+  - `arena::standard_meshes` loads RocketSim's 16 soccar `.cmf` files
+    (`assets/soccar/`, Apache-2.0, from `rlgym_rocket_league` 2.0.1; their
+    hashes match RocketSim's `MeshHashSet`) in its load order, via
+    `StaticMesh::from_cmf`. The RLUtilities `.bin` assets and their
+    loaders are gone, and the workspace is `MIT OR Apache-2.0` again.
+  - `bvh::visit_order` ports `btQuantizedBvh`'s build (`setQuantizationValues`,
+    the leaf quantization, `calcSplittingAxis`, `sortAndCalcSplittingIndex`,
+    `buildTree`) in `f32` and Bullet units to recover the leaf order
+    `walkStacklessQuantizedTree` reports triangles in; `sphere_contacts`
+    visits near triangles in that order, so the last triangle at a shared
+    vertex (FR-116) is Bullet's.
+  - Why: the crossbar frame (`hitjump.jsonl` 127.633 s) kept a bevel
+    triangle's downward normal because RLUtilities' triangle order put it
+    last; RocketSim's order, over its own meshes, puts a wall triangle
+    last. RLUtilities' meshes have the same geometry but a different
+    split (10 meshes, mirrored) and triangle order, so the BVH order could
+    not be reproduced over them.
+  - **Verification**:
+    - `bvh` tests `an_empty_mesh_has_no_order`,
+      `triangles_past_the_mean_on_the_widest_axis_come_first`,
+      `a_lopsided_split_falls_back_to_the_middle`,
+      `quantized_bounds_contain_the_triangle`.
+    - `mesh` tests `a_cmf_mesh_is_scaled_to_uu_and_wound_as_written`,
+      `a_malformed_cmf_is_rejected`.
+    - `arena` test `standard_meshes_are_rocketsims_sixteen`; `world` test
+      `standard_arena_is_planes_plus_the_game_meshes` expects 16.
+    - `hitjump` one-step ball mean, resets excluded: 0.513 (was 0.589);
+      with the new meshes in file order alone, 0.569.
+    - `hitjump` worst ball frame: 97.908 s at 208 uu/s (was 127.633 s at
+      988); 127.633 s and 20.767 s (633) are gone.
+    - `hitjump` k = 30 ball: 20.84 (was 22.47).
+    - `test2`, `front` and `side` are unchanged (`test2` one-step car
+      0.895, was 0.899).
 
 
 ## Architecture and interfaces
@@ -7566,6 +7602,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.121.0 (2026-10-03): `RB-PHYSICS-001-FR-117` — the arena is
+  RocketSim's 16 meshes, reported in Bullet's BVH order (ADR-0037);
+  relicensed MIT OR Apache-2.0. 420 tests in `rb_physics_bullet`.
 - 0.120.0 (2026-10-03): `RB-PHYSICS-001-FR-116` — ball manifold points
   are matched on the ball (ADR-0036). 414 tests in `rb_physics_bullet`.
 - 0.119.0 (2026-10-03): `RB-PHYSICS-001-FR-115` — ball-mesh contacts

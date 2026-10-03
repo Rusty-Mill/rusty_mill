@@ -438,9 +438,9 @@ impl PhysicsWorld {
     /// `arena::standard_nets()`'s 2 goal net panels. Cars are
     /// added afterward with `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
-        // RLUtilities' `Field::initialize_soccar` (RB-PHYSICS-001-FR-113):
-        // floor, ceiling and side walls as planes, everything else as the
-        // game's collision mesh, the goals and back walls included.
+        // RocketSim's `Arena::_SetupArenaCollisionShapes` (RB-PHYSICS-001-
+        // FR-113, FR-117): floor, ceiling and side walls as planes,
+        // everything else as the game's collision mesh, goals included.
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
             world = world.with_wall(wall);
@@ -3335,15 +3335,15 @@ mod tests {
 
     #[test]
     fn standard_arena_is_planes_plus_the_game_meshes() {
-        // RLUtilities' `Field::initialize_soccar` (RB-PHYSICS-001-FR-113):
-        // the ground, both side walls and the ceiling as planes; 4 corners,
-        // 2 floor ramps, 2 ceiling ramps and 2 goals as mesh. The analytic
-        // back-wall seams, goal walls, goal boxes and nets are out.
+        // RocketSim's `Arena::_SetupArenaCollisionShapes` (RB-PHYSICS-001-
+        // FR-113, FR-117): the ground, both side walls and the ceiling as
+        // planes; its 16 soccar meshes. The analytic back-wall seams, goal
+        // walls, goal boxes and nets are out.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
         assert_eq!(world.ground, crate::arena::standard_ground());
         assert_eq!(world.walls.len(), 3);
-        assert_eq!(world.meshes.len(), 10);
+        assert_eq!(world.meshes.len(), 16);
         assert!(world.curves.is_empty());
         assert!(world.corner_fillets.is_empty());
         assert!(world.goal_walls.is_empty());

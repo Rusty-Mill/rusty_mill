@@ -1,17 +1,20 @@
 # Soccar arena collision meshes
 
-The curved parts of the standard (soccar) arena: one corner (x > 0, y < 0),
-the side wall's floor ramp, its ceiling ramp, and one goal with the back
-wall around it (`soccar_goal`, placed at `y = -5120` and mirrored, as
-RLUtilities does; its triangles are used as wound), as little-endian `f32`
-vertex triples (`*_vertices.bin`) and `i32` triangle index triples
-(`*_ids.bin`). `rb_physics_bullet::arena` mirrors them into all four
-corners and both sides, as RLUtilities' `Field::initialize_soccar` does.
+The standard (soccar) arena's curved parts, as the 16 RocketSim collision
+mesh files (`mesh_0.cmf` .. `mesh_15.cmf`): 4 corners, 4 goal halves with
+the back wall around them (split at `x = 0`), 4 side-wall floor ramps and
+4 ceiling ramps. Each file is little-endian: `i32` triangle count, `i32`
+vertex count, the triangles as `i32` vertex index triples, the vertices as
+`f32` triples in Bullet units (1 BT = 50 uu). Every triangle is wound to
+face the arena. `rb_physics_bullet::arena::standard_meshes` loads them in
+file order and `mesh::StaticMesh::from_cmf` reports their triangles in
+Bullet's BVH order (`RB-PHYSICS-001-FR-117`, ADR-0037).
 
-- Source: RLUtilities (`samuelpmish/RLUtilities`, branch `develop`,
-  `assets/soccar/`), unmodified.
-- License: GPL-3.0, which is why this repository is GPL-3.0-only (see
-  `/LICENSE`).
-- The geometry is Rocket League's own collision mesh, extracted from the
-  game by RLUtilities' authors. Rocket League is a trademark of Psyonix /
-  Epic Games; this project is not affiliated with them.
+- Source: the `rlgym_rocket_league` 2.0.1 source distribution on PyPI
+  (`rlgym/rocket_league/sim/collision_meshes/soccar/`), unmodified. They
+  are the files RocketSim (`ZealanL/RocketSim`, MIT) loads; its
+  `RocketSim.cpp` lists their hashes, which these match.
+- License: Apache-2.0 (rlgym's). See `/THIRD_PARTY_NOTICES.md`.
+- The geometry is Rocket League's own collision mesh, dumped from the game
+  with RocketSim's `RLArenaCollisionDumper`. Rocket League is a trademark
+  of Psyonix / Epic Games; this project is not affiliated with them.
