@@ -30,3 +30,4 @@ uuid = { version = "1", features = ["v7", "v5", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+rusty_multimodal_db_engine = { workspace = true, features = ["test-support"] }

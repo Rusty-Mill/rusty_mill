@@ -884,6 +884,16 @@ where
             .get(&id)
             .ok_or(ReplaceError::NotFound(id))?;
         self.log_record(&record)?;
+        #[cfg(feature = "test-support")]
+        if crate::test_support::take_fault(|fault| {
+            fault == crate::test_support::Fault::ReplaceAfterLog
+        })
+        .is_some()
+        {
+            return Err(ReplaceError::Durability(DurabilityError::Io(
+                std::io::Error::other("injected interruption after record append"),
+            )));
+        }
         self.file.write_value(position, record.scannable_value());
         let new_value = record.indexed_value().clone();
         if old_value != new_value {
@@ -1247,9 +1257,10 @@ where
     }
 }
 
-/// The insert log is the only file a write syncs: slot appends and
-/// in-place slot writes go through the mapping unsynced (see [`Flush`]).
-/// Deferring the log's sync therefore defers every sync a write makes.
+/// Group commit covers both representations changed by a replacement. The
+/// insert log is synced first and then the mapped slots are flushed. A redo
+/// owner may retire its journal only after this method returns `Ok`; before
+/// then the journal remains authoritative if either sync fails.
 impl<R, IndexMarker, ScanMarker> GroupCommit for GenericMmapStore<R, IndexMarker, ScanMarker>
 where
     R: IndexedField<IndexMarker> + ScannableField<ScanMarker>,
@@ -1266,6 +1277,7 @@ where
             self.log.sync()?;
             self.unsynced = false;
         }
+        self.file.flush()?;
         Ok(())
     }
 }

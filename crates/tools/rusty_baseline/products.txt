@@ -1,6 +1,12 @@
 # The products rusty_baseline measures: each app's shipped binaries.
 #
-#   <package>[:<features>] <bin> <exit|idle> [KEY=value...] [args...]
+#   <package>[:<features>] <bin> <exit|idle> [@platform=<os>|@unsupported=<os>] [KEY=value...] [args...]
+#
+# `@platform=linux`, `@platform=windows`, or `@platform=macos` immediately
+# after the mode restricts a product to that OS. With no declaration a product
+# remains unrestricted.
+# `@unsupported=<os>` instead excludes only that OS. This preserves eligibility
+# on every other host when a product has one narrow, temporary platform gap.
 #
 # `exit`: a cheap command that runs to completion; startup is its wall time.
 # `idle`: a server or daemon, started with no real config (dummy secrets,
@@ -24,10 +30,12 @@ sessionmgr-daemon     sessionmgr           exit  --help
 nexus-cli             nexus                exit  --help
 rusty-meshed-cli      meshed               exit  --help
 rusty_homelab_mcp     rusty_homelab_mcp    exit  --help
-rusty_fedora_agent    rusty_fedora_agent   exit  --help
+rusty_fedora_agent    rusty_fedora_agent   exit  @platform=linux  --help
 agentgateway          agentgateway         exit  --help
 ts-cli                ts-cli               exit  --help
-ts-daemon             ts-daemon            exit  --help
+# Temporary until ts-daemon has a real Windows implementation; its current
+# Windows binary is only a stub and must not be treated as a measured daemon.
+ts-daemon             ts-daemon            exit  @unsupported=windows  --help
 
 # Servers and daemons
 rusty_tick                     rusty_tick           idle  RUSTY_TICK_TOKEN=baseline-dummy-token
