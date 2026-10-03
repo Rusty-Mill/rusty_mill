@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0033 (`RB-PHYSICS-001-FR-113`): the goals and back walls are
+  Rocket League's collision mesh (`arena::standard_goal_meshes`,
+  RLUtilities' `soccar_goal`, GPL-3.0, under `assets/soccar/`), loaded as
+  wound (`StaticMesh::from_wound_buffers`, `Triangle::wound`).
 - ADR-0031 (`RB-PHYSICS-001-FR-111`): unlimited boost —
   `PhysicsWorld::set_boost_used_per_second` (`drive::BOOST_USED_PER_SECOND`
   by default, 0 unlimited), detected by `rb_verify_cli::boost_is_unlimited`
@@ -37,6 +41,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- `PhysicsWorld::standard_arena` is RLUtilities' soccar arena: ground,
+  side walls and ceiling as planes plus 10 meshes. The back-wall seams,
+  goal walls, goal boxes and soft nets are no longer part of it
+  (`RB-PHYSICS-001-FR-113`).
 - One friction row per contact, Bullet's default solver mode
   (`RB-PHYSICS-001-FR-110`, ADR-0029): `solver::friction_directions` is
   `friction_direction`, `ContactCache` keeps `[normal, friction]`.

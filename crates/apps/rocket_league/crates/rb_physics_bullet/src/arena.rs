@@ -28,6 +28,13 @@
 //! fillets described above and below: the facets sit up to ~2.5 uu inside
 //! any smooth fit, and the owner's corner-wall ride touches them. Only the
 //! back walls' seams (`standard_curves`) and the goal mouth stay analytic.
+//!
+//! **Since `RB-PHYSICS-001-FR-113` (ADR-0033) the goals and back walls are
+//! mesh too** (`standard_goal_meshes`), so `PhysicsWorld::standard_arena`
+//! is exactly RLUtilities' `Field::initialize_soccar`: the ground, side
+//! walls and ceiling as planes, everything else as the game's triangles.
+//! `standard_curves`, the goal walls, goal boxes, goal fillets and nets
+//! below are no longer part of it; they remain as built and tested shapes.
 //! FR-102's measured radii survive for the back seams
 //! (`BACK_FLOOR_RADIUS`, `CEILING_RADIUS`).
 //!
@@ -570,6 +577,24 @@ pub fn standard_meshes() -> Vec<StaticMesh> {
         .map(|((vertices, ids), (sx, sy))| {
             StaticMesh::from_buffers(vertices, ids, Vec3::new(sx, sy, 1.0), ARENA_INSIDE)
         })
+        .chain(standard_goal_meshes())
+        .collect()
+}
+
+/// Both goals and the back walls around them as Rocket League's collision
+/// triangles (`RB-PHYSICS-001-FR-113`): RLUtilities' `soccar_goal`, moved
+/// to `y = -BACK_WALL_Y` and mirrored for the `+y` end, as
+/// `Field::initialize_soccar` does. Spans `|x| <= 2688`, from the field
+/// side of the back wall to the back of the goal: the back wall with its
+/// floor and ceiling seams, the goal mouth's rounded edges, and the goal's
+/// sloped back, side walls, roof and floor.
+pub fn standard_goal_meshes() -> Vec<StaticMesh> {
+    let vertices = &include_bytes!("../assets/soccar/soccar_goal_vertices.bin")[..];
+    let ids = &include_bytes!("../assets/soccar/soccar_goal_ids.bin")[..];
+    let offset = Vec3::new(0.0, -BACK_WALL_Y, 0.0);
+    [1.0, -1.0]
+        .into_iter()
+        .map(|sy| StaticMesh::from_wound_buffers(vertices, ids, offset, Vec3::new(1.0, sy, 1.0)))
         .collect()
 }
 
@@ -666,22 +691,60 @@ mod tests {
     #[test]
     fn standard_meshes_hold_every_corner_and_ramp_triangle() {
         // RB-PHYSICS-001-FR-106: 4 mirrored corners (880 triangles each),
-        // 2 floor ramps (252) and 2 ceiling ramps (32), none skipped.
+        // 2 floor ramps (252) and 2 ceiling ramps (32); since FR-113 the 2
+        // goals (1966 each, minus any without area).
         let counts: Vec<usize> = standard_meshes()
             .iter()
             .map(|mesh| mesh.triangles().len())
             .collect();
-        assert_eq!(counts, vec![880, 880, 880, 880, 252, 252, 32, 32]);
+        assert_eq!(counts[..8], [880, 880, 880, 880, 252, 252, 32, 32]);
+        assert_eq!(counts.len(), 10);
+        assert!(counts[8] > 1900 && counts[8] == counts[9], "{counts:?}");
     }
 
     #[test]
-    fn every_mesh_triangle_faces_the_arena() {
-        for mesh in standard_meshes() {
+    fn every_corner_and_ramp_triangle_faces_the_arena() {
+        // The goals (FR-113) face as wound: their roof faces down.
+        for mesh in standard_meshes().into_iter().take(8) {
             for triangle in mesh.triangles() {
                 let [a, b, c] = triangle.vertices;
                 let centroid = (a + b + c) * (1.0 / 3.0);
                 assert!(triangle.normal.dot(&(ARENA_INSIDE - centroid)) > 0.0);
             }
+        }
+    }
+
+    /// RB-PHYSICS-001-FR-113: the goal mesh faces the way it is played on:
+    /// the back wall toward the field, the goal's floor up, its roof down,
+    /// its back toward the field; the mirrored goal the same way.
+    #[test]
+    fn goal_mesh_triangles_face_the_playable_side() {
+        for (mesh, toward_field) in standard_goal_meshes().iter().zip([1.0f32, -1.0]) {
+            let probe = |origin: Vec3, direction: Vec3| {
+                mesh.raycast(origin, direction, 400.0).map(|hit| hit.normal)
+            };
+            let side = -toward_field;
+            // Back wall above the goal, from the field.
+            let wall = probe(
+                Vec3::new(0.0, side * (BACK_WALL_Y - 100.0), 1200.0),
+                Vec3::new(0.0, side, 0.0),
+            )
+            .expect("back wall");
+            assert!(wall.y * toward_field > 0.9, "{wall:?}");
+            // Goal roof, from inside the goal.
+            let roof = probe(
+                Vec3::new(0.0, side * (BACK_WALL_Y + 300.0), 300.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            )
+            .expect("goal roof");
+            assert!(roof.z < -0.9, "{roof:?}");
+            // Goal back, from inside the goal.
+            let back = probe(
+                Vec3::new(0.0, side * (BACK_WALL_Y + 500.0), 150.0),
+                Vec3::new(0.0, side, 0.0),
+            )
+            .expect("goal back");
+            assert!(back.y * toward_field > 0.5, "{back:?}");
         }
     }
 

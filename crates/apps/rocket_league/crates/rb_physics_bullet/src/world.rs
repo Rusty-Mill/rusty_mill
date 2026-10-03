@@ -438,30 +438,15 @@ impl PhysicsWorld {
     /// `arena::standard_nets()`'s 2 goal net panels. Cars are
     /// added afterward with `with_car`, exactly as with `PhysicsWorld::new`.
     pub fn standard_arena(ball: RigidBody) -> PhysicsWorld {
+        // RLUtilities' `Field::initialize_soccar` (RB-PHYSICS-001-FR-113):
+        // floor, ceiling and side walls as planes, everything else as the
+        // game's collision mesh, the goals and back walls included.
         let mut world = PhysicsWorld::new(ball, crate::arena::standard_ground());
         for wall in crate::arena::standard_walls() {
             world = world.with_wall(wall);
         }
-        for curve in crate::arena::standard_curves() {
-            world = world.with_curve(curve);
-        }
         for mesh in crate::arena::standard_meshes() {
             world = world.with_mesh(mesh);
-        }
-        for goal_wall in crate::arena::standard_goal_walls() {
-            world = world.with_goal_wall(goal_wall);
-        }
-        for wall in crate::arena::standard_goal_back_walls() {
-            world = world.with_wall(wall);
-        }
-        for wall in crate::arena::standard_goal_side_walls() {
-            world = world.with_bounded_wall(wall);
-        }
-        for wall in crate::arena::standard_goal_roofs() {
-            world = world.with_bounded_wall(wall);
-        }
-        for net in crate::arena::standard_nets() {
-            world = world.with_net(net);
         }
         world
     }
@@ -3341,49 +3326,21 @@ mod tests {
     }
 
     #[test]
-    fn standard_arena_has_five_walls_and_the_standard_ground() {
-        // The 2 side walls and the ceiling (`standard_walls`; the corner
-        // walls are mesh facets since RB-PHYSICS-001-FR-106) plus the 2
-        // goal boxes' back-of-net walls (RB-PHYSICS-001-FR-029).
+    fn standard_arena_is_planes_plus_the_game_meshes() {
+        // RLUtilities' `Field::initialize_soccar` (RB-PHYSICS-001-FR-113):
+        // the ground, both side walls and the ceiling as planes; 4 corners,
+        // 2 floor ramps, 2 ceiling ramps and 2 goals as mesh. The analytic
+        // back-wall seams, goal walls, goal boxes and nets are out.
         let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
         let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.walls.len(), 5);
         assert_eq!(world.ground, crate::arena::standard_ground());
-    }
-
-    #[test]
-    fn standard_arena_has_six_curved_transitions() {
-        // Per back wall a ceiling seam and a floor seam either side of the
-        // goal mouth (the rest are mesh since RB-PHYSICS-001-FR-106). The
-        // goal-cutout fillets (FR-024) are out since FR-112: concave, they
-        // filled the goal mouth.
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
-        let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.curves.len(), 6);
-    }
-
-    #[test]
-    fn standard_arena_has_two_goal_walls() {
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
-        let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.goal_walls.len(), 2);
-    }
-
-    #[test]
-    fn standard_arena_has_six_bounded_walls() {
-        // 4 goal side walls (2 per goal) plus 2 goal roofs (1 per goal),
-        // since RB-PHYSICS-001-FR-029.
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
-        let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.bounded_walls.len(), 6);
-    }
-
-    #[test]
-    fn standard_arena_has_two_nets() {
-        // One net panel per goal, since RB-PHYSICS-001-FR-033.
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
-        let world = PhysicsWorld::standard_arena(ball);
-        assert_eq!(world.nets.len(), 2);
+        assert_eq!(world.walls.len(), 3);
+        assert_eq!(world.meshes.len(), 10);
+        assert!(world.curves.is_empty());
+        assert!(world.corner_fillets.is_empty());
+        assert!(world.goal_walls.is_empty());
+        assert!(world.bounded_walls.is_empty());
+        assert!(world.nets.is_empty());
     }
 
     #[test]
@@ -3785,17 +3742,6 @@ mod tests {
         for contact in wheels.iter().flatten() {
             assert!((contact.normal - normal).length() < 1e-3, "{contact:?}");
         }
-    }
-
-    #[test]
-    fn standard_arena_has_no_goal_corner_fillets_and_eight_meshes() {
-        // The goal post-crossbar corner fillets (RB-PHYSICS-001-FR-026)
-        // are out since FR-112, like the cutout fillets; since FR-106 the
-        // arena's corners and side ramps are 8 meshes.
-        let ball = RigidBody::sphere(1.0, 1.0, Vec3::ZERO);
-        let world = PhysicsWorld::standard_arena(ball);
-        assert!(world.corner_fillets.is_empty());
-        assert_eq!(world.meshes.len(), 8);
     }
 
     /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 56.3 s: a ball shot into
