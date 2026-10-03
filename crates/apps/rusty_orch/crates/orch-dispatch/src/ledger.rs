@@ -55,6 +55,17 @@ impl Ledger {
         self.goal_calls += 1;
         *self.task_calls.entry(task).or_insert(0) += 1;
     }
+
+    /// Undo exactly the most recent charge for `task`.
+    pub(crate) fn rollback(&mut self, task: TaskId) {
+        self.goal_calls -= 1;
+        if let Some(calls) = self.task_calls.get_mut(&task) {
+            *calls -= 1;
+            if *calls == 0 {
+                self.task_calls.remove(&task);
+            }
+        }
+    }
 }
 
 fn ceiling(ceiling: Ceiling, task: TaskId, limit: NonZeroU32) -> DispatchError {

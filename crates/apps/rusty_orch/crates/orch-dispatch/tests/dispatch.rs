@@ -1,15 +1,16 @@
 //! End-to-end dispatcher behaviour against the scripted fake.
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 
 use orch_core::board::{Author, Board, BoardError, Confidence, EntryKind, NewEntry, Verdict};
 use orch_core::goal::{Goal, GoalDraft, StopRule};
-use orch_core::task::{Agent, Plan, PlanError, Role, Status, TaskSpec, TaskState};
+use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskSpec, TaskState};
 use orch_core::{GoalId, TaskId, Text};
 use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_dispatch::{
-    AgentError, AgentRunner, Ceiling, DispatchError, Dispatcher, Ledger, Outcome, Output, Routing,
-    RoutingConfig,
+    AgentError, AgentRunner, Ceiling, ClassifiedError, DispatchError, Dispatcher, Ledger, Outcome,
+    Output, Routing, RoutingConfig,
 };
 
 fn text(s: &str) -> Text {
@@ -360,6 +361,283 @@ impl AgentRunner for NoImplement {
     ) -> Result<Vec<Output>, AgentError> {
         self.0.run(agent, task, board)
     }
+}
+
+#[derive(Debug)]
+enum TypedReply {
+    Write,
+    Fail(ClassifiedError),
+}
+
+#[derive(Debug)]
+struct TypedRunner {
+    replies: VecDeque<TypedReply>,
+    calls: usize,
+}
+
+impl TypedRunner {
+    fn new(replies: impl IntoIterator<Item = TypedReply>) -> Self {
+        Self {
+            replies: replies.into_iter().collect(),
+            calls: 0,
+        }
+    }
+
+    fn next(&mut self) -> Result<Vec<Output>, ClassifiedError> {
+        self.calls += 1;
+        match self.replies.pop_front() {
+            Some(TypedReply::Write) => Ok(vec![Output {
+                kind: finding(),
+                body: text("typed result"),
+                refs: vec![],
+                supersedes: None,
+            }]),
+            Some(TypedReply::Fail(error)) => Err(error),
+            None => Err(ClassifiedError::Transient(AgentError(
+                "typed script exhausted".into(),
+            ))),
+        }
+    }
+}
+
+impl AgentRunner for TypedRunner {
+    fn run(&mut self, _: Agent, _: &Task, _: &Board) -> Result<Vec<Output>, AgentError> {
+        self.next().map_err(ClassifiedError::into_error)
+    }
+
+    fn run_classified(
+        &mut self,
+        _: Agent,
+        _: &Task,
+        _: &Board,
+    ) -> Result<Vec<Output>, ClassifiedError> {
+        self.next()
+    }
+}
+
+#[derive(Debug)]
+struct Composite(TypedRunner);
+
+impl AgentRunner for Composite {
+    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+        self.0.run(agent, task, board)
+    }
+
+    fn run_classified(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, ClassifiedError> {
+        self.0.run_classified(agent, task, board)
+    }
+}
+
+#[test]
+fn permanent_agent_failure_fails_the_card_once_and_strands_dependents() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 3)).expect("add");
+    let dependent = plan.add(spec(Role::Design, vec![task], 3)).expect("add");
+    let mut board = Board::new(plan.goal());
+    // A second reply is scripted so a wrongful retry would be visible.
+    let fake = TypedRunner::new([
+        TypedReply::Fail(ClassifiedError::Permanent(AgentError("refused".into()))),
+        TypedReply::Write,
+    ]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        fake,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(10);
+
+    let err = d
+        .run(&goal, &mut plan, &mut board, &mut ledger)
+        .expect_err("permanent agent error");
+    assert!(matches!(
+        &err,
+        DispatchError::Agent { task: t, agent: Agent::Claude, source: AgentError(m) }
+            if *t == task && m == "refused"
+    ));
+    assert_eq!(
+        plan.get(task).expect("task").state().status(),
+        Status::Failed
+    );
+    assert_eq!(ledger.calls(), 1, "the failing call is still metered");
+
+    // Nothing is retried: the card is failed, its dependent can never run.
+    assert_eq!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger),
+        Err(DispatchError::Stuck)
+    );
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(d.runner().calls, 1);
+    assert_eq!(
+        plan.get(dependent).expect("task").state().status(),
+        Status::Pending
+    );
+    assert!(board.entries().is_empty());
+}
+
+#[test]
+fn unavailable_prerequisite_can_repeat_then_resume_at_max_calls() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 1)).expect("add");
+    let mut board = Board::new(plan.goal());
+    let fake = Composite(TypedRunner::new([
+        TypedReply::Fail(ClassifiedError::Unavailable(AgentError(
+            "not logged in".into(),
+        ))),
+        TypedReply::Fail(ClassifiedError::Unavailable(AgentError(
+            "still not logged in".into(),
+        ))),
+        TypedReply::Write,
+    ]));
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        fake,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(1);
+
+    for reason in ["not logged in", "still not logged in"] {
+        let err = d
+            .run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect_err("external prerequisite is absent");
+        assert!(matches!(
+            err,
+            DispatchError::Agent { source: AgentError(message), .. } if message == reason
+        ));
+        assert_eq!(
+            plan.get(task).expect("task").state().status(),
+            Status::Running
+        );
+        assert_eq!(
+            ledger.calls(),
+            0,
+            "unavailable attempts do not consume budget"
+        );
+        assert_eq!(ledger, Ledger::new(), "rollback removes zero-count keys");
+        assert!(board.entries().is_empty());
+    }
+
+    assert_eq!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger)
+            .expect("same card resumes after the prerequisite is restored"),
+        Outcome::Finished
+    );
+    assert_eq!(ledger.calls(), 1);
+    assert_eq!(ledger.task_calls(task), 1);
+    assert_eq!(d.runner().0.calls, 3);
+}
+
+#[test]
+fn unavailable_restores_only_its_charge_with_prior_usage() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let task = plan.add(spec(Role::Research, vec![], 2)).expect("add");
+    let mut board = Board::new(plan.goal());
+    let runner = TypedRunner::new([
+        TypedReply::Fail(ClassifiedError::Transient(AgentError("retry".into()))),
+        TypedReply::Fail(ClassifiedError::Unavailable(AgentError("login".into()))),
+        TypedReply::Write,
+    ]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        runner,
+    );
+    let mut ledger = Ledger::new();
+    let goal = goal(2);
+
+    assert!(matches!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger),
+        Err(DispatchError::Agent { .. })
+    ));
+    assert_eq!((ledger.calls(), ledger.task_calls(task)), (1, 1));
+    assert!(matches!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger),
+        Err(DispatchError::Agent { .. })
+    ));
+    assert_eq!((ledger.calls(), ledger.task_calls(task)), (1, 1));
+    assert!(board.entries().is_empty());
+
+    assert_eq!(
+        d.run(&goal, &mut plan, &mut board, &mut ledger),
+        Ok(Outcome::Finished)
+    );
+    assert_eq!((ledger.calls(), ledger.task_calls(task)), (2, 2));
+    assert_eq!(d.runner().calls, 3);
+}
+
+#[test]
+fn exhausted_budget_refuses_without_invocation_or_recovery_credit() {
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let first = plan.add(spec(Role::Research, vec![], 1)).expect("add");
+    let second = plan.add(spec(Role::Design, vec![], 1)).expect("add");
+    let mut board = Board::new(plan.goal());
+    let runner = TypedRunner::new([
+        TypedReply::Write,
+        TypedReply::Fail(ClassifiedError::Unavailable(AgentError("login".into()))),
+    ]);
+    let mut d = Dispatcher::new(
+        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        runner,
+    );
+    let mut ledger = Ledger::new();
+
+    let error = d
+        .run(&goal(1), &mut plan, &mut board, &mut ledger)
+        .expect_err("goal budget is genuinely exhausted");
+    assert!(matches!(
+        error,
+        DispatchError::CeilingReached {
+            ceiling: Ceiling::Goal,
+            task,
+            ..
+        } if task == second
+    ));
+    assert_eq!((ledger.calls(), ledger.task_calls(first)), (1, 1));
+    assert_eq!(ledger.task_calls(second), 0);
+    assert_eq!(d.runner().calls, 1, "no unavailable call was attempted");
+    assert_eq!(board.entries().len(), 1);
+}
+
+#[test]
+fn downstream_legacy_api_remains_exhaustively_matchable() {
+    fn legacy_call(runner: &mut impl AgentRunner, task: &Task, board: &Board) -> String {
+        match runner.run(Agent::Claude, task, board) {
+            Ok(_) => String::new(),
+            Err(error) => error.0,
+        }
+    }
+
+    fn reply(reply: Reply) {
+        match reply {
+            Reply::Write(_) | Reply::Fail(_) => {}
+        }
+    }
+
+    fn dispatch(error: DispatchError) {
+        match error {
+            DispatchError::Plan(_)
+            | DispatchError::Board(_)
+            | DispatchError::Agent { .. }
+            | DispatchError::UnsupportedRole { .. }
+            | DispatchError::CeilingReached { .. }
+            | DispatchError::Unroutable { .. }
+            | DispatchError::Stuck => {}
+        }
+    }
+
+    let mut plan = Plan::new(GoalId::from_raw(1));
+    let id = plan.add(spec(Role::Research, vec![], 1)).expect("add");
+    let board = Board::new(plan.goal());
+    let mut runner = FakeAgent::new([Reply::Fail("legacy".into())]);
+    assert_eq!(
+        legacy_call(&mut runner, plan.get(id).expect("task"), &board),
+        "legacy"
+    );
+    reply(Reply::Fail("still exhaustive".into()));
+    dispatch(DispatchError::Stuck);
 }
 
 #[test]

@@ -13,7 +13,7 @@ Ports-and-adapters. `orch-core` holds all invariants and does no I/O; everything
 | Agent runner | `orch-dispatch::AgentRunner`; `orch-ollama::OllamaAgent` (`ollama run --format json`), `orch-codex::CodexAgent` (`codex exec --sandbox read-only`, [ADR-0006](./docs/adr/0006-codex-adapter.md)) and `FakeAgent` today; `claude -p`, `gemini -p` planned. Shared core in `orch-cli`. | One adapter per CLI; card in, `Output` entries out. The dispatcher stamps task and author and appends, so adapters never write the board directly. Subscriptions only, no API keys. |
 | Board store | remind-me MCP (`board:<project>`) or SQLite | Planned. Persists `Board`/`Plan`; the domain assigns ids. |
 | Goal intake | CLI / JSON → `GoalDraft` | Planned. Parsing and serde live here, not in the core. |
-| Call meter | `orch-dispatch::Ledger` | Caller-owned; counts calls against `Budget::max_calls` and each card's `TaskSpec::max_calls`, checked before every call. Wall-clock is still planned (needs a clock adapter). |
+| Call meter | `orch-dispatch::Ledger` | Caller-owned; counts usable calls against `Budget::max_calls` and each card's `TaskSpec::max_calls`, checked before every call. An adapter-classified unavailable prerequisite (such as a missing CLI login) is not charged, so the same card can resume after it is restored. Wall-clock is still planned (needs a clock adapter). |
 | Process | `orch-cli::CommandRunner` | Fixed argv, stdin bytes, deadline, env scrub. `StdCommand` is real; `orch_cli::fake::FakeCommand` for tests. Own seam because `contract::ProcessRunner` lacks stdin and timeout ([ADR-0004](./docs/adr/0004-ollama-output-protocol.md)). |
 
 ## Structure
@@ -28,7 +28,7 @@ Modular monolith inside the `rusty_mill` workspace. `orch-dispatch` is the appli
 2. Dispatcher adds cards to a `Plan` and loops on `Plan::ready()`.
 3. For each ready card, lowest id first: route role → agent (reviews take the first configured reviewer that is not the target's author), verify the runner supports that agent/role pair, check both ceilings in the `Ledger`, `Plan::start`, count the call, run the adapter with the card and the board. An unsupported pair fails the card before start/count/invocation (ADR-0007).
 4. Dispatcher appends the agent's entries to the `Board` atomically (all or none) and calls `Plan::complete` with their ids, or `block` on a `Question`.
-5. The loop returns `Blocked` with the waiting cards; once a human appends an `Answer`, the next `run` resumes them. Hitting a ceiling, an agent failure, or zero outputs stops the loop with a typed error; an agent failure is retried on the next run until the card's own ceiling fails it.
+5. The loop returns `Blocked` with the waiting cards; once a human appends an `Answer`, the next `run` resumes them. Hitting a ceiling, an agent failure, or zero outputs stops the loop with a typed error; the runner classifies each failure ([ADR-0008](./docs/adr/0008-permanent-agent-errors.md)): a transient one is metered and retried on the next run until the card's own ceiling fails it; an unavailable backend (a missing CLI login) is not metered and leaves the card `Running`, so the same card resumes once a human repairs the environment; a permanent one, like an unsupported agent/role pair ([ADR-0007](./docs/adr/0007-explicit-runner-capabilities.md)), fails the card at once.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/).

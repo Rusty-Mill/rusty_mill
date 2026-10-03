@@ -35,7 +35,9 @@ condition is known before adapter setup.
   by `run`. Direct calls to each CLI adapter retain a guard before process or
   scratch-file setup.
 - `AgentError` remains retryable. Its representation and the `orch-core` API
-  and persisted plan/board shapes do not change.
+  and persisted plan/board shapes do not change. *Amended by ADR-0008:
+  adapters may attach dispatcher policy through the additive `ClassifiedError`
+  result of `run_classified`; `AgentError` itself remains compatible.*
 
 ## Consequences
 
