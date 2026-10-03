@@ -11,12 +11,16 @@
 //! manifold) lives in `collision::ContactManifold`; the ball and wheel
 //! rays query the mesh directly here.
 
+use crate::bvh::visit_order;
 use crate::collision::{
     replacement_slot, Contact, RayHit, CONTACT_BREAKING_FACTOR, CONTACT_PROCESSING_THRESHOLD,
     MANIFOLD_CAPACITY,
 };
 use rb_domain::Vec3;
 use std::collections::HashMap;
+
+/// Unreal units per Bullet unit, the scale RocketSim's mesh files use.
+const BT_TO_UU: f32 = 50.0;
 
 /// Broad-phase grid cell edge (uu).
 const CELL_SIZE: f32 = 256.0;
@@ -209,6 +213,9 @@ pub struct StaticMesh {
     /// Per triangle, edge `i` runs from vertex `i` to `i + 1`.
     edges: Vec<[EdgeKind; 3]>,
     cells: HashMap<(i32, i32, i32), Vec<u32>>,
+    /// Per triangle, its place in Bullet's BVH report order (FR-117);
+    /// file order unless built from one (`from_cmf`).
+    visit_rank: Vec<u32>,
     pub restitution: f32,
     pub friction: f32,
 }
@@ -221,6 +228,7 @@ impl StaticMesh {
     /// Indexes `triangles` with the same default material as the other
     /// static shapes.
     pub fn new(triangles: Vec<Triangle>) -> StaticMesh {
+        let triangles_len = u32::try_from(triangles.len()).unwrap_or(u32::MAX);
         let mut cells: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
         for (index, triangle) in triangles.iter().enumerate() {
             let (min, max) = triangle.bounds();
@@ -236,6 +244,7 @@ impl StaticMesh {
             triangles,
             edges: Vec::new(),
             cells,
+            visit_rank: (0..triangles_len).collect(),
             restitution: 0.5,
             friction: 0.5,
         };
@@ -280,6 +289,51 @@ impl StaticMesh {
             .filter_map(|[a, b, c]| Triangle::facing(a, b, c, inside))
             .collect();
         StaticMesh::new(triangles)
+    }
+
+    /// A RocketSim collision mesh file (`.cmf`: `i32` triangle and vertex
+    /// counts, `i32` index triples, `f32` vertex triples in Bullet units,
+    /// little-endian), triangles wound as the file winds them and reported
+    /// in the order Bullet's BVH over them would (`RB-PHYSICS-001-FR-117`).
+    /// `None` if the file is malformed. Triangles without area are dropped
+    /// after ordering, as Bullet keeps them in its tree but never touches
+    /// them.
+    pub fn from_cmf(bytes: &[u8]) -> Option<StaticMesh> {
+        let word = |at: usize| -> Option<[u8; 4]> { bytes.get(at..at + 4)?.try_into().ok() };
+        let count = |at: usize| usize::try_from(i32::from_le_bytes(word(at)?)).ok();
+        let (triangle_count, vertex_count) = (count(0)?, count(4)?);
+        let vertices_at = 8 + 12 * triangle_count;
+        if bytes.len() != vertices_at + 12 * vertex_count {
+            return None;
+        }
+        let vertex = |index: usize| -> Option<[f32; 3]> {
+            let at = vertices_at + 12 * index;
+            let component = |k: usize| Some(f32::from_le_bytes(word(at + 4 * k)?));
+            (index < vertex_count).then_some(())?;
+            Some([component(0)?, component(1)?, component(2)?])
+        };
+        let corners: Vec<[[f32; 3]; 3]> = (0..triangle_count)
+            .map(|t| {
+                let id = |k: usize| vertex(count(8 + 12 * t + 4 * k)?);
+                Some([id(0)?, id(1)?, id(2)?])
+            })
+            .collect::<Option<_>>()?;
+        let mut rank = vec![0; triangle_count];
+        for (place, triangle) in visit_order(&corners).into_iter().enumerate() {
+            rank[triangle] = place;
+        }
+        let uu = |p: [f32; 3]| Vec3::new(p[0], p[1], p[2]) * BT_TO_UU;
+        let (triangles, ranks): (Vec<Triangle>, Vec<u32>) = corners
+            .iter()
+            .zip(rank)
+            .filter_map(|([a, b, c], place)| {
+                let triangle = Triangle::wound(uu(*a), uu(*b), uu(*c))?;
+                Some((triangle, u32::try_from(place).ok()?))
+            })
+            .unzip();
+        let mut mesh = StaticMesh::new(triangles);
+        mesh.visit_rank = ranks;
+        Some(mesh)
     }
 
     /// Like `from_buffers`, but each vertex is first moved by `offset`, and
@@ -371,7 +425,9 @@ impl StaticMesh {
         let reach = Vec3::new(radius, radius, radius);
         let breaking = CONTACT_BREAKING_FACTOR * radius;
         let mut kept: Vec<ManifoldEntry> = Vec::with_capacity(MANIFOLD_CAPACITY);
-        for index in self.near_indices(center - reach, center + reach) {
+        let mut near = self.near_indices(center - reach, center + reach);
+        near.sort_unstable_by_key(|&index| self.visit_rank.get(index as usize).copied());
+        for index in near {
             if let Some(entry) = self.sphere_triangle_contact(index as usize, center, radius) {
                 add_manifold_point(&mut kept, entry, breaking);
             }
@@ -789,5 +845,44 @@ mod tests {
         add_manifold_point(&mut kept, at(0.0, 1.0), 1.8);
         add_manifold_point(&mut kept, at(5.0, 0.7), 1.8);
         assert_eq!(kept, vec![at(5.0, 0.7)]);
+    }
+
+    fn cmf(triangles: &[[i32; 3]], vertices: &[[f32; 3]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for count in [triangles.len(), vertices.len()] {
+            bytes.extend(i32::try_from(count).expect("small").to_le_bytes());
+        }
+        for index in triangles.iter().flatten() {
+            bytes.extend(index.to_le_bytes());
+        }
+        for component in vertices.iter().flatten() {
+            bytes.extend(component.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_cmf_mesh_is_scaled_to_uu_and_wound_as_written() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 2.0, 0.0],
+        ];
+        let bytes = cmf(&[[0, 1, 2], [1, 3, 2], [0, 0, 1]], &vertices);
+        let mesh = StaticMesh::from_cmf(&bytes).expect("well formed");
+        // The degenerate third triangle is dropped.
+        assert_eq!(mesh.triangles().len(), 2);
+        let [a, b, _] = mesh.triangles()[0].vertices;
+        assert_eq!((a, b), (Vec3::ZERO, Vec3::new(100.0, 0.0, 0.0)));
+        assert!((mesh.triangles()[1].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_malformed_cmf_is_rejected() {
+        let bytes = cmf(&[[0, 1, 2]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert!(StaticMesh::from_cmf(&bytes[..bytes.len() - 1]).is_none());
+        let bad_index = cmf(&[[0, 1, 7]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert!(StaticMesh::from_cmf(&bad_index).is_none());
     }
 }

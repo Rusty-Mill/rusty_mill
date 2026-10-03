@@ -105,6 +105,7 @@
 
 pub mod arena;
 pub mod body;
+mod bvh;
 pub mod collision;
 pub mod drive;
 pub mod integrate;
