@@ -19,7 +19,9 @@ tasks in code. ARCHITECTURE listed goal intake as planned.
   object. The task list is human-authored; the orchestrator does not ask a
   model to plan. `depends_on` and a review's `target` are indices into
   `tasks`, resolved to ids when the plan is built, and must point at an
-  earlier task. Refs reuse the adapter protocol's syntax through
+  earlier task. `routing`, when present, must be an object; a string,
+  null, array, number, or boolean is rejected rather than silently
+  falling back to the defaults. Refs reuse the adapter protocol's syntax through
   `orch_cli::parse_ref`, now public. Parsing lives in the binary with
   `rusty_json`; `orch-core` stays I/O-free.
 - **Arguments are parsed by hand over `std::env::args`.** One subcommand
@@ -27,8 +29,21 @@ tasks in code. ARCHITECTURE listed goal intake as planned.
   registry-free, and `rush` sets the precedent.
 - **Blocked questions.** Without `--interactive` the run stops with exit
   status 3 and the questions in the report. With it, each open question is
-  offered on stdout and the answer read from stdin, appended as a Human
-  `Answer`, and the dispatcher runs again. A blank line stops.
+  offered on stderr and the answer read from stdin, appended as a Human
+  `Answer`, and the dispatcher runs again. A blank line or end of input
+  stops the round at once, whatever was answered before: earlier answers
+  stay on the board, no further model call is made, exit status 3.
+- **Channel discipline.** stdout is the report and nothing else, so
+  `--json` is one parseable object even through a blocked-and-answered
+  run. Questions, the answer prompt, and progress go to stderr. The entry
+  point lives in the library over injectable streams so this is tested
+  in-process.
+- **Review context.** A review card's `refs` need not name the reviewed
+  task's entries. The shared renderer (`orch-cli`) resolves the target's
+  live entries and the answers to them at render time under
+  `UNDER REVIEW`, after the refs and before the card's own history, with
+  the same deduplication. Review verdicts are therefore always given on the
+  actual output, including findings written after a question was answered.
 - **Wall clock** is enforced in the binary, checked before each dispatcher
   run against `Budget::wall_clock`. The dispatcher itself still meters calls
   only; moving the deadline into it is a separate decision.

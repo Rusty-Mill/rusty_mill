@@ -144,3 +144,19 @@ fn forward_and_self_references_are_refused_when_the_plan_is_built() {
         "{m}"
     );
 }
+
+#[test]
+fn routing_must_be_an_object_when_present() {
+    for bad in [r#""local""#, "null", "[]", "3", "true"] {
+        let json = minimal(ONE_TASK).replace("\"tasks\"", &format!("\"routing\":{bad},\"tasks\""));
+        let m = parse(&json).expect_err(bad).to_string();
+        assert!(m.contains("routing: expected an object"), "{bad}: {m}");
+    }
+    // Omitted and partial objects keep working.
+    assert!(parse(&minimal(ONE_TASK)).is_ok());
+    let partial =
+        minimal(ONE_TASK).replace("\"tasks\"", "\"routing\":{\"triage\":\"codex\"},\"tasks\"");
+    let spec = parse(&partial).expect("partial routing");
+    assert_eq!(spec.routing.triage, Agent::Codex);
+    assert_eq!(spec.routing.research, Agent::Codex);
+}

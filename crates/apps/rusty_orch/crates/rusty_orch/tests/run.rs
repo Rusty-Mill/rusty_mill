@@ -243,3 +243,32 @@ fn the_goal_ceiling_stops_the_second_card_as_a_typed_failure() {
     assert_eq!(s.plan.tasks()[1].state().status(), Status::Pending);
     assert_eq!(s.ledger.calls(), 1);
 }
+
+#[test]
+fn a_blank_after_an_earlier_answer_stops_without_another_model_call() {
+    let two = r#"[{"role":"research","instruction":"i","acceptance":["a"],"max_calls":2},
+                  {"role":"research","instruction":"j","acceptance":["a"],"max_calls":2}]"#;
+    // Both cards ask; a wrongful third call would consume this finding.
+    let fake = FakeAgent::new([
+        Reply::Write(vec![EntryKind::Question]),
+        Reply::Write(vec![EntryKind::Question]),
+        Reply::Write(vec![finding()]),
+    ]);
+    let mut console = Scripted::answering(&[Some("first answer"), None]);
+    let s = execute(spec(10, two), fake, &mut console, frozen()).expect("run");
+
+    assert!(
+        matches!(&s.ended, Ended::Blocked(ids) if ids.len() == 2),
+        "{:?}",
+        s.ended
+    );
+    assert_eq!(console.asked.len(), 2, "both questions were offered");
+    assert_eq!(s.ledger.calls(), 2, "no call after the human stopped");
+    let answers = s
+        .board
+        .live()
+        .filter(|e| matches!(e.content().kind, EntryKind::Answer { .. }))
+        .count();
+    assert_eq!(answers, 1, "the earlier answer is preserved on the board");
+    assert_eq!(s.board.open_questions().len(), 1);
+}

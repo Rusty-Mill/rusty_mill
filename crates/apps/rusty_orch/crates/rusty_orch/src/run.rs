@@ -21,8 +21,9 @@ use crate::input::{build_plan, InputError, Spec};
 pub trait Console {
     /// A progress line. Never carries prompt or model text.
     fn note(&mut self, line: &str);
-    /// Ask the human to answer an open question. `None` means no answer is
-    /// coming, so the run stops as blocked.
+    /// Ask the human to answer an open question. `None` means the human is
+    /// done answering, so the run stops as blocked, keeping any answers
+    /// already recorded on the board and making no further model call.
     fn ask(&mut self, question: &str) -> io::Result<Option<String>>;
 }
 
@@ -110,11 +111,11 @@ pub fn execute<R: AgentRunner>(
         ));
         match outcome {
             Ok(Outcome::Finished) => break Ended::Finished,
-            Ok(Outcome::Blocked(ids)) => {
-                if !answer_questions(&mut board, console).map_err(RunError::Io)? {
-                    break Ended::Blocked(ids);
-                }
-            }
+            Ok(Outcome::Blocked(ids)) => match answer_questions(&mut board, console) {
+                Ok(Answers::Recorded) => {}
+                Ok(Answers::Stop) => break Ended::Blocked(ids),
+                Err(e) => return Err(RunError::Io(e)),
+            },
             Err(e) => break Ended::Failed(e),
         }
     };
@@ -135,9 +136,19 @@ fn describe(outcome: &Result<Outcome, DispatchError>) -> String {
     }
 }
 
-/// Offer every open question to the console. Returns whether at least one
-/// answer landed on the board, i.e. whether another run is worth a try.
-fn answer_questions(board: &mut Board, console: &mut dyn Console) -> io::Result<bool> {
+/// What the question round decided.
+enum Answers {
+    /// Every open question was offered and at least one answer landed on
+    /// the board: run the dispatcher again.
+    Recorded,
+    /// The human stopped (a `None` from the console) or answered nothing.
+    /// Answers already recorded stay on the board; no further call is made.
+    Stop,
+}
+
+/// Offer every open question to the console, in board order. A `None`
+/// from the console stops the round at once, whatever came before.
+fn answer_questions(board: &mut Board, console: &mut dyn Console) -> io::Result<Answers> {
     let open: Vec<(EntryId, Option<TaskId>, String)> = board
         .open_questions()
         .iter()
@@ -152,7 +163,7 @@ fn answer_questions(board: &mut Board, console: &mut dyn Console) -> io::Result<
     let mut answered = false;
     for (id, task, body) in open {
         let Some(reply) = console.ask(&format!("{id}: {body}"))? else {
-            break;
+            return Ok(Answers::Stop);
         };
         let Some(body) = Text::new(&reply) else {
             console.note(&format!("{id}: blank answer ignored"));
@@ -173,5 +184,9 @@ fn answer_questions(board: &mut Board, console: &mut dyn Console) -> io::Result<
             Err(e) => console.note(&format!("{id}: answer refused: {e}")),
         }
     }
-    Ok(answered)
+    Ok(if answered {
+        Answers::Recorded
+    } else {
+        Answers::Stop
+    })
 }

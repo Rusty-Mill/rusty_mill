@@ -6,16 +6,18 @@ use std::fmt::Write as _;
 
 use orch_core::board::{Board, Entry, EntryKind};
 use orch_core::task::{Role, Task};
-use orch_core::{EntryId, Ref};
+use orch_core::{EntryId, Ref, TaskId};
 
 use crate::parse::{allowed_kinds, MAX_BODY_CHARS, MAX_ENTRIES};
 
 /// Render the prompt for `task`. Includes the instruction, acceptance
 /// criteria, refs, the id and body of every live board entry the card's
-/// refs point at (never the whole board), the card's own earlier entries
-/// and the answers to them (so a card resumed after a `Question` sees its
-/// `Answer`), then `footer`: the adapter's output-format spec, normally
-/// [`format_spec`] plus any adapter lines.
+/// refs point at (never the whole board), for a review card every live
+/// entry the reviewed task wrote and the answers to them (resolved at
+/// render time, so the author need not guess entry ids), the card's own
+/// earlier entries and the answers to them (so a card resumed after a
+/// `Question` sees its `Answer`), then `footer`: the adapter's
+/// output-format spec, normally [`format_spec`] plus any adapter lines.
 pub fn render(task: &Task, board: &Board, footer: &str) -> String {
     let spec = task.spec();
     let mut out = String::new();
@@ -52,7 +54,27 @@ pub fn render(task: &Task, board: &Board, footer: &str) -> String {
             entry.content().body
         );
     }
-    let history = card_history(task, board, &shown);
+    if let Role::Review { target } = spec.role {
+        let output = written_on(board, target, &shown);
+        let _ = writeln!(
+            out,
+            "\nUNDER REVIEW (live entries written on task {target}, and answers to them)"
+        );
+        if output.is_empty() {
+            out.push_str("(none)\n");
+        }
+        for entry in output {
+            shown.insert(entry.id());
+            let _ = writeln!(
+                out,
+                "{} [{:?}]: {}",
+                entry.id(),
+                entry.content().kind,
+                entry.content().body
+            );
+        }
+    }
+    let history = written_on(board, task.id(), &shown);
     if !history.is_empty() {
         out.push_str(
             "\nTHIS CARD SO FAR (your earlier entries on this card, and answers to them)\n",
@@ -71,12 +93,13 @@ pub fn render(task: &Task, board: &Board, footer: &str) -> String {
     out
 }
 
-/// Live entries written on this card, plus live answers to any of them,
-/// minus anything the card's refs already show. Board order.
-fn card_history<'b>(task: &Task, board: &'b Board, shown: &HashSet<EntryId>) -> Vec<&'b Entry> {
+/// Live entries written on `task`, plus live answers to any of them, minus
+/// anything already shown. Board order. Serves both the reviewed task's
+/// output and the card's own history.
+fn written_on<'b>(board: &'b Board, task: TaskId, shown: &HashSet<EntryId>) -> Vec<&'b Entry> {
     let own: Vec<EntryId> = board
         .live()
-        .filter(|e| e.content().task == Some(task.id()))
+        .filter(|e| e.content().task == Some(task))
         .map(Entry::id)
         .collect();
     board

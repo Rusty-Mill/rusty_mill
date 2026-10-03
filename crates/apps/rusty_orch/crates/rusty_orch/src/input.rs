@@ -270,6 +270,9 @@ fn task_draft(i: usize, v: &Value) -> Result<TaskDraft, InputError> {
 }
 
 fn routing(v: &Value) -> Result<RoutingConfig, InputError> {
+    if v.as_object().is_none() {
+        return Err(InputError("routing: expected an object".to_owned()));
+    }
     let base = default_routing();
     let one = |field: &str, fallback: Agent| match v.get(field) {
         None => Ok(fallback),

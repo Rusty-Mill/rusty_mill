@@ -14,6 +14,8 @@
 //! - [`run`]: the loop around the dispatcher: wall clock, blocked questions,
 //!   interactive answers.
 //! - [`report`]: text and JSON views of the result.
+//! - [`cli`]: the entry point over injectable streams; stdout is the report
+//!   only, questions and progress go to stderr.
 
 #![cfg_attr(
     not(test),
@@ -22,6 +24,7 @@
 
 pub mod agents;
 pub mod args;
+pub mod cli;
 pub mod input;
 pub mod report;
 pub mod run;

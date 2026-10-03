@@ -146,3 +146,111 @@ fn finding(body: &str, supersedes: Option<orch_core::EntryId>, task: Option<Task
         supersedes,
     }
 }
+
+fn review_of(target: TaskId) -> orch_core::task::TaskSpec {
+    orch_core::task::TaskSpec {
+        role: orch_core::task::Role::Review { target },
+        instruction: text("Review the research for accuracy."),
+        acceptance: vec![text("one verdict")],
+        refs: vec![],
+        depends_on: vec![],
+        max_calls: std::num::NonZeroU32::new(1).expect("non-zero"),
+    }
+}
+
+#[test]
+fn a_review_card_sees_every_live_entry_the_target_wrote_without_naming_them() {
+    let (mut plan, mut board, _, unreferenced) = fixture();
+    let research = task(&plan).id();
+    let first = board
+        .append(finding("First research finding.", None, Some(research)))
+        .expect("first");
+    let second = board
+        .append(finding("Second research finding.", None, Some(research)))
+        .expect("second");
+    let review = plan.add(review_of(research)).expect("add review");
+    let card = plan.get(review).expect("card");
+
+    let prompt = render(card, &board, &format_spec(card.spec().role));
+
+    assert!(prompt.contains(&format!(
+        "UNDER REVIEW (live entries written on task {research}"
+    )));
+    assert!(prompt.contains(&format!("{first} [Finding")));
+    assert!(prompt.contains("First research finding."));
+    assert!(prompt.contains(&format!("{second} [Finding")));
+    assert!(prompt.contains("Second research finding."));
+    assert!(
+        !prompt.contains("Unrelated note."),
+        "entries off the target stay out"
+    );
+    assert!(!prompt.contains(&format!("{unreferenced} [")));
+}
+
+#[test]
+fn a_review_card_sees_the_targets_question_answer_and_resumed_finding() {
+    let (mut plan, mut board, _, _) = fixture();
+    let research = task(&plan).id();
+    let question = board
+        .append(NewEntry {
+            task: Some(research),
+            author: Author::Agent(Agent::Codex),
+            kind: EntryKind::Question,
+            body: text("Which branch counts?"),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("question");
+    let answer = board
+        .append(NewEntry {
+            task: Some(research),
+            author: Author::Human,
+            kind: EntryKind::Answer { to: question },
+            body: text("main only."),
+            refs: vec![],
+            supersedes: None,
+        })
+        .expect("answer");
+    let resumed = board
+        .append(finding(
+            "After resume: main is the branch.",
+            None,
+            Some(research),
+        ))
+        .expect("resumed");
+    let review = plan.add(review_of(research)).expect("add review");
+    let card = plan.get(review).expect("card");
+
+    let prompt = render(card, &board, &format_spec(card.spec().role));
+
+    for (id, body) in [
+        (question, "Which branch counts?"),
+        (answer, "main only."),
+        (resumed, "After resume: main is the branch."),
+    ] {
+        assert!(
+            prompt.contains(&format!("{id} [")),
+            "{id} missing:\n{prompt}"
+        );
+        assert!(prompt.contains(body), "{body:?} missing:\n{prompt}");
+    }
+    // The target's entries are listed once, under review, not again as history.
+    assert_eq!(prompt.matches(&format!("{resumed} [")).count(), 1);
+    assert!(
+        !prompt.contains("THIS CARD SO FAR"),
+        "the review card has written nothing yet"
+    );
+}
+
+#[test]
+fn a_review_card_with_a_silent_target_says_so() {
+    let (mut plan, board, _, _) = fixture();
+    let research = task(&plan).id();
+    let review = plan.add(review_of(research)).expect("add review");
+    let card = plan.get(review).expect("card");
+
+    let prompt = render(card, &board, &format_spec(card.spec().role));
+
+    assert!(prompt.contains("UNDER REVIEW"));
+    assert!(prompt.contains("(none)"));
+}
