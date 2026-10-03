@@ -1,4 +1,4 @@
-# Dependabot version updates — npm lockfiles only.
+# Dependabot version updates — npm lockfiles only; Cargo security updates enabled.
 #
 # Why npm only: the three front-end lockfiles below are the one place this
 # monorepo carries third-party code that nothing here regenerates locally
@@ -11,9 +11,9 @@
 # each lockfile server-side and open PRs that CI (`npm ci` where wired)
 # validates.
 #
-# Cargo is deliberately not listed: this workspace has ~125 crates and a
-# dependency-policy CI job of its own; automated Cargo bump PRs would be
-# noise without a per-crate policy decision first.
+# Cargo points at the workspace root, which owns the workspace Cargo.lock.
+# Its zero open-PR limit deliberately disables routine Cargo version-update
+# PRs while still allowing Dependabot security updates to use this entry.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -84,3 +84,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # The root workspace and lockfile are the single Cargo dependency graph.
+  # A zero limit disables routine version bumps, not security update PRs.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
