@@ -10,13 +10,41 @@
 // THREADED, THREADEDUNLOAD exist. `PLUGINTYPE_FREEPLAY` is this plugin's
 // primary use case (see README); it doesn't gate loading during a normal
 // match, since there's no bit for one to begin with.
-BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.1", PLUGINTYPE_FREEPLAY)
+BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.2", PLUGINTYPE_FREEPLAY)
 
 namespace
 {
 // Field names/nesting below must match crates/rb_capture_ingest/src/wire.rs
 // exactly (see ADR-0005) -- this is the wire format itself, not incidental
 // formatting.
+
+// A freeplay reset (Backspace) destroys and respawns actors. A destroyed
+// actor keeps its memory until garbage collection, but its `bDeleteMe`
+// flag is set; reading physics state through it crashed the game
+// (`Launch.log` call stack inside this plugin, 2026-10-03). Only live
+// actors are read.
+bool isLive(ActorWrapper actor)
+{
+    return !actor.IsNull() && actor.GetbDeleteMe() == 0;
+}
+
+// The first live ball, or a null wrapper when there is none (mid-reset).
+BallWrapper liveBall(ServerWrapper server)
+{
+    ArrayWrapper<BallWrapper> balls = server.GetGameBalls();
+    if (!balls.IsNull())
+    {
+        for (int i = 0; i < balls.Count(); ++i)
+        {
+            BallWrapper ball = balls.Get(i);
+            if (isLive(ball))
+            {
+                return ball;
+            }
+        }
+    }
+    return BallWrapper(0);
+}
 
 std::string vectorJson(Vector v)
 {
@@ -131,6 +159,7 @@ void RustyBulletCapturePlugin::startCapture(std::vector<std::string> args)
     capturing_ = true;
     lastPhysicsFrame_ = -1;
     haveStartTime_ = false;
+    lastTimestampSecs_ = -1.0f;
     cvarManager->log("rusty_bullet_capture: recording to '" + path + "'");
 }
 
@@ -148,7 +177,7 @@ void RustyBulletCapturePlugin::stopCapture(std::vector<std::string> /*args*/)
 
 void RustyBulletCapturePlugin::onVehicleInput(CarWrapper car, void * /*params*/, std::string /*eventName*/)
 {
-    if (!capturing_ || car.IsNull())
+    if (!capturing_ || !isLive(car))
     {
         return;
     }
@@ -159,7 +188,8 @@ void RustyBulletCapturePlugin::onVehicleInput(CarWrapper car, void * /*params*/,
         return;
     }
 
-    BallWrapper ball = server.GetBall();
+    // Mid-reset there may be no live ball for a tick: skip it.
+    BallWrapper ball = liveBall(server);
     if (ball.IsNull())
     {
         return;
@@ -191,6 +221,14 @@ void RustyBulletCapturePlugin::writeFrame(ServerWrapper server, BallWrapper ball
         haveStartTime_ = true;
     }
     float timestampSecs = ball.GetPhysicsTime() - startPhysicsTime_;
+    // A respawned ball restarts its physics clock: rebase so timestamps
+    // keep increasing by one tick instead of jumping back.
+    if (timestampSecs <= lastTimestampSecs_)
+    {
+        timestampSecs = lastTimestampSecs_ + 1.0f / 120.0f;
+        startPhysicsTime_ = ball.GetPhysicsTime() - timestampSecs;
+    }
+    lastTimestampSecs_ = timestampSecs;
 
     // `server.GetPRIs()` + `PriWrapper::GetCar()` looked like the natural way
     // to enumerate cars, but a real capture proved it wrong: in freeplay the
@@ -218,7 +256,7 @@ void RustyBulletCapturePlugin::writeFrame(ServerWrapper server, BallWrapper ball
         for (int i = 0; i < cars.Count(); ++i)
         {
             CarWrapper car = cars.Get(i);
-            if (car.IsNull())
+            if (!isLive(car))
             {
                 continue;
             }

@@ -104,6 +104,11 @@ cl /LD /std:c++17 -I <sdk>\include RustyBulletCapturePlugin.cpp <sdk>\lib\plugin
    (`%appdata%\bakkesmod\bakkesmod\bakkesmod.log`) shows the last command
    before the crash.
 
-Fixed in source: the plugin reads boost fuel only when the car has a boost
-component (a car mid-spawn, mid-reset or demolished may not), and it
-removes its per-tick hook on unload.
+Fixed in source (1.2): a freeplay reset (Backspace) destroys and respawns
+the ball, and 1.0 crashed reading the dying ball (`Launch.log` showed the
+call stack inside this DLL). The plugin now reads only live actors
+(`bDeleteMe` unset), takes the first live ball from `GetGameBalls()`,
+skips a tick with none, and keeps timestamps increasing across a respawn.
+It also reads boost fuel only when the car has a boost component, and
+removes its per-tick hook on unload. BakkesMod's console prints the loaded
+plugin's version on `plugin load`; it should say 1.2.
