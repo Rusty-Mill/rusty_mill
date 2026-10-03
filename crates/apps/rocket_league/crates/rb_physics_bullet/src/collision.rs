@@ -159,10 +159,45 @@ pub fn contacts_vs_plane(body: &RigidBody, plane: &StaticPlane) -> Vec<Contact> 
 /// Bullet's `gContactBreakingThreshold`: a shape's contact breaking
 /// threshold is this times its angular motion disc (bounding radius plus
 /// offset from its body's origin).
-const CONTACT_BREAKING_FACTOR: f32 = 0.02;
+pub(crate) const CONTACT_BREAKING_FACTOR: f32 = 0.02;
 
 /// `MANIFOLD_CACHE_SIZE`: points a Bullet persistent manifold keeps.
-const MANIFOLD_CAPACITY: usize = 4;
+pub(crate) const MANIFOLD_CAPACITY: usize = 4;
+
+/// Bullet's `btPersistentManifold::sortCachedPoints` (3-point area
+/// variant, `KEEP_DEEPEST_POINT`): which of a full manifold's 4 `points`
+/// `new` replaces -- the one whose removal leaves the largest area, never
+/// the deepest (ties go to the lower slot). `None` unless `points` is full.
+pub(crate) fn replacement_slot(points: &[Contact], new: &Contact) -> Option<usize> {
+    let [p0, p1, p2, p3] = points else {
+        return None;
+    };
+    let deepest = points
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.penetration_depth > new.penetration_depth)
+        .max_by(|(_, a), (_, b)| a.penetration_depth.total_cmp(&b.penetration_depth))
+        .map(|(i, _)| i);
+    let area = |a: &Contact, b: &Contact, c: &Contact| {
+        (new.point - a.point)
+            .cross(&(c.point - b.point))
+            .length_squared()
+    };
+    let areas = [
+        area(p1, p2, p3),
+        area(p0, p2, p3),
+        area(p0, p1, p3),
+        area(p0, p1, p2),
+    ];
+    let mut best = None;
+    for (slot, value) in areas.into_iter().enumerate() {
+        let value = if Some(slot) == deepest { 0.0 } else { value };
+        if best.is_none_or(|(_, top)| value > top) {
+            best = Some((slot, value));
+        }
+    }
+    best.map(|(slot, _)| slot)
+}
 
 /// One stored contact: the box corner (shape frame), the surface plane it
 /// touched (`normal . p = offset`; a static plane or one mesh triangle's),
@@ -2506,5 +2541,37 @@ mod tests {
         assert!(manifold
             .update_plane(&tipped_box(0.6, 0.2, 5.0), &floor)
             .is_empty());
+    }
+
+    fn touch(x: f32, y: f32, depth: f32) -> Contact {
+        Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(x, y, 0.0),
+            penetration_depth: depth,
+        }
+    }
+
+    #[test]
+    fn a_manifold_short_of_full_has_no_slot_to_give_up() {
+        let points = [touch(0.0, 0.0, 1.0), touch(10.0, 0.0, 1.0)];
+        assert_eq!(replacement_slot(&points, &touch(5.0, 5.0, 1.0)), None);
+    }
+
+    #[test]
+    fn a_full_manifold_gives_up_the_slot_leaving_the_largest_area() {
+        let square = |deep: usize| {
+            let corners = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+            corners.map(|(x, y)| touch(x, y, 1.0)).map(|mut p| {
+                if p.point == touch(corners[deep].0, corners[deep].1, 0.0).point {
+                    p.penetration_depth = 5.0;
+                }
+                p
+            })
+        };
+        let centre = touch(5.0, 5.0, 1.0);
+        // Dropping corner 2 keeps the triangle new-0-1-3 area largest.
+        assert_eq!(replacement_slot(&square(0), &centre), Some(2));
+        // ...unless corner 2 is the deepest, which is never given up.
+        assert_eq!(replacement_slot(&square(2), &centre), Some(0));
     }
 }
