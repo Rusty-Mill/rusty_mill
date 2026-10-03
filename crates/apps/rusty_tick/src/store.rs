@@ -598,7 +598,9 @@ mod tests {
                 task.updated_ms = 50;
                 task.version += 1;
             }
-            changed.last_mut().unwrap().sort_order = 17;
+            // `ReplaceAfterLog` is one-shot, so the first replacement must be
+            // the sort-changing one to exercise the record/slot mismatch.
+            changed.first_mut().unwrap().sort_order = 17;
             let prior: Vec<_> = originals
                 .iter()
                 .cloned()
@@ -615,7 +617,7 @@ mod tests {
             assert!(store.replace_batch(changed.clone()).is_err(), "{name}");
             assert_complete_view(&store, &prior);
             assert!(matches!(
-                store.replace_batch(changed),
+                store.replace_batch(changed.clone()),
                 Err(TickError::RecoveryRequired)
             ));
             assert!(matches!(
@@ -627,6 +629,21 @@ mod tests {
                 Err(TickError::RecoveryRequired)
             ));
             drop(store);
+
+            if fault == Fault::ReplaceAfterLog {
+                // Open the engine directly, before TaskStore can replay the
+                // journal. The appended record won (including its version and
+                // list), while the authoritative mapped sort slot is still
+                // the old value: this is the exact mismatch redo must repair.
+                let core = Core::open_portable(&dir.path().join("tasks.mmap")).unwrap();
+                let interrupted = core.get(changed[0].id).unwrap();
+                assert_eq!(interrupted.version, changed[0].version);
+                assert_eq!(interrupted.list_id, changed[0].list_id);
+                assert_eq!(interrupted.updated_ms, changed[0].updated_ms);
+                assert_eq!(interrupted.sort_order, originals[0].sort_order);
+                assert_ne!(interrupted.sort_order, changed[0].sort_order);
+                drop(core);
+            }
 
             let reopened = TaskStore::open(dir.path()).unwrap();
             assert_complete_view(&reopened, &after);
