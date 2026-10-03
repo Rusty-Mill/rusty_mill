@@ -1,4 +1,4 @@
-# ADR-0003: Journal parent/child trash as one durable batch
+# ADR-0003: Journal parent/child transitions as one durable batch
 
 ## Status
 
@@ -6,9 +6,10 @@ Accepted (2026-10-02).
 
 ## Context
 
-Trashing a task also trashes its current direct subtasks. The former
-implementation replaced each child and then the parent independently. A crash
-or storage failure between replacements could therefore persist only a prefix.
+Trashing, restoring, or moving a task also changes some or all of its current
+direct subtasks. The former implementation replaced each child and then the
+parent independently. A crash or storage failure between replacements could
+therefore persist only a prefix.
 Unlike list placement, independent deletion timestamps contain no invariant
 from which startup can distinguish an interrupted family operation from a
 child that was deliberately trashed earlier.
@@ -20,19 +21,30 @@ on open and may safely be applied again.
 
 ## Decision
 
-`TaskStore` owns `tasks.journal`. The batch entry point is crate-private and is
-used only by the trash transition, whose replacements do not change list or
-sort slots. `replace_batch` rejects duplicate ids, then validates and encodes every
-replacement, commits one redo batch, applies all task puts with store syncing
-deferred, syncs the task store once, checkpoints the journal, and only then
-publishes the derived full-text and tag changes. Startup replays every committed
-batch into the durable task stack before rebuilding derived indexes and
-checkpointing.
+`TaskStore` owns `tasks.journal`. The crate-private batch entry point is used by
+trash, restore, and parent moves. `replace_batch` rejects duplicate ids, then
+validates and encodes every replacement, commits one redo batch, applies all
+task puts with store syncing deferred, syncs the task store once, checkpoints
+the journal, and only then publishes the derived full-text and tag changes.
+Startup replays every committed batch into the durable task stack before
+rebuilding derived indexes and checkpointing. Ordinary one-record operations
+continue to use the direct store path.
+
+The engine's group-commit barrier syncs the insert log and then flushes the
+mapped sort-order slots before returning success. The journal remains
+authoritative until that complete barrier succeeds and its later checkpoint
+succeeds. Thus a move PATCH that changes both `list_id` and `sort_order` cannot
+retire redo after syncing only the record: an interruption after record append,
+during slot flush, or around journal retirement leaves redo for an idempotent
+whole-record replay on open.
 
 `Service::trash_task` preserves an already-present child deletion timestamp and
 bumps the update timestamp and version of every child and the parent just as
-individual saves did. It submits those replacements as one batch. Restoration,
-move, purge, list deletion, and other writes retain their existing behavior.
+individual saves did. Restore revives only children trashed with the parent;
+when the old list is unavailable, it rehomes every child while preserving a
+separately trashed child's deletion timestamp. A parent move journals the
+children and parent together, including a simultaneous parent sort-order
+change. Purge, list deletion, and other writes retain their existing behavior.
 
 Validation failures are definite pre-commit refusals and change nothing. Any
 I/O error returned by `Journal::commit` is ambiguous: its write may have landed
@@ -68,8 +80,8 @@ the engine's normal parsing and corruption refusal.
 
 ## Consequences
 
-- Acknowledged trash work survives and converges to the complete intended
-  parent/child set on reopen.
+- Acknowledged trash, restore, and move work survives and converges to the
+  complete intended parent/child set on reopen.
 - A definite pre-commit refusal leaves the previous committed records and
   indexes; an ambiguous or post-acceptance failure requires reopen.
 - Replay is idempotent and unrelated tasks are untouched.
