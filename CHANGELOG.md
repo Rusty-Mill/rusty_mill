@@ -39,6 +39,7 @@ Removed / Fixed / Security, newest first.
 - **`rusty_tick`: `StorePool` is now `ServicePool`**, pooling a user's whole `Service` (tasks and lists); the default bound is 32 open users (ADR-0002 step 1, no behaviour change).
 
 ### Removed
+- **`rusty_h2`: uncompiled connection-source remnants.** Removed dormant `connect/config.rs`, `connect/ping.rs`, and `connect/preface.rs`; none was declared in the module tree. The live connection driver, settings, PING acknowledgement behavior, public `CONNECTION_PREFACE`, and no-I/O boundary are unchanged. Byte-level preface validation and scheduled keepalive remain unimplemented.
 - **`rusty_rusqlite`**, the pure-Rust SQLite reimplementation (`crates/libs/storage/rusty_rusqlite`). Nothing in the workspace depended on it; the Tranche 5 storage survey (#428) found the engine and bundled SQLite (`rusqlite`/`rusty_sqlite`) are the two stacks in use. Its history stays in git and in the original `baileyrd/rusty_rusqlite` repository.
 
 ### Fixed

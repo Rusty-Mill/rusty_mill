@@ -13,11 +13,22 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_h2: remove dormant connection sources
+**2026-10-02** · [#418](https://github.com/Rusty-Mill/rusty_mill/issues/418)
+
+- **Removed:** three uncompiled, undeclared `connect` source files that duplicated live settings and PING responsibilities and contained an incorrect server-preface model. Compiled behavior and public API are unchanged.
+- **Docs:** architecture now describes the existing connection driver and thin client/server wrappers while retaining the crate's no-I/O boundary.
+- Known limitations: byte-level connection-preface validation and scheduled keepalive are not implemented by this cleanup.
+
+---
+
 ## rusty_baseline: explicit platform eligibility
 **2026-10-02** · [Issue #428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
 
 - **Fixed:** `products.txt` can mark a product with `@platform=linux`, `@platform=windows`, or `@platform=macos`, and can narrowly exclude one OS with `@unsupported=<os>`. A selected product that is unsupported on the current OS is kept in its original report position as an explicit skipped row with unmeasured cells, and it is filtered before any Cargo query, build, binary lookup, or process launch. Existing entries without a declaration remain unrestricted. The already Linux-only `rusty_fedora_agent` retains `@platform=linux`; `ts-daemon` now uses `@unsupported=windows` temporarily, until it has a real Windows implementation rather than its current stub, without making a policy choice for other hosts.
 - Known limitations: this does not change aggregate exit status, expected-exit handling, or Ubuntu baseline prerequisites.
+
+---
 
 ## rusty_multimodal_db: chunked snapshots, a standby for a table over 8 MiB (ADR-0136)
 **2026-10-01** · [ADR-0136](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0136-chunked-snapshots.md) · wire protocol 35 → 36
