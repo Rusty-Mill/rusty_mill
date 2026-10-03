@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use orch_core::board::Board;
 use orch_core::task::{Agent, Role, Task};
-use orch_dispatch::{AgentError, AgentRunner, Output};
+use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
 use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
 
@@ -59,30 +59,54 @@ impl<C: CommandRunner> AgentRunner for OllamaAgent<C> {
     }
 
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+        self.run_with_policy(agent, task, board)
+            .map_err(ClassifiedError::into_error)
+    }
+
+    fn run_classified(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, ClassifiedError> {
+        self.run_with_policy(agent, task, board)
+    }
+}
+
+impl<C: CommandRunner> OllamaAgent<C> {
+    fn run_with_policy(
+        &mut self,
+        agent: Agent,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, ClassifiedError> {
         if !self.supports(agent, task.spec().role) {
-            return Err(AgentError(format!(
+            return Err(ClassifiedError::Permanent(AgentError(format!(
                 "ollama adapter cannot serve {:?} through {agent:?}",
                 task.spec().role
-            )));
+            ))));
         }
         let prompt = render(task, board);
         // Ollama has no API-key path, so nothing is scrubbed from the child.
         let exit = self
             .runner
             .run_scrubbed(&self.argv(), prompt.as_bytes(), self.timeout, &[])
-            .map_err(exec_error)?;
+            .map_err(exec_error)
+            .map_err(ClassifiedError::Transient)?;
         if exit.status != 0 {
-            return Err(AgentError(format!(
+            return Err(ClassifiedError::Transient(AgentError(format!(
                 "ollama exited with status {}: {}",
                 exit.status,
                 excerpt(&exit.stderr)
-            )));
+            ))));
         }
         let stdout = String::from_utf8_lossy(&exit.stdout);
         if stdout.trim().is_empty() {
-            return Err(AgentError("ollama wrote nothing to stdout".to_owned()));
+            return Err(ClassifiedError::Transient(AgentError(
+                "ollama wrote nothing to stdout".to_owned(),
+            )));
         }
-        parse(&stdout, task.spec().role)
+        parse(&stdout, task.spec().role).map_err(ClassifiedError::Transient)
     }
 }
 

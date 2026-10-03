@@ -8,7 +8,7 @@ use orch_core::goal::Goal;
 use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskState};
 use orch_core::{EntryId, TaskId, Text};
 
-use crate::{AgentError, AgentRunner, Ledger, Output, Routing};
+use crate::{AgentError, AgentRunner, ClassifiedError, Ledger, Output, Routing};
 
 /// Which call ceiling was hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,8 +26,8 @@ pub enum DispatchError {
     /// An output failed board validation. Nothing from that call was
     /// appended; the card stays `Running` and the call is still counted.
     Board(BoardError),
-    /// The agent failed. The card stays `Running`, so a later `run` retries
-    /// it under the same ceilings.
+    /// The agent failed. Its [`ClassifiedError`] classification determines
+    /// metering and whether the card remains `Running` or becomes `Failed`.
     Agent {
         task: TaskId,
         agent: Agent,
@@ -198,16 +198,27 @@ impl<R: AgentRunner> Dispatcher<R> {
         if status == Status::Pending {
             plan.start(id, agent)?;
         }
-        ledger.count(id);
         let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
-        let outputs =
-            self.runner
-                .run(agent, task, board)
-                .map_err(|source| DispatchError::Agent {
+        ledger.count(id);
+        let outputs = match self.runner.run_classified(agent, task, board) {
+            Ok(outputs) => outputs,
+            Err(failure) => {
+                let permanent = matches!(failure, ClassifiedError::Permanent(_));
+                let unavailable = matches!(failure, ClassifiedError::Unavailable(_));
+                if unavailable {
+                    ledger.rollback(id);
+                }
+                let failed = DispatchError::Agent {
                     task: id,
                     agent,
-                    source,
-                })?;
+                    source: failure.into_error(),
+                };
+                if permanent {
+                    fail_terminal(plan, id, &failed)?;
+                }
+                return Err(failed);
+            }
+        };
         let ids = append_atomically(board, id, agent, outputs)?;
         match first_question(board, &ids) {
             Some(question) => plan.block(id, question)?,

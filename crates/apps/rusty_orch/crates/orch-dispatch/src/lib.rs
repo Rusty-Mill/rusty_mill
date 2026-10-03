@@ -22,7 +22,7 @@ pub mod fake;
 mod ledger;
 mod routing;
 
-pub use agent::{AgentError, AgentRunner, Output};
+pub use agent::{AgentError, AgentRunner, ClassifiedError, Output};
 pub use dispatch::{Ceiling, DispatchError, Dispatcher, Outcome};
 pub use ledger::Ledger;
 pub use routing::{Routing, RoutingConfig, RoutingError};
