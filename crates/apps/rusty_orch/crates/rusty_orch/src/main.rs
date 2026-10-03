@@ -54,5 +54,3 @@ fn main() -> ExitCode {
         }
     }
 }
-
-use std::io::Write as _;
