@@ -9,7 +9,8 @@
 //! has no filesystem backend on macOS).
 //!
 //! Concurrent writers to one path are safe: each uses its own temp name,
-//! and the last rename wins.
+//! and the last rename wins. Temp-name collisions are retried without
+//! touching the existing filesystem entry.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -25,8 +26,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// # Errors
 /// Any I/O error from creating, writing, syncing or renaming the temp
 /// file, or from syncing the directory. `InvalidInput` if `path` has no
-/// file name. On error the target is unchanged and the temp file is
-/// removed.
+/// file name. Before the rename, an error leaves the target unchanged and
+/// removes any temp file created by this call. An error syncing the parent
+/// directory occurs after replacement and cannot roll it back.
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     replace(path, bytes, Permissions::Default)
 }
@@ -49,16 +51,96 @@ enum Permissions {
 }
 
 fn replace(path: &Path, bytes: &[u8], permissions: Permissions) -> io::Result<()> {
-    let tmp = temp_sibling(path)?;
-    if let Err(err) = write_synced(&tmp, bytes, permissions) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
+    replace_with(
+        path,
+        bytes,
+        permissions,
+        temp_sibling,
+        |file, contents| file.write_all(contents),
+        File::sync_all,
+    )
+}
+
+const MAX_TEMP_ATTEMPTS: usize = 16;
+
+/// The closures are a deliberately narrow test seam for candidate selection and
+/// failures after this invocation has acquired ownership of a candidate.
+fn replace_with<C, W, S>(
+    path: &Path,
+    bytes: &[u8],
+    permissions: Permissions,
+    mut candidate: C,
+    mut write_file: W,
+    mut sync_file: S,
+) -> io::Result<()>
+where
+    C: FnMut(&Path) -> io::Result<PathBuf>,
+    W: FnMut(&mut File, &[u8]) -> io::Result<()>,
+    S: FnMut(&File) -> io::Result<()>,
+{
+    replace_with_create(
+        path,
+        bytes,
+        permissions,
+        &mut candidate,
+        create_new,
+        &mut write_file,
+        &mut sync_file,
+    )
+}
+
+fn replace_with_create<C, O, W, S>(
+    path: &Path,
+    bytes: &[u8],
+    permissions: Permissions,
+    mut candidate: C,
+    mut open_candidate: O,
+    mut write_file: W,
+    mut sync_file: S,
+) -> io::Result<()>
+where
+    C: FnMut(&Path) -> io::Result<PathBuf>,
+    O: FnMut(&Path, Permissions) -> io::Result<File>,
+    W: FnMut(&mut File, &[u8]) -> io::Result<()>,
+    S: FnMut(&File) -> io::Result<()>,
+{
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let tmp = candidate(path)?;
+        let mut file = match open_candidate(&tmp, permissions) {
+            Ok(file) => file,
+            Err(err) if candidate_already_exists(&tmp, &err) => continue,
+            Err(err) => return Err(err),
+        };
+
+        let result = write_file(&mut file, bytes).and_then(|()| sync_file(&file));
+        drop(file); // Windows requires all handles closed before remove or rename.
+        if let Err(err) = result {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        if let Err(err) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        return sync_parent_dir(path);
     }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("could not create an atomic-write temp file after {MAX_TEMP_ATTEMPTS} attempts"),
+    ))
+}
+
+fn candidate_already_exists(tmp: &Path, create_error: &io::Error) -> bool {
+    if create_error.kind() == io::ErrorKind::AlreadyExists {
+        return true;
     }
-    sync_parent_dir(path)
+
+    // On Windows, CreateFileW can report ERROR_ACCESS_DENIED when CREATE_NEW
+    // encounters a directory. Confirm that special case without following a
+    // symlink; an unconfirmed access failure remains the caller's error.
+    create_error.kind() == io::ErrorKind::PermissionDenied
+        && fs::symlink_metadata(tmp).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// A name in `path`'s directory that no other writer uses: hidden, and
@@ -81,7 +163,7 @@ fn temp_sibling(path: &Path) -> io::Result<PathBuf> {
     Ok(path.with_file_name(tmp))
 }
 
-fn write_synced(tmp: &Path, bytes: &[u8], permissions: Permissions) -> io::Result<()> {
+fn create_new(tmp: &Path, permissions: Permissions) -> io::Result<File> {
     // `create_new` never reuses or follows anything already at `tmp`.
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -92,9 +174,7 @@ fn write_synced(tmp: &Path, bytes: &[u8], permissions: Permissions) -> io::Resul
     }
     #[cfg(not(unix))]
     let _ = permissions;
-    let mut file: File = options.open(tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    options.open(tmp)
 }
 
 #[cfg(unix)]
@@ -165,6 +245,219 @@ mod tests {
         let target = dir.0.join("empty");
         write(&target, b"").expect("write");
         assert_eq!(fs::read(&target).expect("read"), b"");
+    }
+
+    fn replace_with_candidates(
+        target: &Path,
+        bytes: &[u8],
+        candidates: &[PathBuf],
+    ) -> io::Result<()> {
+        let mut candidates = candidates.iter().cloned();
+        replace_with(
+            target,
+            bytes,
+            Permissions::Default,
+            |_| Ok(candidates.next().expect("enough candidates")),
+            |file, contents| file.write_all(contents),
+            File::sync_all,
+        )
+    }
+
+    #[test]
+    fn a_regular_file_collision_is_preserved_before_later_success() {
+        let dir = Scratch::new("file-collision");
+        let target = dir.0.join("target");
+        fs::write(&target, b"old target").expect("seed target");
+        let collision = dir.0.join("collision");
+        fs::write(&collision, b"sentinel").expect("seed collision");
+        let candidate = dir.0.join("candidate");
+
+        replace_with_candidates(&target, b"new target", &[collision.clone(), candidate])
+            .expect("retry succeeds");
+        assert_eq!(fs::read(&collision).expect("read collision"), b"sentinel");
+        assert_eq!(fs::read(&target).expect("read target"), b"new target");
+    }
+
+    #[test]
+    fn a_directory_collision_is_preserved_before_later_success() {
+        let dir = Scratch::new("directory-collision");
+        let target = dir.0.join("target");
+        let collision = dir.0.join("collision");
+        fs::create_dir(&collision).expect("seed collision");
+        fs::write(collision.join("sentinel"), b"keep").expect("populate collision");
+
+        replace_with_candidates(
+            &target,
+            b"new",
+            &[collision.clone(), dir.0.join("candidate")],
+        )
+        .expect("retry succeeds");
+        assert_eq!(
+            fs::read(collision.join("sentinel")).expect("read sentinel"),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn permission_denied_for_a_confirmed_directory_collision_is_retried() {
+        let dir = Scratch::new("permission-denied-directory-collision");
+        let target = dir.0.join("target");
+        let collision = dir.0.join("collision");
+        fs::create_dir(&collision).expect("seed collision");
+        fs::write(collision.join("sentinel"), b"keep").expect("populate collision");
+        let candidate = dir.0.join("candidate");
+        let mut candidates = [collision.clone(), candidate].into_iter();
+        let mut create_attempts = 0;
+
+        replace_with_create(
+            &target,
+            b"new",
+            Permissions::Default,
+            |_| Ok(candidates.next().expect("enough candidates")),
+            |path, permissions| {
+                create_attempts += 1;
+                if path == collision {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else {
+                    create_new(path, permissions)
+                }
+            },
+            |file, contents| file.write_all(contents),
+            File::sync_all,
+        )
+        .expect("retry succeeds");
+
+        assert_eq!(create_attempts, 2);
+        assert_eq!(
+            fs::read(collision.join("sentinel")).expect("read sentinel"),
+            b"keep"
+        );
+        assert_eq!(fs::read(&target).expect("read target"), b"new");
+    }
+
+    #[test]
+    fn permission_denied_without_a_confirmed_collision_is_returned() {
+        let dir = Scratch::new("permission-denied-no-collision");
+        let target = dir.0.join("target");
+        fs::write(&target, b"old target").expect("seed target");
+        let candidate = dir.0.join("absent-candidate");
+        let mut create_attempts = 0;
+
+        let err = replace_with_create(
+            &target,
+            b"new",
+            Permissions::Default,
+            |_| Ok(candidate.clone()),
+            |_, _| {
+                create_attempts += 1;
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            |file, contents| file.write_all(contents),
+            File::sync_all,
+        )
+        .expect_err("permission failure is preserved");
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(create_attempts, 1);
+        assert_eq!(fs::read(&target).expect("read target"), b"old target");
+        assert!(!candidate.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_collision_and_its_target_are_preserved() {
+        let dir = Scratch::new("symlink-collision");
+        let target = dir.0.join("target");
+        let link_target = dir.0.join("link-target");
+        fs::write(&link_target, b"sentinel").expect("seed link target");
+        let collision = dir.0.join("collision");
+        std::os::unix::fs::symlink(&link_target, &collision).expect("symlink");
+
+        replace_with_candidates(
+            &target,
+            b"new",
+            &[collision.clone(), dir.0.join("candidate")],
+        )
+        .expect("retry succeeds");
+        assert!(
+            fs::symlink_metadata(&collision)
+                .expect("lstat")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(&link_target).expect("read link target"),
+            b"sentinel"
+        );
+    }
+
+    #[test]
+    fn collision_exhaustion_preserves_all_entries_and_the_target() {
+        let dir = Scratch::new("collision-exhaustion");
+        let target = dir.0.join("target");
+        fs::write(&target, b"old target").expect("seed target");
+        let candidates: Vec<PathBuf> = (0..MAX_TEMP_ATTEMPTS)
+            .map(|index| dir.0.join(format!("collision-{index}")))
+            .collect();
+        for (index, candidate) in candidates.iter().enumerate() {
+            fs::write(candidate, format!("sentinel-{index}")).expect("seed collision");
+        }
+
+        let err = replace_with_candidates(&target, b"new", &candidates).expect_err("exhausted");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(err.to_string().contains("16 attempts"));
+        assert_eq!(fs::read(&target).expect("read target"), b"old target");
+        for (index, candidate) in candidates.iter().enumerate() {
+            assert_eq!(
+                fs::read_to_string(candidate).expect("read collision"),
+                format!("sentinel-{index}")
+            );
+        }
+    }
+
+    fn assert_owned_temp_is_cleaned_after_failure(sync_failure: bool) {
+        let dir = Scratch::new(if sync_failure {
+            "sync-failure"
+        } else {
+            "write-failure"
+        });
+        let target = dir.0.join("target");
+        fs::write(&target, b"old target").expect("seed target");
+        let candidate = dir.0.join("owned-temp");
+        let err = replace_with(
+            &target,
+            b"new",
+            Permissions::Default,
+            |_| Ok(candidate.clone()),
+            |file, contents| {
+                if sync_failure {
+                    file.write_all(contents)
+                } else {
+                    Err(io::Error::other("injected write failure"))
+                }
+            },
+            |_| {
+                if sync_failure {
+                    Err(io::Error::other("injected sync failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("injected failure");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&target).expect("read target"), b"old target");
+        assert!(!candidate.exists(), "owned candidate was cleaned up");
+    }
+
+    #[test]
+    fn a_write_failure_cleans_up_the_owned_temp_and_preserves_the_target() {
+        assert_owned_temp_is_cleaned_after_failure(false);
+    }
+
+    #[test]
+    fn a_file_sync_failure_cleans_up_the_owned_temp_and_preserves_the_target() {
+        assert_owned_temp_is_cleaned_after_failure(true);
     }
 
     #[test]

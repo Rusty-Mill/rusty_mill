@@ -105,6 +105,29 @@ pub fn log_path(path: &Path) -> PathBuf {
     PathBuf::from(log)
 }
 
+/// Remove the only insert-log images that can be left by interruption while
+/// creating a new log: an empty file or an exact prefix of this record type's
+/// header.  Callers must independently know that authoritative redo is
+/// pending; this function deliberately does not treat a malformed established
+/// log as disposable.
+pub fn clear_interrupted_creation<R>(path: &Path) -> Result<bool, DurabilityError>
+where
+    R: SchemaTag,
+{
+    let log = log_path(path);
+    let raw = match std::fs::read(&log) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let header = encode_tagged_image(&MAGIC, LOG_VERSION, 0, R::SCHEMA_TAG, &[]);
+    if raw.len() < TAGGED_HEADER_LEN && header.starts_with(&raw) {
+        clear(&log)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Append one record to the log at `log`, creating the file (header
 /// included) on first use. When this returns `Ok`, the entry is on disk
 /// (`sync_data`) — the durability `GenericMmapStore::insert` promises.
@@ -270,8 +293,23 @@ fn try_write_entry(
     image.push(kind);
     image.extend_from_slice(&len.to_le_bytes());
     image.extend_from_slice(payload);
+    #[cfg(feature = "test-support")]
+    if let Some(crate::test_support::Fault::InsertWritePrefix(prefix)) =
+        crate::test_support::take_fault(|fault| {
+            matches!(fault, crate::test_support::Fault::InsertWritePrefix(_))
+        })
+    {
+        file.write_all(&image[..prefix.min(image.len())])?;
+        return Err(io::Error::other("injected insert-log partial write").into());
+    }
     file.write_all(&image)?;
     if when == LogSync::Now {
+        #[cfg(feature = "test-support")]
+        if crate::test_support::take_fault(|fault| fault == crate::test_support::Fault::InsertSync)
+            .is_some()
+        {
+            return Err(io::Error::other("injected insert-log sync failure").into());
+        }
         file.sync_data()?;
     }
     if created {
@@ -359,10 +397,24 @@ impl Appender {
     /// As [`sync`].
     pub fn sync(&mut self) -> Result<(), DurabilityError> {
         match &self.file {
-            Some(file) => file.sync_data().map_err(|e| {
-                self.file = None;
-                e.into()
-            }),
+            Some(file) => {
+                #[cfg(feature = "test-support")]
+                let result = if crate::test_support::take_fault(|fault| {
+                    fault == crate::test_support::Fault::GroupSync
+                })
+                .is_some()
+                {
+                    Err(io::Error::other("injected store group-sync failure"))
+                } else {
+                    file.sync_data()
+                };
+                #[cfg(not(feature = "test-support"))]
+                let result = file.sync_data();
+                result.map_err(|e| {
+                    self.file = None;
+                    e.into()
+                })
+            }
             None => sync(&self.path),
         }
     }
