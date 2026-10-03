@@ -79,6 +79,16 @@ impl Triangle {
         })
     }
 
+    /// The triangle `a, b, c` facing along `(b - a) x (c - a)`, or `None`
+    /// when it has no area.
+    pub fn wound(a: Vec3, b: Vec3, c: Vec3) -> Option<Triangle> {
+        let normal = (b - a).cross(&(c - a)).normalize()?;
+        Some(Triangle {
+            vertices: [a, b, c],
+            normal,
+        })
+    }
+
     /// Height of `point` above the triangle's plane, positive on the
     /// arena side.
     pub fn signed_distance(&self, point: &Vec3) -> f32 {
@@ -262,26 +272,33 @@ impl StaticMesh {
     /// facing `inside`. Triangles naming a missing vertex, or with no
     /// area, are skipped.
     pub fn from_buffers(vertices: &[u8], ids: &[u8], mirror: Vec3, inside: Vec3) -> StaticMesh {
-        let word = |chunk: &[u8]| [chunk[0], chunk[1], chunk[2], chunk[3]];
-        let points: Vec<Vec3> = vertices
-            .chunks_exact(12)
-            .map(|v| {
-                let x = f32::from_le_bytes(word(&v[0..4]));
-                let y = f32::from_le_bytes(word(&v[4..8]));
-                let z = f32::from_le_bytes(word(&v[8..12]));
-                Vec3::new(x * mirror.x, y * mirror.y, z * mirror.z)
-            })
+        let triangles = corners(vertices, ids, Vec3::ZERO, mirror)
+            .into_iter()
+            .filter_map(|[a, b, c]| Triangle::facing(a, b, c, inside))
             .collect();
-        let vertex = |chunk: &[u8]| {
-            usize::try_from(i32::from_le_bytes(word(chunk)))
-                .ok()
-                .and_then(|i| points.get(i).copied())
-        };
-        let triangles = ids
-            .chunks_exact(12)
-            .filter_map(|t| {
-                let (a, b, c) = (vertex(&t[0..4])?, vertex(&t[4..8])?, vertex(&t[8..12])?);
-                Triangle::facing(a, b, c, inside)
+        StaticMesh::new(triangles)
+    }
+
+    /// Like `from_buffers`, but each vertex is first moved by `offset`, and
+    /// every triangle faces the way the file winds it, flipped back when
+    /// `mirror` reflects it (`RB-PHYSICS-001-FR-113`). For a mesh whose
+    /// playable sides don't all face one point: the goal, whose roof faces
+    /// down and whose back faces the field.
+    pub fn from_wound_buffers(
+        vertices: &[u8],
+        ids: &[u8],
+        offset: Vec3,
+        mirror: Vec3,
+    ) -> StaticMesh {
+        let reflected = mirror.x * mirror.y * mirror.z < 0.0;
+        let triangles = corners(vertices, ids, offset, mirror)
+            .into_iter()
+            .filter_map(|[a, b, c]| {
+                if reflected {
+                    Triangle::wound(a, c, b)
+                } else {
+                    Triangle::wound(a, b, c)
+                }
             })
             .collect();
         StaticMesh::new(triangles)
@@ -382,6 +399,30 @@ impl StaticMesh {
         contacts.truncate(4);
         contacts
     }
+}
+
+/// The triangles of RLUtilities-layout buffers (little-endian `f32` vertex
+/// triples, `i32` index triples), each vertex `(v + offset) * mirror`
+/// component-wise. Triangles naming a missing vertex are skipped.
+fn corners(vertices: &[u8], ids: &[u8], offset: Vec3, mirror: Vec3) -> Vec<[Vec3; 3]> {
+    let word = |chunk: &[u8]| [chunk[0], chunk[1], chunk[2], chunk[3]];
+    let points: Vec<Vec3> = vertices
+        .chunks_exact(12)
+        .map(|v| {
+            let x = f32::from_le_bytes(word(&v[0..4])) + offset.x;
+            let y = f32::from_le_bytes(word(&v[4..8])) + offset.y;
+            let z = f32::from_le_bytes(word(&v[8..12])) + offset.z;
+            Vec3::new(x * mirror.x, y * mirror.y, z * mirror.z)
+        })
+        .collect();
+    let vertex = |chunk: &[u8]| {
+        usize::try_from(i32::from_le_bytes(word(chunk)))
+            .ok()
+            .and_then(|i| points.get(i).copied())
+    };
+    ids.chunks_exact(12)
+        .filter_map(|t| Some([vertex(&t[0..4])?, vertex(&t[4..8])?, vertex(&t[8..12])?]))
+        .collect()
 }
 
 impl StaticMesh {

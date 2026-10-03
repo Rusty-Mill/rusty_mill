@@ -179,8 +179,10 @@ version: `a245d35`).
    uu/s/tick), so `test2`'s weak kickoff jump is a one-off.
    `RB-PHYSICS-001-FR-112` (ADR-0032) opens the goal mouth (goal fillets
    out, floor seam stops at the posts): `hitjump` one-step car 2.28 uu/s
-   (was 23.41). Next: the real goal mesh (sloped back, rounded posts;
-   `hitjump` 119.8 s, 29.6 s).
+   (was 23.41). `RB-PHYSICS-001-FR-113` (ADR-0033) makes the goals and
+   back walls the real mesh, so the arena is now RLUtilities' exactly:
+   `hitjump` one-step car 0.58 uu/s, ball 0.75 (resets excluded; were
+   2.06 and 2.35).
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -189,7 +191,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (483 tests: 27 `rb_domain`, 412
+- `cargo test --workspace`: pass (479 tests: 27 `rb_domain`, 408
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

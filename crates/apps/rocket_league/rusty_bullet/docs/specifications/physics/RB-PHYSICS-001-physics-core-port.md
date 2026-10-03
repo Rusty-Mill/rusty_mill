@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.116.0
+- Version: 0.117.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5992,6 +5992,29 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     `hitjump` 119.8 s and 29.6 s.
 - `RB-PHYSICS-001-FR-024` and `FR-026`: their shapes are out of
   `standard_arena` since FR-112.
+- `RB-PHYSICS-001-FR-113` (the goals and back walls are the real collision
+  mesh; implemented, verified by tests and the owner's capture, ADR-0033):
+  - `arena::standard_goal_meshes` is RLUtilities' `soccar_goal`, moved to
+    `y = -5120` and mirrored for `+y`.
+  - It is loaded as wound (`StaticMesh::from_wound_buffers`,
+    `Triangle::wound`), flipped back under a reflection.
+  - `PhysicsWorld::standard_arena` is now ground, side walls and ceiling
+    as planes, plus 10 meshes. The back-wall seams, goal walls, goal
+    boxes, goal fillets and nets are out.
+  - Why: after FR-112, `hitjump.jsonl`'s worst errors were the goal's
+    sloped back (119.8 s), the back wall beside the post (29.6 s) and a
+    car climbing the back wall (169.95 s).
+  - **Verification**:
+    - `arena` tests `goal_mesh_triangles_face_the_playable_side` and
+      `standard_meshes_hold_every_corner_and_ramp_triangle`.
+    - `world` test `standard_arena_is_planes_plus_the_game_meshes`.
+    - FR-112's goal tests still pass.
+    - Real capture, `hitjump` one-step with resets excluded: car mean 0.58
+      uu/s (was 2.06), ball 0.75 (was 2.35).
+    - Real capture, `hitjump` k = 30: car velocity 11.6 uu/s (was 35.5).
+    - `test2`, `front` and `side` are unchanged.
+- `RB-PHYSICS-001-FR-020` (back seams), `FR-024`, `FR-026`, `FR-029` and
+  `FR-033`: their shapes are out of `standard_arena` since FR-113.
 
 
 ## Architecture and interfaces
@@ -7483,6 +7506,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.117.0 (2026-10-03): `RB-PHYSICS-001-FR-113` — the goals and back
+  walls are the real collision mesh (ADR-0033). 408 tests in
+  `rb_physics_bullet`.
 - 0.116.0 (2026-10-03): `RB-PHYSICS-001-FR-112` — the goal mouth is
   open (ADR-0032). 412 tests in `rb_physics_bullet`.
 - 0.115.0 (2026-10-02): `RB-PHYSICS-001-FR-111` — unlimited boost as a

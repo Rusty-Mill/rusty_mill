@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The real goals
+**2026-10-03** · `RB-PHYSICS-001-FR-113` · ADR-0033
+
+- The goals and the back walls around them are now the game's own
+  collision shape, as the corners and side ramps already were: a sloped
+  goal back, rounded posts and crossbar, and the real back-wall curves.
+  The simulated arena is now built exactly as RLUtilities builds it. On
+  the owner's goal recording the car's per-tick error fell from 2.1 to 0.6
+  uu/s and the ball's from 2.3 to 0.7. 479 tests.
+
 ## Balls go into the goal
 **2026-10-03** · `RB-PHYSICS-001-FR-112` · ADR-0032
 
