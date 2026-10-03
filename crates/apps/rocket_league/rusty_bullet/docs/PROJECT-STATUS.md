@@ -182,7 +182,8 @@ version: `a245d35`).
    (was 23.41). `RB-PHYSICS-001-FR-113` (ADR-0033) makes the goals and
    back walls the real mesh, so the arena is now RLUtilities' exactly:
    `hitjump` one-step car 0.58 uu/s, ball 0.75 (resets excluded; were
-   2.06 and 2.35).
+   2.06 and 2.35). `RB-PHYSICS-001-FR-114` (ADR-0034) calibrates the
+   car-ball contact radius to 92.3 uu from 28 recorded hits: ball 0.62.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -191,7 +192,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (479 tests: 27 `rb_domain`, 408
+- `cargo test --workspace`: pass (480 tests: 27 `rb_domain`, 409
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

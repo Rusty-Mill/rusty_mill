@@ -1005,8 +1005,14 @@ impl PhysicsWorld {
         )> = Vec::new();
         self.ball_hit_ticks.resize(self.cars.len(), None);
         let mut ball_hit_velocity = Vec3::ZERO;
+        // Car-ball contacts start at `BALL_CAR_CONTACT_RADIUS`, not the
+        // ball's world radius (RB-PHYSICS-001-FR-114).
+        let mut hit_sphere = self.ball;
+        hit_sphere.shape = crate::body::Shape::Sphere {
+            radius: crate::body::BALL_CAR_CONTACT_RADIUS,
+        };
         for (car_index, car) in self.cars.iter().enumerate() {
-            let contacts = collision::contacts_between(&self.ball, car);
+            let contacts = collision::contacts_between(&hit_sphere, car);
             if contacts.is_empty() {
                 continue;
             }
@@ -2922,10 +2928,12 @@ mod tests {
         );
         let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
         ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
+        // Face at the ball's car-contact reach (RB-PHYSICS-001-FR-114).
+        let reach = ball_radius - crate::body::BALL_CAR_CONTACT_RADIUS;
         let heavy_car = RigidBody::car_box(
             Vec3::new(1000.0, 1000.0, 1000.0),
             1.0e9,
-            Vec3::new(ball_radius, -1000.0, 1000.0),
+            Vec3::new(ball_radius, -1000.0 + reach, 1000.0),
         );
         let extra = extra_ball_hit_velocity(&ball, &heavy_car);
         let mut world = PhysicsWorld::new(ball, flat_ground())
@@ -3742,6 +3750,33 @@ mod tests {
         for contact in wheels.iter().flatten() {
             assert!((contact.normal - normal).length() < 1e-3, "{contact:?}");
         }
+    }
+
+    /// A car at the origin facing +x driving at 1000 uu/s into a resting
+    /// ball whose centre is `overlap` uu inside a `BALL_RADIUS` sphere's
+    /// reach of the hitbox's front face; the ball's speed after one tick.
+    fn ball_speed_after_a_tick_at_overlap(overlap: f32) -> f32 {
+        let car_z = 17.0;
+        let front = crate::body::CAR_HITBOX_OFFSET.x + CAR_HALF_EXTENTS.x;
+        let hitbox_z = car_z + crate::body::CAR_HITBOX_OFFSET.z;
+        let ball_x = front + crate::body::BALL_RADIUS - overlap;
+        let mut ball = RigidBody::standard_ball(Vec3::new(ball_x, 0.0, hitbox_z));
+        ball.linear_velocity = Vec3::ZERO;
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, car_z));
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        world.ball.linear_velocity.length()
+    }
+
+    /// RB-PHYSICS-001-FR-114: a car hitbox overlapping the ball's world
+    /// sphere by 0.57 uu doesn't hit it yet (`hitjump.jsonl` 83.19 s); by
+    /// 1.13 uu, the least overlap of any recorded hit, it does.
+    #[test]
+    fn a_car_hits_the_ball_only_inside_the_car_contact_radius() {
+        assert!(ball_speed_after_a_tick_at_overlap(0.57) < 1e-3);
+        assert!(ball_speed_after_a_tick_at_overlap(1.13) > 100.0);
     }
 
     /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 56.3 s: a ball shot into
