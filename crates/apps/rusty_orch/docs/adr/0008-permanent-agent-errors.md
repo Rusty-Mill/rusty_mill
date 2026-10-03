@@ -20,22 +20,24 @@ exhaustive downstream assumptions solely to attach dispatcher policy.
 ## Decision
 
 - Preserve `AgentError(String)` unchanged.
-- Add `AgentFailure`, with `Transient`, `Permanent`, and `Unavailable` variants,
+- Add `ClassifiedError`, with `Transient`, `Permanent`, and `Unavailable` variants,
   and an additive `AgentRunner::run_classified` method. Its default wraps the
   existing `run` result as `Transient`, preserving existing implementations.
 - The dispatcher calls `run_classified`; it never classifies message text.
   Transient and permanent attempts are metered. Transient errors leave the card
   `Running`; permanent errors mark it `Failed`. An unavailable prerequisite
-  leaves the card `Running` and is not metered because no usable agent call was
-  made.
+  leaves the card `Running`. The dispatcher preserves its check → start → count
+  → run ordering, then rolls back exactly that invocation's goal and task
+  charges (including removing a newly created zero-count task entry).
 - Codex classifies `401`, `not logged in`, and login instructions as
   `Unavailable`. Repeated probes therefore cannot exhaust either call ceiling;
   after login, the same plan, card, board, and ledger can be passed to `run`
   again. Rate limits, process failures, timeouts, overflow, missing or malformed
   output remain ordinary transient failures.
 - Capability guards remain the preferred permanent path when refusal is known
-  before invocation. `FakeAgent::Refuse` exercises a true permanent failure;
-  `FakeAgent::Unavailable` deterministically exercises prerequisite recovery.
+  before invocation. `FakeAgent` keeps its original two reply variants;
+  dispatcher tests use a private typed runner for permanent and unavailable
+  outcomes without expanding that public test API.
 
 ## Consequences
 

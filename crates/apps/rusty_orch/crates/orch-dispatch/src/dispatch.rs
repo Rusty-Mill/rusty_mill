@@ -8,7 +8,7 @@ use orch_core::goal::Goal;
 use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskState};
 use orch_core::{EntryId, TaskId, Text};
 
-use crate::{AgentError, AgentFailure, AgentRunner, Ledger, Output, Routing};
+use crate::{AgentError, AgentRunner, ClassifiedError, Ledger, Output, Routing};
 
 /// Which call ceiling was hit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub enum DispatchError {
     /// An output failed board validation. Nothing from that call was
     /// appended; the card stays `Running` and the call is still counted.
     Board(BoardError),
-    /// The agent failed. Its [`AgentFailure`] classification determines
+    /// The agent failed. Its [`ClassifiedError`] classification determines
     /// metering and whether the card remains `Running` or becomes `Failed`.
     Agent {
         task: TaskId,
@@ -199,13 +199,14 @@ impl<R: AgentRunner> Dispatcher<R> {
             plan.start(id, agent)?;
         }
         let task = plan.get(id).ok_or(PlanError::UnknownTask(id))?;
+        ledger.count(id);
         let outputs = match self.runner.run_classified(agent, task, board) {
             Ok(outputs) => outputs,
             Err(failure) => {
-                let permanent = matches!(failure, AgentFailure::Permanent(_));
-                let unavailable = matches!(failure, AgentFailure::Unavailable(_));
-                if !unavailable {
-                    ledger.count(id);
+                let permanent = matches!(failure, ClassifiedError::Permanent(_));
+                let unavailable = matches!(failure, ClassifiedError::Unavailable(_));
+                if unavailable {
+                    ledger.rollback(id);
                 }
                 let failed = DispatchError::Agent {
                     task: id,
@@ -218,7 +219,6 @@ impl<R: AgentRunner> Dispatcher<R> {
                 return Err(failed);
             }
         };
-        ledger.count(id);
         let ids = append_atomically(board, id, agent, outputs)?;
         match first_question(board, &ids) {
             Some(question) => plan.block(id, question)?,

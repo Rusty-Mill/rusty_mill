@@ -10,7 +10,7 @@ use orch_codex::CodexAgent;
 use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
 use orch_core::task::{Agent, Plan, Role, TaskSpec};
 use orch_core::GoalId;
-use orch_dispatch::{AgentFailure, AgentRunner};
+use orch_dispatch::{AgentRunner, ClassifiedError};
 
 fn agent(fake: ReplyFile) -> CodexAgent<ReplyFile> {
     CodexAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
@@ -107,7 +107,7 @@ fn not_logged_in_is_an_unavailable_prerequisite() {
         .run_classified(Agent::Codex, task(&plan), &board)
         .expect_err("401");
 
-    assert!(matches!(failure, AgentFailure::Unavailable(_)));
+    assert!(matches!(failure, ClassifiedError::Unavailable(_)));
 }
 
 #[test]

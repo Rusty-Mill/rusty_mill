@@ -5,7 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
-- `orch-dispatch`: the additive `AgentFailure` classification lets runners distinguish counted transient failures, counted permanent failures, and unmetered unavailable prerequisites without changing `AgentError(String)`. Missing Codex login now leaves the same card resumable without consuming `max_calls`; true permanent failures still fail it immediately. ADR-0008.
+- `orch-dispatch`: the additive `ClassifiedError` classification lets runners distinguish counted transient failures, counted permanent failures, and unmetered unavailable prerequisites without changing `AgentError(String)`. Missing Codex login now leaves the same card resumable without consuming `max_calls`; true permanent failures still fail it immediately. ADR-0008.
 ### Fixed
 - `orch-dispatch`: adapters now declare agent/role capability, so a routed but unsupported role fails its card once before call accounting or backend setup instead of consuming its retry budget (#440). ADR-0007.
 - `orch-ollama` real-binary test asserts a per-run nonce appears in an entry body instead of merely a non-empty reply, matching `orch-codex` (#441).

@@ -34,7 +34,7 @@ impl std::error::Error for AgentError {}
 /// This is separate from `AgentError` to preserve its tuple constructor and
 /// field while allowing adapters to report consequential lifecycle state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentFailure {
+pub enum ClassifiedError {
     /// The attempted call counts and the running card may be retried.
     Transient(AgentError),
     /// The attempted call counts and the card is failed immediately.
@@ -44,7 +44,7 @@ pub enum AgentFailure {
     Unavailable(AgentError),
 }
 
-impl AgentFailure {
+impl ClassifiedError {
     /// Remove the dispatcher policy and return the compatible agent error.
     pub fn into_error(self) -> AgentError {
         match self {
@@ -81,8 +81,8 @@ pub trait AgentRunner {
         agent: Agent,
         task: &Task,
         board: &Board,
-    ) -> Result<Vec<Output>, AgentFailure> {
+    ) -> Result<Vec<Output>, ClassifiedError> {
         self.run(agent, task, board)
-            .map_err(AgentFailure::Transient)
+            .map_err(ClassifiedError::Transient)
     }
 }

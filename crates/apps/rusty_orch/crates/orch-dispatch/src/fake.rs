@@ -8,19 +8,15 @@ use orch_core::board::{Board, EntryKind};
 use orch_core::task::{Agent, Task};
 use orch_core::{TaskId, Text};
 
-use crate::{AgentError, AgentFailure, AgentRunner, Output};
+use crate::{AgentError, AgentRunner, Output};
 
 /// What the fake returns for one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
     /// Write one entry per kind, with a generated body and no refs.
     Write(Vec<EntryKind>),
-    /// Fail the call transiently.
+    /// Fail the call.
     Fail(String),
-    /// Fail the call permanently.
-    Refuse(String),
-    /// Report an absent external prerequisite without spending call budget.
-    Unavailable(String),
 }
 
 /// Scripted agent. An exhausted script fails the call rather than panicking.
@@ -50,32 +46,8 @@ impl AgentRunner for FakeAgent {
         self.calls.push((agent, task.id()));
         match self.script.pop_front() {
             None => Err(AgentError("fake agent: script exhausted".to_owned())),
-            Some(Reply::Fail(reason) | Reply::Refuse(reason) | Reply::Unavailable(reason)) => {
-                Err(AgentError(reason))
-            }
+            Some(Reply::Fail(reason)) => Err(AgentError(reason)),
             Some(Reply::Write(kinds)) => kinds.into_iter().map(output).collect(),
-        }
-    }
-
-    fn run_classified(
-        &mut self,
-        agent: Agent,
-        task: &Task,
-        _: &Board,
-    ) -> Result<Vec<Output>, AgentFailure> {
-        self.calls.push((agent, task.id()));
-        match self.script.pop_front() {
-            None => Err(AgentFailure::Transient(AgentError(
-                "fake agent: script exhausted".to_owned(),
-            ))),
-            Some(Reply::Fail(reason)) => Err(AgentFailure::Transient(AgentError(reason))),
-            Some(Reply::Refuse(reason)) => Err(AgentFailure::Permanent(AgentError(reason))),
-            Some(Reply::Unavailable(reason)) => Err(AgentFailure::Unavailable(AgentError(reason))),
-            Some(Reply::Write(kinds)) => kinds
-                .into_iter()
-                .map(output)
-                .collect::<Result<_, _>>()
-                .map_err(AgentFailure::Transient),
         }
     }
 }

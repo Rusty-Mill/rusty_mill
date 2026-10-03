@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use orch_core::board::Board;
 use orch_core::task::{Agent, Role, Task};
-use orch_dispatch::{AgentError, AgentFailure, AgentRunner, Output};
+use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
 use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
 
@@ -112,7 +112,7 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
 
     fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
         self.run_with_policy(agent, task, board)
-            .map_err(AgentFailure::into_error)
+            .map_err(ClassifiedError::into_error)
     }
 
     fn run_classified(
@@ -120,7 +120,7 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
         agent: Agent,
         task: &Task,
         board: &Board,
-    ) -> Result<Vec<Output>, AgentFailure> {
+    ) -> Result<Vec<Output>, ClassifiedError> {
         self.run_with_policy(agent, task, board)
     }
 }
@@ -131,14 +131,14 @@ impl<C: CommandRunner> CodexAgent<C> {
         agent: Agent,
         task: &Task,
         board: &Board,
-    ) -> Result<Vec<Output>, AgentFailure> {
+    ) -> Result<Vec<Output>, ClassifiedError> {
         if !self.supports(agent, task.spec().role) {
-            return Err(AgentFailure::Permanent(AgentError(format!(
+            return Err(ClassifiedError::Permanent(AgentError(format!(
                 "codex adapter cannot serve {:?} through {agent:?}",
                 task.spec().role
             ))));
         }
-        let scratch = Scratch::create().map_err(AgentFailure::Transient)?;
+        let scratch = Scratch::create().map_err(ClassifiedError::Transient)?;
         let prompt = render(task, board);
         let exit = self
             .runner
@@ -149,22 +149,22 @@ impl<C: CommandRunner> CodexAgent<C> {
                 SCRUBBED_ENV,
             )
             .map_err(exec_error)
-            .map_err(AgentFailure::Transient)?;
+            .map_err(ClassifiedError::Transient)?;
         if exit.status != 0 {
             return Err(classify(exit.status, &exit.stderr));
         }
         let reply = fs::read_to_string(&scratch.reply).map_err(|e| {
-            AgentFailure::Transient(AgentError(format!(
+            ClassifiedError::Transient(AgentError(format!(
                 "codex wrote no last message ({e}): {}",
                 excerpt(&exit.stderr)
             )))
         })?;
         if reply.trim().is_empty() {
-            return Err(AgentFailure::Transient(AgentError(
+            return Err(ClassifiedError::Transient(AgentError(
                 "codex wrote an empty last message".to_owned(),
             )));
         }
-        parse(&reply, task.spec().role).map_err(AgentFailure::Transient)
+        parse(&reply, task.spec().role).map_err(ClassifiedError::Transient)
     }
 }
 
@@ -172,14 +172,14 @@ impl<C: CommandRunner> CodexAgent<C> {
 /// (both exit 1). Verified against codex-cli 0.160.0: a missing login ends
 /// with `401 Unauthorized`; quota exhaustion carries `429`,
 /// `rate_limit_reached` or `usage_limit_reached`.
-fn classify(status: i32, stderr: &[u8]) -> AgentFailure {
+fn classify(status: i32, stderr: &[u8]) -> ClassifiedError {
     let text = String::from_utf8_lossy(stderr).to_lowercase();
     let short = excerpt(stderr);
     if text.contains("401 unauthorized")
         || text.contains("not logged in")
         || text.contains("codex login")
     {
-        return AgentFailure::Unavailable(AgentError(format!(
+        return ClassifiedError::Unavailable(AgentError(format!(
             "codex: not logged in (run `codex login`): {short}"
         )));
     }
@@ -189,9 +189,9 @@ fn classify(status: i32, stderr: &[u8]) -> AgentFailure {
         || text.contains("usage_limit")
         || text.contains("too many requests")
     {
-        return AgentFailure::Transient(AgentError(format!("codex: rate limited: {short}")));
+        return ClassifiedError::Transient(AgentError(format!("codex: rate limited: {short}")));
     }
-    AgentFailure::Transient(AgentError(format!(
+    ClassifiedError::Transient(AgentError(format!(
         "codex exited with status {status}: {short}"
     )))
 }
