@@ -19,7 +19,11 @@ use crate::input::{build_plan, InputError, Spec};
 /// Where answers come from and where progress goes. The binary wires stdin
 /// and stderr; tests script it.
 pub trait Console {
-    /// A progress line. Never carries prompt or model text.
+    /// A progress line. Built only from fixed outcome categories, task ids,
+    /// agent names, and counts: never from prompt text, model output, an
+    /// adapter's error message, or child-process stderr. Those belong to
+    /// the report. Questions go through [`Console::ask`] and do carry
+    /// model text.
     fn note(&mut self, line: &str);
     /// Ask the human to answer an open question. `None` means the human is
     /// done answering, so the run stops as blocked, keeping any answers
@@ -106,7 +110,7 @@ pub fn execute<R: AgentRunner>(
         let outcome = dispatcher.run(&goal, &mut plan, &mut board, &mut ledger);
         console.note(&format!(
             "run: {} after {} call(s)",
-            describe(&outcome),
+            progress(&outcome),
             ledger.calls()
         ));
         match outcome {
@@ -128,11 +132,30 @@ pub fn execute<R: AgentRunner>(
     })
 }
 
-fn describe(outcome: &Result<Outcome, DispatchError>) -> String {
+/// The progress wording for one dispatcher run. Exhaustive over
+/// [`DispatchError`] so a new variant is a compile error here, and built
+/// only from the error's fixed category and its ids, agents, and limits.
+/// The `source` of an agent failure is deliberately dropped: it can carry
+/// model output or a child's stderr, and the report is where that goes.
+fn progress(outcome: &Result<Outcome, DispatchError>) -> String {
     match outcome {
         Ok(Outcome::Finished) => "finished".to_owned(),
         Ok(Outcome::Blocked(ids)) => format!("blocked on {} card(s)", ids.len()),
-        Err(e) => format!("stopped: {e}"),
+        Err(DispatchError::Plan(_)) => "stopped: plan error (see report)".to_owned(),
+        Err(DispatchError::Board(_)) => "stopped: board refused an entry (see report)".to_owned(),
+        Err(DispatchError::Agent { task, agent, .. }) => {
+            format!("stopped: {agent:?} failed {task} (see report)")
+        }
+        Err(DispatchError::UnsupportedRole { task, agent, role }) => {
+            format!("stopped: {agent:?} cannot serve {role:?} for {task}")
+        }
+        Err(DispatchError::CeilingReached {
+            ceiling,
+            task,
+            limit,
+        }) => format!("stopped: {ceiling:?} ceiling of {limit} calls reached at {task}"),
+        Err(DispatchError::Unroutable { task }) => format!("stopped: no agent routes {task}"),
+        Err(DispatchError::Stuck) => "stopped: no card is ready or blocked".to_owned(),
     }
 }
 

@@ -2,8 +2,12 @@
 //! path from goal text to exit status is testable in-process.
 //!
 //! Channel discipline: stdout carries the report and nothing else, so
-//! `--json` always yields one parseable object; questions, the answer
-//! prompt, and progress go to stderr; answers come from stdin.
+//! `--json` always yields one parseable object. stderr carries two kinds
+//! of line: progress, built only from fixed categories, ids, and counts;
+//! and, under `--interactive`, the open questions themselves, which are
+//! model text by nature. Answers come from stdin. Detailed dispatcher
+//! failure text, including adapter and model messages, appears in the
+//! report. Startup, input, and I/O errors can still go to stderr.
 
 use std::io::{self, BufRead, Write};
 use std::time::Instant;

@@ -23,3 +23,4 @@ rusty_json = { path = "../../../../foundation/rusty_json", default-features = fa
 
 [dev-dependencies]
 orch-dispatch = { workspace = true, features = ["fake"] }
+orch-cli = { workspace = true, features = ["fake"] }

@@ -272,3 +272,24 @@ fn a_blank_after_an_earlier_answer_stops_without_another_model_call() {
     assert_eq!(answers, 1, "the earlier answer is preserved on the board");
     assert_eq!(s.board.open_questions().len(), 1);
 }
+
+#[test]
+fn progress_notes_name_the_category_and_never_the_agents_message() {
+    const SENTINEL: &str = "SENTINEL-2b9d-must-not-leak";
+    let fake = FakeAgent::new([Reply::Fail(format!("model said {SENTINEL}"))]);
+    let mut console = Scripted::default();
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+
+    assert!(matches!(
+        s.ended,
+        Ended::Failed(DispatchError::Agent { .. })
+    ));
+    assert_eq!(
+        console.notes,
+        vec!["run: stopped: Codex failed T-1 (see report) after 1 call(s)"]
+    );
+    assert!(
+        report::text(&s).contains(SENTINEL),
+        "the report still carries the detail"
+    );
+}

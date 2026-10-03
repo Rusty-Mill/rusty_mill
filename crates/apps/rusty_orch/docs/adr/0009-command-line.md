@@ -35,9 +35,13 @@ tasks in code. ARCHITECTURE listed goal intake as planned.
   stay on the board, no further model call is made, exit status 3.
 - **Channel discipline.** stdout is the report and nothing else, so
   `--json` is one parseable object even through a blocked-and-answered
-  run. Questions, the answer prompt, and progress go to stderr. The entry
-  point lives in the library over injectable streams so this is tested
-  in-process.
+  run. Questions, the answer prompt, and progress go to stderr. A progress
+  line is built from an exhaustive match over the dispatcher's outcome:
+  fixed categories plus task ids, agent names, roles, and counts. The
+  text of an agent failure, which can carry model output or a child's
+  stderr, never reaches it; the report holds it. Questions shown under
+  `--interactive` are model text by nature. The entry point lives in the
+  library over injectable streams so this is tested in-process.
 - **Review context.** A review card's `refs` need not name the reviewed
   task's entries. The shared renderer (`orch-cli`) resolves the target's
   live entries and the answers to them at render time under
@@ -49,7 +53,8 @@ tasks in code. ARCHITECTURE listed goal intake as planned.
   only; moving the deadline into it is a separate decision.
 - **Output.** A text page or, with `--json`, one object with `goal`,
   `ended`, `calls`, `tasks`, and every board entry with a `superseded`
-  flag. Progress lines go to stderr and never carry prompt or model text.
+  flag. Progress lines go to stderr and carry only fixed categories, ids,
+  and counts.
 - **Adapters.** A composite over `CodexAgent` and `OllamaAgent` that
   forwards `run_classified` (ADR-0008). `Agent::Claude` and `Agent::Gemini`
   have no adapter and are refused permanently.
