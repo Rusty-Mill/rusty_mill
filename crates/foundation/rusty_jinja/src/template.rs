@@ -84,7 +84,9 @@ impl Scanner {
     /// Reads a `{{ ... }}`/`{% ... %}` tag starting at the current
     /// position (the opening delimiter must already be at `self.pos`),
     /// returning `(trim_left, trim_right, inner_text)` with the cursor
-    /// left just past the closing delimiter.
+    /// left just past the closing delimiter. Closing delimiters and trim
+    /// markers inside single- or double-quoted expression strings are
+    /// literal content, matching the expression lexer's quote rules.
     fn read_tag(&mut self, open: &str, close: &str) -> Result<(bool, bool, String), JinjaError> {
         self.pos += open.chars().count();
         let trim_left = self.chars.get(self.pos) == Some(&'-');
@@ -97,7 +99,20 @@ impl Scanner {
         let mut end = None;
         let mut trim_right = false;
         let mut i = self.pos;
+        let mut quote = None;
         while i < self.chars.len() {
+            if let Some(active_quote) = quote {
+                if self.chars[i] == active_quote {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            if matches!(self.chars[i], '\'' | '"') {
+                quote = Some(self.chars[i]);
+                i += 1;
+                continue;
+            }
             if i + close_pat.len() <= self.chars.len()
                 && self.chars[i..i + close_pat.len()] == close_pat[..]
             {
