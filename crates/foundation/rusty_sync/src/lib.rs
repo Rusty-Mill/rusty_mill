@@ -19,33 +19,56 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use rusty_std::sync::{Mutex, MutexGuard};
 
-/// Atomic spinlock mutex.
+/// Compatibility facade for the canonical [`Mutex`] spinlock.
+///
+/// This nominally distinct type preserves the historical `rusty_sync` API and
+/// downstream trait-coherence behavior while delegating all locking state and
+/// acquisition behavior to `rusty_std`. It has the same synchronous spinning,
+/// progress, fairness, reentrancy, unwind, cancellation, and guard-leak
+/// limitations as [`Mutex`]. It is not interrupt-safe or async-aware.
+///
+/// A lock containing a non-`Send` value is neither `Send` nor `Sync`:
+///
+/// ```compile_fail
+/// # extern crate alloc;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rusty_sync::SpinLock<alloc::rc::Rc<()>>>();
+/// ```
+///
+/// ```compile_fail
+/// # extern crate alloc;
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<rusty_sync::SpinLock<alloc::rc::Rc<()>>>();
+/// ```
+///
+/// A `Send + !Sync` payload still permits both traits on the lock:
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// fn assert_sync<T: Sync>() {}
+/// assert_send::<rusty_sync::SpinLock<core::cell::Cell<u32>>>();
+/// assert_sync::<rusty_sync::SpinLock<core::cell::Cell<u32>>>();
+/// ```
 pub struct SpinLock<T> {
-    lock: core::sync::atomic::AtomicBool,
-    data: UnsafeCell<T>,
+    inner: Mutex<T>,
 }
-
-unsafe impl<T: Send> Send for SpinLock<T> {}
-unsafe impl<T: Send> Sync for SpinLock<T> {}
 
 impl<T> SpinLock<T> {
     /// Creates a new SpinLock wrapping data.
     pub const fn new(data: T) -> Self {
         Self {
-            lock: core::sync::atomic::AtomicBool::new(false),
-            data: UnsafeCell::new(data),
+            inner: Mutex::new(data),
         }
     }
 
     /// Acquires spinlock and returns a Guard borrowing inner value.
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
-        while self.lock.swap(true, core::sync::atomic::Ordering::Acquire) {
-            core::hint::spin_loop();
+        SpinLockGuard {
+            inner: self.inner.lock(),
         }
-        SpinLockGuard { lock: self }
     }
 }
 
@@ -57,41 +80,47 @@ impl<T> SpinLock<T> {
 /// fn assert_sync<T: Sync>() {}
 /// assert_sync::<rusty_sync::SpinLockGuard<'static, core::cell::Cell<u32>>>();
 /// ```
+///
+/// A guard is `Send` only when its payload is `Send`:
+///
+/// ```compile_fail
+/// # extern crate alloc;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rusty_sync::SpinLockGuard<'static, alloc::rc::Rc<()>>>();
+/// ```
+///
+/// The corresponding positive bounds remain `T: Send` for `Send` and
+/// `T: Sync` for `Sync` (including a `Sync + !Send` payload):
+///
+/// ```
+/// fn assert_send<T: Send>() {}
+/// fn assert_sync<T: Sync>() {}
+/// assert_send::<rusty_sync::SpinLockGuard<'static, core::cell::Cell<u32>>>();
+/// assert_sync::<
+///     rusty_sync::SpinLockGuard<'static, std::sync::MutexGuard<'static, ()>>,
+/// >();
+/// ```
 pub struct SpinLockGuard<'a, T> {
-    lock: &'a SpinLock<T>,
+    inner: MutexGuard<'a, T>,
 }
-
-// SAFETY: `SpinLockGuard` only holds `&'a SpinLock<T>`, and `SpinLock<T>` is
-// `Sync` whenever `T: Send` (see the `unsafe impl` above). Left to
-// auto-derivation, that would make `SpinLockGuard<T>` itself `Sync` for any
-// `T: Send`, even when `T` is not `Sync` (e.g. `Cell<u32>`) — sharing
-// `&SpinLockGuard<T>` across threads would then let multiple threads call
-// `Deref` concurrently and obtain simultaneous `&T` references, racing
-// unsynchronized interior mutation through types like `Cell` that are
-// deliberately `!Sync`. This explicit impl overrides that unsound
-// auto-derivation: `SpinLockGuard<T>` is `Sync` only when `T: Sync`, which
-// is exactly the bound required to soundly hand out concurrent `&T`s.
-unsafe impl<'a, T: Sync> Sync for SpinLockGuard<'a, T> {}
 
 impl<'a, T> core::ops::Deref for SpinLockGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.data.get() }
+        &self.inner
     }
 }
 
 impl<'a, T> core::ops::DerefMut for SpinLockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.lock.data.get() }
+        &mut self.inner
     }
 }
 
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
-    fn drop(&mut self) {
-        self.lock
-            .lock
-            .store(false, core::sync::atomic::Ordering::Release);
-    }
+    // Intentionally empty: after this compatibility `Drop` runs, Rust drops
+    // `inner`, whose canonical `MutexGuard::drop` performs the single unlock.
+    fn drop(&mut self) {}
 }
 
 /// A bounded FIFO ring buffer, protected by a [`SpinLock`].
@@ -277,6 +306,22 @@ mod tests {
             *val += 1;
         }
         assert_eq!(*lock.lock(), 43);
+    }
+
+    #[test]
+    fn facade_fields_are_the_canonical_types() {
+        fn assert_lock_field<T>(lock: &SpinLock<T>) {
+            let _: &Mutex<T> = &lock.inner;
+        }
+
+        fn assert_guard_field<T>(guard: &SpinLockGuard<'_, T>) {
+            let _: &MutexGuard<'_, T> = &guard.inner;
+        }
+
+        let lock = SpinLock::new(1usize);
+        assert_lock_field(&lock);
+        let guard = lock.lock();
+        assert_guard_field(&guard);
     }
 
     #[test]
