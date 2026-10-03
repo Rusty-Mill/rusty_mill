@@ -1,5 +1,28 @@
 # rustils_async
 
+## Linux pidfd requirement
+
+The async Linux spawner opens and retains one pidfd immediately after
+`posix_spawn` succeeds. That descriptor is dedicated to `kill_single` and lives
+as long as the returned child, preventing the internal wait-job helper's
+reap-to-cache publication interval from turning signaling into an operation on
+a recycled numeric PID. Wait readiness continues to use independent, temporary
+pidfds so the epoll reactor's descriptor-lifetime assumptions are unchanged.
+
+This acquisition is not atomic with `posix_spawn`. Before the child is exposed,
+the backend assumes SIGCHLD is not explicitly ignored, `SA_NOCLDWAIT` is not
+installed, and external code does not reap the exclusively owned child. If
+pidfd acquisition fails, the backend terminates and reaps that unexposed child
+before returning the acquisition error; a cleanup failure is reported instead
+of blocking indefinitely. On kernels without `pidfd_open` (`ENOSYS`), async
+spawn therefore fails with `Unsupported`. Permission/seccomp and descriptor
+resource failures retain their actual errno. Successfully opening a pidfd does
+not guarantee that a later signal is permitted.
+
+This is intentionally narrower than the synchronous Linux backend's portable
+wait fallback. It changes neither synchronous processes nor PTYs and does not
+add a numeric-PID signaling fallback.
+
 A native-async sibling to [`rustils`](https://github.com/baileyrd/rustils),
 built to satisfy [`rusty_foundation_akb`](https://github.com/Rusty-Mill/rusty_foundation_akb)'s
 requirement that platform crates support async and multithreading.

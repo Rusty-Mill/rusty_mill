@@ -49,3 +49,6 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 # The `Order`/`Customer` fixture domain the engine's own tests exercise it
 # with, and which rusty_multimodal_db's research benches and order server use.
 research = []
+# Narrow deterministic syscall-boundary hooks used by downstream durability
+# tests. They are inert unless a test explicitly arms one on its thread.
+test-support = []

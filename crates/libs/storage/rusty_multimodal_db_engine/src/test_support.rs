@@ -2,6 +2,43 @@
 //! when the engine was extracted (ADR-0124), so the engine's own tests do
 //! not depend on that crate.
 
+#[cfg(feature = "test-support")]
+use std::cell::RefCell;
+
+/// One-shot, thread-local durability fault used only by deterministic tests.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    JournalWritePrefix(usize),
+    JournalSync,
+    InsertWritePrefix(usize),
+    InsertSync,
+    CheckpointAfterRename,
+    BatchApply(usize),
+    ReplaceAfterLog,
+    GroupSync,
+    SlotFlush,
+}
+
+#[cfg(feature = "test-support")]
+thread_local! { static FAULT: RefCell<Option<Fault>> = const { RefCell::new(None) }; }
+
+#[cfg(feature = "test-support")]
+pub fn arm_fault(fault: Fault) {
+    FAULT.with(|slot| *slot.borrow_mut() = Some(fault));
+}
+
+#[cfg(feature = "test-support")]
+pub fn take_fault(expected: impl FnOnce(Fault) -> bool) -> Option<Fault> {
+    FAULT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some_and(expected) {
+            slot.take()
+        } else {
+            None
+        }
+    })
+}
 /// See module docs.
 ///
 /// Uniqueness (PID + atomic counter, not just `label`) matters because

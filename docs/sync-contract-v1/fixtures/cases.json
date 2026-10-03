@@ -1,0 +1,60 @@
+{
+  "compatible": {
+    "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status", "field.lineage"],
+    "record": {
+      "id": "synthetic-001", "content": "Synthetic compatible memory", "category": "general",
+      "tags": ["fixture"], "source": "synthetic", "metadata": {"fixture": true},
+      "created_at": "2026-01-02T03:04:05Z", "updated_at": "2026-01-02T03:04:06Z",
+      "client": "fixture", "node_id": "node-a", "capture_id": null,
+      "source_capture_id": null, "memory_type": "semantic", "status": "active",
+      "deleted_at": null, "sensitive": false, "remind_at": null,
+      "superseded_by": null, "subject": null, "predicate": null, "object": null,
+      "accessed_at": null, "access_count": 0, "decay_rate": 0.1, "vitality": 1.0,
+      "base_weight": 1.0
+    }
+  },
+  "negative": [
+    {"name": "status tombstone sent to deleted-at peer", "mutate": {"status": "deleted"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.deleted-at"], "error": "tombstone_capability_mismatch"},
+    {"name": "deleted-at tombstone sent to status peer", "mutate": {"deleted_at": "2026-01-02T03:04:07Z"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status"], "error": "tombstone_capability_mismatch"},
+    {"name": "open type sent to closed peer", "mutate": {"memory_type": "fact"}, "error": "unsupported_memory_type"},
+    {"name": "sensitivity not preserved", "mutate": {"sensitive": true}, "error": "unsupported_sensitive"},
+    {"name": "reminder not preserved", "mutate": {"remind_at": "2026-02-01T00:00:00Z"}, "error": "unsupported_reminder"},
+    {"name": "lineage not preserved", "mutate": {"source_capture_id": "capture-1"}, "capabilities": ["cursor.timestamp-id", "memory-types.closed", "tombstone.status"], "error": "unsupported_lineage"},
+    {"name": "malformed timestamp", "mutate": {"updated_at": "tomorrow"}, "error": "invalid_timestamp"},
+    {"name": "unsupported id", "mutate": {"id": "contains spaces"}, "error": "invalid_id"},
+    {"name": "empty superseded id", "mutate": {"superseded_by": ""}, "error": "invalid_id"},
+    {"name": "invalid superseded id", "mutate": {"superseded_by": "contains spaces"}, "error": "invalid_id"},
+    {"name": "empty content", "mutate": {"content": ""}, "error": "invalid_record_type"},
+    {"name": "empty category", "mutate": {"category": ""}, "error": "invalid_record_type"},
+    {"name": "empty source", "mutate": {"source": ""}, "error": "invalid_record_type"},
+    {"name": "tags is not an array", "mutate": {"tags": 42}, "error": "invalid_record_type"},
+    {"name": "tag is not a string", "mutate": {"tags": ["valid", 42]}, "error": "invalid_record_type"},
+    {"name": "metadata is not an object", "mutate": {"metadata": []}, "error": "invalid_record_type"},
+    {"name": "client is null", "mutate": {"client": null}, "error": "invalid_record_type"},
+    {"name": "node id is a number", "mutate": {"node_id": 17}, "error": "invalid_record_type"},
+    {"name": "capture id is an array", "mutate": {"capture_id": []}, "error": "invalid_record_type"},
+    {"name": "sensitive is numeric", "mutate": {"sensitive": 0}, "error": "invalid_record_type"},
+    {"name": "access count is boolean", "mutate": {"access_count": true}, "error": "invalid_record_type"},
+    {"name": "vitality is boolean", "mutate": {"vitality": true}, "error": "invalid_record_type"},
+    {"name": "missing memory type capability", "mutate": {}, "capabilities": ["cursor.timestamp-id", "tombstone.status", "field.lineage"], "error": "memory_type_capability_mismatch"},
+    {"name": "conflicting memory type capabilities", "mutate": {}, "capabilities": ["memory-types.closed", "memory-types.open", "tombstone.status", "field.lineage"], "error": "memory_type_capability_mismatch"}
+  ],
+  "invalid_timestamps": [
+    "tomorrow",
+    "2026-01-02+00:00",
+    "20260102T030405Z",
+    "2026-W01-5T03:04:05Z",
+    "2026-01-02 03:04:05Z",
+    "2026-02-29T03:04:05Z",
+    "2026-01-02T24:00:00Z",
+    "2026-01-02T03:04:05.1234567890Z",
+    "2026-01-02T03:04:05",
+    "２０２６-01-02T03:04:05Z",
+    "2026-01-02T03:04:05.١Z",
+    "2026-01-02T03:04:05+٠١:00"
+  ],
+  "exact_numbers": {
+    "large_decimal": 1e400,
+    "large_integer": 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  }
+}
