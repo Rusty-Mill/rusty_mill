@@ -170,11 +170,9 @@ impl Service {
     }
 
     /// A subtask always lives in its parent's list (`patch_task` refuses to
-    /// move one alone). A move saves the children, then the parent, one
-    /// record at a time, so a crash between them leaves some children in the
-    /// new list and the parent in the old. Put every such child back in its
-    /// parent's list: the parent is the record of truth, and an interrupted
-    /// move was never acknowledged (design review 2.9).
+    /// move one alone). Current moves are journaled, but older versions saved
+    /// children and then the parent one record at a time. Put children left by
+    /// such an interrupted move back in the parent's list (design review 2.9).
     fn realign_subtasks(&mut self) -> Result<()> {
         let stray: Vec<Task> = self
             .tasks
@@ -394,19 +392,15 @@ impl Service {
             if task.parent_id.is_some() {
                 return invalid("a subtask moves with its parent");
             }
-            self.move_with_children(&task, list)?;
+            let mut changed = self.children(&task);
+            for child in &mut changed {
+                child.list_id = list;
+            }
             task.list_id = list;
+            changed.push(task);
+            return self.save_batch(changed);
         }
         self.save_task(task)
-    }
-
-    /// Move `parent`'s subtasks to `list`; the parent itself is saved by the caller.
-    fn move_with_children(&mut self, parent: &Task, list: Uuid) -> Result<()> {
-        for mut child in self.children(parent) {
-            child.list_id = list;
-            self.save_task(child)?;
-        }
-        Ok(())
     }
 
     fn children(&self, parent: &Task) -> Vec<Task> {
@@ -422,6 +416,21 @@ impl Service {
         task.version = task.version.wrapping_add(1);
         self.tasks.replace(task.clone())?;
         Ok(task)
+    }
+
+    /// Save a task and its children under the task store's durable redo seam.
+    fn save_batch(&mut self, mut tasks: Vec<Task>) -> Result<Task> {
+        let now = self.now();
+        for task in &mut tasks {
+            task.updated_ms = now;
+            task.version = task.version.wrapping_add(1);
+        }
+        let result = tasks
+            .last()
+            .cloned()
+            .ok_or_else(|| ServiceError::Invalid("nothing to save".into()))?;
+        self.tasks.replace_batch(tasks)?;
+        Ok(result)
     }
 
     pub fn set_status(&mut self, id: Uuid, status: Status) -> Result<Task> {
@@ -458,22 +467,26 @@ impl Service {
     pub fn restore_task(&mut self, id: Uuid) -> Result<Task> {
         let mut task = self.task(id)?;
         let trashed_at = task.deleted_ms;
-        if self.live_list(task.list_id).is_err() {
-            let target = INBOX_ID;
-            for mut child in self.children(&task) {
+        let rehome = self.live_list(task.list_id).is_err().then_some(INBOX_ID);
+        let mut changed = Vec::new();
+        for mut child in self.children(&task) {
+            let restore = child.deleted_ms == trashed_at;
+            if let Some(target) = rehome {
                 child.list_id = target;
-                self.save_task(child)?;
             }
+            if restore {
+                child.deleted_ms = None;
+            }
+            if restore || rehome.is_some() {
+                changed.push(child);
+            }
+        }
+        if let Some(target) = rehome {
             task.list_id = target;
         }
-        for mut child in self.children(&task) {
-            if child.deleted_ms == trashed_at {
-                child.deleted_ms = None;
-                self.save_task(child)?;
-            }
-        }
         task.deleted_ms = None;
-        self.save_task(task)
+        changed.push(task);
+        self.save_batch(changed)
     }
 
     /// Delete a task and its subtasks for good.

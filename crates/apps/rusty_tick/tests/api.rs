@@ -751,11 +751,24 @@ fn comments_follow_their_task_to_the_grave_but_not_to_the_trash() {
 fn a_task_whose_list_was_deleted_restores_into_the_inbox() {
     let (_d, mut h) = harness();
     let list = h.list("Doomed");
-    let t = h.task(&list, r#""title":"orphan""#);
-    let id = t["id"].as_str().unwrap();
+    let parent = h.task(&list, r#""title":"orphan""#);
+    let id = parent["id"].as_str().unwrap();
+    let child = h.task(&list, &format!(r#""title":"child","parentId":"{id}""#));
+    let child_id = child["id"].as_str().unwrap();
+    let old = h.task(&list, &format!(r#""title":"old","parentId":"{id}""#));
+    let old_id = old["id"].as_str().unwrap();
+    h.clock.store(NOW - HOUR, Ordering::SeqCst);
+    h.call(Method::Delete, &format!("/api/v1/tasks/{old_id}"), "");
+    h.clock.store(NOW, Ordering::SeqCst);
     h.call(Method::Delete, &format!("/api/v1/lists/{list}"), "");
     let (_, back) = h.call(Method::Post, &format!("/api/v1/tasks/{id}/restore"), "");
     assert_eq!(back["listId"], INBOX);
+    let (_, child_back) = h.call(Method::Get, &format!("/api/v1/tasks/{child_id}"), "");
+    let (_, old_back) = h.call(Method::Get, &format!("/api/v1/tasks/{old_id}"), "");
+    assert_eq!(child_back["listId"], INBOX);
+    assert!(child_back["deletedMs"].is_null());
+    assert_eq!(old_back["listId"], INBOX);
+    assert_eq!(old_back["deletedMs"].as_i64(), Some(NOW - HOUR));
 }
 
 #[test]
@@ -908,7 +921,7 @@ fn tag_parents_must_exist_and_be_another_tag() {
 
 #[test]
 fn moving_a_task_moves_its_subtasks() {
-    let (_d, mut h) = harness();
+    let (d, mut h) = harness();
     let (a, b) = (h.list("A"), h.list("B"));
     let parent = h.task(&a, r#""title":"p""#);
     let pid = parent["id"].as_str().unwrap();
@@ -918,9 +931,10 @@ fn moving_a_task_moves_its_subtasks() {
     let (s, v) = h.call(
         Method::Patch,
         &format!("/api/v1/tasks/{pid}"),
-        &format!(r#"{{"listId":"{b}"}}"#),
+        &format!(r#"{{"listId":"{b}","sortOrder":17}}"#),
     );
     assert_eq!((s, v["listId"].as_str()), (200, Some(b.as_str())));
+    assert_eq!(v["sortOrder"].as_i64(), Some(17));
     assert_eq!(
         h.call(Method::Get, &format!("/api/v1/tasks/{cid}"), "").1["listId"],
         b.as_str()
@@ -942,6 +956,13 @@ fn moving_a_task_moves_its_subtasks() {
         ),
         ["p", "c"]
     );
+    drop(h);
+    let mut reopened = Harness::open(d.path());
+    let (_, parent) = reopened.call(Method::Get, &format!("/api/v1/tasks/{pid}"), "");
+    let (_, child) = reopened.call(Method::Get, &format!("/api/v1/tasks/{cid}"), "");
+    assert_eq!(parent["listId"], b.as_str());
+    assert_eq!(parent["sortOrder"].as_i64(), Some(17));
+    assert_eq!(child["listId"], b.as_str());
 }
 
 #[test]

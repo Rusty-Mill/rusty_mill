@@ -16,7 +16,7 @@
 //! in. Every wrapper below forwards it, same as every other capability.
 //!
 //! [`GroupCommit`] lets a caller apply a batch of writes under one sync of
-//! the core's insert log. Only the layers that keep no file of their own
+//! the core's insert log and one flush of its mapped slots. Only the layers that keep no file of their own
 //! forward it (`Indexed`, `Scanned`, `NameIndex`, `Ordered`); a relation
 //! layer's edge log would need its sync ordered against the record log's,
 //! which nothing needs yet.
@@ -126,9 +126,10 @@ pub trait Flush {
     fn flush(&self) -> Result<(), DurabilityError>;
 }
 
-/// Apply a batch of writes under one sync: after [`Self::defer_sync`], a
-/// write returns once its insert-log entry is written but not yet synced,
-/// and [`Self::commit`] syncs them all and restores sync-per-write.
+/// Apply a batch of writes under one durability barrier: after
+/// [`Self::defer_sync`], a write returns once its insert-log entry and mapped
+/// slot update are written but not yet synced, and [`Self::commit`] syncs both
+/// representations and restores sync-per-write.
 ///
 /// Nothing written while deferred is durable until `commit` returns `Ok`,
 /// though reads see it at once. A caller that lets others read between
@@ -140,8 +141,9 @@ pub trait GroupCommit {
     /// Stop syncing each write's insert-log entry until [`Self::commit`].
     fn defer_sync(&mut self);
 
-    /// Sync every entry written since [`Self::defer_sync`] and go back to
-    /// syncing each write. `Ok` means every write so far is durable.
+    /// Sync every entry and mapped slot written since [`Self::defer_sync`]
+    /// and go back to syncing each write. `Ok` means both representations of
+    /// every write so far are durable.
     ///
     /// # Errors
     ///

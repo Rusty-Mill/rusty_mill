@@ -15,7 +15,9 @@ pub enum Fault {
     InsertSync,
     CheckpointAfterRename,
     BatchApply(usize),
+    ReplaceAfterLog,
     GroupSync,
+    SlotFlush,
 }
 
 #[cfg(feature = "test-support")]

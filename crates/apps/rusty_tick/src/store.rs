@@ -492,16 +492,6 @@ mod tests {
         let mut expected_all = expected.to_vec();
         expected_all.sort_by_key(|task| task.id);
         assert_eq!(actual, expected_all);
-        let list = expected[0].list_id;
-        let mut in_list = store.in_list(list);
-        in_list.sort_by_key(|task| task.id);
-        let mut expected_in_list: Vec<_> = expected
-            .iter()
-            .filter(|task| task.list_id == list)
-            .cloned()
-            .collect();
-        expected_in_list.sort_by_key(|task| task.id);
-        assert_eq!(in_list, expected_in_list);
         for task in expected {
             assert_eq!(store.get(task.id).as_ref(), Some(task));
             let expected_search = if task.is_deleted() {
@@ -514,24 +504,32 @@ mod tests {
                 assert_eq!(store.with_tag(tag), expected_search);
             }
         }
-        let mut manual: Vec<_> = expected
-            .iter()
-            .filter(|task| task.list_id == list)
-            .cloned()
-            .collect();
-        manual.sort_by_key(|task| (task.sort_order, task.id));
-        assert_eq!(store.in_manual_order(list), manual);
-        assert_eq!(
-            store.next_sort_order(list),
-            manual.last().unwrap().sort_order.saturating_add(SORT_STEP)
-        );
-        let mut due: Vec<_> = expected
-            .iter()
-            .filter(|task| task.list_id == list && task.due_ms.is_some())
-            .cloned()
-            .collect();
-        due.sort_by_key(|task| (task.due_ms, task.id));
-        assert_eq!(store.due_between(list, i64::MIN, i64::MAX), due);
+        let lists: BTreeSet<_> = expected.iter().map(|task| task.list_id).collect();
+        for list in lists {
+            let mut in_list = store.in_list(list);
+            in_list.sort_by_key(|task| task.id);
+            let mut expected_in_list: Vec<_> = expected
+                .iter()
+                .filter(|task| task.list_id == list)
+                .cloned()
+                .collect();
+            expected_in_list.sort_by_key(|task| task.id);
+            assert_eq!(in_list, expected_in_list);
+
+            let mut manual = expected_in_list.clone();
+            manual.sort_by_key(|task| (task.sort_order, task.id));
+            assert_eq!(store.in_manual_order(list), manual);
+            assert_eq!(
+                store.next_sort_order(list),
+                manual.last().unwrap().sort_order.saturating_add(SORT_STEP)
+            );
+            let mut due: Vec<_> = expected_in_list
+                .into_iter()
+                .filter(|task| task.due_ms.is_some())
+                .collect();
+            due.sort_by_key(|task| (task.due_ms, task.id));
+            assert_eq!(store.due_between(list, i64::MIN, i64::MAX), due);
+        }
     }
 
     #[test]
@@ -582,6 +580,73 @@ mod tests {
             drop(store);
             let reopened = TaskStore::open(dir.path()).unwrap();
             assert_complete_view(&reopened, if accepted { &after } else { &prior });
+        }
+    }
+
+    #[test]
+    fn move_and_sort_replay_survives_record_slot_and_retirement_interruptions() {
+        for (name, fault) in [
+            ("after-record-append", Fault::ReplaceAfterLog),
+            ("slot-flush", Fault::SlotFlush),
+            ("journal-retirement", Fault::CheckpointAfterRename),
+        ] {
+            let (dir, originals, unrelated) = fixture();
+            let destination = Uuid::from_u128(100);
+            let mut changed = originals.clone();
+            for task in &mut changed {
+                task.list_id = destination;
+                task.updated_ms = 50;
+                task.version += 1;
+            }
+            // `ReplaceAfterLog` is one-shot, so the first replacement must be
+            // the sort-changing one to exercise the record/slot mismatch.
+            changed.first_mut().unwrap().sort_order = 17;
+            let prior: Vec<_> = originals
+                .iter()
+                .cloned()
+                .chain(std::iter::once(unrelated.clone()))
+                .collect();
+            let after: Vec<_> = changed
+                .iter()
+                .cloned()
+                .chain(std::iter::once(unrelated.clone()))
+                .collect();
+
+            let mut store = TaskStore::open(dir.path()).unwrap();
+            arm_fault(fault);
+            assert!(store.replace_batch(changed.clone()).is_err(), "{name}");
+            assert_complete_view(&store, &prior);
+            assert!(matches!(
+                store.replace_batch(changed.clone()),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.replace(unrelated.clone()),
+                Err(TickError::RecoveryRequired)
+            ));
+            assert!(matches!(
+                store.delete(unrelated.id),
+                Err(TickError::RecoveryRequired)
+            ));
+            drop(store);
+
+            if fault == Fault::ReplaceAfterLog {
+                // Open the engine directly, before TaskStore can replay the
+                // journal. The appended record won (including its version and
+                // list), while the authoritative mapped sort slot is still
+                // the old value: this is the exact mismatch redo must repair.
+                let core = Core::open_portable(&dir.path().join("tasks.mmap")).unwrap();
+                let interrupted = core.get(changed[0].id).unwrap();
+                assert_eq!(interrupted.version, changed[0].version);
+                assert_eq!(interrupted.list_id, changed[0].list_id);
+                assert_eq!(interrupted.updated_ms, changed[0].updated_ms);
+                assert_eq!(interrupted.sort_order, originals[0].sort_order);
+                assert_ne!(interrupted.sort_order, changed[0].sort_order);
+                drop(core);
+            }
+
+            let reopened = TaskStore::open(dir.path()).unwrap();
+            assert_complete_view(&reopened, &after);
         }
     }
 
