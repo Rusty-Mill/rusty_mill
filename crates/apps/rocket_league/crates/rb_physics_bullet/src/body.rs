@@ -543,6 +543,10 @@ pub struct StaticQuarterPipe {
     /// must cover the fillet's own (at most 180-degree) angle — see
     /// `between_planes`, which guarantees this by construction.
     pub sector_end: Vec3,
+    /// How far along `axis_direction`, from `axis_point`, the fillet
+    /// reaches (`RB-PHYSICS-001-FR-112`): infinite by default; a back-wall
+    /// floor seam stops at the goal mouth (`with_span`).
+    pub span: (f32, f32),
     pub restitution: f32,
     pub friction: f32,
 }
@@ -561,9 +565,19 @@ impl StaticQuarterPipe {
             radius,
             sector_start,
             sector_end,
+            span: (f32::NEG_INFINITY, f32::INFINITY),
             restitution: 0.5,
             friction: 0.5,
         }
+    }
+
+    /// This fillet limited to the stretch of its axis between the world
+    /// points `from` and `to` (each projected onto the axis).
+    pub fn with_span(mut self, from: Vec3, to: Vec3) -> StaticQuarterPipe {
+        let a = (from - self.axis_point).dot(&self.axis_direction);
+        let b = (to - self.axis_point).dot(&self.axis_direction);
+        self.span = (a.min(b), a.max(b));
+        self
     }
 
     /// Derives a fillet of the given `radius` connecting two flat

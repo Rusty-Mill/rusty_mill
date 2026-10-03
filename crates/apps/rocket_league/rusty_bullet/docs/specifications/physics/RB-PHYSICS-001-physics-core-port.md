@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.115.0
+- Version: 0.116.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5969,6 +5969,29 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `rb_verify_cli` test
       `unlimited_boost_is_detected_only_from_a_held_boost_that_never_drains`.
     - Real capture: `test2` `--self` mean car position 906 uu (was 1,365).
+- `RB-PHYSICS-001-FR-112` (the goal mouth is open; implemented, verified by
+  tests and the owner's capture, ADR-0032):
+  - `PhysicsWorld::standard_arena` leaves out FR-024's goal cutout fillets
+    and FR-026's goal corner fillets. Built concave between the back wall
+    and the post and crossbar planes, they filled the goal mouth.
+  - `StaticQuarterPipe::span` (`with_span`) limits a fillet to a stretch
+    of its axis. Each back wall's floor seam now covers only |x| from
+    `GOAL_HALF_WIDTH` to `SIDE_WALL_X`.
+  - Why: in `hitjump.jsonl` (the first capture with goals), a ball shot
+    into the goal bounced out at 56.3 s (4,667 uu/s off), and a car inside
+    the goal was shoved back at 277.0 s (1,909 uu/s off).
+  - **Verification**:
+    - `world` tests `a_ball_shot_into_the_goal_mouth_goes_in` and
+      `a_car_inside_the_goal_meets_no_back_wall_seam`.
+    - `arena` test `the_back_wall_floor_seam_stops_at_the_goal_mouth`.
+    - Updated arena-count tests.
+    - Real captures, `hitjump`: one-step car 2.28 uu/s (was 23.41); k = 30
+      car 42.4 uu / 35.5 uu/s (was 91.2 / 48.3). `test2`, `front` and
+      `side` are unchanged.
+  - Open: the goal's real geometry (sloped back, rounded posts),
+    `hitjump` 119.8 s and 29.6 s.
+- `RB-PHYSICS-001-FR-024` and `FR-026`: their shapes are out of
+  `standard_arena` since FR-112.
 
 
 ## Architecture and interfaces
@@ -7460,6 +7483,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.116.0 (2026-10-03): `RB-PHYSICS-001-FR-112` — the goal mouth is
+  open (ADR-0032). 412 tests in `rb_physics_bullet`.
 - 0.115.0 (2026-10-02): `RB-PHYSICS-001-FR-111` — unlimited boost as a
   drain rate, detected from the capture (ADR-0031). 409 tests in
   `rb_physics_bullet`.

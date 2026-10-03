@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Balls go into the goal
+**2026-10-03** · `RB-PHYSICS-001-FR-112` · ADR-0032
+
+- The owner's first recording with goals showed the simulated goal mouth
+  was partly blocked: a shot into the goal bounced back out, and a car
+  driving into the goal got shoved back. The rounded edges built around
+  the opening curved the wrong way and filled it, and the floor curve of
+  the back wall ran across it. Both are fixed: car error on that recording
+  fell from 23.4 to 2.3 uu/s per tick. 483 tests.
+
 ## Capture plugin survives freeplay resets
 **2026-10-03** · `RB-VERIFY-002-FR-001`
 

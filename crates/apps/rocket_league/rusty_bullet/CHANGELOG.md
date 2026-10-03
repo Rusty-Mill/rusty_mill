@@ -47,6 +47,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   arena meshes (ADR-0025). `LICENSE-MIT`/`LICENSE-APACHE` replaced by
   `LICENSE`.
 ### Fixed
+- The goal mouth is open (`RB-PHYSICS-001-FR-112`, ADR-0032):
+  `standard_arena` drops the goal cutout and corner fillets, which filled
+  it, and the back-wall floor seam stops at the posts
+  (`StaticQuarterPipe::span`).
 - BakkesMod capture plugin 1.2 no longer crashes Rocket League on a
   freeplay reset: it reads only live actors (`bDeleteMe` unset), takes the
   first live ball from `GetGameBalls()`, keeps timestamps increasing across

@@ -598,6 +598,9 @@ pub(crate) fn sphere_vs_quarter_pipe(
 ) -> Option<Contact> {
     let rel = position - pipe.axis_point;
     let along_axis = rel.dot(&pipe.axis_direction);
+    if along_axis < pipe.span.0 || along_axis > pipe.span.1 {
+        return None;
+    }
     let perp = rel - pipe.axis_direction * along_axis;
     let dist = perp.length();
 
