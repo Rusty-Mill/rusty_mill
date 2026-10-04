@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.126.0
+- Version: 0.127.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6212,6 +6212,28 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       than 3 uu/s, none worse); k = 30 car 5.65 uu/s (was 5.76).
     - `front` 0.178 (was 0.192), `side` 0.192 (was 0.219), `hitjump` car
       0.494 (was 0.574). Ball errors unchanged.
+- `RB-PHYSICS-001-FR-123` (a car on its roof pops up and rolls over on a
+  jump press; implemented and verified on the owner's capture,
+  ADR-0043): `drive::jump::auto_flip` ports RocketSim's
+  `Car::_UpdateAutoFlip`. On a fresh jump press while the car's body
+  touched an upward-facing surface last tick
+  (`DriveState::world_contact_normal`, RocketSim's `worldContact`, set
+  by `PhysicsWorld::step` from the car's static manifolds; normal
+  `z > 1/sqrt 2`) and the car is rolled past 2.8 rad, it pops the car
+  `AUTO_FLIP_SPEED` (200 uu/s) along minus its up axis and runs a
+  50 rad/s^2 roll torque toward upright for `0.4 * |roll| / pi` s.
+  Roll is RocketSim's `-atan2(right.z, up.z)`.
+  - Why: `hitjump.jsonl` 279.750 s, a jump press on the car's roof: 207
+    uu/s up and 4.6 rad/s of roll in the game, nothing in the simulator
+    (205 uu/s off).
+  - **Verification**:
+    - `world` tests `a_jump_press_on_the_roof_pops_the_car_up_and_starts_a_roll`,
+      `a_jump_press_upside_down_in_the_air_does_not_pop`.
+    - `hitjump` 279.750 s car velocity error 12.6 uu/s (was 205); the
+      press tick's spin error stays 4.1 rad/s (one tick of RocketSim's
+      torque is 0.42 rad/s, the game's roll is immediate), the ticks after
+      improve. One-step car 0.489 (was 0.494); `test2`, `front`, `side`
+      unchanged.
 
 
 ## Architecture and interfaces
@@ -7703,6 +7725,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.127.0 (2026-10-04): `RB-PHYSICS-001-FR-123` — a car on its roof pops
+  up and rolls over on a jump press, RocketSim's auto-flip (ADR-0043).
+  431 tests in `rb_physics_bullet`.
 - 0.126.0 (2026-10-04): `RB-PHYSICS-001-FR-122` — the wheel pushback's
   ERP is 0.1, calibrated from a recorded landing (ADR-0042). 429 tests
   in `rb_physics_bullet`.

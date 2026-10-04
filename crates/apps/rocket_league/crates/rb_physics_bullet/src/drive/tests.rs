@@ -156,6 +156,8 @@ fn step_with_input_and_dodge_flip(
         sticky_surface_up: None,
         was_on_ground: false,
         boost_used_per_second: BOOST_USED_PER_SECOND,
+        world_contact_normal: None,
+        auto_flip: None,
     };
     car.clear_forces();
     apply_driven_forces(
@@ -2425,6 +2427,8 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             sticky_surface_up: None,
             was_on_ground: false,
             boost_used_per_second: BOOST_USED_PER_SECOND,
+            world_contact_normal: None,
+            auto_flip: None,
         }
     );
 }

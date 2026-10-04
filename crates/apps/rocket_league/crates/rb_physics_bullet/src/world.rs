@@ -1024,6 +1024,16 @@ impl PhysicsWorld {
                     static_manifolds.push((0, ball_world_material(body), vec![contact]));
                 }
             } else {
+                // RocketSim's `worldContact`: the last static contact the
+                // car's body made this step, read by the next step's drive
+                // (`RB-PHYSICS-001-FR-123`).
+                let last_normal = found
+                    .last()
+                    .and_then(|(_, contacts)| contacts.last())
+                    .map(|contact| contact.normal);
+                if let Some(drive_state) = self.car_drive.get_mut(body_index - 1) {
+                    drive_state.world_contact_normal = last_normal;
+                }
                 for (material, contacts) in found {
                     static_manifolds.push((body_index, material, contacts));
                 }
@@ -4844,5 +4854,73 @@ mod tests {
             (v - Vec3::new(692.4, -1399.3, -63.2)).length() < 5.0,
             "landing rebound off: {v:?}"
         );
+    }
+
+    /// A car lying on its roof (`hitjump.jsonl` 279.742 s), sliding, with
+    /// `jump` held from `press_tick` on.
+    fn roof_jump_world(z: f32) -> PhysicsWorld {
+        let ball = RigidBody::standard_ball(Vec3::new(1000.0, 1000.0, 93.15));
+        let mut car = RigidBody::standard_car(Vec3::new(3.8, 4597.6, z));
+        // The recorded orientation: rolled 3.10 rad in RocketSim's sense,
+        // so the flip torque runs along +forward, as the recorded spin does.
+        car.orientation = Quat::new(0.759, -0.65, 0.012, -0.017).normalize();
+        car.linear_velocity = Vec3::new(18.7, -513.5, -12.4);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        // The recorded car had spent its flip before ending up on its roof;
+        // a fresh press would otherwise also fire the double jump.
+        world.car_drive[0].double_jump_available = false;
+        world
+    }
+
+    /// RB-PHYSICS-001-FR-123: a jump press on the roof pops the car away
+    /// from its own up axis (200 uu/s) and starts a roll about its forward
+    /// axis toward upright.
+    #[test]
+    fn a_jump_press_on_the_roof_pops_the_car_up_and_starts_a_roll() {
+        let mut world = roof_jump_world(39.4);
+        world.step(1.0 / 120.0);
+        let before = world.cars[0].linear_velocity;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        let car = world.cars[0];
+        let dv = car.linear_velocity - before;
+        assert!(
+            (dv.z - drive::AUTO_FLIP_SPEED).abs() < 25.0,
+            "expected a 200 uu/s pop, got {dv:?}"
+        );
+        let forward = car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0));
+        // One tick of 50 rad/s^2 less what the ground contact and air
+        // damping take back the same tick.
+        assert!(
+            car.angular_velocity.dot(&forward) > 0.15,
+            "expected a roll toward upright, got {:?}",
+            car.angular_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-123: the same press upside down in the air, with
+    /// nothing touched last tick, pops nothing.
+    #[test]
+    fn a_jump_press_upside_down_in_the_air_does_not_pop() {
+        let mut world = roof_jump_world(400.0);
+        world.step(1.0 / 120.0);
+        let before = world.cars[0].linear_velocity;
+        world.set_car_input(
+            0,
+            ControllerInput {
+                jump: true,
+                ..ControllerInput::default()
+            },
+        );
+        world.step(1.0 / 120.0);
+        let dv = world.cars[0].linear_velocity - before;
+        assert!(dv.z < 50.0, "popped in the air: {dv:?}");
     }
 }

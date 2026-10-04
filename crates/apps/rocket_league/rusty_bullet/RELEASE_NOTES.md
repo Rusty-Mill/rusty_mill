@@ -8,6 +8,17 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Jumping off your roof
+**2026-10-04** · `RB-PHYSICS-001-FR-123` · ADR-0043
+
+- A car lying upside down can press jump to pop itself up and roll back
+  onto its wheels. The simulator ignored that press, since no wheel was
+  touching. It now does what RocketSim does: a 200 uu/s pop away from
+  the surface and a roll torque toward upright. The one such press in
+  the recordings is now 13 uu/s off instead of 205; the roll builds up
+  over a few ticks here where the game's is immediate, which a
+  recording with more roof jumps could settle. 502 tests.
+
 ## Hard landings rebound like the game's
 **2026-10-04** · `RB-PHYSICS-001-FR-122` · ADR-0042
 
