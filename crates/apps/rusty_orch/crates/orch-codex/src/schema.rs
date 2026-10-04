@@ -11,10 +11,12 @@
 //!
 //! [`orch_cli::parse`] remains the single authority: it decides which
 //! kinds a role may write and rejects anything the schema let through.
+//! Under [`StopRule::BestEffort`] the `question` variant is left out, so a
+//! model constrained by the schema cannot even form one (ADR-0011).
 
-/// The schema text, written to a scratch file per run. Strictness is
-/// checked by `tests/contract.rs`.
-pub const OUTPUT_SCHEMA: &str = r#"{
+use orch_core::goal::StopRule;
+
+const HEAD: &str = r#"{
   "type": "object",
   "additionalProperties": false,
   "required": ["entries"],
@@ -23,7 +25,17 @@ pub const OUTPUT_SCHEMA: &str = r#"{
       "type": "array",
       "items": {
         "anyOf": [
-          {
+"#;
+
+const TAIL: &str = r#"
+        ]
+      }
+    }
+  }
+}
+"#;
+
+const FINDING: &str = r#"          {
             "type": "object",
             "additionalProperties": false,
             "required": ["kind", "confidence", "body", "refs"],
@@ -33,8 +45,9 @@ pub const OUTPUT_SCHEMA: &str = r#"{
               "body": { "type": "string" },
               "refs": { "type": "array", "items": { "type": "string" } }
             }
-          },
-          {
+          }"#;
+
+const QUESTION: &str = r#"          {
             "type": "object",
             "additionalProperties": false,
             "required": ["kind", "body", "refs"],
@@ -43,8 +56,9 @@ pub const OUTPUT_SCHEMA: &str = r#"{
               "body": { "type": "string" },
               "refs": { "type": "array", "items": { "type": "string" } }
             }
-          },
-          {
+          }"#;
+
+const ASSUMPTION: &str = r#"          {
             "type": "object",
             "additionalProperties": false,
             "required": ["kind", "body", "refs"],
@@ -53,8 +67,9 @@ pub const OUTPUT_SCHEMA: &str = r#"{
               "body": { "type": "string" },
               "refs": { "type": "array", "items": { "type": "string" } }
             }
-          },
-          {
+          }"#;
+
+const REVIEW: &str = r#"          {
             "type": "object",
             "additionalProperties": false,
             "required": ["kind", "verdict", "body", "refs"],
@@ -64,10 +79,14 @@ pub const OUTPUT_SCHEMA: &str = r#"{
               "body": { "type": "string" },
               "refs": { "type": "array", "items": { "type": "string" } }
             }
-          }
-        ]
-      }
-    }
-  }
+          }"#;
+
+/// The schema text for a run under `stop`, written to a scratch file per
+/// run. Strictness is checked by `tests/contract.rs`.
+pub fn output_schema(stop: StopRule) -> String {
+    let variants: &[&str] = match stop {
+        StopRule::Checkpoint => &[FINDING, QUESTION, ASSUMPTION, REVIEW],
+        StopRule::BestEffort => &[FINDING, ASSUMPTION, REVIEW],
+    };
+    format!("{HEAD}{}{TAIL}", variants.join(",\n"))
 }
-"#;

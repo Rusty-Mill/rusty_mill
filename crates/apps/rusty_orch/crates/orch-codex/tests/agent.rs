@@ -234,3 +234,29 @@ fn resumed_card_prompt_carries_answers_and_live_successors() {
     assert!(prompt.contains("The live referenced finding."));
     assert!(!prompt.contains("Plan::start rejects the author."));
 }
+
+#[test]
+fn best_effort_withdraws_questions_from_prompt_and_parser() {
+    use orch_core::goal::StopRule;
+    let (plan, board, _, _) = fixture();
+    let question = r#"{"entries":[{"kind":"question","body":"which branch?","refs":[]}]}"#;
+    let mut a = agent(ReplyFile::ok(question)).with_stop_rule(StopRule::BestEffort);
+
+    let err = a
+        .run_classified(Agent::Codex, task(&plan), &board)
+        .expect_err("questions are withdrawn under best effort");
+    assert!(
+        matches!(&err, ClassifiedError::Transient(e) if e.0.contains("question")),
+        "{err:?}"
+    );
+    let calls = a.runner().inner.calls.lock().expect("lock");
+    let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
+    assert!(prompt.contains("This run is best-effort"));
+    assert!(prompt.contains("kind is one of: finding, assumption."));
+    drop(calls);
+
+    // Under checkpoint the same reply is a question the dispatcher can block on.
+    let mut a = agent(ReplyFile::ok(question));
+    let out = a.run(Agent::Codex, task(&plan), &board).expect("ok");
+    assert_eq!(out[0].kind, EntryKind::Question);
+}

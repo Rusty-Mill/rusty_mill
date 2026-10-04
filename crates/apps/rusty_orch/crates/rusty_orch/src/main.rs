@@ -32,12 +32,15 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let agents = Agents::new(AgentsConfig {
-        ollama_model: args.ollama_model.clone(),
-        ollama_timeout: OLLAMA_TIMEOUT,
-        codex_repo: args.codex_repo.clone(),
-        codex_model: args.codex_model.clone(),
-    });
+    let agents = |stop| {
+        Agents::new(AgentsConfig {
+            ollama_model: args.ollama_model.clone(),
+            ollama_timeout: OLLAMA_TIMEOUT,
+            codex_repo: args.codex_repo.clone(),
+            codex_model: args.codex_model.clone(),
+            stop,
+        })
+    };
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
@@ -46,7 +49,7 @@ fn main() -> ExitCode {
         stdout: &mut stdout,
         stderr: &mut stderr,
     };
-    match cli::run(&args, &goal_json, agents, &mut streams) {
+    match cli::run_with(&args, &goal_json, agents, &mut streams) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             let _ = writeln!(streams.stderr, "rusty_orch: {e}");

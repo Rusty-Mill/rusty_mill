@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use orch_core::board::{Board, Entry, EntryKind};
+use orch_core::goal::StopRule;
 use orch_core::task::{Role, Task};
 use orch_core::{EntryId, Ref, TaskId};
 
@@ -145,9 +146,12 @@ fn ref_line(r: &Ref) -> String {
 }
 
 /// The output contract [`crate::parse`] enforces, phrased for a small model.
-pub fn format_spec(role: Role) -> String {
-    let kinds = allowed_kinds(role).join(", ");
-    format!(
+/// Under [`StopRule::BestEffort`] two rules are added: no question will be
+/// answered, so none is asked, and an unknown becomes an `assumption`
+/// entry (ADR-0011). Under `Checkpoint` the text is unchanged.
+pub fn format_spec(role: Role, stop: StopRule) -> String {
+    let kinds = allowed_kinds(role, stop).join(", ");
+    let mut spec = format!(
         "\nOUTPUT FORMAT\n\
          Reply with exactly one JSON object and nothing else:\n\
          {{\"entries\":[{{\"kind\":\"finding\",\"confidence\":\"high\",\"body\":\"...\",\"refs\":[\"E-1\",\"path:src/x.rs\"]}}]}}\n\
@@ -157,7 +161,17 @@ pub fn format_spec(role: Role) -> String {
          - review requires verdict: approve or changes_requested, and a review card includes exactly one review entry.\n\
          - body is a short non-blank statement, at most {MAX_BODY_CHARS} characters. Put detail behind refs.\n\
          - refs is an array of strings: E-<n> for a board entry listed above, or path:<repo path>, commit:<hash>, url:<address>.\n\
-         - Never settle a decision; propose it as a finding.\n\
-         - At most {MAX_ENTRIES} entries. At least one.\n"
-    )
+         - Never settle a decision; propose it as a finding.\n"
+    );
+    if stop == StopRule::BestEffort && !matches!(role, Role::Review { .. }) {
+        spec.push_str(BEST_EFFORT_RULES);
+    }
+    spec.push_str(&format!("- At most {MAX_ENTRIES} entries. At least one.\n"));
+    spec
 }
+
+/// What a best-effort run asks of an agent that may otherwise block on a
+/// question (ADR-0011).
+pub const BEST_EFFORT_RULES: &str = "\
+    - This run is best-effort: nobody will answer a question, so do not ask one.\n\
+    - When something you need is unknown, write an assumption entry stating what you are taking as true, then continue on that basis.\n";

@@ -20,4 +20,4 @@ mod schema;
 
 pub use agent::{CodexAgent, DEFAULT_TIMEOUT, SCRUBBED_ENV};
 pub use prompt::render;
-pub use schema::OUTPUT_SCHEMA;
+pub use schema::output_schema;
