@@ -23,7 +23,7 @@ inside the `rusty_mill` monorepo. The monorepo's own conventions (root
   the journal, the full-text index or the directory lock is made in the
   engine crate, and its tests run there. Here: `src/` (`record`,
   `generator`, `store` + the research backends, `durability`, `concurrency`,
-  `production`, `generic/{entity,memory,relation,reminder}.rs`, `server/`,
+  `production`, `generic/{entity,memory,relation,reminder}.rs` (and `generic::fair_play`, a re-export of the libs crate `rusty_fair_play_domain`), `server/`,
   `bin/`), `benches/`, `tests/`, `examples/`, `clients/python/`.
 - Features: default (front-door only: `ProductionStore`,
   `GenericProductionStore`, the domain stacks), `research` (the benchmarked

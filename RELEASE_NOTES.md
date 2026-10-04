@@ -13,6 +13,120 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi P4: the outer loop, calibration and run reports
+**2026-10-04** · [#483](https://github.com/Rusty-Mill/rusty_mill/pull/483) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `rsi run`, the outer loop. Each step:
+  - checks the incumbent out in a sparse, detached git worktree that holds only the harness;
+  - lets a proposer rewrite it;
+  - commits the result under `refs/rsi/<run>/<step>`, never on a branch, and rejects it as a path violation if anything but a regular file under `harness/src/` changed;
+  - builds it, grades it on fresh seeds, gates it (`screen`, then `confirm` on another fresh seed set) and appends the result to the run's lineage.
+- **Added:** `rsi-runtime`:
+  - `JsonlLineage`, an append-only, hash-chained `lineage.jsonl` with content-addressed `blobs/`. Every read re-verifies the chain and each entry's verdict.
+  - A git adapter.
+  - `ModelProposer`, whole-file rewrites from any chat model, and `ScriptedProposer`.
+  - `outer::run` and `outer::calibrate`.
+  - `report::summary` and `report::replay`.
+- **Added:** `rsi calibrate`. It grades the base harness on N disjoint seed sets and writes the noise band and the margin `z·√2·σ̂`.
+- **Added:** `rsi report [--replay]`. Replay re-grades every stored submission bit for bit and re-runs every inner run from its transcript.
+- **Added:** `rsi-core` gains the `Proposer` and `LineageStore` ports. The proposer sees only `Precedent`s (verdicts, grades, public scores), so a per-task private score cannot reach it.
+- **Changed:** model configuration is per role, from `RSI_INNER_*` and `RSI_OUTER_*` (`_MODEL`, `_BASE_URL`, `_API_KEY`).
+- **Tests:**
+  - **10-step run.** A 10-step run on the real suite in a throwaway repository, with scripted models, gets every verdict right: not better, within noise, path violation (manifest, symlink, private labels), buggy and accepted. The acceptance comes from a fresh, disjoint seed set.
+  - **Replay and tampering.** Replay reproduces all 27 grades and 27 trajectories. An altered blob, a forged verdict and an overwritten run are all caught.
+  - **Mutation checks.** The run test fails when the allowlist is removed, when re-evaluation reuses seeds, or when the proposer gets stale history.
+- **Fixed (review):**
+  - Proposer writes refuse a symlinked ancestor directory, not just a symlinked leaf, so a write cannot escape the worktree.
+  - Refs are create-only, and a run claims `refs/rsi/<run>/base` first: a second run directory with the same name is refused instead of overwriting the first run's refs.
+  - A missing or baseline-less lineage is an error, not a successful replay. A partial run is reported as `INCOMPLETE`, and `--replay` on it fails after checking what was recorded.
+- Known limitations:
+  - The outer model must be a local OpenAI-compatible endpoint (there is no TLS yet). A Codex CLI proposer is deferred.
+  - The parent is always the incumbent.
+  - The outer model's token cost is not yet recorded in lineage.
+
+---
+
+## rusty_fair_play: a web front end for the Fair Play domain
+**2026-10-04** · [ADR-0001](crates/apps/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md) · follows [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md)
+
+- **Added:** `rusty_fair_play` (`crates/apps/rusty_fair_play`), a JSON HTTP API over the embedded `fair_play` stacks on `rusty_http`/`rusty_json`/`rusty_url` (rusty_tick's sans-IO router and thread-per-connection adapter): one boot read with every card's derived state, people, card patch/create/split/reset/baseline/position, and an idempotent `/seed`. The deck ships in the binary and loads on first start. An optional bearer token; without one the server is loopback-only.
+- **Added:** the web UI in its `web/`: React/TypeScript/Vite/Tailwind/Zustand with hash routes — a deck board in six suit shelves with owner chips and `edited`/`custom`/split badges, filters and search; a card pane with dealing, CPE editing, minimum standards, notes, a baseline diff and reset, ordered children and a split dialog; a players page; a balance page with all-cards and leaf-only bars and the "still undealt" leaves. An in-browser `MemoryAdapter` runs the same rules for unit tests and a demo mode; the contract runs against the real binary; Playwright drives the built UI against it. Two CI jobs mirror rusty_tick's.
+- **Changed:** the Fair Play domain is its own libs crate, `rusty_fair_play_domain` (`crates/libs/storage/`), re-exported by `rusty_multimodal_db` as `generic::fair_play` the way the engine is (ADR-0124), so the app depends on no other app crate (ADR-0003's layer rule). The seed loader moved from `examples/support/` into it as `seed` (pure text parsing, file wrappers beside it, `DECK_CSV` embedded); the seed CLI, the benchmark example, the crash writer and the domain's tests moved with it; the `fair_play_seed` example's `--cards` is now optional.
+- **Added:** the gaps the first cut named, closed. The domain crate gains guarded deletes — `delete_card` (leaves only), `unsplit_card` (ADR-0137's merge/unsplit hook: the subtree, deepest first, parent kept), `delete_person` (holding nothing) — and `reorder_children` (an exact list of the children, validated before anything is written). The API exposes them (`DELETE /cards/{id}`, `POST …/unsplit`, `PUT …/children/order`, `DELETE /people/{id}`; 409 when a guard refuses). Every card carries an `etag`, and a `treeEtag` over its whole subtree; a write may send the right one as `If-Match` (the subtree tag for unsplit and reorder) and a mismatch is 412 with the current card. The web UI uses all of it: delete and unsplit with confirmation, re-parent and suit selects, one-request child reorder, the full 100-card deck in demo mode, and `If-Match` on every card write using the version the edit was based on, with a kept draft and an Overwrite / Discard notice on a conflict.
+- **Added:** `rusty_serve` (`crates/libs/net/rusty_serve`): the blocking `rusty_http` HTTP/1.1 server and path-safe static file loader that rusty_tick and rusty_fair_play both carried, now one crate with a sans-IO `Handler` trait; each app's `server.rs` is a few lines binding its router to it.
+- **Fixed (review):** the `seed` subcommand now takes the directory lock, so it is refused while a server holds the directory (a separate-process test checks the refusal and that no file changed). "The deck is loaded" is a `deck.loaded` marker written after a full load, not the presence of card 1, so a deleted deck card stays deleted across restarts and an interrupted first load finishes on the next start. In the browser, a save no longer discards what was typed while it was in flight, and a slow or out-of-order snapshot can no longer roll back an acknowledged write or drop a new card. `rusty_multimodal_db`'s Fair Play server adapter maps the new `CardError` variants.
+- Known limitations: a child reorder is one validated request, but the positions are then written one by one, so it is not crash-atomic (equal positions fall back to id order). `If-Match` is optional on the wire; a client that omits it still wins last-writer. Conflicts are per card, not per field. `POST /seed` also restores a deleted deck card.
+
+---
+
+## rusty_rsi P3: the inner agent a0, its broker and model clients
+**2026-10-04** · [#478](https://github.com/Rusty-Mill/rusty_mill/pull/478) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `crates/apps/rusty_rsi/harness` (`rsi-harness`), a0, the std-only inner agent. It ports AIDE0: five drafts, then debug a random buggy leaf (p = 0.5, debug depth at most 3) or improve the best node, with the full history in every prompt; it submits each new best. The runtime compiles `src/lib.rs` as a binary with plain `rustc` in the sandbox, so a candidate has no manifest, dependencies or build scripts. A compile error is a build failure, not a crash.
+- **Added:** `rsi-runtime`:
+  - The broker: a length-prefixed binary protocol (`llm`, `eval`, `submit`) over a socket pair passed as the agent's stdin. `LiveService` meters model tokens and wall-clock time with `CostMeter`; once the budget is spent only `submit` works, and the agent is killed at the wall-clock budget plus a grace period.
+  - Every exchange is recorded. `HarnessProcess::replay` re-runs an agent against its transcript, without the model, and fails on the first divergent request.
+  - `OpenAiModel`, an OpenAI-compatible client over `rusty_http` (plain HTTP; local Ollama by default), and `ScriptedModel` for CI. A response without token usage is refused.
+  - The agent's sandbox refuses every new socket, so the broker socket is its only channel.
+- **Added:** `rsi inner`, one inner run with a live model, configured only from the environment (`RSI_INNER_MODEL`, `RSI_INNER_BASE_URL`, `RSI_INNER_API_KEY`).
+- **Added:** `rsi-core` gains the `Harness` and `ChatModel` ports and `PublicTask::description`; each toy task gains `public/task.md`.
+- **Tests:** end-to-end tests for invariant 2 (the token budget stops a0 after exactly the affordable calls; an agent that ignores the wall clock is killed and keeps its submission), invariant 4 (a run replays to the same submission without the model; a changed task diverges) and invariant 1(b) (the agent cannot read private or public labels, the task or the repository, or open TCP or Unix sockets). A mutation check confirmed the isolation and budget tests fail when the socket rule or the budget check is removed.
+- **Security (review):**
+  - **Socket rules.** The agent can create no socket of any kind; `socketpair` is now refused too. The build refuses `socket` but keeps anonymous socketpairs, which rustc needs to start its linker. Every sandbox, solutions included, refuses `io_uring`, which would bypass seccomp.
+  - **Transcript cap.** The broker's transcript is capped at 64 MiB, charging each exchange its frames plus a fixed overhead. The cut is deterministic, and the last accepted submission is kept.
+  - **Deadline.** Model calls and evaluations get the budget's remaining time as a hard limit. A call cut off at the deadline counts as an exhausted budget, so the run keeps its earlier submission.
+  - **Response size.** Every HTTP response framing, chunked included, is capped at 16 MiB while it is read.
+  - **API key.** With a key configured, nothing the endpoint sent reaches a diagnostic: neither an error body nor a head, framing or body parser error that quotes it.
+  - **DNS.** The model endpoint is resolved once, when the client is built, under a timeout. Only one lookup may run at a time, so a stalled resolver cannot pile up threads. Connecting uses the call's remaining time.
+  - **Tests and mutation checks.** Each fix has regression tests, and each test was confirmed red with its defence removed.
+- Known limitations:
+  - `https://` model endpoints are refused until TLS is wired in.
+  - The last model call can overshoot the token budget by its prompt tokens (admit-then-record).
+  - Solutions, unlike the agent, may still create Unix sockets.
+
+---
+
+## rusty_multimodal_db: the Fair Play domain (ADR-0137)
+**2026-10-04** · [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md) · no wire change
+
+- **Added:** `generic::fair_play` — Eve Rodsky's household-task cards as three tables on the one-index/one-scan stack: `Person`, `CardDefault` (the shipped text, read-only by convention) and `Card`, a self-referential tree with an explicit owner per card, CPE as three fields, and a state (`Original`/`Edited`/`Custom`) derived against the baseline rather than stored. Queries over the generic traits: held by, unassigned and unassigned leaves, by suit, by number, balance (all or leaf-only), reassign, ordered children, chain to root, nested tree, leaves under, owner coverage, split, custom card, state, diff, reset, counts.
+- **Added:** `split_card`, ordered so every crash prefix is a valid store (children first, parent last), proven by `tests/fair_play_crash.rs` with a real `SIGKILL` after each step; the seed loader `examples/fair_play_seed.rs` for the supplied 100-card deck (hand-rolled CSV, refusals by file and line, idempotent by deterministic id, never overwriting a family's edits); `examples/fair_play_bench.rs`.
+- **Added:** `server::fair_play` — `card`, `person` and `card_default` adapters through `serve_tables`, `fair_play_server`, the socket suite and a Python driver against the three-table server.
+- **Changed:** `rusty_multimodal_db_engine`: `Reversed::inner`, so a stack with two `Reversed` layers reaches the inner one's `Children`.
+- **Measured:** a depth-5 parent-chain walk costs 1.3 µs against 160 ns for one read, so no denormalized `root_card_id`; state queries scan at about 1 µs a card (100 cards 0.1 ms, 5 000 cards 18 ms), so no second index.
+- Known limitations: the stack cannot enforce `number` uniqueness, acyclicity or the origin/number/baseline invariant (the domain functions do; the raw traits bypass them, tested); the wire carries one relation per table, so `owner_id` is a filterable field there, not an index; `card_default` is read-only on the wire and by convention in-process; no delete in the domain (merge/unsplit and deal history are named hooks).
+
+---
+
+## rusty_rsi P2: sandboxed execution, toy tasks and private grading
+**2026-10-04** · [#476](https://github.com/Rusty-Mill/rusty_mill/pull/476) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `rsi-runtime`:
+  - `ProcessExecutor` runs untrusted programs through the `rsi __sandbox` helper. The helper applies rlimits, then Landlock with a read allowlist, then a seccomp block on internet sockets, then `exec`s the program. Setup failures come back through a close-on-exec status file, so a run fails closed.
+  - Wall-clock kills take down the whole process group.
+  - `TaskDir` (`task.json`), `LocalTask` (public scoring) and `SandboxedGrader` (private grading through the separate `rsi __grade` process).
+- **Added:** three toy tasks, one per family. Each has public and private splits and a naive baseline, generated deterministically by `tasks/generate.py`:
+  - `ml-regression` (R²)
+  - `tsp-heuristic` (tour ratio)
+  - `scaffold-oracle` (accuracy around a noisy oracle)
+- **Tests:** end-to-end tests for invariant 1 (a solution cannot read private labels during public or private runs; the runner refuses a sandbox that could reach the task) and invariant 5:
+  - internet sockets are denied, and so are writes outside the work directory;
+  - memory, CPU and wall-clock limits are enforced;
+  - sandbox setup failures fail closed.
+
+  A mutation check confirmed these tests fail when the confinement or the rlimits are removed.
+- **Security (review):**
+  - **Output ingestion.** A solution's output is read once, without following links or blocking. Only a regular single-link file within the size limit is accepted, and that snapshot goes to the private grader on stdin.
+  - **Containment.** A seccomp filter forbids `setsid` and `setpgid`, so the process group is the whole job. The executor kills it and verifies through `/proc` that no live member survives.
+  - **Regression tests.** Symlink and FIFO outputs, input swapping, and detached grandchildren at normal exit and at timeout. Each was confirmed red before the fix, and red again when its defence is removed.
+- **Fixed:** `rsi-runtime` now really has no external dependencies. The workspace's `rusty_json` entry was silently re-enabling the serde default feature.
+- Known limitations:
+  - Linux only; elsewhere every run fails closed.
+  - `RLIMIT_NPROC` does not bind root.
+  - The harness-family oracle is a readable simulator until the P3 model broker exists.
+
+---
+
 ## rusty_tick: calendar test no longer fails on Sundays
 **2026-10-04** · [#474](https://github.com/Rusty-Mill/rusty_mill/pull/474)
 

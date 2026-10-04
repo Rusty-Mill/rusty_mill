@@ -1,0 +1,34 @@
+[package]
+name = "rusty_fair_play"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+description = "Fair Play household cards: a JSON HTTP API and web UI over rusty_multimodal_db's fair_play domain"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+# The domain, embedded: the three stacks, the queries, the seed loader
+# with the deck inside it (a libs crate, so this app depends on no other
+# app crate — ADR-0003).
+rusty_fair_play_domain = { workspace = true }
+# The generic query traits and the data-directory lock.
+rusty_multimodal_db_engine = { workspace = true }
+# HTTP/1.1 framing, JSON and query-string decoding come from the
+# monorepo's own crates (rusty_tick's ADR-0001), not hyper/axum/serde_json.
+rusty_http = { workspace = true }
+rusty_serve = { workspace = true }
+rusty_json = { workspace = true }
+rusty_url = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+# Etags: SHA-256 over a card's serialized form, so `If-Match` can refuse a
+# write over a card that changed since it was read, with no stored version.
+sha2 = "0.10"
+thiserror = "1"
+uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

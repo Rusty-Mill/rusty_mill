@@ -72,13 +72,23 @@ A new family at `crates/apps/rusty_rsi/`, with `layer = "apps"`:
 | Member | Path | Role | Deps (workspace → external) |
 |---|---|---|---|
 | `rsi-core` | `crates/rsi-core` | Pure domain: no I/O, no async, no clock. | `rusty_err`, `rusty_rsa` (sha256 for the lineage hash chain) → none |
-| `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_http`, `rusty_json`/`rusty_serde`, `rusty_rsa` (sha256), `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimit) → none planned |
+| `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_err`, `rusty_json` (no default features), `rusty_http` (sync adapter only); on Linux `platform`, `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimits, `killpg`) → none |
 | `rsi-cli` | `crates/rsi-cli` | Composition root: `rsi run \| calibrate \| report`, plus hidden `rsi __sandbox` / `rsi __grade` entry points. | the two above |
-| `rsi-harness` | `harness/` | **The only mutable surface**: the inner agent. It has zero dependencies (std only). | none |
+| `rsi-harness` | `harness/` | **The only mutable surface**: the inner agent. It has zero dependencies (std only). A library to Cargo; the runtime compiles `src/lib.rs` as the binary (§3). | none |
 
 There are no other crates, and none will be added before a second real
 call site exists. Tasks are data, not crates:
-`crates/apps/rusty_rsi/tasks/<name>/{task.toml, public/, private/}`.
+`crates/apps/rusty_rsi/crates/rsi-runtime/tasks/<name>/{task.json, public/,
+private/}`. Two deviations from this ADR's first draft, both made in P2:
+
+- **`task.json`, not `task.toml`.** The workspace has no first-party TOML
+  parser (only the external `toml` crate), and `rusty_json` is already a
+  dependency, so a JSON manifest keeps `rsi-runtime` free of external
+  dependencies.
+- **Tasks live inside `rsi-runtime`'s directory.** CI's
+  `affected_crates.py` maps a changed file to the crate whose directory
+  contains it. Data outside every crate directory would never re-run the
+  tests that consume it, so a task edit has to belong to a crate.
 
 This family is `apps` and therefore may depend only on
 `foundation`/`platform`/`libs`. `check_workspace_layers.py:98-101`
@@ -94,16 +104,17 @@ inner loop cannot score privately.
 
 | Port | Contract | Adapter (`rsi-runtime`) |
 |---|---|---|
-| `PublicTask` | `public_score(&Solution) -> Result<Score>` | Sandboxed run of the solution on public inputs, then a public metric. |
-| `PrivateGrader` | `private_score(&Solution, Seed) -> Result<Score>` | An out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
-| `Harness` | `run(&PublicTaskView, &Budget, Seed) -> Result<InnerOutcome>` (chosen solution, `CostUsage`, transcript id) | Builds the candidate, spawns it in the sandbox, and serves it over a broker socket. |
-| `Proposer` | `propose(&[LineageEntry], &Workspace) -> Result<Proposal>` | `OpenAiCompatProposer` (HTTP) and `CodexCliProposer` (subprocess); `ScriptedProposer` in tests. |
-| `Executor` | `exec(&SandboxSpec, &Command) -> Result<ExecOutcome>` | Linux: rlimits → Landlock → seccomp → exec. Fails closed where these are unsupported. |
+| `PublicTask` | `baseline()`, `public_score(&Solution, Seed, time limit) -> Result<Attempt>` (score or buggy, feedback, wall time) | `LocalTask`: sandboxed run on the public split, scored in-process. |
+| `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
+| `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
+| `ChatModel` | `complete(&[Message], max_tokens, timeout) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
+| `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests. A Codex CLI proposer is deferred (§7, as built). |
+| `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
-| `LineageStore` | `append(LineageEntry) -> Result<EntryId>`, `iter()`, `verify()` | Append-only JSONL plus a content-addressed blob dir (see §6). |
+| `LineageStore` | `append(&LineageEntry) -> Result<Digest>` (the entry's chain hash), `entries()` (verifies the chain first) | `JsonlLineage`: append-only JSONL plus a content-addressed blob dir (see §6). |
 
 Each trait lands in `rsi-core` in the same phase as its first adapter
-(P2: `PublicTask`, `PrivateGrader`, `Executor`; P3: `Harness`; P4:
+(P2: `PublicTask`, `PrivateGrader`, `Executor`; P3: `Harness`, `ChatModel`; P4:
 `Proposer`, `LineageStore`), so no port is defined before something
 implements it.
 
@@ -160,7 +171,7 @@ Why a broker rather than letting the harness call the model itself:
 b_tokens` or `wall ≥ b_wall`, every op except `submit` returns
 `BudgetExhausted`. At `b_wall + grace` the runtime kills the process
 group. If a task has no submission, it scores the task's declared floor
-(`task.toml: floor`).
+(`task.json: floor`).
 
 `a0` ports AIDE0's behaviour:
 
@@ -172,6 +183,131 @@ group. If a task has no submission, it scores the task's declared floor
 - It submits the best node by public score.
 - It is seeded from `--seed` (its own SplitMix64), so it is deterministic
   given the broker's responses.
+
+**As built (P3).**
+- **Build.** The runtime copies the candidate's `src/` (directories and
+  regular files only, at most 4 MiB; a symlink is a build failure) into a
+  fresh build directory and runs, in the sandbox,
+  `rustc --edition 2021 -O --crate-type bin --crate-name rsi_harness
+  src/lib.rs`. `src/lib.rs` is the binary root and its `pub fn main` the
+  entry point. To Cargo the crate is a library with no `main.rs`, so CI
+  builds, lints and unit-tests a0 as an ordinary workspace member. The
+  build reads only system directories, the toolchain's sysroot (found once,
+  outside the sandbox, with `rustc --print sysroot`) and the copy.
+- **Channel and socket rules.** The broker socket is one end of a
+  `socketpair`, passed as the agent's standard input. The seccomp filter
+  (inherited by every descendant) takes a `Sockets` rule:
+  - **Agent: `None`.** `socket(2)` and `socketpair(2)` fail with `EPERM`,
+    so the inherited socket is the only way out: no network, and no Unix
+    or abstract socket either (Landlock covers neither).
+  - **Build: `NoEndpoints`.** `socket(2)` fails, so nothing can reach an
+    endpoint, but anonymous socketpairs work. rustc starts its linker
+    through std's fork-and-exec path, which reports exec errors over an
+    `AF_UNIX` socketpair, so refusing it breaks every build. A socketpair
+    connects only processes inside the job, and the build runs no
+    candidate code (no build scripts or proc-macros).
+  - **Solutions: `NoInternet`** (P2, unchanged).
+  - **Every sandbox:** `io_uring_setup`, `io_uring_enter` and
+    `io_uring_register` fail with `EPERM`, because `io_uring` operations
+    (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, ...) bypass seccomp.
+- **Frames.** Length-prefixed binary (`u32` big-endian length, a tag byte,
+  then length-prefixed UTF-8 fields), because a std-only agent has no JSON
+  parser. `rsi-runtime/src/protocol.rs` and `harness/src/broker.rs` each
+  pin the same golden bytes. A malformed or oversized frame ends the
+  session; it is not an error.
+- **Metering.** `LiveService` charges model tokens from the endpoint's
+  `usage` field (a response without it is refused as unmetered) and asks
+  for at most min(per-call cap, tokens left). Wall-clock time runs from
+  session start and is charged before and after every operation. `submit`
+  is free and stays open after exhaustion. The agent process is killed at
+  `b_wall + grace`.
+- **Deadline.** No model call or evaluation outlives the wall-clock
+  budget. `ChatModel::complete` and `PublicTask::public_score` each take
+  the time left as a limit. `OpenAiModel` bounds the whole call, not each
+  read, so a server that drips bytes cannot stretch it.
+  - **DNS is outside every call.** `OpenAiModel` resolves its host once,
+    when it is built and before any budget starts.
+    - An IP literal needs no lookup.
+    - A name is looked up on a resolver thread, which the caller waits on
+      for at most 10 s.
+    - std's resolver cannot be cancelled, so only one lookup may run at a
+      time. A stalled resolver strands one thread, not one per attempt.
+  - **Connect is inside the call.** Connecting uses the time left before
+    the call's deadline. An evaluation's
+  limits are cut to the time left, and its process group is killed at that
+  point. A call cut off by the deadline is answered `exhausted`, so the
+  run keeps its earlier submission; a call that fails while time remains
+  is an endpoint failure.
+- **Transcript bound.** The transcript lives in the runtime's memory,
+  outside the agent's limits, so it is capped at 64 MiB. Each exchange
+  is charged its frames plus 256 bytes, so floods of tiny requests are
+  bounded too. A request is served only if a largest-possible exchange
+  still fits, so the cut falls at the same request in a replay, and the
+  last accepted submission is kept. A response larger than a frame is
+  replaced by `refused`.
+- **Model failures** (endpoint down, HTTP error, malformed reply) end the
+  run with `RuntimeError::Model`; they are infrastructure, never graded.
+- **Transcript.** Every exchange, in order, encoded as the same frames.
+  `HarnessProcess::replay` serves the recorded responses, fails with
+  `RuntimeError::Broker` as soon as the agent sends a request the recording
+  did not, hangs up where the recording ends (as the live session ended,
+  whether the agent exited or was killed), and returns the replayed final
+  submission.
+- **Task description.** Each task's `public/task.md` (goal, data formats,
+  solution contract, metric) is staged into the agent's work directory.
+  The agent never sees data files; it learns about them through `eval`.
+- **Models.** `OpenAiModel` speaks OpenAI-compatible `/chat/completions`
+  over plain HTTP through `rusty_http`'s sync adapter; `https://` endpoints
+  are refused until TLS is wired in. The API key comes from the
+  environment and is redacted from `Debug`. With a key configured, nothing
+  the endpoint sent reaches a diagnostic, because an endpoint may echo a
+  rejected key in full or in part. That covers error bodies and the
+  parser errors that quote the response head, its framing (for example a
+  `Content-Length` or chunk-size line) or the body. Each diagnostic still
+  names its category. Every response framing,
+  chunked included, fails as soon as the body passes 16 MiB.
+  `ScriptedModel` serves CI.
+  `rsi inner` reads `RSI_INNER_MODEL`, `RSI_INNER_BASE_URL` (default:
+  local Ollama) and `RSI_INNER_API_KEY`.
+- **Tests (`rsi-cli/tests/inner.rs`).**
+  - Invariant 2: a0 with 1,200 tokens at 150 per call gets exactly 8 calls,
+    and the 8th program's evaluation is refused. An agent that ignores the
+    wall clock is killed at `b_wall + grace` and keeps its earlier
+    submission.
+  - Invariant 4: a run replays from its transcript to the same submission
+    without calling the model, and a changed task description diverges.
+  - Invariant 1(b): all of these fail with `PermissionDenied`:
+    - reads of private labels, public labels, the task directory and the
+      repository;
+    - a TCP connect, a Unix socket and a socketpair;
+    - a connect to an abstract Unix endpoint the test listens on, which
+      sees no connection.
+
+    An agent whose sandbox could reach a protected path is not started.
+  - Deadline: a model endpoint that accepts and never answers, and an
+    evaluation that sleeps for a minute, both end at the 2 s budget. The
+    earlier submission is kept, and no solution process survives.
+  - A candidate that does not compile is a `BuildFailure`.
+- **Unit tests.** A seccomp interpreter checks that the filter refuses
+  exactly the listed syscalls under each rule. Other unit tests cover the
+  transcript cap (a flood of refused submissions and exhausted calls, with
+  a deterministic cut and the submission kept), the model and evaluation
+  deadlines, a silent and a dripping endpoint, oversized bodies in every
+  framing, and a sentinel key echoed by a 401 (absent from `Display`,
+  `Debug` and the CLI's `rsi inner: {error}` line).
+- **Mutation check.** Each defence, removed alone, turns its test red:
+  - the socket rule, then the socketpair half of it (isolation);
+  - the budget admission check (token budget);
+  - the transcript cap;
+  - the model deadline and the evaluation deadline;
+  - the chunked body cap;
+  - the key withholding, then its extension to parser errors;
+  - the one-lookup guard and the lookup timeout.
+- **Known limits.** Solutions (not the agent) can still create Unix
+  sockets, as P2 allows. A model call cut off by the deadline is not
+  charged tokens, because the endpoint reported none. The token cap is admit-then-record, so the last
+  call may overshoot by at most its own prompt tokens (its completion is
+  capped at the tokens left).
 
 ### 4. Private isolation (invariant 1)
 
@@ -196,6 +332,77 @@ group. If a task has no submission, it scores the task's declared floor
   - (b) Likewise for the harness.
   - (c) With Landlock unavailable, the executor refuses to run rather
     than running unconfined.
+
+**As built (P2).**
+- **Solution runs.** A solution runs as `python3 solution.py
+  data/<inputs> output.txt` in a fresh work directory. That directory holds
+  the solution, the task's shared public files and one split's inputs,
+  staged by the runtime. The task directory itself is never in the sandbox.
+  - Before every run, `SolutionRunner` checks
+    `SandboxSpec::can_reach(task root)` and refuses if the sandbox could
+    reach it.
+  - Read roots are `/usr`, `/lib`, `/lib64` and `/bin`, canonicalised.
+    `/etc` is excluded: Python needs none of it.
+- **The helper.** The sandbox helper is the `rsi` binary itself
+  (`rsi __sandbox`), single-threaded from birth. It applies these steps in
+  order, then `exec`s the program:
+  1. rlimits: CPU (soft, plus a hard limit 1 s later), address space,
+     file size, descriptors, processes, and core dumps set to 0;
+  2. Landlock;
+  3. seccomp.
+- **Fail closed.** A step that is not `Enforced` is a setup error. The
+  helper writes it to a status file that the parent created and the helper
+  opened *before* confining itself. The descriptor is close-on-exec, so the
+  file stays empty after a successful `exec`, and the untrusted program can
+  neither reach it nor forge it. Any non-empty status file aborts the run
+  with `RuntimeError::Sandbox`.
+- **Wall-clock limit.** The executor enforces it by `SIGKILL` to the whole
+  process group, and kills the group again after every exit so stragglers
+  die too.
+- **Tests.**
+  - (a) is `a_solution_cannot_read_private_*` (public scoring and private
+    grading).
+  - (c) is covered two ways. `sandbox_setup_failure_fails_closed` uses an
+    un-addable Landlock root, so the program never runs. The
+    `require_enforced` unit test covers `NotEnforced` and `Unsupported`.
+    Off Linux, `execution_fails_closed_off_linux` runs on CI's Windows job.
+  - (b) is `the_agent_cannot_reach_private_data_the_repository_or_any_socket` (P3).
+- **Mutation check.** With the Landlock and seccomp step removed, exactly
+  the five confinement tests fail. With the rlimits removed, the memory and
+  CPU tests fail.
+- **Untrusted output (review of #476).** The parent reads `output.txt`
+  outside the sandbox, so the file is treated as hostile.
+  `output::read_untrusted` opens it once with `O_NOFOLLOW | O_NONBLOCK`. It
+  accepts only a regular file with one link and reads at most the task's
+  file-size limit from that descriptor.
+  - A symlink to private labels, a FIFO, a device or a hard link scores
+    the floor promptly, and a path swapped after the open has no effect.
+  - The bytes read are the only snapshot: private grading sends them to
+    `rsi __grade` on stdin (`--output -`) and never reopens the path.
+  - Public scoring reads inputs from the task directory, never from the
+    work dir the solution controlled.
+- **Job containment (review of #476).** A process can leave its process
+  group only through `setsid` or `setpgid`. A second seccomp filter, stacked
+  on the socket filter, makes both fail with `EPERM` (and refuses x32-ABI
+  syscalls), so the process group *is* the job.
+  - After every exit or timeout the executor `SIGKILL`s the group, then
+    scans `/proc` until no live member remains.
+  - If any member survives 2 s of that, the run fails closed
+    (`RuntimeError::Sandbox`).
+  - Cost: `subprocess.Popen(..., start_new_session=True)` and similar
+    raise `PermissionError` inside the sandbox.
+  - This stays within this ADR's scope: no cgroups, no namespaces,
+    unprivileged, and it works on CI's kernel.
+- **Known limit.** `RLIMIT_NPROC` counts every process and thread of the
+  user, not just the sandboxed tree, and the kernel does not apply it to
+  root.
+  - It is therefore set high: `PROCESS_LIMIT` = 4096. CI showed why. At 64,
+    `subprocess.Popen` failed with `EAGAIN` because the runner's
+    (non-root) user already had that many threads; locally the run was
+    root and unaffected.
+  - It is a fork-bomb brake, not a quota. The wall-clock kill of the
+    process group is what bounds a run, which is one more reason cgroups
+    stay listed under Out of scope.
 
 ### 5. Budget, noise and the accept gate (invariants 2, 3)
 
@@ -282,6 +489,135 @@ For step k:
 Both the `CodexCliProposer` subprocess and the HTTP proposer run under
 the same Landlock read allowlist. Network is allowed there, since that
 is the outer model's endpoint.
+
+**As built (P4).**
+- **Ports.** `Proposer::propose(&[Precedent], &Path)` edits the worktree in
+  place. `rsi_core::precedents` is the only way to build its input: per
+  candidate, the verdict, the first-round grade, a build or path note, and
+  the first round's public scores. A per-task private score has no field
+  to live in. Inner-run transcripts are not passed (they are large); the
+  public scores stand in for them.
+- **Worktrees.** `git worktree add --detach --no-checkout`, then
+  `sparse-checkout set --no-cone /crates/apps/rusty_rsi/harness/`, then
+  `checkout`, so the proposer sees only the harness crate.
+  - `git add --all --sparse` stages everything, including files created
+    outside the sparse checkout, without mistaking unchecked-out files for
+    deletions.
+  - `git diff --cached --raw -z --no-renames` lists each path with its new
+    mode.
+  - The allowlist accepts only regular files (modes `100644`, `100755`,
+    or a deletion) under `crates/apps/rusty_rsi/harness/src/`.
+  - A violation is committed (for the audit trail) and recorded as
+    `PathViolation`, and never built.
+  - Every git call runs with hooks disabled (`core.hooksPath=/dev/null`),
+    no signing and a fixed identity.
+- **Refs and run names.** Candidates are committed under
+  `refs/rsi/<run>/<step>`, where `<run>` is the run directory's name
+  (lowercase, digits, `-`, `_`). `rusty_uuid` is not used: an explicit
+  directory is simpler to find and to reason about.
+  - **Claims.** Every ref is created with `git update-ref --stdin`
+    `create`, which fails if the ref exists. A run first claims
+    `refs/rsi/<run>/base`, before writing anything, so a second run
+    directory with the same name is refused and the first run's refs and
+    candidates are never overwritten.
+- **Loop.** The parent is always the incumbent (AIDE²'s rule). `ucb1` and
+  `softmax` selection stay in core, unused until a run needs them.
+  - **Each step:** propose, stage, commit, check the allowlist, build
+    (a compile error is `Buggy`, with the first 4,000 characters of the
+    compiler output), grade round 0, `screen`, grade round 1 on a fresh
+    seed set, `confirm`, append.
+  - **The incumbent's grade** after an acceptance is the fresh grade.
+  - **Infrastructure failures** end the run; entries already appended
+    stay valid.
+- **Grading.**
+  - **Runs.** Each round runs every task once per seed
+    (`seed_set(run_seed, candidate, round, n)`), all under the same budget.
+  - **Recorded per task:** the submission's public score, its private
+    score (the floor if there was no submission), the submission and
+    transcript blobs, and the inner cost.
+- **Lineage file.** Each line is
+  `{"hash":"<64 hex>","prev":"<64 hex>","entry":<entry>}`.
+  - **Exact bytes.** The fixed-width prefix lets a reader recover the
+    entry's exact bytes, which `hash` covers.
+  - **Encoding.** Scores, grades, margins and 64-bit seeds are decimal
+    strings, which round-trip exactly; durations are integer nanoseconds.
+  - **Validation.** Reading re-runs `LineageEntry::new`, so a recorded
+    verdict must still follow from its evidence.
+  - **Create vs open.** `JsonlLineage::create` makes a new, empty
+    lineage and fails if one exists; `open` fails if there is none, so a
+    missing lineage is never read as an empty run.
+  - **Completeness.** `report::check` requires a baseline first, then
+    candidates in step order, at most `steps` of them. A run without a
+    baseline has nothing to report or reproduce. A valid prefix is
+    reported as `INCOMPLETE, k of n`, and `--replay` on it fails after
+    replaying what was recorded. The hash chain does not detect a
+    truncated suffix; the step count in `run.json` does, for the tail.
+  - **Appends** use `O_APPEND` plus `fsync`. **Blobs** are written aside
+    and renamed, and checked against their address on every read.
+- **Configuration.** Command-line flags plus a calibration JSON file
+  (`rsi calibrate --out`, `rsi run --calibration`), not `rsi.toml`: the
+  workspace has no first-party TOML parser, as with `task.json`. Each
+  role reads `RSI_<ROLE>_MODEL`, `_BASE_URL` and `_API_KEY`, with `INNER`
+  for the agent and `OUTER` for the proposer. `run.json` records the
+  model ids, never a key.
+- **Proposer.** `ModelProposer` sends the system contract, the
+  precedents and the current harness source.
+  - **Reply format.** The model replies with whole files as
+    `<<<FILE path` ... `>>>END`.
+  - **Writing.** Files are written only inside the worktree: absolute
+    paths, `..` and `.git` (in any case) are refused, every ancestor
+    directory must be a real directory (a symlinked parent is refused,
+    and missing ones are created one level at a time), and a planted
+    symlink at the leaf is replaced rather than followed. The allowlist decides afterwards.
+  - **Codex CLI (deferred).** Running `codex exec` safely needs its own
+    sandbox profile (Landlock plus network), and plain-HTTP-only model
+    access rules out hosted endpoints. Remote outer models therefore wait
+    on that adapter or on TLS, and an outer model is a local
+    OpenAI-compatible endpoint for now.
+- **Replay** (`rsi report --replay`).
+  - **Grade replay.** Every stored submission is re-graded through the
+    out-of-process grader, and each private score must match bit for bit.
+  - **Trajectory replay.** Every graded candidate is rebuilt from its
+    commit and re-run against each recorded transcript; the same
+    submission must come out.
+  - **Failures.** A missing or altered blob is an error; a disagreement
+    is listed, and the command fails.
+- **Calibration.** `rsi calibrate` grades the base harness on N rounds
+  (default 5) of candidate 0 and writes the band and
+  `margin = z · √2 · σ̂`. It warns that σ̂ from N = 5 is rough.
+- **Tests (`rsi-cli/tests/outer.rs`).** A 10-step run in a throwaway repo
+  holding a copy of the harness, on the real three-task suite, with the
+  scripted inner model and scripted proposals of known strength. Each
+  proposal gets its verdict:
+  - not better (equal);
+  - within noise (+0.20 against a 0.30 margin);
+  - path violation (the harness manifest);
+  - buggy;
+  - accepted (+0.61 on a fresh, disjoint seed set);
+  - not better (after the incumbent changed);
+  - path violation (a symlink in `src/`);
+  - not better (no change);
+  - path violation (a task's private labels);
+  - not better (identical to the incumbent).
+
+  The test also checks:
+  - parents and refs, and that no new branches were created;
+  - that each proposal saw the lineage so far;
+  - that the stored lineage equals the returned one;
+  - that replay reproduces all 27 private scores and 27 trajectories;
+  - that an altered submission blob and a forged verdict are both caught;
+  - that a finished run cannot be overwritten.
+
+  A second test calibrates on three rounds.
+- **Mutation check.** Each of these, removed alone, fails the run test:
+  - the allowlist;
+  - fresh seeds for the re-evaluation;
+  - passing the full history to the proposer.
+- **Known limits.**
+  - `run.json` keeps the run seed. Calibrating and running with the same
+    `--seed` makes calibration's round 0 and the baseline share seeds,
+    which is harmless: neither is a gate decision.
+  - Cost of the outer model is not yet recorded in lineage.
 
 ### 8. Models and configuration
 
@@ -418,6 +754,6 @@ is the outer model's endpoint.
 | Phase | Deliverable | Invariant tests landing |
 |---|---|---|
 | P1 | `rsi-core`: types, accept gate, noise margin, UCB1, softmax, SplitMix64, `CostMeter`, lineage types and hash chain (pure) | 2 (meter hard-stop boundaries), 3 (gate), 4 (chain verification, pure part) |
-| P2 | Task format; 3 toy tasks (ML-lite regression, heuristic TSP, prompt/harness scaffold around a deterministic weak-solver simulator); executor; out-of-process grader | 1, 5 |
+| P2 | Task format; 3 toy tasks (ML-lite regression, heuristic TSP, prompt/harness scaffold around a deterministic weak-solver simulator); executor; out-of-process grader; `rsi-cli` with the internal `__sandbox`/`__grade` entry points (the helper and grader must be a binary) | 1, 5 |
 | P3 | Broker, `rsi-harness` a0, inner `Harness` adapter, model client, scripted model | 2 (end-to-end hard stop), 4 (trajectory replay) |
 | P4 | Outer loop, git adapter, path allowlist, `rsi calibrate`, a 10-step run, `rsi report` | 3 (end to end), 4 (grade replay), path-violation rejection |

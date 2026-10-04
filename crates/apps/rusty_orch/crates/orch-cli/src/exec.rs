@@ -13,6 +13,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -79,20 +80,37 @@ impl std::error::Error for ExecError {}
 
 /// Runs one non-interactive command: fixed argv, bytes on stdin, deadline.
 pub trait CommandRunner {
-    /// `argv[0]` is the program. Never a shell. `remove_env` names variables
-    /// the child must not see, e.g. a vendor API key that would otherwise
-    /// route a subscription CLI onto a paid API path.
-    fn run_scrubbed(
+    /// `argv[0]` is the program. Never a shell. `cwd` is the child's working
+    /// directory, or the parent's when `None`; an adapter whose CLI reads
+    /// the repository from its working directory passes the repository root
+    /// here rather than inheriting wherever the orchestrator was launched.
+    /// `remove_env` names variables the child must not see, e.g. a vendor
+    /// API key that would otherwise route a subscription CLI onto a paid API
+    /// path.
+    fn run_in(
         &self,
+        cwd: Option<&Path>,
         argv: &[String],
         stdin: &[u8],
         timeout: Duration,
         remove_env: &[&str],
     ) -> Result<Exit, ExecError>;
 
-    /// [`CommandRunner::run_scrubbed`] with the child's environment untouched.
+    /// [`CommandRunner::run_in`] in the parent's working directory.
+    fn run_scrubbed(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+        timeout: Duration,
+        remove_env: &[&str],
+    ) -> Result<Exit, ExecError> {
+        self.run_in(None, argv, stdin, timeout, remove_env)
+    }
+
+    /// [`CommandRunner::run_in`] in the parent's working directory with the
+    /// child's environment untouched.
     fn run(&self, argv: &[String], stdin: &[u8], timeout: Duration) -> Result<Exit, ExecError> {
-        self.run_scrubbed(argv, stdin, timeout, &[])
+        self.run_in(None, argv, stdin, timeout, &[])
     }
 }
 
@@ -101,8 +119,9 @@ pub trait CommandRunner {
 pub struct StdCommand;
 
 impl CommandRunner for StdCommand {
-    fn run_scrubbed(
+    fn run_in(
         &self,
+        cwd: Option<&Path>,
         argv: &[String],
         stdin: &[u8],
         timeout: Duration,
@@ -116,6 +135,9 @@ impl CommandRunner for StdCommand {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
         for name in remove_env {
             cmd.env_remove(name);
         }

@@ -10160,6 +10160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-claude"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-cli"
 version = "0.1.0"
 dependencies = [
@@ -12704,11 +12714,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-cli"
+version = "0.1.0"
+dependencies = [
+ "rsi-core",
+ "rsi-harness",
+ "rsi-runtime",
+]
+
+[[package]]
 name = "rsi-core"
 version = "0.1.0"
 dependencies = [
  "rusty_err",
  "rusty_rsa",
+]
+
+[[package]]
+name = "rsi-harness"
+version = "0.1.0"
+
+[[package]]
+name = "rsi-runtime"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "rsi-core",
+ "rusty_err",
+ "rusty_http",
+ "rusty_json",
+ "rusty_libc",
 ]
 
 [[package]]
@@ -13846,6 +13882,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_fair_play"
+version = "0.1.0"
+dependencies = [
+ "rusty_fair_play_domain",
+ "rusty_http",
+ "rusty_json",
+ "rusty_multimodal_db_engine",
+ "rusty_serve",
+ "rusty_url",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "rusty_fair_play_domain"
+version = "0.1.0"
+dependencies = [
+ "rusty_multimodal_db_engine",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "rusty_fedora"
 version = "0.1.0"
 dependencies = [
@@ -14036,6 +14100,7 @@ dependencies = [
  "rcgen",
  "redb",
  "rusqlite",
+ "rusty_fair_play_domain",
  "rusty_http",
  "rusty_libc",
  "rusty_multimodal_db_engine",
@@ -14084,6 +14149,7 @@ dependencies = [
 name = "rusty_orch"
 version = "0.1.0"
 dependencies = [
+ "orch-claude",
  "orch-cli",
  "orch-codex",
  "orch-core",
@@ -14176,6 +14242,14 @@ version = "0.1.0"
 [[package]]
 name = "rusty_serde_erased"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_serve"
+version = "0.1.0"
+dependencies = [
+ "rusty_http",
+ "tempfile",
+]
 
 [[package]]
 name = "rusty_sha1"
@@ -14272,6 +14346,7 @@ dependencies = [
  "rusty_multimodal_db_engine",
  "rusty_rand",
  "rusty_rsa",
+ "rusty_serve",
  "rusty_url",
  "serde",
  "tempfile",

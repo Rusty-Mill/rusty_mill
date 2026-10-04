@@ -1,0 +1,48 @@
+/* Design tokens. Colours are space-separated RGB triplets so Tailwind can apply
+   opacity; every colour in the UI comes from here, so dark is a variable swap. */
+:root {
+  --text: 25 25 25; /* #191919 */
+  --grey: 140 140 140; /* #8c8c8c */
+  --line: 232 233 235; /* #e8e9eb */
+  --surface: 255 255 255;
+  --rail: 250 250 250; /* #fafafa */
+  --side: 247 247 247; /* #f7f7f7 */
+  --hover: 245 245 245;
+  --selected: 240 240 240; /* #f0f0f0 */
+  --primary: 13 148 136; /* #0d9488 */
+  --green: 12 206 156; /* #0CCE9C */
+  --danger: 229 49 45; /* #E5312D */
+  --amber: 217 119 6; /* #d97706: the `edited` badge */
+  --violet: 124 58 237; /* #7c3aed: the `custom` badge */
+  /* The six suits. */
+  --suit-home: 13 148 136; /* teal #0d9488 */
+  --suit-out: 37 99 235; /* blue #2563eb */
+  --suit-caregiving: 225 29 72; /* rose #e11d48 */
+  --suit-magic: 124 58 237; /* violet #7c3aed */
+  --suit-wild: 217 119 6; /* amber #d97706 */
+  --suit-unicorn: 192 38 211; /* fuchsia #c026d3 */
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.12);
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --text: 232 232 232;
+  --grey: 150 150 150;
+  --line: 52 52 56;
+  --surface: 26 26 28;
+  --rail: 32 32 34;
+  --side: 30 30 32;
+  --hover: 40 40 43;
+  --selected: 52 52 56;
+  --primary: 45 212 191;
+  --amber: 251 191 36;
+  --violet: 167 139 250;
+  --suit-home: 45 212 191; /* #2dd4bf */
+  --suit-out: 96 165 250; /* #60a5fa */
+  --suit-caregiving: 251 113 133; /* #fb7185 */
+  --suit-magic: 167 139 250; /* #a78bfa */
+  --suit-wild: 251 191 36; /* #fbbf24 */
+  --suit-unicorn: 232 121 249; /* #e879f9 */
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}

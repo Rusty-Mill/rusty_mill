@@ -1,0 +1,13 @@
+{
+  "id": "tsp-heuristic",
+  "family": "heuristic",
+  "metric": "tour_ratio",
+  "shared": [],
+  "inputs": "instances.txt",
+  "floor": 0.0,
+  "limits": {
+    "cpu_secs": 10,
+    "wall_secs": 20,
+    "memory_mb": 512
+  }
+}

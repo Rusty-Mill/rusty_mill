@@ -20,8 +20,9 @@ fn args(interactive: bool, json: bool) -> Args {
     Args {
         goal: PathBuf::from("goal.json"),
         ollama_model: "m".into(),
-        codex_repo: PathBuf::from("."),
+        repo: PathBuf::from("."),
         codex_model: None,
+        claude_model: None,
         interactive,
         json,
         state: None,
@@ -340,4 +341,38 @@ fn an_answer_given_before_stopping_is_saved() {
         .collect();
     assert_eq!(kinds, ["question", "answer", "finding"], "{stdout}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn run_with_builds_the_runner_from_the_goals_stop_rule() {
+    use orch_core::goal::StopRule;
+    let best_effort = GOAL.replace("\"stop\":\"checkpoint\"", "\"stop\":\"best_effort\"");
+    let mut seen = None;
+    let mut stdin = Cursor::new(Vec::new());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut streams = Streams {
+        stdin: &mut stdin,
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
+    let code = cli::run_with(
+        &args(false, true),
+        &best_effort,
+        |stop| {
+            seen = Some(stop);
+            FakeAgent::new([Reply::Write(vec![
+                EntryKind::Assumption,
+                EntryKind::Finding {
+                    confidence: Confidence::Low,
+                },
+            ])])
+        },
+        &mut streams,
+    )
+    .expect("run");
+    assert_eq!(seen, Some(StopRule::BestEffort));
+    assert_eq!(code, EXIT_FINISHED);
+    let json = Value::parse(&String::from_utf8(stdout).expect("utf8")).expect("one JSON document");
+    assert_eq!(json.get("calls").and_then(|c| c.as_u64()), Some(1));
 }

@@ -339,7 +339,7 @@ describe('lists and tags', () => {
     await waitFor(async () => expect((await api.snapshot()).lists.map((l) => l.name)).toContain('Errands'))
     expect((await api.snapshot()).lists.find((l) => l.name === 'Errands')?.color).toBe('#4772fa')
     await waitFor(() => expect(router.state.location.pathname).toMatch(/^\/p\/[0-9a-f-]{36}\/tasks$/))
-    expect(screen.getByPlaceholderText('Add task to "Errands"')).toBeInTheDocument()
+    expect(await screen.findByPlaceholderText('Add task to "Errands"')).toBeInTheDocument()
   })
 
   it('renames, archives and deletes a list', async () => {

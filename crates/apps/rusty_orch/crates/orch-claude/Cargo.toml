@@ -1,0 +1,22 @@
+[package]
+name = "orch-claude"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+orch-core = { workspace = true }
+orch-dispatch = { workspace = true }
+orch-cli = { workspace = true }
+# Parses the one-line result envelope `claude -p --output-format json`
+# prints; the reply inside it goes to `orch_cli::parse`. Foundation crate,
+# serde off, as in orch-cli.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+orch-cli = { workspace = true, features = ["fake"] }

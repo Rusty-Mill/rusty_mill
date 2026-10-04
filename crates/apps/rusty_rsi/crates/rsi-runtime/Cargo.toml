@@ -1,0 +1,28 @@
+[package]
+name = "rsi-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics, the out-of-process private grader, the inner-agent broker, model clients, the outer loop, the hash-chained lineage store, the git candidate adapter and run reports"
+
+# ADR-0002 tier S: workspace crates only, no external dependencies in this
+# manifest (platform-linux's own libc dependency is its manifest's concern).
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rsi-core = { path = "../rsi-core" }
+rusty_err = { workspace = true }
+# The inner model client (ADR-0005 §8): rusty_http's sans-IO HTTP/1.1 core
+# with its sync adapter. No default features, so no async runtime.
+rusty_http = { workspace = true }
+# A path dependency, not `workspace = true`: the workspace entry keeps
+# rusty_json's default features (which pull in external serde), and Cargo
+# ignores `default-features = false` on an inherited dependency.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform = { workspace = true }
+platform-linux = { workspace = true }
+rusty_libc = { workspace = true, features = ["std"] }

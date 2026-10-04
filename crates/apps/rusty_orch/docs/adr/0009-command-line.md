@@ -65,6 +65,7 @@ tasks in code. ARCHITECTURE listed goal intake as planned.
 - Persistence is still absent, so a run that stops blocked cannot resume in
   a later process. That is the next item.
 - `StopRule::BestEffort` is parsed but behaves as `Checkpoint`; the
-  dispatcher has no best-effort path yet.
+  dispatcher has no best-effort path yet. *Resolved by
+  [ADR-0011](./0011-best-effort-stop-rule.md): the adapters enforce it.*
 - `orch-codex` gains a `[workspace.dependencies]` entry so the binary can
   depend on it the same way as its siblings.

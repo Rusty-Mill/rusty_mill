@@ -12,24 +12,36 @@
 //! - [`search`]: greedy, UCB1 and softmax selection helpers.
 //! - [`rng`]: the seeded [`SplitMix64`] generator and seed derivation.
 //! - [`lineage`]: lineage entry types and the SHA-256 hash chain.
+//! - [`task`]: the [`PublicTask`] and [`PrivateGrader`] ports.
+//! - [`exec`]: the sandboxed [`Executor`] port and its [`SandboxSpec`].
+//! - [`inner`]: the [`ChatModel`] and [`Harness`] ports of the inner loop.
+//! - [`outer`]: the [`Proposer`] and [`LineageStore`] ports of the outer loop.
 
 pub mod accept;
 pub mod budget;
 pub mod error;
+pub mod exec;
+pub mod inner;
 pub mod lineage;
 pub mod noise;
+pub mod outer;
 pub mod rng;
 pub mod score;
 pub mod search;
+pub mod task;
 
 pub use accept::{confirm, screen, Challenger, Decision, Evaluation, Rejection, Screen};
 pub use budget::{Budget, BudgetExhausted, CostMeter, CostUsage};
 pub use error::CoreError;
+pub use exec::{ExecOutcome, Executor, Limits, SandboxSpec, Termination};
+pub use inner::{ChatModel, Completion, Harness, InnerOutcome, Message, Role};
 pub use lineage::{
     BlobId, CandidateId, ChainError, ChainRecord, CommitSha, EntryFields, EvaluationRecord,
     LineageEntry, ModelId, TaskId, TaskResult,
 };
 pub use noise::{Margin, NoiseBand};
+pub use outer::{precedents, LineageStore, Precedent, Proposal, Proposer, PublicResult, Verdict};
 pub use rng::{derive_seed, seed_set, Seed, SplitMix64};
 pub use score::{Grade, Score};
 pub use search::{argmax, softmax, softmax_sample, ucb1, Arm};
+pub use task::{Attempt, PrivateGrader, PublicTask, Solution};

@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use orch_core::board::Board;
+use orch_core::goal::StopRule;
 use orch_core::task::{Agent, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
-use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
+use orch_cli::{excerpt, output_schema, parse, CommandRunner, ExecError, StdCommand};
 
-use crate::{render, OUTPUT_SCHEMA};
+use crate::render;
 
 /// Codex reads the repo and reasons before answering; ten minutes by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -37,6 +38,7 @@ pub struct CodexAgent<C = StdCommand> {
     repo_root: PathBuf,
     timeout: Duration,
     model: Option<String>,
+    stop: StopRule,
     runner: C,
 }
 
@@ -54,8 +56,17 @@ impl<C: CommandRunner> CodexAgent<C> {
             repo_root: repo_root.into(),
             timeout: DEFAULT_TIMEOUT,
             model: None,
+            stop: StopRule::Checkpoint,
             runner,
         }
+    }
+
+    /// The goal's stop rule, which decides whether cards may ask questions
+    /// and shapes the output schema (ADR-0011). Defaults to
+    /// [`StopRule::Checkpoint`].
+    pub fn with_stop_rule(mut self, stop: StopRule) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// Replace the default ten-minute deadline.
@@ -138,8 +149,9 @@ impl<C: CommandRunner> CodexAgent<C> {
                 task.spec().role
             ))));
         }
-        let scratch = Scratch::create().map_err(ClassifiedError::Transient)?;
-        let prompt = render(task, board);
+        let scratch =
+            Scratch::create(&output_schema(self.stop)).map_err(ClassifiedError::Transient)?;
+        let prompt = render(task, board, self.stop);
         let exit = self
             .runner
             .run_scrubbed(
@@ -164,7 +176,7 @@ impl<C: CommandRunner> CodexAgent<C> {
                 "codex wrote an empty last message".to_owned(),
             )));
         }
-        parse(&reply, task.spec().role).map_err(ClassifiedError::Transient)
+        parse(&reply, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
     }
 }
 
@@ -208,13 +220,13 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn create() -> Result<Self, AgentError> {
+    fn create(schema_text: &str) -> Result<Self, AgentError> {
         let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
         let stem = format!("orch-codex-{}-{seq}", std::process::id());
         let dir = std::env::temp_dir();
         let schema = dir.join(format!("{stem}.schema.json"));
         let reply = dir.join(format!("{stem}.reply.json"));
-        fs::write(&schema, OUTPUT_SCHEMA)
+        fs::write(&schema, schema_text)
             .map_err(|e| AgentError(format!("codex: cannot write schema file: {e}")))?;
         Ok(Self { schema, reply })
     }
