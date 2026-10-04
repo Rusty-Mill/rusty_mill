@@ -20,8 +20,8 @@ use crate::{GoalState, StoreError};
 
 /// The equality index: the goal id, so the record is found by key.
 pub struct ById;
-/// The mmap slot: the persisted checkpoint generation, a cheap monotonic
-/// field the engine requires one of.
+/// The mmap slot: the save count, a cheap monotonic field the engine
+/// requires one of.
 pub struct Revision;
 
 /// Engine key for a goal. Orch ids are small 1-based counters, so the
@@ -465,188 +465,178 @@ mod format_tests {
     }
 
     fn populated_v1() -> GoalRecord {
+        let task = |id, role, state| TaskRow {
+            id,
+            role,
+            instruction: format!("instruction {id}"),
+            acceptance: vec![format!("acceptance {id}")],
+            refs: vec![],
+            depends_on: vec![],
+            max_calls: 3,
+            state,
+        };
+        let entry = |id, task, author, kind, body: &str| EntryRow {
+            id,
+            task,
+            author,
+            kind,
+            body: body.to_owned(),
+            refs: vec![],
+            supersedes: None,
+        };
+
+        let mut tasks = vec![
+            task(
+                1,
+                RoleRow::Research,
+                StateRow::Done {
+                    agent: AgentRow::Codex,
+                    outputs: vec![1],
+                },
+            ),
+            task(
+                2,
+                RoleRow::Design,
+                StateRow::Blocked {
+                    agent: AgentRow::Claude,
+                    question: 2,
+                },
+            ),
+            task(
+                3,
+                RoleRow::Triage,
+                StateRow::Running {
+                    agent: AgentRow::Gemini,
+                },
+            ),
+            task(
+                4,
+                RoleRow::Implement,
+                StateRow::Failed {
+                    agent: AgentRow::Codex,
+                    reason: "failed".to_owned(),
+                },
+            ),
+            task(
+                5,
+                RoleRow::Review { target: 1 },
+                StateRow::Done {
+                    agent: AgentRow::Local,
+                    outputs: vec![4],
+                },
+            ),
+            task(6, RoleRow::Research, StateRow::Pending),
+        ];
+        tasks[0].refs = vec![
+            RefRow::Path("src/lib.rs".to_owned()),
+            RefRow::Commit("abc123".to_owned()),
+            RefRow::Url("https://example.invalid".to_owned()),
+        ];
+        tasks[1].depends_on = vec![1];
+
+        let mut entries = vec![
+            entry(
+                1,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Finding {
+                    confidence: ConfidenceRow::Medium,
+                },
+                "finding",
+            ),
+            entry(
+                2,
+                Some(2),
+                AuthorRow::Agent(AgentRow::Claude),
+                KindRow::Question,
+                "question",
+            ),
+            entry(
+                3,
+                None,
+                AuthorRow::Human,
+                KindRow::Answer { to: 2 },
+                "answer",
+            ),
+            entry(
+                4,
+                Some(5),
+                AuthorRow::Agent(AgentRow::Local),
+                KindRow::Review {
+                    of: 1,
+                    verdict: VerdictRow::Approve,
+                },
+                "approved",
+            ),
+            entry(
+                5,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Decision,
+                "decision",
+            ),
+            entry(
+                6,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Artifact,
+                "artifact",
+            ),
+            entry(
+                7,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Assumption,
+                "old assumption",
+            ),
+            entry(
+                8,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Assumption,
+                "new assumption",
+            ),
+            entry(
+                9,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Gemini),
+                KindRow::Finding {
+                    confidence: ConfidenceRow::Low,
+                },
+                "low finding",
+            ),
+            entry(
+                10,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Claude),
+                KindRow::Finding {
+                    confidence: ConfidenceRow::High,
+                },
+                "high finding",
+            ),
+            entry(
+                11,
+                Some(5),
+                AuthorRow::Agent(AgentRow::Local),
+                KindRow::Review {
+                    of: 1,
+                    verdict: VerdictRow::ChangesRequested,
+                },
+                "changes",
+            ),
+        ];
+        entries[4].refs = vec![RefRow::Entry(4)];
+        entries[5].refs = vec![RefRow::Path("out.md".to_owned())];
+        entries[7].supersedes = Some(7);
+
         GoalRecord {
             id: 1,
-            revision: 7,
+            revision: 9,
             fingerprint: 0x0102_0304_0506_0708,
-            tasks: vec![
-                TaskRow {
-                    id: 1,
-                    role: RoleRow::Research,
-                    instruction: "research".to_owned(),
-                    acceptance: vec!["evidence".to_owned()],
-                    refs: vec![RefRow::Path("src/lib.rs".to_owned())],
-                    depends_on: vec![],
-                    max_calls: 1,
-                    state: StateRow::Pending,
-                },
-                TaskRow {
-                    id: 2,
-                    role: RoleRow::Design,
-                    instruction: "design".to_owned(),
-                    acceptance: vec!["plan".to_owned()],
-                    refs: vec![RefRow::Commit("abc123".to_owned())],
-                    depends_on: vec![],
-                    max_calls: 2,
-                    state: StateRow::Running {
-                        agent: AgentRow::Claude,
-                    },
-                },
-                TaskRow {
-                    id: 3,
-                    role: RoleRow::Triage,
-                    instruction: "triage".to_owned(),
-                    acceptance: vec!["answer".to_owned()],
-                    refs: vec![RefRow::Url("https://example.invalid".to_owned())],
-                    depends_on: vec![],
-                    max_calls: 3,
-                    state: StateRow::Blocked {
-                        agent: AgentRow::Gemini,
-                        question: 2,
-                    },
-                },
-                TaskRow {
-                    id: 4,
-                    role: RoleRow::Implement,
-                    instruction: "implement".to_owned(),
-                    acceptance: vec!["artifact".to_owned()],
-                    refs: vec![RefRow::Entry(1)],
-                    depends_on: vec![],
-                    max_calls: 4,
-                    state: StateRow::Done {
-                        agent: AgentRow::Codex,
-                        outputs: vec![6],
-                    },
-                },
-                TaskRow {
-                    id: 5,
-                    role: RoleRow::Review { target: 4 },
-                    instruction: "review".to_owned(),
-                    acceptance: vec!["verdict".to_owned()],
-                    refs: vec![],
-                    depends_on: vec![],
-                    max_calls: 5,
-                    state: StateRow::Failed {
-                        agent: AgentRow::Local,
-                        reason: "rejected".to_owned(),
-                    },
-                },
-            ],
-            entries: vec![
-                EntryRow {
-                    id: 1,
-                    task: Some(2),
-                    author: AuthorRow::Agent(AgentRow::Claude),
-                    kind: KindRow::Finding {
-                        confidence: ConfidenceRow::Low,
-                    },
-                    body: "low".to_owned(),
-                    refs: vec![RefRow::Path("a".to_owned())],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 2,
-                    task: Some(3),
-                    author: AuthorRow::Agent(AgentRow::Gemini),
-                    kind: KindRow::Question,
-                    body: "question".to_owned(),
-                    refs: vec![RefRow::Commit("b".to_owned())],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 3,
-                    task: None,
-                    author: AuthorRow::Human,
-                    kind: KindRow::Answer { to: 2 },
-                    body: "answer".to_owned(),
-                    refs: vec![RefRow::Url("https://e.invalid".to_owned())],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 4,
-                    task: Some(4),
-                    author: AuthorRow::Agent(AgentRow::Codex),
-                    kind: KindRow::Artifact,
-                    body: "artifact".to_owned(),
-                    refs: vec![RefRow::Entry(1)],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 5,
-                    task: Some(5),
-                    author: AuthorRow::Agent(AgentRow::Local),
-                    kind: KindRow::Review {
-                        of: 4,
-                        verdict: VerdictRow::Approve,
-                    },
-                    body: "approve".to_owned(),
-                    refs: vec![],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 6,
-                    task: Some(4),
-                    author: AuthorRow::Agent(AgentRow::Codex),
-                    kind: KindRow::Decision,
-                    body: "decision".to_owned(),
-                    refs: vec![RefRow::Entry(5)],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 7,
-                    task: None,
-                    author: AuthorRow::Human,
-                    kind: KindRow::Assumption,
-                    body: "old".to_owned(),
-                    refs: vec![],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 8,
-                    task: None,
-                    author: AuthorRow::Human,
-                    kind: KindRow::Assumption,
-                    body: "new".to_owned(),
-                    refs: vec![],
-                    supersedes: Some(7),
-                },
-                EntryRow {
-                    id: 9,
-                    task: Some(1),
-                    author: AuthorRow::Agent(AgentRow::Local),
-                    kind: KindRow::Finding {
-                        confidence: ConfidenceRow::Medium,
-                    },
-                    body: "medium".to_owned(),
-                    refs: vec![],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 10,
-                    task: Some(1),
-                    author: AuthorRow::Agent(AgentRow::Local),
-                    kind: KindRow::Finding {
-                        confidence: ConfidenceRow::High,
-                    },
-                    body: "high".to_owned(),
-                    refs: vec![],
-                    supersedes: None,
-                },
-                EntryRow {
-                    id: 11,
-                    task: Some(5),
-                    author: AuthorRow::Agent(AgentRow::Claude),
-                    kind: KindRow::Review {
-                        of: 4,
-                        verdict: VerdictRow::ChangesRequested,
-                    },
-                    body: "changes".to_owned(),
-                    refs: vec![],
-                    supersedes: None,
-                },
-            ],
-            goal_calls: 9,
-            task_calls: vec![(2, 1), (3, 2), (4, 3), (5, 3)],
+            tasks,
+            entries,
+            goal_calls: 7,
+            task_calls: vec![(1, 2), (2, 1), (4, 3), (5, 1)],
         }
     }
 
@@ -667,93 +657,52 @@ mod format_tests {
 
     #[test]
     fn v1_populated_record_has_stable_golden_bytes_and_rebuilds_domain() {
-        const GOLDEN: &[u8] = &[
-            1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 5, 0, 0, 0, 0,
-            0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 114, 101, 115,
-            101, 97, 114, 99, 104, 1, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 101, 118, 105,
-            100, 101, 110, 99, 101, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0,
-            115, 114, 99, 47, 108, 105, 98, 46, 114, 115, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
-            0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 100, 101, 115, 105,
-            103, 110, 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 112, 108, 97, 110, 1, 0, 0,
-            0, 0, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 97, 98, 99, 49, 50, 51, 0, 0, 0, 0,
-            0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 6,
-            0, 0, 0, 0, 0, 0, 0, 116, 114, 105, 97, 103, 101, 1, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0,
-            0, 0, 0, 0, 97, 110, 115, 119, 101, 114, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 23, 0, 0,
-            0, 0, 0, 0, 0, 104, 116, 116, 112, 115, 58, 47, 47, 101, 120, 97, 109, 112, 108, 101,
-            46, 105, 110, 118, 97, 108, 105, 100, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0,
-            2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 9, 0, 0, 0, 0,
-            0, 0, 0, 105, 109, 112, 108, 101, 109, 101, 110, 116, 1, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0,
-            0, 0, 0, 0, 0, 97, 114, 116, 105, 102, 97, 99, 116, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 4, 0,
-            0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 114, 101, 118, 105, 101, 119, 1, 0, 0, 0, 0,
-            0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 118, 101, 114, 100, 105, 99, 116, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0,
-            114, 101, 106, 101, 99, 116, 101, 100, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
-            1, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
-            0, 0, 0, 0, 108, 111, 119, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
-            97, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0,
-            0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 113, 117, 101, 115, 116, 105, 111, 110, 1, 0, 0, 0, 0, 0,
-            0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 98, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            4, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 97, 110, 115, 119, 101,
-            114, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 104, 116, 116, 112,
-            115, 58, 47, 47, 101, 46, 105, 110, 118, 97, 108, 105, 100, 0, 4, 0, 0, 0, 0, 0, 0, 0,
-            1, 4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0,
-            97, 114, 116, 105, 102, 97, 99, 116, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0,
-            0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0,
-            6, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 97, 112, 112,
-            114, 111, 118, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 0,
-            0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 100, 101, 99,
-            105, 115, 105, 111, 110, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0,
-            7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 111, 108,
-            100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3,
-            0, 0, 0, 0, 0, 0, 0, 110, 101, 119, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7, 0, 0, 0, 0, 0, 0, 0,
-            9, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
-            1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 109, 101, 100, 105, 117, 109, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0,
-            0, 0, 2, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 104, 105, 103, 104, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0,
-            0, 4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 99, 104, 97, 110, 103,
-            101, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0,
-            0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 3, 0,
-            0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
-        ];
+        let golden = include_bytes!("fixtures/goal_record_v1_populated.bin");
         let record = populated_v1();
         let bytes = codec::encode(&record).expect("encode");
-        assert_eq!(bytes, GOLDEN, "actual bytes: {bytes:?}");
-        let state = codec::decode::<GoalRecord>(GOLDEN)
-            .expect("decode golden")
-            .into_state()
-            .expect("rebuild domain");
-        assert_eq!(state.plan.tasks().len(), 5);
+        assert_eq!(
+            bytes.as_slice(),
+            golden,
+            "change only with an explicit format decision"
+        );
+
+        let decoded: GoalRecord = codec::decode(golden).expect("decode golden");
+        let state = decoded.into_state().expect("rebuild domain");
+        assert_eq!(state.goal(), GoalId::from_raw(1));
+        assert_eq!(state.fingerprint, 0x0102_0304_0506_0708);
+        assert_eq!(state.plan.tasks().len(), 6);
         assert_eq!(state.board.entries().len(), 11);
-        assert_eq!(state.ledger.calls(), 9);
+        assert_eq!(state.ledger.calls(), 7);
         assert_eq!(state.ledger.task_calls(TaskId::from_raw(4)), 3);
     }
 
     #[test]
-    fn malformed_v1_snapshots_are_rejected_as_corrupt() {
+    fn corrupt_snapshot_rows_are_rejected_during_domain_reconstruction() {
+        let mut fixtures = Vec::new();
+
         let mut invalid_order = populated_v1();
-        invalid_order.tasks[0].depends_on = vec![2];
+        invalid_order.tasks[1].depends_on = vec![99];
+        fixtures.push(("invalid task prerequisite/order", invalid_order));
+
         let mut blank_text = populated_v1();
-        blank_text.tasks[0].instruction = " ".to_owned();
-        let mut invalid_reference = populated_v1();
-        invalid_reference.entries[0].refs = vec![RefRow::Entry(99)];
+        blank_text.tasks[0].instruction.clear();
+        fixtures.push(("blank text", blank_text));
+
+        let mut invalid_board_ref = populated_v1();
+        invalid_board_ref.entries[0].refs = vec![RefRow::Entry(99)];
+        fixtures.push(("invalid board reference", invalid_board_ref));
+
         let mut empty_done_outputs = populated_v1();
-        empty_done_outputs.tasks[3].state = StateRow::Done {
+        empty_done_outputs.tasks[0].state = StateRow::Done {
             agent: AgentRow::Codex,
             outputs: vec![],
         };
+        fixtures.push(("empty Done outputs", empty_done_outputs));
 
-        for (label, record) in [
-            ("invalid task order", invalid_order),
-            ("blank text", blank_text),
-            ("invalid board reference", invalid_reference),
-            ("empty done outputs", empty_done_outputs),
-        ] {
+        for (label, fixture) in fixtures {
             assert!(
-                matches!(record.into_state(), Err(StoreError::Corrupt(_))),
-                "{label} should be corrupt"
+                matches!(fixture.into_state(), Err(StoreError::Corrupt(_))),
+                "{label} must be reported as corrupt"
             );
         }
     }

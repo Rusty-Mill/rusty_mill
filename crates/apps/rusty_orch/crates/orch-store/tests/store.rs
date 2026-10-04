@@ -181,30 +181,6 @@ fn saving_again_replaces_the_snapshot_and_bumps_the_revision() {
 }
 
 #[test]
-fn failed_initial_insert_can_recover_generation_one() {
-    let dir = dir("insert_after_log");
-    let state = full_state();
-    let mut store = Store::open(&dir).expect("open");
-
-    arm_fault(Fault::InsertAfterLog);
-    assert!(matches!(store.save(&state), Err(StoreError::Engine(_))));
-    drop(store);
-
-    let store = Store::open(&dir).expect("portable reopen");
-    assert_eq!(
-        store.load(state.goal()).expect("load"),
-        Some(state.clone()),
-        "the logged initial aggregate is recovered"
-    );
-    assert_eq!(
-        store.revision(state.goal()),
-        1,
-        "portable reopen synthesizes the initial scannable generation"
-    );
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn failed_replace_can_recover_new_aggregate_with_previous_revision() {
     let dir = dir("replace_after_log");
     let mut before = full_state();
@@ -237,7 +213,28 @@ fn failed_replace_can_recover_new_aggregate_with_previous_revision() {
     assert_eq!(
         store.revision(before.goal()),
         1,
-        "the separate scannable generation can lag the recovered payload"
+        "the replacement log does not advance the existing scannable slot"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn failed_initial_insert_can_recover_with_a_synthesized_first_revision() {
+    let dir = dir("insert_after_log");
+    let state = full_state();
+    let mut store = Store::open(&dir).expect("open");
+
+    arm_fault(Fault::InsertAfterLog);
+    assert!(matches!(store.save(&state), Err(StoreError::Engine(_))));
+    drop(store);
+
+    let store = Store::open(&dir).expect("portable reopen");
+    let recovered = store.load(state.goal()).expect("load").expect("record");
+    assert_eq!(recovered, state, "the durable insert log is recovered");
+    assert_eq!(
+        store.revision(state.goal()),
+        1,
+        "recovery synthesizes the initial scannable slot despite the save error"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -26,11 +26,11 @@ routing come from the goal file, which the next process reads again.
   id, replaced on every save. The aggregate payload cannot split across
   versions. The revision is a separate scannable mmap slot, however: a
   replacement interrupted after its durable log append can reopen with the
-  new payload and preceding revision. An initial insert interrupted after its
-  durable log append can instead reopen with a synthesized generation 1 even
-  though `save` returned an error. The revision is therefore the persisted
-  scannable checkpoint generation, not a count of successfully returned saves.
-  Only a successful save return guarantees the new payload and revision are
+  new payload and preceding revision. After an initial insert is interrupted
+  following its durable log append, reopen can synthesize a generation-1 slot
+  even though that save returned an error. Revision is therefore the persisted
+  scannable checkpoint generation, not a count of successful save returns. Only
+  a successful save return guarantees the submitted payload and revision are
   durable; no journal is added.
   Per-aggregate records with a journal batch are the upgrade when a
   second reader of the board exists; none does yet.
@@ -42,8 +42,7 @@ routing come from the goal file, which the next process reads again.
   refuses is `StoreError::Corrupt`. `orch-core`'s API does not change.
 - **Ids.** Orch ids are 1-based `u64` counters; the engine keys on `i64`.
   The cast is lossless. One index (the goal id) and one mmap slot (the
-  persisted checkpoint generation (`revision`) satisfy the engine's record
-  shape.
+  save count, `revision`) satisfy the engine's record shape.
 - **Fingerprint.** The FNV-1a hash of the goal file's text is stored with
   the snapshot. A run whose goal file hashes differently is refused
   (`RunError::GoalChanged`) rather than resumed against a plan built from

@@ -5,8 +5,10 @@
 //!
 //! One record prevents plan, board, and ledger payloads from splitting across
 //! versions. A failed replacement can nevertheless be recovered with its new
-//! payload and the preceding scannable revision; only a successful return is
-//! a durability guarantee. The domain types are rebuilt on load through their own
+//! payload and the preceding scannable revision. The revision is the persisted
+//! scannable checkpoint generation; it may lag a recovered replacement and does
+//! not prove how many saves returned successfully. The domain types are rebuilt
+//! on load through their own
 //! public API (`Plan::add` and the lifecycle transitions, `Board::append`,
 //! `Ledger::from_counts`), so every invariant `orch-core` enforces is
 //! re-checked and a snapshot that no longer satisfies them is refused as
@@ -153,11 +155,11 @@ impl Store {
 
     /// The persisted scannable checkpoint generation, or zero.
     ///
-    /// It may lag a recovered replacement because the record log is durable
-    /// before the separate slot is rewritten. Conversely, recovery after an
-    /// interrupted initial insert may synthesize generation one from its
-    /// logged record even though `save` returned an error. It is therefore
-    /// not a count of successfully returned saves.
+    /// Recovery after a failed replacement may expose the replacement's
+    /// aggregate payload with the preceding generation, while recovery after a
+    /// failed initial insert can synthesize generation one from the durable log.
+    /// It therefore does not prove how many calls to [`Store::save`] returned
+    /// successfully.
     pub fn revision(&self, goal: GoalId) -> u64 {
         self.goals
             .get(record::key(goal))

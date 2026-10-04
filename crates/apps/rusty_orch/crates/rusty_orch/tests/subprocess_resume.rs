@@ -14,16 +14,6 @@ fn temp_dir() -> std::path::PathBuf {
     dir
 }
 
-/// The scripted CLI first, then the inherited system path.
-fn path_with(bin: &std::path::Path) -> std::ffi::OsString {
-    let mut path = bin.as_os_str().to_owned();
-    if let Some(system) = std::env::var_os("PATH") {
-        path.push(":");
-        path.push(system);
-    }
-    path
-}
-
 fn run(
     binary: &str,
     goal: &std::path::Path,
@@ -38,7 +28,7 @@ fn run(
         .arg("--state")
         .arg(state)
         .arg("--json")
-        .env("PATH", path_with(bin))
+        .env("PATH", bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
