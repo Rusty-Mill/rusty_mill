@@ -274,15 +274,18 @@ mod tests {
         .expect("valid limits")
     }
 
+    /// A fixture path: a leading `/` maps onto an absolute root that is
+    /// valid on every platform (`/usr` is not absolute on Windows).
+    fn p(fixture: &str) -> PathBuf {
+        match fixture.strip_prefix('/') {
+            Some(rest) => std::env::temp_dir().join("rsi-spec").join(rest),
+            None => PathBuf::from(fixture),
+        }
+    }
+
     fn spec(read: &[&str], write: &[&str], cwd: &str) -> Result<SandboxSpec, CoreError> {
-        let paths = |items: &[&str]| items.iter().map(PathBuf::from).collect();
-        SandboxSpec::new(
-            paths(read),
-            paths(write),
-            PathBuf::from(cwd),
-            Vec::new(),
-            limits(),
-        )
+        let paths = |items: &[&str]| items.iter().map(|item| p(item)).collect();
+        SandboxSpec::new(paths(read), paths(write), p(cwd), Vec::new(), limits())
     }
 
     #[test]
@@ -314,31 +317,28 @@ mod tests {
     fn spec_rejects_bad_env_names() {
         for name in ["", "A=B"] {
             let env = vec![(name.to_owned(), "x".to_owned())];
-            let result = SandboxSpec::new(
-                vec![],
-                vec![PathBuf::from("/w")],
-                PathBuf::from("/w"),
-                env,
-                limits(),
+            let result = SandboxSpec::new(vec![], vec![p("/w")], p("/w"), env, limits());
+            assert!(
+                matches!(
+                    result,
+                    Err(CoreError::InvalidId {
+                        kind: "environment variable name",
+                        ..
+                    })
+                ),
+                "{name:?}: {result:?}"
             );
-            assert!(result.is_err(), "{name:?}");
         }
     }
 
     #[test]
     fn reachability_covers_both_directions() {
         let s = spec(&["/usr"], &["/tmp/run"], "/tmp/run").expect("valid");
-        assert!(s.can_reach(std::path::Path::new("/usr/lib/x")));
-        assert!(s.can_reach(std::path::Path::new("/tmp/run/out")));
-        assert!(
-            s.can_reach(std::path::Path::new("/tmp")),
-            "a root inside it"
-        );
-        assert!(!s.can_reach(std::path::Path::new("/srv/private/labels.txt")));
-        assert!(
-            !s.can_reach(std::path::Path::new("/usrx")),
-            "component-wise"
-        );
+        assert!(s.can_reach(&p("/usr/lib/x")));
+        assert!(s.can_reach(&p("/tmp/run/out")));
+        assert!(s.can_reach(&p("/tmp")), "a root inside it");
+        assert!(!s.can_reach(&p("/srv/private/labels.txt")));
+        assert!(!s.can_reach(&p("/usrx")), "component-wise");
     }
 
     #[test]
