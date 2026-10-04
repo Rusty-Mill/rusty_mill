@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { MemoryAdapter } from '@/api/memory'
 import { balance, bySuit, chainToRoot, childrenOf, indexCards, isLeaf, stateCounts, subtree, undealt } from './derive'
 
-/** A dozen deck cards, Ada and Bob, Cleaning split into Floors (Bob) and Bathrooms (Ada), Floors split into Mopping (unowned). */
+/** The deck, Ada and Bob, Cleaning split into Floors (Bob) and Bathrooms (Ada), Floors split into Mopping (unowned). */
 async function fixture() {
   const api = new MemoryAdapter()
   await api.seed()
@@ -27,8 +27,8 @@ describe('derived views', () => {
     expect(isLeaf(index, floors.id)).toBe(false)
     expect(isLeaf(index, bathrooms.id)).toBe(true)
     expect(isLeaf(index, mopping.id)).toBe(true)
-    expect(index.roots).toHaveLength(12)
-    expect(index.leafIds.size).toBe(12 - 2 + 3) // 12 roots minus Cleaning and Floors, plus Floors' and Cleaning's leaves
+    expect(index.roots).toHaveLength(100)
+    expect(index.leafIds.size).toBe(100 - 2 + 3) // 100 roots minus Cleaning and Floors, plus Floors' and Cleaning's leaves
   })
 
   it('walks the chain to the root and the subtree down', async () => {
@@ -40,7 +40,7 @@ describe('derived views', () => {
   })
 
   it('stops on a cycle instead of looping', () => {
-    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: null, conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const }
+    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: null, conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const, etag: '0', treeEtag: '0' }
     const index = indexCards([
       { ...base, id: 'a', name: 'A', parentCardId: 'b' },
       { ...base, id: 'b', name: 'B', parentCardId: 'a' },
@@ -64,14 +64,15 @@ describe('derived views', () => {
   it('lists the undealt as unowned leaves only', async () => {
     const { snap, index } = await fixture()
     const left = undealt(index, snap.cards)
-    expect(left).toHaveLength(10 + 1) // ten untouched deck cards plus Mopping; neither split parent
+    expect(left).toHaveLength(98 + 1) // the untouched deck cards plus Mopping; neither split parent
     expect(left.some((c) => c.name === 'Mopping')).toBe(true)
     expect(left.some((c) => c.name === 'Cleaning' || c.name === 'Floors')).toBe(false)
-    expect(bySuit(left).Home.map((c) => c.name)).toEqual(['Childcare Helpers (Kids)', 'Mopping'])
+    expect(bySuit(left).Home).toHaveLength(21)
+    expect(bySuit(left).Home.map((c) => c.name)).toEqual(expect.arrayContaining(['Childcare Helpers (Kids)', 'Mopping']))
   })
 
   it('counts states', async () => {
     const { snap } = await fixture()
-    expect(stateCounts(snap.cards)).toEqual({ original: 11, edited: 1, custom: 3 })
+    expect(stateCounts(snap.cards)).toEqual({ original: 99, edited: 1, custom: 3 })
   })
 })

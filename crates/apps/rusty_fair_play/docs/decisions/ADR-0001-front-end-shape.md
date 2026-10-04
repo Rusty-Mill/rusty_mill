@@ -50,10 +50,16 @@ Three things in the workspace fix the shape:
    and counts client-side from a few hundred rows. Writes are per card
    (`PATCH`, `POST …/split`, `…/reset`, `PUT …/position`) and return the
    card. Every card carries an `etag` (the first eight bytes of
-   SHA-256 over the stored record, so it costs nothing to keep) and a
-   write may send it as `If-Match`; a mismatch is 412 with the current
-   card, so a UI can reload rather than overwrite. A household's edits
-   rarely race, so the header is optional and a bare write still wins.
+   SHA-256 over the stored record) and a `treeEtag` (the same over the
+   etags of the card and everything under it, in tree order). A write may
+   send the `etag` as `If-Match`; `unsplit` and `children/order`, which
+   act on the subtree, take the `treeEtag`, because the card's own tag
+   does not move when a descendant is edited, added or reordered. A
+   mismatch is 412 with the current card. The header is optional on the
+   wire and a bare write still wins; the web UI sends it on every card
+   write, using the version the edit was *based on* (a draft's own, not
+   whatever the store holds at save time) so a refresh cannot launder a
+   stale edit.
 4. **The deck ships in the binary.** The seed loader moved from
    `examples/support/` into `generic::fair_play::seed`, parsing text with
    file wrappers beside it, and the supplied CSV is `include_str!`ed as
@@ -78,7 +84,23 @@ Three things in the workspace fix the shape:
    (leaves only), `unsplit_card` (the subtree, deepest first, parent
    kept: ADR-0137's merge/unsplit hook), `delete_person` (holding
    nothing), and `reorder_children` (one call, exact set, positions
-   `0..n`) so a move is never two half-done writes. Each is a route.
+   `0..n`). Each is a route. `reorder_children` validates the whole list
+   first and the service runs it under its one lock, so a bad list or a
+   concurrent request never half-applies it. It is **not** crash-atomic:
+   the engine has no multi-slot transaction and the positions are written
+   one by one, so a crash part way leaves some applied (equal positions
+   fall back to id order). That is better than the two separate swap
+   writes it replaced, not a different guarantee.
+8. **Start-up loads the deck once, recorded by a marker.** "The deck is
+   loaded" is the file `deck.loaded`, written by rename after a full
+   load. Reading it off card 1 would resurrect every deleted deck card on
+   restart and never finish a load killed after card 1. `POST /seed`
+   stays the explicit way to restore missing deck cards.
+9. **One writer per directory, `seed` included.** The `seed` subcommand
+   and `seed()` in the domain crate take the directory lock before
+   opening any stack, so the command is refused while a server holds the
+   directory (a second writer would leave the server's in-memory
+   indexes stale). `seed_into` is for callers that already hold it.
 
 ## Consequences
 
@@ -87,6 +109,8 @@ Three things in the workspace fix the shape:
 - Deletes exist but refuse to orphan: a parent is unsplit first, a
   holder's cards reassigned first. A bare write still wins; `If-Match`
   is the client's choice, and the web UI always sends it.
+- Conflicts are per card. A browser tab keeps its draft on a 412 and
+  offers Overwrite or Discard; it does not merge field by field.
 - One server crate, `rusty_serve`; a third app gets it for free.
 - The domain's home is now a libs crate; a future domain that two apps
   share has this shape to copy.

@@ -1,4 +1,5 @@
 /** Failures the store knows how to react to. Adapters translate transport details into these. */
+import type { Card } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -40,6 +41,17 @@ export class ConflictError extends ApiError {
   constructor(message: string) {
     super(409, 'conflict', message)
     this.name = 'ConflictError'
+  }
+}
+
+/** 412: the `If-Match` etag is not the card's any more; `current` is the card as stored now. */
+export class StaleError extends ApiError {
+  constructor(
+    readonly current: Card,
+    message = 'the card changed since it was read',
+  ) {
+    super(412, 'precondition_failed', message)
+    this.name = 'StaleError'
   }
 }
 

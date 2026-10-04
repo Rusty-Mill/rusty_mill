@@ -49,6 +49,8 @@ pub struct CardDto {
     pub state: &'static str,
     /// Changes whenever the card does; send it back as `If-Match`.
     pub etag: String,
+    /// Like `etag`, but over the card and everything under it.
+    pub tree_etag: String,
 }
 
 pub fn state_name(state: CardState) -> &'static str {
@@ -62,6 +64,7 @@ pub fn state_name(state: CardState) -> &'static str {
 impl From<CardView> for CardDto {
     fn from(v: CardView) -> Self {
         let etag = v.etag();
+        let tree_etag = v.tree_etag;
         let c: Card = v.card;
         Self {
             id: c.id,
@@ -83,6 +86,7 @@ impl From<CardView> for CardDto {
             baseline_id: c.baseline_id,
             state: state_name(v.state),
             etag,
+            tree_etag,
         }
     }
 }

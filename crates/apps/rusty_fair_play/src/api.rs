@@ -24,10 +24,13 @@
 //! | POST | `/cards/{id}/unsplit` | delete everything under the card, deepest first; the card stays |
 //! | DELETE | `/people/{id}` | 409 while the person holds a card |
 //!
-//! Every card carries an `etag`; a write on a card (`PATCH`, `DELETE`,
-//! `split`, `reset`, `unsplit`, `position`, `children/order`) accepts
-//! `If-Match: "<etag>"` and is refused with 412 and the current card in
-//! `current` when the card changed since it was read.
+//! Every card carries an `etag` (the card alone) and a `treeEtag` (the
+//! card and everything under it). A write on a card (`PATCH`, `DELETE`,
+//! `split`, `reset`, `position`) accepts `If-Match: "<etag>"`; the two
+//! subtree writes (`unsplit`, `children/order`) accept
+//! `If-Match: "<treeEtag>"`, which moves when any descendant is edited,
+//! added, removed or reordered. A mismatch is 412 with the current card
+//! in `current`; `*` always matches.
 //!
 //! Errors are `{"error":{"code","message"}}`: 400 malformed request, 401,
 //! 404, 409 conflict, 412 stale, 422 invalid value, 500.
@@ -37,7 +40,9 @@ use crate::dto::{
     PatchPerson, PersonDto, SeedDto, SetOrder, SetPosition, SnapshotDto, SplitChildInput, SplitDto,
     SplitInput, TallyDto, UnsplitDto,
 };
-use crate::service::{CardPatch, NewCard, Service, ServiceError, SplitChild, SplitRequest};
+use crate::service::{
+    CardPatch, CardView, NewCard, Service, ServiceError, SplitChild, SplitRequest,
+};
 use rusty_http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -275,6 +280,16 @@ impl Cx<'_> {
     /// `Err(412 with the current card)` when `If-Match` is present and
     /// does not name the card as stored now; `Ok` otherwise.
     fn check_match(&self, service: &Service, id: Uuid) -> Result<()> {
+        self.check(service, id, CardView::etag)
+    }
+
+    /// [`Cx::check_match`] against the subtree tag, for the writes that
+    /// act on the children too.
+    fn check_tree(&self, service: &Service, id: Uuid) -> Result<()> {
+        self.check(service, id, |v| v.tree_etag.clone())
+    }
+
+    fn check(&self, service: &Service, id: Uuid, tag: fn(&CardView) -> String) -> Result<()> {
         let Some(presented) = self.if_match else {
             return Ok(());
         };
@@ -284,7 +299,7 @@ impl Cx<'_> {
         }
         let current = service.card(id)?;
         let presented = presented.trim_start_matches("W/").trim_matches('"');
-        if presented == current.etag() {
+        if presented == tag(&current) {
             return Ok(());
         }
         Err(ApiError::Stale(Box::new(CardDto::from(current))))
@@ -422,7 +437,7 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
         }
         (Method::Post, [id, "unsplit"]) => {
             let id = parse_id(id)?;
-            cx.check_match(service, id)?;
+            cx.check_tree(service, id)?;
             let (parent, deleted) = service.unsplit(id)?;
             Ok(Response::json(
                 StatusCode::OK,
@@ -434,7 +449,7 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
         }
         (Method::Put, [id, "children", "order"]) => {
             let id = parse_id(id)?;
-            cx.check_match(service, id)?;
+            cx.check_tree(service, id)?;
             let input: SetOrder = cx.body()?;
             let cards = service.reorder_children(id, &input.ids)?;
             Ok(Response::json(

@@ -7,15 +7,15 @@
  */
 import type { ApiClient } from './client'
 import { DEMO_DECK } from './demoDeck'
-import { ConflictError, InvalidError, NotFoundError } from './errors'
-import { SUITS, type Baseline, type BaselineResponse, type Card, type CardPatch, type CardState, type DiffField, type FieldDiff, type NewCard, type Person, type SeedResult, type Snapshot, type SplitInput, type SplitResult, type Suit } from './types'
+import { ConflictError, InvalidError, NotFoundError, StaleError } from './errors'
+import { SUITS, type Baseline, type BaselineResponse, type Card, type CardPatch, type CardState, type DiffField, type FieldDiff, type NewCard, type Person, type SeedResult, type Snapshot, type SplitInput, type SplitResult, type Suit, type UnsplitResult } from './types'
 import { newId } from '@/lib/id'
 
 const MAX_TEXT_LEN = 10_000
 const MAX_STANDARDS = 50
 
-/** A card as stored: everything but the derived `state`. */
-type Stored = Omit<Card, 'state'>
+/** A card as stored: everything but the derived `state`, `etag` and `treeEtag`. */
+type Stored = Omit<Card, 'state' | 'etag' | 'treeEtag'>
 
 interface Data {
   people: Person[]
@@ -27,7 +27,7 @@ export interface MemoryOptions {
   /** Persist across reloads (the demo); omit for tests. */
   storage?: Storage | null
   key?: string
-  /** The baselines `seed()` loads. Defaults to the dozen in `demoDeck.ts`. */
+  /** The baselines `seed()` loads. Defaults to the full deck in `demoDeck.ts`. */
   deck?: Baseline[]
 }
 
@@ -83,7 +83,27 @@ export class MemoryAdapter implements ApiClient {
   private view(card: Stored): Card {
     const baseline = this.baselineOf(card)
     const state: CardState = card.origin === 'family' ? 'custom' : diff(card, baseline!).length === 0 ? 'original' : 'edited'
-    return { ...clone(card), state }
+    return { ...clone(card), state, etag: etagOf(card), treeEtag: this.treeEtagOf(card) }
+  }
+
+  /** Over the card and its whole subtree in tree order, as the server's. */
+  private treeEtagOf(card: Stored): string {
+    const tags: string[] = []
+    const walk = (c: Stored): void => {
+      tags.push(etagOf(c))
+      for (const child of this.childrenOf(c.id)) walk(child)
+    }
+    walk(card)
+    return fnv(tags.join(''))
+  }
+
+  /** The server's `If-Match`: absent or `*` always passes; anything else must be the card's tag now (its tree tag for `tree`). */
+  private check(card: Stored, etag: string | undefined, tree = false): void {
+    if (etag === undefined) return
+    const tag = etag.trim()
+    const current = tree ? this.treeEtagOf(card) : etagOf(card)
+    if (tag === '*' || tag.replace(/^W\//, '').replace(/^"|"$/g, '') === current) return
+    throw new StaleError(this.view(card))
   }
 
   private checkOwner(owner: string | null | undefined): void {
@@ -103,6 +123,10 @@ export class MemoryAdapter implements ApiClient {
       seen.add(at)
       at = this.data.cards.find((c) => c.id === at)?.parentCardId ?? null
     }
+  }
+
+  private childrenOf(parentId: string): Stored[] {
+    return this.data.cards.filter((c) => c.parentCardId === parentId).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))
   }
 
   private nextPosition(parentId: string | null): number {
@@ -185,10 +209,20 @@ export class MemoryAdapter implements ApiClient {
     return clone(person)
   }
 
+  async deletePerson(id: string): Promise<void> {
+    const at = this.data.people.findIndex((p) => p.id === id)
+    if (at < 0) throw new NotFoundError('person not found')
+    const held = this.data.cards.filter((c) => c.ownerId === id).length
+    if (held > 0) throw new ConflictError(`holds ${held} ${held === 1 ? 'card' : 'cards'}`)
+    this.data.people.splice(at, 1)
+    this.save()
+  }
+
   // ---- cards ---------------------------------------------------------
 
-  async updateCard(id: string, patch: CardPatch): Promise<Card> {
+  async updateCard(id: string, patch: CardPatch, etag?: string): Promise<Card> {
     const card = this.stored(id)
+    this.check(card, etag)
     const next: Stored = clone(card)
     if (patch.name !== undefined) next.name = cleanName(patch.name)
     if (patch.suit !== undefined) next.suit = cleanSuit(patch.suit)
@@ -234,9 +268,10 @@ export class MemoryAdapter implements ApiClient {
     return this.view(card)
   }
 
-  async split(id: string, input: SplitInput): Promise<SplitResult> {
-    if (input.children.length === 0) throw invalid('a split needs at least one child')
+  async split(id: string, input: SplitInput, etag?: string): Promise<SplitResult> {
     const parent = this.stored(id)
+    this.check(parent, etag)
+    if (input.children.length === 0) throw invalid('a split needs at least one child')
     // Validate everything before writing anything, as the server does.
     const specs: Stored[] = []
     let position = this.nextPosition(id)
@@ -271,8 +306,9 @@ export class MemoryAdapter implements ApiClient {
     return { parent: this.view(parent), children: specs.map((c) => this.view(c)) }
   }
 
-  async reset(id: string): Promise<Card> {
+  async reset(id: string, etag?: string): Promise<Card> {
     const card = this.stored(id)
+    this.check(card, etag)
     const baseline = this.baselineOf(card)
     if (!baseline) throw invalid('not a deck card')
     card.name = baseline.name
@@ -285,13 +321,63 @@ export class MemoryAdapter implements ApiClient {
     return this.view(card)
   }
 
-  async setPosition(id: string, position: number): Promise<void> {
-    this.stored(id).position = position
+  async setPosition(id: string, position: number, etag?: string): Promise<void> {
+    const card = this.stored(id)
+    this.check(card, etag)
+    card.position = position
     this.save()
+  }
+
+  async deleteCard(id: string, etag?: string): Promise<void> {
+    const card = this.stored(id)
+    this.check(card, etag)
+    if (this.data.cards.some((c) => c.parentCardId === id)) throw new ConflictError('the card has children; unsplit it first')
+    this.data.cards = this.data.cards.filter((c) => c.id !== id)
+    this.save()
+  }
+
+  async unsplitCard(id: string, treeEtag?: string): Promise<UnsplitResult> {
+    const card = this.stored(id)
+    this.check(card, treeEtag, true)
+    const deleted: string[] = []
+    const walk = (parentId: string): void => {
+      for (const child of this.childrenOf(parentId)) {
+        walk(child.id)
+        deleted.push(child.id)
+      }
+    }
+    walk(id)
+    const gone = new Set(deleted)
+    this.data.cards = this.data.cards.filter((c) => !gone.has(c.id))
+    this.save()
+    return { parent: this.view(card), deleted }
+  }
+
+  async reorderChildren(parentId: string, ids: string[], treeEtag?: string): Promise<Card[]> {
+    const parent = this.stored(parentId)
+    this.check(parent, treeEtag, true)
+    const children = this.childrenOf(parentId)
+    const want = new Set(ids)
+    if (want.size !== ids.length || children.length !== ids.length || !children.every((c) => want.has(c.id))) throw invalid('ids must be exactly the current children, each once')
+    const byId = new Map(children.map((c) => [c.id, c]))
+    const ordered = ids.map((cid, position) => Object.assign(byId.get(cid)!, { position }))
+    this.save()
+    return ordered.map((c) => this.view(c))
   }
 }
 
 // ---- rules shared with the server ---------------------------------------
+
+/** FNV-1a over the stored record: 16 hex chars, like the server's SHA-256 prefix; new whenever the card changes. */
+function etagOf(card: Stored): string {
+  return fnv(JSON.stringify(card))
+}
+
+function fnv(text: string): string {
+  let h = 0xcbf29ce484222325n
+  for (const byte of new TextEncoder().encode(text)) h = ((h ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn
+  return h.toString(16).padStart(16, '0')
+}
 
 export const deckCardId = (number: number): string => `00000000-0000-4000-8000-1000${String(number).padStart(8, '0')}`
 

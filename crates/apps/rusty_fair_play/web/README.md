@@ -24,8 +24,9 @@ and open `http://127.0.0.1:8790/`. The deck ships in the binary and is loaded on
 first start, so the board is full straight away. The UI boots without asking for
 anything; if the server was started with `RUSTY_FAIR_PLAY_TOKEN`, the first `401`
 brings up the token prompt (kept in sessionStorage, or localStorage with
-"remember on this device"). Demo mode: open `/?adapter=memory` — a dozen real
-deck cards in the browser's localStorage, nothing sent anywhere.
+"remember on this device"). Demo mode: open `/?adapter=memory` — the full
+hundred-card deck (parsed from the same CSV the binary embeds) in the browser's
+localStorage, nothing sent anywhere.
 
 ## What it does
 
@@ -36,13 +37,16 @@ deck cards in the browser's localStorage, nothing sent anywhere.
 - `#/deck/:cardId` — the detail pane (a drawer over the board on narrow screens):
   breadcrumb up the split chain, inline rename, "Deal to…", Conception /
   Planning / Execution, the minimum standard of care as an editable list, notes —
-  one Save sends only the changed fields in one `PATCH`. Deck cards get a
+  plus Suit and Parent selects (the parent list leaves out the card and what is
+  under it). One Save sends only the changed fields in one `PATCH`. Deck cards get a
   "Changes from the original" disclosure (field-by-field diff from `/baseline`)
   and a confirmed "Reset to original"; custom cards say so. Children are listed in
-  position order with move up/down (`PUT /position`, swapping positions) and a
-  "Split…" dialog (child rows with owners, and whom to hand the parent to).
+  position order with move up/down (one `PUT /cards/{id}/children/order`), a
+  "Split…" dialog (child rows with owners, and whom to hand the parent to), a
+  confirmed "Unsplit…" (removes the whole subtree, says how many cards) and a
+  confirmed "Delete card" (leaves only; disabled with the reason while it has children).
 - `#/players` — people with "holds N cards (M leaves)", inline rename, add (a
-  `409` shows as "already exists").
+  `409` shows as "already exists"), and a confirmed remove, disabled while they hold a card.
 - `#/balance` — per person, all-cards and leaf-only bars with a per-suit row, then
   "Still undealt": the unassigned leaf cards grouped by suit with a quick deal.
 
@@ -55,7 +59,11 @@ deck cards in the browser's localStorage, nothing sent anywhere.
   behaviour suite run against both (`npm test` and `npm run test:integration`).
 - `src/store/data.ts` — a Zustand store holding the snapshot; writes await the
   server and merge the returned card(s) in; the snapshot is refreshed on window
-  focus and every 30 s. `derive.ts` computes children, leaves, chains, balance
+  focus and every 30 s. Reads and writes are ordered: a snapshot requested before
+  a write started (or still in flight when one finished) is dropped, and an older
+  read never replaces a newer one, so a slow refresh cannot roll back a save or
+  hide a new card. A write to a card with an ancestor is followed by a re-read so
+  the ancestors' `treeEtag`s match the server. `derive.ts` computes children, leaves, chains, balance
   (all vs leaf-only) and counts from the cards array on the client.
 - `src/features/` — deck (board, filters, detail pane, split dialog, baseline
   block), players, balance. `src/components/` — Dialog, Confirm, Toasts, Tooltip,
@@ -67,12 +75,32 @@ deck cards in the browser's localStorage, nothing sent anywhere.
 |---|---|
 | ![Balance](docs/screenshots/balance.png) | ![Players](docs/screenshots/players.png) |
 
-## Known gaps
+## Concurrent edits
 
-- Re-parenting a card (`parentCardId`) and changing a card's suit are supported by
-  the API and the adapters but not exposed; reset is the only way a suit changes.
-- Concurrent edits: the last write wins and the 30 s refresh shows it; there is no
-  etag/412 handling because the API has none.
-- Moving a child swaps two positions with two `PUT`s; a crash between them can
-  leave two children on one position (the order then falls back to id).
-- The demo deck is twelve cards, not the hundred the binary ships.
+Every card write sends `If-Match` with the version it was based on: the draft's
+own `etag` for an edit (fixed when the user starts typing, not re-read at save),
+the card's `etag` for deal, rename, split, reset and delete, and its `treeEtag`
+for unsplit and child reorder, which also moves when a descendant is edited,
+added or reordered.
+
+- A save the server refuses (`412`) keeps the draft, merges the newer card in and
+  toasts. The pane then shows a notice with **Overwrite** (save on top of the new
+  version) and **Discard mine**.
+- A refresh that brings in a newer card while a draft is pending shows the same
+  notice before any save, and there is no quiet Save: it is an Overwrite.
+- Fields the user has not touched follow the card; fields typed while a save is in
+  flight are kept, not reset by the answer.
+- The check is per card, not per field: editing a different field of a card
+  someone else just saved is still a conflict, and Overwrite replaces only the
+  fields the user changed.
+
+## Limits
+
+- A child reorder is one request, validated whole before anything is written, but
+  the server then writes each child's position separately. It is not crash-atomic:
+  a crash part way leaves some positions applied (equal positions fall back to id
+  order). A failed request leaves the UI as it was.
+- Without `If-Match` the API is last-writer-wins; this UI always sends it, other
+  clients may not.
+- Deleting a deck card removes it for good until `POST /seed` (not done on start-up
+  once the deck has loaded) restores the missing ones.

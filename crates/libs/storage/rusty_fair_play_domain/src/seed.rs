@@ -26,6 +26,7 @@ use crate::{
     CardError, CardProductionStack, NameField, Person, SplitSpec, Suit, CARD_DEFAULT_FILE,
     CARD_FILE, PERSON_FILE,
 };
+use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::{FilterEq, GetById};
 use std::collections::{BTreeMap, HashSet};
@@ -82,6 +83,8 @@ pub enum SeedError {
     },
     Store(DurabilityError),
     Card(CardError),
+    /// The directory is held by a running service (or another seeder).
+    Locked(DirLockError),
 }
 
 impl std::fmt::Display for SeedError {
@@ -96,6 +99,7 @@ impl std::fmt::Display for SeedError {
             SeedError::File { label, message } => write!(f, "{label}: {message}"),
             SeedError::Store(e) => write!(f, "store: {e}"),
             SeedError::Card(e) => write!(f, "card: {e}"),
+            SeedError::Locked(e) => write!(f, "{e}"),
         }
     }
 }
@@ -105,6 +109,12 @@ impl std::error::Error for SeedError {}
 impl From<DurabilityError> for SeedError {
     fn from(e: DurabilityError) -> Self {
         SeedError::Store(e)
+    }
+}
+
+impl From<DirLockError> for SeedError {
+    fn from(e: DirLockError) -> Self {
+        SeedError::Locked(e)
     }
 }
 
@@ -521,10 +531,9 @@ fn resolve_parent(
 /// splits in order; nothing is written for an input that failed to
 /// parse, since parsing happens before this is called.
 pub fn seed(store_dir: &Path, data: &SeedData) -> Result<SeedReport, SeedError> {
-    std::fs::create_dir_all(store_dir).map_err(|source| SeedError::Io {
-        path: store_dir.to_path_buf(),
-        source,
-    })?;
+    // Before any stack is opened: a live service keeps its indexes in
+    // memory, so a second writer would leave its guards stale.
+    let _lock = DirLock::acquire(store_dir, crate::LOCK_FILE)?;
     let mut people = open_or_create_person_production_stack(&store_dir.join(PERSON_FILE))?;
     let mut defaults =
         open_or_create_card_default_production_stack(&store_dir.join(CARD_DEFAULT_FILE))?;

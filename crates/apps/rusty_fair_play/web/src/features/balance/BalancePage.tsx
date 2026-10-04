@@ -77,7 +77,7 @@ export function BalancePage() {
                         {card.number !== null && <span className="mr-1 text-xs text-grey">#{card.number}</span>}
                         {card.name}
                       </Link>
-                      <select aria-label={`Deal ${card.name} to`} value="" onChange={(e) => e.target.value && void updateCard(card.id, { ownerId: e.target.value }).catch(() => undefined)} className="field h-7 w-auto py-0 text-s" disabled={people.length === 0}>
+                      <select aria-label={`Deal ${card.name} to`} value="" onChange={(e) => e.target.value && void updateCard(card.id, { ownerId: e.target.value }, card.etag).catch(() => undefined)} className="field h-7 w-auto py-0 text-s" disabled={people.length === 0}>
                         <option value="">Deal to…</option>
                         {people.map((p) => (
                           <option key={p.id} value={p.id}>

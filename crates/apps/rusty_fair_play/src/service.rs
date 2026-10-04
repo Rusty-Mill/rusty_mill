@@ -5,24 +5,26 @@
 
 use rusty_fair_play_domain::seed::{self, SeedData, SeedError, SeedReport};
 use rusty_fair_play_domain::{
-    baseline_diff, baseline_of, card_state, create_custom_card, deck_card_id, delete_card,
+    baseline_diff, baseline_of, card_state, card_tree, create_custom_card, delete_card,
     delete_person, fair_play_id, open_or_create_card_default_production_stack,
     open_or_create_card_production_stack, open_or_create_person_production_stack, person_id,
     reorder_children, replace_card, reset_to_baseline, set_position, split_card, unsplit_card,
     Card, CardDefault, CardDefaultProductionStack, CardError, CardProductionStack, CardState,
     FieldDiff, NewCustomCard, Person, PersonProductionStack, SplitSpec, Suit, CARD_DEFAULT_FILE,
-    CARD_FILE, PERSON_FILE,
+    CARD_FILE, LOCK_FILE, PERSON_FILE,
 };
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use rusty_multimodal_db_engine::generic::{DeleteError, InsertError, ReplaceError};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// The lock file in the data directory.
-pub const LOCK_FILE: &str = "store.lock";
+/// Written once the deck has been loaded in full. Whether the deck was
+/// loaded must not be read off the live cards: a card can be deleted,
+/// and a first load can be interrupted part way.
+pub const DECK_MARKER: &str = "deck.loaded";
 /// Longest text a single field accepts; a card is a card, not a document.
 pub const MAX_TEXT_LEN: usize = 10_000;
 /// Most standards one card lists.
@@ -77,7 +79,7 @@ impl From<SeedError> for ServiceError {
         match e {
             SeedError::Card(e) => e.into(),
             SeedError::Store(e) => e.into(),
-            SeedError::Io { .. } => Self::Storage(e.to_string()),
+            SeedError::Io { .. } | SeedError::Locked(_) => Self::Storage(e.to_string()),
             SeedError::Row { .. } | SeedError::File { .. } => Self::Invalid(e.to_string()),
         }
     }
@@ -90,6 +92,11 @@ pub type Result<T> = std::result::Result<T, ServiceError>;
 pub struct CardView {
     pub card: Card,
     pub state: CardState,
+    /// Covers the card and everything under it: it moves when a
+    /// descendant is edited, added, removed or reordered, so it guards the
+    /// subtree operations (`unsplit`, `reorder`) that the card's own tag
+    /// cannot.
+    pub tree_etag: String,
 }
 
 impl CardView {
@@ -173,6 +180,7 @@ pub struct Split {
 }
 
 pub struct Service {
+    dir: PathBuf,
     _lock: DirLock,
     people: PersonProductionStack,
     defaults: CardDefaultProductionStack,
@@ -185,6 +193,7 @@ impl Service {
     pub fn open(dir: &Path) -> Result<Self> {
         let lock = DirLock::acquire(dir, LOCK_FILE)?;
         Ok(Self {
+            dir: dir.to_path_buf(),
             _lock: lock,
             people: open_or_create_person_production_stack(&dir.join(PERSON_FILE))?,
             defaults: open_or_create_card_default_production_stack(&dir.join(CARD_DEFAULT_FILE))?,
@@ -195,7 +204,28 @@ impl Service {
     fn view(&self, card: Card) -> Result<CardView> {
         let baseline = baseline_of(&self.cards, &self.defaults, card.id)?;
         let state = card_state(&card, baseline.as_ref())?;
-        Ok(CardView { card, state })
+        let tree_etag = self.tree_etag(card.id);
+        Ok(CardView {
+            card,
+            state,
+            tree_etag,
+        })
+    }
+
+    /// [`CardView::tree_etag`]: SHA-256 over the card tags of the card and
+    /// its whole subtree in tree order.
+    fn tree_etag(&self, id: Uuid) -> String {
+        let Ok(tree) = card_tree(&self.cards, id) else {
+            return String::new();
+        };
+        let mut hash = Sha256::new();
+        for card in tree.flatten() {
+            hash.update(card_etag(card).as_bytes());
+        }
+        hash.finalize()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     fn card_view(&self, id: Uuid) -> Result<CardView> {
@@ -411,8 +441,9 @@ impl Service {
         set_position(&mut self.cards, id, position).map_err(|_| ServiceError::NotFound("card"))
     }
 
-    /// Put `parent`'s children in `order` — one request, one lock, one
-    /// slot write per child — and return them in that order.
+    /// Put `parent`'s children in `order` — validated whole first, then
+    /// one slot write per child under this service's lock (not
+    /// crash-atomic) — and return them in that order.
     pub fn reorder_children(&mut self, parent: Uuid, order: &[Uuid]) -> Result<Vec<CardView>> {
         reorder_children(&mut self.cards, parent, order)?;
         order.iter().map(|id| self.card_view(*id)).collect()
@@ -436,23 +467,42 @@ impl Service {
         Ok(delete_person(&mut self.people, &self.cards, id)?)
     }
 
-    /// Load the deck that ships in the library; idempotent.
+    /// Load the deck that ships in the library, restoring any deck card
+    /// that is missing and never touching one that exists, then record
+    /// that the load finished. An explicit call, so it also brings back a
+    /// card that was deleted; start-up uses [`Service::ensure_deck`].
     pub fn seed_deck(&mut self) -> Result<SeedReport> {
         let data = SeedData {
             deck: seed::deck()?,
             ..SeedData::default()
         };
-        Ok(seed::seed_into(
-            &mut self.people,
-            &mut self.defaults,
-            &mut self.cards,
-            &data,
-        )?)
+        let report = seed::seed_into(&mut self.people, &mut self.defaults, &mut self.cards, &data)?;
+        self.mark_deck_loaded()?;
+        Ok(report)
     }
 
-    /// Whether the deck has been loaded: deck card 1 exists.
+    /// Load the deck once: a no-op when a load already finished (so a
+    /// deleted deck card stays deleted), and a completing re-run when a
+    /// first load was interrupted before it wrote its marker.
+    pub fn ensure_deck(&mut self) -> Result<Option<SeedReport>> {
+        if self.has_deck() {
+            return Ok(None);
+        }
+        self.seed_deck().map(Some)
+    }
+
+    /// Whether a deck load has finished.
     pub fn has_deck(&self) -> bool {
-        self.cards.get(deck_card_id(1)).is_some()
+        self.dir.join(DECK_MARKER).is_file()
+    }
+
+    /// Write the marker by rename, so it is either absent or complete.
+    fn mark_deck_loaded(&self) -> Result<()> {
+        let io = |e: std::io::Error| ServiceError::Storage(format!("deck marker: {e}"));
+        let tmp = self.dir.join(format!("{DECK_MARKER}.tmp"));
+        let file = std::fs::File::create(&tmp).map_err(io)?;
+        file.sync_all().map_err(io)?;
+        std::fs::rename(&tmp, self.dir.join(DECK_MARKER)).map_err(io)
     }
 }
 
@@ -498,6 +548,8 @@ fn clean_standards(list: Vec<String>) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_fair_play_domain::deck_card_id;
+    use rusty_fair_play_domain::seed::SeedData;
 
     fn service() -> (tempfile::TempDir, Service) {
         let dir = tempfile::tempdir().unwrap();
@@ -517,6 +569,96 @@ mod tests {
             "a second service on the same directory is refused"
         );
         assert_eq!(s.snapshot().unwrap().cards.len(), 100);
+    }
+
+    #[test]
+    fn a_deleted_deck_card_stays_deleted_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Service::open(dir.path()).unwrap();
+        assert!(!s.has_deck());
+        assert_eq!(s.ensure_deck().unwrap().unwrap().cards.created, 100);
+        assert!(s.has_deck());
+        s.delete_card(deck_card_id(1)).unwrap();
+        assert!(s.ensure_deck().unwrap().is_none(), "already loaded");
+        drop(s);
+
+        let mut s = Service::open(dir.path()).unwrap();
+        assert!(s.has_deck(), "the marker is on disk");
+        assert!(s.ensure_deck().unwrap().is_none());
+        assert_eq!(s.snapshot().unwrap().cards.len(), 99);
+        assert!(
+            s.card(deck_card_id(1)).is_err(),
+            "card 1 was not resurrected"
+        );
+
+        // An explicit POST /seed does bring it back.
+        assert_eq!(s.seed_deck().unwrap().cards.created, 1);
+        assert_eq!(s.snapshot().unwrap().cards.len(), 100);
+    }
+
+    #[test]
+    fn an_interrupted_first_load_is_finished_on_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Service::open(dir.path()).unwrap();
+        // Ten cards in, no marker: what a kill part way through leaves.
+        let partial = SeedData {
+            deck: seed::deck().unwrap().into_iter().take(10).collect(),
+            ..SeedData::default()
+        };
+        seed::seed_into(&mut s.people, &mut s.defaults, &mut s.cards, &partial).unwrap();
+        assert!(s.card(deck_card_id(1)).is_ok());
+        assert!(!s.has_deck(), "ten cards are not a loaded deck");
+        drop(s);
+
+        let mut s = Service::open(dir.path()).unwrap();
+        let report = s.ensure_deck().unwrap().expect("the load resumes");
+        assert_eq!((report.cards.created, report.cards.existing), (90, 10));
+        assert_eq!(s.snapshot().unwrap().cards.len(), 100);
+        assert!(s.has_deck());
+    }
+
+    #[test]
+    fn the_tree_etag_moves_with_any_descendant() {
+        let (_d, mut s) = service();
+        let cleaning = deck_card_id(2);
+        let made = s
+            .split(
+                cleaning,
+                SplitRequest {
+                    children: vec![
+                        SplitChild {
+                            name: "Bathrooms".into(),
+                            ..SplitChild::default()
+                        },
+                        SplitChild {
+                            name: "Floors".into(),
+                            ..SplitChild::default()
+                        },
+                    ],
+                    ..SplitRequest::default()
+                },
+            )
+            .unwrap();
+        let root = s.card(cleaning).unwrap();
+        let (a, b) = (made.children[0].card.id, made.children[1].card.id);
+        let patch = CardPatch {
+            notes: Some("x".into()),
+            ..CardPatch::default()
+        };
+        s.patch_card(a, patch).unwrap();
+        let edited = s.card(cleaning).unwrap();
+        assert_eq!(edited.etag(), root.etag(), "the card itself did not change");
+        assert_ne!(edited.tree_etag, root.tree_etag, "but its subtree did");
+
+        s.reorder_children(cleaning, &[b, a]).unwrap();
+        let reordered = s.card(cleaning).unwrap();
+        assert_eq!(reordered.etag(), root.etag());
+        assert_ne!(reordered.tree_etag, edited.tree_etag, "a reorder moves it");
+        assert_eq!(
+            s.card(a).unwrap().tree_etag,
+            s.card(a).unwrap().tree_etag,
+            "a leaf's tags are stable between reads"
+        );
     }
 
     #[test]

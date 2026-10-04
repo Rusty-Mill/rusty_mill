@@ -36,4 +36,23 @@ describe('players', () => {
     await renderApp('/players', (api) => api.seed().then(() => undefined))
     expect(screen.getByText(/Nobody yet/)).toBeInTheDocument()
   })
+
+  it('removes a person who holds nothing; one who holds cards cannot be removed and says so', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/players', async (api) => {
+      const { ada } = await seedFamily(api)
+      const cards = (await api.snapshot()).cards
+      await api.updateCard(cards[0]!.id, { ownerId: ada })
+      await api.updateCard(cards[1]!.id, { ownerId: ada })
+    })
+    const list = screen.getByRole('list', { name: 'People' })
+    const [adaRow, bobRow] = within(list).getAllByRole('listitem')
+    expect(within(adaRow!).getByRole('button', { name: 'Remove Ada' })).toBeDisabled()
+    expect(within(adaRow!).getByText('holds 2 cards')).toBeInTheDocument()
+    await user.click(within(bobRow!).getByRole('button', { name: 'Remove Bob' }))
+    const dialog = screen.getByRole('dialog', { name: 'Remove Bob?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(1))
+    expect((await api.snapshot()).people.map((p) => p.name)).toEqual(['Ada'])
+  })
 })

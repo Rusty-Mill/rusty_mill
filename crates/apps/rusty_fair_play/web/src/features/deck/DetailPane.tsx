@@ -1,11 +1,14 @@
-import { ArrowDown, ArrowUp, ChevronRight, Scissors, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronRight, Merge, Scissors, Trash2, X } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
+import { StaleError } from '@/api/errors'
 import { Link, useNavigate } from 'react-router-dom'
-import type { Card, CardPatch } from '@/api/types'
+import { SUITS, type Card, type CardPatch, type Suit } from '@/api/types'
 import { PATHS } from '@/app/paths'
 import { useActions, useData } from '@/app/services'
 import { OwnerChip, ownerOf, StateBadge, suitBg, suitText } from '@/components/badges'
-import { chainToRoot, childrenOf } from '@/store/derive'
+import { Confirm } from '@/components/Confirm'
+import { Tooltip } from '@/components/Tooltip'
+import { chainToRoot, childrenOf, subtree, type CardIndex } from '@/store/derive'
 import { BaselineBlock } from './BaselineBlock'
 import { SplitDialog } from './SplitDialog'
 import { StandardsEditor } from './StandardsEditor'
@@ -31,6 +34,8 @@ export function DetailPane({ cardId }: { cardId: string | null }) {
 }
 
 interface Draft {
+  suit: Suit
+  parentCardId: string | null
   conception: string
   planning: string
   execution: string
@@ -38,13 +43,13 @@ interface Draft {
   notes: string
 }
 
-const draftOf = (c: Card): Draft => ({ conception: c.conception, planning: c.planning, execution: c.execution, minimumStandardOfCare: [...c.minimumStandardOfCare], notes: c.notes })
+const draftOf = (c: Card): Draft => ({ suit: c.suit, parentCardId: c.parentCardId, conception: c.conception, planning: c.planning, execution: c.execution, minimumStandardOfCare: [...c.minimumStandardOfCare], notes: c.notes })
 
 function CardDetail({ card }: { card: Card }) {
   const navigate = useNavigate()
   const people = useData((s) => s.people)
   const index = useData((s) => s.index)
-  const { updateCard, swapPositions } = useActions()
+  const { updateCard, reorderChildren, deleteCard, unsplit } = useActions()
   const [draft, setDraft] = useState<Draft>(() => draftOf(card))
   // When the card changes under the draft (a reset, a background refresh), fields the user has not touched follow it.
   const [base, setBase] = useState(card)
@@ -52,6 +57,8 @@ function CardDetail({ card }: { card: Card }) {
     const was = draftOf(base)
     const now = draftOf(card)
     setDraft({
+      suit: draft.suit === was.suit ? now.suit : draft.suit,
+      parentCardId: draft.parentCardId === was.parentCardId ? now.parentCardId : draft.parentCardId,
       conception: draft.conception === was.conception ? now.conception : draft.conception,
       planning: draft.planning === was.planning ? now.planning : draft.planning,
       execution: draft.execution === was.execution ? now.execution : draft.execution,
@@ -60,16 +67,24 @@ function CardDetail({ card }: { card: Card }) {
     })
     setBase(card)
   }
+  // The version the edit was started from. It stays put while the card moves on underneath (a
+  // refresh, another tab), so a save is judged against what the user actually saw.
+  const [draftBase, setDraftBase] = useState(card.etag)
   const [saving, setSaving] = useState(false)
   const [splitOpen, setSplitOpen] = useState(false)
+  const [confirm, setConfirm] = useState<'delete' | 'unsplit' | null>(null)
 
   const chain = useMemo(() => chainToRoot(index, card.id), [index, card.id])
   const children = childrenOf(index, card.id)
+  const below = subtree(index, card.id).length - 1
   const owner = ownerOf(card, people)
+  const parents = useMemo(() => parentOptions(index, card.id), [index, card.id])
 
   /** Only the fields that differ from the card go in the PATCH. */
   const changes = useMemo((): CardPatch => {
     const p: CardPatch = {}
+    if (draft.suit !== card.suit) p.suit = draft.suit
+    if (draft.parentCardId !== card.parentCardId) p.parentCardId = draft.parentCardId
     if (draft.conception !== card.conception) p.conception = draft.conception
     if (draft.planning !== card.planning) p.planning = draft.planning
     if (draft.execution !== card.execution) p.execution = draft.execution
@@ -78,27 +93,57 @@ function CardDetail({ card }: { card: Card }) {
     return p
   }, [draft, card])
   const dirty = Object.keys(changes).length > 0
+  /** Edits are pending and the card is no longer the one they were made against. */
+  const conflicted = dirty && draftBase !== card.etag
 
-  const save = async (): Promise<void> => {
+  /** The first change of a clean draft records which version it is based on. */
+  const edit = (next: Draft): void => {
+    if (!dirty) setDraftBase(card.etag)
+    setDraft(next)
+  }
+
+  const save = async (base: string): Promise<void> => {
     setSaving(true)
     try {
-      const saved = await updateCard(card.id, changes)
-      setDraft(draftOf(saved))
-    } catch {
-      /* toasted by the store; the draft stays for another try */
+      // The store merges the saved card in; the follow-the-card logic above then clears the
+      // fields that were just saved and keeps anything typed while the request was in flight.
+      const saved = await updateCard(card.id, changes, base)
+      setDraftBase(saved.etag)
+    } catch (e) {
+      // Toasted by the store. The draft stays; on a 412 the card is now the newer one, so the
+      // conflict notice below offers to overwrite it or drop the edits.
+      if (!(e instanceof StaleError)) return
     } finally {
       setSaving(false)
     }
   }
 
   const deal = (value: string): void => {
-    void updateCard(card.id, { ownerId: value || null }).catch(() => undefined)
+    void updateCard(card.id, { ownerId: value || null }, card.etag).catch(() => undefined)
   }
 
+  /** Move child `i` by `delta` as one order request. */
   const move = (i: number, delta: number): void => {
-    const a = children[i]
-    const b = children[i + delta]
-    if (a && b) void swapPositions(a, b).catch(() => undefined)
+    const ids = children.map((c) => c.id)
+    const j = i + delta
+    if (!ids[i] || !ids[j]) return
+    ;[ids[i], ids[j]] = [ids[j]!, ids[i]!]
+    void reorderChildren(card.id, ids).catch(() => undefined)
+  }
+
+  const doDelete = async (): Promise<void> => {
+    setConfirm(null)
+    try {
+      await deleteCard(card.id)
+      navigate(card.parentCardId ? PATHS.card(card.parentCardId) : PATHS.deck)
+    } catch {
+      /* toasted by the store */
+    }
+  }
+
+  const doUnsplit = async (): Promise<void> => {
+    setConfirm(null)
+    await unsplit(card.id).catch(() => undefined)
   }
 
   return (
@@ -132,6 +177,26 @@ function CardDetail({ card }: { card: Card }) {
           </div>
         </div>
 
+        <div className="grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5 text-s">
+          <span className="text-grey">Suit</span>
+          <select aria-label="Suit" value={draft.suit} onChange={(e) => edit({ ...draft, suit: e.target.value as Suit })} className="field h-8">
+            {SUITS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <span className="text-grey">Parent</span>
+          <select aria-label="Parent" value={draft.parentCardId ?? ''} onChange={(e) => edit({ ...draft, parentCardId: e.target.value || null })} className="field h-8">
+            <option value="">None (top level)</option>
+            {parents.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <label className="flex items-center gap-2">
           <span className="text-s text-grey">Deal to</span>
           <select aria-label="Deal to" value={card.ownerId ?? ''} onChange={(e) => deal(e.target.value)} className="field h-8 w-auto">
@@ -148,7 +213,7 @@ function CardDetail({ card }: { card: Card }) {
         {(['conception', 'planning', 'execution'] as const).map((field) => (
           <label key={field} className="flex flex-col gap-1">
             <span className="text-s font-semibold capitalize">{field}</span>
-            <textarea aria-label={field[0]!.toUpperCase() + field.slice(1)} value={draft[field]} onChange={(e) => setDraft({ ...draft, [field]: e.target.value })} rows={3} className="field resize-y" />
+            <textarea aria-label={field[0]!.toUpperCase() + field.slice(1)} value={draft[field]} onChange={(e) => edit({ ...draft, [field]: e.target.value })} rows={3} className="field resize-y" />
           </label>
         ))}
 
@@ -156,22 +221,29 @@ function CardDetail({ card }: { card: Card }) {
           <h3 id="msc-h" className="m-0 text-s font-semibold">
             Minimum standard of care
           </h3>
-          <StandardsEditor value={draft.minimumStandardOfCare} onChange={(minimumStandardOfCare) => setDraft({ ...draft, minimumStandardOfCare })} />
+          <StandardsEditor value={draft.minimumStandardOfCare} onChange={(minimumStandardOfCare) => edit({ ...draft, minimumStandardOfCare })} />
         </section>
 
         <label className="flex flex-col gap-1">
           <span className="text-s font-semibold">Notes</span>
-          <textarea aria-label="Notes" value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} rows={2} placeholder="Notes never make a card edited." className="field resize-y" />
+          <textarea aria-label="Notes" value={draft.notes} onChange={(e) => edit({ ...draft, notes: e.target.value })} rows={2} placeholder="Notes never make a card edited." className="field resize-y" />
         </label>
 
         {dirty && (
-          <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t border-line bg-surface py-2">
-            <button type="button" onClick={() => setDraft(draftOf(card))} className="btn border-transparent">
-              Cancel
-            </button>
-            <button type="button" onClick={() => void save()} disabled={saving} className="btn-primary">
-              Save
-            </button>
+          <div className="sticky bottom-0 flex flex-col gap-2 border-t border-line bg-surface py-2">
+            {conflicted && (
+              <p role="alert" className="m-0 text-s text-danger">
+                This card changed elsewhere while you were editing. Your changes are kept; the fields you did not touch show the new version. Saving replaces the new version of the fields you changed.
+              </p>
+            )}
+            <div className="flex items-center justify-end gap-2">
+              <button type="button" onClick={() => setDraft(draftOf(card))} className="btn border-transparent">
+                {conflicted ? 'Discard mine' : 'Cancel'}
+              </button>
+              <button type="button" onClick={() => void save(conflicted ? card.etag : draftBase)} disabled={saving} className="btn-primary">
+                {conflicted ? 'Overwrite' : 'Save'}
+              </button>
+            </div>
           </div>
         )}
 
@@ -182,13 +254,20 @@ function CardDetail({ card }: { card: Card }) {
         )}
 
         <section aria-labelledby="children-h" className="flex flex-col gap-2">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h3 id="children-h" className="m-0 text-base font-semibold">
               Children {children.length > 0 && <span className="font-normal text-grey">· {children.length}</span>}
             </h3>
-            <button type="button" onClick={() => setSplitOpen(true)} className="btn">
-              <Scissors size={14} /> Split…
-            </button>
+            <div className="flex items-center gap-1.5">
+              {children.length > 0 && (
+                <button type="button" onClick={() => setConfirm('unsplit')} className="btn">
+                  <Merge size={14} /> Unsplit…
+                </button>
+              )}
+              <button type="button" onClick={() => setSplitOpen(true)} className="btn">
+                <Scissors size={14} /> Split…
+              </button>
+            </div>
           </div>
           {children.length === 0 && <p className="text-s text-grey">Not split. Split it to deal parts of this card to different people.</p>}
           {children.length > 0 && (
@@ -211,10 +290,42 @@ function CardDetail({ card }: { card: Card }) {
             </ol>
           )}
         </section>
+
+        <div className="flex justify-end border-t border-line pt-3">
+          <Tooltip label={children.length > 0 ? `Unsplit first: it has ${children.length} ${children.length === 1 ? 'child' : 'children'}` : 'Deletes this card for good'}>
+            <button type="button" aria-label="Delete card" disabled={children.length > 0} onClick={() => setConfirm('delete')} className="btn text-danger">
+              <Trash2 size={14} /> Delete card
+            </button>
+          </Tooltip>
+        </div>
       </div>
       {splitOpen && <SplitDialog card={card} open onClose={() => setSplitOpen(false)} />}
+      <Confirm
+        open={confirm === 'delete'}
+        title={`Delete "${card.name}"?`}
+        message={card.origin === 'deck' ? 'The deck card goes from the board; its owner loses it. Load the deck again to bring it back.' : 'The card goes from the board; its owner loses it. This cannot be undone.'}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => void doDelete()}
+        onCancel={() => setConfirm(null)}
+      />
+      <Confirm
+        open={confirm === 'unsplit'}
+        title={`Unsplit "${card.name}"?`}
+        message={`This removes ${below} ${below === 1 ? 'card' : 'cards'} under it (every child and grandchild, with their owners) and keeps "${card.name}" itself.`}
+        confirmLabel={`Remove ${below} ${below === 1 ? 'card' : 'cards'}`}
+        danger
+        onConfirm={() => void doUnsplit()}
+        onCancel={() => setConfirm(null)}
+      />
     </aside>
   )
+}
+
+/** Every card that could become the parent: not the card itself nor anything under it. Labelled by its chain. */
+function parentOptions(index: CardIndex, id: string): { id: string; label: string }[] {
+  const excluded = new Set(subtree(index, id).map((c) => c.id))
+  return [...index.byId.values()].filter((c) => !excluded.has(c.id)).map((c) => ({ id: c.id, label: chainToRoot(index, c.id).map((x) => (x.number !== null ? `#${x.number} ${x.name}` : x.name)).join(' › ') }))
 }
 
 /** The name, edited in place: Enter or blur saves, Escape reverts. */
@@ -231,7 +342,7 @@ function NameField({ card }: { card: Card }) {
     }
     const next = value.trim()
     if (!next || next === card.name) return setValue(card.name)
-    void updateCard(card.id, { name: next }).catch(() => setValue(card.name))
+    void updateCard(card.id, { name: next }, card.etag).catch(() => setValue(card.name))
   }
   return (
     <input

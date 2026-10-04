@@ -33,6 +33,10 @@ export interface Card {
   baselineId: string | null
   /** Derived against the baseline, never stored. */
   state: CardState
+  /** Changes whenever the card changes; sent back as `If-Match` on writes to the card. */
+  etag: string
+  /** Like `etag` but over the card and everything under it; guards `unsplitCard` and `reorderChildren`. */
+  treeEtag: string
 }
 
 export interface Baseline {
@@ -114,6 +118,12 @@ export interface SplitInput {
 export interface SplitResult {
   parent: Card
   children: Card[]
+}
+
+export interface UnsplitResult {
+  parent: Card
+  /** The subtree that went, deepest first. */
+  deleted: string[]
 }
 
 export interface Tally {
