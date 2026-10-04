@@ -17,7 +17,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 **2026-10-04** · [#472](https://github.com/Rusty-Mill/rusty_mill/pull/472) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `crates/apps/rusty_rsi/crates/rsi-core`, the I/O-free domain of an AIDE²-style self-improvement loop: `Score`/`Grade` confined to `[0, 1]`, a token + wall-clock (+ GPU) `CostMeter` with a hard stop, `NoiseBand` and a `z·√2·σ̂` accept `Margin`, a two-stage fresh-seed accept gate (`screen`/`confirm`), `argmax`/UCB1/softmax helpers, a SplitMix64 PRNG with counter-based seed derivation, and lineage entry types with a SHA-256 hash chain.
-- **Changed (review):** lineage entries are now validated: `LineageEntry::new` replays the gate on the recorded evaluations and refuses a decision they do not produce; a repeated `(task, seed)` result is rejected rather than double-counted; softmax stays correct at finite extremes (`[f64::MAX, -f64::MAX]` at `T = f64::MAX` gives ≈ `[0.881, 0.119]`, not `[1, 0]`).
+- **Changed (review):** lineage entries are now validated: `LineageEntry::new` replays the gate on the recorded evaluations and refuses a decision they do not produce; a repeated `(task, seed)` result is rejected rather than double-counted; softmax stays correct at finite extremes (`[f64::MAX, -f64::MAX]` at `T = f64::MAX` gives ≈ `[0.881, 0.119]`, not `[1, 0]`) and for subnormal logits (`[5e-324, 0]` at `T = 5e-324` gives ≈ `[0.731, 0.269]`, not `[0.5, 0.5]`).
 - **Docs:** ADR-0005 accepted.
 - Known limitation: nothing runs yet. Tasks, the sandbox, the inner harness and the outer loop arrive in P2 to P4.
 

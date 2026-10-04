@@ -72,10 +72,11 @@ pub fn ucb1(arms: &[Arm], exploration: f64) -> Result<Option<usize>, CoreError> 
 /// Softmax probabilities `exp(logit / temperature) / Σ exp(logit_j / temperature)`.
 ///
 /// Lower temperatures approach greedy; higher ones approach uniform. Each
-/// exponent is computed as `(logit/2 - max/2) / temperature * 2`, which is
-/// exact for ordinary inputs and never overflows to `inf - inf` or NaN for
-/// finite extremes such as `[f64::MAX, -f64::MAX]`. Returns an empty vector
-/// for no logits.
+/// exponent is `(logit - max) / temperature`. When `logit - max` overflows
+/// (finite extremes such as `[f64::MAX, -f64::MAX]`) it is computed as
+/// `(logit/2 - max/2) / temperature * 2` instead; that only happens at
+/// magnitudes where halving is exact, so subnormal logits keep full precision.
+/// Returns an empty vector for no logits.
 ///
 /// # Errors
 /// [`CoreError::InvalidParameter`] if `temperature` is not finite and
@@ -90,13 +91,18 @@ pub fn softmax(logits: &[f64], temperature: f64) -> Result<Vec<f64>, CoreError> 
     let Some(top) = argmax(logits)? else {
         return Ok(Vec::new());
     };
-    let half_max = logits[top] / 2.0;
-    // `l/2 - max/2` lies in [-f64::MAX, 0], so it cannot overflow; dividing by
-    // a positive temperature can only push it towards -inf, where exp is 0.
-    let weights: Vec<f64> = logits
-        .iter()
-        .map(|&l| ((l / 2.0 - half_max) / temperature * 2.0).exp())
-        .collect();
+    let max = logits[top];
+    let exponent = |l: f64| {
+        let shifted = l - max;
+        if shifted.is_finite() {
+            // Exact for subnormals; a huge quotient only tends to -inf, where exp is 0.
+            return shifted / temperature;
+        }
+        // `l - max` overflowed to -inf, so both are huge and halving them is
+        // exact; `l/2 - max/2` lies in [-f64::MAX, 0] and cannot overflow.
+        (l / 2.0 - max / 2.0) / temperature * 2.0
+    };
+    let weights: Vec<f64> = logits.iter().map(|&l| exponent(l).exp()).collect();
     // The maximum's weight is exactly exp(0) = 1, so the total is at least 1.
     let total: f64 = weights.iter().sum();
     Ok(weights.into_iter().map(|w| w / total).collect())
@@ -254,6 +260,22 @@ mod tests {
         assert!((p[0] - 0.880_797).abs() < 1e-6, "{p:?}");
         assert!((p[1] - 0.119_203).abs() < 1e-6, "{p:?}");
         assert!(((p[0] + p[1]) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn softmax_keeps_the_smallest_subnormal_logits_distinct() {
+        // Exponents (l - max) / T are exactly 0 and -1: p = [e/(1+e), 1/(1+e)].
+        // Halving 5e-324 rounds it to 0, which would make the two logits equal.
+        let tiny = f64::from_bits(1);
+        let expected = [1.0 / (1.0 + (-1f64).exp()), 1.0 / (1.0 + 1f64.exp())];
+        for (logits, temperature) in [([tiny, 0.0], tiny), ([0.0, -tiny], tiny)] {
+            let p = softmax(&logits, temperature).expect("finite inputs");
+            assert!((p[0] - expected[0]).abs() < 1e-15, "{logits:?}: {p:?}");
+            assert!((p[1] - expected[1]).abs() < 1e-15, "{logits:?}: {p:?}");
+        }
+        let normal = f64::MIN_POSITIVE;
+        let p = softmax(&[normal, 0.0], normal).expect("finite inputs");
+        assert!((p[0] - expected[0]).abs() < 1e-15, "{p:?}");
     }
 
     #[test]
