@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Wall-hit friction uses the car's own contact point
+**2026-10-04** · `RB-PHYSICS-001-FR-135` · ADR-0054
+
+- When the car sinks into the arena, the game measures friction leverage to
+  the car's own surface point, not the arena's. We used the arena's, so
+  corner and wall impacts had friction acting about 6 uu off. Applied the
+  same rule already used between two bodies. The driving recording's 8.96 s
+  corner impact error 19 -> 10 uu/s and its 0.5 s-ahead car error 2.12 ->
+  1.99; the jumping recording gives back 0.08. 522 tests.
+
 ## Coasting tires slip on walls
 **2026-10-04** · `RB-PHYSICS-001-FR-134` · ADR-0053
 

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.137.0
+- Version: 0.138.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6509,6 +6509,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `hitjump` k = 30 car 10.82 -> 10.52, one-step 0.62 -> 0.61. `test2`,
       `front`, `side` unchanged.
 
+- `RB-PHYSICS-001-FR-135` (a body's static-contact lever arm runs to its
+  own surface point; implemented and verified on the owner's captures,
+  ADR-0054): `solver::setup_rows_with_erp` measures the body's lever arm to
+  `Contact::point_on_a` (the contact point `penetration_depth` back along
+  the normal), as FR-130 does for two bodies. The normal row is unchanged
+  (the shift is along the normal); the friction rows' lever and velocity
+  change.
+  - Why: the `test2.jsonl` 8.958 s corner impact: normal impulse right,
+    friction lever 5.7 uu short.
+  - **Verification**:
+    - `solver` test `a_static_contacts_friction_lever_arm_runs_to_the_bodys_own_point`.
+    - `test2` 8.958 s 19 -> 10.4 uu/s, k = 30 car 2.12 -> 1.99; `hitjump`
+      k = 30 10.52 -> 10.60 and `front` 0.49 -> 0.50 (the cost, accepted:
+      the principle is Bullet's and the capture with wall impacts gains
+      most); `side` unchanged; 9.125 s unmoved.
+
 
 ## Architecture and interfaces
 
@@ -7999,6 +8015,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.138.0 (2026-10-04): `RB-PHYSICS-001-FR-135` — a body's static-contact
+  lever arm runs to its own surface point (ADR-0054). 451 tests in
+  `rb_physics_bullet`.
 - 0.137.0 (2026-10-04): `RB-PHYSICS-001-FR-134` — coasting tires grip less on
   steep surfaces (ADR-0053). 450 tests in `rb_physics_bullet`.
 - 0.136.0 (2026-10-04): `RB-PHYSICS-001-FR-133` — a boost burns for at least
