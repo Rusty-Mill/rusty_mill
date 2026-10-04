@@ -48,6 +48,27 @@ use ast::Node;
 // `render` plus the `TemplateEnvironment` convenience wrapper.
 pub use template::JinjaError;
 
+/// Resource limits applied while rendering a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderLimits {
+    /// Maximum render work, including AST nodes, loop iterations, expressions,
+    /// composite-value traversal, and one unit per KiB copied.
+    pub max_operations: u64,
+    /// Maximum number of UTF-8 bytes in the rendered output and in any
+    /// intermediate string or cloned composite value. Composite accounting
+    /// includes every value node and object-key byte, not only string payloads.
+    pub max_output_bytes: usize,
+}
+
+impl Default for RenderLimits {
+    fn default() -> Self {
+        Self {
+            max_operations: 1_000_000,
+            max_output_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
 /// A compiled template, ready to render against any context.
 pub struct Template {
     nodes: Vec<Node>,
@@ -64,7 +85,16 @@ impl Template {
     /// Renders this template against `context` (typically a JSON object
     /// holding `messages`, `add_generation_prompt`, `bos_token`, etc.).
     pub fn render(&self, context: &Value) -> Result<String, JinjaError> {
-        render::render(&self.nodes, context)
+        self.render_with_limits(context, RenderLimits::default())
+    }
+
+    /// Renders this template with explicit operation and output limits.
+    pub fn render_with_limits(
+        &self,
+        context: &Value,
+        limits: RenderLimits,
+    ) -> Result<String, JinjaError> {
+        render::render(&self.nodes, context, limits)
     }
 }
 
@@ -151,6 +181,202 @@ mod tests {
     fn quoted_closing_delimiters_render_as_literal_content() {
         assert_eq!(render(r#"{{ "}}" }}"#).unwrap(), "}}");
         assert_eq!(render("{{ '}}' }}").unwrap(), "}}");
+    }
+
+    #[test]
+    fn render_refuses_output_past_the_byte_limit() {
+        let template = Template::compile("four").unwrap();
+        let error = template
+            .render_with_limits(
+                &Value::Object(Map::new()),
+                RenderLimits {
+                    max_operations: 10,
+                    max_output_bytes: 3,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            JinjaError::Limit("rendered output exceeds byte limit")
+        );
+    }
+
+    #[test]
+    fn render_refuses_work_past_the_operation_limit() {
+        let template = Template::compile("{% for item in items %}x{% endfor %}").unwrap();
+        let mut context = Map::new();
+        context.insert(
+            "items".into(),
+            Value::Array(alloc::vec![Value::Null, Value::Null]),
+        );
+        let error = template
+            .render_with_limits(
+                &Value::Object(context),
+                RenderLimits {
+                    max_operations: 3,
+                    max_output_bytes: 100,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, JinjaError::Limit("render operation limit exceeded"));
+    }
+
+    fn render_with_byte_limit(source: &str, max_output_bytes: usize) -> Result<String, JinjaError> {
+        Template::compile(source)?.render_with_limits(
+            &Value::Object(Map::new()),
+            RenderLimits {
+                max_operations: 1_000,
+                max_output_bytes,
+            },
+        )
+    }
+
+    #[test]
+    fn render_refuses_repeated_intermediate_doubling_without_output() {
+        let source = "{% set x = 'a' %}{% set x = x ~ x %}{% set x = x ~ x %}{% set x = x ~ x %}{% set x = x ~ x %}";
+        assert_eq!(
+            render_with_byte_limit(source, 8).unwrap_err(),
+            JinjaError::Limit("render value exceeds byte limit")
+        );
+    }
+
+    #[test]
+    fn render_refuses_repeated_intermediate_doubling_before_output() {
+        let source = "{% set x = 'a' %}{% set x = x + x %}{% set x = x + x %}{% set x = x + x %}{% set x = x + x %}{{ x }}";
+        assert_eq!(
+            render_with_byte_limit(source, 8).unwrap_err(),
+            JinjaError::Limit("render value exceeds byte limit")
+        );
+    }
+
+    #[test]
+    fn render_refuses_oversized_join_intermediate() {
+        let source = "{% set x = values | join('::') %}";
+        let mut context = Map::new();
+        context.insert(
+            "values".into(),
+            Value::Array(alloc::vec![
+                Value::String("ab".into()),
+                Value::String("cd".into())
+            ]),
+        );
+        let error = Template::compile(source)
+            .unwrap()
+            .render_with_limits(
+                &Value::Object(context),
+                RenderLimits {
+                    max_operations: 100,
+                    max_output_bytes: 5,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, JinjaError::Limit("render value exceeds byte limit"));
+    }
+
+    #[test]
+    fn render_refuses_oversized_formatted_value_before_output() {
+        let mut context = Map::new();
+        context.insert(
+            "values".into(),
+            Value::Array(alloc::vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
+            ]),
+        );
+        let error = Template::compile("{% set x = values | string %}")
+            .unwrap()
+            .render_with_limits(
+                &Value::Object(context),
+                RenderLimits {
+                    max_operations: 100,
+                    max_output_bytes: 4,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, JinjaError::Limit("render value exceeds byte limit"));
+    }
+
+    #[test]
+    fn render_byte_limit_uses_utf8_bytes_for_intermediate_values() {
+        assert_eq!(
+            render_with_byte_limit("{% set x = 'éé' %}{{ x }}", 5).unwrap(),
+            "éé"
+        );
+        assert_eq!(
+            render_with_byte_limit("{% set x = 'éé' ~ 'a' %}", 4).unwrap_err(),
+            JinjaError::Limit("render value exceeds byte limit")
+        );
+    }
+
+    #[test]
+    fn render_refuses_payload_free_composites_before_clone() {
+        for (items, max_output_bytes) in [
+            (alloc::vec![Value::Null], 0),
+            (alloc::vec![Value::Null, Value::Null, Value::Null], 3),
+            (
+                alloc::vec![
+                    Value::Number(rusty_json::Number::from(1i64)),
+                    Value::Number(rusty_json::Number::from(2i64)),
+                    Value::Number(rusty_json::Number::from(3i64)),
+                ],
+                3,
+            ),
+        ] {
+            let mut context = Map::new();
+            context.insert("items".into(), Value::Array(items));
+            let error = Template::compile("{% set copy = items %}")
+                .unwrap()
+                .render_with_limits(
+                    &Value::Object(context),
+                    RenderLimits {
+                        max_operations: 100,
+                        max_output_bytes,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error, JinjaError::Limit("render value exceeds byte limit"));
+        }
+    }
+
+    #[test]
+    fn render_refuses_nested_payload_free_composites_before_clone() {
+        let mut context = Map::new();
+        context.insert(
+            "items".into(),
+            Value::Array(alloc::vec![Value::Array(alloc::vec![Value::Null])]),
+        );
+        let error = Template::compile("{% set copy = items %}")
+            .unwrap()
+            .render_with_limits(
+                &Value::Object(context),
+                RenderLimits {
+                    max_operations: 100,
+                    max_output_bytes: 2,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, JinjaError::Limit("render value exceeds byte limit"));
+    }
+
+    #[test]
+    fn repeated_stored_composite_clones_consume_render_work() {
+        let mut context = Map::new();
+        context.insert(
+            "items".into(),
+            Value::Array(alloc::vec![Value::Null, Value::Null]),
+        );
+        let source = "{% set a1 = items %}{% set a2 = items %}{% set a3 = items %}";
+        let error = Template::compile(source)
+            .unwrap()
+            .render_with_limits(
+                &Value::Object(context),
+                RenderLimits {
+                    max_operations: 9,
+                    max_output_bytes: 3,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, JinjaError::Limit("render operation limit exceeded"));
     }
 
     #[test]
