@@ -72,13 +72,23 @@ A new family at `crates/apps/rusty_rsi/`, with `layer = "apps"`:
 | Member | Path | Role | Deps (workspace → external) |
 |---|---|---|---|
 | `rsi-core` | `crates/rsi-core` | Pure domain: no I/O, no async, no clock. | `rusty_err`, `rusty_rsa` (sha256 for the lineage hash chain) → none |
-| `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_http`, `rusty_json`/`rusty_serde`, `rusty_rsa` (sha256), `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimit) → none planned |
+| `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_err`, `rusty_json` (no default features); on Linux `platform`, `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimits, `killpg`); `rusty_http` from P3 → none |
 | `rsi-cli` | `crates/rsi-cli` | Composition root: `rsi run \| calibrate \| report`, plus hidden `rsi __sandbox` / `rsi __grade` entry points. | the two above |
 | `rsi-harness` | `harness/` | **The only mutable surface**: the inner agent. It has zero dependencies (std only). | none |
 
 There are no other crates, and none will be added before a second real
 call site exists. Tasks are data, not crates:
-`crates/apps/rusty_rsi/tasks/<name>/{task.toml, public/, private/}`.
+`crates/apps/rusty_rsi/crates/rsi-runtime/tasks/<name>/{task.json, public/,
+private/}`. Two deviations from this ADR's first draft, both made in P2:
+
+- **`task.json`, not `task.toml`.** The workspace has no first-party TOML
+  parser (only the external `toml` crate), and `rusty_json` is already a
+  dependency, so a JSON manifest keeps `rsi-runtime` free of external
+  dependencies.
+- **Tasks live inside `rsi-runtime`'s directory.** CI's
+  `affected_crates.py` maps a changed file to the crate whose directory
+  contains it. Data outside every crate directory would never re-run the
+  tests that consume it, so a task edit has to belong to a crate.
 
 This family is `apps` and therefore may depend only on
 `foundation`/`platform`/`libs`. `check_workspace_layers.py:98-101`
@@ -94,11 +104,11 @@ inner loop cannot score privately.
 
 | Port | Contract | Adapter (`rsi-runtime`) |
 |---|---|---|
-| `PublicTask` | `public_score(&Solution) -> Result<Score>` | Sandboxed run of the solution on public inputs, then a public metric. |
-| `PrivateGrader` | `private_score(&Solution, Seed) -> Result<Score>` | An out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
+| `PublicTask` | `baseline()`, `public_score(&Solution, Seed) -> Result<Attempt>` (score or buggy, feedback, wall time) | `LocalTask`: sandboxed run on the public split, scored in-process. |
+| `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
 | `Harness` | `run(&PublicTaskView, &Budget, Seed) -> Result<InnerOutcome>` (chosen solution, `CostUsage`, transcript id) | Builds the candidate, spawns it in the sandbox, and serves it over a broker socket. |
 | `Proposer` | `propose(&[LineageEntry], &Workspace) -> Result<Proposal>` | `OpenAiCompatProposer` (HTTP) and `CodexCliProposer` (subprocess); `ScriptedProposer` in tests. |
-| `Executor` | `exec(&SandboxSpec, &Command) -> Result<ExecOutcome>` | Linux: rlimits → Landlock → seccomp → exec. Fails closed where these are unsupported. |
+| `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
 | `LineageStore` | `append(LineageEntry) -> Result<EntryId>`, `iter()`, `verify()` | Append-only JSONL plus a content-addressed blob dir (see §6). |
 
@@ -160,7 +170,7 @@ Why a broker rather than letting the harness call the model itself:
 b_tokens` or `wall ≥ b_wall`, every op except `submit` returns
 `BudgetExhausted`. At `b_wall + grace` the runtime kills the process
 group. If a task has no submission, it scores the task's declared floor
-(`task.toml: floor`).
+(`task.json: floor`).
 
 `a0` ports AIDE0's behaviour:
 
@@ -196,6 +206,48 @@ group. If a task has no submission, it scores the task's declared floor
   - (b) Likewise for the harness.
   - (c) With Landlock unavailable, the executor refuses to run rather
     than running unconfined.
+
+**As built (P2).**
+- **Solution runs.** A solution runs as `python3 solution.py
+  data/<inputs> output.txt` in a fresh work directory. That directory holds
+  the solution, the task's shared public files and one split's inputs,
+  staged by the runtime. The task directory itself is never in the sandbox.
+  - Before every run, `SolutionRunner` checks
+    `SandboxSpec::can_reach(task root)` and refuses if the sandbox could
+    reach it.
+  - Read roots are `/usr`, `/lib`, `/lib64` and `/bin`, canonicalised.
+    `/etc` is excluded: Python needs none of it.
+- **The helper.** The sandbox helper is the `rsi` binary itself
+  (`rsi __sandbox`), single-threaded from birth. It applies these steps in
+  order, then `exec`s the program:
+  1. rlimits: CPU (soft, plus a hard limit 1 s later), address space,
+     file size, descriptors, processes, and core dumps set to 0;
+  2. Landlock;
+  3. seccomp.
+- **Fail closed.** A step that is not `Enforced` is a setup error. The
+  helper writes it to a status file that the parent created and the helper
+  opened *before* confining itself. The descriptor is close-on-exec, so the
+  file stays empty after a successful `exec`, and the untrusted program can
+  neither reach it nor forge it. Any non-empty status file aborts the run
+  with `RuntimeError::Sandbox`.
+- **Wall-clock limit.** The executor enforces it by `SIGKILL` to the whole
+  process group, and kills the group again after every exit so stragglers
+  die too.
+- **Tests.**
+  - (a) is `a_solution_cannot_read_private_*` (public scoring and private
+    grading).
+  - (c) is covered two ways. `sandbox_setup_failure_fails_closed` uses an
+    un-addable Landlock root, so the program never runs. The
+    `require_enforced` unit test covers `NotEnforced` and `Unsupported`.
+    Off Linux, `execution_fails_closed_off_linux` runs on CI's Windows job.
+  - (b) needs the harness and lands in P3.
+- **Mutation check.** With the Landlock and seccomp step removed, exactly
+  the five confinement tests fail. With the rlimits removed, the memory and
+  CPU tests fail.
+- **Known limit.** The process limit is per-UID, and the kernel does not
+  apply it to root. In a root container it does not stop a fork bomb (the
+  wall-clock kill still does). This is one more reason cgroups stay listed
+  under Out of scope.
 
 ### 5. Budget, noise and the accept gate (invariants 2, 3)
 
@@ -418,6 +470,6 @@ is the outer model's endpoint.
 | Phase | Deliverable | Invariant tests landing |
 |---|---|---|
 | P1 | `rsi-core`: types, accept gate, noise margin, UCB1, softmax, SplitMix64, `CostMeter`, lineage types and hash chain (pure) | 2 (meter hard-stop boundaries), 3 (gate), 4 (chain verification, pure part) |
-| P2 | Task format; 3 toy tasks (ML-lite regression, heuristic TSP, prompt/harness scaffold around a deterministic weak-solver simulator); executor; out-of-process grader | 1, 5 |
+| P2 | Task format; 3 toy tasks (ML-lite regression, heuristic TSP, prompt/harness scaffold around a deterministic weak-solver simulator); executor; out-of-process grader; `rsi-cli` with the internal `__sandbox`/`__grade` entry points (the helper and grader must be a binary) | 1, 5 |
 | P3 | Broker, `rsi-harness` a0, inner `Harness` adapter, model client, scripted model | 2 (end-to-end hard stop), 4 (trajectory replay) |
 | P4 | Outer loop, git adapter, path allowlist, `rsi calibrate`, a 10-step run, `rsi report` | 3 (end to end), 4 (grade replay), path-violation rejection |

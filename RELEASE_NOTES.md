@@ -13,6 +13,30 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi P2: sandboxed execution, toy tasks and private grading
+**2026-10-04** · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `rsi-runtime`:
+  - `ProcessExecutor` runs untrusted programs through the `rsi __sandbox` helper. The helper applies rlimits, then Landlock with a read allowlist, then a seccomp block on internet sockets, then `exec`s the program. Setup failures come back through a close-on-exec status file, so a run fails closed.
+  - Wall-clock kills take down the whole process group.
+  - `TaskDir` (`task.json`), `LocalTask` (public scoring) and `SandboxedGrader` (private grading through the separate `rsi __grade` process).
+- **Added:** three toy tasks, one per family. Each has public and private splits and a naive baseline, generated deterministically by `tasks/generate.py`:
+  - `ml-regression` (R²)
+  - `tsp-heuristic` (tour ratio)
+  - `scaffold-oracle` (accuracy around a noisy oracle)
+- **Tests:** end-to-end tests for invariant 1 (a solution cannot read private labels during public or private runs; the runner refuses a sandbox that could reach the task) and invariant 5:
+  - internet sockets are denied, and so are writes outside the work directory;
+  - memory, CPU and wall-clock limits are enforced;
+  - sandbox setup failures fail closed.
+
+  A mutation check confirmed these tests fail when the confinement or the rlimits are removed.
+- Known limitations:
+  - Linux only; elsewhere every run fails closed.
+  - `RLIMIT_NPROC` does not bind root.
+  - The harness-family oracle is a readable simulator until the P3 model broker exists.
+
+---
+
 ## rusty_tick: calendar test no longer fails on Sundays
 **2026-10-04** · [#474](https://github.com/Rusty-Mill/rusty_mill/pull/474)
 

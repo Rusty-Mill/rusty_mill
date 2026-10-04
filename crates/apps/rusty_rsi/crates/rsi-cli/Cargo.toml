@@ -1,0 +1,19 @@
+[package]
+name = "rsi-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Composition root of the rusty_rsi harness: the `rsi` binary and its sandbox and grader entry points"
+
+# ADR-0002 tier S: workspace crates only, no external dependencies.
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "rsi"
+path = "src/main.rs"
+
+[dependencies]
+rsi-core = { path = "../rsi-core" }
+rsi-runtime = { path = "../rsi-runtime" }

@@ -1,0 +1,22 @@
+[package]
+name = "rsi-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics and the out-of-process private grader"
+
+# ADR-0002 tier S: workspace crates only, no external dependencies in this
+# manifest (platform-linux's own libc dependency is its manifest's concern).
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rsi-core = { path = "../rsi-core" }
+rusty_err = { workspace = true }
+rusty_json = { workspace = true, default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform = { workspace = true }
+platform-linux = { workspace = true }
+rusty_libc = { workspace = true, features = ["std"] }
