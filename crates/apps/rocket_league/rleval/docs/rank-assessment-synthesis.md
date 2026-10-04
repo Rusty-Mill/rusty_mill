@@ -215,7 +215,7 @@ toward brief AFKs as rank rises.)
 
 ## Where the rubric's validity ends
 
-Two boundaries surfaced, honestly:
+Three boundaries surfaced, honestly:
 
 1. **At the top, the textbook stops describing the game.** GC's falling
    second-man sub-score, "regressing" double-commits, "too-tight" spacing,
@@ -224,7 +224,18 @@ Two boundaries surfaced, honestly:
    as leak. Above Champion, within-bracket assessment should lean on the
    rank-relative layer (`scoring::relative`) and the value model's ΔV
    rather than the absolute composite.
-2. **Within-bracket correlations are range-restricted everywhere** — the
+2. **The rubric reads rank far better than in-match value.** On the
+   v14 run the composite tracks rank at ρ = +0.81 but per-player ΔV at
+   only +0.14 (sum) / +0.08 (mean), and rank itself vs ΔV is just +0.16 —
+   the two ground truths barely overlap, so part of that gap is a ceiling
+   in the data, not only a scoring flaw. The rank signal comes mostly from
+   mechanical-style proxies (`boost_management` +0.68, `reverse_driving`
+   −0.65, `aerial_presence` +0.62, `pace` +0.62); the decision-quality
+   metrics (`challenge_timing`, `first_touch_value`, `possession_retention`,
+   `recovery_speed`, `transition_readiness`) sit within ±0.07 of zero.
+   Read the composite as "how much does this player look like their rank",
+   not "how much did they win the match"; use ΔV for the latter.
+3. **Within-bracket correlations are range-restricted everywhere** — the
    reliable cross-bracket signal is each bracket's position on the
    corpus-wide calibrated curves, not tier-vs-metric Spearman inside a
    3-tier slice (each entry carries this caveat with its numbers).
@@ -262,3 +273,18 @@ repo's history to include the bottom of the ladder:
 The per-bracket write-ups in this series were deliberately produced with
 the *pre-recalibration* config so all seven are mutually comparable; their
 numbers describe that fixed ruler and remain valid as published.
+
+## The recalibration after the demo fix
+
+Re-run on the same corpus (1,055 of 1,057 files) after the demo
+re-replication window changed (2.5 → 4.0 s, matching Spire's demo counts
+exactly on two real matches), `scfg-v14-fitted+promoted`:
+
+- Cross-validated composite-vs-rank ρ: refit curves **+0.551**, ρ²-weights
+  **+0.780**, ridge weights **+0.808** (default config +0.470) — unchanged
+  from the previous recalibration (+0.809), as expected.
+- Reconcile: still **zero sign disagreements**. Promoted on ΔV evidence:
+  `pace` (ρ_ΔV +0.111, w = 0.012) and `shot_angle` (−0.106, w = 0.011);
+  `agility` (+0.069), `whiff_rate` and `dangerous_turnover` stay
+  experimental. Promotion weights are small, so the composite barely moves.
+- The `rank_norms.json` buckets were regenerated alongside.
