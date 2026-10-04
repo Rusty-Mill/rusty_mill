@@ -7,7 +7,7 @@
 //! quotes, newlines inside quotes) rather than a new dependency: the
 //! files are three, small and ours.
 //!
-//! The deck ships inside the library ([`DECK_CSV`], the supplied file
+//! The deck ships inside the library ([`DECK_CSV`](crate::generic::fair_play::seed::DECK_CSV), the supplied file
 //! verbatim), so a binary can seed itself with no file on disk.
 //!
 //! Idempotent by id: every row's id is deterministic (`person_id`,
