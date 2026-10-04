@@ -987,6 +987,20 @@ impl PhysicsWorld {
                 plane_manifolds,
             );
             if body_index == 0 {
+                // RocketSim keeps every raw point's split-impulse push
+                // (RB-PHYSICS-001-FR-118) beside the one combined bounce,
+                // measuring penetration from its 91.25 uu sphere.
+                let band = crate::body::BALL_RADIUS - crate::body::BALL_COLLISION_RADIUS;
+                for (_, contacts) in &found {
+                    let pushes: Vec<collision::Contact> = contacts
+                        .iter()
+                        .map(|c| collision::Contact {
+                            penetration_depth: c.penetration_depth - band,
+                            ..*c
+                        })
+                        .collect();
+                    static_manifolds.push((0, solver::StaticMaterial::PushOnly, pushes));
+                }
                 if let Some(contact) = combined_ball_world_contact(body, found) {
                     static_manifolds.push((0, ball_world_material(body), vec![contact]));
                 }
@@ -4711,6 +4725,45 @@ mod tests {
         assert!(
             (v.z - 1000.0 * ARENA_RESTITUTION).abs() < 30.0,
             "expected one rebound at the arena's 0.3, got {v:?}"
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-118: a ball sunk into the floor is pushed out by
+    /// 0.8 of what passes RocketSim's 91.25 uu sphere, through position
+    /// alone; the one combined contact still decides its velocity.
+    #[test]
+    fn a_sunk_ball_is_pushed_out_of_the_floor_without_gaining_velocity() {
+        use crate::body::{BALL_COLLISION_RADIUS, BALL_RADIUS};
+        let depth = 5.0;
+        let start = BALL_RADIUS - depth;
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, start));
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        let pushed = world.ball.position.z - start;
+        let expected = 0.8 * (depth - (BALL_RADIUS - BALL_COLLISION_RADIUS));
+        assert!(
+            (pushed - expected).abs() < 0.1,
+            "expected {expected:.2} uu of push, got {pushed:.2}"
+        );
+        assert!(
+            world.ball.linear_velocity.z.abs() < 1.0,
+            "push must not become velocity: {:?}",
+            world.ball.linear_velocity
+        );
+    }
+
+    /// RB-PHYSICS-001-FR-118: inside the 1.9 uu band above RocketSim's
+    /// sphere the ball rests, with nothing to push.
+    #[test]
+    fn a_ball_within_the_contact_band_is_not_pushed() {
+        let start = crate::body::BALL_RADIUS - 1.0;
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, start));
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        assert!(
+            (world.ball.position.z - start).abs() < 0.05,
+            "moved by {}",
+            world.ball.position.z - start
         );
     }
 }

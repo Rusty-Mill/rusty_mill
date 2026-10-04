@@ -192,6 +192,11 @@ version: `a245d35`).
    16 mesh files (Apache-2.0; the repository is MIT OR Apache-2.0 again)
    and reports their triangles in Bullet's BVH order: ball 0.513, worst
    frame 208 uu/s (was 988, the crossbar bevel vertex).
+   `RB-PHYSICS-001-FR-118` (ADR-0038) pushes ball-world penetration out
+   per point at RocketSim's ERP 0.8, measured from its 91.25 uu sphere:
+   `test2` k = 30 ball 0.37 uu (was 0.45), `hitjump` flat. Worst
+   one-step ball frame: `hitjump` 97.908 s, a bounce one tick early
+   (208 uu/s), which Bullet's unported persistent manifold would decide.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -200,7 +205,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (491 tests: 27 `rb_domain`, 420
+- `cargo test --workspace`: pass (494 tests: 27 `rb_domain`, 423
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

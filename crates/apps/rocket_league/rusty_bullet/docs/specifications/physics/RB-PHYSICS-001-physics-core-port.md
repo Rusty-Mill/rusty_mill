@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.121.0
+- Version: 0.122.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6111,6 +6111,33 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `hitjump` k = 30 ball: 20.84 (was 22.47).
     - `test2`, `front` and `side` are unchanged (`test2` one-step car
       0.895, was 0.899).
+- `RB-PHYSICS-001-FR-118` (ball-world penetration is pushed out per
+  point, from RocketSim's 91.25 uu sphere; implemented and verified on
+  the owner's captures, ADR-0038):
+  - `solver::StaticMaterial::PushOnly`: rows that take part in the
+    split-impulse penetration resolve only, at RocketSim's `m_erp2`
+    (`ROCKETSIM_ERP2 = 0.8`); no velocity or friction solve.
+    `PhysicsWorld::step` adds every raw ball-world contact as such a
+    manifold beside FR-108's combined contact, its `penetration_depth`
+    reduced by `BALL_RADIUS - BALL_COLLISION_RADIUS` (1.9 uu);
+    `body::BALL_COLLISION_RADIUS = 91.25` is RocketSim's
+    `BALL_COLLISION_RADIUS_SOCCAR`.
+  - Why: RocketSim skips its `m_isSpecial` points in the velocity resolve
+    only; their split-impulse push rows still run. `hitjump.jsonl`
+    97.892 s shows the ball pushed 5.2 uu out of an 8.3 uu overlap in one
+    tick, 0.8 x (8.3 - 1.9); the simulator pushed it 0.
+  - **Verification**:
+    - `solver` test
+      `a_push_only_manifold_corrects_position_at_rocketsims_erp_and_leaves_velocity_alone`.
+    - `world` tests
+      `a_sunk_ball_is_pushed_out_of_the_floor_without_gaining_velocity`,
+      `a_ball_within_the_contact_band_is_not_pushed`.
+    - `test2` k = 30 ball 0.37 uu (was 0.45). `hitjump` k = 30 ball 20.88
+      (was 20.84; median, p90 and p99 unchanged). Pushing from
+      `BALL_RADIUS` instead gave 21.54.
+    - One-step errors unchanged on every capture (position-only change).
+    - Open: `hitjump` 97.908 s (208 uu/s) bounces a tick early; Bullet's
+      persistent manifold is not ported.
 
 
 ## Architecture and interfaces
@@ -7602,6 +7629,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.122.0 (2026-10-04): `RB-PHYSICS-001-FR-118` — ball-world
+  penetration is pushed out per point, from RocketSim's 91.25 uu sphere
+  (ADR-0038). 423 tests in `rb_physics_bullet`.
 - 0.121.0 (2026-10-03): `RB-PHYSICS-001-FR-117` — the arena is
   RocketSim's 16 meshes, reported in Bullet's BVH order (ADR-0037);
   relicensed MIT OR Apache-2.0. 420 tests in `rb_physics_bullet`.

@@ -122,6 +122,15 @@ pub const BALL_RADIUS: f32 = 93.15;
 /// that rests the ball at the recorded 93.15 uu. RocketSim's 91.25 sphere
 /// rests there through its contact band, but would hit at 0.57 uu.
 pub const BALL_CAR_CONTACT_RADIUS: f32 = 92.3;
+
+/// RocketSim's ball sphere (`BALL_COLLISION_RADIUS_SOCCAR`, uu). Its
+/// world contacts open `BALL_RADIUS - BALL_COLLISION_RADIUS` (1.9 uu)
+/// before this sphere touches, which is where the ball rests; only what
+/// passes this sphere counts as penetration for position correction
+/// (`RB-PHYSICS-001-FR-118`). The recorded corner bounce (`hitjump.jsonl`
+/// 97.892 s) is pushed out 5.2 uu from 8.3 uu inside `BALL_RADIUS`:
+/// 0.8 x (8.3 - 1.9), not 0.8 x 8.3.
+pub const BALL_COLLISION_RADIUS: f32 = 91.25;
 /// Real Rocket League's own ball mass, fetched from RocketSim's own real
 /// source (`src/RLConst.h`: `BALL_MASS_BT = CAR_MASS_BT / 6.f`) — see
 /// `standard_ball`'s own doc comment for the full citation and why this
