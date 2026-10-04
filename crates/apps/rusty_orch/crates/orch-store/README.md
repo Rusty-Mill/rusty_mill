@@ -13,7 +13,9 @@ store.save(&GoalState { fingerprint, plan, board, ledger })?; // durable on retu
 - **Fingerprint.** `fingerprint(goal_json)` is stored with the snapshot; the caller refuses to resume when the goal file no longer matches.
 - **One process per directory** (`StoreError::Locked`).
 
-The engine's record bound needs `serde` derives on the snapshot rows, which makes this the one crate in the family with registry dependencies, and its `rust-version` is the engine's 1.89. Row field order and enum variant order are the on-disk format: append, never reorder.
+The engine's record bound needs `serde` derives on the snapshot rows, which makes this the one crate in the family with registry dependencies, and its `rust-version` is the engine's 1.89. The initial format is tagged `rusty_orch::GoalRecord::v1`. Positional bincode makes the complete row layout the format; adding fields is not compatible. A future incompatible layout must either have an explicit supported reader that migrates v1 or use a new tag and reject v1 before decoding.
+
+Plan, board, and ledger share one record payload and therefore cannot come from different snapshots. The revision is narrower: it is the last successfully completed checkpoint generation. If replacement fails after its durable log append but before its separate scannable slot update, portable reopen can recover the new aggregate payload with the preceding revision. Only a successful `save` return guarantees the new payload and revision are durable.
 
 ```sh
 cargo test -p orch-store

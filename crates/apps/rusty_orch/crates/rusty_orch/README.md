@@ -23,7 +23,7 @@ Channels: stdout carries the report and nothing else, so `--json` is always one 
 
 ## Resuming
 
-`--state <dir>` keeps the goal's plan, board, and ledger in that directory ([ADR-0010](../../docs/adr/0010-persistence-on-multimodal-db.md)). A run that exits `3` can be continued later with the same goal file and directory, typically with `--interactive` to answer what blocked it; the calls already spent still count against the ceilings. The goal file is fingerprinted: a different file against saved state is refused with exit `1`, so use a fresh directory per goal. One process holds a directory at a time. The wall clock is per invocation.
+`--state <dir>` keeps the goal's plan, board, and ledger in that directory ([ADR-0010](../../docs/adr/0010-persistence-on-multimodal-db.md)). A run that exits `3` can be continued later with the same goal file and directory, typically with `--interactive` to answer what blocked it. Calls recorded in the recovered checkpoint count against the resumed ceilings. Abrupt termination can repeat work and calls since the last successful checkpoint; those lost charges are not reconstructed. The goal file is fingerprinted: a different file against saved state is refused with exit `1`, so use a fresh directory per goal. One process holds a directory at a time. The wall clock is per invocation. Because persistence is unconditional in the binary, its Rust requirement is 1.89.
 
 ```sh
 rusty_orch run goal.json --state .orch            # exit 3: a card asked a question
@@ -44,4 +44,4 @@ A review card needs no `refs` to see what it reviews: the shared renderer resolv
 cargo test -p rusty_orch
 ```
 
-Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection, the run loop through finished, blocked, answered, blank answer, wall clock, and dispatcher failure, and the entry point through a blocked run resumed in a second and third process with its ledger, a saved answer, and a changed goal file refused, over `orch_dispatch::fake::FakeAgent`. No real binary is run.
+Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection, the run loop through finished, blocked, answered, blank answer, wall clock, dispatcher failure, and a partial answer round whose second read fails. Repeated entry-point calls in one test process cover resume logic over `orch_dispatch::fake::FakeAgent`; a separate subprocess test executes the built binary twice with a scripted local CLI and reopens the state directory. The deterministic store fault test exercises error/drop/reopen recovery, not an OS process crash.

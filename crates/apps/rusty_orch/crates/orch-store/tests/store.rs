@@ -10,6 +10,7 @@ use orch_core::{EntryId, GoalId, Ref, TaskId, Text};
 use orch_dispatch::Ledger;
 use orch_store::{fingerprint, GoalState, Store, StoreError};
 use rusty_multimodal_db_engine::test_support::fresh_temp_dir;
+use rusty_multimodal_db_engine::test_support::{arm_fault, Fault};
 
 fn dir(label: &str) -> PathBuf {
     fresh_temp_dir(&format!("orch_store_{label}")).expect("temp dir")
@@ -176,6 +177,44 @@ fn saving_again_replaces_the_snapshot_and_bumps_the_revision() {
     let loaded = store.load(state.goal()).expect("load").expect("saved");
     assert_eq!(loaded, state);
     assert_eq!(loaded.ledger.calls(), 6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn failed_replace_can_recover_new_aggregate_with_previous_revision() {
+    let dir = dir("replace_after_log");
+    let mut before = full_state();
+    let mut store = Store::open(&dir).expect("open");
+    store.save(&before).expect("first save");
+
+    let t6 = TaskId::from_raw(6);
+    before.plan.start(t6, Agent::Codex).expect("start");
+    before
+        .board
+        .append(entry(
+            Some(6),
+            Author::Human,
+            EntryKind::Artifact,
+            vec![Ref::Path(text("recovered.txt"))],
+        ))
+        .expect("append");
+    before.fingerprint = 99;
+    before.ledger = Ledger::from_counts(6, [(t6, 1)]);
+    arm_fault(Fault::ReplaceAfterLog);
+    assert!(matches!(store.save(&before), Err(StoreError::Engine(_))));
+    drop(store);
+
+    let store = Store::open(&dir).expect("portable reopen");
+    let recovered = store.load(before.goal()).expect("load").expect("record");
+    assert_eq!(
+        recovered, before,
+        "the whole aggregate payload is recovered"
+    );
+    assert_eq!(
+        store.revision(before.goal()),
+        1,
+        "the separate revision slot records only completed checkpoints"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

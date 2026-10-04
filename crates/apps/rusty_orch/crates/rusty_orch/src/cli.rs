@@ -59,7 +59,7 @@ pub fn run<R: AgentRunner>(
         store,
         fingerprint: orch_store::fingerprint(goal_json),
     });
-    let summary = run::execute(spec, runner, &mut console, Instant::now, resume)?;
+    let summary = run::execute_resumable(spec, runner, &mut console, Instant::now, resume)?;
     if args.json {
         writeln!(
             streams.stdout,

@@ -3,9 +3,10 @@
 //! `rusty_multimodal_db` engine, so a run that stops blocked in one process
 //! resumes in the next.
 //!
-//! One record per goal keeps a save atomic by construction: the engine
-//! makes a `replace` durable before it returns, and nothing else has to
-//! land with it. The domain types are rebuilt on load through their own
+//! One record prevents plan, board, and ledger payloads from splitting across
+//! versions. A failed replacement can nevertheless be recovered with its new
+//! payload and the preceding scannable revision; only a successful return is
+//! a durability guarantee. The domain types are rebuilt on load through their own
 //! public API (`Plan::add` and the lifecycle transitions, `Board::append`,
 //! `Ledger::from_counts`), so every invariant `orch-core` enforces is
 //! re-checked and a snapshot that no longer satisfies them is refused as
@@ -150,15 +151,22 @@ impl Store {
             .transpose()
     }
 
-    /// How many times `goal` has been saved, or zero.
+    /// The last successfully completed checkpoint generation, or zero.
+    ///
+    /// Recovery after a failed replacement may expose the replacement's
+    /// aggregate payload with the preceding generation, because the engine
+    /// logs the record before rewriting its separate scannable slot.
     pub fn revision(&self, goal: GoalId) -> u64 {
         self.goals
             .get(record::key(goal))
             .map_or(0, |r| r.revision as u64)
     }
 
-    /// Save `state`, replacing the previous snapshot of its goal. Returns
-    /// once the engine has made the write durable.
+    /// Save `state`, replacing the previous snapshot of its goal. A successful
+    /// return means the aggregate and its new revision are durable. After an
+    /// error, reopening may recover either the prior snapshot or the new
+    /// aggregate payload with the prior revision; callers must not infer
+    /// durability from the error alone.
     ///
     /// # Errors
     ///

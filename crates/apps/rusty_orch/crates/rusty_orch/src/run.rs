@@ -132,10 +132,22 @@ impl Resume<'_> {
 impl std::error::Error for RunError {}
 
 /// Run `spec` to completion, a block, a failure, or the wall clock. `now`
-/// is injected so tests can move time. With `resume`, saved state replaces
-/// the fresh plan and every run and answer round is saved. The wall clock
-/// is per process: a goal waiting on a human does not spend it.
+/// is injected so tests can move time. State remains in memory; use
+/// [`execute_resumable`] to load and checkpoint it. The wall clock is per
+/// invocation: a goal waiting on a human does not spend it.
 pub fn execute<R: AgentRunner>(
+    spec: Spec,
+    runner: R,
+    console: &mut dyn Console,
+    now: impl Fn() -> Instant,
+) -> Result<Summary, RunError> {
+    execute_resumable(spec, runner, console, now, None)
+}
+
+/// Run like [`execute`], loading and checkpointing through `resume` when
+/// supplied. This separate entry point preserves the original four-argument
+/// API for callers that keep state in memory.
+pub fn execute_resumable<R: AgentRunner>(
     spec: Spec,
     runner: R,
     console: &mut dyn Console,
@@ -175,8 +187,13 @@ pub fn execute<R: AgentRunner>(
         match outcome {
             Ok(Outcome::Finished) => break Ended::Finished,
             Ok(Outcome::Blocked(ids)) => {
-                let answers = answer_questions(&mut board, console).map_err(RunError::Io)?;
+                let answers = answer_questions(&mut board, console);
+                // `ask` can fail after earlier answers were appended. Always
+                // attempt to persist the round before returning that error.
+                // A checkpoint error wins because it means the caller cannot
+                // rely on the newly accepted answers being recoverable.
                 checkpoint(&mut resume, &plan, &board, &ledger)?;
+                let answers = answers.map_err(RunError::Io)?;
                 if answers == Answers::Stop {
                     break Ended::Blocked(ids);
                 }

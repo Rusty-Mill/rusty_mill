@@ -2,7 +2,8 @@
 name = "rusty_orch"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# `orch-store` and its embedded engine set the effective floor.
+rust-version = "1.89"
 description = "Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex and Ollama adapters and prints the board."
 license = "MIT"
 

@@ -1,9 +1,9 @@
 //! The on-disk shape of a goal snapshot, and the two conversions.
 //!
-//! Every type here is encoded by the engine's bincode codec: field order
-//! and enum variant order are the format. Adding a variant at the end or a
-//! field at the end of a struct keeps old snapshots readable; reordering
-//! does not. The `SCHEMA_TAG` is checked before any byte is decoded.
+//! Every type here is encoded by the engine's positional bincode codec: the
+//! complete v1 layout is the format. Any layout change is incompatible unless
+//! an explicit old-layout reader migrates it. Otherwise it must use a new
+//! schema tag and old files are rejected before record decoding.
 
 use std::num::NonZeroU32;
 
@@ -49,7 +49,7 @@ impl Record for GoalRecord {
 }
 
 impl SchemaTag for GoalRecord {
-    const SCHEMA_TAG: &'static str = "rusty_orch::GoalRecord";
+    const SCHEMA_TAG: &'static str = "rusty_orch::GoalRecord::v1";
 }
 
 impl IndexedField<ById> for GoalRecord {
@@ -444,4 +444,86 @@ fn text_of(s: &str) -> Result<Text, StoreError> {
 
 fn corrupt<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Corrupt(e.to_string())
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use rusty_multimodal_db_engine::codec;
+    use rusty_multimodal_db_engine::generic::GenericMmapStore;
+
+    fn empty_v1() -> GoalRecord {
+        GoalRecord::from_state(
+            &GoalState {
+                fingerprint: 7,
+                plan: Plan::new(GoalId::from_raw(1)),
+                board: Board::new(GoalId::from_raw(1)),
+                ledger: Ledger::new(),
+            },
+            1,
+        )
+    }
+
+    #[test]
+    fn v1_empty_record_has_stable_golden_bytes() {
+        const GOLDEN: &[u8] = &[
+            1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let bytes = codec::encode(&empty_v1()).expect("encode");
+        assert_eq!(
+            bytes, GOLDEN,
+            "update only with an explicit format decision"
+        );
+        let decoded: GoalRecord = codec::decode(GOLDEN).expect("decode golden");
+        assert_eq!(codec::encode(&decoded).expect("re-encode"), GOLDEN);
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct WrongVersion {
+        id: i64,
+        revision: i64,
+    }
+
+    impl Record for WrongVersion {
+        type Id = i64;
+        fn id(&self) -> i64 {
+            self.id
+        }
+    }
+    impl SchemaTag for WrongVersion {
+        const SCHEMA_TAG: &'static str = "rusty_orch::GoalRecord::v2";
+    }
+    impl IndexedField<ById> for WrongVersion {
+        type IndexValue = i64;
+        fn indexed_value(&self) -> &i64 {
+            &self.id
+        }
+    }
+    impl ScannableField<Revision> for WrongVersion {
+        type ScanValue = i64;
+        fn scannable_value(&self) -> i64 {
+            self.revision
+        }
+        fn set_scannable_value(&mut self, value: i64) {
+            self.revision = value;
+        }
+    }
+
+    #[test]
+    fn wrong_schema_version_is_rejected_before_record_decode() {
+        let dir = rusty_multimodal_db_engine::test_support::fresh_temp_dir("orch_schema")
+            .expect("temp dir");
+        let path = dir.join("goals.mmap");
+        let store: GenericMmapStore<GoalRecord, ById, Revision> =
+            GenericMmapStore::create(vec![empty_v1()], &path).expect("create v1");
+        drop(store);
+
+        let error = match GenericMmapStore::<WrongVersion, ById, Revision>::open_portable(&path) {
+            Ok(_) => panic!("v2 must reject v1"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("schema tag mismatch"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

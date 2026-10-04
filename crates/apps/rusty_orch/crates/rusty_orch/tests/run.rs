@@ -7,9 +7,10 @@ use orch_core::board::{Confidence, EntryKind};
 use orch_core::task::Status;
 use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_dispatch::{Ceiling, DispatchError};
+use orch_store::{fingerprint, Store};
 use rusty_orch::input::parse;
 use rusty_orch::report;
-use rusty_orch::run::{execute, Console, Ended};
+use rusty_orch::run::{execute, execute_resumable, Console, Ended, Resume, RunError};
 
 /// A console that hands out scripted answers and records what it saw.
 #[derive(Default)]
@@ -64,7 +65,7 @@ fn frozen() -> impl Fn() -> Instant {
 fn a_plan_runs_to_finished_and_reports_both_ways() {
     let fake = FakeAgent::new([Reply::Write(vec![finding()])]);
     let mut console = Scripted::default();
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
 
     assert_eq!(s.ended, Ended::Finished);
     assert_eq!(s.ledger.calls(), 1);
@@ -110,7 +111,7 @@ fn a_plan_runs_to_finished_and_reports_both_ways() {
 fn a_question_blocks_when_nobody_answers() {
     let fake = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
     let mut console = Scripted::answering(&[None]);
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
 
     let task = s.plan.tasks()[0].id();
     assert_eq!(s.ended, Ended::Blocked(vec![task]));
@@ -131,7 +132,7 @@ fn an_answer_resumes_the_card_on_the_same_run() {
         Reply::Write(vec![finding()]),
     ]);
     let mut console = Scripted::answering(&[Some("yes, go ahead")]);
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
 
     assert_eq!(s.ended, Ended::Finished);
     assert_eq!(s.ledger.calls(), 2);
@@ -154,7 +155,7 @@ fn an_answer_resumes_the_card_on_the_same_run() {
 fn a_blank_answer_is_ignored_and_the_run_stays_blocked() {
     let fake = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
     let mut console = Scripted::answering(&[Some("   ")]);
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
 
     assert!(matches!(s.ended, Ended::Blocked(_)));
     assert!(
@@ -187,7 +188,7 @@ fn the_wall_clock_is_checked_before_every_run() {
             start + Duration::from_secs(60)
         }
     };
-    let s = execute(spec(3, RESEARCH), fake, &mut console, now, None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, now).expect("run");
 
     assert_eq!(s.ended, Ended::WallClock(Duration::from_secs(60)));
     assert_eq!(s.ledger.calls(), 1, "the second run never started");
@@ -198,7 +199,7 @@ fn the_wall_clock_is_checked_before_every_run() {
 fn a_dispatcher_error_ends_the_run_with_the_state_intact() {
     let fake = FakeAgent::new([Reply::Fail("boom".into()), Reply::Fail("boom".into())]);
     let mut console = Scripted::default();
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
 
     assert!(
         matches!(s.ended, Ended::Failed(DispatchError::Agent { .. })),
@@ -228,7 +229,7 @@ fn the_goal_ceiling_stops_the_second_card_as_a_typed_failure() {
                   {"role":"research","instruction":"j","acceptance":["a"],"max_calls":1}]"#;
     let fake = FakeAgent::new([Reply::Write(vec![finding()]), Reply::Write(vec![finding()])]);
     let mut console = Scripted::default();
-    let s = execute(spec(1, two), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(1, two), fake, &mut console, frozen()).expect("run");
 
     let second = s.plan.tasks()[1].id();
     assert_eq!(
@@ -255,7 +256,7 @@ fn a_blank_after_an_earlier_answer_stops_without_another_model_call() {
         Reply::Write(vec![finding()]),
     ]);
     let mut console = Scripted::answering(&[Some("first answer"), None]);
-    let s = execute(spec(10, two), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(10, two), fake, &mut console, frozen()).expect("run");
 
     assert!(
         matches!(&s.ended, Ended::Blocked(ids) if ids.len() == 2),
@@ -278,7 +279,7 @@ fn progress_notes_name_the_category_and_never_the_agents_message() {
     const SENTINEL: &str = "SENTINEL-2b9d-must-not-leak";
     let fake = FakeAgent::new([Reply::Fail(format!("model said {SENTINEL}"))]);
     let mut console = Scripted::default();
-    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen(), None).expect("run");
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
 
     assert!(matches!(
         s.ended,
@@ -292,4 +293,63 @@ fn progress_notes_name_the_category_and_never_the_agents_message() {
         report::text(&s).contains(SENTINEL),
         "the report still carries the detail"
     );
+}
+
+#[test]
+fn an_io_error_after_one_of_two_answers_checkpoints_the_partial_round() {
+    struct FailSecond {
+        asks: usize,
+    }
+    impl Console for FailSecond {
+        fn note(&mut self, _line: &str) {}
+        fn ask(&mut self, _question: &str) -> io::Result<Option<String>> {
+            self.asks += 1;
+            if self.asks == 1 {
+                Ok(Some("kept answer".to_owned()))
+            } else {
+                Err(io::Error::other("input disappeared"))
+            }
+        }
+    }
+
+    let two = r#"[{"role":"research","instruction":"i","acceptance":["a"],"max_calls":2},
+                  {"role":"research","instruction":"j","acceptance":["a"],"max_calls":2}]"#;
+    let spec = spec(10, two);
+    let dir =
+        std::env::temp_dir().join(format!("rusty_orch_partial_answers_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut store = Store::open(&dir).expect("open");
+    let fake = FakeAgent::new([
+        Reply::Write(vec![EntryKind::Question]),
+        Reply::Write(vec![EntryKind::Question]),
+    ]);
+    let err = execute_resumable(
+        spec,
+        fake,
+        &mut FailSecond { asks: 0 },
+        frozen(),
+        Some(Resume {
+            store: &mut store,
+            fingerprint: fingerprint("two-question-goal"),
+        }),
+    )
+    .expect_err("second read fails");
+    assert!(matches!(err, RunError::Io(_)));
+    drop(store);
+
+    let store = Store::open(&dir).expect("reopen");
+    let saved = store
+        .load(orch_core::GoalId::from_raw(1))
+        .expect("load")
+        .expect("saved state");
+    assert_eq!(saved.ledger.calls(), 2, "no dispatcher call was replayed");
+    assert_eq!(saved.board.open_questions().len(), 1);
+    let answer = saved
+        .board
+        .entries()
+        .iter()
+        .find(|entry| matches!(entry.content().kind, EntryKind::Answer { .. }))
+        .expect("first answer persisted");
+    assert_eq!(answer.content().body.as_str(), "kept answer");
+    let _ = std::fs::remove_dir_all(dir);
 }

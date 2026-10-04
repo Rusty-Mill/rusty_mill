@@ -23,9 +23,12 @@ routing come from the goal file, which the next process reads again.
 
 - **One snapshot record per goal.** `orch-store` saves the plan, board, and
   ledger of a goal as a single `GenericMmapStore` record, keyed by the goal
-  id, replaced on every save. The engine makes a `replace` durable before
-  it returns, so a save is atomic by construction and no journal is
-  needed. Per-aggregate records with a journal batch are the upgrade when a
+  id, replaced on every save. The aggregate payload cannot split across
+  versions. The revision is a separate scannable mmap slot, however: a
+  replacement interrupted after its durable log append can reopen with the
+  new payload and preceding revision. Thus only a successful save return
+  guarantees the new payload and revision are durable; no journal is added.
+  Per-aggregate records with a journal batch are the upgrade when a
   second reader of the board exists; none does yet.
 - **Rebuilt, not trusted.** `load` replays the snapshot through the
   domain's own constructors: `Plan::add` in id order and then each card's
@@ -41,10 +44,11 @@ routing come from the goal file, which the next process reads again.
   (`RunError::GoalChanged`) rather than resumed against a plan built from
   another file.
 - **Save points.** After every dispatcher run and after every answer
-  round, in `rusty_orch::run::execute`. A crash mid-run re-runs at most the
-  calls since the last block; the ledger is saved with the plan, so the
-  ceilings still bound the total. Per-step saving would need a seam in
-  `Dispatcher::run` and is not done.
+  round, in `rusty_orch::run::execute_resumable`. Resumed ceilings apply to
+  calls present in the last recovered checkpoint. Abrupt termination can
+  repeat dispatcher work and external calls since that checkpoint, and lost
+  charges do not count toward the resumed ceilings. Per-step saving would
+  need a seam in `Dispatcher::run` and is not done.
 - **Wall clock is per process.** `Budget::wall_clock` bounds one
   invocation. A goal waiting days for a human answer does not spend it.
 - **Surface.** `rusty_orch run <goal.json> --state <dir>` (env
@@ -55,10 +59,12 @@ routing come from the goal file, which the next process reads again.
   carries the engine's pinned registry crates (`uuid`, `thiserror`,
   `serde`, `bincode`, `memmap2`) transitively: the first registry
   dependencies in the family, confined to this one crate. Its
-  `rust-version` is the engine's 1.89; the other crates keep 1.75. The
-  snapshot rows are bincode-encoded, so their field and variant order is
-  the on-disk format: append, never reorder. The schema tag
-  `rusty_orch::GoalRecord` is checked before any byte is decoded.
+  `rust-version` is the engine's 1.89, as is the unconditionally dependent
+  `rusty_orch` binary; unaffected crates keep 1.75. The initial positional
+  bincode layout is tagged `rusty_orch::GoalRecord::v1`. Adding a field is
+  incompatible. A future layout must have an explicit supported old-layout
+  reader and migration, or change the tag so old files are rejected before
+  record decoding.
 
 ## Consequences
 
