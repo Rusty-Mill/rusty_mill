@@ -24,6 +24,7 @@ fn add(store: &Store<'_>, content: &str, category: &str) -> String {
         predicate: None,
         object: None,
         entities: vec![],
+        ..Default::default()
     };
     queries::add_memory(store, input).expect("add failed").id
 }

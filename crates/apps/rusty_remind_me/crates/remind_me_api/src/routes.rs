@@ -283,6 +283,7 @@ pub fn api_list(store: &Store<'_>, _wiki: &Wiki, req: &Request, _params: &Params
         Err(e) => return e,
     };
     let input = MemoryListInput {
+        scope: Default::default(),
         category: req.query_str("category").map(str::to_string),
         source: req.query_str("source").map(str::to_string),
         tags: req.query_list("tags"),
@@ -355,6 +356,7 @@ pub fn api_add(store: &Store<'_>, _wiki: &Wiki, req: &Request, _params: &Params)
         predicate: None,
         object: None,
         entities: Vec::new(),
+        ..Default::default()
     };
     match queries::add_memory(store, input) {
         Ok(memory) => (

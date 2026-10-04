@@ -48,6 +48,7 @@ fn seed_reminder(store: &Store<'_>, content: &str, remind_at: &str) -> String {
             object: None,
             entities: vec![],
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap();

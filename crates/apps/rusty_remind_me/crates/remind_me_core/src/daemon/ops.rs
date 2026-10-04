@@ -10,7 +10,7 @@
 
 use crate::db::Store;
 use crate::models::{EntityInput, MemoryAddInput, MemoryListInput, MemorySearchInput};
-use crate::{db::queries, entity, stats, wiki, wiki_import};
+use crate::{db::queries, entity, session_ops, stats, wiki, wiki_import};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,7 +47,42 @@ pub enum Op {
     WikiImport {
         dir: PathBuf,
     },
+    /// Close a decision or action item; see [`crate::resolve`].
+    Resolve {
+        memory_id: String,
+        outcome: String,
+        note: Option<String>,
+    },
     Stats,
+    /// The session subcommands (`crate::session_ops`). Paths are absolute.
+    SessionStart {
+        session_id: String,
+        cwd: PathBuf,
+        client: Option<String>,
+    },
+    SessionEnd {
+        session_id: String,
+        cwd: PathBuf,
+        reason: Option<String>,
+    },
+    CaptureTranscript {
+        path: PathBuf,
+        session_id: String,
+        cwd: Option<PathBuf>,
+        reason: Option<String>,
+    },
+    Context {
+        cwd: Option<PathBuf>,
+        project: Option<String>,
+        branch: Option<String>,
+        prompt: Option<String>,
+        budget: usize,
+        #[serde(default)]
+        hits_only: bool,
+    },
+    SessionTimeline {
+        session_id: String,
+    },
     /// The daemon's own state. Answered by the daemon, not [`execute`].
     Status,
     /// Stop the daemon. Answered by the daemon, not [`execute`].
@@ -98,7 +133,64 @@ fn run(store: &Store<'_>, op: &Op) -> Result<Value, String> {
                 wiki_import::import_wiki_dir(store, dir, true).map_err(|e| e.to_string())?;
             serde_json::to_value(report).map_err(|e| e.to_string())
         }
+        Op::Resolve {
+            memory_id,
+            outcome,
+            note,
+        } => to_value(crate::resolve::resolve_memory(
+            store,
+            memory_id,
+            outcome,
+            note.as_deref(),
+        )),
         Op::Stats => to_value(stats::collect(store)),
+        Op::SessionStart {
+            session_id,
+            cwd,
+            client,
+        } => session_ops::session_start(store, session_id, cwd, client.as_deref())
+            .map_err(|e| e.to_string()),
+        Op::SessionEnd {
+            session_id,
+            cwd,
+            reason,
+        } => session_ops::session_end(store, session_id, cwd, reason.as_deref())
+            .map_err(|e| e.to_string()),
+        Op::CaptureTranscript {
+            path,
+            session_id,
+            cwd,
+            reason,
+        } => session_ops::capture_transcript(
+            store,
+            path,
+            session_id,
+            cwd.as_deref(),
+            reason.as_deref(),
+        )
+        .map_err(|e| e.to_string()),
+        Op::Context {
+            cwd,
+            project,
+            branch,
+            prompt,
+            budget,
+            hits_only,
+        } => session_ops::context(
+            store,
+            &session_ops::ContextArgs {
+                cwd: cwd.as_deref(),
+                project: project.as_deref(),
+                branch: branch.as_deref(),
+                prompt: prompt.as_deref(),
+                budget: *budget,
+                hits_only: *hits_only,
+            },
+        )
+        .map_err(|e| e.to_string()),
+        Op::SessionTimeline { session_id } => {
+            session_ops::session_timeline(store, session_id).map_err(|e| e.to_string())
+        }
         Op::Status | Op::Shutdown => Err("only a daemon answers status and shutdown".into()),
     }
 }
@@ -126,6 +218,7 @@ mod tests {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         };
         execute(store, &Op::Add { input }).into_result().unwrap()
     }
@@ -149,6 +242,43 @@ mod tests {
             serde_json::to_string(&got).unwrap(),
             serde_json::to_string(&added).unwrap()
         );
+    }
+
+    #[test]
+    fn resolve_answers_with_the_resolved_memory_or_an_error() {
+        let db = Database::open_in_memory().unwrap();
+        let store = db.store();
+        let resolve = |id: &str, outcome: &str| {
+            execute(
+                &store,
+                &Op::Resolve {
+                    memory_id: id.into(),
+                    outcome: outcome.into(),
+                    note: None,
+                },
+            )
+        };
+        // A plain note tracks no outcome, so resolving it is refused.
+        let note = add(&store, "just a note");
+        assert!(matches!(resolve(&note.id, "done"), OpReply::Err(_)));
+        let missing: Option<Memory> = resolve("mem_ghost", "done").into_result().unwrap();
+        assert!(missing.is_none());
+
+        let input = serde_json::from_value(serde_json::json!({
+            "content": "ship it", "metadata": { "rationale": "r" }
+        }))
+        .unwrap();
+        let decision = crate::db::queries::add_memory_with(
+            &store,
+            input,
+            &crate::kinds::StructuredFields {
+                memory_type: Some("decision".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let done: Option<Memory> = resolve(&decision.id, "done").into_result().unwrap();
+        assert_eq!(done.unwrap().outcome.as_deref(), Some("done"));
     }
 
     #[test]

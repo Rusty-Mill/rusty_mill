@@ -90,6 +90,7 @@ fn add(store: &Store<'_>, content: &str) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
@@ -110,6 +111,7 @@ fn add_with_category(store: &Store<'_>, content: &str, category: &str) -> String
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()

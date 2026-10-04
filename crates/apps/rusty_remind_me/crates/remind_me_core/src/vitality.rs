@@ -93,45 +93,6 @@ pub fn calculate_vitality(
     base_weight * frequency_boost * decay_factor
 }
 
-/// Name of the SQL scalar function registered by [`register_sql_functions`].
-pub const EFFECTIVE_VITALITY_FN: &str = "effective_vitality";
-
-/// Expose [`calculate_vitality`] to SQL as `effective_vitality(base_weight,
-/// access_count, decay_rate, accessed_at)`.
-///
-/// Dormancy has to be filtered inside the query, before `LIMIT`, or a page gets
-/// truncated first and thinned afterwards — the `DI-03` shape. Spelling the
-/// ACT-R formula out as a SQL expression would do that, but the bundled SQLite
-/// is built without `SQLITE_ENABLE_MATH_FUNCTIONS`, so `exp` and `sqrt` do not
-/// exist. Registering the Rust function instead keeps the filter in the query
-/// *and* leaves one implementation of the maths rather than two that can drift.
-///
-/// Not marked deterministic: it reads the clock, so SQLite must not cache it.
-pub fn register_sql_functions(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.create_scalar_function(
-        EFFECTIVE_VITALITY_FN,
-        4,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-        |ctx| {
-            let base_weight: f64 = ctx.get(0)?;
-            let access_count: i64 = ctx.get(1)?;
-            let decay_rate: f64 = ctx.get(2)?;
-            // NULL is normal here: `remind_me` leaves `accessed_at` unset until
-            // a memory is first retrieved. Treating it as "just now" matches
-            // `calculate_vitality`'s own fallback for an unparseable stamp.
-            let accessed_at: Option<String> = ctx.get(3)?;
-            let now = Utc::now();
-            Ok(calculate_vitality(
-                base_weight,
-                access_count,
-                decay_rate,
-                accessed_at.as_deref().unwrap_or_default(),
-                now,
-            ))
-        },
-    )
-}
-
 /// Fractional adjustment one feedback event applies to `base_weight`.
 pub const FEEDBACK_MAGNITUDE: f64 = 0.15;
 /// Minimum Jaccard similarity a stored feedback query must have with the
@@ -147,6 +108,20 @@ pub const FEEDBACK_ADJUSTMENT_CAP: f64 = 0.4;
 /// memory cannot run away in either direction.
 pub const BASE_WEIGHT_MAX: f64 = 3.0;
 pub const BASE_WEIGHT_MIN: f64 = 0.1;
+
+/// Factor applied to [`FEEDBACK_MAGNITUDE`] when the memory was written by
+/// a hook or an importer: a verbatim capture is noisier than something a
+/// person or model chose to say, so one thumbs-up or down says less about it.
+pub const MACHINE_FEEDBACK_SCALE: f64 = 0.5;
+
+/// The magnitude of one feedback signal on a memory written by `written_by`.
+pub fn feedback_magnitude(written_by: &str) -> f64 {
+    if written_by.starts_with("hook") || written_by.starts_with("importer:") {
+        FEEDBACK_MAGNITUDE * MACHINE_FEEDBACK_SCALE
+    } else {
+        FEEDBACK_MAGNITUDE
+    }
+}
 
 /// A signed retrieval-quality signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +180,10 @@ pub fn record_feedback(
     };
     let access_count = importance.access_count;
     let base_weight = importance.base_weight;
+    let magnitude = match crate::db::memories::Memories::new(store).get_live(memory_id)? {
+        Some(memory) => feedback_magnitude(&memory.written_by),
+        None => FEEDBACK_MAGNITUDE,
+    };
 
     if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
         let event = FeedbackEvent {
@@ -214,7 +193,7 @@ pub fn record_feedback(
                 FeedbackSignal::Unhelpful => "unhelpful",
             }
             .to_string(),
-            magnitude: FEEDBACK_MAGNITUDE,
+            magnitude,
         };
         feedback.log_event(
             &format!("fb_{}", uuid::Uuid::new_v4().simple()),
@@ -227,10 +206,8 @@ pub fn record_feedback(
     }
 
     let new_base_weight = match signal {
-        FeedbackSignal::Helpful => (base_weight * (1.0 + FEEDBACK_MAGNITUDE)).min(BASE_WEIGHT_MAX),
-        FeedbackSignal::Unhelpful => {
-            (base_weight * (1.0 - FEEDBACK_MAGNITUDE)).max(BASE_WEIGHT_MIN)
-        }
+        FeedbackSignal::Helpful => (base_weight * (1.0 + magnitude)).min(BASE_WEIGHT_MAX),
+        FeedbackSignal::Unhelpful => (base_weight * (1.0 - magnitude)).max(BASE_WEIGHT_MIN),
     };
 
     // Snapshot recompute with zero elapsed days, matching how `add_memory` seeds

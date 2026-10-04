@@ -77,6 +77,8 @@ struct ChunkExtras {
     mention_entities: Vec<String>,
     /// Connector-supplied metadata merged into the chunk's own.
     metadata: serde_json::Map<String, serde_json::Value>,
+    /// The v32 columns an exported record carried, for the chat path.
+    exported: Option<ExportedColumns>,
 }
 
 /// Short content fingerprint used for dedup.
@@ -137,6 +139,107 @@ pub fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// RFC3339 time of the message, when the envelope carried one.
+    pub timestamp: Option<String>,
+    /// Client session the message belongs to (`sessionId` in a Claude Code
+    /// transcript).
+    pub session_id: Option<String>,
+    pub uuid: Option<String>,
+    /// Working directory and branch the client recorded on the envelope.
+    pub cwd: Option<String>,
+    pub git_branch: Option<String>,
+    /// One summary per `tool_use` block; the blocks themselves are not kept.
+    pub tool_use: Vec<ToolUseSummary>,
+}
+
+/// A `tool_use` block reduced to what is worth recalling: which tool, and
+/// the start of what it was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolUseSummary {
+    pub name: String,
+    /// First [`TOOL_INPUT_CHARS`] characters of the call's main argument.
+    pub input_summary: String,
+    pub is_error: bool,
+}
+
+/// Cap on [`ToolUseSummary::input_summary`].
+pub const TOOL_INPUT_CHARS: usize = 200;
+
+impl ChatMessage {
+    fn plain(role: &str, content: String) -> Self {
+        Self {
+            role: role.to_string(),
+            content,
+            timestamp: None,
+            session_id: None,
+            uuid: None,
+            cwd: None,
+            git_branch: None,
+            tool_use: Vec::new(),
+        }
+    }
+
+    /// `tool: Bash — cargo test -p …` per tool call, one per line.
+    pub fn tool_lines(&self) -> Vec<String> {
+        self.tool_use
+            .iter()
+            .map(|t| {
+                let err = if t.is_error { " (error)" } else { "" };
+                format!("tool: {} — {}{err}", t.name, t.input_summary)
+            })
+            .collect()
+    }
+}
+
+/// The argument of a `tool_use` input that says what the call did.
+fn summarize_tool_input(input: &serde_json::Value) -> String {
+    const KEYS: [&str; 7] = [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "url",
+        "query",
+        "description",
+    ];
+    let picked = KEYS
+        .iter()
+        .find_map(|k| input.get(k).and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| input.to_string());
+    let one_line = picked.split_whitespace().collect::<Vec<_>>().join(" ");
+    one_line.chars().take(TOOL_INPUT_CHARS).collect()
+}
+
+/// The `tool_use` blocks of a message `content`, summarised. A `tool_result`
+/// block flagged `is_error` in the same message marks the call it answers.
+fn tool_use_of(content: &serde_json::Value) -> Vec<ToolUseSummary> {
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+    let kind = |b: &serde_json::Value| b.get("type").and_then(|t| t.as_str()).map(str::to_string);
+    let failed: Vec<&str> = blocks
+        .iter()
+        .filter(|b| kind(b).as_deref() == Some("tool_result"))
+        .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
+        .filter_map(|b| b.get("tool_use_id").and_then(|i| i.as_str()))
+        .collect();
+    blocks
+        .iter()
+        .filter(|b| kind(b).as_deref() == Some("tool_use"))
+        .map(|b| ToolUseSummary {
+            name: b
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            input_summary: summarize_tool_input(b.get("input").unwrap_or(&serde_json::Value::Null)),
+            is_error: b
+                .get("id")
+                .and_then(|i| i.as_str())
+                .is_some_and(|id| failed.contains(&id)),
+        })
+        .collect()
 }
 
 /// Flatten a message `content` field to plain text.
@@ -184,11 +287,50 @@ fn text_of(value: &serde_json::Value) -> String {
 
 fn push_message(out: &mut Vec<ChatMessage>, role: &str, content: String) {
     if !content.trim().is_empty() {
-        out.push(ChatMessage {
-            role: role.to_string(),
-            content: content.trim().to_string(),
-        });
+        out.push(ChatMessage::plain(role, content.trim().to_string()));
     }
+}
+
+/// A non-empty string field of `object`.
+fn str_field(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Push a message read from `source` (a Claude Code envelope or a bare
+/// message), with what the source says about when and where it was written.
+/// Kept when it has text or a tool call; a message with neither is noise.
+fn push_envelope(
+    out: &mut Vec<ChatMessage>,
+    role: &str,
+    source: &serde_json::Map<String, serde_json::Value>,
+    content: Option<&serde_json::Value>,
+) {
+    let text = content.map(text_of).unwrap_or_default();
+    let tool_use = content.map(tool_use_of).unwrap_or_default();
+    if text.is_empty() && tool_use.is_empty() {
+        return;
+    }
+    let mut message = ChatMessage::plain(role, text);
+    message.timestamp = str_field(source, "timestamp").or_else(|| str_field(source, "created_at"));
+    message.session_id = str_field(source, "sessionId").or_else(|| str_field(source, "session_id"));
+    message.uuid = str_field(source, "uuid");
+    message.cwd = str_field(source, "cwd");
+    message.git_branch = str_field(source, "gitBranch");
+    message.tool_use = tool_use;
+    out.push(message);
+}
+
+/// The messages of [`extract_messages_with_tools`] that have text: a message
+/// of nothing but tool calls yields no entry here.
+pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
+    extract_messages_with_tools(data)
+        .into_iter()
+        .filter(|m| !m.content.is_empty())
+        .collect()
 }
 
 /// Pull messages out of whatever JSON shape the export uses.
@@ -198,10 +340,14 @@ fn push_message(out: &mut Vec<ChatMessage>, role: &str, content: String) {
 /// transcripts (one `{"type": …, "message": {…}}` envelope per JSONL line),
 /// and a list of conversations containing either.
 ///
+/// This variant also keeps a message that is only tool calls, with its
+/// [`ChatMessage::tool_use`] summaries, which is how the `conversations`
+/// mode and the transcript capture see them. [`extract_messages`] drops it.
+///
 /// Records carrying a `record_type` are **entity-graph records from an
 /// export**, not messages, and are skipped here — they are restored
 /// separately by [`restore_graph_records`].
-pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
+pub fn extract_messages_with_tools(data: &serde_json::Value) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
 
     if let Some(object) = data.as_object() {
@@ -215,12 +361,9 @@ pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
                     .or_else(|| message.get("role"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let content = message
-                    .get("content")
-                    .or_else(|| message.get("text"))
-                    .map(text_of)
-                    .unwrap_or_default();
-                push_message(&mut messages, role, content);
+                let source = message.as_object().cloned().unwrap_or_default();
+                let content = message.get("content").or_else(|| message.get("text"));
+                push_envelope(&mut messages, role, &source, content);
             }
             return messages;
         }
@@ -244,20 +387,16 @@ pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
                     // inner message omits the role.
                     .or_else(|| object.get("type").and_then(|v| v.as_str()))
                     .unwrap_or("unknown");
-                let content = inner
-                    .get("content")
-                    .or_else(|| inner.get("text"))
-                    .map(text_of)
-                    .unwrap_or_default();
-                push_message(&mut messages, role, content);
+                let content = inner.get("content").or_else(|| inner.get("text"));
+                push_envelope(&mut messages, role, object, content);
                 return messages;
             }
         }
         if let Some(inner) = object.get("messages") {
-            return extract_messages(inner);
+            return extract_messages_with_tools(inner);
         }
         if object.contains_key("role") || object.contains_key("sender") {
-            return extract_messages(&serde_json::Value::Array(vec![data.clone()]));
+            return extract_messages_with_tools(&serde_json::Value::Array(vec![data.clone()]));
         }
     }
 
@@ -270,19 +409,15 @@ pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
                 continue;
             }
             if object.contains_key("messages") || object.contains_key("chat_messages") {
-                messages.extend(extract_messages(item));
+                messages.extend(extract_messages_with_tools(item));
             } else if object.contains_key("role") || object.contains_key("sender") {
                 let role = object
                     .get("role")
                     .or_else(|| object.get("sender"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let content = object
-                    .get("content")
-                    .or_else(|| object.get("text"))
-                    .map(text_of)
-                    .unwrap_or_default();
-                push_message(&mut messages, role, content);
+                let content = object.get("content").or_else(|| object.get("text"));
+                push_envelope(&mut messages, role, object, content);
             }
         }
     }
@@ -290,8 +425,34 @@ pub fn extract_messages(data: &serde_json::Value) -> Vec<ChatMessage> {
     messages
 }
 
+/// One turn of a `conversations` memory: the text, then a line per tool call
+/// (tool blocks are summarised here and nowhere else).
+fn conversation_turn(m: &ChatMessage) -> String {
+    let mut body = m.content.clone();
+    for line in m.tool_lines() {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&line);
+    }
+    format!("**{}:** {}", m.role, body)
+}
+
 /// Reduce messages to the content strings a mode asks for.
 pub fn filter_messages(messages: &[ChatMessage], mode: &str) -> Vec<String> {
+    // A message that is only tool calls has no text of its own; only
+    // `conversations` shows its summaries.
+    let owned: Vec<ChatMessage>;
+    let messages = if mode == "conversations" {
+        messages
+    } else {
+        owned = messages
+            .iter()
+            .filter(|m| !m.content.is_empty())
+            .cloned()
+            .collect();
+        &owned
+    };
     match mode {
         "assistant_messages" => messages
             .iter()
@@ -314,7 +475,7 @@ pub fn filter_messages(messages: &[ChatMessage], mode: &str) -> Vec<String> {
             } else {
                 vec![messages
                     .iter()
-                    .map(|m| format!("**{}:** {}", m.role, m.content))
+                    .map(conversation_turn)
                     .collect::<Vec<_>>()
                     .join("\n\n")]
             }
@@ -489,6 +650,140 @@ pub fn parse_document(
 struct ChatChunk {
     content: String,
     span: Option<(usize, usize)>,
+    /// The v32 columns the envelope carried, when it was a record this
+    /// crate's own export wrote. A chat someone else exported has none.
+    exported: Option<ExportedColumns>,
+}
+
+/// Short project name for a working directory: its last path component.
+fn project_of(cwd: &str) -> Option<String> {
+    std::path::Path::new(cwd.trim_end_matches('/'))
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
+/// The schema v32 columns a `remind_me_export_memories` record carries, read
+/// back on import so a round trip keeps where a memory was written and how
+/// far to trust it. Each defaults to the schema's own default when absent,
+/// so an export from a build before v32 reads as it always did.
+#[derive(Debug, Clone, PartialEq)]
+struct ExportedColumns {
+    /// When the memory was written, for a chat whose messages are timed:
+    /// the message's own time rather than the import's.
+    created_at: Option<String>,
+    project: Option<String>,
+    session_id: Option<String>,
+    git_remote: Option<String>,
+    git_branch: Option<String>,
+    git_sha: Option<String>,
+    cwd: Option<String>,
+    valid_from: Option<String>,
+    valid_until: Option<String>,
+    confidence: f64,
+    verified_at: Option<String>,
+    outcome: Option<String>,
+    written_by: String,
+    capture_method: String,
+}
+
+impl ExportedColumns {
+    /// The columns of `record`, or `None` when it carries none of them: a
+    /// chat export from another tool, or an export from before v32.
+    fn from_record(record: &serde_json::Value) -> Option<Self> {
+        let text = |key: &str| {
+            record
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let carried = [
+            "project",
+            "session_id",
+            "git_remote",
+            "git_branch",
+            "git_sha",
+            "cwd",
+            "valid_from",
+            "valid_until",
+            "confidence",
+            "verified_at",
+            "outcome",
+            "written_by",
+            "capture_method",
+        ]
+        .iter()
+        .any(|key| record.get(key).is_some_and(|v| !v.is_null()));
+        if !carried {
+            return None;
+        }
+        Some(Self {
+            created_at: None,
+            project: text("project"),
+            session_id: text("session_id"),
+            git_remote: text("git_remote"),
+            git_branch: text("git_branch"),
+            git_sha: text("git_sha"),
+            cwd: text("cwd"),
+            valid_from: text("valid_from"),
+            valid_until: text("valid_until"),
+            confidence: record
+                .get("confidence")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_else(crate::models::default_confidence),
+            verified_at: text("verified_at"),
+            outcome: text("outcome"),
+            written_by: text("written_by").unwrap_or_else(crate::models::default_written_by),
+            capture_method: text("capture_method")
+                .unwrap_or_else(crate::models::default_capture_method),
+        })
+    }
+
+    /// What a chat import knows about where its messages came from: the
+    /// first envelope that says anything. Always written by the importer.
+    fn from_messages(messages: &[ChatMessage]) -> Self {
+        let first = |pick: fn(&ChatMessage) -> &Option<String>| {
+            messages.iter().find_map(|m| pick(m).clone())
+        };
+        let cwd = first(|m| &m.cwd);
+        Self {
+            created_at: first(|m| &m.timestamp),
+            project: cwd.as_deref().and_then(project_of),
+            session_id: first(|m| &m.session_id),
+            git_remote: None,
+            git_branch: first(|m| &m.git_branch),
+            git_sha: None,
+            cwd,
+            valid_from: None,
+            valid_until: None,
+            confidence: crate::models::default_confidence(),
+            verified_at: None,
+            outcome: None,
+            written_by: "importer:chat".to_string(),
+            capture_method: "auto".to_string(),
+        }
+    }
+
+    fn apply(&self, row: &mut NewMemory) {
+        if let Some(created_at) = &self.created_at {
+            row.created_at.clone_from(created_at);
+        }
+        row.project.clone_from(&self.project);
+        row.session_id.clone_from(&self.session_id);
+        row.git_remote.clone_from(&self.git_remote);
+        row.git_branch.clone_from(&self.git_branch);
+        row.git_sha.clone_from(&self.git_sha);
+        row.cwd.clone_from(&self.cwd);
+        row.valid_from.clone_from(&self.valid_from);
+        row.valid_until.clone_from(&self.valid_until);
+        row.confidence = self.confidence;
+        row.verified_at.clone_from(&self.verified_at);
+        row.outcome.clone_from(&self.outcome);
+        row.written_by.clone_from(&self.written_by);
+        row.capture_method.clone_from(&self.capture_method);
+    }
 }
 
 /// Parse a chat export into chunked content strings.
@@ -498,8 +793,9 @@ fn parse_chat(
     extract_mode: &str,
     max_length: usize,
 ) -> (Vec<ChatChunk>, usize) {
-    // (content, originating byte span) before chunking.
-    let mut contents: Vec<(String, Option<(usize, usize)>)> = Vec::new();
+    // (content, originating byte span, exported columns) before chunking.
+    type Envelope = (String, Option<(usize, usize)>, Option<ExportedColumns>);
+    let mut contents: Vec<Envelope> = Vec::new();
 
     match suffix {
         "json" => {
@@ -511,18 +807,38 @@ fn parse_chat(
                 });
                 if conversations {
                     for conversation in data.as_array().unwrap() {
-                        let messages = extract_messages(conversation);
+                        let messages = extract_messages_with_tools(conversation);
+                        let columns = Some(ExportedColumns::from_messages(&messages));
                         contents.extend(
                             filter_messages(&messages, extract_mode)
                                 .into_iter()
-                                .map(|c| (c, None)),
+                                .map(|c| (c, None, columns.clone())),
+                        );
+                    }
+                } else if let Some(records) = data.as_array().filter(|items| {
+                    items
+                        .iter()
+                        .any(|r| ExportedColumns::from_record(r).is_some())
+                }) {
+                    // This crate's own export: one record per memory, each
+                    // carrying the columns it was exported with. An array
+                    // of plain messages, or an export from before v32, is
+                    // one conversation as it always was.
+                    for record in records.iter().filter(|r| r.get("record_type").is_none()) {
+                        let exported = ExportedColumns::from_record(record);
+                        contents.extend(
+                            filter_messages(&extract_messages_with_tools(record), extract_mode)
+                                .into_iter()
+                                .map(|c| (c, None, exported.clone())),
                         );
                     }
                 } else {
+                    let messages = extract_messages_with_tools(&data);
+                    let columns = Some(ExportedColumns::from_messages(&messages));
                     contents.extend(
-                        filter_messages(&extract_messages(&data), extract_mode)
+                        filter_messages(&messages, extract_mode)
                             .into_iter()
-                            .map(|c| (c, None)),
+                            .map(|c| (c, None, columns.clone())),
                     );
                 }
             }
@@ -550,10 +866,20 @@ fn parse_chat(
                 // The span covers the whole line, including the blocks
                 // `text_of` dropped — recovering those is the entire point.
                 let span = Some((start, offset));
+                let messages = extract_messages_with_tools(&value);
+                // A session envelope also carries `cwd`, which is one of the
+                // exported columns, so it must not be read as an export.
+                let is_envelope = value.get("message").is_some_and(|m| m.is_object());
+                let from_envelope = Some(ExportedColumns::from_messages(&messages));
+                let exported = if is_envelope {
+                    from_envelope
+                } else {
+                    ExportedColumns::from_record(&value).or(from_envelope)
+                };
                 contents.extend(
-                    filter_messages(&extract_messages(&value), extract_mode)
+                    filter_messages(&messages, extract_mode)
                         .into_iter()
-                        .map(|c| (c, span)),
+                        .map(|c| (c, span, exported.clone())),
                 );
             }
         }
@@ -565,12 +891,13 @@ fn parse_chat(
                 if raw.trim().is_empty() {
                     Vec::new()
                 } else {
-                    vec![(raw.trim().to_string(), Some((0, raw.len())))]
+                    vec![(raw.trim().to_string(), Some((0, raw.len())), None)]
                 }
             } else {
+                let columns = Some(ExportedColumns::from_messages(&messages));
                 filter_messages(&messages, extract_mode)
                     .into_iter()
-                    .map(|c| (c, None))
+                    .map(|c| (c, None, columns.clone()))
                     .collect()
             };
         }
@@ -582,15 +909,17 @@ fn parse_chat(
     let raw_entries = contents.len();
     let chunks = contents
         .iter()
-        .filter(|(c, _)| !c.trim().is_empty())
-        // Every chunk of a message inherits that message's span: they all came
-        // from the same envelope, and the drill-down unit is the envelope.
-        .flat_map(|(c, span)| {
+        .filter(|(c, _, _)| !c.trim().is_empty())
+        // Every chunk of a message inherits that message's span and exported
+        // columns: they all came from the same envelope, and the drill-down
+        // unit is the envelope.
+        .flat_map(|(c, span, exported)| {
             chunk_text(c, max_length)
                 .into_iter()
                 .map(move |content| ChatChunk {
                     content,
                     span: *span,
+                    exported: exported.clone(),
                 })
         })
         .collect();
@@ -805,6 +1134,7 @@ pub fn import_content(
                 let mut metadata = serde_json::Map::new();
                 metadata.insert("page".to_string(), serde_json::json!(page.page));
                 extras.push(ChunkExtras {
+                    exported: None,
                     extra_tags: Vec::new(),
                     mention_entities: Vec::new(),
                     metadata,
@@ -885,6 +1215,7 @@ pub fn import_content(
                     serde_json::json!((segment.end * 100.0).round() / 100.0),
                 );
                 extras.push(ChunkExtras {
+                    exported: None,
                     extra_tags: Vec::new(),
                     mention_entities: Vec::new(),
                     metadata,
@@ -924,6 +1255,7 @@ pub fn import_content(
             for highlight in highlights {
                 chunks.push((highlight.content, None));
                 extras.push(ChunkExtras {
+                    exported: None,
                     extra_tags: Vec::new(),
                     mention_entities: Vec::new(),
                     metadata: highlight.metadata,
@@ -951,6 +1283,7 @@ pub fn import_content(
             for note in notes {
                 chunks.push((note.content, note.section));
                 extras.push(ChunkExtras {
+                    exported: None,
                     extra_tags: note.extra_tags,
                     mention_entities: note.mention_entities,
                     metadata: serde_json::Map::new(),
@@ -994,10 +1327,19 @@ pub fn import_content(
         _ => {
             let (contents, raw_entries) = parse_chat(raw, suffix, extract_mode, max_length);
             let spans = contents.iter().map(|c| c.span).collect();
+            // Only an export of this crate's own carries anything here;
+            // every other chat leaves the extras at their defaults.
+            let extras = contents
+                .iter()
+                .map(|c| ChunkExtras {
+                    exported: c.exported.clone(),
+                    ..ChunkExtras::default()
+                })
+                .collect();
             ParsedImport {
                 chunks: contents.into_iter().map(|c| (c.content, None)).collect(),
                 raw_entries,
-                extras: Vec::new(),
+                extras,
                 spans,
                 frontmatter: serde_json::Map::new(),
                 source: CHAT_SOURCE,
@@ -1031,7 +1373,7 @@ pub fn import_content(
     // default 'unknown' regardless of what was actually configured. Hoisted
     // above the loop rather than called per chunk -- the identity cannot
     // change mid-import.
-    let (node_id, client) = crate::sync::memory_provenance();
+    let provenance = crate::context::importer_provenance(source);
 
     let mut created = 0;
     for (chunk_index, (content, section)) in chunks.iter().enumerate() {
@@ -1066,21 +1408,37 @@ pub fn import_content(
 
         let memory_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
 
+        let (mut chunk_tags, mut metadata) = (chunk_tags, metadata);
+        let content = &crate::boundary::scrub(content, &mut chunk_tags, &mut metadata);
+
         // `doc_id`/`chunk_index` group every chunk of this file in source
         // order, which is what lets neighbour expansion find a hit's siblings
         // without re-parsing anything.
-        Memories::new(store).insert_or_ignore(&NewMemory {
+        let mut row = NewMemory {
             category: category.to_string(),
             tags: chunk_tags,
             source: source.to_string(),
             metadata,
             doc_id: Some(import_id.clone()),
             chunk_index: Some(chunk_index as i64),
-            node_id: Some(node_id.clone()),
-            client: client.clone(),
-            ..NewMemory::new(memory_id.clone(), content.clone(), &now)
-        })?;
+            ..provenance.stamp(NewMemory::new(memory_id.clone(), content.clone(), &now))
+        };
+        if let Some(exported) = chunk_extras.and_then(|e| e.exported.as_ref()) {
+            exported.apply(&mut row);
+        }
+        Memories::new(store).insert_or_ignore(&row)?;
         created += 1;
+        crate::boundary::index(store, &memory_id, content, &[], true, &[], &now)?;
+        crate::episodes::ensure_session(
+            store,
+            &crate::models::WriteContext {
+                session_id: row.session_id.clone(),
+                project: row.project.clone(),
+                git_branch: row.git_branch.clone(),
+                cwd: row.cwd.clone(),
+                ..Default::default()
+            },
+        )?;
 
         // Point this memory back at the bytes it came from, so a caller can
         // recover the tool_use/thinking blocks `text_of` dropped.

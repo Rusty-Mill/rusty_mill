@@ -99,6 +99,7 @@ mod with_the_feature {
                 object: None,
                 entities: vec![],
                 sensitive: false,
+                ..Default::default()
             },
         )
         .unwrap()
