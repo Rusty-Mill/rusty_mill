@@ -475,3 +475,83 @@ fn delete_unsplit_reorder_and_if_match_over_the_api() {
         404
     );
 }
+
+#[test]
+fn subtree_writes_are_guarded_by_the_tree_etag() {
+    let (_d, mut h) = harness();
+    let cleaning = card(2);
+    let (status, v) = h.call(
+        Method::Post,
+        &format!("/api/v1/cards/{cleaning}/split"),
+        r#"{"children":[{"name":"Bathrooms"},{"name":"Floors"}]}"#,
+    );
+    assert_eq!(status, 201, "{v:?}");
+    let (a, b) = (
+        v["children"][0]["id"].as_str().unwrap().to_string(),
+        v["children"][1]["id"].as_str().unwrap().to_string(),
+    );
+    let (_, v) = h.call(Method::Get, &format!("/api/v1/cards/{cleaning}"), "");
+    let (etag, tree) = (
+        v["etag"].as_str().unwrap().to_string(),
+        v["treeEtag"].as_str().unwrap().to_string(),
+    );
+
+    // Another client edits a child: the parent's own tag is unchanged,
+    // its tree tag is not.
+    let (status, _) = h.call(
+        Method::Patch,
+        &format!("/api/v1/cards/{a}"),
+        r#"{"notes":"edited elsewhere"}"#,
+    );
+    assert_eq!(status, 200);
+    let (_, v) = h.call(Method::Get, &format!("/api/v1/cards/{cleaning}"), "");
+    assert_eq!(v["etag"].as_str(), Some(etag.as_str()));
+    assert_ne!(v["treeEtag"].as_str(), Some(tree.as_str()));
+
+    // So a reorder or unsplit based on the old read is refused, and
+    // nothing changed.
+    let stale = format!("\"{tree}\"");
+    let order = format!("/api/v1/cards/{cleaning}/children/order");
+    let (status, v) = h.send_with(
+        Method::Put,
+        &order,
+        &format!(r#"{{"ids":["{b}","{a}"]}}"#),
+        Some(TOKEN),
+        Some(&stale),
+    );
+    assert_eq!(status, 412, "{v:?}");
+    assert_ne!(v["current"]["treeEtag"].as_str(), Some(tree.as_str()));
+    let (status, _) = h.send_with(
+        Method::Post,
+        &format!("/api/v1/cards/{cleaning}/unsplit"),
+        "",
+        Some(TOKEN),
+        Some(&stale),
+    );
+    assert_eq!(status, 412);
+    assert_eq!(
+        h.call(Method::Get, &format!("/api/v1/cards/{a}"), "").0,
+        200,
+        "the unsplit did not run"
+    );
+
+    // The fresh tag goes through; the card's own tag does not guard a
+    // subtree write once a descendant has moved on.
+    let fresh = v["current"]["treeEtag"].as_str().unwrap().to_string();
+    let (status, _) = h.send_with(
+        Method::Put,
+        &order,
+        &format!(r#"{{"ids":["{b}","{a}"]}}"#),
+        Some(TOKEN),
+        Some(&format!("\"{fresh}\"")),
+    );
+    assert_eq!(status, 200);
+    let (status, _) = h.send_with(
+        Method::Post,
+        &format!("/api/v1/cards/{cleaning}/unsplit"),
+        "",
+        Some(TOKEN),
+        Some(&format!("\"{etag}\"")),
+    );
+    assert_eq!(status, 412, "the reorder moved the tree tag again");
+}

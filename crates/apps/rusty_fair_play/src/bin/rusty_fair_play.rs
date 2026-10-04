@@ -136,14 +136,16 @@ fn run() -> Result<(), String> {
     }
     let mut service =
         Service::open(&o.data_dir).map_err(|e| format!("opening {}: {e}", o.data_dir.display()))?;
-    if !o.no_seed && !service.has_deck() {
-        let r = service
-            .seed_deck()
+    if !o.no_seed {
+        let loaded = service
+            .ensure_deck()
             .map_err(|e| format!("seeding the deck: {e}"))?;
-        eprintln!(
-            "rusty_fair_play: loaded the deck ({} cards)",
-            r.cards.created
-        );
+        if let Some(r) = loaded {
+            eprintln!(
+                "rusty_fair_play: loaded the deck ({} cards)",
+                r.cards.created
+            );
+        }
     }
     let api = Api::new(service, token)?;
     let mut server = Server::bind(o.addr, api).map_err(|e| format!("binding {}: {e}", o.addr))?;

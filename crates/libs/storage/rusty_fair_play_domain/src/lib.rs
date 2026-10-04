@@ -232,6 +232,9 @@ pub fn split_card_id(path: &str) -> Uuid {
 pub const PERSON_FILE: &str = "people.mmap";
 pub const CARD_FILE: &str = "cards.mmap";
 pub const CARD_DEFAULT_FILE: &str = "card_defaults.mmap";
+/// The directory lock file: whoever writes the three stores holds it, so
+/// a running service is never written under from a second process.
+pub const LOCK_FILE: &str = "store.lock";
 
 // ---------------------------------------------------------------------
 // Person
