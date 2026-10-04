@@ -65,7 +65,7 @@ test('split a card into two with different owners', async ({ page }) => {
   await expect(kids.nth(0)).toContainText('Bob')
   await expect(kids.nth(1)).toContainText('Bathrooms')
   await expect(page.getByTestId('card-tile')).toHaveCount(102)
-  // Reorder with one atomic order write, and open a child.
+  // Reorder with one order request, and open a child.
   await kids.nth(1).getByRole('button', { name: 'Move Bathrooms up' }).click()
   await expect(kids.nth(0)).toContainText('Bathrooms')
   await kids.nth(1).getByRole('link', { name: /Floors/ }).click()

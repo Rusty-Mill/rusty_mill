@@ -823,9 +823,11 @@ where
     Ok(())
 }
 
-/// Reorder the children of `parent` in one call: `order` must name each
-/// current child exactly once (`CardError::BadOrder` otherwise), and gets
-/// positions `0..n` in that order.
+/// Reorder the children of `parent`: `order` must name each current child
+/// exactly once (`CardError::BadOrder` otherwise, before anything is
+/// written), and gets positions `0..n` in that order. The slots are then
+/// written one at a time, so a crash part way leaves some positions
+/// applied; it is not a transaction.
 pub fn reorder_children<S>(store: &mut S, parent: Uuid, order: &[Uuid]) -> Result<(), CardError>
 where
     S: GetById<Card> + Children<Card, Card, ParentCard> + UpdateField<Card, PositionField>,

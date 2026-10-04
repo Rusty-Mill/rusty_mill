@@ -122,7 +122,7 @@ function CardDetail({ card }: { card: Card }) {
     void updateCard(card.id, { ownerId: value || null }, card.etag).catch(() => undefined)
   }
 
-  /** Move child `i` by `delta` in one atomic order write. */
+  /** Move child `i` by `delta` as one order request. */
   const move = (i: number, delta: number): void => {
     const ids = children.map((c) => c.id)
     const j = i + delta

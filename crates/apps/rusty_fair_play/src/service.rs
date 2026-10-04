@@ -441,8 +441,9 @@ impl Service {
         set_position(&mut self.cards, id, position).map_err(|_| ServiceError::NotFound("card"))
     }
 
-    /// Put `parent`'s children in `order` — one request, one lock, one
-    /// slot write per child — and return them in that order.
+    /// Put `parent`'s children in `order` — validated whole first, then
+    /// one slot write per child under this service's lock (not
+    /// crash-atomic) — and return them in that order.
     pub fn reorder_children(&mut self, parent: Uuid, order: &[Uuid]) -> Result<Vec<CardView>> {
         reorder_children(&mut self.cards, parent, order)?;
         order.iter().map(|id| self.card_view(*id)).collect()

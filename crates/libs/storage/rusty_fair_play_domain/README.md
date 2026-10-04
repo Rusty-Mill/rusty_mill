@@ -22,8 +22,8 @@ self-parents, missing parents and cycles; `split_card` inserts children
 first and replaces the parent last, so every crash prefix is a valid store.
 Deletes are guarded so nothing is orphaned: `delete_card` takes a leaf,
 `unsplit_card` a whole subtree deepest first (the parent stays),
-`delete_person` someone holding nothing; `reorder_children` sets every
-child's position in one call from an exact list.
+`delete_person` someone holding nothing; `reorder_children` checks an exact
+list of the children, then writes each position in turn (not crash-atomic).
 
 ```sh
 cargo test -p rusty_fair_play_domain                       # unit, seed and SIGKILL-split tests
