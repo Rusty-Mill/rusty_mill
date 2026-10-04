@@ -22,9 +22,11 @@ export function PlayersPage() {
     if (!name.trim()) return
     setBusy(true)
     setError(null)
+    const submitted = name.trim()
     try {
-      await createPerson(name.trim())
-      setName('')
+      await createPerson(submitted)
+      // Clear the box only if nothing new was typed while the server answered.
+      setName((current) => (current.trim() === submitted ? '' : current))
     } catch (err) {
       setError(err instanceof ConflictError ? `${name.trim()} already exists` : (err as Error).message)
     } finally {
