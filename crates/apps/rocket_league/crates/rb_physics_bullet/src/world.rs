@@ -5045,4 +5045,26 @@ mod tests {
         let dv_z = world.cars[0].linear_velocity.z - 309.6;
         assert!((80.0..110.0).contains(&dv_z), "pushed up {dv_z:.1} uu/s");
     }
+
+    /// RB-PHYSICS-001-FR-130, `hitjump.jsonl` 274.208 s: a car at 2300 uu/s
+    /// meets a resting ball with its top-front edge 12 uu inside it, and
+    /// the ball leaves at (0, 2863, 959) uu/s. The ball's lever arm runs to
+    /// its own surface (91 uu), not the 79 uu to the point on the box, so
+    /// sticking friction drags it less: (2887, 908) before, (2871, 939) now
+    /// in this bare world.
+    #[test]
+    fn a_deep_edge_hit_uses_the_balls_own_lever_arm() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.1));
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, -144.4, 17.0));
+        car.orientation = Quat::new(0.0, 0.0, 0.5f32.sqrt(), 0.5f32.sqrt());
+        car.linear_velocity = Vec3::new(0.0, 2300.0, 0.3);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.step(1.0 / 120.0);
+        let v = world.ball.linear_velocity;
+        assert!(
+            (v.y - 2862.8).abs() < 20.0 && (v.z - 958.7).abs() < 25.0,
+            "{v:?}"
+        );
+    }
 }

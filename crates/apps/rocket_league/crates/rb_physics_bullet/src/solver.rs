@@ -780,7 +780,9 @@ fn setup_two_body_rows(
     combined_restitution: f32,
     dt: f32,
 ) -> [TwoBodyRow; 2] {
-    let rel_pos_a = contact.point - a.position;
+    // Bullet's `rel_pos1`/`rel_pos2` run to each body's own contact point,
+    // A's on A's surface (`RB-PHYSICS-001-FR-130`).
+    let rel_pos_a = contact.point_on_a() - a.position;
     let rel_pos_b = contact.point - b.position;
     let inv_dt = 1.0 / dt;
 

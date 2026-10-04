@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0049 (`RB-PHYSICS-001-FR-130`): `Contact::point_on_a`
+  (`m_positionWorldOnA`); `solver::setup_two_body_rows` measures body A's
+  lever arm to its own contact point, not the shared point on B.
 - ADR-0048 (`RB-PHYSICS-001-FR-129`): `collision::raycast_sphere` and
   `PhysicsWorld::wheel_ray`; a car's wheel rays hit the ball as well as
   the arena, so wheels on the ball suspend, push back and count toward

@@ -34,6 +34,17 @@ pub struct Contact {
     pub penetration_depth: f32,
 }
 
+impl Contact {
+    /// The contact point on the first body's own surface
+    /// (`btManifoldPoint::m_positionWorldOnA`, `pointInWorld + normal *
+    /// depth`): `point` lies on the second body's, so for a pair that
+    /// overlaps by `penetration_depth` the two differ by that much along
+    /// `normal`. A body's lever arm in the solver runs to its own point.
+    pub fn point_on_a(&self) -> Vec3 {
+        self.point - self.normal * self.penetration_depth
+    }
+}
+
 /// `contact_processing_threshold`, matching
 /// `btManifoldPoint::getContactProcessingThreshold()`: contacts aren't
 /// generated until the gap is this small (or overlapping), so resting
@@ -2494,6 +2505,23 @@ mod tests {
         let down = Vec3::new(0.0, 0.0, -1.0);
         assert!(raycast(floor_probe, Vec3::new(0.0, 0.0, 30.0), down, 29.0).is_none());
         assert!(raycast(floor_probe, Vec3::new(0.0, 0.0, -1.0), down, 50.0).is_none());
+    }
+
+    #[test]
+    fn a_contacts_point_on_a_lies_a_penetration_back_along_the_normal() {
+        // RB-PHYSICS-001-FR-130: a ball (A) 12 uu into a box face (B), the
+        // normal pointing from the box to the ball.
+        let contact = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(5.0, 6.0, 40.0),
+            penetration_depth: 12.0,
+        };
+        assert_eq!(contact.point_on_a(), Vec3::new(5.0, 6.0, 28.0));
+        let apart = Contact {
+            penetration_depth: -1.5,
+            ..contact
+        };
+        assert_eq!(apart.point_on_a(), Vec3::new(5.0, 6.0, 41.5));
     }
 
     #[test]
