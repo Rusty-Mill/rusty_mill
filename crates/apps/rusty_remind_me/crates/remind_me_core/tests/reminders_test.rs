@@ -27,6 +27,7 @@ fn add(store: &Store<'_>, content: &str) -> String {
             object: None,
             entities: vec![],
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap()

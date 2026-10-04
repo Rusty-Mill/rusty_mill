@@ -1,25 +1,27 @@
-//! `Database::open` on the engine for an on-disk node (ADR-0023 §5): the
-//! first open copies the SQLite file, later opens use the copy, and the
-//! file is refused without the engine once its store has moved.
+//! `Database::open` for an on-disk node (ADR-0023 §5, ADR-0025): the first
+//! open copies an old SQLite file beside which no engine directory exists,
+//! later opens use the copy, and the file is never opened again.
 
 use super::copy::copy_into_place;
 use super::{retry_while_locked, TemporaryDir};
+use crate::db::legacy_sqlite::{fixture, LegacyDb};
 use crate::db::memories::{Memories, NewMemory};
 use crate::db::{engine_dir, Database, StoreError};
 use crate::testing::{self, Table};
-use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 const T1: &str = "2026-01-01T00:00:00+00:00";
 
-/// A node's SQLite file holding one memory, in a directory of its own.
+/// A node's old SQLite file holding three memories (the v32 fixture), in a
+/// directory of its own.
 fn sqlite_node(dir: &TemporaryDir) -> PathBuf {
     std::fs::create_dir_all(dir.path()).unwrap();
     let file = dir.path().join("memory.db");
-    let db = Database::open_on_sqlite(&file).unwrap();
-    Memories::new(&db.store())
-        .insert(&NewMemory::new("m1", "copied from SQLite", T1))
-        .unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy_store/legacy_v32.db"),
+        &file,
+    )
+    .unwrap();
     file
 }
 
@@ -28,14 +30,16 @@ fn memories(db: &Database) -> i64 {
 }
 
 /// The memory rows in the SQLite file itself, bypassing the engine.
-fn sqlite_memories(file: &Path) -> i64 {
-    let conn = Connection::open(file).unwrap();
-    conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+fn sqlite_memories(file: &Path) -> usize {
+    LegacyDb::open(file)
         .unwrap()
+        .rows("memories")
+        .unwrap()
+        .len()
 }
 
-fn open_on_engine(file: &Path) -> Database {
-    retry_while_locked(|| Database::open_on_engine(file)).unwrap()
+fn open(file: &Path) -> Database {
+    retry_while_locked(|| Database::open(file)).unwrap()
 }
 
 #[test]
@@ -43,27 +47,29 @@ fn the_first_open_copies_the_file_and_later_opens_keep_the_engine() {
     let dir = TemporaryDir::fresh();
     let file = sqlite_node(&dir);
     {
-        let db = open_on_engine(&file);
+        let db = open(&file);
         assert!(engine_dir(&file).is_dir());
-        assert_eq!(memories(&db), 1);
+        assert_eq!(memories(&db), 3);
         Memories::new(&db.store())
-            .insert(&NewMemory::new("m2", "written on the engine", T1))
+            .insert(&NewMemory::new("m4", "written on the engine", T1))
             .unwrap();
     }
-    let db = open_on_engine(&file);
-    assert_eq!(memories(&db), 2);
+    let db = open(&file);
+    assert_eq!(memories(&db), 4);
     // The file stopped changing at the copy.
-    assert_eq!(sqlite_memories(&file), 1);
+    assert_eq!(sqlite_memories(&file), 3);
 }
 
 #[test]
-fn the_file_is_refused_without_the_engine_once_copied() {
+fn a_node_with_no_file_starts_empty_on_the_engine() {
     let dir = TemporaryDir::fresh();
-    let file = sqlite_node(&dir);
-    drop(open_on_engine(&file));
-    let refused = Database::open_on_sqlite(&file);
-    let why = refused.err().map(|e| e.to_string()).unwrap_or_default();
-    assert!(why.contains("copied onto the engine"), "{why}");
+    std::fs::create_dir_all(dir.path()).unwrap();
+    let file = dir.path().join("memory.db");
+    let db = open(&file);
+    assert_eq!(memories(&db), 0);
+    assert!(engine_dir(&file).is_dir());
+    assert!(!file.exists(), "no SQLite file is ever created");
+    assert_eq!(db.store().path(), Some(file.as_path()));
 }
 
 #[test]
@@ -73,8 +79,8 @@ fn a_partial_copy_left_by_a_crash_is_redone() {
     let partial = dir.path().join("memory.engine.partial");
     std::fs::create_dir_all(&partial).unwrap();
     std::fs::write(partial.join("stray"), b"half a copy").unwrap();
-    let db = open_on_engine(&file);
-    assert_eq!(memories(&db), 1);
+    let db = open(&file);
+    assert_eq!(memories(&db), 3);
     assert!(!partial.exists());
     assert!(!engine_dir(&file).join("stray").exists());
 }
@@ -83,17 +89,13 @@ fn a_partial_copy_left_by_a_crash_is_redone() {
 fn a_refused_row_leaves_no_engine_store() {
     let dir = TemporaryDir::fresh();
     let file = sqlite_node(&dir);
-    {
-        // A column the engine has nowhere to keep: the copy would lose it.
-        // (Opening the file with this build rebuilds the table without it,
-        // so the copy is called directly.)
-        let conn = Connection::open(&file).unwrap();
-        conn.execute_batch(
-            "ALTER TABLE memories ADD COLUMN extra TEXT;
-             UPDATE memories SET extra = 'kept only by SQLite';",
-        )
-        .unwrap();
-    }
+    // A column the engine has nowhere to keep: the copy would lose it.
+    fixture(
+        &file,
+        "ALTER TABLE memories ADD COLUMN extra TEXT;
+         UPDATE memories SET extra = 'kept only by SQLite';",
+    )
+    .unwrap();
     let engine = engine_dir(&file);
     let refused = copy_into_place(&file, &engine, &mut |_| {});
     assert!(
@@ -102,19 +104,82 @@ fn a_refused_row_leaves_no_engine_store() {
     );
     assert!(!engine.exists());
     assert!(dir.path().join("memory.engine.partial").is_dir());
-    assert_eq!(sqlite_memories(&file), 1);
+    assert_eq!(sqlite_memories(&file), 3);
+    // `Database::open` reports the same and leaves the file as it was.
+    let opened = Database::open(&file).map(|_| ());
+    assert!(matches!(opened, Err(StoreError::Invalid(_))), "{opened:?}");
+    assert_eq!(sqlite_memories(&file), 3);
+}
+
+#[test]
+fn a_file_the_copy_cannot_read_is_refused_with_the_remedy() {
+    let dir = TemporaryDir::fresh();
+    let file = sqlite_node(&dir);
+    fixture(&file, "PRAGMA user_version = 29;").unwrap();
+    let opened = Database::open(&file);
+    let why = opened.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(
+        why.contains("schema version 29") && why.contains("0.2.x"),
+        "{why}"
+    );
+    assert!(!engine_dir(&file).exists());
 }
 
 #[test]
 fn background_threads_share_the_engine_store() {
     let dir = TemporaryDir::fresh();
     let file = sqlite_node(&dir);
-    let db = open_on_engine(&file);
+    let db = open(&file);
     let source = db.secondary_source().unwrap();
-    let conn = Database::open_secondary_at(source.path()).unwrap();
-    Memories::new(&source.store(&conn))
-        .insert(&NewMemory::new("m2", "from a background thread", T1))
+    assert_eq!(source.path(), file.as_path());
+    Memories::new(&source.store())
+        .insert(&NewMemory::new("m4", "from a background thread", T1))
         .unwrap();
-    assert_eq!(memories(&db), 2);
-    assert_eq!(sqlite_memories(&file), 1);
+    assert_eq!(memories(&db), 4);
+    assert_eq!(sqlite_memories(&file), 3);
+}
+
+#[test]
+fn a_store_written_under_another_layout_is_refused_in_plain_words() {
+    use rusty_multimodal_db_engine::generic::record_blob::TAG_OFFSET;
+
+    let dir = TemporaryDir::fresh();
+    let file = dir.path().join("memory.db");
+    std::fs::create_dir_all(dir.path()).unwrap();
+    {
+        let db = open(&file);
+        Memories::new(&db.store())
+            .insert(&NewMemory::new("m1", "written by this build", T1))
+            .unwrap();
+    }
+
+    // What an older build leaves behind, or a newer one: the same table under
+    // a different record layout, which the file records as a different tag.
+    let blob = engine_dir(&file).join("memories.mmap.records");
+    let mut bytes = std::fs::read(&blob).unwrap();
+    bytes[TAG_OFFSET] ^= 0xff;
+    std::fs::write(&blob, &bytes).unwrap();
+
+    let refused = match retry_while_locked(|| Database::open(&file)) {
+        Err(e) => e,
+        Ok(_) => panic!("a store under another layout opened"),
+    };
+    let StoreError::Invalid(message) = &refused else {
+        panic!("expected a plain refusal, got {refused:?}");
+    };
+    assert!(
+        message.contains("different version of rusty-remind-me"),
+        "{message}"
+    );
+    assert!(message.contains(env!("CARGO_PKG_VERSION")), "{message}");
+    assert!(message.contains("restore a backup"), "{message}");
+    assert!(
+        message.contains("schema tag mismatch"),
+        "keeps the engine's detail: {message}"
+    );
+
+    // Nothing was rewritten: put the byte back and the store opens as before.
+    bytes[TAG_OFFSET] ^= 0xff;
+    std::fs::write(&blob, &bytes).unwrap();
+    assert_eq!(memories(&open(&file)), 1);
 }

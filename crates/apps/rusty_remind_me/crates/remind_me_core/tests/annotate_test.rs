@@ -24,6 +24,7 @@ fn add_with_entities(store: &Store<'_>, content: &str, entities: Vec<EntityInput
         predicate: None,
         object: None,
         entities,
+        ..Default::default()
     };
     queries::add_memory(store, input).expect("add failed").id
 }
