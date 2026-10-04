@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The ball is pushed back out of walls the way the game does it
+**2026-10-04** · `RB-PHYSICS-001-FR-118` · ADR-0038
+
+- When the ball ends a tick inside a wall or corner, the game nudges it
+  back out by position (80% of the overlap past its 91.25 uu core) on
+  top of the bounce. The simulator only bounced, so the ball stayed
+  deeper and sometimes bounced again. It now nudges the same way. The
+  ball's 30-tick error on the driving recording fell from 0.45 to 0.37
+  uu; the goal recording is unchanged. 494 tests.
+
 ## RocketSim's arena meshes, in Bullet's order; MIT OR Apache-2.0 again
 **2026-10-03** · `RB-PHYSICS-001-FR-117` · ADR-0037
 

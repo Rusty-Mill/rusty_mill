@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0038 (`RB-PHYSICS-001-FR-118`): `solver::StaticMaterial::PushOnly`
+  (split-impulse penetration rows only, at RocketSim's `m_erp2` 0.8) and
+  `body::BALL_COLLISION_RADIUS` (91.25 uu); `PhysicsWorld::step` pushes
+  every raw ball-world contact out from that sphere beside the combined
+  bounce.
 - ADR-0037 (`RB-PHYSICS-001-FR-117`): `bvh::visit_order` (Bullet's
   `btQuantizedBvh` build order), `StaticMesh::from_cmf` (RocketSim's
   mesh file format), and RocketSim's 16 soccar meshes under

@@ -401,6 +401,18 @@ impl DeltaVelocity {
 /// 0` (this crate has no conveyor-belt/friction-anchor feature, so this is
 /// its only reachable case).
 fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 2] {
+    setup_rows_with_erp(body, contact, dt, ERP2)
+}
+
+/// `setup_rows` with the contact's error reduction parameter (`m_erp2`,
+/// or a point's own `m_contactERP`) given: RocketSim's ball-world push
+/// rows use its arena-wide 0.8 (`RB-PHYSICS-001-FR-118`).
+fn setup_rows_with_erp(
+    body: &RigidBody,
+    contact: &Contact,
+    dt: f32,
+    erp: f32,
+) -> [ConstraintRow; 2] {
     let rel_pos = contact.point - body.position;
     let inv_dt = 1.0 / dt;
 
@@ -420,7 +432,7 @@ fn setup_rows(body: &RigidBody, contact: &Contact, dt: f32) -> [ConstraintRow; 2
     let (positional_error, velocity_error) = if gap_with_slop > 0.0 {
         (0.0, restitution - rel_vel)
     } else {
-        (-gap_with_slop * ERP2 * inv_dt, restitution - rel_vel)
+        (-gap_with_slop * erp * inv_dt, restitution - rel_vel)
     };
 
     let normal_row = ConstraintRow {
@@ -1383,7 +1395,17 @@ pub enum StaticMaterial {
     /// Coefficients fixed for the pair, used as they are: RocketSim's
     /// car-vs-world override (`RB-PHYSICS-001-FR-100`).
     Pair { restitution: f32, friction: f32 },
+    /// Position correction only (`RB-PHYSICS-001-FR-118`): the contacts
+    /// take part in the split-impulse penetration resolve at RocketSim's
+    /// `m_erp2` (0.8) but in no velocity or friction solve, like the
+    /// per-point rows RocketSim's solver marks `m_isSpecial` and skips while
+    /// their body's one combined contact (FR-108) bounces instead. Its
+    /// `solveGroupCacheFriendlySplitImpulseIterations` has no such skip.
+    PushOnly,
 }
+
+/// RocketSim's `m_erp2` (`Arena::Arena`, "closer to older Bullet").
+const ROCKETSIM_ERP2: f32 = 0.8;
 
 /// Restitution and friction fixed for a pair of dynamic bodies, used as
 /// they are instead of combining the bodies' own (`RB-PHYSICS-001-FR-107`):
@@ -1410,6 +1432,15 @@ impl StaticMaterial {
                 restitution,
                 friction,
             } => (restitution, friction),
+            Self::PushOnly => (0.0, 0.0),
+        }
+    }
+
+    /// The error reduction parameter this material's penetration rows use.
+    fn erp(self) -> f32 {
+        match self {
+            Self::PushOnly => ROCKETSIM_ERP2,
+            Self::Surface { .. } | Self::Pair { .. } => ERP2,
         }
     }
 }
@@ -1478,6 +1509,7 @@ pub fn resolve_manifolds(
     struct StaticManifold {
         body_index: usize,
         combined_friction: f32,
+        push_only: bool,
         rows: Vec<[ConstraintRow; 2]>,
     }
 
@@ -1510,11 +1542,12 @@ pub fn resolve_manifolds(
             effective_body.restitution = combined_restitution;
             let rows = contacts
                 .iter()
-                .map(|c| setup_rows(&effective_body, c, dt))
+                .map(|c| setup_rows_with_erp(&effective_body, c, dt, material.erp()))
                 .collect();
             StaticManifold {
                 body_index: *body_index,
                 combined_friction,
+                push_only: *material == StaticMaterial::PushOnly,
                 rows,
             }
         })
@@ -1588,6 +1621,10 @@ pub fn resolve_manifolds(
             let delta = &mut deltas[m.body_index];
             let push_delta = &mut push_deltas[m.body_index];
             for rows in &mut m.rows {
+                if m.push_only {
+                    resolve_push_row(&mut rows[0], inv_mass, push_delta);
+                    continue;
+                }
                 resolve_row(&mut rows[0], inv_mass, delta);
                 resolve_push_row(&mut rows[0], inv_mass, push_delta);
 
@@ -2616,5 +2653,40 @@ mod tests {
         let t = friction_direction(&normal, &Vec3::new(0.0, 0.0, -1000.0));
         assert!((t.length() - 1.0).abs() < 1e-5, "not unit: {t:?}");
         assert!(t.dot(&normal).abs() < 1e-5, "not tangent: {t:?}");
+    }
+
+    /// RB-PHYSICS-001-FR-118: a push-only manifold moves the body out of
+    /// penetration by RocketSim's `m_erp2` share (0.8) and never touches
+    /// its velocity, even while it approaches the surface.
+    #[test]
+    fn a_push_only_manifold_corrects_position_at_rocketsims_erp_and_leaves_velocity_alone() {
+        let dt = 1.0 / 120.0;
+        let mut ball = RigidBody::sphere(93.15, 1.0, Vec3::new(0.0, 0.0, 83.15));
+        ball.linear_velocity = Vec3::new(0.0, 0.0, -300.0);
+        let contact = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::ZERO,
+            penetration_depth: 10.0,
+        };
+        let mut bodies = [ball];
+        let mut caches = HashMap::new();
+        resolve_manifolds(
+            &mut bodies,
+            &[(0, StaticMaterial::PushOnly, vec![contact])],
+            &[],
+            dt,
+            &mut caches,
+        );
+        let after = bodies[0];
+        assert!(
+            (after.linear_velocity.z + 300.0).abs() < 1e-3,
+            "velocity changed: {:?}",
+            after.linear_velocity
+        );
+        let pushed = after.position.z - 83.15;
+        assert!(
+            (pushed - 0.8 * 10.0).abs() < 1e-2,
+            "expected 8 uu of push, got {pushed}"
+        );
     }
 }
