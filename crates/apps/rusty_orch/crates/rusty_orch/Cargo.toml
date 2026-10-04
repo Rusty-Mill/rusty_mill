@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 # `orch-store` and its embedded engine set the effective floor.
 rust-version = "1.89"
-description = "Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex and Ollama adapters and prints the board."
+description = "Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board."
 license = "MIT"
 
 [package.metadata.rusty_mill]
@@ -20,6 +20,7 @@ orch-dispatch = { workspace = true }
 orch-cli = { workspace = true }
 orch-ollama = { workspace = true }
 orch-codex = { workspace = true }
+orch-claude = { workspace = true }
 orch-store = { workspace = true }
 rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 

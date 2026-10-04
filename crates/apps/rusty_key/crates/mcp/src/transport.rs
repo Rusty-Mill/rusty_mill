@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::model::CallToolRequestParam;
+use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -59,12 +59,15 @@ async fn call_tool_on(svc: &Running, name: &str, args: Value) -> Result<String, 
             Some(m)
         }
     };
+    // rmcp 3.1.4: the params struct is non-exhaustive, so it is built
+    // through its constructor.
+    let mut params = CallToolRequestParams::new(name.to_string());
+    if let Some(arguments) = arguments {
+        params = params.with_arguments(arguments);
+    }
     let result = svc
         .peer()
-        .call_tool(CallToolRequestParam {
-            name: name.to_string().into(),
-            arguments,
-        })
+        .call_tool(params)
         .await
         .map_err(|_| McpError::CallFailed {
             tool: name.to_string(),

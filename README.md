@@ -108,6 +108,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rusty_stream`](crates/libs/async/rusty_stream) | `crates/libs/async/rusty_stream` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty_url`](crates/foundation/rusty_url) | `crates/foundation/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
 | [`rusty_http`](crates/libs/net/rusty_http) | `crates/libs/net/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
+| [`rusty_serve`](crates/libs/net/rusty_serve) | `crates/libs/net/rusty_serve` | Small blocking HTTP/1.1 server on `rusty_http` for a JSON API plus a built web UI (sans-IO `Handler`, bounded, path-safe static files); used by `rusty_tick` and `rusty_fair_play` |
 | [`rusty_json`](crates/foundation/rusty_json) | `crates/foundation/rusty_json` | From-scratch JSON library, `no_std`-capable, with `serde` interop |
 | [`rusty_json-derive`](crates/foundation/rusty_json/rusty_json-derive) | `crates/foundation/rusty_json/rusty_json-derive` | `rusty_json`'s `#[derive(RustyJson)]` proc-macro |
 | [`rusty_oauth`](crates/libs/net/rusty_oauth) | `crates/libs/net/rusty_oauth` | Hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation |

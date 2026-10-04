@@ -190,3 +190,37 @@ fn scrubbed_variables_are_removed_from_the_child_environment() {
     assert_eq!(String::from_utf8_lossy(&visible.stdout).trim(), "leaked");
     assert_eq!(String::from_utf8_lossy(&scrubbed.stdout).trim(), "unset");
 }
+
+#[test]
+fn run_in_sets_the_working_directory_and_none_inherits_it() {
+    let dir = std::env::temp_dir().join(format!("orch-cli-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let canonical = dir.canonicalize().expect("canonical");
+
+    let exit = StdCommand
+        .run_in(
+            Some(&dir),
+            &argv(&["pwd"]),
+            b"",
+            Duration::from_secs(5),
+            &[],
+        )
+        .expect("pwd runs");
+    assert_eq!(
+        String::from_utf8_lossy(&exit.stdout).trim(),
+        canonical.to_string_lossy()
+    );
+
+    let inherited = StdCommand
+        .run(&argv(&["pwd"]), b"", Duration::from_secs(5))
+        .expect("pwd runs");
+    let parent = std::env::current_dir()
+        .expect("cwd")
+        .canonicalize()
+        .expect("canonical");
+    assert_eq!(
+        String::from_utf8_lossy(&inherited.stdout).trim(),
+        parent.to_string_lossy()
+    );
+    let _ = std::fs::remove_dir(&dir);
+}

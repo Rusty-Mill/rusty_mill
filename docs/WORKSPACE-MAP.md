@@ -27,7 +27,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 16 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 22 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 24 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 11 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
@@ -42,7 +42,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 15 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 1 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
-| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
+| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 5 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 11 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
@@ -88,20 +88,21 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_db | rusty-db-mysql | MySQL/MariaDB driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_db | rusty-db-postgres | PostgreSQL driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_db | rusty-db-sqlite | SQLite driver for rusty_db, built on sqlx | 1 |
+| libs | rusty_fair_play_domain | rusty_fair_play_domain | The Fair Play household-card domain on rusty_multimodal_db_engine: Person, Card (a tree with an owner per card), CardDefault (the shipped baseline), the queries, and the seed loader with the deck embedded | 2 |
 | libs | rusty_fedora | rusty_fedora | Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write. | 1 |
 | libs | rusty_font | rusty_font | A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer | 4 |
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary | 1 |
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 16 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 18 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
 | libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
-| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 5 |
+| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 7 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 0 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
@@ -120,6 +121,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_search | rusty-search-solr | Apache Solr-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
 | libs | rusty_search | rusty-search-sqlite-fts5 | SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables | 1 |
 | libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 1 |
+| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 2 |
 | libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
 | libs | rusty_stream | rusty_stream | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
@@ -185,6 +187,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_agent_gateway | agentgateway-proxy | HTTP reverse proxying for rusty_agent_gateway host backends | 1 |
 | apps | rusty_agent_gateway | agentgateway-tls | TLS termination for rusty_agent_gateway, over rusty_tls | 1 |
 | apps | rusty_croc | rusty-croc | Rust port of croc (https://github.com/schollz/croc) — secure peer-to-peer file transfer | 0 |
+| apps | rusty_fair_play | rusty_fair_play | Fair Play household cards: a JSON HTTP API and web UI over rusty_multimodal_db's fair_play domain | 0 |
 | apps | rusty_fedora_agent | rusty_fedora_agent | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP -- the backend rusty_homelab_mcp's fedora module talks to. | 0 |
 | apps | rusty_hister | rusty-hister-core | Shared types, IDs, and error types for the rusty_hister crate cluster (a Rust port of asciimoo/hister) | 7 |
 | apps | rusty_hister | rusty-hister-crawler | HTTP and JS-rendering crawler backends for rusty_hister (JS-rendering approach pending ADR-0003) | 0 |
@@ -216,13 +219,14 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_meshed | rusty-meshed-sdk | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure. | 2 |
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
-| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 3 |
+| apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
+| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 4 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
-| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 6 |
-| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 5 |
+| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 7 |
+| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 6 |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. | 2 |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. | 1 |
-| apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex and Ollama adapters and prints the board. | 0 |
+| apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board. | 0 |
 | apps | rusty_provider | rp-cli |  | 0 |
 | apps | rusty_provider | rp-core |  | 4 |
 | apps | rusty_provider | rp-mcp |  | 1 |

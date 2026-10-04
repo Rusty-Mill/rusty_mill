@@ -4,6 +4,7 @@
 
 pub use orch_cli::fake::*;
 
+use std::path::Path;
 use std::time::Duration;
 
 use orch_cli::{CommandRunner, ExecError, Exit};
@@ -40,8 +41,9 @@ impl ReplyFile {
 }
 
 impl CommandRunner for ReplyFile {
-    fn run_scrubbed(
+    fn run_in(
         &self,
+        cwd: Option<&Path>,
         argv: &[String],
         stdin: &[u8],
         timeout: Duration,
@@ -55,6 +57,6 @@ impl CommandRunner for ReplyFile {
                 .expect("argv names the last-message file");
             std::fs::write(path, reply).expect("write reply file");
         }
-        self.inner.run_scrubbed(argv, stdin, timeout, remove_env)
+        self.inner.run_in(cwd, argv, stdin, timeout, remove_env)
     }
 }

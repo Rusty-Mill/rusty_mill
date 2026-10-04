@@ -1,0 +1,29 @@
+[package]
+name = "rusty_fair_play_domain"
+version = "0.1.0"
+edition = "2021"
+# Matches rusty_multimodal_db_engine, which this is built on.
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+description = "The Fair Play household-card domain on rusty_multimodal_db_engine: Person, Card (a tree with an owner per card), CardDefault (the shipped baseline), the queries, and the seed loader with the deck embedded"
+publish = false
+
+# A libs crate (ADR-0003) so both rusty_multimodal_db (its wire adapters)
+# and rusty_fair_play (the web app) can depend on it: an app crate may
+# not depend on another family's app crate.
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_multimodal_db_engine = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+# Deterministic ids (`fair_play_id`): SHA-256 over a namespaced key, the
+# `entity_id` recipe rusty_multimodal_db uses (ADR-0042).
+sha2 = "0.10"
+thiserror = "1"
+uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+
+# `tests/fair_play_crash.rs` spawns this and SIGKILLs it mid-split.
+[[bin]]
+name = "fair_play_crash_writer"

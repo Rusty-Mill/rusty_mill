@@ -5,8 +5,8 @@
 | Piece | What |
 | ---- | ---- |
 | `CodexAgent { repo_root, timeout, model }` | `AgentRunner` for `Agent::Codex` only. Runs `codex exec --sandbox read-only --ephemeral --ignore-user-config --ignore-rules -C <repo_root> --output-schema <f> --output-last-message <f> -` with the prompt on stdin, reads the reply from the last-message file, parses it with `orch_cli::parse`. Default timeout 10 minutes. |
-| `OUTPUT_SCHEMA` | The JSON Schema handed to `--output-schema`: strict Structured Outputs form, one fully-required `anyOf` variant per kind. The parser remains the authority on caps and roles. |
-| `render(task, board)` | The shared prompt core plus two Codex lines: read files under the working directory and cite them as `path:` refs; the sandbox is read-only and offline. |
+| `output_schema(stop)` | The JSON Schema handed to `--output-schema`, re-exported from `orch-cli` where the Claude adapter shares it: strict Structured Outputs form, one fully-required `anyOf` variant per kind, no `question` variant under best effort. The parser remains the authority on caps and roles. |
+| `render(task, board, stop)` | The shared prompt core plus two Codex lines: read files under the working directory and cite them as `path:` refs; the sandbox is read-only and offline. |
 | `SCRUBBED_ENV` | `OPENAI_API_KEY` is removed from the child's environment on every run. Codex uses the ChatGPT subscription login, never a key. |
 
 Failures are typed `AgentError`s whose messages tell "not logged in" from "rate limited"; both are exit 1 from Codex and are told apart by stderr. "Not logged in" is classified as an unavailable prerequisite: the card remains resumable and the attempt does not spend call budget. Rate limits are counted transient failures.
