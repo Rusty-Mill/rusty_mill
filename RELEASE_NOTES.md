@@ -13,6 +13,25 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi P3: the inner agent a0, its broker and model clients
+**2026-10-04** · [#PR](https://github.com/Rusty-Mill/rusty_mill/pull/PR) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `crates/apps/rusty_rsi/harness` (`rsi-harness`), a0, the std-only inner agent. It ports AIDE0: five drafts, then debug a random buggy leaf (p = 0.5, debug depth at most 3) or improve the best node, with the full history in every prompt; it submits each new best. The runtime compiles `src/lib.rs` as a binary with plain `rustc` in the sandbox, so a candidate has no manifest, dependencies or build scripts. A compile error is a build failure, not a crash.
+- **Added:** `rsi-runtime`:
+  - The broker: a length-prefixed binary protocol (`llm`, `eval`, `submit`) over a socket pair passed as the agent's stdin. `LiveService` meters model tokens and wall-clock time with `CostMeter`; once the budget is spent only `submit` works, and the agent is killed at the wall-clock budget plus a grace period.
+  - Every exchange is recorded. `HarnessProcess::replay` re-runs an agent against its transcript, without the model, and fails on the first divergent request.
+  - `OpenAiModel`, an OpenAI-compatible client over `rusty_http` (plain HTTP; local Ollama by default), and `ScriptedModel` for CI. A response without token usage is refused.
+  - The agent's sandbox refuses every new socket, so the broker socket is its only channel.
+- **Added:** `rsi inner`, one inner run with a live model, configured only from the environment (`RSI_INNER_MODEL`, `RSI_INNER_BASE_URL`, `RSI_INNER_API_KEY`).
+- **Added:** `rsi-core` gains the `Harness` and `ChatModel` ports and `PublicTask::description`; each toy task gains `public/task.md`.
+- **Tests:** end-to-end tests for invariant 2 (the token budget stops a0 after exactly the affordable calls; an agent that ignores the wall clock is killed and keeps its submission), invariant 4 (a run replays to the same submission without the model; a changed task diverges) and invariant 1(b) (the agent cannot read private or public labels, the task or the repository, or open TCP or Unix sockets). A mutation check confirmed the isolation and budget tests fail when the socket rule or the budget check is removed.
+- Known limitations:
+  - `https://` model endpoints are refused until TLS is wired in.
+  - The last model call can overshoot the token budget by its prompt tokens (admit-then-record).
+  - Solutions, unlike the agent, may still create Unix sockets.
+
+---
+
 ## rusty_rsi P2: sandboxed execution, toy tasks and private grading
 **2026-10-04** · [#476](https://github.com/Rusty-Mill/rusty_mill/pull/476) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

@@ -6,7 +6,8 @@
 //! So the executor never confines itself: it spawns the `rsi` binary with
 //! the `__sandbox` subcommand (single-threaded from birth), which runs
 //! [`run_helper`]: set rlimits, restrict the filesystem to an allowlist,
-//! block internet sockets, verify each step was enforced, then `exec`.
+//! block internet sockets (or, for the inner agent, every new socket),
+//! verify each step was enforced, then `exec`.
 //!
 //! Setup failures are reported through a status file the parent created
 //! and the helper opens *before* confining itself. The descriptor is
@@ -44,6 +45,9 @@ pub struct HelperRequest {
     pub write: Vec<PathBuf>,
     /// The program's complete environment.
     pub env: Vec<(String, String)>,
+    /// Refuse to create any socket at all, Unix ones included. The inner
+    /// agent's only channel is the broker socket it inherits as stdin.
+    pub deny_sockets: bool,
     /// The program to execute (looked up on the environment's `PATH`).
     pub program: OsString,
     /// Its arguments.
@@ -75,6 +79,9 @@ impl HelperRequest {
         for (name, value) in &self.env {
             flag("--env", format!("{name}={value}").into());
         }
+        if self.deny_sockets {
+            out.push("--no-sockets".into());
+        }
         out.push("--".into());
         out.push(self.program.clone());
         out.extend(self.args.iter().cloned());
@@ -92,6 +99,7 @@ impl HelperRequest {
         let mut cwd = None;
         let mut limits = [None::<u64>; 5];
         let (mut read, mut write, mut env) = (Vec::new(), Vec::new(), Vec::new());
+        let mut deny_sockets = false;
         let mut iter = args.iter();
         let program = loop {
             let Some(flag) = iter.next() else {
@@ -102,6 +110,10 @@ impl HelperRequest {
                     .next()
                     .cloned()
                     .ok_or_else(|| bad("missing program".into()))?;
+            }
+            if flag == "--no-sockets" {
+                deny_sockets = true;
+                continue;
             }
             let value = iter
                 .next()
@@ -150,6 +162,7 @@ impl HelperRequest {
             read,
             write,
             env,
+            deny_sockets,
             program,
             args: iter.cloned().collect(),
         })
@@ -287,16 +300,22 @@ fn confine(request: &HelperRequest) -> Result<(), RuntimeError> {
         .block_inet_sockets()
         .map_err(|error| RuntimeError::Sandbox(format!("seccomp: {error}")))?;
     require_enforced("seccomp socket blocking", net)?;
-    group_lock::install()
+    group_lock::install(request.deny_sockets)
 }
 
-/// Keeps every descendant in the job's process group (review finding 2).
+/// Keeps every descendant in the job's process group (review finding 2),
+/// and optionally refuses every new socket.
 ///
 /// The executor contains a job by killing its process group, and a process
 /// can only leave a group through `setsid` or `setpgid`. This second
 /// seccomp filter (filters stack; the strictest verdict wins) makes both
 /// fail with `EPERM`, so the group is the whole job. It also refuses every
 /// x32-ABI syscall on x86_64, since those bypass number-based checks.
+///
+/// With `deny_sockets`, `socket(2)` fails with `EPERM` for every address
+/// family. The inner agent then has no way to talk to anything but the
+/// broker socket it inherited: not the network, and not a local Unix or
+/// abstract socket either, which Landlock does not cover.
 #[cfg(target_os = "linux")]
 mod group_lock {
     use rusty_libc::arch::{nr, syscall3};
@@ -351,18 +370,26 @@ mod group_lock {
     /// Installs the filter on the calling thread (inherited by children).
     ///
     /// Requires `no_new_privs`, which the Landlock step has already set.
-    pub(super) fn install() -> Result<(), RuntimeError> {
-        // Jump offsets count from the next instruction.
+    pub(super) fn install(deny_sockets: bool) -> Result<(), RuntimeError> {
+        // Jump offsets count from the next instruction. Without
+        // `deny_sockets`, instruction 6 never matches (no syscall number is
+        // `u32::MAX`), which keeps every offset the same.
+        let socket = if deny_sockets {
+            nr::SOCKET as u32
+        } else {
+            u32::MAX
+        };
         let program = [
             stmt(LD_W_ABS, OFFSET_ARCH),           // 0
-            jump(JEQ_K, AUDIT_ARCH, 0, 6),         // 1: foreign arch -> 8
+            jump(JEQ_K, AUDIT_ARCH, 0, 7),         // 1: foreign arch -> 9
             stmt(LD_W_ABS, OFFSET_NR),             // 2
-            jump(JSET_K, X32_SYSCALL_BIT, 3, 0),   // 3: x32 -> 7
-            jump(JEQ_K, nr::SETSID as u32, 2, 0),  // 4: setsid -> 7
-            jump(JEQ_K, nr::SETPGID as u32, 1, 0), // 5: setpgid -> 7
-            stmt(RET_K, RET_ALLOW),                // 6
-            stmt(RET_K, RET_EPERM),                // 7
-            stmt(RET_K, RET_KILL_PROCESS),         // 8
+            jump(JSET_K, X32_SYSCALL_BIT, 4, 0),   // 3: x32 -> 8
+            jump(JEQ_K, nr::SETSID as u32, 3, 0),  // 4: setsid -> 8
+            jump(JEQ_K, nr::SETPGID as u32, 2, 0), // 5: setpgid -> 8
+            jump(JEQ_K, socket, 1, 0),             // 6: socket -> 8
+            stmt(RET_K, RET_ALLOW),                // 7
+            stmt(RET_K, RET_EPERM),                // 8
+            stmt(RET_K, RET_KILL_PROCESS),         // 9
         ];
         let fprog = SockFprog {
             len: program.len() as u16,
@@ -404,6 +431,7 @@ mod tests {
                 ("PATH".into(), "/usr/bin".into()),
                 ("RSI_SEED".into(), "7".into()),
             ],
+            deny_sockets: true,
             program: "python3".into(),
             args: vec!["solution.py".into(), "--".into(), "--cpu".into()],
         }

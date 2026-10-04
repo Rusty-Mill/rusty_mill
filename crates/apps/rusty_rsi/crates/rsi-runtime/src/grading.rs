@@ -223,6 +223,10 @@ impl<E: Executor<Error = RuntimeError>> PublicTask for LocalTask<'_, E> {
         self.task.baseline()
     }
 
+    fn description(&self) -> &str {
+        self.task.description()
+    }
+
     fn public_score(&self, solution: &Solution, seed: Seed) -> Result<Attempt, RuntimeError> {
         let run = self.runner.run(self.task, Split::Public, solution, seed)?;
         // Inputs and labels come from the task directory, never from the

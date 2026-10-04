@@ -20,53 +20,8 @@ use rsi_runtime::{
     TaskDir,
 };
 
-const RSI: &str = env!("CARGO_BIN_EXE_rsi");
-
-/// A per-test directory under the system temp dir, removed on success.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("rsi-it-{name}-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("clearing an old scratch dir");
-        }
-        std::fs::create_dir_all(&dir).expect("creating scratch");
-        Self(dir.canonicalize().expect("canonical scratch"))
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            std::fs::remove_dir_all(&self.0).expect("removing scratch");
-        }
-    }
-}
-
-fn suite_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rsi-runtime/tasks")
-}
-
-fn suite() -> Vec<TaskDir> {
-    TaskDir::load_suite(&suite_dir()).expect("toy suite loads")
-}
-
-fn task(tasks: &[TaskDir], id: &str) -> TaskDir {
-    tasks
-        .iter()
-        .find(|t| t.manifest().id.as_str() == id)
-        .cloned()
-        .expect("task exists")
-}
-
-fn executor(scratch: &Scratch) -> ProcessExecutor {
-    ProcessExecutor::new(RSI.into(), vec!["__sandbox".into()], scratch.path("state"))
-}
+mod common;
+use common::{executor, suite, suite_dir, task, Scratch, RSI};
 
 fn runner(scratch: &Scratch) -> SolutionRunner<ProcessExecutor> {
     let roots: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();

@@ -17,3 +17,9 @@ path = "src/main.rs"
 [dependencies]
 rsi-core = { path = "../rsi-core" }
 rsi-runtime = { path = "../rsi-runtime" }
+
+[dev-dependencies]
+# Never called: the tests compile the harness from its source with plain
+# rustc, as the runtime does. The edge exists so that CI's affected-crate
+# analysis re-runs these end-to-end tests whenever a0 changes.
+rsi-harness = { path = "../../harness" }

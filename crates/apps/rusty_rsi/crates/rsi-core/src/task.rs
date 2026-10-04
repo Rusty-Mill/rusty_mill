@@ -70,6 +70,10 @@ pub trait PublicTask {
     /// The task's starting solution (`x0` in AIDE²'s Algorithm 1).
     fn baseline(&self) -> &Solution;
 
+    /// What the agent is told about the task: goal, data formats, the
+    /// solution contract and the metric. Public by construction.
+    fn description(&self) -> &str;
+
     /// Runs `solution` on the public split with `seed` and scores it.
     ///
     /// # Errors

@@ -72,9 +72,9 @@ A new family at `crates/apps/rusty_rsi/`, with `layer = "apps"`:
 | Member | Path | Role | Deps (workspace → external) |
 |---|---|---|---|
 | `rsi-core` | `crates/rsi-core` | Pure domain: no I/O, no async, no clock. | `rusty_err`, `rusty_rsa` (sha256 for the lineage hash chain) → none |
-| `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_err`, `rusty_json` (no default features); on Linux `platform`, `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimits, `killpg`); `rusty_http` from P3 → none |
+| `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_err`, `rusty_json` (no default features), `rusty_http` (sync adapter only); on Linux `platform`, `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimits, `killpg`) → none |
 | `rsi-cli` | `crates/rsi-cli` | Composition root: `rsi run \| calibrate \| report`, plus hidden `rsi __sandbox` / `rsi __grade` entry points. | the two above |
-| `rsi-harness` | `harness/` | **The only mutable surface**: the inner agent. It has zero dependencies (std only). | none |
+| `rsi-harness` | `harness/` | **The only mutable surface**: the inner agent. It has zero dependencies (std only). A library to Cargo; the runtime compiles `src/lib.rs` as the binary (§3). | none |
 
 There are no other crates, and none will be added before a second real
 call site exists. Tasks are data, not crates:
@@ -106,14 +106,15 @@ inner loop cannot score privately.
 |---|---|---|
 | `PublicTask` | `baseline()`, `public_score(&Solution, Seed) -> Result<Attempt>` (score or buggy, feedback, wall time) | `LocalTask`: sandboxed run on the public split, scored in-process. |
 | `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
-| `Harness` | `run(&PublicTaskView, &Budget, Seed) -> Result<InnerOutcome>` (chosen solution, `CostUsage`, transcript id) | Builds the candidate, spawns it in the sandbox, and serves it over a broker socket. |
+| `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
+| `ChatModel` | `complete(&[Message], max_tokens) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
 | `Proposer` | `propose(&[LineageEntry], &Workspace) -> Result<Proposal>` | `OpenAiCompatProposer` (HTTP) and `CodexCliProposer` (subprocess); `ScriptedProposer` in tests. |
 | `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
 | `LineageStore` | `append(LineageEntry) -> Result<EntryId>`, `iter()`, `verify()` | Append-only JSONL plus a content-addressed blob dir (see §6). |
 
 Each trait lands in `rsi-core` in the same phase as its first adapter
-(P2: `PublicTask`, `PrivateGrader`, `Executor`; P3: `Harness`; P4:
+(P2: `PublicTask`, `PrivateGrader`, `Executor`; P3: `Harness`, `ChatModel`; P4:
 `Proposer`, `LineageStore`), so no port is defined before something
 implements it.
 
@@ -183,6 +184,70 @@ group. If a task has no submission, it scores the task's declared floor
 - It is seeded from `--seed` (its own SplitMix64), so it is deterministic
   given the broker's responses.
 
+**As built (P3).**
+- **Build.** The runtime copies the candidate's `src/` (directories and
+  regular files only, at most 4 MiB; a symlink is a build failure) into a
+  fresh build directory and runs, in the sandbox,
+  `rustc --edition 2021 -O --crate-type bin --crate-name rsi_harness
+  src/lib.rs`. `src/lib.rs` is the binary root and its `pub fn main` the
+  entry point. To Cargo the crate is a library with no `main.rs`, so CI
+  builds, lints and unit-tests a0 as an ordinary workspace member. The
+  build reads only system directories, the toolchain's sysroot (found once,
+  outside the sandbox, with `rustc --print sysroot`) and the copy.
+- **Channel.** The broker socket is one end of a `socketpair`, passed as
+  the agent's standard input. The agent's sandbox adds a seccomp rule that
+  fails `socket(2)` with `EPERM` for every address family, so the inherited
+  socket is its only way out: no network, and no other Unix or abstract
+  socket either (Landlock does not cover those). The same rule applies to
+  the build.
+- **Frames.** Length-prefixed binary (`u32` big-endian length, a tag byte,
+  then length-prefixed UTF-8 fields), because a std-only agent has no JSON
+  parser. `rsi-runtime/src/protocol.rs` and `harness/src/broker.rs` each
+  pin the same golden bytes. A malformed or oversized frame ends the
+  session; it is not an error.
+- **Metering.** `LiveService` charges model tokens from the endpoint's
+  `usage` field (a response without it is refused as unmetered) and asks
+  for at most min(per-call cap, tokens left). Wall-clock time runs from
+  session start and is charged before and after every operation. `submit`
+  is free and stays open after exhaustion. The agent process is killed at
+  `b_wall + grace`.
+- **Model failures** (endpoint down, HTTP error, malformed reply) end the
+  run with `RuntimeError::Model`; they are infrastructure, never graded.
+- **Transcript.** Every exchange, in order, encoded as the same frames.
+  `HarnessProcess::replay` serves the recorded responses, fails with
+  `RuntimeError::Broker` as soon as the agent sends a request the recording
+  did not, hangs up where the recording ends (as the live session ended,
+  whether the agent exited or was killed), and returns the replayed final
+  submission.
+- **Task description.** Each task's `public/task.md` (goal, data formats,
+  solution contract, metric) is staged into the agent's work directory.
+  The agent never sees data files; it learns about them through `eval`.
+- **Models.** `OpenAiModel` speaks OpenAI-compatible `/chat/completions`
+  over plain HTTP through `rusty_http`'s sync adapter; `https://` endpoints
+  are refused until TLS is wired in. The API key comes from the
+  environment and is redacted from `Debug`. `ScriptedModel` serves CI.
+  `rsi inner` reads `RSI_INNER_MODEL`, `RSI_INNER_BASE_URL` (default:
+  local Ollama) and `RSI_INNER_API_KEY`.
+- **Tests (`rsi-cli/tests/inner.rs`).**
+  - Invariant 2: a0 with 1,200 tokens at 150 per call gets exactly 8 calls,
+    and the 8th program's evaluation is refused. An agent that ignores the
+    wall clock is killed at `b_wall + grace` and keeps its earlier
+    submission.
+  - Invariant 4: a run replays from its transcript to the same submission
+    without calling the model, and a changed task description diverges.
+  - Invariant 1(b): an agent's reads of private labels, public labels, the
+    task directory and the repository, a TCP connect and a Unix socket all
+    fail with `PermissionDenied`. An agent whose sandbox could reach a
+    protected path is not started.
+  - A candidate that does not compile is a `BuildFailure`.
+- **Mutation check.** Without the socket rule, the isolation test fails
+  (a Unix socket opens). Without the budget admission check, the
+  token-budget test fails.
+- **Known limits.** Solutions (not the agent) can still create Unix
+  sockets, as P2 allows. The token cap is admit-then-record, so the last
+  call may overshoot by at most its own prompt tokens (its completion is
+  capped at the tokens left).
+
 ### 4. Private isolation (invariant 1)
 
 - **Where private data lives.** `private/` stays in the main checkout
@@ -240,7 +305,7 @@ group. If a task has no submission, it scores the task's declared floor
     un-addable Landlock root, so the program never runs. The
     `require_enforced` unit test covers `NotEnforced` and `Unsupported`.
     Off Linux, `execution_fails_closed_off_linux` runs on CI's Windows job.
-  - (b) needs the harness and lands in P3.
+  - (b) is `the_agent_cannot_reach_private_data_the_repository_or_any_socket` (P3).
 - **Mutation check.** With the Landlock and seccomp step removed, exactly
   the five confinement tests fail. With the rlimits removed, the memory and
   CPU tests fail.
