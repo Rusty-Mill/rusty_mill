@@ -12148,7 +12148,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remind_me_api"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "remind_me_core",
  "serde",
@@ -12157,7 +12157,7 @@ dependencies = [
 
 [[package]]
 name = "remind_me_core"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -12190,7 +12190,7 @@ dependencies = [
 
 [[package]]
 name = "remind_me_hub"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "postgres",
@@ -12203,7 +12203,7 @@ dependencies = [
 
 [[package]]
 name = "remind_me_mcp"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "remind_me_core",
@@ -12215,7 +12215,7 @@ dependencies = [
 
 [[package]]
 name = "remind_me_remote"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -13507,7 +13507,7 @@ dependencies = [
 
 [[package]]
 name = "rusty-remind-me"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "dirs 5.0.1",
  "remind_me_api",
