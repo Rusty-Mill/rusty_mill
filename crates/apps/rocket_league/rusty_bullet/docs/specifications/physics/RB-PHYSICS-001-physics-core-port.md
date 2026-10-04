@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.124.0
+- Version: 0.125.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6172,6 +6172,31 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `hitjump` 119.908 s: 75 uu/s (was 110; the sideways kick is gone).
       One-step ball 0.500 (was 0.501); k = 30 ball 20.37 (was 20.41).
     - `test2`, `front` and `side` unchanged.
+- `RB-PHYSICS-001-FR-121` (the ball's mesh manifolds persist across
+  ticks; implemented and verified on the owner's captures, ADR-0041):
+  `mesh::BallManifold` keeps each tick's points with their ball-frame
+  position (`m_localPointA`) and mesh point; `StaticMesh::sphere_manifold`
+  adds this tick's triangle contacts to it, matching and sorting by the
+  ball-frame position, then refreshes every point against the ball's new
+  transform (`refreshContactPoints`: dropped past the breaking threshold
+  along its normal or sideways, depth updated). `PhysicsWorld` carries
+  one per mesh; `snap_to_frame` clears them. `sphere_contacts` is the
+  same call on an empty manifold.
+  - Why: `hitjump.jsonl` 97.900 s, the tick after a corner bounce. With
+    contacts rebuilt from nothing each tick the ball bounced again off
+    the back-slope facets it was still inside; the game waited a tick.
+  - **Verification**:
+    - `mesh` tests `a_persistent_point_follows_the_ball_until_it_leaves`,
+      `a_spinning_balls_point_slides_away_with_its_surface`; `world` test
+      `snapping_the_ball_forgets_its_contact_history`.
+    - `hitjump` k = 30: 97.908 s window 206 uu/s to 4, 97.917 s 76 to 11,
+      the 39.9–40.1 s corner sequence 274/261/233/204 to 2/7/2/4; mean
+      20.35 (was 20.37), median/p90/p99 unchanged, 139 windows better by
+      more than 5 and 160 worse (one-tick bounce-timing flips).
+    - One-step unchanged by construction (each tick starts snapped);
+      `test2` k = 30 ball 0.33 unchanged.
+    - RocketSim's `getCacheEntry = -1` (no folding) tried and rejected:
+      one-step ball 0.549.
 
 
 ## Architecture and interfaces
@@ -7663,6 +7688,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.125.0 (2026-10-04): `RB-PHYSICS-001-FR-121` — the ball's mesh
+  manifolds persist across ticks (ADR-0041). 428 tests in
+  `rb_physics_bullet`.
 - 0.124.0 (2026-10-04): `RB-PHYSICS-001-FR-120` — edges on a seam
   between meshes are classified across meshes (ADR-0040). 425 tests in
   `rb_physics_bullet`.
