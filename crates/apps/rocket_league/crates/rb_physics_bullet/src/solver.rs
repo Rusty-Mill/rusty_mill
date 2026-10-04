@@ -413,7 +413,7 @@ fn setup_rows_with_erp(
     dt: f32,
     erp: f32,
 ) -> [ConstraintRow; 2] {
-    let rel_pos = contact.point - body.position;
+    let rel_pos = contact.point_on_a() - body.position;
     let inv_dt = 1.0 / dt;
 
     let (normal_torque_axis, normal_angular_component, denom) =
@@ -2704,5 +2704,29 @@ mod tests {
             (pushed - 0.8 * 10.0).abs() < 1e-2,
             "expected 8 uu of push, got {pushed}"
         );
+    }
+
+    /// RB-PHYSICS-001-FR-135: a body's static-contact lever arm runs to its
+    /// own surface point, `penetration_depth` back along the normal. The
+    /// normal row's lever is unchanged (the shift is along the normal); the
+    /// friction row's is not.
+    #[test]
+    fn a_static_contacts_friction_lever_arm_runs_to_the_bodys_own_point() {
+        let mut car = RigidBody::standard_car(Vec3::ZERO);
+        car.linear_velocity = Vec3::new(100.0, 0.0, 0.0);
+        let contact = Contact {
+            normal: Vec3::new(0.0, 0.0, 1.0),
+            point: Vec3::new(10.0, 0.0, 0.0),
+            penetration_depth: 6.0,
+        };
+        let rows = setup_rows(&car, &contact, 1.0 / 120.0);
+        // The tangent runs along x, so its torque axis is the lever's z
+        // part, 6, about y (the sign follows the tangent's direction).
+        let friction = rows[1].torque_axis;
+        assert!((friction.y.abs() - 6.0).abs() < 1e-4, "{friction:?}");
+        assert!(friction.x.abs() < 1e-4 && friction.z.abs() < 1e-4);
+        // The normal row's lever, 10 about y, ignores the shift.
+        let normal = rows[0].torque_axis;
+        assert!((normal.y.abs() - 10.0).abs() < 1e-4, "{normal:?}");
     }
 }

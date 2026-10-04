@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0054 (`RB-PHYSICS-001-FR-135`): a body's static-contact lever arm
+  runs to `Contact::point_on_a`, shifting the friction rows' lever.
 - ADR-0053 (`RB-PHYSICS-001-FR-134`): `ground::NON_STICKY_FRICTION_CURVE`;
   a coasting car's tires grip less on steep surfaces.
 - ADR-0052 (`RB-PHYSICS-001-FR-133`): `boost::update_boosting`; a boost
