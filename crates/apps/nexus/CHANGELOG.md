@@ -8,6 +8,9 @@ lives in the git log and in `docs/0.1.2/audits/`.
 
 ## [Unreleased]
 
+### Fixed
+- **`nexus-mcp` builds against `rmcp` 3.1.4 again.** The bump in #473 changed `ServerHandler::call_tool`, `get_prompt` and `read_resource` to return `CallToolResponse`, `GetPromptResponse` and `ReadResourceResponse` (a completed result, a request for client input, or a task); the Nexus handler still returned the bare `*Result` types, so the whole workspace failed to compile in every full CI sweep. The three handlers now wrap their completed results; no behaviour change.
+
 ### Changed
 - **The bundled shell is now the workspace's `rush` (`crates/apps/rush`); `nexus-rush` is removed** (RFC 0002). The vendored copy had drifted behind rush. `nexus-terminal` looks for a `rush` binary beside the executable instead of `nexus-rush`, and no longer sets `NEXUS_EMBEDDED_SHELL`: `portable-pty` makes the shell a session leader with the PTY as its controlling terminal, so rush's job control (`fg`, `bg`, Ctrl-Z) works, where nexus-rush had disabled it.
 
