@@ -8,6 +8,17 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Hard landings rebound like the game's
+**2026-10-04** · `RB-PHYSICS-001-FR-122` · ADR-0042
+
+- When a car lands hard enough to bottom out its suspension, the engine
+  pushes it back up with an extra correction on top of the springs. Ours
+  pushed about 25 uu/s per tick too hard, using Bullet's default
+  correction strength; the recordings fit half of that. With the
+  calibrated value the driving recording's car error nearly halves
+  (0.895 → 0.470 uu/s per tick, 116 frames better and none worse) and
+  every other recording's car error drops too. 500 tests.
+
 ## The ball remembers what it touched last tick
 **2026-10-04** · `RB-PHYSICS-001-FR-121` · ADR-0041
 

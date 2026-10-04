@@ -4824,4 +4824,25 @@ mod tests {
         world.snap_to_frame(&frame);
         assert!(world.ball_mesh_manifolds.is_empty());
     }
+
+    /// RB-PHYSICS-001-FR-122, `test2.jsonl` 18.358 s: a car landing
+    /// nose-first at 231 uu/s down, its suspension bottomed out, gains
+    /// 168 uu/s upward in the next tick. With the wheel pushback's ERP at
+    /// Bullet's default 0.2 it gained 195; at the calibrated 0.1 it matches.
+    #[test]
+    fn a_bottomed_out_landing_rebounds_as_recorded() {
+        let ball = RigidBody::standard_ball(Vec3::new(1000.0, 1000.0, 93.15));
+        let mut car = RigidBody::standard_car(Vec3::new(-2110.1, -504.9, 9.4));
+        car.orientation = Quat::new(-0.023, 0.055, -0.463, 0.884).normalize();
+        car.linear_velocity = Vec3::new(662.8, -1425.3, -231.2);
+        car.angular_velocity = Vec3::new(-0.37, -5.48, 0.2);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.step(1.0 / 120.0);
+        let v = world.cars[0].linear_velocity;
+        assert!(
+            (v - Vec3::new(692.4, -1399.3, -63.2)).length() < 5.0,
+            "landing rebound off: {v:?}"
+        );
+    }
 }
