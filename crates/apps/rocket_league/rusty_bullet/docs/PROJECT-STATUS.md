@@ -247,7 +247,13 @@ version: `a245d35`).
    ball's, not the box's), which lowers every car-ball hit: `hitjump`
    274.217 s ball 47 → 10, 37.4 s 36 → 5, 223.2 s 30 → 8; one-step ball
    0.428, k = 30 ball 20.96; `test2` k = 30 ball 1.27. Frames over 20
-   uu/s in `hitjump`: 1 (77.667 s, 58). Open car-side leads: `test2`
+   uu/s in `hitjump`: 1 (77.667 s, 58): the ball is 57 uu/s short along
+   the car's forward direction (and 11 down) after the wheel-over-ball hit,
+   the car within 6. Tried and rejected: the ball's velocity in the wheel
+   model (it is at rest), a wheel-impulse reaction on the ball before the
+   solve (the downward push bounces off the floor, z error 95) or after it
+   (best fit 31 at a free scale of 0.05, direction misfit, spin unchanged),
+   so one frame stays open. Open car-side leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
