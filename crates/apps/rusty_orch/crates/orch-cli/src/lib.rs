@@ -8,6 +8,8 @@
 //!   may write depend on the goal's `StopRule` (ADR-0011).
 //! - [`render`]: the prompt core, with the adapter's format-spec footer
 //!   appended.
+//! - [`output_schema`]: the JSON Schema of a reply, for CLIs that constrain
+//!   their final message to one (Codex, Claude).
 //!
 //! What stays per adapter: argv, the footer wording, where the reply is read
 //! from, and the stderr-to-`AgentError` mapping.
@@ -22,6 +24,7 @@ mod exec;
 pub mod fake;
 mod parse;
 mod prompt;
+mod schema;
 
 pub use exec::{
     excerpt, CommandRunner, ExecError, Exit, StdCommand, EXCERPT_CHARS, JOIN_GRACE,
@@ -29,3 +32,4 @@ pub use exec::{
 };
 pub use parse::{allowed_kinds, parse, parse_ref, MAX_BODY_CHARS, MAX_ENTRIES};
 pub use prompt::{format_spec, render, BEST_EFFORT_RULES};
+pub use schema::output_schema;

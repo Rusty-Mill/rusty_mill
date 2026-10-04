@@ -148,11 +148,13 @@ members = [
     "crates/apps/rusty_rsi/crates/rsi-core",
     "crates/apps/rusty_rsi/crates/rsi-runtime",
     "crates/apps/rusty_rsi/crates/rsi-cli",
+    "crates/apps/rusty_rsi/harness",
     "crates/apps/rusty_orch/crates/orch-core",
     "crates/apps/rusty_orch/crates/orch-dispatch",
     "crates/apps/rusty_orch/crates/orch-cli",
     "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_orch/crates/orch-codex",
+    "crates/apps/rusty_orch/crates/orch-claude",
     "crates/apps/rusty_orch/crates/orch-store",
     "crates/apps/rusty_orch/crates/rusty_orch",
     "crates/apps/rusty_key/crates/config",
@@ -510,6 +512,7 @@ orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
 orch-cli = { path = "crates/apps/rusty_orch/crates/orch-cli" }
 orch-ollama = { path = "crates/apps/rusty_orch/crates/orch-ollama" }
 orch-codex = { path = "crates/apps/rusty_orch/crates/orch-codex" }
+orch-claude = { path = "crates/apps/rusty_orch/crates/orch-claude" }
 orch-store = { path = "crates/apps/rusty_orch/crates/orch-store" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }

@@ -2088,6 +2088,14 @@ where
             _marker: PhantomData,
         }
     }
+
+    /// The store beneath this layer — how a stack with two `Reversed`
+    /// layers reaches the inner one's `Children` (the outer answers its
+    /// own marker only; a generic forwarding impl is E0119, as
+    /// [`Ordered`]'s docs explain). The `Ordered::inner` precedent.
+    pub fn inner(&self) -> &S {
+        &self.inner
+    }
 }
 
 // `INS-FR-005`: a child inserted at runtime is indexed under its parent

@@ -32,7 +32,8 @@ Write one answer per input line to `output.txt`.
 
 ```text
 <task>/task.json      id, family, metric, shared, inputs, floor, limits
-<task>/public/        shared files, inputs, labels.txt, baseline.py (x0)
+<task>/public/        shared files, inputs, labels.txt, baseline.py (x0),
+                      task.md (what the inner agent is told)
 <task>/private/       held-out inputs and labels.txt; never readable by a solution
 ```
 
@@ -41,6 +42,7 @@ Write one answer per input line to `output.txt`.
 - **Readable oracle.** `scaffold-oracle`'s oracle is a deterministic
   simulator, and its source is staged with the solution. A solution can
   therefore read or reimplement it, or simply compute the arithmetic
-  itself. A real model-backed harness task needs the P3 broker.
+  itself. A model-backed harness task would route the oracle through the
+  broker; that is future work.
 - **Small TSP reference.** `tsp-heuristic`'s reference length comes from
   nearest neighbour plus 2-opt, so strong solutions hit the cap of 1.0.
