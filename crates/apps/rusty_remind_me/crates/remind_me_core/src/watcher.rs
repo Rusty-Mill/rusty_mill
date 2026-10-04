@@ -47,7 +47,6 @@ use crate::import_paths::{
 use crate::importer::import_file;
 use crate::models::{ImportKind, ImportOutcome};
 use chrono::Utc;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,6 +58,12 @@ pub const WATCH_DIRS_ENV: &str = "REMIND_ME_WATCH_DIRS";
 pub const WATCH_INTERVAL_ENV: &str = "REMIND_ME_WATCH_INTERVAL";
 /// Seconds a file must be untouched before it is considered stable.
 pub const WATCH_GRACE_ENV: &str = "REMIND_ME_WATCH_GRACE";
+
+/// `1` makes Claude Code's session-transcript directory (`.claude/projects`
+/// under the home directory) the watch root when [`WATCH_DIRS_ENV`] is unset.
+/// Off by default: transcripts hold everything said in a session, so reading
+/// them is an explicit choice.
+pub const WATCH_CLAUDE_PROJECTS_ENV: &str = "REMIND_ME_WATCH_CLAUDE_PROJECTS";
 
 pub const DEFAULT_INTERVAL_SECONDS: u64 = 60;
 pub const DEFAULT_GRACE_SECONDS: u64 = 5;
@@ -169,18 +174,36 @@ pub fn validate_watch_dirs(dirs: &[PathBuf]) -> (Vec<PathBuf>, Vec<RejectedDir>)
     (accepted, rejected)
 }
 
-/// Watch directories from the environment.
+/// Watch directories from the environment: [`WATCH_DIRS_ENV`] when set,
+/// else the Claude Code transcripts directory when
+/// [`WATCH_CLAUDE_PROJECTS_ENV`] is `1`, else none.
 pub fn configured_watch_dirs() -> Vec<PathBuf> {
-    std::env::var(WATCH_DIRS_ENV)
+    let explicit = std::env::var(WATCH_DIRS_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(|raw| {
             split_path_list(&raw)
                 .into_iter()
                 .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default()
+                .collect::<Vec<_>>()
+        });
+    explicit.unwrap_or_else(claude_projects_dir)
+}
+
+/// The transcripts directory when [`WATCH_CLAUDE_PROJECTS_ENV`] is `1` and a
+/// home directory is known, else empty.
+fn claude_projects_dir() -> Vec<PathBuf> {
+    let flag = std::env::var(WATCH_CLAUDE_PROJECTS_ENV).ok();
+    claude_projects_in(flag.as_deref(), dirs::home_dir())
+}
+
+fn claude_projects_in(flag: Option<&str>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    if flag != Some("1") {
+        return Vec::new();
+    }
+    home.map(|home| home.join(".claude").join("projects"))
+        .into_iter()
+        .collect()
 }
 
 /// Mark a previous import's memories superseded by a newer one.
@@ -623,9 +646,8 @@ impl WatcherHandle {
 /// Returns `None` when there is nothing to run: no watch directories
 /// configured (or none usable), or an in-memory database. The in-memory case
 /// matters for the same reason it does for the scheduler — the loop's thread
-/// opens its own connection by path, and `:memory:` would give it a
-/// *different*, empty database, so it would scan files into a store nobody
-/// can read.
+/// lives only as long as its `Database`, so there is nothing a background
+/// thread could outlive it on.
 ///
 /// Conditional, unlike the scheduler: the watcher has an explicit enable
 /// switch in `REMIND_ME_WATCH_DIRS`, and a watcher with no directories is not
@@ -636,7 +658,6 @@ pub fn start_watcher_for(store: &Store<'_>) -> Option<WatcherHandle> {
 }
 
 fn start_watcher(watcher: Watcher, source: SecondarySource) -> WatcherHandle {
-    let db_path = source.path().to_path_buf();
     let interval = std::time::Duration::from_secs(watcher.interval().max(1));
     let shared = std::sync::Arc::new(std::sync::Mutex::new(watcher));
     let (liveness, liveness_guard) = crate::scheduler::Liveness::new();
@@ -651,25 +672,15 @@ fn start_watcher(watcher: Watcher, source: SecondarySource) -> WatcherHandle {
         .name("folder-watcher".to_string())
         .spawn(move || {
             let _liveness_guard = liveness_guard;
-            // Its own connection, by path: `rusqlite::Connection` is not
-            // `Sync`, so sharing the caller's would trade a compile error for
-            // a runtime serialisation problem.
-            let store = match Connection::open(&db_path) {
-                Ok(store) => store,
-                Err(e) => {
-                    eprintln!("folder watcher: cannot open {:?}: {}", db_path, e);
-                    // Clear the registration rather than leave a `running:
-                    // true` behind a thread that is about to exit.
-                    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    return;
-                }
-            };
+            // Its own store over the shared engine tables, holding no lock
+            // across a scan.
+            let store = source.store();
             while !loop_stop.is_stopped() {
                 {
                     // Scoped so the lock is released before the sleep — a
                     // status call must not block for a whole interval.
                     let mut guard = loop_shared.lock().unwrap_or_else(|e| e.into_inner());
-                    let counts = guard.scan_once(&source.store(&store));
+                    let counts = guard.scan_once(&store);
                     if counts.ingested > 0 || counts.superseded > 0 {
                         eprintln!(
                             "folder watcher: ingested {}, superseded {}",
@@ -709,4 +720,21 @@ pub fn live_status() -> Option<WatchStatus> {
     let mut status = guard.status();
     status.running = alive;
     Some(status)
+}
+
+#[cfg(test)]
+mod claude_projects_tests {
+    use super::*;
+
+    #[test]
+    fn transcripts_are_watched_only_when_switched_on_and_home_is_known() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            claude_projects_in(Some("1"), home.clone()),
+            vec![PathBuf::from("/home/u/.claude/projects")]
+        );
+        assert!(claude_projects_in(None, home.clone()).is_empty());
+        assert!(claude_projects_in(Some("0"), home).is_empty());
+        assert!(claude_projects_in(Some("1"), None).is_empty());
+    }
 }

@@ -21,12 +21,14 @@ fn add(store: &Store<'_>, content: &str, category: &str, source: &str, tags: &[&
         predicate: None,
         object: None,
         entities: vec![],
+        ..Default::default()
     };
     queries::add_memory(store, input).expect("add failed").id
 }
 
 fn search(store: &Store<'_>, query: &str) -> Vec<String> {
     let input = MemorySearchInput {
+        scope: Default::default(),
         strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
@@ -42,6 +44,8 @@ fn search(store: &Store<'_>, query: &str) -> Vec<String> {
         include_neighbors: false,
         expand_co_retrieval: false,
         bootstrap: false,
+        include_expired: true,
+        min_confidence: 0.0,
     };
     queries::search_memories(store, &input)
         .expect("search failed")
@@ -447,6 +451,7 @@ fn delete_cleans_up_dependent_rows_explicitly() {
             kind: Some("place".into()),
             aliases: vec![],
         }],
+        ..Default::default()
     };
     let id = queries::add_memory(&store, input).unwrap().id;
 
