@@ -14,6 +14,11 @@ use crate::template::JinjaError;
 
 type Scope = BTreeMap<String, Value>;
 
+// Byte-oriented work is deliberately coarser than the value-size ceiling. A
+// render may legitimately copy a large prompt, but every such copy must still
+// consume a bounded amount of fuel.
+const BYTES_PER_OPERATION: usize = 1024;
+
 /// Renders `nodes` against `context` (typically a JSON object holding
 /// `messages`, `add_generation_prompt`, `bos_token`, etc.).
 pub fn render(nodes: &[Node], context: &Value, limits: RenderLimits) -> Result<String, JinjaError> {
@@ -38,14 +43,31 @@ impl RenderBudget {
     }
 
     fn spend(&mut self) -> Result<(), JinjaError> {
+        self.spend_many(1)
+    }
+
+    fn spend_many(&mut self, amount: usize) -> Result<(), JinjaError> {
+        let amount = u64::try_from(amount)
+            .map_err(|_| JinjaError::Limit("render operation limit exceeded"))?;
         self.operations_left = self
             .operations_left
-            .checked_sub(1)
+            .checked_sub(amount)
             .ok_or(JinjaError::Limit("render operation limit exceeded"))?;
         Ok(())
     }
 
-    fn push(&self, out: &mut String, value: &str) -> Result<(), JinjaError> {
+    fn spend_bytes(&mut self, bytes: usize) -> Result<(), JinjaError> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let operations = bytes
+            .checked_add(BYTES_PER_OPERATION - 1)
+            .ok_or(JinjaError::Limit("render operation limit exceeded"))?
+            / BYTES_PER_OPERATION;
+        self.spend_many(operations)
+    }
+
+    fn push(&mut self, out: &mut String, value: &str) -> Result<(), JinjaError> {
         let new_len = out
             .len()
             .checked_add(value.len())
@@ -53,6 +75,7 @@ impl RenderBudget {
         if new_len > self.max_output_bytes {
             return Err(JinjaError::Limit("rendered output exceeds byte limit"));
         }
+        self.spend_bytes(value.len())?;
         out.push_str(value);
         Ok(())
     }
@@ -67,25 +90,35 @@ impl RenderBudget {
         Ok(len)
     }
 
-    fn value_push(&self, out: &mut String, value: &str) -> Result<(), JinjaError> {
+    fn value_push(&mut self, out: &mut String, value: &str) -> Result<(), JinjaError> {
         self.value_len(out.len(), value.len())?;
+        self.spend_bytes(value.len())?;
         out.push_str(value);
         Ok(())
     }
 
-    fn clone_value(&self, value: &Value) -> Result<Value, JinjaError> {
+    fn clone_value(&mut self, value: &Value) -> Result<Value, JinjaError> {
         self.check_value(value)?;
         Ok(value.clone())
     }
 
-    fn check_value(&self, value: &Value) -> Result<(), JinjaError> {
+    fn check_value(&mut self, value: &Value) -> Result<(), JinjaError> {
         self.value_size(value, 0)?;
         Ok(())
     }
 
-    fn value_size(&self, value: &Value, mut size: usize) -> Result<usize, JinjaError> {
+    fn value_size(&mut self, value: &Value, size: usize) -> Result<usize, JinjaError> {
+        // Every JSON node has a non-zero logical size, even when it carries no
+        // string payload. This makes arrays of nulls/numbers and empty nested
+        // containers subject to the same pre-allocation ceiling as strings.
+        self.spend()?;
+        let mut size = self.value_len(size, 1)?;
         match value {
-            Value::String(s) => self.value_len(size, s.len()),
+            Value::String(s) => {
+                size = self.value_len(size, s.len())?;
+                self.spend_bytes(s.len())?;
+                Ok(size)
+            }
             Value::Array(items) => {
                 for item in items {
                     size = self.value_size(item, size)?;
@@ -95,6 +128,7 @@ impl RenderBudget {
             Value::Object(map) => {
                 for (key, value) in map {
                     size = self.value_len(size, key.len())?;
+                    self.spend_bytes(key.len())?;
                     size = self.value_size(value, size)?;
                 }
                 Ok(size)
@@ -116,7 +150,8 @@ fn render_nodes(
         match node {
             Node::Text(s) => budget.push(out, s)?,
             Node::Output(expr) => {
-                let value = display(&eval(expr, context, scopes, budget)?, budget)?;
+                let evaluated = eval(expr, context, scopes, budget)?;
+                let value = display(&evaluated, budget)?;
                 budget.push(out, &value)?;
             }
             Node::Set { var, value } => {
@@ -217,7 +252,8 @@ fn eval(
     budget.spend()?;
     match expr {
         Expr::Str(s) => {
-            budget.value_len(0, s.len())?;
+            budget.value_len(1, s.len())?;
+            budget.spend_bytes(s.len())?;
             Ok(Value::String(s.clone()))
         }
         Expr::Num(n) => Ok(f64_to_value(*n)),
@@ -247,8 +283,10 @@ fn eval(
         }
         Expr::Not(e) => Ok(Value::Bool(!truthy(&eval(e, context, scopes, budget)?))),
         Expr::Concat(a, b) => {
-            let mut s = display(&eval(a, context, scopes, budget)?, budget)?;
-            let right = display(&eval(b, context, scopes, budget)?, budget)?;
+            let left = eval(a, context, scopes, budget)?;
+            let mut s = display(&left, budget)?;
+            let right = eval(b, context, scopes, budget)?;
+            let right = display(&right, budget)?;
             budget.value_push(&mut s, &right)?;
             Ok(Value::String(s))
         }
@@ -322,6 +360,7 @@ fn eval_binop(
         BinOp::Add => match (&av, &bv) {
             (Value::String(sa), Value::String(sb)) => {
                 let capacity = budget.value_len(sa.len(), sb.len())?;
+                budget.spend_bytes(capacity)?;
                 let mut value = String::with_capacity(capacity);
                 value.push_str(sa);
                 value.push_str(sb);
@@ -363,45 +402,56 @@ fn apply_filter(
     name: &str,
     value: Value,
     args: &[Value],
-    budget: &RenderBudget,
+    budget: &mut RenderBudget,
 ) -> Result<Value, JinjaError> {
     match name {
         "trim" | "strip" => {
             let displayed = display(&value, budget)?;
-            Ok(Value::String(displayed.trim().to_string()))
+            let trimmed = displayed.trim();
+            budget.spend_bytes(trimmed.len())?;
+            Ok(Value::String(trimmed.to_string()))
         }
-        "upper" => map_case(&display(&value, budget)?, budget, true),
-        "lower" => map_case(&display(&value, budget)?, budget, false),
-        "title" => Ok(Value::String(title_case(
-            &display(&value, budget)?,
-            budget,
-        )?)),
+        "upper" => {
+            let displayed = display(&value, budget)?;
+            map_case(&displayed, budget, true)
+        }
+        "lower" => {
+            let displayed = display(&value, budget)?;
+            map_case(&displayed, budget, false)
+        }
+        "title" => {
+            let displayed = display(&value, budget)?;
+            Ok(Value::String(title_case(&displayed, budget)?))
+        }
         "string" => Ok(Value::String(display(&value, budget)?)),
         "length" | "count" => Ok(Value::Number(Number::from(value_length(&value) as i64))),
         "first" => Ok(match value {
             Value::Array(items) => items.into_iter().next().unwrap_or(Value::Null),
-            Value::String(s) => s
-                .chars()
-                .next()
-                .map(|c| Value::String(c.to_string()))
-                .unwrap_or(Value::Null),
+            Value::String(s) => match s.chars().next() {
+                Some(c) => {
+                    budget.spend_bytes(c.len_utf8())?;
+                    Value::String(c.to_string())
+                }
+                None => Value::Null,
+            },
             _ => Value::Null,
         }),
         "last" => Ok(match value {
             Value::Array(items) => items.into_iter().next_back().unwrap_or(Value::Null),
-            Value::String(s) => s
-                .chars()
-                .next_back()
-                .map(|c| Value::String(c.to_string()))
-                .unwrap_or(Value::Null),
+            Value::String(s) => match s.chars().next_back() {
+                Some(c) => {
+                    budget.spend_bytes(c.len_utf8())?;
+                    Value::String(c.to_string())
+                }
+                None => Value::Null,
+            },
             _ => Value::Null,
         }),
         "join" => {
-            let sep = args
-                .first()
-                .map(|value| display(value, budget))
-                .transpose()?
-                .unwrap_or_default();
+            let sep = match args.first() {
+                Some(value) => display(value, budget)?,
+                None => String::new(),
+            };
             match value {
                 Value::Array(items) => {
                     let mut joined = String::new();
@@ -409,7 +459,8 @@ fn apply_filter(
                         if index != 0 {
                             budget.value_push(&mut joined, &sep)?;
                         }
-                        budget.value_push(&mut joined, &display(item, budget)?)?;
+                        let displayed = display(item, budget)?;
+                        budget.value_push(&mut joined, &displayed)?;
                     }
                     Ok(Value::String(joined))
                 }
@@ -417,7 +468,10 @@ fn apply_filter(
             }
         }
         "default" => Ok(match value {
-            Value::Null => args.first().cloned().unwrap_or(Value::Null),
+            Value::Null => match args.first() {
+                Some(value) => budget.clone_value(value)?,
+                None => Value::Null,
+            },
             other => other,
         }),
         "list" => Ok(value),
@@ -425,7 +479,9 @@ fn apply_filter(
     }
 }
 
-fn title_case(s: &str, budget: &RenderBudget) -> Result<String, JinjaError> {
+fn title_case(s: &str, budget: &mut RenderBudget) -> Result<String, JinjaError> {
+    budget.value_len(0, s.len())?;
+    budget.spend_bytes(s.len())?;
     let mut out = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for c in s.chars() {
@@ -446,7 +502,9 @@ fn title_case(s: &str, budget: &RenderBudget) -> Result<String, JinjaError> {
     Ok(out)
 }
 
-fn map_case(s: &str, budget: &RenderBudget, upper: bool) -> Result<Value, JinjaError> {
+fn map_case(s: &str, budget: &mut RenderBudget, upper: bool) -> Result<Value, JinjaError> {
+    budget.value_len(0, s.len())?;
+    budget.spend_bytes(s.len())?;
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if upper {
@@ -462,8 +520,9 @@ fn map_case(s: &str, budget: &RenderBudget, upper: bool) -> Result<Value, JinjaE
     Ok(Value::String(out))
 }
 
-fn push_char(out: &mut String, c: char, budget: &RenderBudget) -> Result<(), JinjaError> {
+fn push_char(out: &mut String, c: char, budget: &mut RenderBudget) -> Result<(), JinjaError> {
     budget.value_len(out.len(), c.len_utf8())?;
+    budget.spend_bytes(c.len_utf8())?;
     out.push(c);
     Ok(())
 }
@@ -499,7 +558,7 @@ fn truthy(value: &Value) -> bool {
 /// Jinja/Python-style (no quotes around strings, `True`/`False`/`None`
 /// capitalized to match what real chat templates that echo booleans back
 /// would expect, though chat templates rarely do this).
-fn display(value: &Value, budget: &RenderBudget) -> Result<String, JinjaError> {
+fn display(value: &Value, budget: &mut RenderBudget) -> Result<String, JinjaError> {
     let mut out = String::new();
     match value {
         Value::Null => {}
@@ -512,7 +571,8 @@ fn display(value: &Value, budget: &RenderBudget) -> Result<String, JinjaError> {
                 if index != 0 {
                     budget.value_push(&mut out, ", ")?;
                 }
-                budget.value_push(&mut out, &display(item, budget)?)?;
+                let displayed = display(item, budget)?;
+                budget.value_push(&mut out, &displayed)?;
             }
             budget.value_push(&mut out, "]")?;
         }

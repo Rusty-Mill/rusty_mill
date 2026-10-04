@@ -66,8 +66,12 @@ real engine instead of hand-formatted strings.
 
 `Template::render` fails closed after 1,000,000 render operations or 8 MiB of
 UTF-8 output. The byte ceiling also applies to intermediate strings and cloned
-composite values, so concatenation, formatting, case conversion, and filters
-cannot allocate an oversized value before it reaches the output. Call
+composite values, counting every value node and object-key byte, so even
+payload-free arrays and nested containers cannot bypass it. Composite traversal
+costs one operation per node, while copying strings and keys costs one operation
+per KiB; repeated retained clones therefore consume bounded render work even
+when the template emits no output. Concatenation, formatting, case conversion,
+and filters likewise cannot allocate an oversized value before output. Call
 `Template::render_with_limits` with a `RenderLimits` value when a caller needs a
 smaller application-specific budget. Both limits return `JinjaError::Limit`
 rather than partially rendered output.
