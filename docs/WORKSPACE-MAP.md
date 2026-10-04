@@ -88,6 +88,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_db | rusty-db-mysql | MySQL/MariaDB driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_db | rusty-db-postgres | PostgreSQL driver for rusty_db, built on sqlx | 1 |
 | libs | rusty_db | rusty-db-sqlite | SQLite driver for rusty_db, built on sqlx | 1 |
+| libs | rusty_fair_play_domain | rusty_fair_play_domain | The Fair Play household-card domain on rusty_multimodal_db_engine: Person, Card (a tree with an owner per card), CardDefault (the shipped baseline), the queries, and the seed loader with the deck embedded | 2 |
 | libs | rusty_fedora | rusty_fedora | Async client for rusty_fedora_agent's local HTTP API: system status, systemd services, journal reads, dnf updates/install/remove, and allowlisted config file read/write. | 1 |
 | libs | rusty_font | rusty_font | A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer | 4 |
 | libs | rusty_git | rusty_git | Pure Rust implementation of Git object model, index, refs, and CLI binary | 1 |
@@ -101,7 +102,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
 | libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
-| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 6 |
+| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 7 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 0 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
@@ -185,6 +186,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_agent_gateway | agentgateway-proxy | HTTP reverse proxying for rusty_agent_gateway host backends | 1 |
 | apps | rusty_agent_gateway | agentgateway-tls | TLS termination for rusty_agent_gateway, over rusty_tls | 1 |
 | apps | rusty_croc | rusty-croc | Rust port of croc (https://github.com/schollz/croc) — secure peer-to-peer file transfer | 0 |
+| apps | rusty_fair_play | rusty_fair_play | Fair Play household cards: a JSON HTTP API and web UI over rusty_multimodal_db's fair_play domain | 0 |
 | apps | rusty_fedora_agent | rusty_fedora_agent | Unprivileged local agent exposing scoped systemd/dnf/config-file control over HTTP -- the backend rusty_homelab_mcp's fedora module talks to. | 0 |
 | apps | rusty_hister | rusty-hister-core | Shared types, IDs, and error types for the rusty_hister crate cluster (a Rust port of asciimoo/hister) | 7 |
 | apps | rusty_hister | rusty-hister-crawler | HTTP and JS-rendering crawler backends for rusty_hister (JS-rendering approach pending ADR-0003) | 0 |
@@ -215,8 +217,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_meshed | rusty-meshed-schema-registry | Confluent Schema Registry client and compatibility-mode enforcement, ported from meshed.schema_registry. | 5 |
 | apps | rusty_meshed | rusty-meshed-sdk | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure. | 2 |
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. | 0 |
-| apps | rusty_multimodal_db | rusty_fair_play | Fair Play household cards: a JSON HTTP API and web UI over rusty_multimodal_db's fair_play domain | 0 |
-| apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 1 |
+| apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 3 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 6 |

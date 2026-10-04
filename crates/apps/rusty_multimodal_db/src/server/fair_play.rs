@@ -959,7 +959,7 @@ impl ConnectionStore for CardDefaultConnectionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::fair_play::tests::{deck, people, spec};
+    use crate::generic::fair_play::fixtures::{deck, people, spec};
     use crate::generic::fair_play::{
         card_default_id, create_card_default_production_stack, create_card_production_stack,
         create_person_production_stack, deck_card_id, person_id, split_card, split_card_id,

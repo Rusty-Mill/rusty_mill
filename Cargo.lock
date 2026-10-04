@@ -13870,13 +13870,24 @@ dependencies = [
 name = "rusty_fair_play"
 version = "0.1.0"
 dependencies = [
+ "rusty_fair_play_domain",
  "rusty_http",
  "rusty_json",
- "rusty_multimodal_db",
  "rusty_multimodal_db_engine",
  "rusty_url",
  "serde",
  "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "rusty_fair_play_domain"
+version = "0.1.0"
+dependencies = [
+ "rusty_multimodal_db_engine",
+ "serde",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -14072,6 +14083,7 @@ dependencies = [
  "rcgen",
  "redb",
  "rusqlite",
+ "rusty_fair_play_domain",
  "rusty_http",
  "rusty_libc",
  "rusty_multimodal_db_engine",

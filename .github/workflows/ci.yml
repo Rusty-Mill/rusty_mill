@@ -588,22 +588,21 @@ jobs:
           name: rusty-tick-e2e-results
           path: crates/apps/rusty_tick/web/test-results
 
-  # rusty_fair_play's web UI (Vite/React), the Fair Play front end in the
-  # rusty_multimodal_db family: typecheck, unit tests (jsdom over the
+  # rusty_fair_play's web UI (Vite/React), the Fair Play front end: typecheck, unit tests (jsdom over the
   # in-memory adapter) and the production build. Mirrors rusty-tick-web.
   rusty-fair-play-web:
     name: rusty_fair_play web (typecheck, test, build)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web
+        working-directory: crates/apps/rusty_fair_play/web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web/package-lock.json
+          cache-dependency-path: crates/apps/rusty_fair_play/web/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
@@ -616,7 +615,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web
+        working-directory: crates/apps/rusty_fair_play/web
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -629,7 +628,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web/package-lock.json
+          cache-dependency-path: crates/apps/rusty_fair_play/web/package-lock.json
       - run: cargo build -p rusty_fair_play
         working-directory: .
       - run: npm ci --no-audit --no-fund
@@ -641,7 +640,7 @@ jobs:
         if: failure()
         with:
           name: rusty-fair-play-e2e-results
-          path: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web/test-results
+          path: crates/apps/rusty_fair_play/web/test-results
 
   # rusty_key's desktop front end: a vendored Vite/Solid app inside a
   # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build

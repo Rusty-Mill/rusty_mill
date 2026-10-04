@@ -14,11 +14,6 @@ repository = "https://github.com/baileyrd/rusty_multimodal_db"
 license = "MIT"
 publish = false
 
-# The family's second crate, `crates/rusty_fair_play` (the Fair Play front
-# end, ADR-0137's follow-up), is its own workspace member nested here per
-# ADR-0003's multi-crate family shape; keep it out of this package's files.
-exclude = ["crates/"]
-
 [package.metadata.rusty_mill]
 layer = "apps"
 
@@ -332,16 +327,6 @@ name = "restore_backup"
 [[test]]
 name = "restore_backup"
 
-# `ADR-0137`: the Fair Play seed loader — the supplied deck, people and
-# splits into a data directory. No required-features: `generic::fair_play`
-# is front-door; the shared main-less module lives under examples/support/
-# like the restore and migration tools' own.
-[[example]]
-name = "fair_play_seed"
-
-[[test]]
-name = "fair_play_seed"
-
 # `ADR-0118`: the replica-refresh CLI — `FetchSnapshot` into a fresh,
 # verified directory, once or on an interval. Needs the client half
 # (`SchemaDrivenClient`); the shared main-less module lives under
@@ -382,15 +367,6 @@ required-features = ["research"]
 [[bin]]
 name = "crash_safety_harness"
 required-features = ["research"]
-
-# `ADR-0137` (`FPL-FR-005`): the child `tests/fair_play_crash.rs` spawns
-# and `SIGKILL`s mid-`split_card`. Front-door only, so no
-# `required-features`; listed for the same reason every other target is.
-[[bin]]
-name = "fair_play_crash_writer"
-
-[[test]]
-name = "fair_play_crash"
 
 # `multiprocess_writer`/`multiprocess_harness` (the multi-process access
 # diagnosis harness) — same reason as `crash_writer`/`crash_safety_harness`
@@ -450,6 +426,9 @@ uuid = { version = "1", default-features = false, features = ["std", "serde"] }
 # (ADR-0124); re-exported as `generic`, `durability::DurabilityError` and
 # `codec`, so this crate's paths are unchanged.
 rusty_multimodal_db_engine = { workspace = true }
+# The Fair Play domain (ADR-0137), its own libs crate so the `rusty_fair_play`
+# app can share it; re-exported as `generic::fair_play`.
+rusty_fair_play_domain = { workspace = true }
 # Error type for the one fallible DogStore operation (update_age on an unknown UUID), and for
 # DurabilityError (src/durability/mod.rs).
 thiserror = "1"

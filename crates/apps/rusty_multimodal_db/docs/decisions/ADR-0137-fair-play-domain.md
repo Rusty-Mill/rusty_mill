@@ -319,11 +319,15 @@ CPE as three child rows** — lets the data say what the game forbids.
   line), three for the crash harness (control, kill after each step ×3
   trials, resume), the adapter's unit tests, and the socket suite with
   the Python driver. `SERVER-001` v0.110.0 / `FR-123`, `FPL-FR-001`–`008`.
-- 2026-10-04: the front end, as a second crate of this family —
-  `crates/rusty_fair_play` (ADR-0003's nested shape; an app crate may
-  depend on an app crate only within its family): a JSON HTTP API over
-  the embedded stacks on `rusty_http` (rusty_tick's sans-IO router and
-  TCP adapter) and a React web UI in its `web/`. The seed loader moved
-  from `examples/support/` into `generic::fair_play::seed` with the deck
-  embedded as `DECK_CSV`, so the CLI example and the server share it.
-  Its own decision record is `crates/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md`.
+- 2026-10-04: the front end, `crates/apps/rusty_fair_play` — a JSON HTTP
+  API over the embedded stacks on `rusty_http` (rusty_tick's sans-IO
+  router and TCP adapter) and a React web UI in its `web/`. To let an
+  app crate depend on the domain under ADR-0003's layer rule (no app
+  depends on another family's app crate), the domain moved out of this
+  crate into `crates/libs/storage/rusty_fair_play_domain`, re-exported
+  here as `generic::fair_play` exactly as the engine is (ADR-0124); the
+  seed loader moved from `examples/support/` into it as `seed` with the
+  deck embedded as `DECK_CSV`, and the seed CLI, the benchmark example,
+  the crash writer and the domain's tests went with it. The wire
+  adapters, `fair_play_server` and the socket suite stay here. Its own
+  decision record is `crates/apps/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md`.
