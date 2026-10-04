@@ -1,11 +1,12 @@
 use orch_cli::fake::{REPLY_ONE, REPLY_TWO};
 use orch_cli::{parse, MAX_BODY_CHARS, MAX_ENTRIES};
 use orch_core::board::{Confidence, EntryKind, Verdict};
+use orch_core::goal::StopRule;
 use orch_core::task::Role;
 use orch_core::{EntryId, Ref, TaskId};
 
 fn err(reply: &str) -> String {
-    parse(reply, Role::Research)
+    parse(reply, Role::Research, StopRule::Checkpoint)
         .expect_err("rejected")
         .0
         .as_str()
@@ -14,7 +15,7 @@ fn err(reply: &str) -> String {
 
 #[test]
 fn accepts_example_reply_one() {
-    let out = parse(REPLY_ONE, Role::Research).expect("valid");
+    let out = parse(REPLY_ONE, Role::Research, StopRule::Checkpoint).expect("valid");
     assert_eq!(out.len(), 1);
     assert_eq!(
         out[0].kind,
@@ -32,7 +33,7 @@ fn accepts_example_reply_one() {
 
 #[test]
 fn accepts_example_reply_two() {
-    let out = parse(REPLY_TWO, Role::Research).expect("valid");
+    let out = parse(REPLY_TWO, Role::Research, StopRule::Checkpoint).expect("valid");
     assert_eq!(out.len(), 2);
     assert_eq!(out[1].kind, EntryKind::Question);
     assert!(out[1].refs.is_empty());
@@ -41,7 +42,12 @@ fn accepts_example_reply_two() {
 #[test]
 fn accepts_one_fence_wrapper() {
     let fenced = format!("```json\n{REPLY_ONE}\n```");
-    assert_eq!(parse(&fenced, Role::Research).expect("valid").len(), 1);
+    assert_eq!(
+        parse(&fenced, Role::Research, StopRule::Checkpoint)
+            .expect("valid")
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -58,7 +64,7 @@ fn rejects_unknown_kind_and_kind_not_allowed_for_role() {
         err(r#"{"entries":[{"kind":"decision","body":"x","refs":[]}]}"#).contains("not allowed")
     );
     let design = r#"{"entries":[{"kind":"decision","body":"x","refs":[]}]}"#;
-    assert!(parse(design, Role::Design)
+    assert!(parse(design, Role::Design, StopRule::Checkpoint)
         .expect_err("agents never settle decisions")
         .0
         .as_str()
@@ -67,7 +73,8 @@ fn rejects_unknown_kind_and_kind_not_allowed_for_role() {
 
 #[test]
 fn rejects_unserved_roles() {
-    let unserved = parse(REPLY_ONE, Role::Implement).expect_err("unserved role");
+    let unserved =
+        parse(REPLY_ONE, Role::Implement, StopRule::Checkpoint).expect_err("unserved role");
     assert!(unserved.0.contains("role Implement is not served"));
 }
 
@@ -81,7 +88,7 @@ fn review_role() -> Role {
 fn review_card_accepts_one_review_with_a_verdict() {
     let approve =
         r#"{"entries":[{"kind":"review","verdict":"approve","body":"Sound.","refs":["E-1"]}]}"#;
-    let out = parse(approve, review_role()).expect("valid");
+    let out = parse(approve, review_role(), StopRule::Checkpoint).expect("valid");
     assert_eq!(
         out[0].kind,
         EntryKind::Review {
@@ -90,7 +97,7 @@ fn review_card_accepts_one_review_with_a_verdict() {
         }
     );
     let changes = r#"{"entries":[{"kind":"finding","confidence":"low","body":"Missing test.","refs":[]},{"kind":"review","verdict":"changes_requested","body":"Add a test.","refs":["E-1"]}]}"#;
-    let out = parse(changes, review_role()).expect("valid");
+    let out = parse(changes, review_role(), StopRule::Checkpoint).expect("valid");
     assert_eq!(out.len(), 2);
     assert!(matches!(
         out[1].kind,
@@ -104,25 +111,25 @@ fn review_card_accepts_one_review_with_a_verdict() {
 #[test]
 fn review_card_rejects_missing_bad_or_duplicate_verdicts() {
     let no_verdict = r#"{"entries":[{"kind":"review","body":"x","refs":[]}]}"#;
-    assert!(parse(no_verdict, review_role())
+    assert!(parse(no_verdict, review_role(), StopRule::Checkpoint)
         .expect_err("no verdict")
         .0
         .as_str()
         .contains("verdict"));
     let bad = r#"{"entries":[{"kind":"review","verdict":"lgtm","body":"x","refs":[]}]}"#;
-    assert!(parse(bad, review_role())
+    assert!(parse(bad, review_role(), StopRule::Checkpoint)
         .expect_err("bad verdict")
         .0
         .as_str()
         .contains("not approve"));
     // Findings alone are not a review: the card must deliver its verdict.
-    assert!(parse(REPLY_ONE, review_role())
+    assert!(parse(REPLY_ONE, review_role(), StopRule::Checkpoint)
         .expect_err("no review")
         .0
         .as_str()
         .contains("must include one review"));
     let two = r#"{"entries":[{"kind":"review","verdict":"approve","body":"x","refs":[]},{"kind":"review","verdict":"approve","body":"y","refs":[]}]}"#;
-    assert!(parse(two, review_role())
+    assert!(parse(two, review_role(), StopRule::Checkpoint)
         .expect_err("two")
         .0
         .as_str()
@@ -160,7 +167,7 @@ fn rejects_malformed_refs_and_missing_refs() {
     ] {
         let reply = format!(r#"{{"entries":[{{"kind":"question","body":"x","refs":["{bad}"]}}]}}"#);
         assert!(
-            parse(&reply, Role::Research).is_err(),
+            parse(&reply, Role::Research, StopRule::Checkpoint).is_err(),
             "{bad} should be rejected"
         );
     }
@@ -177,9 +184,13 @@ fn rejects_over_cap_entry_count_and_body_length() {
     assert!(err(&format!(r#"{{"entries":[{many}]}}"#)).contains("exceeds the cap"));
     let at_cap = [one; MAX_ENTRIES].join(",");
     assert_eq!(
-        parse(&format!(r#"{{"entries":[{at_cap}]}}"#), Role::Research)
-            .expect("at cap")
-            .len(),
+        parse(
+            &format!(r#"{{"entries":[{at_cap}]}}"#),
+            Role::Research,
+            StopRule::Checkpoint
+        )
+        .expect("at cap")
+        .len(),
         MAX_ENTRIES
     );
 
@@ -191,7 +202,33 @@ fn rejects_over_cap_entry_count_and_body_length() {
     let max = "é".repeat(MAX_BODY_CHARS);
     assert!(parse(
         &format!(r#"{{"entries":[{{"kind":"question","body":"{max}","refs":[]}}]}}"#),
-        Role::Research
+        Role::Research,
+        StopRule::Checkpoint
     )
     .is_ok());
+}
+
+#[test]
+fn best_effort_withdraws_questions_and_keeps_assumptions() {
+    let question = r#"{"entries":[{"kind":"question","body":"which branch?","refs":[]}]}"#;
+    assert!(parse(question, Role::Research, StopRule::Checkpoint).is_ok());
+    let err = parse(question, Role::Research, StopRule::BestEffort).expect_err("withdrawn");
+    assert!(
+        err.0.contains("kind \"question\" is not allowed here"),
+        "{}",
+        err.0
+    );
+    let assumption =
+        r#"{"entries":[{"kind":"assumption","body":"taking main as the base","refs":[]}]}"#;
+    let out = parse(assumption, Role::Design, StopRule::BestEffort).expect("allowed");
+    assert_eq!(out[0].kind, EntryKind::Assumption);
+    // Review cards never asked questions; the rule changes nothing for them.
+    assert_eq!(
+        orch_cli::allowed_kinds(review_role(), StopRule::BestEffort),
+        orch_cli::allowed_kinds(review_role(), StopRule::Checkpoint)
+    );
+    assert_eq!(
+        orch_cli::allowed_kinds(Role::Implement, StopRule::BestEffort),
+        &[] as &[&str]
+    );
 }

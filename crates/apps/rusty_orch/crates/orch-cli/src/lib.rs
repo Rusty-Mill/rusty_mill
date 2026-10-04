@@ -4,7 +4,8 @@
 //! the parts that are the same for all of them:
 //! - [`CommandRunner`] and [`StdCommand`]: fixed argv, bytes on stdin, a hard
 //!   deadline, process-group kill, bounded pipe join, env scrubbing.
-//! - [`parse`]: the strict one-JSON-object reply protocol.
+//! - [`parse`]: the strict one-JSON-object reply protocol. The kinds a role
+//!   may write depend on the goal's `StopRule` (ADR-0011).
 //! - [`render`]: the prompt core, with the adapter's format-spec footer
 //!   appended.
 //!
@@ -27,4 +28,4 @@ pub use exec::{
     MAX_STDOUT_BYTES,
 };
 pub use parse::{allowed_kinds, parse, parse_ref, MAX_BODY_CHARS, MAX_ENTRIES};
-pub use prompt::{format_spec, render};
+pub use prompt::{format_spec, render, BEST_EFFORT_RULES};

@@ -5,6 +5,7 @@
 //! exists is left to `Board::append`, which already validates it.
 
 use orch_core::board::{Confidence, EntryKind, Verdict};
+use orch_core::goal::StopRule;
 use orch_core::task::Role;
 use orch_core::{EntryId, Ref, Text};
 use orch_dispatch::{AgentError, Output};
@@ -15,23 +16,30 @@ pub const MAX_ENTRIES: usize = 8;
 /// Bodies longer than this, in characters, are rejected.
 pub const MAX_BODY_CHARS: usize = 500;
 
-/// Entry kinds a card of `role` may write. Empty means the adapter does
-/// not serve that role. Never `decision`: agents propose decisions as
-/// findings and the board refuses unreviewed ones (ADR-0005). A review
-/// card writes exactly one `review`, optionally with findings beside it.
-pub fn allowed_kinds(role: Role) -> &'static [&'static str] {
-    match role {
-        Role::Research | Role::Triage => &["finding", "question", "assumption"],
-        Role::Design => &["finding", "question", "assumption"],
-        Role::Review { .. } => &["review", "finding"],
-        Role::Implement => &[],
+/// Entry kinds a card of `role` may write under `stop`. Empty means the
+/// adapter does not serve that role. Never `decision`: agents propose
+/// decisions as findings and the board refuses unreviewed ones (ADR-0005).
+/// A review card writes exactly one `review`, optionally with findings
+/// beside it. Under [`StopRule::BestEffort`] nobody will answer, so
+/// `question` is withdrawn and an unknown is recorded as an `assumption`
+/// instead (ADR-0011).
+pub fn allowed_kinds(role: Role, stop: StopRule) -> &'static [&'static str] {
+    match (role, stop) {
+        (Role::Research | Role::Triage | Role::Design, StopRule::Checkpoint) => {
+            &["finding", "question", "assumption"]
+        }
+        (Role::Research | Role::Triage | Role::Design, StopRule::BestEffort) => {
+            &["finding", "assumption"]
+        }
+        (Role::Review { .. }, _) => &["review", "finding"],
+        (Role::Implement, _) => &[],
     }
 }
 
-/// Parse one JSON reply for a card of `role`. Tolerates a single ``` fence
-/// around the object and nothing else.
-pub fn parse(stdout: &str, role: Role) -> Result<Vec<Output>, AgentError> {
-    let allowed = allowed_kinds(role);
+/// Parse one JSON reply for a card of `role` under `stop`. Tolerates a
+/// single ``` fence around the object and nothing else.
+pub fn parse(stdout: &str, role: Role, stop: StopRule) -> Result<Vec<Output>, AgentError> {
+    let allowed = allowed_kinds(role, stop);
     if allowed.is_empty() {
         return Err(AgentError(format!(
             "role {role:?} is not served by this adapter"

@@ -16,6 +16,7 @@
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
+use orch_core::goal::StopRule;
 use orch_dispatch::AgentRunner;
 
 use crate::args::Args;
@@ -45,7 +46,19 @@ pub fn run<R: AgentRunner>(
     runner: R,
     streams: &mut Streams<'_>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
+    run_with(args, goal_json, |_| runner, streams)
+}
+
+/// Like [`run`], but the runner is built after the goal file is parsed, so
+/// it can be configured with the goal's stop rule (ADR-0011).
+pub fn run_with<R: AgentRunner>(
+    args: &Args,
+    goal_json: &str,
+    make_runner: impl FnOnce(StopRule) -> R,
+    streams: &mut Streams<'_>,
+) -> Result<u8, Box<dyn std::error::Error>> {
     let spec = input::parse(goal_json)?;
+    let runner = make_runner(spec.goal.budget().stop());
     let mut console = Stdio {
         interactive: args.interactive,
         stdin: streams.stdin,

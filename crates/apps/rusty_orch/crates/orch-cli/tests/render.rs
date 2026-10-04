@@ -1,13 +1,18 @@
 use orch_cli::fake::{fixture, research_spec, task, text};
-use orch_cli::{format_spec, render};
+use orch_cli::{format_spec, render, BEST_EFFORT_RULES};
 use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
-use orch_core::task::Agent;
+use orch_core::goal::StopRule;
+use orch_core::task::{Agent, Role};
 use orch_core::{Ref, TaskId};
 
 #[test]
 fn render_includes_instruction_acceptance_refs_and_referenced_bodies() {
     let (plan, board, referenced, _) = fixture();
-    let prompt = render(task(&plan), &board, &format_spec(task(&plan).spec().role));
+    let prompt = render(
+        task(&plan),
+        &board,
+        &format_spec(task(&plan).spec().role, StopRule::Checkpoint),
+    );
 
     assert!(prompt.contains("Explain how Plan::start enforces no self-review."));
     assert!(prompt.contains("- cites the function"));
@@ -21,7 +26,11 @@ fn render_includes_instruction_acceptance_refs_and_referenced_bodies() {
 #[test]
 fn render_excludes_unreferenced_entries() {
     let (plan, board, _, unreferenced) = fixture();
-    let prompt = render(task(&plan), &board, &format_spec(task(&plan).spec().role));
+    let prompt = render(
+        task(&plan),
+        &board,
+        &format_spec(task(&plan).spec().role, StopRule::Checkpoint),
+    );
 
     assert!(!prompt.contains("Unrelated note."));
     assert!(!prompt.contains(&format!("{unreferenced} [")));
@@ -37,7 +46,11 @@ fn render_follows_a_multi_hop_ref_to_the_live_successor() {
         .append(finding("Current body.", Some(middle), None))
         .expect("live");
 
-    let prompt = render(task(&plan), &board, &format_spec(task(&plan).spec().role));
+    let prompt = render(
+        task(&plan),
+        &board,
+        &format_spec(task(&plan).spec().role, StopRule::Checkpoint),
+    );
 
     assert!(prompt.contains(&format!("{live} [Finding")));
     assert!(prompt.contains("Current body."));
@@ -64,7 +77,11 @@ fn render_deduplicates_alias_refs_and_the_card_history() {
     ]))
     .expect("task");
 
-    let prompt = render(task(&plan), &board, &format_spec(task(&plan).spec().role));
+    let prompt = render(
+        task(&plan),
+        &board,
+        &format_spec(task(&plan).spec().role, StopRule::Checkpoint),
+    );
 
     assert_eq!(prompt.matches("One live body.").count(), 1);
     assert_eq!(prompt.matches(&format!("{live} [Finding")).count(), 1);
@@ -77,7 +94,11 @@ fn render_deduplicates_alias_refs_and_the_card_history() {
 #[test]
 fn render_ends_with_the_format_spec_for_the_role() {
     let (plan, board, _, _) = fixture();
-    let prompt = render(task(&plan), &board, &format_spec(task(&plan).spec().role));
+    let prompt = render(
+        task(&plan),
+        &board,
+        &format_spec(task(&plan).spec().role, StopRule::Checkpoint),
+    );
 
     assert!(prompt.contains("OUTPUT FORMAT"));
     assert!(prompt.contains("kind is one of: finding, question, assumption."));
@@ -114,7 +135,11 @@ fn render_includes_the_cards_own_question_and_its_answer() {
         })
         .expect("answer");
 
-    let prompt = render(card, &board, &format_spec(card.spec().role));
+    let prompt = render(
+        card,
+        &board,
+        &format_spec(card.spec().role, StopRule::Checkpoint),
+    );
 
     assert!(prompt.contains("THIS CARD SO FAR"));
     assert!(prompt.contains("Which branch is the baseline?"));
@@ -130,7 +155,11 @@ fn render_includes_the_cards_own_question_and_its_answer() {
 fn render_omits_the_history_block_when_the_card_has_no_entries() {
     let (plan, board, _, _) = fixture();
     let card = task(&plan);
-    let prompt = render(card, &board, &format_spec(card.spec().role));
+    let prompt = render(
+        card,
+        &board,
+        &format_spec(card.spec().role, StopRule::Checkpoint),
+    );
     assert!(!prompt.contains("THIS CARD SO FAR"));
 }
 
@@ -171,7 +200,11 @@ fn a_review_card_sees_every_live_entry_the_target_wrote_without_naming_them() {
     let review = plan.add(review_of(research)).expect("add review");
     let card = plan.get(review).expect("card");
 
-    let prompt = render(card, &board, &format_spec(card.spec().role));
+    let prompt = render(
+        card,
+        &board,
+        &format_spec(card.spec().role, StopRule::Checkpoint),
+    );
 
     assert!(prompt.contains(&format!(
         "UNDER REVIEW (live entries written on task {research}"
@@ -221,7 +254,11 @@ fn a_review_card_sees_the_targets_question_answer_and_resumed_finding() {
     let review = plan.add(review_of(research)).expect("add review");
     let card = plan.get(review).expect("card");
 
-    let prompt = render(card, &board, &format_spec(card.spec().role));
+    let prompt = render(
+        card,
+        &board,
+        &format_spec(card.spec().role, StopRule::Checkpoint),
+    );
 
     for (id, body) in [
         (question, "Which branch counts?"),
@@ -249,8 +286,36 @@ fn a_review_card_with_a_silent_target_says_so() {
     let review = plan.add(review_of(research)).expect("add review");
     let card = plan.get(review).expect("card");
 
-    let prompt = render(card, &board, &format_spec(card.spec().role));
+    let prompt = render(
+        card,
+        &board,
+        &format_spec(card.spec().role, StopRule::Checkpoint),
+    );
 
     assert!(prompt.contains("UNDER REVIEW"));
     assert!(prompt.contains("(none)"));
+}
+
+#[test]
+fn best_effort_spec_adds_the_two_rules_and_drops_question() {
+    let (plan, board, _, _) = fixture();
+    let role = task(&plan).spec().role;
+    let checkpoint = format_spec(role, StopRule::Checkpoint);
+    let best_effort = format_spec(role, StopRule::BestEffort);
+
+    assert!(checkpoint.contains("kind is one of: finding, question, assumption."));
+    assert!(!checkpoint.contains("best-effort"));
+    assert!(best_effort.contains("kind is one of: finding, assumption."));
+    assert!(best_effort.contains(BEST_EFFORT_RULES));
+    assert!(!best_effort.contains("finding, question"));
+    let prompt = render(task(&plan), &board, &best_effort);
+    assert!(prompt.trim_end().ends_with("At least one."));
+    // A review card's spec is the same under both rules.
+    let review = Role::Review {
+        target: task(&plan).id(),
+    };
+    assert_eq!(
+        format_spec(review, StopRule::BestEffort),
+        format_spec(review, StopRule::Checkpoint)
+    );
 }

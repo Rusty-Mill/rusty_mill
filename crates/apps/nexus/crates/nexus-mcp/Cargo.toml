@@ -25,7 +25,7 @@ http = "1"
 # on the rmcp transport as a plain `Bearer …` string, so the version
 # split with rmcp's reqwest doesn't matter.
 reqwest = { workspace = true }
-rmcp = { version = "2.1", features = ["server", "client", "transport-io", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest-native-tls", "client-side-sse", "macros"] }
+rmcp = { version = "3.1", features = ["server", "client", "transport-io", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest-native-tls", "client-side-sse", "macros"] }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

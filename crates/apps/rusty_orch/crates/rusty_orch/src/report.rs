@@ -9,7 +9,8 @@ use rusty_json::{Map, Value};
 
 use crate::run::{Ended, Summary};
 
-/// Human-readable: goal, every card, the live board, the ledger.
+/// Human-readable: goal, every card, the live assumptions when any, the
+/// live board, the ledger.
 pub fn text(s: &Summary) -> String {
     let mut out = String::new();
     out.push_str(&format!("goal: {}\n", s.goal.outcome()));
@@ -23,6 +24,23 @@ pub fn text(s: &Summary) -> String {
             status_name(t.state().status()),
             state_detail(t)
         ));
+    }
+    let assumptions: Vec<&Entry> = s
+        .board
+        .live()
+        .filter(|e| e.content().kind == EntryKind::Assumption)
+        .collect();
+    if !assumptions.is_empty() {
+        out.push_str("\nassumptions (taken as true, unverified):\n");
+        for e in assumptions {
+            let c = e.content();
+            out.push_str(&format!(
+                "  {} {}: {}\n",
+                e.id(),
+                author_name(c.author),
+                c.body
+            ));
+        }
     }
     out.push_str("\nboard (live):\n");
     for e in s.board.live() {
