@@ -66,4 +66,4 @@ Alternatives considered:
   ones it reports, and our grid broad-phase over-reports harmlessly.
 - The goal halves meet at `x = 0`; FR-109's edge classification works per
   mesh, so a seam between halves is `Open` there. RocketSim has the same
-  seam.
+  seam. (Classified across meshes since FR-120, ADR-0040.)

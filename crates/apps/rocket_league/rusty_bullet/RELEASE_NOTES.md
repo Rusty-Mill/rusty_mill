@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## No more sideways nudge on the goal roof's centre line
+**2026-10-04** · `RB-PHYSICS-001-FR-120` · ADR-0040
+
+- The arena's goal meshes are split down the middle, and a ball touching
+  the roof right at that split got a small sideways kick from the seam
+  edge that the game doesn't give. Edges on a seam between two meshes
+  are now treated like the interior edges they really are. The goal
+  recording's roof touch at 119.9 s loses its sideways error (110 → 75
+  uu/s off, the rest is vertical); nothing else changes. 496 tests.
+
 ## Friction on slopes pulls the right way
 **2026-10-04** · `RB-PHYSICS-001-FR-119` · ADR-0039
 

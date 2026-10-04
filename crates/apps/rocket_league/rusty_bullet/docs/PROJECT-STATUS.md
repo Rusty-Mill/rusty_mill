@@ -200,7 +200,10 @@ version: `a245d35`).
    `hitjump` one-step ball 0.501, k = 30 ball 20.41 (was 20.88); `test2`
    k = 30 ball 0.33. Worst one-step ball frame: `hitjump` 97.908 s, a
    bounce one tick early (207 uu/s), which Bullet's unported persistent
-   manifold would decide.
+   manifold would decide. `RB-PHYSICS-001-FR-120` (ADR-0040) classifies
+   mesh-seam edges across meshes, removing a sideways kick on the goal
+   roof near `x = 0`: `hitjump` 119.908 s 75 uu/s (was 110), k = 30 ball
+   20.37.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -209,7 +212,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (495 tests: 27 `rb_domain`, 424
+- `cargo test --workspace`: pass (496 tests: 27 `rb_domain`, 425
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

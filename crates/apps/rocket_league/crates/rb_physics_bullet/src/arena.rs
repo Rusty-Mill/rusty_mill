@@ -574,10 +574,13 @@ pub fn standard_meshes() -> Vec<StaticMesh> {
         include_bytes!("../assets/soccar/mesh_14.cmf"),
         include_bytes!("../assets/soccar/mesh_15.cmf"),
     ];
-    FILES
+    let mut meshes: Vec<StaticMesh> = FILES
         .iter()
         .filter_map(|file| StaticMesh::from_cmf(file))
-        .collect()
+        .collect();
+    // The goal halves meet at `x = 0` (RB-PHYSICS-001-FR-120).
+    StaticMesh::classify_seams(&mut meshes);
+    meshes
 }
 
 /// The goals and the back walls around them (`RB-PHYSICS-001-FR-113`):

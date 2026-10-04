@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.123.0
+- Version: 0.124.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6157,6 +6157,21 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       0.513); k = 30 ball 20.41 (was 20.88).
     - `test2` one-step ball 0.099 (was 0.109); k = 30 ball 0.33 (was
       0.37). `front` and `side` unchanged.
+- `RB-PHYSICS-001-FR-120` (edges on a seam between meshes are classified
+  across meshes; implemented and verified on the owner's captures,
+  ADR-0040): `StaticMesh::classify_seams` re-classifies every edge a mesh
+  left `Open` against the other meshes' nearby triangles, with FR-109's
+  `edge_kind` rule; `arena::standard_meshes` calls it after loading.
+  - Why: `hitjump.jsonl` 119.900 s, the ball on the goal roof 16 uu from
+    the `x = 0` seam between the goal halves (FR-117). The `x <= 0` half
+    reached it only at its seam edge, `Open` under per-mesh
+    classification, and kept a normal tilted 0.18 in x: an 84 uu/s
+    sideways kick the game does not have.
+  - **Verification**:
+    - `mesh` test `a_seam_between_meshes_is_smooth_once_classified_across_them`.
+    - `hitjump` 119.908 s: 75 uu/s (was 110; the sideways kick is gone).
+      One-step ball 0.500 (was 0.501); k = 30 ball 20.37 (was 20.41).
+    - `test2`, `front` and `side` unchanged.
 
 
 ## Architecture and interfaces
@@ -7648,6 +7663,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.124.0 (2026-10-04): `RB-PHYSICS-001-FR-120` — edges on a seam
+  between meshes are classified across meshes (ADR-0040). 425 tests in
+  `rb_physics_bullet`.
 - 0.123.0 (2026-10-04): `RB-PHYSICS-001-FR-119` — the combined
   ball-world normal is renormalized (ADR-0039). 424 tests in
   `rb_physics_bullet`.
