@@ -65,9 +65,12 @@ real engine instead of hand-formatted strings.
 ## Render limits
 
 `Template::render` fails closed after 1,000,000 render operations or 8 MiB of
-UTF-8 output. Call `Template::render_with_limits` with a `RenderLimits` value
-when a caller needs a smaller application-specific budget. Both limits return
-`JinjaError::Limit` rather than partially rendered output.
+UTF-8 output. The byte ceiling also applies to intermediate strings and cloned
+composite values, so concatenation, formatting, case conversion, and filters
+cannot allocate an oversized value before it reaches the output. Call
+`Template::render_with_limits` with a `RenderLimits` value when a caller needs a
+smaller application-specific budget. Both limits return `JinjaError::Limit`
+rather than partially rendered output.
 
 ## Testing
 

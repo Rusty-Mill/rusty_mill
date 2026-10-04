@@ -56,6 +56,52 @@ impl RenderBudget {
         out.push_str(value);
         Ok(())
     }
+
+    fn value_len(&self, left: usize, right: usize) -> Result<usize, JinjaError> {
+        let len = left
+            .checked_add(right)
+            .ok_or(JinjaError::Limit("render value exceeds byte limit"))?;
+        if len > self.max_output_bytes {
+            return Err(JinjaError::Limit("render value exceeds byte limit"));
+        }
+        Ok(len)
+    }
+
+    fn value_push(&self, out: &mut String, value: &str) -> Result<(), JinjaError> {
+        self.value_len(out.len(), value.len())?;
+        out.push_str(value);
+        Ok(())
+    }
+
+    fn clone_value(&self, value: &Value) -> Result<Value, JinjaError> {
+        self.check_value(value)?;
+        Ok(value.clone())
+    }
+
+    fn check_value(&self, value: &Value) -> Result<(), JinjaError> {
+        self.value_size(value, 0)?;
+        Ok(())
+    }
+
+    fn value_size(&self, value: &Value, mut size: usize) -> Result<usize, JinjaError> {
+        match value {
+            Value::String(s) => self.value_len(size, s.len()),
+            Value::Array(items) => {
+                for item in items {
+                    size = self.value_size(item, size)?;
+                }
+                Ok(size)
+            }
+            Value::Object(map) => {
+                for (key, value) in map {
+                    size = self.value_len(size, key.len())?;
+                    size = self.value_size(value, size)?;
+                }
+                Ok(size)
+            }
+            _ => Ok(size),
+        }
+    }
 }
 
 fn render_nodes(
@@ -70,7 +116,7 @@ fn render_nodes(
         match node {
             Node::Text(s) => budget.push(out, s)?,
             Node::Output(expr) => {
-                let value = display(&eval(expr, context, scopes, budget)?);
+                let value = display(&eval(expr, context, scopes, budget)?, budget)?;
                 budget.push(out, &value)?;
             }
             Node::Set { var, value } => {
@@ -140,13 +186,13 @@ fn eval_iterable(
     }
 }
 
-fn lookup_var(name: &str, context: &Value, scopes: &[Scope]) -> Option<Value> {
+fn lookup_var<'a>(name: &str, context: &'a Value, scopes: &'a [Scope]) -> Option<&'a Value> {
     for scope in scopes.iter().rev() {
         if let Some(v) = scope.get(name) {
-            return Some(v.clone());
+            return Some(v);
         }
     }
-    context.get(name).cloned()
+    context.get(name)
 }
 
 fn is_defined(
@@ -170,14 +216,22 @@ fn eval(
 ) -> Result<Value, JinjaError> {
     budget.spend()?;
     match expr {
-        Expr::Str(s) => Ok(Value::String(s.clone())),
+        Expr::Str(s) => {
+            budget.value_len(0, s.len())?;
+            Ok(Value::String(s.clone()))
+        }
         Expr::Num(n) => Ok(f64_to_value(*n)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::None => Ok(Value::Null),
-        Expr::Var(name) => Ok(lookup_var(name, context, scopes).unwrap_or(Value::Null)),
+        Expr::Var(name) => lookup_var(name, context, scopes)
+            .map(|value| budget.clone_value(value))
+            .unwrap_or(Ok(Value::Null)),
         Expr::Attr(base, name) => {
             let base_val = eval(base, context, scopes, budget)?;
-            Ok(base_val.get(name).cloned().unwrap_or(Value::Null))
+            base_val
+                .get(name)
+                .map(|value| budget.clone_value(value))
+                .unwrap_or(Ok(Value::Null))
         }
         Expr::Index(base, idx) => {
             let base_val = eval(base, context, scopes, budget)?;
@@ -186,15 +240,16 @@ fn eval(
             if i < 0 {
                 return Ok(Value::Null);
             }
-            Ok(base_val
+            base_val
                 .get_index(i as usize)
-                .cloned()
-                .unwrap_or(Value::Null))
+                .map(|value| budget.clone_value(value))
+                .unwrap_or(Ok(Value::Null))
         }
         Expr::Not(e) => Ok(Value::Bool(!truthy(&eval(e, context, scopes, budget)?))),
         Expr::Concat(a, b) => {
-            let mut s = display(&eval(a, context, scopes, budget)?);
-            s.push_str(&display(&eval(b, context, scopes, budget)?));
+            let mut s = display(&eval(a, context, scopes, budget)?, budget)?;
+            let right = display(&eval(b, context, scopes, budget)?, budget)?;
+            budget.value_push(&mut s, &right)?;
             Ok(Value::String(s))
         }
         Expr::BinOp(op, a, b) => eval_binop(op, a, b, context, scopes, budget),
@@ -204,7 +259,7 @@ fn eval(
                 .iter()
                 .map(|a| eval(a, context, scopes, budget))
                 .collect::<Result<_, _>>()?;
-            apply_filter(name, base_val, &arg_vals)
+            apply_filter(name, base_val, &arg_vals, budget)
         }
         Expr::Test(base, name, negate) => {
             let result = match name.as_str() {
@@ -265,7 +320,13 @@ fn eval_binop(
     let bv = eval(b, context, scopes, budget)?;
     Ok(match op {
         BinOp::Add => match (&av, &bv) {
-            (Value::String(sa), Value::String(sb)) => Value::String(format!("{sa}{sb}")),
+            (Value::String(sa), Value::String(sb)) => {
+                let capacity = budget.value_len(sa.len(), sb.len())?;
+                let mut value = String::with_capacity(capacity);
+                value.push_str(sa);
+                value.push_str(sb);
+                Value::String(value)
+            }
             _ => f64_to_value(num(&av) + num(&bv)),
         },
         BinOp::Sub => f64_to_value(num(&av) - num(&bv)),
@@ -298,13 +359,24 @@ fn compare(a: &Value, b: &Value) -> core::cmp::Ordering {
         .unwrap_or(core::cmp::Ordering::Equal)
 }
 
-fn apply_filter(name: &str, value: Value, args: &[Value]) -> Result<Value, JinjaError> {
+fn apply_filter(
+    name: &str,
+    value: Value,
+    args: &[Value],
+    budget: &RenderBudget,
+) -> Result<Value, JinjaError> {
     match name {
-        "trim" | "strip" => Ok(Value::String(display(&value).trim().to_string())),
-        "upper" => Ok(Value::String(display(&value).to_uppercase())),
-        "lower" => Ok(Value::String(display(&value).to_lowercase())),
-        "title" => Ok(Value::String(title_case(&display(&value)))),
-        "string" => Ok(Value::String(display(&value))),
+        "trim" | "strip" => {
+            let displayed = display(&value, budget)?;
+            Ok(Value::String(displayed.trim().to_string()))
+        }
+        "upper" => map_case(&display(&value, budget)?, budget, true),
+        "lower" => map_case(&display(&value, budget)?, budget, false),
+        "title" => Ok(Value::String(title_case(
+            &display(&value, budget)?,
+            budget,
+        )?)),
+        "string" => Ok(Value::String(display(&value, budget)?)),
         "length" | "count" => Ok(Value::Number(Number::from(value_length(&value) as i64))),
         "first" => Ok(match value {
             Value::Array(items) => items.into_iter().next().unwrap_or(Value::Null),
@@ -325,12 +397,23 @@ fn apply_filter(name: &str, value: Value, args: &[Value]) -> Result<Value, Jinja
             _ => Value::Null,
         }),
         "join" => {
-            let sep = args.first().map(display).unwrap_or_default();
+            let sep = args
+                .first()
+                .map(|value| display(value, budget))
+                .transpose()?
+                .unwrap_or_default();
             match value {
-                Value::Array(items) => Ok(Value::String(
-                    items.iter().map(display).collect::<Vec<_>>().join(&sep),
-                )),
-                other => Ok(Value::String(display(&other))),
+                Value::Array(items) => {
+                    let mut joined = String::new();
+                    for (index, item) in items.iter().enumerate() {
+                        if index != 0 {
+                            budget.value_push(&mut joined, &sep)?;
+                        }
+                        budget.value_push(&mut joined, &display(item, budget)?)?;
+                    }
+                    Ok(Value::String(joined))
+                }
+                other => Ok(Value::String(display(&other, budget)?)),
             }
         }
         "default" => Ok(match value {
@@ -342,21 +425,47 @@ fn apply_filter(name: &str, value: Value, args: &[Value]) -> Result<Value, Jinja
     }
 }
 
-fn title_case(s: &str) -> String {
+fn title_case(s: &str, budget: &RenderBudget) -> Result<String, JinjaError> {
     let mut out = String::with_capacity(s.len());
     let mut capitalize_next = true;
     for c in s.chars() {
         if c.is_whitespace() {
             capitalize_next = true;
-            out.push(c);
+            push_char(&mut out, c, budget)?;
         } else if capitalize_next {
-            out.extend(c.to_uppercase());
+            for mapped in c.to_uppercase() {
+                push_char(&mut out, mapped, budget)?;
+            }
             capitalize_next = false;
         } else {
-            out.extend(c.to_lowercase());
+            for mapped in c.to_lowercase() {
+                push_char(&mut out, mapped, budget)?;
+            }
         }
     }
-    out
+    Ok(out)
+}
+
+fn map_case(s: &str, budget: &RenderBudget, upper: bool) -> Result<Value, JinjaError> {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if upper {
+            for mapped in c.to_uppercase() {
+                push_char(&mut out, mapped, budget)?;
+            }
+        } else {
+            for mapped in c.to_lowercase() {
+                push_char(&mut out, mapped, budget)?;
+            }
+        }
+    }
+    Ok(Value::String(out))
+}
+
+fn push_char(out: &mut String, c: char, budget: &RenderBudget) -> Result<(), JinjaError> {
+    budget.value_len(out.len(), c.len_utf8())?;
+    out.push(c);
+    Ok(())
 }
 
 fn value_length(value: &Value) -> usize {
@@ -390,18 +499,26 @@ fn truthy(value: &Value) -> bool {
 /// Jinja/Python-style (no quotes around strings, `True`/`False`/`None`
 /// capitalized to match what real chat templates that echo booleans back
 /// would expect, though chat templates rarely do this).
-fn display(value: &Value) -> String {
+fn display(value: &Value, budget: &RenderBudget) -> Result<String, JinjaError> {
+    let mut out = String::new();
     match value {
-        Value::Null => String::new(),
-        Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
-        Value::String(s) => s.clone(),
-        Value::Number(_) => num(value).to_string_trimmed(),
-        Value::Array(items) => format!(
-            "[{}]",
-            items.iter().map(display).collect::<Vec<_>>().join(", ")
-        ),
-        Value::Object(_) => "{...}".to_string(),
+        Value::Null => {}
+        Value::Bool(b) => budget.value_push(&mut out, if *b { "True" } else { "False" })?,
+        Value::String(s) => budget.value_push(&mut out, s)?,
+        Value::Number(_) => budget.value_push(&mut out, &num(value).to_string_trimmed())?,
+        Value::Array(items) => {
+            budget.value_push(&mut out, "[")?;
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    budget.value_push(&mut out, ", ")?;
+                }
+                budget.value_push(&mut out, &display(item, budget)?)?;
+            }
+            budget.value_push(&mut out, "]")?;
+        }
+        Value::Object(_) => budget.value_push(&mut out, "{...}")?,
     }
+    Ok(out)
 }
 
 fn f64_to_value(n: f64) -> Value {
