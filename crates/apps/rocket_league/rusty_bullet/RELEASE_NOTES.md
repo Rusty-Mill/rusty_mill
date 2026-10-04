@@ -8,6 +8,30 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## RocketSim's arena meshes, in Bullet's order; MIT OR Apache-2.0 again
+**2026-10-03** · `RB-PHYSICS-001-FR-117` · ADR-0037
+
+- The arena is now built from the same 16 mesh files RocketSim loads,
+  and the simulator checks their triangles in the same order Bullet's
+  lookup tree does. That order decides which surface wins when the ball
+  touches a shared corner point, which was the last big ball error (the
+  crossbar bounce on the goal recording, 988 uu/s off, now 0). The ball's
+  per-tick error on that recording fell from 0.589 to 0.513 uu/s and its
+  30-tick error from 22.5 to 20.8 uu; the other recordings are unchanged.
+- The files come from rlgym under Apache-2.0, so the GPL-3.0 RLUtilities
+  meshes are gone and the repository is `MIT OR Apache-2.0` again, as it
+  was before ADR-0025. 491 tests.
+
+## Corner touches count once
+**2026-10-03** · `RB-PHYSICS-001-FR-116` · ADR-0036
+
+- When the ball touches several triangles at one shared corner point,
+  the game engine counts that as a single touch, not one per triangle.
+  The simulator now does the same, which trims the ball's error on the
+  goal recording a little (0.595 to 0.589). The crossbar bounce is still
+  off: which triangle "wins" at the corner depends on the engine's
+  internal triangle order, which isn't reproduced yet. 485 tests.
+
 ## The ball reads rounded corners better
 **2026-10-03** · `RB-PHYSICS-001-FR-115` · ADR-0035
 

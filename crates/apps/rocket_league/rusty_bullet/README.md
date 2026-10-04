@@ -61,9 +61,11 @@ See [SECURITY.md](./SECURITY.md) to report a vulnerability.
 
 ## License
 
-GPL-3.0-only ([LICENSE](./LICENSE)), since it embeds RLUtilities' GPL-3.0
-soccar arena meshes (`crates/rb_physics_bullet/assets/soccar/`, ADR-0025).
-Earlier commits were released under MIT OR Apache-2.0. This project is an independent reimplementation and is not
+Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE),
+at your option. Commits from ADR-0025 to ADR-0037 were GPL-3.0-only while
+the repository embedded RLUtilities' GPL-3.0 arena meshes; the arena now
+uses RocketSim's Apache-2.0 mesh files (`crates/rb_physics_bullet/assets/soccar/`,
+see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)). This project is an independent reimplementation and is not
 affiliated with, endorsed by, or associated with Psyonix or Epic Games;
 "Rocket League" is their trademark, referenced here only to describe
 compatibility intent.

@@ -31,8 +31,9 @@
 //!
 //! **Since `RB-PHYSICS-001-FR-113` (ADR-0033) the goals and back walls are
 //! mesh too** (`standard_goal_meshes`), so `PhysicsWorld::standard_arena`
-//! is exactly RLUtilities' `Field::initialize_soccar`: the ground, side
-//! walls and ceiling as planes, everything else as the game's triangles.
+//! is exactly RocketSim's `Arena::_SetupArenaCollisionShapes`: the ground,
+//! side walls and ceiling as planes, everything else as the game's
+//! triangles (RocketSim's own 16 mesh files since FR-117, ADR-0037).
 //! `standard_curves`, the goal walls, goal boxes, goal fillets and nets
 //! below are no longer part of it; they remain as built and tested shapes.
 //! FR-102's measured radii survive for the back seams
@@ -548,54 +549,46 @@ pub fn standard_curves() -> Vec<StaticQuarterPipe> {
 /// every boundary triangle faces this point.
 const ARENA_INSIDE: Vec3 = Vec3::new(0.0, 0.0, CEILING_Z * 0.5);
 
-/// The arena's curved ramps and corners as Rocket League's own collision
-/// triangles (`RB-PHYSICS-001-FR-106`, ADR-0025), from RLUtilities'
-/// soccar assets (GPL-3.0, `assets/soccar/README.md`), mirrored the way
-/// its `Field::initialize_soccar` does: the corner (`x > 0, y < 0`) into
-/// all four quadrants, the side floor and ceiling ramps (`x > 0`) to both
-/// sides. 8 meshes: 4 corners, 2 floor ramps, 2 ceiling ramps.
+/// The arena's curved parts as Rocket League's own collision triangles
+/// (`RB-PHYSICS-001-FR-106`, ADR-0025): RocketSim's 16 soccar mesh files
+/// (`assets/soccar/README.md`, Apache-2.0) in its load order, each
+/// reporting triangles in Bullet's BVH order (FR-117, ADR-0037). 4 corners
+/// (0-3), 4 goal halves with their back wall (4-7), 2 ceiling ramps (8,
+/// 9), 4 floor ramps (10-13), 2 ceiling ramps (14, 15).
 pub fn standard_meshes() -> Vec<StaticMesh> {
-    let corner = (
-        &include_bytes!("../assets/soccar/soccar_corner_vertices.bin")[..],
-        &include_bytes!("../assets/soccar/soccar_corner_ids.bin")[..],
-    );
-    let floor_ramp = (
-        &include_bytes!("../assets/soccar/soccar_ramps_0_vertices.bin")[..],
-        &include_bytes!("../assets/soccar/soccar_ramps_0_ids.bin")[..],
-    );
-    let ceiling_ramp = (
-        &include_bytes!("../assets/soccar/soccar_ramps_1_vertices.bin")[..],
-        &include_bytes!("../assets/soccar/soccar_ramps_1_ids.bin")[..],
-    );
-    let quadrants = [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)];
-    let sides = [(1.0, 1.0), (-1.0, 1.0)];
-    quadrants
+    const FILES: [&[u8]; 16] = [
+        include_bytes!("../assets/soccar/mesh_0.cmf"),
+        include_bytes!("../assets/soccar/mesh_1.cmf"),
+        include_bytes!("../assets/soccar/mesh_2.cmf"),
+        include_bytes!("../assets/soccar/mesh_3.cmf"),
+        include_bytes!("../assets/soccar/mesh_4.cmf"),
+        include_bytes!("../assets/soccar/mesh_5.cmf"),
+        include_bytes!("../assets/soccar/mesh_6.cmf"),
+        include_bytes!("../assets/soccar/mesh_7.cmf"),
+        include_bytes!("../assets/soccar/mesh_8.cmf"),
+        include_bytes!("../assets/soccar/mesh_9.cmf"),
+        include_bytes!("../assets/soccar/mesh_10.cmf"),
+        include_bytes!("../assets/soccar/mesh_11.cmf"),
+        include_bytes!("../assets/soccar/mesh_12.cmf"),
+        include_bytes!("../assets/soccar/mesh_13.cmf"),
+        include_bytes!("../assets/soccar/mesh_14.cmf"),
+        include_bytes!("../assets/soccar/mesh_15.cmf"),
+    ];
+    FILES
         .iter()
-        .map(|&mirror| (corner, mirror))
-        .chain(sides.iter().map(|&mirror| (floor_ramp, mirror)))
-        .chain(sides.iter().map(|&mirror| (ceiling_ramp, mirror)))
-        .map(|((vertices, ids), (sx, sy))| {
-            StaticMesh::from_buffers(vertices, ids, Vec3::new(sx, sy, 1.0), ARENA_INSIDE)
-        })
-        .chain(standard_goal_meshes())
+        .filter_map(|file| StaticMesh::from_cmf(file))
         .collect()
 }
 
-/// Both goals and the back walls around them as Rocket League's collision
-/// triangles (`RB-PHYSICS-001-FR-113`): RLUtilities' `soccar_goal`, moved
-/// to `y = -BACK_WALL_Y` and mirrored for the `+y` end, as
-/// `Field::initialize_soccar` does. Spans `|x| <= 2688`, from the field
-/// side of the back wall to the back of the goal: the back wall with its
-/// floor and ceiling seams, the goal mouth's rounded edges, and the goal's
-/// sloped back, side walls, roof and floor.
+/// The goals and the back walls around them (`RB-PHYSICS-001-FR-113`):
+/// the `+y` goal's two halves (`x >= 0`, then `x <= 0`), then the `-y`
+/// goal's (`x <= 0`, then `x >= 0`), each spanning `|x| <= 2688` from the
+/// field side of the back wall to the back of the goal.
 pub fn standard_goal_meshes() -> Vec<StaticMesh> {
-    let vertices = &include_bytes!("../assets/soccar/soccar_goal_vertices.bin")[..];
-    let ids = &include_bytes!("../assets/soccar/soccar_goal_ids.bin")[..];
-    let offset = Vec3::new(0.0, -BACK_WALL_Y, 0.0);
-    [1.0, -1.0]
-        .into_iter()
-        .map(|sy| StaticMesh::from_wound_buffers(vertices, ids, offset, Vec3::new(1.0, sy, 1.0)))
-        .collect()
+    let mut meshes = standard_meshes();
+    meshes.drain(..4);
+    meshes.truncate(4);
+    meshes
 }
 
 #[cfg(test)]
@@ -689,23 +682,28 @@ mod tests {
     }
 
     #[test]
-    fn standard_meshes_hold_every_corner_and_ramp_triangle() {
-        // RB-PHYSICS-001-FR-106: 4 mirrored corners (880 triangles each),
-        // 2 floor ramps (252) and 2 ceiling ramps (32); since FR-113 the 2
-        // goals (1966 each, minus any without area).
+    fn standard_meshes_are_rocketsims_sixteen() {
+        // RB-PHYSICS-001-FR-117: 4 corners (880 triangles), 4 goal halves
+        // (983, minus any without area), 2 + 2 ceiling ramps (16) and 4
+        // floor ramps (126), in RocketSim's load order.
         let counts: Vec<usize> = standard_meshes()
             .iter()
             .map(|mesh| mesh.triangles().len())
             .collect();
-        assert_eq!(counts[..8], [880, 880, 880, 880, 252, 252, 32, 32]);
-        assert_eq!(counts.len(), 10);
-        assert!(counts[8] > 1900 && counts[8] == counts[9], "{counts:?}");
+        assert_eq!(counts.len(), 16);
+        assert_eq!(counts[..4], [880; 4]);
+        assert!(
+            counts[4..8].iter().all(|&n| n > 970 && n <= 983),
+            "{counts:?}"
+        );
+        assert_eq!(counts[8..], [16, 16, 126, 126, 126, 126, 16, 16]);
     }
 
     #[test]
     fn every_corner_and_ramp_triangle_faces_the_arena() {
         // The goals (FR-113) face as wound: their roof faces down.
-        for mesh in standard_meshes().into_iter().take(8) {
+        let meshes = standard_meshes();
+        for mesh in meshes[..4].iter().chain(&meshes[8..]) {
             for triangle in mesh.triangles() {
                 let [a, b, c] = triangle.vertices;
                 let centroid = (a + b + c) * (1.0 / 3.0);
@@ -719,28 +717,31 @@ mod tests {
     /// its back toward the field; the mirrored goal the same way.
     #[test]
     fn goal_mesh_triangles_face_the_playable_side() {
-        for (mesh, toward_field) in standard_goal_meshes().iter().zip([1.0f32, -1.0]) {
+        let goals = standard_goal_meshes();
+        // The `x >= 0` half of each goal.
+        let x = 300.0;
+        for (mesh, toward_field) in [&goals[0], &goals[3]].into_iter().zip([-1.0f32, 1.0]) {
             let probe = |origin: Vec3, direction: Vec3| {
                 mesh.raycast(origin, direction, 400.0).map(|hit| hit.normal)
             };
             let side = -toward_field;
             // Back wall above the goal, from the field.
             let wall = probe(
-                Vec3::new(0.0, side * (BACK_WALL_Y - 100.0), 1200.0),
+                Vec3::new(x, side * (BACK_WALL_Y - 100.0), 1200.0),
                 Vec3::new(0.0, side, 0.0),
             )
             .expect("back wall");
             assert!(wall.y * toward_field > 0.9, "{wall:?}");
             // Goal roof, from inside the goal.
             let roof = probe(
-                Vec3::new(0.0, side * (BACK_WALL_Y + 300.0), 300.0),
+                Vec3::new(x, side * (BACK_WALL_Y + 300.0), 300.0),
                 Vec3::new(0.0, 0.0, 1.0),
             )
             .expect("goal roof");
             assert!(roof.z < -0.9, "{roof:?}");
             // Goal back, from inside the goal.
             let back = probe(
-                Vec3::new(0.0, side * (BACK_WALL_Y + 500.0), 150.0),
+                Vec3::new(x, side * (BACK_WALL_Y + 500.0), 150.0),
                 Vec3::new(0.0, side, 0.0),
             )
             .expect("goal back");

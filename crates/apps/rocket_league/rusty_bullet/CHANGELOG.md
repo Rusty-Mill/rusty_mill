@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0037 (`RB-PHYSICS-001-FR-117`): `bvh::visit_order` (Bullet's
+  `btQuantizedBvh` build order), `StaticMesh::from_cmf` (RocketSim's
+  mesh file format), and RocketSim's 16 soccar meshes under
+  `assets/soccar/` (Apache-2.0, from `rlgym_rocket_league` 2.0.1).
+- ADR-0036 (`RB-PHYSICS-001-FR-116`): `mesh::ManifoldEntry`.
 - ADR-0035 (`RB-PHYSICS-001-FR-115`): `collision::replacement_slot`
   (Bullet's `sortCachedPoints`) and `mesh::add_manifold_point`.
 - ADR-0033 (`RB-PHYSICS-001-FR-113`): the goals and back walls are
@@ -43,6 +48,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   speculative points to the solver; wheel rays hit triangles
   (`drive::cast_wheels` takes a ray function).
 ### Changed
+- The workspace is `MIT OR Apache-2.0` again (`LICENSE-MIT`,
+  `LICENSE-APACHE`); it was GPL-3.0-only from ADR-0025 to ADR-0036 for
+  RLUtilities' meshes (`RB-PHYSICS-001-FR-117`, ADR-0037).
+- `arena::standard_meshes` is RocketSim's 16 soccar meshes in its load
+  order, and `StaticMesh::sphere_contacts` visits triangles in Bullet's
+  BVH order (`RB-PHYSICS-001-FR-117`, ADR-0037).
+- Ball-mesh manifold points are matched and sorted by their ball-side
+  point along the unadjusted normal, as Bullet does; triangles meeting
+  the ball at one vertex fold into one contact (`RB-PHYSICS-001-FR-116`,
+  ADR-0036). `collision::replacement_slot` takes (point, depth) pairs.
 - `StaticMesh::sphere_contacts` keeps contacts as Bullet's manifold
   does: a point within 0.02 × radius of a kept one replaces it, and a full
   manifold keeps the largest area and its deepest point, instead of the 4
@@ -80,6 +95,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `solver::friction_directions` normalizes a non-unit normal before
   `plane_space` (it returned NaN on the branch boundary).
 ### Removed
+- RLUtilities' `assets/soccar/*.bin` meshes (GPL-3.0) and their loaders
+  `StaticMesh::from_buffers`/`from_wound_buffers`, and `/LICENSE` (GPL
+  text), replaced by RocketSim's `.cmf` meshes and `StaticMesh::from_cmf`
+  (`RB-PHYSICS-001-FR-117`, ADR-0037).
 - `body::StaticSweptFillet`, `arena::standard_corner_sweeps`,
   `SIDE_FLOOR_RADIUS`, `CORNER_FLOOR_RADIUS`, `CORNER_EDGE_RADIUS`, the
   corner wall planes and the side/corner seams (replaced by the meshes);

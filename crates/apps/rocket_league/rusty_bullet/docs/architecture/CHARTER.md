@@ -105,8 +105,10 @@ Both goals are served by the same build — there is one project, not two.
 ## Ownership, license, and classification
 
 - Owner: baileyrd.
-- License: GPL-3.0-only (see [LICENSE](../../LICENSE)) since ADR-0025,
-  because `rb_physics_bullet` embeds RLUtilities' GPL-3.0 soccar arena
-  meshes. Earlier commits were released under MIT OR Apache-2.0.
+- License: MIT OR Apache-2.0 (see [LICENSE-MIT](../../LICENSE-MIT) and
+  [LICENSE-APACHE](../../LICENSE-APACHE)). Commits from ADR-0025 to
+  ADR-0036 were GPL-3.0-only while `rb_physics_bullet` embedded
+  RLUtilities' GPL-3.0 arena meshes; ADR-0037 replaced them with
+  RocketSim's Apache-2.0 mesh files.
 - Data classification: no user data collection. Any recorded
   replays/captures used for verification are the owner's own match data.

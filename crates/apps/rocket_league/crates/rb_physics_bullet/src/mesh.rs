@@ -11,12 +11,16 @@
 //! manifold) lives in `collision::ContactManifold`; the ball and wheel
 //! rays query the mesh directly here.
 
+use crate::bvh::visit_order;
 use crate::collision::{
     replacement_slot, Contact, RayHit, CONTACT_BREAKING_FACTOR, CONTACT_PROCESSING_THRESHOLD,
     MANIFOLD_CAPACITY,
 };
 use rb_domain::Vec3;
 use std::collections::HashMap;
+
+/// Unreal units per Bullet unit, the scale RocketSim's mesh files use.
+const BT_TO_UU: f32 = 50.0;
 
 /// Broad-phase grid cell edge (uu).
 const CELL_SIZE: f32 = 256.0;
@@ -209,6 +213,9 @@ pub struct StaticMesh {
     /// Per triangle, edge `i` runs from vertex `i` to `i + 1`.
     edges: Vec<[EdgeKind; 3]>,
     cells: HashMap<(i32, i32, i32), Vec<u32>>,
+    /// Per triangle, its place in Bullet's BVH report order (FR-117);
+    /// file order unless built from one (`from_cmf`).
+    visit_rank: Vec<u32>,
     pub restitution: f32,
     pub friction: f32,
 }
@@ -221,6 +228,7 @@ impl StaticMesh {
     /// Indexes `triangles` with the same default material as the other
     /// static shapes.
     pub fn new(triangles: Vec<Triangle>) -> StaticMesh {
+        let triangles_len = u32::try_from(triangles.len()).unwrap_or(u32::MAX);
         let mut cells: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
         for (index, triangle) in triangles.iter().enumerate() {
             let (min, max) = triangle.bounds();
@@ -236,6 +244,7 @@ impl StaticMesh {
             triangles,
             edges: Vec::new(),
             cells,
+            visit_rank: (0..triangles_len).collect(),
             restitution: 0.5,
             friction: 0.5,
         };
@@ -269,42 +278,49 @@ impl StaticMesh {
         kinds
     }
 
-    /// Builds a mesh from little-endian `f32` vertex triples and `i32`
-    /// index triples (RLUtilities' asset layout), each vertex scaled
-    /// component-wise by `mirror` (`+-1` per axis) and every triangle
-    /// facing `inside`. Triangles naming a missing vertex, or with no
-    /// area, are skipped.
-    pub fn from_buffers(vertices: &[u8], ids: &[u8], mirror: Vec3, inside: Vec3) -> StaticMesh {
-        let triangles = corners(vertices, ids, Vec3::ZERO, mirror)
-            .into_iter()
-            .filter_map(|[a, b, c]| Triangle::facing(a, b, c, inside))
-            .collect();
-        StaticMesh::new(triangles)
-    }
-
-    /// Like `from_buffers`, but each vertex is first moved by `offset`, and
-    /// every triangle faces the way the file winds it, flipped back when
-    /// `mirror` reflects it (`RB-PHYSICS-001-FR-113`). For a mesh whose
-    /// playable sides don't all face one point: the goal, whose roof faces
-    /// down and whose back faces the field.
-    pub fn from_wound_buffers(
-        vertices: &[u8],
-        ids: &[u8],
-        offset: Vec3,
-        mirror: Vec3,
-    ) -> StaticMesh {
-        let reflected = mirror.x * mirror.y * mirror.z < 0.0;
-        let triangles = corners(vertices, ids, offset, mirror)
-            .into_iter()
-            .filter_map(|[a, b, c]| {
-                if reflected {
-                    Triangle::wound(a, c, b)
-                } else {
-                    Triangle::wound(a, b, c)
-                }
+    /// A RocketSim collision mesh file (`.cmf`: `i32` triangle and vertex
+    /// counts, `i32` index triples, `f32` vertex triples in Bullet units,
+    /// little-endian), triangles wound as the file winds them and reported
+    /// in the order Bullet's BVH over them would (`RB-PHYSICS-001-FR-117`).
+    /// `None` if the file is malformed. Triangles without area are dropped
+    /// after ordering, as Bullet keeps them in its tree but never touches
+    /// them.
+    pub fn from_cmf(bytes: &[u8]) -> Option<StaticMesh> {
+        let word = |at: usize| -> Option<[u8; 4]> { bytes.get(at..at + 4)?.try_into().ok() };
+        let count = |at: usize| usize::try_from(i32::from_le_bytes(word(at)?)).ok();
+        let (triangle_count, vertex_count) = (count(0)?, count(4)?);
+        let vertices_at = 8 + 12 * triangle_count;
+        if bytes.len() != vertices_at + 12 * vertex_count {
+            return None;
+        }
+        let vertex = |index: usize| -> Option<[f32; 3]> {
+            let at = vertices_at + 12 * index;
+            let component = |k: usize| Some(f32::from_le_bytes(word(at + 4 * k)?));
+            (index < vertex_count).then_some(())?;
+            Some([component(0)?, component(1)?, component(2)?])
+        };
+        let corners: Vec<[[f32; 3]; 3]> = (0..triangle_count)
+            .map(|t| {
+                let id = |k: usize| vertex(count(8 + 12 * t + 4 * k)?);
+                Some([id(0)?, id(1)?, id(2)?])
             })
-            .collect();
-        StaticMesh::new(triangles)
+            .collect::<Option<_>>()?;
+        let mut rank = vec![0; triangle_count];
+        for (place, triangle) in visit_order(&corners).into_iter().enumerate() {
+            rank[triangle] = place;
+        }
+        let uu = |p: [f32; 3]| Vec3::new(p[0], p[1], p[2]) * BT_TO_UU;
+        let (triangles, ranks): (Vec<Triangle>, Vec<u32>) = corners
+            .iter()
+            .zip(rank)
+            .filter_map(|([a, b, c], place)| {
+                let triangle = Triangle::wound(uu(*a), uu(*b), uu(*c))?;
+                Some((triangle, u32::try_from(place).ok()?))
+            })
+            .unzip();
+        let mut mesh = StaticMesh::new(triangles);
+        mesh.visit_rank = ranks;
+        Some(mesh)
     }
 
     /// Every triangle.
@@ -369,88 +385,91 @@ impl StaticMesh {
     /// own contact point.
     pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<Contact> {
         let reach = Vec3::new(radius, radius, radius);
-        let contacts: Vec<Contact> = self
-            .near_indices(center - reach, center + reach)
-            .into_iter()
-            .filter_map(|index| {
-                let triangle = self.triangles.get(index as usize)?;
-                let height = triangle.signed_distance(&center);
-                if height < -radius {
-                    return None;
-                }
-                let closest = triangle.closest_point(&center);
-                let offset = center - closest;
-                let distance = offset.length();
-                let (normal, depth) = if height > 0.0 && distance > 1e-6 {
-                    (offset * (1.0 / distance), radius - distance)
-                } else if triangle.covers_at_depth(&center, height) {
-                    (triangle.normal, radius - height)
-                } else {
-                    return None;
-                };
-                if depth < -CONTACT_PROCESSING_THRESHOLD {
-                    return None;
-                }
-                let adjusted = self.adjust_edge_normal(index as usize, &closest, normal);
-                Some(Contact {
-                    normal: adjusted,
-                    point: center - normal * radius + adjusted * depth,
-                    penetration_depth: depth,
-                })
-            })
-            .collect();
-        let mut kept: Vec<Contact> = Vec::with_capacity(MANIFOLD_CAPACITY);
-        for contact in contacts {
-            add_manifold_point(&mut kept, contact, CONTACT_BREAKING_FACTOR * radius);
+        let breaking = CONTACT_BREAKING_FACTOR * radius;
+        let mut kept: Vec<ManifoldEntry> = Vec::with_capacity(MANIFOLD_CAPACITY);
+        let mut near = self.near_indices(center - reach, center + reach);
+        near.sort_unstable_by_key(|&index| self.visit_rank.get(index as usize).copied());
+        for index in near {
+            if let Some(entry) = self.sphere_triangle_contact(index as usize, center, radius) {
+                add_manifold_point(&mut kept, entry, breaking);
+            }
         }
-        kept
+        kept.into_iter().map(|entry| entry.contact).collect()
+    }
+
+    /// `btSphereTriangleCollisionAlgorithm`'s contact between the sphere
+    /// and triangle `index`, if within the processing threshold, with its
+    /// normal edge-adjusted afterwards (`btAdjustInternalEdgeContacts`).
+    fn sphere_triangle_contact(
+        &self,
+        index: usize,
+        center: Vec3,
+        radius: f32,
+    ) -> Option<ManifoldEntry> {
+        let triangle = self.triangles.get(index)?;
+        let height = triangle.signed_distance(&center);
+        if height < -radius {
+            return None;
+        }
+        let closest = triangle.closest_point(&center);
+        let offset = center - closest;
+        let distance = offset.length();
+        let (normal, depth) = if height > 0.0 && distance > 1e-6 {
+            (offset * (1.0 / distance), radius - distance)
+        } else if triangle.covers_at_depth(&center, height) {
+            (triangle.normal, radius - height)
+        } else {
+            return None;
+        };
+        if depth < -CONTACT_PROCESSING_THRESHOLD {
+            return None;
+        }
+        let adjusted = self.adjust_edge_normal(index, &closest, normal);
+        let on_ball = center - normal * radius;
+        Some(ManifoldEntry {
+            on_ball,
+            contact: Contact {
+                normal: adjusted,
+                point: on_ball + adjusted * depth,
+                penetration_depth: depth,
+            },
+        })
     }
 }
 
-/// Adds `contact` to a ball's per-tick manifold `kept` the way Bullet's
-/// `btPersistentManifold::addManifoldPoint` does as each triangle reports
-/// (`RB-PHYSICS-001-FR-115`, ADR-0035): a point within `breaking` (uu) of a
+/// A ball-mesh contact as a Bullet manifold point: `on_ball` is where the
+/// ball's surface meets the triangle along the *unadjusted* normal
+/// (`m_localPointA`), which Bullet matches and sorts points by; the edge
+/// adjustment, applied after, changes only `contact`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ManifoldEntry {
+    on_ball: Vec3,
+    contact: Contact,
+}
+
+/// Adds `entry` to a ball's per-tick manifold `kept` the way Bullet's
+/// `btManifoldResult::addContactPoint` does as each triangle reports
+/// (`RB-PHYSICS-001-FR-115`, ADR-0035; ball-side matching since FR-116,
+/// ADR-0036): an entry whose `on_ball` is within `breaking` (uu) of a
 /// kept one replaces it (`getCacheEntry`); a full manifold gives up the
 /// slot `replacement_slot` picks (`sortCachedPoints`), never the deepest.
-/// Taking the 4 deepest instead clusters them on the fan of facets nearest
-/// the ball's center, tilting the averaged normal of a ball wedged in a
-/// rounded corner (`hitjump.jsonl` 97.9 s).
-fn add_manifold_point(kept: &mut Vec<Contact>, contact: Contact, breaking: f32) {
+/// Every triangle meeting the ball at one shared vertex reports the same
+/// ball point, so they fold into one contact, the last one reported.
+fn add_manifold_point(kept: &mut Vec<ManifoldEntry>, entry: ManifoldEntry, breaking: f32) {
     let limit = breaking * breaking;
     let near = kept
         .iter()
-        .position(|k| (k.point - contact.point).length_squared() < limit);
+        .position(|k| (k.on_ball - entry.on_ball).length_squared() < limit);
+    let sorted = |e: &ManifoldEntry| (e.on_ball, e.contact.penetration_depth);
     if let Some(slot) = near {
-        kept[slot] = contact;
+        kept[slot] = entry;
     } else if kept.len() < MANIFOLD_CAPACITY {
-        kept.push(contact);
-    } else if let Some(slot) = replacement_slot(kept, &contact) {
-        kept[slot] = contact;
+        kept.push(entry);
+    } else if let Some(slot) =
+        replacement_slot(&kept.iter().map(sorted).collect::<Vec<_>>(), sorted(&entry))
+    {
+        kept[slot] = entry;
     }
-}
-
-/// The triangles of RLUtilities-layout buffers (little-endian `f32` vertex
-/// triples, `i32` index triples), each vertex `(v + offset) * mirror`
-/// component-wise. Triangles naming a missing vertex are skipped.
-fn corners(vertices: &[u8], ids: &[u8], offset: Vec3, mirror: Vec3) -> Vec<[Vec3; 3]> {
-    let word = |chunk: &[u8]| [chunk[0], chunk[1], chunk[2], chunk[3]];
-    let points: Vec<Vec3> = vertices
-        .chunks_exact(12)
-        .map(|v| {
-            let x = f32::from_le_bytes(word(&v[0..4])) + offset.x;
-            let y = f32::from_le_bytes(word(&v[4..8])) + offset.y;
-            let z = f32::from_le_bytes(word(&v[8..12])) + offset.z;
-            Vec3::new(x * mirror.x, y * mirror.y, z * mirror.z)
-        })
-        .collect();
-    let vertex = |chunk: &[u8]| {
-        usize::try_from(i32::from_le_bytes(word(chunk)))
-            .ok()
-            .and_then(|i| points.get(i).copied())
-    };
-    ids.chunks_exact(12)
-        .filter_map(|t| Some([vertex(&t[0..4])?, vertex(&t[4..8])?, vertex(&t[8..12])?]))
-        .collect()
 }
 
 impl StaticMesh {
@@ -709,11 +728,15 @@ mod tests {
         assert!((contacts[0].normal - raw).length() < 1e-5);
     }
 
-    fn touch(x: f32, depth: f32) -> Contact {
-        Contact {
-            normal: Vec3::new(0.0, 0.0, 1.0),
-            point: Vec3::new(x, x * x / 40.0, 0.0),
-            penetration_depth: depth,
+    fn touch(x: f32, depth: f32) -> ManifoldEntry {
+        let point = Vec3::new(x, x * x / 40.0, 0.0);
+        ManifoldEntry {
+            on_ball: point,
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point,
+                penetration_depth: depth,
+            },
         }
     }
 
@@ -744,5 +767,60 @@ mod tests {
             kept.contains(&touch(40.0, 1.0)),
             "the newest point always enters"
         );
+    }
+
+    #[test]
+    fn triangles_meeting_the_ball_at_one_ball_point_fold_into_the_last() {
+        let at = |mesh_x: f32, normal_z: f32| ManifoldEntry {
+            on_ball: Vec3::new(0.0, 0.0, -93.15),
+            contact: Contact {
+                normal: Vec3::new(0.0, (1.0 - normal_z * normal_z).sqrt(), normal_z),
+                point: Vec3::new(mesh_x, 0.0, 0.0),
+                penetration_depth: 3.0,
+            },
+        };
+        let mut kept = Vec::new();
+        add_manifold_point(&mut kept, at(0.0, 1.0), 1.8);
+        add_manifold_point(&mut kept, at(5.0, 0.7), 1.8);
+        assert_eq!(kept, vec![at(5.0, 0.7)]);
+    }
+
+    fn cmf(triangles: &[[i32; 3]], vertices: &[[f32; 3]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for count in [triangles.len(), vertices.len()] {
+            bytes.extend(i32::try_from(count).expect("small").to_le_bytes());
+        }
+        for index in triangles.iter().flatten() {
+            bytes.extend(index.to_le_bytes());
+        }
+        for component in vertices.iter().flatten() {
+            bytes.extend(component.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_cmf_mesh_is_scaled_to_uu_and_wound_as_written() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 2.0, 0.0],
+        ];
+        let bytes = cmf(&[[0, 1, 2], [1, 3, 2], [0, 0, 1]], &vertices);
+        let mesh = StaticMesh::from_cmf(&bytes).expect("well formed");
+        // The degenerate third triangle is dropped.
+        assert_eq!(mesh.triangles().len(), 2);
+        let [a, b, _] = mesh.triangles()[0].vertices;
+        assert_eq!((a, b), (Vec3::ZERO, Vec3::new(100.0, 0.0, 0.0)));
+        assert!((mesh.triangles()[1].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_malformed_cmf_is_rejected() {
+        let bytes = cmf(&[[0, 1, 2]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert!(StaticMesh::from_cmf(&bytes[..bytes.len() - 1]).is_none());
+        let bad_index = cmf(&[[0, 1, 7]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        assert!(StaticMesh::from_cmf(&bad_index).is_none());
     }
 }
