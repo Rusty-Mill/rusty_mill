@@ -796,9 +796,14 @@ impl PhysicsWorld {
                 .as_deref_mut()
                 .and_then(|all| all.get_mut(index));
             let contacts = match (body.shape, ball_manifold) {
-                (crate::body::Shape::Sphere { radius }, Some(manifold)) if !is_car => {
-                    mesh.sphere_manifold(body.position, &body.orientation, radius, manifold)
-                }
+                (crate::body::Shape::Sphere { radius }, Some(manifold)) if !is_car => mesh
+                    .sphere_manifold(
+                        body.position,
+                        &body.orientation,
+                        radius,
+                        &mesh::SphereLimits::BALL,
+                        manifold,
+                    ),
                 _ => stateful(1 + scene.walls.len() + index, &|manifold| {
                     manifold.update_mesh(body, mesh)
                 }),
@@ -1149,6 +1154,11 @@ impl PhysicsWorld {
     /// like the rest (`RB-VERIFY-003-FR-009`): an unlimited-boost freeplay
     /// capture holds it at 100 while the candidate's own tank would run dry.
     pub fn snap_to_frame(&mut self, frame: &PhysicsFrame) {
+        // A ball that stays within its own radius of where the world left
+        // it keeps its contact history; one that jumped (a reset) has none
+        // (RB-PHYSICS-001-FR-128).
+        let teleported =
+            (frame.ball.position - self.ball.position).length() > crate::body::BALL_RADIUS;
         snap_body(
             &mut self.ball,
             frame.ball.position,
@@ -1170,8 +1180,9 @@ impl PhysicsWorld {
                 drive.boost_amount = car_state.boost_amount.clamp(0.0, drive::MAX_BOOST);
             }
         }
-        // A snapped ball has no contact history (RB-PHYSICS-001-FR-121).
-        self.ball_mesh_manifolds.clear();
+        if teleported {
+            self.ball_mesh_manifolds.clear();
+        }
     }
 
     /// The scene's current state as a `PhysicsFrame`, for consumption by
@@ -4850,10 +4861,11 @@ mod tests {
         assert!((w.x + 2.72).abs() < 0.1, "spin off: {w:?}");
     }
 
-    /// RB-PHYSICS-001-FR-121: a stepped world carries one ball manifold
-    /// per mesh; snapping to a recorded frame forgets them all.
+    /// RB-PHYSICS-001-FR-121/FR-128: a stepped world carries one ball
+    /// manifold per mesh; snapping to a frame the ball is still near keeps
+    /// them, and a snap that teleports the ball forgets them all.
     #[test]
-    fn snapping_the_ball_forgets_its_contact_history() {
+    fn snapping_the_ball_keeps_its_history_unless_it_teleports() {
         let ball = RigidBody::standard_ball(Vec3::new(0.0, 5912.49, 213.35));
         let mut world = PhysicsWorld::standard_arena(ball);
         world.step(1.0 / 120.0);
@@ -4862,7 +4874,14 @@ mod tests {
             world.ball_mesh_manifolds.iter().any(|m| !m.is_empty()),
             "the ball on the goal slope keeps a point"
         );
-        let frame = world.frame();
+        let mut frame = world.frame();
+        frame.ball.position.x += 1.0;
+        world.snap_to_frame(&frame);
+        assert!(
+            world.ball_mesh_manifolds.iter().any(|m| !m.is_empty()),
+            "a snap within the ball's radius keeps the history"
+        );
+        frame.ball.position = Vec3::new(0.0, 0.0, 93.15);
         world.snap_to_frame(&frame);
         assert!(world.ball_mesh_manifolds.is_empty());
     }

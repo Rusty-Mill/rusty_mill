@@ -5,6 +5,16 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0047 (`RB-PHYSICS-001-FR-127`, `FR-128`): `mesh::SphereLimits`
+  (`SphereLimits::BALL`, `body::BALL_BREAKING_THRESHOLD`,
+  `body::BALL_CONTACT_SLACK`) make, keep and fold the ball's mesh
+  contacts at Bullet's thresholds; `PhysicsWorld::snap_to_frame` keeps
+  the ball's contact history unless the ball teleported more than its
+  radius.
+### Changed
+- `PhysicsWorld::snap_to_frame` no longer always clears the ball's mesh
+  manifolds (FR-121 amended): one-step and k-step predictions now carry
+  them.
 - ADR-0046 (`RB-PHYSICS-001-FR-126`): `mesh::BallManifold::refresh`
   drops a slot as Bullet's `removeContactPoint` does (last entry moves
   into the hole) and `mesh::add_manifold_point` folds into the nearest
