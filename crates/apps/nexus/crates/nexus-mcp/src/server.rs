@@ -16,10 +16,11 @@ use nexus_kernel::{EventFilter, Events as _, Ipc as _, KernelPluginContext, Nexu
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, GetPromptRequestParams, GetPromptResult,
-    ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
-    PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResult, Resource,
-    ResourceContents, ResourceUpdatedNotificationParam, Role, ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResponse, CallToolResult, GetPromptRequestParams,
+    GetPromptResponse, GetPromptResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents,
+    ResourceUpdatedNotificationParam, Role, ServerCapabilities, ServerInfo,
 };
 use rmcp::schemars;
 use rmcp::service::{Peer, RequestContext};
@@ -3768,7 +3769,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, rmcp::ErrorData>> + Send + '_
     {
         // DG-40 / PRD-14 §12.2 — every tool call is audited with the
         // tool name and wall-clock duration. We capture the name before
@@ -3815,7 +3816,10 @@ impl rmcp::ServerHandler for NexusMcpServer {
                         .ipc_call(&tool.plugin_id, &tool.command, args, IPC_TIMEOUT)
                         .await
                     {
-                        Ok(value) => Ok(CallToolResult::structured(value)),
+                        // rmcp 3.1.4: a completed call is one variant of
+                        // `CallToolResponse`; the others ask the client for
+                        // input or hand back a task, neither used here.
+                        Ok(value) => Ok(CallToolResponse::from(CallToolResult::structured(value))),
                         Err(e) => Err(rmcp::ErrorData::internal_error(
                             format!("dynamic tool '{}' failed: {e}", tool.name),
                             None,
@@ -3942,7 +3946,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
         &self,
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResult, rmcp::ErrorData> {
+    ) -> Result<GetPromptResponse, rmcp::ErrorData> {
         #[derive(Deserialize)]
         struct Rec {
             name: String,
@@ -3958,10 +3962,10 @@ impl rmcp::ServerHandler for NexusMcpServer {
                 None,
             )
         })?;
-        Ok(
+        Ok(GetPromptResponse::from(
             GetPromptResult::new(vec![PromptMessage::new_text(Role::User, rec.body)])
                 .with_description(rec.name),
-        )
+        ))
     }
 
     async fn list_resources(
@@ -4012,7 +4016,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+    ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
         #[derive(Deserialize)]
         struct ReadFileResp {
             bytes: Vec<u8>,
@@ -4063,7 +4067,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
                 Some(&e.to_string()),
             ),
         }
-        outcome
+        outcome.map(ReadResourceResponse::from)
     }
 }
 

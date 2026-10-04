@@ -10160,6 +10160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-claude"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-cli"
 version = "0.1.0"
 dependencies = [
@@ -14111,6 +14121,7 @@ dependencies = [
 name = "rusty_orch"
 version = "0.1.0"
 dependencies = [
+ "orch-claude",
  "orch-cli",
  "orch-codex",
  "orch-core",

@@ -1,6 +1,6 @@
 //! The command line. Hand-parsed over `std::env::args`: the surface is one
-//! subcommand and five flags, which does not justify a parser dependency in
-//! an otherwise registry-free family (ADR-0009).
+//! subcommand and a handful of flags, which does not justify a parser
+//! dependency in an otherwise registry-free family (ADR-0009).
 
 use std::path::PathBuf;
 
@@ -12,8 +12,11 @@ Runs the goal file through the dispatcher and prints the board.
 
 options:
   --ollama-model <name>   model for Agent::Local       [env ORCH_OLLAMA_MODEL, default llama3.2]
-  --codex-repo <dir>      repository Codex may read    [env ORCH_CODEX_REPO, default: current dir]
+  --repo <dir>            repository Codex and Claude may read
+                                                       [env ORCH_REPO, default: current dir]
+  --codex-repo <dir>      alias of --repo              [env ORCH_CODEX_REPO]
   --codex-model <name>    model for Agent::Codex       [default: Codex's own]
+  --claude-model <name>   model for Agent::Claude      [default: Claude Code's own]
   --interactive           answer open questions from stdin and keep going
   --state <dir>           save the plan, board, and ledger there and resume
                           from it on the next run      [env RUSTY_ORCH_STATE]
@@ -27,8 +30,10 @@ exit status: 0 finished, 3 blocked on questions, 4 budget or agent failure, 2 us
 pub struct Args {
     pub goal: PathBuf,
     pub ollama_model: String,
-    pub codex_repo: PathBuf,
+    /// The repository the CLI agents read, as their working directory.
+    pub repo: PathBuf,
     pub codex_model: Option<String>,
+    pub claude_model: Option<String>,
     pub interactive: bool,
     pub json: bool,
     /// Where to persist and resume from; `None` keeps the run in memory.
@@ -60,16 +65,20 @@ pub fn parse(
     }
     let mut goal = None;
     let mut ollama_model = env("ORCH_OLLAMA_MODEL");
-    let mut codex_repo = env("ORCH_CODEX_REPO").map(PathBuf::from);
+    let mut repo = env("ORCH_REPO")
+        .or_else(|| env("ORCH_CODEX_REPO"))
+        .map(PathBuf::from);
     let mut codex_model = None;
+    let mut claude_model = None;
     let mut interactive = false;
     let mut json = false;
     let mut state = env("RUSTY_ORCH_STATE").map(PathBuf::from);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--ollama-model" => ollama_model = Some(value(&arg, argv.next())?),
-            "--codex-repo" => codex_repo = Some(PathBuf::from(value(&arg, argv.next())?)),
+            "--repo" | "--codex-repo" => repo = Some(PathBuf::from(value(&arg, argv.next())?)),
             "--codex-model" => codex_model = Some(value(&arg, argv.next())?),
+            "--claude-model" => claude_model = Some(value(&arg, argv.next())?),
             "--interactive" => interactive = true,
             "--json" => json = true,
             "--state" => state = Some(PathBuf::from(value(&arg, argv.next())?)),
@@ -82,8 +91,9 @@ pub fn parse(
     Ok(Args {
         goal: goal.ok_or_else(|| usage("missing <goal.json>".to_owned()))?,
         ollama_model: ollama_model.unwrap_or_else(|| "llama3.2".to_owned()),
-        codex_repo: codex_repo.unwrap_or(cwd),
+        repo: repo.unwrap_or(cwd),
         codex_model,
+        claude_model,
         interactive,
         json,
         state,
@@ -116,8 +126,9 @@ mod tests {
         let a = parse(argv("run goal.json"), no_env, PathBuf::from("/work")).expect("ok");
         assert_eq!(a.goal, PathBuf::from("goal.json"));
         assert_eq!(a.ollama_model, "llama3.2");
-        assert_eq!(a.codex_repo, PathBuf::from("/work"));
+        assert_eq!(a.repo, PathBuf::from("/work"));
         assert_eq!(a.codex_model, None);
+        assert_eq!(a.claude_model, None);
         assert!(!a.interactive && !a.json);
         assert_eq!(a.state, None);
     }
@@ -139,6 +150,27 @@ mod tests {
     }
 
     #[test]
+    fn repo_comes_from_orch_repo_before_the_codex_alias() {
+        let both = |k: &str| match k {
+            "ORCH_REPO" => Some("/env/repo".to_owned()),
+            "ORCH_CODEX_REPO" => Some("/env/old".to_owned()),
+            _ => None,
+        };
+        let a = parse(argv("run g.json"), both, PathBuf::from("/work")).expect("ok");
+        assert_eq!(a.repo, PathBuf::from("/env/repo"));
+        let old_only = |k: &str| (k == "ORCH_CODEX_REPO").then(|| "/env/old".to_owned());
+        let a = parse(argv("run g.json"), old_only, PathBuf::from("/work")).expect("ok");
+        assert_eq!(a.repo, PathBuf::from("/env/old"));
+        let a = parse(
+            argv("run --codex-repo /flag g.json"),
+            both,
+            PathBuf::from("/work"),
+        )
+        .expect("ok");
+        assert_eq!(a.repo, PathBuf::from("/flag"));
+    }
+
+    #[test]
     fn flags_override_environment_which_overrides_defaults() {
         let env = |k: &str| match k {
             "ORCH_OLLAMA_MODEL" => Some("env-model".to_owned()),
@@ -147,17 +179,18 @@ mod tests {
         };
         let a = parse(argv("run g.json"), env, PathBuf::from("/work")).expect("ok");
         assert_eq!(a.ollama_model, "env-model");
-        assert_eq!(a.codex_repo, PathBuf::from("/env/repo"));
+        assert_eq!(a.repo, PathBuf::from("/env/repo"));
         let a = parse(
             argv(
-                "run --ollama-model m --codex-repo /r --codex-model c --interactive --json g.json",
+                "run --ollama-model m --repo /r --codex-model c --claude-model k --interactive --json g.json",
             ),
             env,
             PathBuf::from("/work"),
         )
         .expect("ok");
         assert_eq!(a.ollama_model, "m");
-        assert_eq!(a.codex_repo, PathBuf::from("/r"));
+        assert_eq!(a.repo, PathBuf::from("/r"));
+        assert_eq!(a.claude_model.as_deref(), Some("k"));
         assert_eq!(a.codex_model.as_deref(), Some("c"));
         assert!(a.interactive && a.json);
     }

@@ -27,7 +27,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 16 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 22 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 23 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 11 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
@@ -216,13 +216,14 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_meshed | rusty-meshed-sdk | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure. | 2 |
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
-| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 3 |
+| apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
+| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 4 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
-| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 6 |
-| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 5 |
+| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 7 |
+| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 6 |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. | 2 |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. | 1 |
-| apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex and Ollama adapters and prints the board. | 0 |
+| apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board. | 0 |
 | apps | rusty_provider | rp-cli |  | 0 |
 | apps | rusty_provider | rp-core |  | 4 |
 | apps | rusty_provider | rp-mcp |  | 1 |

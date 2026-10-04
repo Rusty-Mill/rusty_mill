@@ -10,8 +10,8 @@ use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
 use anyhow::Context;
 use rmcp::model::{
-    CallToolRequestParam, CallToolResult, Content, ListToolsResult, PaginatedRequestParam,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt};
@@ -29,18 +29,15 @@ where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            instructions: Some(
-                "Rusty Keys harness exposed over MCP. Call `chat` to run a turn.".into(),
-            ),
-            ..Default::default()
-        }
+        // rmcp 3.1.4: `ServerInfo` is non-exhaustive, so it is built through
+        // its constructor.
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("Rusty Keys harness exposed over MCP. Call `chat` to run a turn.")
     }
 
     fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + Send + '_ {
         let schema = json!({
@@ -59,15 +56,15 @@ where
         );
         std::future::ready(Ok(ListToolsResult {
             tools: vec![tool],
-            next_cursor: None,
+            ..Default::default()
         }))
     }
 
     fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         _ctx: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send + '_ {
+    ) -> impl std::future::Future<Output = Result<CallToolResponse, ErrorData>> + Send + '_ {
         let session = self.session.clone();
         async move {
             if request.name != "chat" {
@@ -82,10 +79,12 @@ where
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             match session.send(message).await {
-                Ok(outcome) => Ok(CallToolResult::success(vec![Content::text(outcome.reply)])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "harness error: {e}"
-                ))])),
+                Ok(outcome) => Ok(CallToolResponse::from(CallToolResult::success(vec![
+                    ContentBlock::text(outcome.reply),
+                ]))),
+                Err(e) => Ok(CallToolResponse::from(CallToolResult::error(vec![
+                    ContentBlock::text(format!("harness error: {e}")),
+                ]))),
             }
         }
     }
