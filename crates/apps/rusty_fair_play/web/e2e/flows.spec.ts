@@ -186,3 +186,46 @@ test('re-parent and re-suit, split, reorder, unsplit, delete a card, and remove 
   await page.reload()
   await expect(page.getByRole('list', { name: 'People' }).getByRole('listitem')).toHaveCount(2)
 })
+
+test('two tabs edit the same card: the second save is refused, its draft is kept, and Overwrite takes it', async ({ browser }) => {
+  const context = await browser.newContext()
+  const one = await context.newPage()
+  const two = await context.newPage()
+  for (const page of [one, two]) {
+    await page.goto('/#/deck')
+    await tile(page, /^Laundry/).click()
+    await expect(pane(page).getByLabel('Name')).toHaveValue('Laundry')
+  }
+
+  // Both tabs have read the card; the first saves its notes.
+  await pane(one).getByLabel('Notes').fill('first tab')
+  await pane(one).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(one).getByRole('button', { name: 'Save' })).toBeHidden()
+
+  // The second tab, still on the old version, saves a different field. The server refuses it.
+  await pane(two).getByLabel('Planning').fill('second tab plan')
+  await pane(two).getByRole('button', { name: 'Save' }).click()
+  await expect(two.getByRole('status')).toContainText('changed elsewhere')
+  await expect(pane(two).getByRole('alert')).toContainText('changed elsewhere')
+  await expect(pane(two).getByLabel('Planning')).toHaveValue('second tab plan') // the draft is kept
+  await expect(pane(two).getByLabel('Notes')).toHaveValue('first tab') // the rest shows the new version
+
+  // Nothing was written by the refused save.
+  await two.reload()
+  await expect(pane(two).getByLabel('Planning')).not.toHaveValue('second tab plan')
+
+  // Typing again and choosing Overwrite lands it on top of the newer card.
+  await pane(two).getByLabel('Planning').fill('second tab plan')
+  await one.reload() // the first tab changes the card again before the second saves
+  await pane(one).getByLabel('Notes').fill('first tab, again')
+  await pane(one).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(one).getByRole('button', { name: 'Save' })).toBeHidden()
+  await pane(two).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(two).getByRole('alert')).toBeVisible()
+  await pane(two).getByRole('button', { name: 'Overwrite' }).click()
+  await expect(pane(two).getByRole('alert')).toBeHidden()
+  await two.reload()
+  await expect(pane(two).getByLabel('Planning')).toHaveValue('second tab plan')
+  await expect(pane(two).getByLabel('Notes')).toHaveValue('first tab, again')
+  await context.close()
+})
