@@ -19,13 +19,23 @@
 //! | POST | `/cards/{id}/reset` | the six text fields back to the baseline |
 //! | GET | `/cards/{id}/baseline` | the baseline and a field-by-field diff |
 //! | PUT | `/cards/{id}/position` | `{"position": n}`: one durable slot write |
+//! | PUT | `/cards/{id}/children/order` | `{"ids":[…]}`: every child once; positions follow the list |
+//! | DELETE | `/cards/{id}` | a leaf card; 409 for a split parent |
+//! | POST | `/cards/{id}/unsplit` | delete everything under the card, deepest first; the card stays |
+//! | DELETE | `/people/{id}` | 409 while the person holds a card |
+//!
+//! Every card carries an `etag`; a write on a card (`PATCH`, `DELETE`,
+//! `split`, `reset`, `unsplit`, `position`, `children/order`) accepts
+//! `If-Match: "<etag>"` and is refused with 412 and the current card in
+//! `current` when the card changed since it was read.
 //!
 //! Errors are `{"error":{"code","message"}}`: 400 malformed request, 401,
-//! 404, 409 conflict, 422 invalid value, 500.
+//! 404, 409 conflict, 412 stale, 422 invalid value, 500.
 
 use crate::dto::{
-    parse_suit, BaselineResponse, CardDto, CreateCard, CreatePerson, PatchCard, PatchPerson,
-    PersonDto, SeedDto, SetPosition, SnapshotDto, SplitChildInput, SplitDto, SplitInput, TallyDto,
+    parse_suit, BaselineResponse, CardDto, CardsDto, CreateCard, CreatePerson, PatchCard,
+    PatchPerson, PersonDto, SeedDto, SetOrder, SetPosition, SnapshotDto, SplitChildInput, SplitDto,
+    SplitInput, TallyDto, UnsplitDto,
 };
 use crate::service::{CardPatch, NewCard, Service, ServiceError, SplitChild, SplitRequest};
 use rusty_http::{Method, StatusCode};
@@ -41,6 +51,7 @@ pub struct Request<'a> {
     /// Origin-form target: path and optional `?query`.
     pub target: &'a str,
     pub authorization: Option<&'a str>,
+    pub if_match: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -77,6 +88,8 @@ impl Response {
         #[derive(Serialize)]
         struct Body<'a> {
             error: Inner<'a>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            current: Option<&'a CardDto>,
         }
         #[derive(Serialize)]
         struct Inner<'a> {
@@ -88,6 +101,10 @@ impl Response {
                 code: error.code(),
                 message: &error.message(),
             },
+            current: match error {
+                ApiError::Stale(current) => Some(current),
+                _ => None,
+            },
         };
         let text = rusty_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
         Self {
@@ -97,13 +114,14 @@ impl Response {
     }
 }
 
-#[derive(Debug)]
 enum ApiError {
     BadRequest(String),
     Unauthorized,
     NotFound(String),
     Invalid(String),
     Conflict(String),
+    /// `If-Match` named another version; carries the card as stored now.
+    Stale(Box<CardDto>),
     Internal,
 }
 
@@ -115,6 +133,7 @@ impl ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Stale(_) => StatusCode::PRECONDITION_FAILED,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -126,6 +145,7 @@ impl ApiError {
             Self::NotFound(_) => "not_found",
             Self::Invalid(_) => "invalid",
             Self::Conflict(_) => "conflict",
+            Self::Stale(_) => "precondition_failed",
             Self::Internal => "internal",
         }
     }
@@ -137,6 +157,7 @@ impl ApiError {
                 m.clone()
             }
             Self::Unauthorized => "missing or invalid bearer token".to_string(),
+            Self::Stale(_) => "the card changed since you read it".to_string(),
             Self::Internal => "internal error".to_string(),
         }
     }
@@ -205,6 +226,7 @@ impl Api {
         let cx = Cx {
             method: request.method,
             body: request.body,
+            if_match: request.if_match,
         };
         match segments.as_slice() {
             ["api", "v1", rest @ ..] => route(&mut self.service, &cx, rest),
@@ -241,12 +263,31 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 struct Cx<'a> {
     method: &'a Method,
     body: &'a [u8],
+    if_match: Option<&'a str>,
 }
 
 impl Cx<'_> {
     fn body<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
         rusty_json::from_slice(self.body)
             .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
+    }
+
+    /// `Err(412 with the current card)` when `If-Match` is present and
+    /// does not name the card as stored now; `Ok` otherwise.
+    fn check_match(&self, service: &Service, id: Uuid) -> Result<()> {
+        let Some(presented) = self.if_match else {
+            return Ok(());
+        };
+        let presented = presented.trim();
+        if presented == "*" {
+            return Ok(());
+        }
+        let current = service.card(id)?;
+        let presented = presented.trim_start_matches("W/").trim_matches('"');
+        if presented == current.etag() {
+            return Ok(());
+        }
+        Err(ApiError::Stale(Box::new(CardDto::from(current))))
     }
 }
 
@@ -319,6 +360,10 @@ fn route_people(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Res
             let person = service.rename_person(parse_id(id)?, &input.name)?;
             Ok(Response::json(StatusCode::OK, &PersonDto::from(person)))
         }
+        (Method::Delete, [id]) => {
+            service.delete_person(parse_id(id)?)?;
+            Ok(Response::empty(StatusCode::NO_CONTENT))
+        }
         _ => Err(not_found()),
     }
 }
@@ -352,6 +397,7 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
             Ok(Response::json(StatusCode::OK, &CardDto::from(view)))
         }
         (Method::Patch, [id]) => {
+            cx.check_match(service, parse_id(id)?)?;
             let input: PatchCard = cx.body()?;
             let patch = CardPatch {
                 name: input.name,
@@ -368,7 +414,38 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
             let view = service.patch_card(parse_id(id)?, patch)?;
             Ok(Response::json(StatusCode::OK, &CardDto::from(view)))
         }
+        (Method::Delete, [id]) => {
+            let id = parse_id(id)?;
+            cx.check_match(service, id)?;
+            service.delete_card(id)?;
+            Ok(Response::empty(StatusCode::NO_CONTENT))
+        }
+        (Method::Post, [id, "unsplit"]) => {
+            let id = parse_id(id)?;
+            cx.check_match(service, id)?;
+            let (parent, deleted) = service.unsplit(id)?;
+            Ok(Response::json(
+                StatusCode::OK,
+                &UnsplitDto {
+                    parent: CardDto::from(parent),
+                    deleted,
+                },
+            ))
+        }
+        (Method::Put, [id, "children", "order"]) => {
+            let id = parse_id(id)?;
+            cx.check_match(service, id)?;
+            let input: SetOrder = cx.body()?;
+            let cards = service.reorder_children(id, &input.ids)?;
+            Ok(Response::json(
+                StatusCode::OK,
+                &CardsDto {
+                    cards: cards.into_iter().map(CardDto::from).collect(),
+                },
+            ))
+        }
         (Method::Post, [id, "split"]) => {
+            cx.check_match(service, parse_id(id)?)?;
             let input: SplitInput = cx.body()?;
             let request = SplitRequest {
                 children: input.children.into_iter().map(split_child).collect(),
@@ -385,6 +462,7 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
             ))
         }
         (Method::Post, [id, "reset"]) => {
+            cx.check_match(service, parse_id(id)?)?;
             let view = service.reset(parse_id(id)?)?;
             Ok(Response::json(StatusCode::OK, &CardDto::from(view)))
         }
@@ -399,6 +477,7 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
             ))
         }
         (Method::Put, [id, "position"]) => {
+            cx.check_match(service, parse_id(id)?)?;
             let input: SetPosition = cx.body()?;
             service.set_position(parse_id(id)?, input.position)?;
             Ok(Response::empty(StatusCode::NO_CONTENT))

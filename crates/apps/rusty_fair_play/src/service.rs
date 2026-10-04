@@ -5,17 +5,19 @@
 
 use rusty_fair_play_domain::seed::{self, SeedData, SeedError, SeedReport};
 use rusty_fair_play_domain::{
-    baseline_diff, baseline_of, card_state, create_custom_card, deck_card_id, fair_play_id,
-    open_or_create_card_default_production_stack, open_or_create_card_production_stack,
-    open_or_create_person_production_stack, person_id, replace_card, reset_to_baseline,
-    set_position, split_card, Card, CardDefault, CardDefaultProductionStack, CardError,
-    CardProductionStack, CardState, FieldDiff, NewCustomCard, Person, PersonProductionStack,
-    SplitSpec, Suit, CARD_DEFAULT_FILE, CARD_FILE, PERSON_FILE,
+    baseline_diff, baseline_of, card_state, create_custom_card, deck_card_id, delete_card,
+    delete_person, fair_play_id, open_or_create_card_default_production_stack,
+    open_or_create_card_production_stack, open_or_create_person_production_stack, person_id,
+    reorder_children, replace_card, reset_to_baseline, set_position, split_card, unsplit_card,
+    Card, CardDefault, CardDefaultProductionStack, CardError, CardProductionStack, CardState,
+    FieldDiff, NewCustomCard, Person, PersonProductionStack, SplitSpec, Suit, CARD_DEFAULT_FILE,
+    CARD_FILE, PERSON_FILE,
 };
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
-use rusty_multimodal_db_engine::generic::{InsertError, ReplaceError};
+use rusty_multimodal_db_engine::generic::{DeleteError, InsertError, ReplaceError};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -53,14 +55,18 @@ impl From<DirLockError> for ServiceError {
 impl From<CardError> for ServiceError {
     fn from(e: CardError) -> Self {
         match e {
-            CardError::NotFound(_) | CardError::Replace(ReplaceError::NotFound(_)) => {
-                Self::NotFound("card")
-            }
+            CardError::NotFound(_)
+            | CardError::Replace(ReplaceError::NotFound(_))
+            | CardError::Delete(DeleteError::NotFound(_)) => Self::NotFound("card"),
             CardError::Insert(InsertError::Duplicate(_)) => {
                 Self::Conflict("a card with that id already exists".into())
             }
+            CardError::HasChildren(_) | CardError::HoldsCards { .. } => {
+                Self::Conflict(e.to_string())
+            }
             CardError::Insert(InsertError::Durability(e))
-            | CardError::Replace(ReplaceError::Durability(e)) => Self::Storage(e.to_string()),
+            | CardError::Replace(ReplaceError::Durability(e))
+            | CardError::Delete(DeleteError::Durability(e)) => Self::Storage(e.to_string()),
             other => Self::Invalid(other.to_string()),
         }
     }
@@ -84,6 +90,21 @@ pub type Result<T> = std::result::Result<T, ServiceError>;
 pub struct CardView {
     pub card: Card,
     pub state: CardState,
+}
+
+impl CardView {
+    /// The card's etag: SHA-256 over its serialized form, shortened. Two
+    /// reads of the same stored card agree; any field change changes it.
+    pub fn etag(&self) -> String {
+        card_etag(&self.card)
+    }
+}
+
+/// See [`CardView::etag`].
+pub fn card_etag(card: &Card) -> String {
+    let text = rusty_json::to_string(card).unwrap_or_default();
+    let digest = Sha256::digest(text.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Everything the UI needs to boot: one read.
@@ -390,6 +411,31 @@ impl Service {
         set_position(&mut self.cards, id, position).map_err(|_| ServiceError::NotFound("card"))
     }
 
+    /// Put `parent`'s children in `order` — one request, one lock, one
+    /// slot write per child — and return them in that order.
+    pub fn reorder_children(&mut self, parent: Uuid, order: &[Uuid]) -> Result<Vec<CardView>> {
+        reorder_children(&mut self.cards, parent, order)?;
+        order.iter().map(|id| self.card_view(*id)).collect()
+    }
+
+    /// Delete a leaf card; a split parent is refused (`Conflict`).
+    pub fn delete_card(&mut self, id: Uuid) -> Result<()> {
+        Ok(delete_card(&mut self.cards, id)?)
+    }
+
+    /// Merge a split back: every card under `id` goes, deepest first;
+    /// `id` stays. Returns the parent and the deleted ids.
+    pub fn unsplit(&mut self, id: Uuid) -> Result<(CardView, Vec<Uuid>)> {
+        let deleted = unsplit_card(&mut self.cards, id)?;
+        Ok((self.card_view(id)?, deleted))
+    }
+
+    /// Delete a person who holds no card; one who does is refused
+    /// (`Conflict`, naming the count).
+    pub fn delete_person(&mut self, id: Uuid) -> Result<()> {
+        Ok(delete_person(&mut self.people, &self.cards, id)?)
+    }
+
     /// Load the deck that ships in the library; idempotent.
     pub fn seed_deck(&mut self) -> Result<SeedReport> {
         let data = SeedData {
@@ -583,5 +629,53 @@ mod tests {
             s.card(Uuid::from_u128(1)),
             Err(ServiceError::NotFound("card"))
         ));
+
+        // Etags change with the card and only with the card.
+        let before = s.card(cleaning).unwrap().etag();
+        assert_eq!(before, s.card(cleaning).unwrap().etag());
+        s.patch_card(
+            cleaning,
+            CardPatch {
+                notes: Some("again".into()),
+                ..CardPatch::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(before, s.card(cleaning).unwrap().etag());
+
+        // Reorder, delete, unsplit, delete person.
+        let (floors, bathrooms) = (split.children[1].card.id, split.children[0].card.id);
+        let ordered = s.reorder_children(cleaning, &[floors, bathrooms]).unwrap();
+        assert_eq!(
+            ordered.iter().map(|v| v.card.position).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(matches!(
+            s.reorder_children(cleaning, &[floors]),
+            Err(ServiceError::Invalid(_))
+        ));
+        assert!(matches!(
+            s.delete_card(cleaning),
+            Err(ServiceError::Conflict(_))
+        ));
+        assert!(matches!(
+            s.delete_person(bob.id),
+            Err(ServiceError::Conflict(_))
+        ));
+        s.delete_card(floors).unwrap();
+        let (parent, deleted) = s.unsplit(cleaning).unwrap();
+        assert_eq!(deleted, vec![bathrooms]);
+        assert_eq!(parent.card.id, cleaning);
+        assert!(matches!(
+            s.card(bathrooms),
+            Err(ServiceError::NotFound("card"))
+        ));
+        s.delete_card(custom.card.id).unwrap();
+        s.delete_person(bob.id).unwrap();
+        assert!(matches!(
+            s.person(bob.id),
+            Err(ServiceError::NotFound("person"))
+        ));
+        assert_eq!(s.snapshot().unwrap().cards.len(), 100);
     }
 }

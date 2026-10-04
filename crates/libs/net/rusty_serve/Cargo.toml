@@ -1,0 +1,17 @@
+[package]
+name = "rusty_serve"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+description = "A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty_http = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

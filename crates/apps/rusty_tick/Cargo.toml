@@ -16,6 +16,7 @@ rusty_multimodal_db_engine = { workspace = true }
 # HTTP/1.1 framing, JSON and query-string decoding come from the monorepo's
 # own crates (ADR-0002), not hyper/axum/serde_json.
 rusty_http = { workspace = true }
+rusty_serve = { workspace = true }
 rusty_json = { workspace = true }
 rusty_url = { workspace = true }
 # Per-user tokens (ADR-0002): random secrets, their encoding, and a digest of

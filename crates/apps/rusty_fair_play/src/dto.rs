@@ -47,6 +47,8 @@ pub struct CardDto {
     pub origin: &'static str,
     pub baseline_id: Option<Uuid>,
     pub state: &'static str,
+    /// Changes whenever the card does; send it back as `If-Match`.
+    pub etag: String,
 }
 
 pub fn state_name(state: CardState) -> &'static str {
@@ -59,6 +61,7 @@ pub fn state_name(state: CardState) -> &'static str {
 
 impl From<CardView> for CardDto {
     fn from(v: CardView) -> Self {
+        let etag = v.etag();
         let c: Card = v.card;
         Self {
             id: c.id,
@@ -79,8 +82,20 @@ impl From<CardView> for CardDto {
             },
             baseline_id: c.baseline_id,
             state: state_name(v.state),
+            etag,
         }
     }
+}
+
+#[derive(Serialize)]
+pub struct CardsDto {
+    pub cards: Vec<CardDto>,
+}
+
+#[derive(Serialize)]
+pub struct UnsplitDto {
+    pub parent: CardDto,
+    pub deleted: Vec<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -267,6 +282,13 @@ pub struct SplitInput {
 #[serde(deny_unknown_fields)]
 pub struct SetPosition {
     pub position: u32,
+}
+
+/// `PUT /cards/{id}/children/order`: every current child, once.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetOrder {
+    pub ids: Vec<Uuid>,
 }
 
 /// The deck spelling, or `None`.

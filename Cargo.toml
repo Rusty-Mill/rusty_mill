@@ -42,6 +42,7 @@ members = [
     "crates/libs/async/rusty_stream",
     "crates/foundation/rusty_url",
     "crates/libs/net/rusty_http",
+    "crates/libs/net/rusty_serve",
     "crates/foundation/rusty_json",
     "crates/foundation/rusty_json/rusty_json-derive",
     "crates/libs/net/rusty_oauth",
@@ -584,6 +585,7 @@ ts-engine = { path = "crates/apps/rusty_tailscale/crates/ts-engine" }
 ts-localapi = { path = "crates/apps/rusty_tailscale/crates/ts-localapi" }
 ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
+rusty_serve = { path = "crates/libs/net/rusty_serve" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }

@@ -13874,8 +13874,10 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_multimodal_db_engine",
+ "rusty_serve",
  "rusty_url",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "uuid",
@@ -14226,6 +14228,14 @@ name = "rusty_serde_erased"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_serve"
+version = "0.1.0"
+dependencies = [
+ "rusty_http",
+ "tempfile",
+]
+
+[[package]]
 name = "rusty_sha1"
 version = "0.1.0"
 
@@ -14320,6 +14330,7 @@ dependencies = [
  "rusty_multimodal_db_engine",
  "rusty_rand",
  "rusty_rsa",
+ "rusty_serve",
  "rusty_url",
  "serde",
  "tempfile",

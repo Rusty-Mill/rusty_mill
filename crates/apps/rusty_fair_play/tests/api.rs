@@ -28,11 +28,23 @@ impl Harness {
         body: &str,
         auth: Option<&str>,
     ) -> (u16, Value) {
+        self.send_with(method, target, body, auth, None)
+    }
+
+    fn send_with(
+        &mut self,
+        method: Method,
+        target: &str,
+        body: &str,
+        auth: Option<&str>,
+        if_match: Option<&str>,
+    ) -> (u16, Value) {
         let header = auth.map(|t| format!("Bearer {t}"));
         let request = Request {
             method: &method,
             target,
             authorization: header.as_deref(),
+            if_match,
             body: body.as_bytes(),
         };
         let response = self.api.handle(&request);
@@ -324,4 +336,145 @@ fn deal_split_edit_reset_and_custom_cards_over_the_api() {
     let (_, v) = h.call(Method::Get, "/api/v1/snapshot", "");
     assert_eq!(v["cards"].as_array().unwrap().len(), 104);
     assert_eq!(v["people"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn delete_unsplit_reorder_and_if_match_over_the_api() {
+    let (_d, mut h) = harness();
+    let ada = h.person("Ada");
+    let cleaning = card(2);
+    let (status, v) = h.call(
+        Method::Post,
+        &format!("/api/v1/cards/{cleaning}/split"),
+        r#"{"children":[{"name":"Bathrooms"},{"name":"Floors"},{"name":"Windows"}]}"#,
+    );
+    assert_eq!(status, 201, "{v:?}");
+    let ids: Vec<String> = v["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect();
+    let etag = v["parent"]["etag"].as_str().unwrap().to_string();
+    assert_eq!(etag.len(), 16, "eight bytes of SHA-256, hex");
+
+    // Atomic reorder: exact set or 422; the children come back in order.
+    let order = format!("/api/v1/cards/{cleaning}/children/order");
+    let (status, v) = h.call(
+        Method::Put,
+        &order,
+        &format!(r#"{{"ids":["{}","{}","{}"]}}"#, ids[2], ids[0], ids[1]),
+    );
+    assert_eq!(status, 200, "{v:?}");
+    let back: Vec<&str> = v["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        back,
+        vec![ids[2].as_str(), ids[0].as_str(), ids[1].as_str()]
+    );
+    assert_eq!(v["cards"][0]["position"].as_i64(), Some(0));
+    assert_eq!(
+        h.call(Method::Put, &order, &format!(r#"{{"ids":["{}"]}}"#, ids[0]))
+            .0,
+        422
+    );
+    assert_eq!(
+        h.call(Method::Put, &order, r#"{"ids":["not-a-uuid"]}"#).0,
+        400
+    );
+
+    // If-Match: a stale tag is a 412 carrying the current card.
+    let (status, v) = h.send_with(
+        Method::Patch,
+        &format!("/api/v1/cards/{cleaning}"),
+        r#"{"notes":"x"}"#,
+        Some(TOKEN),
+        Some("\"0000000000000000\""),
+    );
+    assert_eq!(status, 412, "{v:?}");
+    assert_eq!(v["error"]["code"].as_str(), Some("precondition_failed"));
+    assert_eq!(
+        v["current"]["id"].as_str(),
+        Some(cleaning.as_str())
+    );
+    assert_eq!(v["current"]["etag"].as_str(), Some(etag.as_str()));
+    let (status, v) = h.send_with(
+        Method::Patch,
+        &format!("/api/v1/cards/{cleaning}"),
+        r#"{"notes":"x"}"#,
+        Some(TOKEN),
+        Some(&format!("\"{etag}\"")),
+    );
+    assert_eq!(status, 200, "{v:?}");
+    assert_ne!(v["etag"].as_str(), Some(etag.as_str()), "the tag moved");
+    let (status, _) = h.send_with(
+        Method::Patch,
+        &format!("/api/v1/cards/{cleaning}"),
+        r#"{"notes":"y"}"#,
+        Some(TOKEN),
+        Some("*"),
+    );
+    assert_eq!(status, 200, "a wildcard always matches");
+
+    // Delete: a leaf goes, a parent is refused until unsplit.
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/cards/{cleaning}"), "")
+            .0,
+        409
+    );
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/cards/{}", ids[1]), "")
+            .0,
+        204
+    );
+    assert_eq!(
+        h.call(Method::Get, &format!("/api/v1/cards/{}", ids[1]), "")
+            .0,
+        404
+    );
+    let (status, v) = h.call(
+        Method::Post,
+        &format!("/api/v1/cards/{cleaning}/unsplit"),
+        "",
+    );
+    assert_eq!(status, 200, "{v:?}");
+    assert_eq!(v["deleted"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/cards/{cleaning}"), "")
+            .0,
+        204,
+        "a deck card is deletable once it is a leaf"
+    );
+
+    // A person holding a card stays; one holding none goes.
+    let laundry = card(3);
+    h.call(
+        Method::Patch,
+        &format!("/api/v1/cards/{laundry}"),
+        &format!(r#"{{"ownerId":"{ada}"}}"#),
+    );
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/people/{ada}"), "")
+            .0,
+        409
+    );
+    h.call(
+        Method::Patch,
+        &format!("/api/v1/cards/{laundry}"),
+        r#"{"ownerId":null}"#,
+    );
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/people/{ada}"), "")
+            .0,
+        204
+    );
+    assert_eq!(
+        h.call(Method::Delete, &format!("/api/v1/people/{ada}"), "")
+            .0,
+        404
+    );
 }
