@@ -26,6 +26,22 @@ def manifest(task: str, **fields) -> None:
     write(HERE / task / "task.json", json.dumps({"id": task, **fields}, indent=2) + "\n")
 
 
+CONTRACT = """
+## Solution contract
+
+Write one Python 3 file, standard library only. It runs as
+`python3 solution.py data/{inputs} output.txt` in a fresh directory,
+with no network, a {cpu}-second CPU limit and {memory} MB of memory.
+`RSI_SEED` in the environment holds a seed for any randomness.
+Write exactly one answer per input line to `output.txt`.
+"""
+
+
+def describe(task: str, body: str, inputs: str) -> None:
+    contract = CONTRACT.format(inputs=inputs, cpu=10, memory=512)
+    write(HERE / task / "public" / "task.md", body.strip() + "\n" + contract)
+
+
 # --- ml-regression --------------------------------------------------------
 
 def target(x1: float, x2: float, x3: float, rng: random.Random) -> float:
@@ -48,9 +64,23 @@ def ml_regression() -> None:
         write(HERE / task / split / "inputs.csv", "x1,x2,x3\n" + "".join(f"{a},{b},{c}\n" for (a, b, c), _ in rows))
         write(HERE / task / split / "labels.txt", "".join(f"{y}\n" for _, y in rows))
     write(HERE / task / "public" / "baseline.py", ML_BASELINE)
+    describe(task, ML_DESCRIPTION, "inputs.csv")
     manifest(task, family="ml", metric="r2", shared=["train.csv"], inputs="inputs.csv", floor=0.0,
              limits={"cpu_secs": 10, "wall_secs": 20, "memory_mb": 512})
 
+
+ML_DESCRIPTION = """
+# ml-regression
+
+Predict a numeric target `y` from three features.
+
+- `data/train.csv` has a header `x1,x2,x3,y` and 200 training rows.
+- `data/inputs.csv` has a header `x1,x2,x3` and one row per prediction.
+- The target is a smooth, partly nonlinear function of the features plus noise.
+
+Write one prediction (a number) per input row. The score is R² against the
+true targets, clamped to [0, 1]; predicting the training mean scores about 0.
+"""
 
 ML_BASELINE = '''"""Baseline: predict the training mean of y for every row."""
 import csv
@@ -110,9 +140,24 @@ def tsp_heuristic() -> None:
         write(HERE / task / split / "instances.txt", "".join(f"{line}\n" for line in lines))
         write(HERE / task / split / "labels.txt", "".join(f"{r}\n" for r in refs))
     write(HERE / task / "public" / "baseline.py", TSP_BASELINE)
+    describe(task, TSP_DESCRIPTION, "instances.txt")
     manifest(task, family="heuristic", metric="tour_ratio", shared=[], inputs="instances.txt", floor=0.0,
              limits={"cpu_secs": 10, "wall_secs": 20, "memory_mb": 512})
 
+
+TSP_DESCRIPTION = """
+# tsp-heuristic
+
+Find short round trips through cities in the unit square.
+
+- Each line of `data/instances.txt` is one instance: `x0 y0 x1 y1 ...`,
+  between 25 and 50 cities.
+
+For each instance write a permutation of the city indices `0..n-1`,
+space-separated, on its own line. The tour returns to its start. The score
+is the mean over instances of min(1, reference length / your length); the
+order as given scores about 0.2.
+"""
 
 TSP_BASELINE = '''"""Baseline: visit the cities in the order given."""
 import sys
@@ -144,6 +189,7 @@ def scaffold_oracle() -> None:
         write(HERE / task / split / "labels.txt", "".join(f"{a}\n" for a in answers))
     write(HERE / task / "public" / "oracle.py", ORACLE)
     write(HERE / task / "public" / "baseline.py", ORACLE_BASELINE)
+    describe(task, ORACLE_DESCRIPTION, "questions.txt")
     manifest(task, family="harness", metric="accuracy", shared=["oracle.py"], inputs="questions.txt",
              floor=0.0, limits={"cpu_secs": 10, "wall_secs": 20, "memory_mb": 512})
 
@@ -180,6 +226,21 @@ def ask(question: str, attempt: int = 0) -> str:
     offset = 1 + digest[1] % 3
     return str(truth + offset if digest[2] % 2 else truth - offset)
 '''
+
+ORACLE_DESCRIPTION = """
+# scaffold-oracle
+
+Answer arithmetic questions using a noisy oracle.
+
+- Each line of `data/questions.txt` is a question such as `What is 12 plus 7?`.
+- `data/oracle.py` provides `ask(question, attempt=0) -> str`. About a third
+  of its answers are slightly wrong; different `attempt` numbers can give
+  different answers. Each question may be asked at most 5 times.
+  Import it with `sys.path.insert(0, "data"); import oracle`.
+
+Write one integer answer per question. The score is accuracy; asking once
+and trusting the oracle scores about 0.8.
+"""
 
 ORACLE_BASELINE = '''"""Baseline: ask the oracle once per question and trust it."""
 import sys

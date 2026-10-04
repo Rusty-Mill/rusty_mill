@@ -27,7 +27,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 16 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 22 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 23 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 0 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 9 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
@@ -95,7 +95,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 2 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 3 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 15 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 16 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
@@ -219,13 +219,14 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_meshed | rusty-meshed-sdk | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure. | 2 |
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. | 0 |
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
-| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 3 |
+| apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. | 1 |
+| apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 4 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
-| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 6 |
-| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 5 |
+| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 7 |
+| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 6 |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. | 2 |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. | 1 |
-| apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex and Ollama adapters and prints the board. | 0 |
+| apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board. | 0 |
 | apps | rusty_provider | rp-cli |  | 0 |
 | apps | rusty_provider | rp-core |  | 4 |
 | apps | rusty_provider | rp-mcp |  | 1 |
@@ -240,7 +241,8 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_remind_me | rusty-remind-me |  | 0 |
 | apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary and its sandbox and grader entry points | 0 |
 | apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types | 2 |
-| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics and the out-of-process private grader | 1 |
+| apps | rusty_rsi | rsi-harness | a0, the inner agent of the rusty_rsi harness: AIDE0-style tree search over a metered broker; the outer loop's only mutable surface | 1 |
+| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics, the out-of-process private grader, the inner-agent broker and model clients | 1 |
 | apps | rusty_skillopt | skillopt-cli |  | 0 |
 | apps | rusty_skillopt | skillopt-core |  | 3 |
 | apps | rusty_skillopt | skillopt-envs |  | 1 |

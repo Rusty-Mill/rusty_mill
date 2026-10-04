@@ -10160,6 +10160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-claude"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-cli"
 version = "0.1.0"
 dependencies = [
@@ -12709,6 +12719,7 @@ name = "rsi-cli"
 version = "0.1.0"
 dependencies = [
  "rsi-core",
+ "rsi-harness",
  "rsi-runtime",
 ]
 
@@ -12721,6 +12732,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-harness"
+version = "0.1.0"
+
+[[package]]
 name = "rsi-runtime"
 version = "0.1.0"
 dependencies = [
@@ -12728,6 +12743,7 @@ dependencies = [
  "platform-linux",
  "rsi-core",
  "rusty_err",
+ "rusty_http",
  "rusty_json",
  "rusty_libc",
 ]
@@ -14134,6 +14150,7 @@ dependencies = [
 name = "rusty_orch"
 version = "0.1.0"
 dependencies = [
+ "orch-claude",
  "orch-cli",
  "orch-codex",
  "orch-core",

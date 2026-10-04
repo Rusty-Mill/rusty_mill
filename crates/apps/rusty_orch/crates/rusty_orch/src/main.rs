@@ -8,7 +8,8 @@ use rusty_orch::agents::{Agents, AgentsConfig};
 use rusty_orch::args::{self, ArgsError};
 use rusty_orch::cli::{self, Streams};
 
-/// Local models answer in a few minutes; Codex's default stays its own.
+/// Local models answer in a few minutes; Codex's and Claude's defaults stay
+/// their own.
 const OLLAMA_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn main() -> ExitCode {
@@ -36,8 +37,9 @@ fn main() -> ExitCode {
         Agents::new(AgentsConfig {
             ollama_model: args.ollama_model.clone(),
             ollama_timeout: OLLAMA_TIMEOUT,
-            codex_repo: args.codex_repo.clone(),
+            repo: args.repo.clone(),
             codex_model: args.codex_model.clone(),
+            claude_model: args.claude_model.clone(),
             stop,
         })
     };
