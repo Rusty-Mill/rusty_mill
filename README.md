@@ -188,6 +188,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`skillopt-model`](crates/apps/rusty_skillopt/crates/skillopt-model) | `crates/apps/rusty_skillopt/crates/skillopt-model` | LLM provider adapters for `skillopt-core` |
 | [`skillopt-envs`](crates/apps/rusty_skillopt/crates/skillopt-envs) | `crates/apps/rusty_skillopt/crates/skillopt-envs` | Task environments and benchmark adapters `skillopt-core` optimizes against |
 | [`skillopt-cli`](crates/apps/rusty_skillopt/crates/skillopt-cli) | `crates/apps/rusty_skillopt/crates/skillopt-cli` | `skillopt`: the training-loop command line front end |
+| [`rsi-core`](crates/apps/rusty_rsi/crates/rsi-core) | `crates/apps/rusty_rsi/crates/rsi-core` | Pure domain core of `rusty_rsi`, an AIDE²-style self-improvement harness (ADR-0005): noise-aware accept gate, token and wall-clock budget meter, UCB1/softmax helpers, lineage hash chain |
 | [`rk-config`](crates/apps/rusty_key/crates/config) | `crates/apps/rusty_key/crates/config` | Rusty Keys' configuration layer: typed settings, env overrides, workspace discovery |
 | [`rk-observe`](crates/apps/rusty_key/crates/observe) | `crates/apps/rusty_key/crates/observe` | Rusty Keys' *observe* pillar: structured attribution and turn-level observation records |
 | [`rk-constrain`](crates/apps/rusty_key/crates/constrain) | `crates/apps/rusty_key/crates/constrain` | Rusty Keys' *constrain* pillar: policy enforcement around tool dispatch |

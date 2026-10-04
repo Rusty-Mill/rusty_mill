@@ -3,7 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import { createServices, ServicesProvider, type Services } from '@/app/services'
-import { startOfDay } from '@/lib/date'
+import { DEFAULT_PREFS } from '@/features/settings/prefs'
+import { startOfDay, startOfWeek } from '@/lib/date'
 import { CalendarPage } from './CalendarPage'
 import { rangeTitle, visibleRange } from './layout'
 
@@ -190,8 +191,11 @@ describe('CalendarPage', () => {
   it('shows a repeating task on each of its days in the week, and lists overdue tasks first in the agenda', async () => {
     const { services } = await setup('/c/all/calendar/w')
     const d0 = startOfDay(now())
+    // Start the repeat on the visible week's first day: anchored at today, it
+    // would show once on the week's last day (a Sunday with a Monday start).
+    const weekStart = startOfWeek(d0, DEFAULT_PREFS.weekStart)
     await act(async () => {
-      await services.store.getState().createTask({ listId: services.store.getState().inboxId, title: 'Stretch', dueMs: d0, isAllDay: true, repeatFlag: 'RRULE:FREQ=DAILY' })
+      await services.store.getState().createTask({ listId: services.store.getState().inboxId, title: 'Stretch', dueMs: weekStart, isAllDay: true, repeatFlag: 'RRULE:FREQ=DAILY' })
       await services.store.getState().createTask({ listId: services.store.getState().inboxId, title: 'Late one', dueMs: d0 - 3 * 86_400_000, isAllDay: true })
     })
     expect(screen.getAllByRole('button', { name: /Stretch/ }).length).toBeGreaterThan(1)
