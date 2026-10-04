@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_rsi P2: sandboxed execution, toy tasks and private grading
-**2026-10-04** · [ADR-0005](docs/adr/0005-rsi-harness.md)
+**2026-10-04** · [#476](https://github.com/Rusty-Mill/rusty_mill/pull/476) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `rsi-runtime`:
   - `ProcessExecutor` runs untrusted programs through the `rsi __sandbox` helper. The helper applies rlimits, then Landlock with a read allowlist, then a seccomp block on internet sockets, then `exec`s the program. Setup failures come back through a close-on-exec status file, so a run fails closed.
