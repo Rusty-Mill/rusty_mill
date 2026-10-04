@@ -58,6 +58,8 @@ export interface DataActions {
   split(id: string, input: SplitInput): Promise<SplitResult>
   reset(id: string): Promise<Card>
   deleteCard(id: string): Promise<void>
+  /** Put cards in the family's deck or set them aside, one write each, stopping at the first that fails. */
+  setInPlay(ids: string[], inPlay: boolean): Promise<void>
   unsplit(id: string): Promise<UnsplitResult>
   /** One request: `ids` is the new order of all of `parentId`'s children (validated whole, applied slot by slot). */
   reorderChildren(parentId: string, ids: string[]): Promise<void>
@@ -223,6 +225,12 @@ export function createDataStore({ api }: DataOptions): DataStore {
           mergeCards(card)
           return card
         }, hasParent(id)),
+      async setInPlay(ids, inPlay) {
+        for (const id of ids) {
+          const card = get().index.byId.get(id)
+          if (card && card.inPlay !== inPlay) await get().updateCard(id, { inPlay }, card.etag)
+        }
+      },
       deleteCard: (id) =>
         write(async () => {
           await api.deleteCard(id, etagOf(id))

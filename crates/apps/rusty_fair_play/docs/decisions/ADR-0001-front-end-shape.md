@@ -101,6 +101,21 @@ Three things in the workspace fix the shape:
    opening any stack, so the command is refused while a server holds the
    directory (a second writer would leave the server's in-memory
    indexes stale). `seed_into` is for callers that already hold it.
+10. **The family's deck is a set of ids, not a field on the card.**
+    Families play with the cards they choose, so a card can be *set aside*
+    (`inPlay: false`). The ids live in `set-aside.json` beside the stores,
+    written by rename. Why not a `Card` field: records are `bincode`-
+    positional, so a new field changes the stored layout and breaks every
+    existing data directory, and the wire adapters in `rusty_multimodal_db`
+    would need a column (a protocol change). The cost: the set is outside
+    the engine's durability, so every write orders itself to be safe on a
+    crash (the card is replaced, owner cleared, before the file changes; a
+    crash between leaves an unowned card still in play, never a dealt card
+    set aside), a deleted card is removed from the file, and an unreadable
+    file fails the open. Rules: a set-aside card has no owner and no
+    children, cannot be dealt, split or parented under, and a split card
+    cannot be set aside. It is part of the etag. If another app ever needs
+    the choice, promote it to a `Card` field with a versioned migration.
 
 ## Consequences
 

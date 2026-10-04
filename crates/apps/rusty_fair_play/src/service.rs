@@ -825,7 +825,7 @@ mod tests {
             before.etag(),
             "deck membership is part of the version"
         );
-        assert_eq!(s.card(mail).unwrap().in_play, true);
+        assert!(s.card(mail).unwrap().in_play);
         assert_eq!(
             s.snapshot()
                 .unwrap()

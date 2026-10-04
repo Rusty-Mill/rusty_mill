@@ -169,6 +169,22 @@ describe('data store', () => {
     expect(store.getState().toasts.at(-1)?.kind).toBe('error')
   })
 
+  it('puts cards in or out of the deck, skipping the ones already there', async () => {
+    const { store, api, ada } = await seeded()
+    const [a, b, c] = store.getState().cards as [Card, Card, Card]
+    await store.getState().updateCard(a.id, { ownerId: ada.id }, a.etag)
+    const update = vi.spyOn(api, 'updateCard')
+    await store.getState().setInPlay([a.id, b.id], false)
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(store.getState().index.byId.get(a.id)).toMatchObject({ inPlay: false, ownerId: null })
+    expect(store.getState().index.byId.get(b.id)?.inPlay).toBe(false)
+    expect(store.getState().index.byId.get(c.id)?.inPlay).toBe(true)
+    await store.getState().setInPlay([a.id, b.id], false) // already out: nothing to write
+    expect(update).toHaveBeenCalledTimes(2)
+    await store.getState().setInPlay([a.id], true)
+    expect(store.getState().index.byId.get(a.id)?.inPlay).toBe(true)
+  })
+
   it('toasts a failed write and rethrows it', async () => {
     const { store } = await seeded()
     await expect(store.getState().createPerson('Ada')).rejects.toBeInstanceOf(ConflictError)

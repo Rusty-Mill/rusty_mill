@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ChevronRight, Merge, Scissors, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronRight, ChevronsLeft, ChevronsRight, Merge, Scissors, Trash2, X } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
 import { StaleError } from '@/api/errors'
 import { Link, useNavigate } from 'react-router-dom'
@@ -9,16 +9,28 @@ import { OwnerChip, ownerOf, StateBadge, suitBg, suitText } from '@/components/b
 import { Confirm } from '@/components/Confirm'
 import { Tooltip } from '@/components/Tooltip'
 import { chainToRoot, childrenOf, subtree, type CardIndex } from '@/store/derive'
+import { useUi } from '@/store/ui'
 import { BaselineBlock } from './BaselineBlock'
 import { SplitDialog } from './SplitDialog'
 import { StandardsEditor } from './StandardsEditor'
 
-const shell = 'flex w-[460px] shrink-0 flex-col border-l border-line bg-surface max-[1279px]:w-[400px] max-[999px]:absolute max-[999px]:inset-0 max-[999px]:z-20 max-[999px]:w-full max-[999px]:border-l-0'
+const shell = 'relative flex w-[460px] shrink-0 flex-col border-l border-line bg-surface max-[1279px]:w-[400px] max-[999px]:absolute max-[999px]:inset-0 max-[999px]:z-20 max-[999px]:w-full max-[999px]:border-l-0'
 
 /** The right-side pane for the card in the URL (a drawer over the board on narrow screens). */
 export function DetailPane({ cardId }: { cardId: string | null }) {
   const card = useData((s) => (cardId ? s.index.byId.get(cardId) : undefined))
-  if (!cardId) return <aside aria-label="Card details" className={`${shell} items-center justify-center text-grey max-[999px]:hidden`}>Pick a card</aside>
+  const collapsed = useUi((s) => s.paneCollapsed)
+  // Folded away: a thin rail with one button, so the board gets the room. (On narrow screens the pane is a drawer with its own close button.)
+  if (collapsed) {
+    return (
+      <aside aria-label="Card details" className="flex w-11 shrink-0 flex-col items-center border-l border-line bg-surface pt-3 max-[999px]:hidden">
+        <button type="button" aria-label="Show details" title="Show details" onClick={() => useUi.getState().setPaneCollapsed(false)} className="rounded-row p-1.5 text-grey hover:bg-hover">
+          <ChevronsLeft size={18} />
+        </button>
+      </aside>
+    )
+  }
+  if (!cardId) return <aside aria-label="Card details" className={`${shell} items-center justify-center text-grey max-[999px]:hidden`}><CollapseButton className="absolute right-2 top-3" />Pick a card</aside>
   if (!card) {
     return (
       <aside aria-label="Card details" className={`${shell} items-center justify-center gap-2 text-grey`}>
@@ -31,6 +43,15 @@ export function DetailPane({ cardId }: { cardId: string | null }) {
   }
   // Keyed by id so every draft starts from the card being opened.
   return <CardDetail key={card.id} card={card} />
+}
+
+/** Folds the pane away to its rail; hidden on narrow screens, where the pane is a drawer closed with ✕. */
+function CollapseButton({ className = '' }: { className?: string }) {
+  return (
+    <button type="button" aria-label="Hide details" title="Hide details" onClick={() => useUi.getState().setPaneCollapsed(true)} className={`rounded-row p-1.5 text-grey hover:bg-hover max-[999px]:hidden ${className}`}>
+      <ChevronsRight size={18} />
+    </button>
+  )
 }
 
 interface Draft {
@@ -49,7 +70,7 @@ function CardDetail({ card }: { card: Card }) {
   const navigate = useNavigate()
   const people = useData((s) => s.people)
   const index = useData((s) => s.index)
-  const { updateCard, reorderChildren, deleteCard, unsplit } = useActions()
+  const { updateCard, reorderChildren, deleteCard, unsplit, setInPlay } = useActions()
   const [draft, setDraft] = useState<Draft>(() => draftOf(card))
   // When the card changes under the draft (a reset, a background refresh), fields the user has not touched follow it.
   const [base, setBase] = useState(card)
@@ -72,7 +93,7 @@ function CardDetail({ card }: { card: Card }) {
   const [draftBase, setDraftBase] = useState(card.etag)
   const [saving, setSaving] = useState(false)
   const [splitOpen, setSplitOpen] = useState(false)
-  const [confirm, setConfirm] = useState<'delete' | 'unsplit' | null>(null)
+  const [confirm, setConfirm] = useState<'delete' | 'unsplit' | 'aside' | null>(null)
 
   const chain = useMemo(() => chainToRoot(index, card.id), [index, card.id])
   const children = childrenOf(index, card.id)
@@ -118,6 +139,11 @@ function CardDetail({ card }: { card: Card }) {
     }
   }
 
+  const toggleDeck = (): void => {
+    if (card.inPlay && card.ownerId) return setConfirm('aside')
+    void setInPlay([card.id], !card.inPlay).catch(() => undefined)
+  }
+
   const deal = (value: string): void => {
     void updateCard(card.id, { ownerId: value || null }, card.etag).catch(() => undefined)
   }
@@ -161,6 +187,7 @@ function CardDetail({ card }: { card: Card }) {
             </span>
           ))}
         </nav>
+        <CollapseButton />
         <button type="button" aria-label="Close" onClick={() => navigate(PATHS.deck)} className="rounded-row p-1.5 text-grey hover:bg-hover">
           <X size={18} />
         </button>
@@ -173,6 +200,7 @@ function CardDetail({ card }: { card: Card }) {
             <span className={`font-medium ${suitText[card.suit]}`}>{card.suit}</span>
             {card.number !== null && <span className="text-grey">#{card.number}</span>}
             <StateBadge state={card.state} showOriginal />
+            {!card.inPlay && <span className="rounded-full border border-dashed border-line px-1.5 text-xs text-grey">set aside</span>}
             {card.origin === 'family' && <span className="text-grey">Custom card</span>}
           </div>
         </div>
@@ -197,9 +225,15 @@ function CardDetail({ card }: { card: Card }) {
           </select>
         </div>
 
+        <label className="flex items-center gap-2 text-s">
+          <input type="checkbox" checked={card.inPlay} disabled={children.length > 0 && card.inPlay} onChange={toggleDeck} className="accent-primary" />
+          <span>In our deck</span>
+          {children.length > 0 && card.inPlay && <span className="text-grey">(unsplit it to set it aside)</span>}
+        </label>
+
         <label className="flex items-center gap-2">
           <span className="text-s text-grey">Deal to</span>
-          <select aria-label="Deal to" value={card.ownerId ?? ''} onChange={(e) => deal(e.target.value)} className="field h-8 w-auto">
+          <select aria-label="Deal to" value={card.ownerId ?? ''} disabled={!card.inPlay} onChange={(e) => deal(e.target.value)} className="field h-8 w-auto disabled:opacity-50">
             <option value="">Unassigned</option>
             {people.map((p) => (
               <option key={p.id} value={p.id}>
@@ -264,7 +298,7 @@ function CardDetail({ card }: { card: Card }) {
                   <Merge size={14} /> Unsplit…
                 </button>
               )}
-              <button type="button" onClick={() => setSplitOpen(true)} className="btn">
+              <button type="button" disabled={!card.inPlay} title={card.inPlay ? undefined : 'Add it back to the deck to split it'} onClick={() => setSplitOpen(true)} className="btn disabled:opacity-50">
                 <Scissors size={14} /> Split…
               </button>
             </div>
@@ -300,6 +334,18 @@ function CardDetail({ card }: { card: Card }) {
         </div>
       </div>
       {splitOpen && <SplitDialog card={card} open onClose={() => setSplitOpen(false)} />}
+      <Confirm
+        open={confirm === 'aside'}
+        title={`Set aside "${card.name}"?`}
+        message={`${owner?.name ?? 'Its owner'} gives it up, and it leaves the undealt list and the balance. You can add it back to the deck later.`}
+        confirmLabel="Set aside"
+        danger
+        onConfirm={() => {
+          setConfirm(null)
+          void setInPlay([card.id], false).catch(() => undefined)
+        }}
+        onCancel={() => setConfirm(null)}
+      />
       <Confirm
         open={confirm === 'delete'}
         title={`Delete "${card.name}"?`}

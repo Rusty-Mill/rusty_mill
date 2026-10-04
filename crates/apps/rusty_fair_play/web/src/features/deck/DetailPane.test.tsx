@@ -264,4 +264,22 @@ describe('the detail pane', () => {
     await user.click(within(pane()).getByRole('button', { name: 'Save' }))
     await waitFor(async () => expect((await api.getCard(dishes.id)).notes).toBe('typed meanwhile'))
   })
+
+  it('sets a card aside from the pane (asking first when it is dealt) and adds it back', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    await user.selectOptions(within(pane()).getByLabelText('Deal to'), 'Ada')
+    await waitFor(async () => expect((await api.getCard(dishes.id)).ownerId).toBeTruthy())
+    await user.click(within(pane()).getByRole('checkbox', { name: 'In our deck' }))
+    await user.click(await screen.findByRole('button', { name: 'Set aside' }))
+    await waitFor(() => expect(within(pane()).getByText('set aside')).toBeInTheDocument())
+    expect(await api.getCard(dishes.id)).toMatchObject({ inPlay: false, ownerId: null })
+    expect(within(pane()).getByLabelText('Deal to')).toBeDisabled()
+    expect(within(pane()).getByRole('button', { name: 'Split…' })).toBeDisabled()
+    await user.click(within(pane()).getByRole('checkbox', { name: 'In our deck' }))
+    await waitFor(() => expect(within(pane()).getByLabelText('Deal to')).toBeEnabled())
+    expect((await api.getCard(dishes.id)).inPlay).toBe(true)
+  })
 })
