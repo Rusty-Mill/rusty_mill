@@ -397,10 +397,7 @@ fn delete_unsplit_reorder_and_if_match_over_the_api() {
     );
     assert_eq!(status, 412, "{v:?}");
     assert_eq!(v["error"]["code"].as_str(), Some("precondition_failed"));
-    assert_eq!(
-        v["current"]["id"].as_str(),
-        Some(cleaning.as_str())
-    );
+    assert_eq!(v["current"]["id"].as_str(), Some(cleaning.as_str()));
     assert_eq!(v["current"]["etag"].as_str(), Some(etag.as_str()));
     let (status, v) = h.send_with(
         Method::Patch,
