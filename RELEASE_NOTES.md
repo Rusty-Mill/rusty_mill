@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_rsi P3: the inner agent a0, its broker and model clients
-**2026-10-04** · [#PR](https://github.com/Rusty-Mill/rusty_mill/pull/PR) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+**2026-10-04** · [#478](https://github.com/Rusty-Mill/rusty_mill/pull/478) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `crates/apps/rusty_rsi/harness` (`rsi-harness`), a0, the std-only inner agent. It ports AIDE0: five drafts, then debug a random buggy leaf (p = 0.5, debug depth at most 3) or improve the best node, with the full history in every prompt; it submits each new best. The runtime compiles `src/lib.rs` as a binary with plain `rustc` in the sandbox, so a candidate has no manifest, dependencies or build scripts. A compile error is a build failure, not a crash.
 - **Added:** `rsi-runtime`:
