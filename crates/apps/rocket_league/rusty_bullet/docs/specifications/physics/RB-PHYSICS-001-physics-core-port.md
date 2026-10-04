@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.136.0
+- Version: 0.137.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6497,6 +6497,18 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - `test2` one-step error over 8.342-8.383 s 8.8 -> 0; one-step car
       0.31 -> 0.29, k = 30 car 2.55 -> 2.12. Other captures unchanged.
 
+- `RB-PHYSICS-001-FR-134` (non-sticky tire friction; implemented and
+  verified on the owner's captures, ADR-0053): with no (effective) throttle,
+  each wheel's side grip and braking scale by
+  `NON_STICKY_FRICTION_FACTOR_CURVE` of its contact normal's z ((0, 0.1),
+  (0.7075, 0.5), (1, 1)); with throttle they are unscaled. From
+  `Car::_UpdateWheels`' `isContactSticky`. On a level surface nothing
+  changes.
+  - **Verification**:
+    - `drive` test `coasting_on_a_steep_surface_grips_less_than_driving`.
+    - `hitjump` k = 30 car 10.82 -> 10.52, one-step 0.62 -> 0.61. `test2`,
+      `front`, `side` unchanged.
+
 
 ## Architecture and interfaces
 
@@ -7987,6 +7999,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.137.0 (2026-10-04): `RB-PHYSICS-001-FR-134` — coasting tires grip less on
+  steep surfaces (ADR-0053). 450 tests in `rb_physics_bullet`.
 - 0.136.0 (2026-10-04): `RB-PHYSICS-001-FR-133` — a boost burns for at least
   0.1 s (ADR-0052). 449 tests in `rb_physics_bullet`.
 - 0.135.0 (2026-10-04): `RB-PHYSICS-001-FR-132` — a tire's side force acts

@@ -3543,3 +3543,38 @@ fn boost_needs_fuel_and_a_held_button_keeps_it_going() {
     ));
     assert_eq!(time, 0.0);
 }
+
+/// RB-PHYSICS-001-FR-134: with no throttle a tire's side grip scales with
+/// how level its surface is (0.5 at a 0.7075 normal), with throttle it is
+/// unscaled, and on a level surface the two are the same.
+#[test]
+fn coasting_on_a_steep_surface_grips_less_than_driving() {
+    let slide = |normal_z: f32, throttle: f32| {
+        let mut car = level_car_at_height(17.0);
+        let mut wheels = cast_wheels(&car, plane_contact(&floor()), TICK);
+        let tilted = Vec3::new(0.0, (1.0 - normal_z * normal_z).sqrt(), normal_z);
+        for contact in wheels.iter_mut().flatten() {
+            contact.normal = tilted;
+        }
+        car.linear_velocity = right_axis(&car) * 100.0;
+        let forward = forward_axis(&car);
+        apply_ground_control(
+            &mut car,
+            &wheels,
+            &ControllerInput::default(),
+            throttle,
+            forward,
+            0.0,
+            TICK,
+        );
+        100.0 - car.linear_velocity.dot(&right_axis(&car))
+    };
+    let driving = slide(0.7075, 1.0);
+    let coasting = slide(0.7075, 0.0);
+    assert!(driving > 0.0 && coasting > 0.0);
+    assert!(
+        (coasting / driving - 0.5).abs() < 0.05,
+        "coasting {coasting} against driving {driving}"
+    );
+    assert!((slide(1.0, 0.0) - slide(1.0, 1.0)).abs() < 1e-3);
+}

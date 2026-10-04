@@ -122,6 +122,12 @@ pub(super) const LAT_FRICTION_CURVE: [(f32, f32); 2] = [(0.0, 1.0), (1.0, 0.2)];
 
 /// Sideways grip factor at full handbrake: RocketSim's
 /// `HANDBRAKE_LAT_FRICTION_FACTOR_CURVE`, a constant `0.1`.
+/// `NON_STICKY_FRICTION_FACTOR_CURVE` (`RB-PHYSICS-001-FR-134`): with no
+/// throttle, tire friction scales with how level the surface is
+/// (contact normal z, then factor): coasting on a wall or ramp barely grips.
+pub(super) const NON_STICKY_FRICTION_CURVE: [(f32, f32); 3] =
+    [(0.0, 0.1), (0.7075, 0.5), (1.0, 1.0)];
+
 pub(super) const HANDBRAKE_LAT_FRICTION_FACTOR: f32 = 0.1;
 
 /// Forward/backward grip factor by slip ratio at full handbrake:
@@ -247,6 +253,7 @@ fn wheel_impulses(
     handbrake_amount: f32,
     engine_acceleration: f32,
     brake_deceleration: f32,
+    sticky: bool,
     dt: f32,
 ) -> Vec<(Vec3, Vec3)> {
     let forward = forward_axis(car);
@@ -275,14 +282,21 @@ fn wheel_impulses(
             let lateral = car.velocity_at_point(&point).dot(&axle);
             let arm = point.cross(&axle);
             let inv_effective_mass = car.inv_mass() + arm.dot(&inv_inertia.mul_vec3(&arm));
+            let surface_grip = if sticky {
+                1.0
+            } else {
+                curve(&NON_STICKY_FRICTION_CURVE, contact.normal.z)
+            };
             let impulse = -SIDE_IMPULSE_DAMPING * lateral / inv_effective_mass
                 * lateral_grip
+                * surface_grip
                 * FRICTION_SCALE
                 * dt;
             let quarter_mass = car.mass() / WHEELS.len() as f32;
             let drive = engine_acceleration * quarter_mass * dt;
             let rolling_speed = car.velocity_at_point(&point).dot(&rolling);
-            let brake = (brake_deceleration * dt).min(rolling_speed.abs()) * quarter_mass;
+            let brake =
+                (brake_deceleration * surface_grip * dt).min(rolling_speed.abs()) * quarter_mass;
             Some((
                 axle * impulse + rolling * (drive - rolling_speed.signum() * brake),
                 flat,
@@ -351,6 +365,7 @@ pub(super) fn apply_ground_control(
         handbrake_amount,
         acceleration,
         deceleration,
+        throttle != 0.0,
         dt,
     ) {
         car.apply_impulse(impulse, point);

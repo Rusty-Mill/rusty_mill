@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Coasting tires slip on walls
+**2026-10-04** · `RB-PHYSICS-001-FR-134` · ADR-0053
+
+- With no throttle, the game scales tire grip down on steep surfaces (to
+  half at a 45-degree slope, a tenth on a wall). We always gripped fully.
+  Found by reading the game's wheel code against ours. The jumping
+  recording's 0.5 s-ahead car error 10.82 -> 10.52 uu/s; flat driving is
+  unchanged. 521 tests.
+
 ## A boost tap burns for a tenth of a second
 **2026-10-04** · `RB-PHYSICS-001-FR-133` · ADR-0052
 
