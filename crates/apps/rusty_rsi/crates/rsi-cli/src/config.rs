@@ -180,7 +180,10 @@ mod tests {
         let vars = [
             (
                 "PATH",
-                format!("/nonexistent:{}", dir.join("bin").display()),
+                std::env::join_paths([PathBuf::from("/nonexistent"), dir.join("bin")])
+                    .expect("joinable")
+                    .into_string()
+                    .expect("utf-8"),
             ),
             ("HOME", dir.join("home").display().to_string()),
             ("RSI_OUTER_MODEL", "gpt-x".to_owned()),
@@ -188,8 +191,9 @@ mod tests {
             ("OPENAI_API_KEY", "never-passed".to_owned()),
         ];
         let config = codex_config(&lookup(&vars), Duration::from_secs(9)).expect("config");
-        assert_eq!(config.program, dir.join("bin/codex"));
-        assert_eq!(config.home, dir.join("home/.codex"));
+        let canonical = |path: PathBuf| path.canonicalize().expect("exists");
+        assert_eq!(config.program, canonical(dir.join("bin").join("codex")));
+        assert_eq!(config.home, canonical(dir.join("home").join(".codex")));
         assert_eq!(config.model.as_deref(), Some("gpt-x"));
         assert_eq!(
             config.env,
