@@ -10,7 +10,7 @@
 //!
 //! **Whoever holds a card owns all of Conception, Planning and
 //! Execution (CPE) for it.** CPE is never assigned separately, so it is
-//! three text fields on [`Card`], not a child table.
+//! three text fields on [`Card`](crate::generic::fair_play::Card), not a child table.
 //!
 //! **A card can be split into cards with different owners.** "Cleaning"
 //! can become "Bathrooms" held by one partner and "Floors" by the other,
@@ -23,21 +23,21 @@
 //!
 //! # Origin and baseline — customization is derived, never stored
 //!
-//! Every deck card has a [`CardDefault`] holding its text as shipped,
+//! Every deck card has a [`CardDefault`](crate::generic::fair_play::CardDefault) holding its text as shipped,
 //! written once by the seed loader (`examples/fair_play_seed.rs`) and
 //! then **read-only by convention**: this module exposes no update or
 //! replace path for it, but the library has no enforced immutability —
 //! a caller reaching for `Replace<CardDefault>` on the raw stack can
-//! still write it. A card's state — [`CardState::Original`], `Edited`
-//! or `Custom` — is computed by [`card_state`] from `origin` and a
+//! still write it. A card's state — [`CardState::Original`](crate::generic::fair_play::CardState::Original), `Edited`
+//! or `Custom` — is computed by [`card_state`](crate::generic::fair_play::card_state) from `origin` and a
 //! six-field comparison against the baseline (`name`, `suit`,
 //! `conception`, `planning`, `execution`, `minimum_standard_of_care`),
 //! never from a stored flag that could drift. `notes`, `owner_id`,
 //! `parent_card_id` and `position` are play state or annotation and
 //! never make a card `Edited`. Invariant: `origin == Deck` iff
 //! `number.is_some()` iff `baseline_id.is_some()` — checked by
-//! [`Card::validate`] on every write that goes through [`insert_card`]/
-//! [`replace_card`]; a write through the raw `Insert`/`Replace` traits
+//! [`Card::validate`](crate::generic::fair_play::Card::validate) on every write that goes through [`insert_card`](crate::generic::fair_play::insert_card)/
+//! [`replace_card`](crate::generic::fair_play::replace_card); a write through the raw `Insert`/`Replace` traits
 //! bypasses it (a documented gap, tested).
 //!
 //! # Ownership — explicit on every card, never inherited
@@ -47,9 +47,9 @@
 //! *that* card. A parent may have a different owner from its children,
 //! or none; the parent's owner holds what is left at that level. The
 //! real "still undealt" list is therefore the **unowned leaf cards**
-//! ([`unassigned_leaf_cards`]), and a balance that counts a split parent
+//! ([`unassigned_leaf_cards`](crate::generic::fair_play::unassigned_leaf_cards)), and a balance that counts a split parent
 //! and its children would double-count the same work, so
-//! [`balance`] has a leaf-only variant. CPE text is not copied from
+//! [`balance`](crate::generic::fair_play::balance) has a leaf-only variant. CPE text is not copied from
 //! parent to child on a split; a "default from parent" is a hook for
 //! later.
 //!
@@ -69,7 +69,7 @@
 //!
 //! # `split_card` is not atomic
 //!
-//! The library has no multi-record transaction. [`split_card`] inserts
+//! The library has no multi-record transaction. [`split_card`](crate::generic::fair_play::split_card) inserts
 //! the children first — each already pointing at an existing parent —
 //! and replaces the parent last, so a crash at any point leaves a valid
 //! store: some or all children present under an unchanged parent, or
