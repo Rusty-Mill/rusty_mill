@@ -4,12 +4,20 @@
 //!   over plain HTTP, such as a local Ollama. Token usage comes from the
 //!   response's `usage` field; a response without it is an error, because
 //!   an unmetered call would defeat the budget.
+//!
+//!   A call never outlives its deadline. The endpoint's address is
+//!   resolved once, when the client is built, so no budgeted call waits on
+//!   DNS; connecting and every read and write share one absolute deadline.
+//!   With an API key configured, nothing the endpoint sent reaches an error
+//!   message, since an endpoint may echo the key it rejected.
 //! - [`ScriptedModel`]: canned replies with fixed token costs, for tests and
 //!   CI, which have no model.
 
 use std::cell::Cell;
+use std::fmt::Display;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rsi_core::{ChatModel, Completion, Message, ModelId};
@@ -25,12 +33,27 @@ use crate::error::RuntimeError;
 const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// The largest response body accepted.
 const MAX_BODY_BYTES: u64 = 16 << 20;
+/// How long building a client may wait for a host name lookup.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A host name lookup: `(host, port)` to addresses.
+type Resolve = fn(&str, u16) -> std::io::Result<Vec<SocketAddr>>;
+
+fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    (host, port).to_socket_addrs().map(Iterator::collect)
+}
+
+/// Whether a lookup is running on a resolver thread. std's resolver
+/// cannot be cancelled, so a lookup that outlives its waiter keeps running;
+/// allowing only one at a time means stalled lookups never pile up.
+static LOOKUP_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// An OpenAI-compatible chat endpoint over plain HTTP. Each call ends by
 /// the earlier of its own timeout and the caller's.
 pub struct OpenAiModel {
     id: ModelId,
     endpoint: Url,
+    address: SocketAddr,
     api_key: Option<String>,
     timeout: Duration,
 }
@@ -50,16 +73,36 @@ impl std::fmt::Debug for OpenAiModel {
 impl OpenAiModel {
     /// A client for model `id` at `base_url` (for example
     /// `http://127.0.0.1:11434/v1`), sending `api_key` as a bearer token
-    /// when set, and giving up on a call after `timeout`.
+    /// when set, and giving up on a call after `timeout`. A host name is
+    /// resolved here, once, waiting at most 10 seconds.
     ///
     /// # Errors
-    /// [`RuntimeError::Model`] for an unparsable URL or an `https` one:
-    /// TLS is not wired in yet, so a remote endpoint needs a local proxy.
+    /// [`RuntimeError::Model`] for an unparsable URL, an `https` one (TLS
+    /// is not wired in yet, so a remote endpoint needs a local proxy), or a
+    /// host name that does not resolve in time.
     pub fn new(
         id: ModelId,
         base_url: &str,
         api_key: Option<String>,
         timeout: Duration,
+    ) -> Result<Self, RuntimeError> {
+        Self::with_resolver(
+            id,
+            base_url,
+            api_key,
+            timeout,
+            system_resolve,
+            RESOLVE_TIMEOUT,
+        )
+    }
+
+    fn with_resolver(
+        id: ModelId,
+        base_url: &str,
+        api_key: Option<String>,
+        timeout: Duration,
+        resolve: Resolve,
+        resolve_timeout: Duration,
     ) -> Result<Self, RuntimeError> {
         let mut endpoint = Url::parse(base_url)
             .map_err(|e| RuntimeError::Model(format!("endpoint {base_url}: {e}")))?;
@@ -69,12 +112,26 @@ impl OpenAiModel {
             )));
         }
         endpoint.path = format!("{}/chat/completions", endpoint.path.trim_end_matches('/'));
+        let address = resolve_once(&endpoint.host, endpoint.port, resolve, resolve_timeout)
+            .map_err(|e| RuntimeError::Model(format!("resolving {}: {e}", endpoint.host)))?;
         Ok(Self {
             id,
             endpoint,
+            address,
             api_key,
             timeout,
         })
+    }
+
+    /// `what: detail` for an error, or just `what` when an API key is
+    /// configured: `detail` came from the endpoint and may echo the key.
+    fn endpoint_error(&self, what: &str, detail: impl Display) -> RuntimeError {
+        let detail = if self.api_key.is_some() {
+            "details withheld: an API key is configured".to_owned()
+        } else {
+            detail.to_string()
+        };
+        RuntimeError::Model(format!("{what} ({}): {detail}", self.endpoint.host))
     }
 
     /// Posts `body` and returns the response body, all within `timeout`.
@@ -85,12 +142,11 @@ impl OpenAiModel {
             return Err(fail("no time left for the call".into()));
         }
         let deadline = Instant::now() + timeout;
-        let address = (self.endpoint.host.as_str(), self.endpoint.port)
-            .to_socket_addrs()
-            .map_err(|e| fail(format!("resolving: {e}")))?
-            .next()
-            .ok_or_else(|| fail("resolving: no address".into()))?;
-        let stream = TcpStream::connect_timeout(&address, timeout)
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(fail("no time left to connect".into()));
+        }
+        let stream = TcpStream::connect_timeout(&self.address, left)
             .map_err(|e| fail(format!("connecting: {e}")))?;
         let mut headers = HeaderMap::new();
         let header = |headers: &mut HeaderMap, name: &str, value: &str| {
@@ -118,12 +174,21 @@ impl OpenAiModel {
             .write_request_head(&head)
             .and_then(|()| transport.write_body(body))
             .map_err(|e| fail(format!("sending: {e}")))?;
+        // From here on, parser errors quote what the endpoint sent.
         let response = transport
             .read_response_head(MAX_HEAD_BYTES)
-            .map_err(|e| fail(format!("reading the response: {e}")))?;
+            .map_err(|e| self.endpoint_error("reading the response head", e))?;
         let framing = response_framing(&response.headers, &Method::Post, response.status)
-            .map_err(|e| fail(format!("response framing: {e}")))?;
-        let body = read_capped_body(transport, framing, MAX_BODY_BYTES).map_err(fail)?;
+            .map_err(|e| self.endpoint_error("response framing", e))?;
+        let body = match read_capped_body(transport, framing, MAX_BODY_BYTES) {
+            Ok(body) => body,
+            Err(BodyError::TooLarge) => {
+                return Err(fail(format!(
+                    "the response body exceeds {MAX_BODY_BYTES} bytes"
+                )));
+            }
+            Err(BodyError::Read(e)) => return Err(self.endpoint_error("reading the body", e)),
+        };
         if !response.status.is_success() {
             let status = response.status.as_u16();
             // An endpoint may echo the credential it rejected, in full or in
@@ -141,31 +206,72 @@ impl OpenAiModel {
     }
 }
 
+/// Why a body could not be read.
+#[derive(Debug)]
+enum BodyError {
+    /// It passed the size limit.
+    TooLarge,
+    /// The transport or the framing failed; the error may quote the body.
+    Read(rusty_http::TransportError),
+}
+
 /// Reads a response body in any framing, failing as soon as it passes
 /// `limit` bytes rather than buffering it first.
 fn read_capped_body<T: Read>(
     transport: SyncTransport<T>,
     framing: Framing,
     limit: u64,
-) -> Result<Vec<u8>, String> {
-    let too_large = || format!("the response body exceeds {limit} bytes");
+) -> Result<Vec<u8>, BodyError> {
     if let Framing::ContentLength(len) = framing {
         if len > limit {
-            return Err(too_large());
+            return Err(BodyError::TooLarge);
         }
     }
     let mut reader = transport.into_body_reader(framing);
     let mut body = Vec::new();
-    while let Some(chunk) = reader
-        .next_chunk()
-        .map_err(|e| format!("reading the body: {e}"))?
-    {
+    while let Some(chunk) = reader.next_chunk().map_err(BodyError::Read)? {
         if (body.len() + chunk.len()) as u64 > limit {
-            return Err(too_large());
+            return Err(BodyError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// Resolves `host` once: an IP literal directly, a name on a resolver
+/// thread that may run for at most `timeout` before the caller gives up.
+/// Only one lookup runs at a time ([`LOOKUP_RUNNING`]), so a resolver
+/// that never returns strands one thread, not one per attempt.
+fn resolve_once(
+    host: &str,
+    port: u16,
+    resolve: Resolve,
+    timeout: Duration,
+) -> std::io::Result<SocketAddr> {
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    if LOOKUP_RUNNING.swap(true, Ordering::AcqRel) {
+        return Err(std::io::Error::other(
+            "an earlier lookup has not finished; refusing to start another",
+        ));
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let name = host.to_owned();
+    std::thread::spawn(move || {
+        let result = resolve(&name, port);
+        LOOKUP_RUNNING.store(false, Ordering::Release);
+        // The caller may have given up; nobody is left to tell.
+        let _ = sender.send(result);
+    });
+    let addresses = receiver
+        .recv_timeout(timeout)
+        .map_err(|_| std::io::Error::new(ErrorKind::TimedOut, "the lookup timed out"))??;
+    addresses
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::other("no address"))
 }
 
 /// A TCP stream whose every read and write must finish by `deadline`: the
@@ -234,11 +340,20 @@ fn request_body(model: &ModelId, messages: &[Message], max_tokens: u64) -> Strin
     body.to_json_string()
 }
 
+/// Why a response body is not a usable completion.
+#[derive(Debug)]
+enum ParseError {
+    /// Not JSON; the parser's message may quote the body.
+    Json(String),
+    /// JSON of the wrong shape; the message is ours.
+    Shape(String),
+}
+
 /// The reply text and token usage of a chat-completion response.
-fn parse_completion(body: &[u8]) -> Result<Completion, RuntimeError> {
-    let bad = |what: &str| RuntimeError::Model(format!("unexpected response: {what}"));
+fn parse_completion(body: &[u8]) -> Result<Completion, ParseError> {
+    let bad = |what: &str| ParseError::Shape(what.to_owned());
     let text = std::str::from_utf8(body).map_err(|_| bad("not UTF-8"))?;
-    let json = Value::parse(text).map_err(|e| bad(&e.to_string()))?;
+    let json = Value::parse(text).map_err(|e| ParseError::Json(e.to_string()))?;
     let reply = json
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -269,7 +384,10 @@ impl ChatModel for OpenAiModel {
         timeout: Duration,
     ) -> Result<Completion, RuntimeError> {
         let body = request_body(&self.id, messages, max_tokens);
-        parse_completion(&self.post(body.as_bytes(), timeout)?)
+        parse_completion(&self.post(body.as_bytes(), timeout)?).map_err(|e| match e {
+            ParseError::Json(detail) => self.endpoint_error("the response is not JSON", detail),
+            ParseError::Shape(what) => RuntimeError::Model(format!("unexpected response: {what}")),
+        })
     }
 }
 
@@ -341,6 +459,7 @@ impl ChatModel for ScriptedModel {
 mod tests {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
 
     use rsi_core::Role;
 
@@ -597,6 +716,158 @@ mod tests {
             .expect_err("404");
         server.join().expect("server");
         assert!(error.to_string().contains("model not found"), "{error}");
+    }
+
+    /// Every way an error is shown: `Display`, `Debug`, and the line the
+    /// CLI prints (`rsi inner: {error}`).
+    fn shown(error: &RuntimeError) -> [String; 3] {
+        [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("rsi inner: {error}"),
+        ]
+    }
+
+    #[test]
+    fn endpoint_text_in_parser_errors_is_withheld_when_a_key_is_set() {
+        const SENTINEL: &str = "sk-SENTINEL-0123456789abcdef";
+        // Each response is malformed in a way whose parser error quotes it.
+        let cases: [(&str, String); 4] = [
+            (
+                "response framing",
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {SENTINEL}\r\n\r\n"),
+            ),
+            (
+                "reading the body",
+                format!(
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{SENTINEL}\r\nx\r\n0\r\n\r\n"
+                ),
+            ),
+            (
+                "reading the response head",
+                format!("HTTP/1.1 2{SENTINEL} OK\r\n\r\n"),
+            ),
+            (
+                "not JSON",
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{SENTINEL}",
+                    SENTINEL.len()
+                ),
+            ),
+        ];
+        for (category, response) in cases {
+            for key in [Some(SENTINEL), None] {
+                let reply = response.clone();
+                let (url, server) = endpoint(move |stream| {
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+                let error = client(&url, key)
+                    .complete(&messages(), 1, 5 * SECOND)
+                    .expect_err("malformed");
+                server.join().expect("server");
+                for text in shown(&error) {
+                    assert!(text.contains(category), "{category}: {text}");
+                    if key.is_some() {
+                        assert!(!text.contains("SENTINEL"), "{category}: {text}");
+                    }
+                }
+                if key.is_none()
+                    && matches!(category, "response framing" | "reading the response head")
+                {
+                    assert!(
+                        error.to_string().contains("SENTINEL"),
+                        "without a key the detail is kept: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    static NAMED_LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+    static HUNG_LOOKUPS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A resolver that takes 200 ms and finds loopback.
+    fn slow_lookup(_: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        NAMED_LOOKUPS.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+    }
+
+    /// A resolver that stalls for 1.5 s and then fails.
+    fn hung_lookup(_: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+        HUNG_LOOKUPS.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        Err(std::io::Error::other("stalled"))
+    }
+
+    fn never_lookup(_: &str, _: u16) -> std::io::Result<Vec<SocketAddr>> {
+        panic!("an IP literal needs no lookup")
+    }
+
+    fn build(url: &str, resolve: Resolve, wait: Duration) -> Result<OpenAiModel, RuntimeError> {
+        OpenAiModel::with_resolver(id(), url, None, 600 * SECOND, resolve, wait)
+    }
+
+    /// One test, because it drives the process-wide one-lookup guard.
+    #[test]
+    fn names_resolve_once_outside_any_call_and_stalled_lookups_do_not_pile_up() {
+        assert!(build("http://127.0.0.1:9/v1", never_lookup, SECOND).is_ok());
+        assert!(build("http://[::1]:9/v1", never_lookup, SECOND).is_ok());
+
+        // A slow lookup happens once, at construction; calls never resolve.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let model = build(&format!("http://model.test:{port}/v1"), slow_lookup, SECOND)
+            .expect("resolves within its time");
+        assert_eq!(model.address, SocketAddr::from(([127, 0, 0, 1], port)));
+        for _ in 0..3 {
+            let error = model
+                .complete(&messages(), 1, Duration::from_millis(300))
+                .expect_err("nothing listens");
+            assert!(error.to_string().contains("connecting"), "{error}");
+        }
+        assert_eq!(
+            NAMED_LOOKUPS.load(Ordering::SeqCst),
+            1,
+            "no lookup per call"
+        );
+
+        // A stalled lookup times out on schedule...
+        let started = Instant::now();
+        let stalled = build(
+            "http://stalled.test:9/v1",
+            hung_lookup,
+            Duration::from_millis(300),
+        );
+        let waited = started.elapsed();
+        assert!(stalled.is_err());
+        assert!(
+            waited >= Duration::from_millis(300) && waited < SECOND,
+            "{waited:?}"
+        );
+        // ...and while it is still stuck, further attempts fail at once
+        // instead of stranding another resolver thread each.
+        for _ in 0..5 {
+            let started = Instant::now();
+            let refused = build("http://stalled.test:9/v1", hung_lookup, SECOND);
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains("has not finished")),
+                "{refused:?}"
+            );
+            assert!(started.elapsed() < Duration::from_millis(100));
+        }
+        assert_eq!(
+            HUNG_LOOKUPS.load(Ordering::SeqCst),
+            1,
+            "one stranded lookup at most"
+        );
+
+        // Once the stalled lookup ends, lookups work again.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(build("http://model.test:9/v1", slow_lookup, SECOND).is_ok());
     }
 
     #[test]

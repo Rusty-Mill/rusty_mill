@@ -30,7 +30,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   - **Transcript cap.** The broker's transcript is capped at 64 MiB, charging each exchange its frames plus a fixed overhead. The cut is deterministic, and the last accepted submission is kept.
   - **Deadline.** Model calls and evaluations get the budget's remaining time as a hard limit. A call cut off at the deadline counts as an exhausted budget, so the run keeps its earlier submission.
   - **Response size.** Every HTTP response framing, chunked included, is capped at 16 MiB while it is read.
-  - **API key.** With a key configured, an error response's body never reaches a diagnostic.
+  - **API key.** With a key configured, nothing the endpoint sent reaches a diagnostic: neither an error body nor a head, framing or body parser error that quotes it.
+  - **DNS.** The model endpoint is resolved once, when the client is built, under a timeout. Only one lookup may run at a time, so a stalled resolver cannot pile up threads. Connecting uses the call's remaining time.
   - **Tests and mutation checks.** Each fix has regression tests, and each test was confirmed red with its defence removed.
 - Known limitations:
   - `https://` model endpoints are refused until TLS is wired in.

@@ -224,7 +224,16 @@ group. If a task has no submission, it scores the task's declared floor
 - **Deadline.** No model call or evaluation outlives the wall-clock
   budget. `ChatModel::complete` and `PublicTask::public_score` each take
   the time left as a limit. `OpenAiModel` bounds the whole call, not each
-  read, so a server that drips bytes cannot stretch it. An evaluation's
+  read, so a server that drips bytes cannot stretch it.
+  - **DNS is outside every call.** `OpenAiModel` resolves its host once,
+    when it is built and before any budget starts.
+    - An IP literal needs no lookup.
+    - A name is looked up on a resolver thread, which the caller waits on
+      for at most 10 s.
+    - std's resolver cannot be cancelled, so only one lookup may run at a
+      time. A stalled resolver strands one thread, not one per attempt.
+  - **Connect is inside the call.** Connecting uses the time left before
+    the call's deadline. An evaluation's
   limits are cut to the time left, and its process group is killed at that
   point. A call cut off by the deadline is answered `exhausted`, so the
   run keeps its earlier submission; a call that fails while time remains
@@ -250,9 +259,12 @@ group. If a task has no submission, it scores the task's declared floor
 - **Models.** `OpenAiModel` speaks OpenAI-compatible `/chat/completions`
   over plain HTTP through `rusty_http`'s sync adapter; `https://` endpoints
   are refused until TLS is wired in. The API key comes from the
-  environment and is redacted from `Debug`. With a key configured, an
-  error response's body never reaches a diagnostic, because an endpoint
-  may echo a rejected key in full or in part. Every response framing,
+  environment and is redacted from `Debug`. With a key configured, nothing
+  the endpoint sent reaches a diagnostic, because an endpoint may echo a
+  rejected key in full or in part. That covers error bodies and the
+  parser errors that quote the response head, its framing (for example a
+  `Content-Length` or chunk-size line) or the body. Each diagnostic still
+  names its category. Every response framing,
   chunked included, fails as soon as the body passes 16 MiB.
   `ScriptedModel` serves CI.
   `rsi inner` reads `RSI_INNER_MODEL`, `RSI_INNER_BASE_URL` (default:
@@ -289,7 +301,8 @@ group. If a task has no submission, it scores the task's declared floor
   - the transcript cap;
   - the model deadline and the evaluation deadline;
   - the chunked body cap;
-  - the key withholding.
+  - the key withholding, then its extension to parser errors;
+  - the one-lookup guard and the lookup timeout.
 - **Known limits.** Solutions (not the agent) can still create Unix
   sockets, as P2 allows. A model call cut off by the deadline is not
   charged tokens, because the endpoint reported none. The token cap is admit-then-record, so the last
