@@ -60,11 +60,11 @@ fn ball_world_material(ball: &RigidBody) -> solver::StaticMaterial {
 
 /// RocketSim's "special" ball-world resolution (`RB-PHYSICS-001-FR-108`,
 /// `convertContactSpecial`): every ball-world contact this tick is folded
-/// into one, at the average normal (not renormalized) and the average
-/// distance from the ball's centre, solved for velocity only (no position
-/// correction). A ball on two ramp facets, or a ramp and the floor, then
-/// bounces once instead of once per contact: `test2.jsonl` 13.892 s went
-/// from 1072 uu/s to under 20.
+/// into one, at the average normal (renormalized since FR-119, ADR-0039)
+/// and the average distance from the ball's centre, solved for velocity
+/// only (position correction runs per raw point, FR-118). A ball on two
+/// ramp facets, or a ramp and the floor, then bounces once instead of once
+/// per contact: `test2.jsonl` 13.892 s went from 1072 uu/s to under 20.
 fn combined_ball_world_contact(
     ball: &RigidBody,
     manifolds: Vec<(solver::StaticMaterial, Vec<collision::Contact>)>,
@@ -85,8 +85,11 @@ fn combined_ball_world_contact(
         let on_ball = contact.point - contact.normal * contact.penetration_depth;
         distance += (on_ball - ball.position).length() * share;
     }
-    // Opposite contacts cancel: no direction left to push along.
-    normal.normalize()?;
+    // Opposite contacts cancel: no direction left to push along. The
+    // average is renormalized (RB-PHYSICS-001-FR-119): left short of unit
+    // length, the friction direction is no longer orthogonal to the normal
+    // row, and the bounce impulse bleeds into friction.
+    let normal = normal.normalize()?;
     Some(collision::Contact {
         normal,
         point: ball.position - normal * distance,
@@ -4635,14 +4638,12 @@ mod tests {
         ];
         let combined =
             combined_ball_world_contact(&ball, manifolds).expect("two contacts fold into one");
-        // Average normal, deliberately not renormalized (RocketSim's own).
-        assert_eq!(combined.normal, Vec3::new(0.5, 0.0, 0.5));
+        // The average normal, renormalized (RB-PHYSICS-001-FR-119).
+        let diagonal = Vec3::new(1.0, 0.0, 1.0).normalize().expect("nonzero");
+        assert!((combined.normal - diagonal).length() < 1e-6);
         // Average distance from the centre to the ball's own contact points
         // (each `point - normal * depth`: 95 and 85) = 90, back along it.
-        assert_eq!(
-            combined.point,
-            ball.position - Vec3::new(0.5, 0.0, 0.5) * 90.0
-        );
+        assert!((combined.point - (ball.position - diagonal * 90.0)).length() < 1e-4);
         // Velocity only: no position correction.
         assert_eq!(combined.penetration_depth, 0.0);
     }
@@ -4765,5 +4766,27 @@ mod tests {
             "moved by {}",
             world.ball.position.z - start
         );
+    }
+
+    /// RB-PHYSICS-001-FR-119, `hitjump.jsonl` 56.617 s: a ball hitting a
+    /// goal's sloped back while its contact point slides up the slope. The
+    /// game's friction pushes it back down the slope (spin -1.31 to -2.72
+    /// about x, velocity to (0, -1608, 757)). With the averaged normal left
+    /// short of unit length the normal impulse bled into the friction row
+    /// and the ball came out spinning +1.66.
+    #[test]
+    fn friction_on_a_goal_slope_opposes_the_contact_points_slide() {
+        let mut ball = RigidBody::standard_ball(Vec3::new(0.0, 5912.49, 213.35));
+        ball.linear_velocity = Vec3::new(0.0, 2892.8, -576.4);
+        ball.angular_velocity = Vec3::new(-1.31, 0.0, 0.0);
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        let v = world.ball.linear_velocity;
+        let w = world.ball.angular_velocity;
+        assert!(
+            (v - Vec3::new(0.0, -1607.8, 757.4)).length() < 10.0,
+            "bounce off: {v:?}"
+        );
+        assert!((w.x + 2.72).abs() < 0.1, "spin off: {w:?}");
     }
 }

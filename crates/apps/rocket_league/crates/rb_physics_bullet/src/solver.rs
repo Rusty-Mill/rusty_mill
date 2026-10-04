@@ -313,8 +313,8 @@ fn friction_direction(normal: &Vec3, relative_velocity: &Vec3) -> Vec3 {
             }
         }
     }
-    // A combined ball-world normal is an average, not unit length
-    // (`RB-PHYSICS-001-FR-108`); `plane_space` needs a unit one.
+    // `plane_space` needs a unit normal; a caller's may not be one (a
+    // combined ball-world normal was an average until FR-119).
     match normal.normalize() {
         Some(unit) => plane_space(&unit).0,
         None => Vec3::new(1.0, 0.0, 0.0),
