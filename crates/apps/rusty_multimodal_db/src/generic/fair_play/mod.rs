@@ -82,6 +82,10 @@
 //! layered over `Replace`), and per-card status or recurrence (Fair
 //! Play divides ownership; it is not a checklist).
 
+/// The seed loader: the supplied deck, people and splits, from CSV text
+/// or files, into a data directory (`FPL-FR-006`).
+pub mod seed;
+
 use super::mmap_store::GenericMmapStore;
 use super::query::{AllIds, Children, FilterEq, GetById, Insert, Parent, Replace, UpdateField};
 use super::store::Reversed;

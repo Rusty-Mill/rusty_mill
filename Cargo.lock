@@ -13867,6 +13867,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_fair_play"
+version = "0.1.0"
+dependencies = [
+ "rusty_http",
+ "rusty_json",
+ "rusty_multimodal_db",
+ "rusty_multimodal_db_engine",
+ "rusty_url",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "rusty_fedora"
 version = "0.1.0"
 dependencies = [

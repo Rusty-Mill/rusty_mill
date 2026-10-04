@@ -14,6 +14,11 @@ repository = "https://github.com/baileyrd/rusty_multimodal_db"
 license = "MIT"
 publish = false
 
+# The family's second crate, `crates/rusty_fair_play` (the Fair Play front
+# end, ADR-0137's follow-up), is its own workspace member nested here per
+# ADR-0003's multi-crate family shape; keep it out of this package's files.
+exclude = ["crates/"]
+
 [package.metadata.rusty_mill]
 layer = "apps"
 
