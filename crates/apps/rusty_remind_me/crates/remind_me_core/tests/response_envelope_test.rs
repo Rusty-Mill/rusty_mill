@@ -33,6 +33,7 @@ fn seed(store: &Store<'_>, n: usize) -> Vec<String> {
                     object: None,
                     entities: vec![],
                     sensitive: false,
+                    ..Default::default()
                 },
             )
             .unwrap()

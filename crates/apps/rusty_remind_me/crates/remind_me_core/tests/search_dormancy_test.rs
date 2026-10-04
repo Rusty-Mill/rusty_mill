@@ -23,6 +23,7 @@ fn add(store: &Store<'_>, content: &str, category: &str) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
@@ -37,6 +38,7 @@ fn age_by_days(store: &Store<'_>, id: &str, days: i64) {
 
 fn search(store: &Store<'_>, query: &str, include_dormant: bool, min_vitality: f64) -> Vec<String> {
     let input = MemorySearchInput {
+        scope: Default::default(),
         strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
@@ -52,6 +54,8 @@ fn search(store: &Store<'_>, query: &str, include_dormant: bool, min_vitality: f
         include_neighbors: false,
         expand_co_retrieval: false,
         bootstrap: false,
+        include_expired: true,
+        min_confidence: 0.0,
     };
     queries::search_memories(store, &input)
         .unwrap()

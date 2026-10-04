@@ -31,6 +31,7 @@ fn add_sized(store: &Store<'_>, tag: &str, chars: usize) -> String {
             object: None,
             entities: vec![],
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap()
