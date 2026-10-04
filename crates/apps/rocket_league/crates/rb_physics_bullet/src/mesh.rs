@@ -278,6 +278,51 @@ impl StaticMesh {
         kinds
     }
 
+    /// Classifies the edges each of `meshes` left `Open` against the other
+    /// meshes' triangles (`RB-PHYSICS-001-FR-120`, ADR-0040). Bullet keeps
+    /// each mesh's edge info to itself, so where RocketSim's goal halves
+    /// meet at `x = 0` a ball straddling the seam got one half's unadjusted
+    /// edge normal and a sideways kick the game does not have
+    /// (`hitjump.jsonl` 119.9 s).
+    pub fn classify_seams(meshes: &mut [StaticMesh]) {
+        let seams: Vec<Vec<(usize, [EdgeKind; 3])>> = meshes
+            .iter()
+            .enumerate()
+            .map(|(index, mesh)| {
+                let others = meshes.iter().enumerate().filter(|(o, _)| *o != index);
+                let open = mesh
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, kinds)| kinds.contains(&EdgeKind::Open));
+                open.filter_map(|(t, kinds)| {
+                    let triangle = mesh.triangles.get(t)?;
+                    let (min, max) = triangle.bounds();
+                    let mut kinds = *kinds;
+                    for (_, other) in others.clone() {
+                        for neighbor in other.near(min, max) {
+                            for (edge, kind) in kinds.iter_mut().enumerate() {
+                                if *kind != EdgeKind::Open {
+                                    continue;
+                                }
+                                if let Some(found) = edge_kind(triangle, edge, neighbor) {
+                                    *kind = found;
+                                }
+                            }
+                        }
+                    }
+                    Some((t, kinds))
+                })
+                .collect()
+            })
+            .collect();
+        for (mesh, found) in meshes.iter_mut().zip(seams) {
+            for (t, kinds) in found {
+                mesh.edges[t] = kinds;
+            }
+        }
+    }
+
     /// A RocketSim collision mesh file (`.cmf`: `i32` triangle and vertex
     /// counts, `i32` index triples, `f32` vertex triples in Bullet units,
     /// little-endian), triangles wound as the file winds them and reported
@@ -822,5 +867,48 @@ mod tests {
         assert!(StaticMesh::from_cmf(&bytes[..bytes.len() - 1]).is_none());
         let bad_index = cmf(&[[0, 1, 7]], &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
         assert!(StaticMesh::from_cmf(&bad_index).is_none());
+    }
+
+    /// RB-PHYSICS-001-FR-120: a flat floor split into two meshes along
+    /// `x = 0`. A ball just past the seam reaches the left half only at
+    /// its seam edge; unclassified, that edge keeps the tilted edge-to-
+    /// centre normal, classified across meshes it is smooth and takes the
+    /// face normal.
+    #[test]
+    fn a_seam_between_meshes_is_smooth_once_classified_across_them() {
+        let inside = Vec3::new(0.0, 0.0, 100.0);
+        let (a, b, c, d) = (
+            Vec3::new(-100.0, -100.0, 0.0),
+            Vec3::new(0.0, -100.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+            Vec3::new(-100.0, 100.0, 0.0),
+        );
+        let shift = Vec3::new(100.0, 0.0, 0.0);
+        let left = StaticMesh::new(vec![
+            Triangle::facing(a, b, c, inside).expect("has area"),
+            Triangle::facing(a, c, d, inside).expect("has area"),
+        ]);
+        let right = StaticMesh::new(vec![
+            Triangle::facing(a + shift, b + shift, c + shift, inside).expect("has area"),
+            Triangle::facing(a + shift, c + shift, d + shift, inside).expect("has area"),
+        ]);
+        let centre = Vec3::new(5.0, 0.0, 90.0);
+        let before = left.sphere_contacts(centre, 93.15);
+        assert_eq!(before.len(), 1);
+        assert!(
+            before[0].normal.x > 0.05,
+            "edge normal kept: {:?}",
+            before[0].normal
+        );
+
+        let mut meshes = vec![left, right];
+        StaticMesh::classify_seams(&mut meshes);
+        let after = meshes[0].sphere_contacts(centre, 93.15);
+        assert_eq!(after.len(), 1);
+        assert!(
+            (after[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5,
+            "seam not smoothed: {:?}",
+            after[0].normal
+        );
     }
 }

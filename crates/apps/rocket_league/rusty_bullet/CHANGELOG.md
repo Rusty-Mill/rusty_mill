@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0040 (`RB-PHYSICS-001-FR-120`): `StaticMesh::classify_seams`
+  classifies edges on a seam between meshes across them;
+  `arena::standard_meshes` applies it to the 16 arena meshes.
 - ADR-0039 (`RB-PHYSICS-001-FR-119`): the combined ball-world normal is
   renormalized, so the friction direction is orthogonal to the normal
   row again (amends ADR-0027).
