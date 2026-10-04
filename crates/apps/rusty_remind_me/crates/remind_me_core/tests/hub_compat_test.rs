@@ -48,6 +48,7 @@ fn add(store: &Store<'_>, content: &str) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
@@ -132,6 +133,7 @@ fn a_sensitive_memory_stays_sensitive_after_a_real_hub_round_trip() {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap();

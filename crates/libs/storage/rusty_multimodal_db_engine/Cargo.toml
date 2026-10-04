@@ -1,6 +1,6 @@
 [package]
 name = "rusty_multimodal_db_engine"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Matches rusty_multimodal_db, which this engine was extracted from and whose
 # msrv job still builds it transitively.
