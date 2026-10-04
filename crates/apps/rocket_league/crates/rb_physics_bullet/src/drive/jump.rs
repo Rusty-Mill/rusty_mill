@@ -480,6 +480,70 @@ pub(super) fn ground_jump(car: &mut RigidBody, jump_hold_time_remaining: &mut f3
     push_jump_hold(car, jump_hold_time_remaining, dt);
 }
 
+/// `CAR_AUTOFLIP_IMPULSE` (uu/s): the pop off a surface the car lies
+/// upside down on when jump is pressed (`RB-PHYSICS-001-FR-123`).
+pub const AUTO_FLIP_SPEED: f32 = 200.0;
+/// `CAR_AUTOFLIP_TORQUE` (rad/s^2) about the car's forward axis while the
+/// auto-flip runs.
+const AUTO_FLIP_TORQUE: f32 = 50.0;
+/// `CAR_AUTOFLIP_TIME` (s): the flip runs this long times `|roll| / pi`.
+const AUTO_FLIP_TIME: f32 = 0.4;
+/// `CAR_AUTOFLIP_NORMZ_THRESH`: the surface must face up at least this much.
+const AUTO_FLIP_NORMAL_Z_THRESHOLD: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// `CAR_AUTOFLIP_ROLL_THRESH` (rad): the car must be rolled at least this far.
+const AUTO_FLIP_ROLL_THRESHOLD: f32 = 2.8;
+
+/// An auto-flip in progress (`RB-PHYSICS-001-FR-123`): how long its torque
+/// still runs and which way about the forward axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoFlip {
+    pub remaining: f32,
+    pub torque_scale: f32,
+}
+
+/// RocketSim's roll from `Angle::FromRotMat`: minus Bullet's
+/// `getEulerYPR` roll, `atan2(right.z, up.z)`.
+fn roll(car: &RigidBody) -> f32 {
+    (-right_axis(car).z).atan2(up_axis(car).z)
+}
+
+/// RocketSim's `_UpdateAutoFlip` (`RB-PHYSICS-001-FR-123`): a fresh jump
+/// press while the car's body touched an upward-facing surface last tick
+/// (`world_contact_normal`, its `worldContact`) and the car is rolled past
+/// `AUTO_FLIP_ROLL_THRESHOLD` pops it `AUTO_FLIP_SPEED` away from its own
+/// up axis and starts a roll torque toward upright, which then runs
+/// `AUTO_FLIP_TIME * |roll| / pi` seconds from this tick on. The wheels
+/// don't touch, so nothing else answers that press.
+pub(super) fn auto_flip(
+    car: &mut RigidBody,
+    jump_pressed: bool,
+    world_contact_normal: Option<Vec3>,
+    flip: &mut Option<AutoFlip>,
+    dt: f32,
+) {
+    let on_upward_surface =
+        world_contact_normal.is_some_and(|n| n.z > AUTO_FLIP_NORMAL_Z_THRESHOLD);
+    if jump_pressed && on_upward_surface {
+        let roll = roll(car);
+        if roll.abs() > AUTO_FLIP_ROLL_THRESHOLD {
+            *flip = Some(AutoFlip {
+                remaining: AUTO_FLIP_TIME * (roll.abs() / std::f32::consts::PI),
+                torque_scale: roll.signum(),
+            });
+            car.apply_impulse(-up_axis(car) * (AUTO_FLIP_SPEED * car.mass()), Vec3::ZERO);
+        }
+    }
+    let Some(active) = flip else {
+        return;
+    };
+    if active.remaining <= 0.0 {
+        *flip = None;
+        return;
+    }
+    car.angular_velocity += forward_axis(car) * (AUTO_FLIP_TORQUE * active.torque_scale * dt);
+    active.remaining -= dt;
+}
+
 /// Clamped dodge direction `(forward, side)` from the stick, the same way
 /// for a ground dodge and a wall-jump dodge: RocketSim's
 /// `dodgeDir = (-controls.pitch, controls.yaw + controls.roll)`. Rocket

@@ -297,7 +297,9 @@ pub(crate) fn bicycle_yaw_rate_for_tests(
     let wheelbase = ground::FRONT_AXLE_X - ground::REAR_AXLE_X;
     forward_speed * ground::steer_angle(forward_speed, steer, handbrake_amount).tan() / wheelbase
 }
-pub use jump::{FlipState, DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED};
+pub use jump::{
+    AutoFlip, FlipState, AUTO_FLIP_SPEED, DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED,
+};
 
 use crate::body::RigidBody;
 use rb_domain::{ControllerInput, Vec3};
@@ -428,6 +430,12 @@ pub struct DriveState {
     /// Fuel drained per second of held boost: `BOOST_USED_PER_SECOND`, or
     /// 0 with unlimited boost (`RB-PHYSICS-001-FR-111`).
     pub boost_used_per_second: f32,
+    /// The normal of the last surface the car's body (not its wheels)
+    /// touched in the previous step, RocketSim's `worldContact`; `None`
+    /// when it touched nothing. Set by the world (`RB-PHYSICS-001-FR-123`).
+    pub world_contact_normal: Option<Vec3>,
+    /// The auto-flip in progress, if any (`RB-PHYSICS-001-FR-123`).
+    pub auto_flip: Option<AutoFlip>,
 }
 
 impl DriveState {
@@ -443,6 +451,8 @@ impl DriveState {
             sticky_surface_up: None,
             was_on_ground: false,
             boost_used_per_second: BOOST_USED_PER_SECOND,
+            world_contact_normal: None,
+            auto_flip: None,
         }
     }
 }
@@ -503,6 +513,15 @@ pub fn apply_driven_forces(
     state.jump_held = input.jump;
 
     jump::apply_jump_hold(car, input.jump, &mut state.jump_hold_time_remaining, dt);
+    // RB-PHYSICS-001-FR-123: a car on its roof pops up and rolls over on a
+    // jump press, as RocketSim's `_UpdateAutoFlip` after `_UpdateJump`.
+    jump::auto_flip(
+        car,
+        jump_pressed,
+        state.world_contact_normal,
+        &mut state.auto_flip,
+        dt,
+    );
     state.handbrake_amount = ground::ramp_handbrake(state.handbrake_amount, input.handbrake, dt);
 
     let throttle = effective_throttle(input, state);

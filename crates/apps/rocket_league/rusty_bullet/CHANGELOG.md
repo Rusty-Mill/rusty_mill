@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0043 (`RB-PHYSICS-001-FR-123`): `drive::jump::auto_flip`,
+  RocketSim's `_UpdateAutoFlip` (a car on its roof pops up 200 uu/s and
+  rolls toward upright on a jump press); `drive::AutoFlip`,
+  `DriveState::world_contact_normal` and `DriveState::auto_flip`.
 - ADR-0042 (`RB-PHYSICS-001-FR-122`): the wheel pushback's ERP
   (`drive::wheels::PUSHBACK_ERP`) is 0.1, calibrated from a recorded
   bottomed-out landing; was Bullet's default 0.2.

@@ -210,8 +210,11 @@ version: `a245d35`).
    still reads 97.908 s (207). `RB-PHYSICS-001-FR-122` (ADR-0042)
    calibrates the wheel pushback's ERP to 0.1 from a bottomed-out
    landing: `test2` one-step car 0.470 (was 0.895), `front` 0.178,
-   `side` 0.192, `hitjump` car 0.494. Open car-side leads: the roof jump
-   (`hitjump` 279.75 s, RocketSim's `_UpdateAutoFlip`, one sample) and
+   `side` 0.192, `hitjump` car 0.494. `RB-PHYSICS-001-FR-123` (ADR-0043)
+   ports RocketSim's auto-flip, the pop and roll a car on its roof gets
+   from a jump press: `hitjump` 279.75 s 12.6 uu/s (was 205), its spin
+   error on the press tick still 4.1 rad/s (one sample; RocketSim's
+   torque ramps where the game's roll is immediate). Open car-side lead:
    the `test2` wall ride at 14.3–14.4 s.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
@@ -221,7 +224,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (500 tests: 27 `rb_domain`, 429
+- `cargo test --workspace`: pass (502 tests: 27 `rb_domain`, 431
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
