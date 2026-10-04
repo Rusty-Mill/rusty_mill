@@ -319,9 +319,15 @@ CPE as three child rows** — lets the data say what the game forbids.
   line), three for the crash harness (control, kill after each step ×3
   trials, resume), the adapter's unit tests, and the socket suite with
   the Python driver. `SERVER-001` v0.110.0 / `FR-123`, `FPL-FR-001`–`008`.
+- 2026-10-04: the merge/unsplit hook is built, in the domain crate:
+  `unsplit_card` deletes the subtree deepest first and keeps the parent
+  (the owner stays the parent's; a child's edited text goes with it),
+  beside `delete_card` (leaves only), `delete_person` (holding nothing)
+  and `reorder_children` (one call, exact set). "The domain exposes no
+  delete" above now reads: no unguarded delete.
 - 2026-10-04: the front end, `crates/apps/rusty_fair_play` — a JSON HTTP
   API over the embedded stacks on `rusty_http` (rusty_tick's sans-IO
-  router and TCP adapter) and a React web UI in its `web/`. To let an
+  router; the TCP adapter is now the shared `rusty_serve`) and a React web UI in its `web/`. To let an
   app crate depend on the domain under ADR-0003's layer rule (no app
   depends on another family's app crate), the domain moved out of this
   crate into `crates/libs/storage/rusty_fair_play_domain`, re-exported

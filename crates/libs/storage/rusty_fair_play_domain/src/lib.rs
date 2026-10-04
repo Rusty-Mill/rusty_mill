@@ -2108,8 +2108,9 @@ mod tests {
     /// names an id with no record, `chain_to_root` stops where the trail
     /// goes cold, and the children index still lists the orphans under
     /// the deleted id — live and after a reopen, since it is rebuilt from
-    /// the children's own fields. This documents current behaviour; the
-    /// domain exposes no delete of its own.
+    /// the children's own fields. This documents what a raw engine
+    /// delete leaves, and why the domain's own `delete_card` refuses a
+    /// parent.
     #[test]
     fn deleting_a_parent_leaves_its_children_pointing_at_nothing() {
         use rusty_multimodal_db_engine::generic::query::Delete;
