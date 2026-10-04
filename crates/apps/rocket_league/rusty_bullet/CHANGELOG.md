@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0048 (`RB-PHYSICS-001-FR-129`): `collision::raycast_sphere` and
+  `PhysicsWorld::wheel_ray`; a car's wheel rays hit the ball as well as
+  the arena, so wheels on the ball suspend, push back and count toward
+  being grounded.
 - ADR-0047 (`RB-PHYSICS-001-FR-127`, `FR-128`): `mesh::SphereLimits`
   (`SphereLimits::BALL`, `body::BALL_BREAKING_THRESHOLD`,
   `body::BALL_CONTACT_SLACK`) make, keep and fold the ball's mesh
