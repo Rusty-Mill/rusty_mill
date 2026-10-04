@@ -15,7 +15,7 @@ Design, reuse decisions and scope: [ADR-0005](../../../docs/adr/0005-rsi-harness
 | P1 | `rsi-core`: domain types, accept gate, budget meter, search helpers, lineage hash chain | merged ([#472](https://github.com/Rusty-Mill/rusty_mill/pull/472)) |
 | P2 | Task format, three toy tasks, sandboxed executor, out-of-process grader | merged ([#476](https://github.com/Rusty-Mill/rusty_mill/pull/476)) |
 | P3 | Model broker, inner harness `a0` (AIDE0 behaviour), model clients, `rsi inner` | merged ([#478](https://github.com/Rusty-Mill/rusty_mill/pull/478)) |
-| P4 | Outer loop, `rsi calibrate`, 10-step end-to-end run, `rsi report` | this PR |
+| P4 | Outer loop, `rsi calibrate`, 10-step end-to-end run, `rsi report` | [#483](https://github.com/Rusty-Mill/rusty_mill/pull/483) |
 
 ## Crates
 

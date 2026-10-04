@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_rsi P4: the outer loop, calibration and run reports
-**2026-10-04** · [#PR](https://github.com/Rusty-Mill/rusty_mill/pull/PR) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+**2026-10-04** · [#483](https://github.com/Rusty-Mill/rusty_mill/pull/483) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `rsi run`, the outer loop. Each step:
   - checks the incumbent out in a sparse, detached git worktree that holds only the harness;
