@@ -29,6 +29,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A manual run deliberately uses the same full-sweep plan as a main push.
+  # It is useful for re-running the whole workspace after runner or cache
+  # incidents without creating a no-op commit.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -65,8 +69,16 @@ env:
   REMIND_ME_PACKAGES: remind_me_core remind_me_mcp remind_me_api rusty-remind-me remind_me_remote remind_me_hub
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PR revisions supersede each other, so cancel their obsolete runs. Main
+  # sweeps are different: one may take long enough for another main push to
+  # arrive, and cancelling it loses the coverage we need. GitHub Actions
+  # permits one running and one pending run in a group; an incoming run may
+  # replace pending work, but it does not guarantee ordering, so this must not
+  # be interpreted as proving that the pending run is always the newest SHA.
+  # Manual runs get their own group: a dispatch from another ref must not
+  # replace pending main work.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fmt:
@@ -435,7 +447,24 @@ jobs:
       # on Windows must do the same.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)' 2>&1 | tee "test-results/nextest-${{ matrix.os }}-shard-${{ matrix.shard }}.log"
+
+      # The configured JUnit report carries each test's timing, retry attempts
+      # and failure output; the captured nextest stream is human-readable.
+      # Keep both even when the test step fails for later diagnosis.
+      - name: Upload nextest timing and retry reports
+        if: ${{ always() && steps.scope.outputs.args != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}-shard-${{ matrix.shard }}
+          path: |
+            target/nextest/default/junit.xml
+            test-results/nextest-${{ matrix.os }}-shard-${{ matrix.shard }}.log
+          if-no-files-found: warn
 
       # Runs once per OS, not once per shard -- it's cheap and not worth
       # partitioning, and nextest's own partitioning above doesn't cover a

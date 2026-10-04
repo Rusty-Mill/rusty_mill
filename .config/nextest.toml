@@ -27,3 +27,8 @@
 [profile.default]
 slow-timeout = { period = "2m", terminate-after = 5 }
 retries = 2
+
+# This report is written below target/nextest/default/. It records test
+# durations, plus failing and retry output, and CI uploads it per matrix job.
+[profile.default.junit]
+path = "junit.xml"
