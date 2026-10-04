@@ -37,7 +37,7 @@
 //!   custom headers ride on the same `McpServerSpec`.
 //!
 //! WebSocket is reserved in the config schema but not currently
-//! dispatchable — rmcp 1.5 ships only a stub (`src/transport/ws.rs`
+//! dispatchable — rmcp 2.1 ships only a stub (`src/transport/ws.rs`
 //! comment: "Maybe we don't really need a ws implementation?") because
 //! the MCP working group folded WS into Streamable HTTP. See
 //! [`McpClient::connect`] for the explicit error path.
@@ -150,7 +150,7 @@ impl McpClientError {
 /// A live connection to one external MCP server. Cheap to `Deref` through
 /// for advanced use (the rmcp `Peer<RoleClient>` is exposed via the field
 /// type), but the methods on this struct cover the common cases and are
-/// stable across rmcp minor-version bumps.
+/// stable across compatible rmcp upgrades.
 ///
 /// `McpClient` is `Send` but **not** `Sync`. Share via `Arc<Mutex<…>>` or
 /// (preferred) move it into a dedicated actor task owned by the Host.
@@ -182,7 +182,7 @@ impl McpClient {
             McpTransport::Websocket => Err(McpClientError::Unsupported {
                 reason: format!(
                     "server '{name}': WebSocket transport is reserved in the config schema \
-                     but not implemented (rmcp 1.5 ships no WebSocket transport; the MCP \
+                     but not implemented (rmcp 2.1 ships no WebSocket transport; the MCP \
                      2025-03-26 spec deprecates WebSocket in favour of `transport = \"http\"`). \
                      Switch to `transport = \"http\"` to connect to this server."
                 ),
@@ -277,7 +277,15 @@ impl McpClient {
             .and_then(|r| r.authorization.clone())
             .or_else(|| spec.auth_header.clone());
         if let Some(auth) = auth_header {
-            http_cfg = http_cfg.auth_header(auth);
+            // Nexus accepts both `Bearer token` and bare `token` forms.
+            // Remove exactly one case-insensitive Bearer prefix before rmcp
+            // supplies the scheme, preserving that compatibility without
+            // producing `Bearer Bearer token`.
+            let token = auth
+                .split_once(' ')
+                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                .map_or(auth.as_str(), |(_, token)| token);
+            http_cfg = http_cfg.auth_header(token.to_string());
         }
         // The reqwest-backed default client uses the version of reqwest
         // that ships with rmcp's `transport-streamable-http-client-reqwest`
@@ -403,6 +411,71 @@ impl McpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const TEST_API_KEY: &str = "synthetic-api-key";
+    const TEST_BEARER_TOKEN: &str = "synthetic-bearer";
+
+    async fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 1024];
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+                .await
+                .expect("request read timed out")
+                .expect("request read failed");
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end + 4;
+            }
+            assert!(request.len() <= 64 * 1024, "test request headers too large");
+        };
+
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("valid content length"))
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 1024];
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .expect("request body read failed");
+            assert!(read > 0, "connection closed before request body completed");
+            request.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8(request).expect("synthetic request must be UTF-8")
+    }
+
+    async fn write_http_response(stream: &mut TcpStream, status: &str, headers: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("response write failed");
+    }
+
+    fn http_spec(url: String, auth_header: &str) -> McpServerSpec {
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("X-Nexus-Test-Key".to_string(), TEST_API_KEY.to_string());
+        McpServerSpec {
+            transport: McpTransport::Http,
+            url: Some(url),
+            auth_header: Some(auth_header.to_string()),
+            headers,
+            ..McpServerSpec::default()
+        }
+    }
 
     /// The only thing we can meaningfully unit-test at this layer is the
     /// spawn-failure path, because connecting to a real MCP server requires
@@ -549,6 +622,111 @@ mod tests {
                 assert_eq!(name, "NEXUS_TEST_BL025_CONNECT_NOENV");
             }
             other => panic!("expected Auth(MissingEnv), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_transport_delivers_custom_and_bearer_headers_directly() {
+        for auth_header in [TEST_BEARER_TOKEN, "bEaReR synthetic-bearer"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut initialize, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut initialize).await;
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("x-nexus-test-key: synthetic-api-key"),
+                    "custom header missing from direct request: {request}"
+                );
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer synthetic-bearer"),
+                    "bearer header missing from direct request: {request}"
+                );
+                let id = serde_json::from_str::<serde_json::Value>(
+                    request.split_once("\r\n\r\n").unwrap().1,
+                )
+                .unwrap()["id"]
+                    .clone();
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "serverInfo": { "name": "synthetic", "version": "1.0.0" }
+                    }
+                })
+                .to_string();
+                write_http_response(
+                    &mut initialize,
+                    "200 OK",
+                    "Content-Type: application/json\r\n",
+                    &body,
+                )
+                .await;
+
+                let (mut initialized, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut initialized).await;
+                assert!(request.contains("notifications/initialized"));
+                write_http_response(&mut initialized, "202 Accepted", "", "").await;
+            });
+
+            let client = McpClient::connect("direct", &http_spec(url, auth_header))
+                .await
+                .expect("synthetic MCP handshake should succeed");
+            client.shutdown().await.expect("shutdown should succeed");
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("synthetic server did not finish")
+                .expect("synthetic server panicked");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_transport_does_not_forward_custom_headers_across_redirects() {
+        for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
+            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let redirect = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target_url = format!("http://{}/capture", target.local_addr().unwrap());
+            let url = format!("http://{}/mcp", redirect.local_addr().unwrap());
+
+            let redirect_server = tokio::spawn(async move {
+                let (mut stream, _) = redirect.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await;
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("x-nexus-test-key: synthetic-api-key"));
+                write_http_response(
+                    &mut stream,
+                    status,
+                    &format!("Location: {target_url}\r\n"),
+                    "",
+                )
+                .await;
+            });
+
+            let result = McpClient::connect(
+                "redirect",
+                &http_spec(url, &format!("Bearer {TEST_BEARER_TOKEN}")),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(McpClientError::Handshake { .. })),
+                "redirect must fail closed instead of completing a handshake: {result:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(2), redirect_server)
+                .await
+                .expect("redirect origin was not contacted")
+                .expect("redirect origin panicked");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), target.accept())
+                    .await
+                    .is_err(),
+                "{status} target was contacted; synthetic credentials may have leaked"
+            );
         }
     }
 

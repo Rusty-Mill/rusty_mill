@@ -16,11 +16,10 @@ use nexus_kernel::{EventFilter, Events as _, Ipc as _, KernelPluginContext, Nexu
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    Annotated, CallToolRequestParams, CallToolResult, GetPromptRequestParams, GetPromptResult,
+    CallToolRequestParams, CallToolResult, GetPromptRequestParams, GetPromptResult,
     ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
-    PromptArgument, PromptMessage, PromptMessageRole, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ResourceUpdatedNotificationParam,
-    ServerCapabilities, ServerInfo,
+    PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResult, Resource,
+    ResourceContents, ResourceUpdatedNotificationParam, Role, ServerCapabilities, ServerInfo,
 };
 use rmcp::schemars;
 use rmcp::service::{Peer, RequestContext};
@@ -107,21 +106,18 @@ pub(crate) fn parse_note_uri(uri: &str) -> Option<&str> {
 
 /// Build an MCP [`Resource`] descriptor for a forge note at `path`.
 ///
-/// `size_bytes` is clamped to `u32::MAX` (the rmcp `RawResource::size` field
-/// is `u32`); we use `try_from` rather than `as` to avoid silent truncation.
+/// `size_bytes` is clamped to `u32::MAX` to preserve Nexus's existing wire
+/// behavior even though rmcp 2.x widened the resource-size field to `u64`.
 pub(crate) fn build_note_resource(path: &str, size_bytes: u64) -> Resource {
     let file_name = std::path::Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(path)
         .to_string();
-    Annotated::new(
-        RawResource::new(format!("{NOTE_URI_PREFIX}{path}"), file_name)
-            .with_description("Markdown note in the Nexus forge")
-            .with_mime_type("text/markdown")
-            .with_size(u32::try_from(size_bytes).unwrap_or(u32::MAX)),
-        None,
-    )
+    Resource::new(format!("{NOTE_URI_PREFIX}{path}"), file_name)
+        .with_description("Markdown note in the Nexus forge")
+        .with_mime_type("text/markdown")
+        .with_size(size_bytes.min(u64::from(u32::MAX)))
 }
 
 /// `com.nexus.terminal` — RFC 0003 Track A. The `nexus_terminal_get_*` tools and
@@ -158,15 +154,12 @@ pub(crate) fn parse_terminal_uri(uri: &str) -> Option<(&str, &str)> {
 
 /// Build an MCP [`Resource`] descriptor for one VT-grid `kind` of a session.
 pub(crate) fn build_terminal_resource(id: &str, kind: &str, description: &str) -> Resource {
-    Annotated::new(
-        RawResource::new(
-            format!("{TERMINAL_URI_PREFIX}{id}/{kind}"),
-            format!("terminal {id} · {kind}"),
-        )
-        .with_description(description)
-        .with_mime_type("text/plain"),
-        None,
+    Resource::new(
+        format!("{TERMINAL_URI_PREFIX}{id}/{kind}"),
+        format!("terminal {id} · {kind}"),
     )
+    .with_description(description)
+    .with_mime_type("text/plain")
 }
 
 /// What a terminal lifecycle event means for the resource notifier — split out
@@ -3965,11 +3958,10 @@ impl rmcp::ServerHandler for NexusMcpServer {
                 None,
             )
         })?;
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
-            rec.body,
-        )])
-        .with_description(rec.name))
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, rec.body)])
+                .with_description(rec.name),
+        )
     }
 
     async fn list_resources(
@@ -4149,24 +4141,24 @@ mod tests {
     #[test]
     fn build_terminal_resource_sets_uri_mime_and_name() {
         let r = build_terminal_resource("sess-1", "screen", "Current visible screen");
-        assert_eq!(r.raw.uri, "mcp://nexus/terminal/sess-1/screen");
-        assert_eq!(r.raw.mime_type.as_deref(), Some("text/plain"));
-        assert!(r.raw.name.contains("sess-1"));
+        assert_eq!(r.uri, "mcp://nexus/terminal/sess-1/screen");
+        assert_eq!(r.mime_type.as_deref(), Some("text/plain"));
+        assert!(r.name.contains("sess-1"));
     }
 
     #[test]
     fn build_note_resource_sets_uri_mime_and_size() {
         let r = build_note_resource("foo.md", 123);
-        assert_eq!(r.raw.uri, "mcp://nexus/notes/foo.md");
-        assert_eq!(r.raw.mime_type.as_deref(), Some("text/markdown"));
-        assert_eq!(r.raw.size, Some(123));
-        assert_eq!(r.raw.name, "foo.md");
+        assert_eq!(r.uri, "mcp://nexus/notes/foo.md");
+        assert_eq!(r.mime_type.as_deref(), Some("text/markdown"));
+        assert_eq!(r.size, Some(123));
+        assert_eq!(r.name, "foo.md");
     }
 
     #[test]
     fn build_note_resource_clamps_oversize_to_u32_max() {
         let r = build_note_resource("huge.md", u64::MAX);
-        assert_eq!(r.raw.size, Some(u32::MAX));
+        assert_eq!(r.size, Some(u64::from(u32::MAX)));
     }
 
     #[test]

@@ -30,7 +30,7 @@
 //!
 //! # Why a hand-rolled flow rather than `rmcp/auth`?
 //!
-//! rmcp 1.5 ships a full OAuth manager (`rmcp::transport::auth`) that
+//! rmcp 2.1 ships a full OAuth manager (`rmcp::transport::auth`) that
 //! covers PKCE, refresh tokens, and DCR — but enabling it pulls in
 //! `dep:reqwest` at rmcp's pinned version (0.13.x) plus extra TLS-feature
 //! scaffolding the workspace doesn't otherwise need, and exposes a
