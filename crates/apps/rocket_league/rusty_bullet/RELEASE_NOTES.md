@@ -8,6 +8,16 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Cars right themselves under throttle
+**2026-10-04** · `RB-PHYSICS-001-FR-131` · ADR-0050
+
+- With throttle held and only some wheels (or the body) on a surface, the
+  game presses the car down and turns it toward lying flat. We lacked
+  that, so landings with throttle on drifted in spin by 0.25-0.43 rad/s per
+  tick. Added from RocketSim's auto-roll; spin error on those frames falls
+  to 0.03 or less, the driving recording's 0.5 s-ahead car error 5.44 →
+  4.73 uu/s and the front-wall one 0.80 → 0.49. 517 tests.
+
 ## The ball's lever arm is its own radius
 **2026-10-04** · `RB-PHYSICS-001-FR-130` · ADR-0049
 

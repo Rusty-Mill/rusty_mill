@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.133.0
+- Version: 0.134.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6442,6 +6442,25 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       0.084 (was 0.091), k = 30 ball 1.27 (was 1.39). `front`, `side`
       unchanged. Worst regression 77.667 s ball 46 → 58 (car 8 → 6).
 
+- `RB-PHYSICS-001-FR-131` (auto-roll; implemented and verified on the
+  owner's captures, ADR-0050): `drive::roll::auto_roll` is RocketSim's
+  `Car::_UpdateAutoRoll`. With throttle held and one to three wheels on a
+  surface (or the body alone touching one), the car is pulled toward that
+  surface at 100 uu/s^2 and turned toward lying flat on it at up to
+  80 rad/s^2, scaled by how far each axis is from flat. It runs last in
+  `apply_driven_forces`, after the jump and flip logic.
+  - Why: `test2.jsonl` 8.967-9.042 s, a car landing on partial contact
+    with throttle on: spin error 0.25-0.43 rad/s per tick, all toward flat.
+  - **Verification**:
+    - `drive` tests `a_rolled_car_on_throttle_is_pressed_down_and_turned_flat`,
+      `auto_roll_needs_throttle_and_a_partial_contact`,
+      `a_car_touching_with_its_body_alone_rolls_toward_that_surface`.
+    - `test2` spin error at 8.967-9.042 s 0.25-0.43 -> <= 0.03 rad/s; k = 30
+      car velocity 5.44 -> 4.73. `front` k = 30 car 0.80 -> 0.49. `hitjump`
+      k = 30 car 11.22 -> 11.23 (unchanged), `side` unchanged.
+    - Not explained: test2 5.8-5.9 s post-kickoff-jump z bias (~5 uu/s per
+      tick); frames at 8.99-9.0 s regress slightly.
+
 
 ## Architecture and interfaces
 
@@ -7932,6 +7951,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.134.0 (2026-10-04): `RB-PHYSICS-001-FR-131` — auto-roll, RocketSim's
+  `_UpdateAutoRoll` (ADR-0050). 446 tests in `rb_physics_bullet`.
 - 0.133.0 (2026-10-04): `RB-PHYSICS-001-FR-130` — each body's lever arm runs
   to its own contact point (ADR-0049). 443 tests in `rb_physics_bullet`.
 - 0.132.0 (2026-10-04): `RB-PHYSICS-001-FR-129` — a car's wheel rays hit

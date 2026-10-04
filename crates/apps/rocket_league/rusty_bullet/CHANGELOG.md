@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0050 (`RB-PHYSICS-001-FR-131`): `drive::roll::auto_roll`,
+  RocketSim's `_UpdateAutoRoll`: throttle plus partial surface contact
+  presses the car down and turns it toward flat.
 - ADR-0049 (`RB-PHYSICS-001-FR-130`): `Contact::point_on_a`
   (`m_positionWorldOnA`); `solver::setup_two_body_rows` measures body A's
   lever arm to its own contact point, not the shared point on B.

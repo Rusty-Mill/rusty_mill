@@ -3367,3 +3367,87 @@ fn clamp_velocity_scales_an_over_cap_linear_velocity_back_along_its_direction() 
     clamp_velocity(&mut c);
     assert_eq!(c.linear_velocity, Vec3::new(1000.0, 0.0, 0.0));
 }
+
+/// A level car rolled `angle` rad about its forward axis, lowered until its
+/// low-side wheels reach the floor.
+fn rolled_car_on_the_floor(angle: f32) -> RigidBody {
+    let mut car = level_car_at_height(60.0);
+    car.orientation = Quat::new((angle * 0.5).sin(), 0.0, 0.0, (angle * 0.5).cos());
+    car.update_inertia_tensor();
+    let mut height = 60.0;
+    while height > 0.0
+        && cast_wheels(&car, plane_contact(&floor()), TICK)
+            .iter()
+            .flatten()
+            .count()
+            == 0
+    {
+        height -= 0.5;
+        car.position.z = height;
+    }
+    car
+}
+
+/// RB-PHYSICS-001-FR-131: on throttle with one to three wheels down, a car
+/// is pressed toward the surface at 100 uu/s^2 and turned to lie flat on it.
+#[test]
+fn a_rolled_car_on_throttle_is_pressed_down_and_turned_flat() {
+    let car = rolled_car_on_the_floor(0.5);
+    let wheels = cast_wheels(&car, plane_contact(&floor()), TICK);
+    let touching = wheels.iter().flatten().count();
+    assert!((1..4).contains(&touching), "{touching} wheels down");
+    let mut rolled = car;
+    rolled.clear_forces();
+    super::roll::auto_roll(&mut rolled, &wheels, &DriveState::new(), 1.0, TICK);
+    assert!(
+        (rolled.total_force().z / rolled.mass() + 100.0).abs() < 1.0,
+        "force {:?}",
+        rolled.total_force()
+    );
+    // The car's up axis swings toward the surface normal.
+    let up = up_axis(&rolled);
+    let turning = rolled
+        .angular_velocity
+        .cross(&up)
+        .dot(&Vec3::new(0.0, 0.0, 1.0));
+    assert!(turning > 0.0, "turning {turning}");
+    assert!(rolled.angular_velocity.length() > 0.01);
+}
+
+/// RB-PHYSICS-001-FR-131: no throttle, four wheels down with no body
+/// contact, or nothing touching: no auto-roll.
+#[test]
+fn auto_roll_needs_throttle_and_a_partial_contact() {
+    let car = rolled_car_on_the_floor(0.5);
+    let wheels = cast_wheels(&car, plane_contact(&floor()), TICK);
+    let apply = |car: &RigidBody, wheels: &WheelContacts, throttle: f32| {
+        let mut out = *car;
+        out.clear_forces();
+        super::roll::auto_roll(&mut out, wheels, &DriveState::new(), throttle, TICK);
+        out
+    };
+    assert_eq!(apply(&car, &wheels, 0.0).angular_velocity, Vec3::ZERO);
+    assert_eq!(
+        apply(&car, &NO_WHEEL_CONTACTS, 1.0).angular_velocity,
+        Vec3::ZERO
+    );
+    let level = level_car_at_height(17.0);
+    let all = cast_wheels(&level, plane_contact(&floor()), TICK);
+    assert_eq!(all.iter().flatten().count(), 4);
+    assert_eq!(apply(&level, &all, 1.0).angular_velocity, Vec3::ZERO);
+}
+
+/// RB-PHYSICS-001-FR-131: with no wheel down, a body contact from the last
+/// tick supplies the surface.
+#[test]
+fn a_car_touching_with_its_body_alone_rolls_toward_that_surface() {
+    let mut car = level_car_at_height(60.0);
+    car.orientation = Quat::new((0.5f32 * 0.5).sin(), 0.0, 0.0, (0.5f32 * 0.5).cos());
+    car.update_inertia_tensor();
+    let mut state = DriveState::new();
+    state.world_contact_normal = Some(Vec3::new(0.0, 0.0, 1.0));
+    car.clear_forces();
+    super::roll::auto_roll(&mut car, &NO_WHEEL_CONTACTS, &state, 1.0, TICK);
+    assert!(car.angular_velocity.length() > 0.01);
+    assert!(car.total_force().z < 0.0);
+}

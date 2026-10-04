@@ -277,6 +277,7 @@ mod air;
 mod boost;
 mod ground;
 mod jump;
+mod roll;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
@@ -608,6 +609,9 @@ pub fn apply_driven_forces(
             jump::advance_flip(car, &mut state.flip, dt);
         }
     }
+
+    // RB-PHYSICS-001-FR-131: after the jump and flip logic, as RocketSim.
+    roll::auto_roll(car, wheels, state, input.throttle.clamp(-1.0, 1.0), dt);
 
     state.was_on_ground = on_ground;
 
