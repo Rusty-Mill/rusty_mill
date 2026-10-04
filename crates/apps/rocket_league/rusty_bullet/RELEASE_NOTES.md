@@ -8,6 +8,21 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## One-step predictions remember the ball's contacts
+**2026-10-04** · `RB-PHYSICS-001-FR-127`, `FR-128` · ADR-0047
+
+- The game keeps up to four contact points between the ball and a curved
+  wall from tick to tick. Our one-step check restarted the ball with none
+  every tick, so on every corner and fillet hit it predicted a different
+  contact set than the game's, and the worst ball frame in the recording
+  (97.9 s) was an artifact of that. The check now carries the contacts
+  across ticks unless the ball was teleported. That exposed a second
+  difference: we kept a contact 1.86 uu longer than Bullet does, which
+  made the carried set drift from the game's after a few ticks. Fixed
+  with Bullet's own thresholds. The hit recording's ball error drops
+  0.490 → 0.435 uu/s per tick and 17 of the 18 frames over 50 uu/s are
+  gone. 508 tests.
+
 ## Manifold slots in Bullet's order
 **2026-10-04** · `RB-PHYSICS-001-FR-126` · ADR-0046
 

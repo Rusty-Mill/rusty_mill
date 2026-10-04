@@ -122,6 +122,19 @@ pub const BALL_RADIUS: f32 = 93.15;
 /// 0.8 x (8.3 - 1.9), not 0.8 x 8.3.
 pub const BALL_COLLISION_RADIUS: f32 = 91.25;
 
+/// Bullet's contact breaking threshold for the ball (uu),
+/// `RB-PHYSICS-001-FR-127`: 0.02 times its angular motion disc, the 91.25
+/// sphere plus the 0.08 BT (4 uu) `getBoundingSphere` pads it by
+/// (ADR-0041). It folds, drops and admits the ball's mesh contacts.
+pub const BALL_BREAKING_THRESHOLD: f32 = 0.02 * (BALL_COLLISION_RADIUS + 4.0);
+
+/// How far past the `BALL_RADIUS` contact sphere a ball's mesh contact is
+/// made and kept (uu), `RB-PHYSICS-001-FR-127`: Bullet's threshold less the
+/// 1.9 uu the contact sphere already stands off the 91.25 sphere, 0.005 uu.
+/// The port took the 0.01 processing tolerance to make a contact and 1.86 uu
+/// (0.02 x 93.15) to keep one: 1.86 uu longer than Bullet keeps it.
+pub const BALL_CONTACT_SLACK: f32 = BALL_BREAKING_THRESHOLD - (BALL_RADIUS - BALL_COLLISION_RADIUS);
+
 /// Bullet's `CONVEX_DISTANCE_MARGIN` (0.04 BT) on a car's hitbox, uu
 /// (`RB-PHYSICS-001-FR-124`). `btBoxShape` keeps a core box this much
 /// smaller on every axis and pads it back out radially, so the box is its

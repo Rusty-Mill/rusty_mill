@@ -231,7 +231,15 @@ version: `a245d35`).
    the 20.7–21.0 s frames from 98–164 uu/s to under 30; with manifolds
    carried through snaps the one-step ball would read 0.464 (97.908 s
    207 → 0) but 20.800 s regresses (2 → 109), left as a lead with the
-   cold one-step unchanged. Open car-side leads: `test2`
+   cold one-step unchanged. `RB-PHYSICS-001-FR-127`/`FR-128` (ADR-0047)
+   then close the lead: the ball's mesh contacts are made, kept and folded
+   at Bullet's thresholds (0.005 uu past the contact sphere, not 1.86) and
+   a snapped ball keeps its contact history unless it teleported, so
+   one-step now predicts from the game's own carried contact set:
+   `hitjump` one-step ball 0.435 (was 0.490), frames over 50 uu/s 18 → 1
+   (97.908 s 207 → 0), k = 30 ball 21.18; `test2`, `front`, `side`
+   unchanged. Largest ball frame now the aerial car hit at 77.667 s (135).
+   Open car-side leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -242,7 +250,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (506 tests: 27 `rb_domain`, 435
+- `cargo test --workspace`: pass (508 tests: 27 `rb_domain`, 437
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

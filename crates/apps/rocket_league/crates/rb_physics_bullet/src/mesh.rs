@@ -430,7 +430,8 @@ impl StaticMesh {
     /// own contact point.
     pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<Contact> {
         let mut manifold = BallManifold::default();
-        self.sphere_manifold(center, &Quat::IDENTITY, radius, &mut manifold)
+        let limits = SphereLimits::plain(radius);
+        self.sphere_manifold(center, &Quat::IDENTITY, radius, &limits, &mut manifold)
     }
 
     /// `btSphereTriangleCollisionAlgorithm`'s contact between the sphere
@@ -441,6 +442,7 @@ impl StaticMesh {
         index: usize,
         center: Vec3,
         radius: f32,
+        admit: f32,
     ) -> Option<ManifoldEntry> {
         let triangle = self.triangles.get(index)?;
         let height = triangle.signed_distance(&center);
@@ -457,7 +459,7 @@ impl StaticMesh {
         } else {
             return None;
         };
-        if depth < -CONTACT_PROCESSING_THRESHOLD {
+        if depth < -admit {
             return None;
         }
         let adjusted = self.adjust_edge_normal(index, &closest, normal);
@@ -486,20 +488,23 @@ impl StaticMesh {
         center: Vec3,
         orientation: &Quat,
         radius: f32,
+        limits: &SphereLimits,
         manifold: &mut BallManifold,
     ) -> Vec<Contact> {
         let reach = Vec3::new(radius, radius, radius);
-        let breaking = CONTACT_BREAKING_FACTOR * radius;
+        let breaking = limits.breaking;
         let to_local = orientation.conjugate();
         let mut near = self.near_indices(center - reach, center + reach);
         near.sort_unstable_by_key(|&index| self.visit_rank.get(index as usize).copied());
         for index in near {
-            if let Some(mut entry) = self.sphere_triangle_contact(index as usize, center, radius) {
+            if let Some(mut entry) =
+                self.sphere_triangle_contact(index as usize, center, radius, limits.admit)
+            {
                 entry.local_on_ball = to_local.rotate(&(entry.on_ball - center));
                 add_manifold_point(&mut manifold.entries, entry, breaking);
             }
         }
-        manifold.refresh(center, orientation, breaking);
+        manifold.refresh(center, orientation, limits);
         manifold.entries.iter().map(|entry| entry.contact).collect()
     }
 }
@@ -522,6 +527,43 @@ struct ManifoldEntry {
 /// The ball's persistent manifold against one mesh, Bullet's
 /// `btPersistentManifold` kept across ticks (`RB-PHYSICS-001-FR-121`,
 /// ADR-0041).
+/// How a sphere's manifold with a mesh makes, keeps and folds contacts
+/// (uu), `RB-PHYSICS-001-FR-127`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphereLimits {
+    /// A contact is made while the sphere is within this far of a triangle
+    /// (`SphereTriangleDetector`'s threshold slack).
+    pub admit: f32,
+    /// A kept point stays while its sphere point is within this far of its
+    /// surface along the normal (`validContactDistance`).
+    pub retain: f32,
+    /// A new point within this far of a kept one replaces it
+    /// (`getCacheEntry`), and a kept point that slides this far sideways
+    /// is dropped (`getContactBreakingThreshold`).
+    pub breaking: f32,
+}
+
+impl SphereLimits {
+    /// A bare sphere: the processing tolerance to make a contact, 0.02 x
+    /// its radius to keep and fold.
+    pub fn plain(radius: f32) -> SphereLimits {
+        let breaking = CONTACT_BREAKING_FACTOR * radius;
+        SphereLimits {
+            admit: CONTACT_PROCESSING_THRESHOLD,
+            retain: breaking,
+            breaking,
+        }
+    }
+
+    /// The ball, whose contact sphere (`body::BALL_RADIUS`) stands 1.9 uu
+    /// off Bullet's own 91.25 sphere.
+    pub const BALL: SphereLimits = SphereLimits {
+        admit: crate::body::BALL_CONTACT_SLACK,
+        retain: crate::body::BALL_CONTACT_SLACK,
+        breaking: crate::body::BALL_BREAKING_THRESHOLD,
+    };
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BallManifold {
     entries: Vec<ManifoldEntry>,
@@ -529,9 +571,10 @@ pub struct BallManifold {
 
 impl BallManifold {
     /// `refreshContactPoints`: each point's ball side follows the ball's
-    /// transform; a point further than `breaking` from its triangle along
-    /// its normal, or slid further than that sideways, is dropped.
-    fn refresh(&mut self, center: Vec3, orientation: &Quat, breaking: f32) {
+    /// transform; a point further than `limits.retain` from its triangle
+    /// along its normal, or slid further than `limits.breaking` sideways,
+    /// is dropped.
+    fn refresh(&mut self, center: Vec3, orientation: &Quat, limits: &SphereLimits) {
         // Bullet's `removeContactPoint` (RB-PHYSICS-001-FR-126): walking
         // from the last slot down, a dropped slot takes the last entry.
         // `sortCachedPoints`'s area terms pair slots by position, so the
@@ -544,7 +587,9 @@ impl BallManifold {
             let on_ball = center + orientation.rotate(&entry.local_on_ball);
             let distance = (on_ball - entry.on_mesh).dot(&entry.contact.normal);
             let drift = entry.on_mesh - (on_ball - entry.contact.normal * distance);
-            if distance > breaking || drift.length_squared() > breaking * breaking {
+            if distance > limits.retain
+                || drift.length_squared() > limits.breaking * limits.breaking
+            {
                 self.entries.swap_remove(slot);
                 continue;
             }
@@ -1004,7 +1049,11 @@ mod tests {
     /// the normal or has slid past it sideways.
     #[test]
     fn a_persistent_point_follows_the_ball_until_it_leaves() {
-        let breaking = 1.86;
+        let limits = SphereLimits {
+            admit: 0.01,
+            retain: 1.86,
+            breaking: 1.86,
+        };
         let resting = || BallManifold {
             entries: vec![ManifoldEntry {
                 on_ball: Vec3::new(0.0, 0.0, -3.15),
@@ -1018,16 +1067,16 @@ mod tests {
             }],
         };
         let mut nudged = resting();
-        nudged.refresh(Vec3::new(1.0, 0.0, 91.0), &Quat::IDENTITY, breaking);
+        nudged.refresh(Vec3::new(1.0, 0.0, 91.0), &Quat::IDENTITY, &limits);
         assert_eq!(nudged.len(), 1);
         assert!((nudged.entries[0].contact.penetration_depth - 2.15).abs() < 1e-5);
 
         let mut lifted = resting();
-        lifted.refresh(Vec3::new(0.0, 0.0, 96.0), &Quat::IDENTITY, breaking);
+        lifted.refresh(Vec3::new(0.0, 0.0, 96.0), &Quat::IDENTITY, &limits);
         assert!(lifted.is_empty(), "2.85 uu clear is past the threshold");
 
         let mut slid = resting();
-        slid.refresh(Vec3::new(5.0, 0.0, 90.0), &Quat::IDENTITY, breaking);
+        slid.refresh(Vec3::new(5.0, 0.0, 90.0), &Quat::IDENTITY, &limits);
         assert!(slid.is_empty(), "5 uu sideways is past the threshold");
     }
 
@@ -1054,7 +1103,11 @@ mod tests {
                 entry(30.0, 0.0),
             ],
         };
-        manifold.refresh(Vec3::new(0.0, 0.0, 90.0), &Quat::IDENTITY, 1.86);
+        manifold.refresh(
+            Vec3::new(0.0, 0.0, 90.0),
+            &Quat::IDENTITY,
+            &SphereLimits::plain(93.15),
+        );
         let order: Vec<f32> = manifold.entries.iter().map(|e| e.on_mesh.x).collect();
         assert_eq!(order, vec![0.0, 30.0, 20.0]);
     }
@@ -1088,15 +1141,89 @@ mod tests {
         let centre = Vec3::new(0.0, 0.0, 90.0);
         let mut manifold = BallManifold::default();
         assert_eq!(
-            mesh.sphere_manifold(centre, &Quat::IDENTITY, 93.15, &mut manifold)
-                .len(),
+            mesh.sphere_manifold(
+                centre,
+                &Quat::IDENTITY,
+                93.15,
+                &SphereLimits::BALL,
+                &mut manifold
+            )
+            .len(),
             1
         );
         let kept = manifold.entries[0];
         // A quarter turn about x moves the bottom point to the side.
         let half = std::f32::consts::FRAC_PI_4;
         let turned = Quat::new(half.sin(), 0.0, 0.0, half.cos());
-        manifold.refresh(centre, &turned, 1.86);
+        manifold.refresh(centre, &turned, &SphereLimits::BALL);
         assert!(manifold.is_empty(), "kept {kept:?}");
+    }
+
+    fn resting_point() -> BallManifold {
+        BallManifold {
+            entries: vec![ManifoldEntry {
+                on_ball: Vec3::new(0.0, 0.0, -3.15),
+                local_on_ball: Vec3::new(0.0, 0.0, -93.15),
+                on_mesh: Vec3::ZERO,
+                contact: Contact {
+                    normal: Vec3::new(0.0, 0.0, 1.0),
+                    point: Vec3::ZERO,
+                    penetration_depth: 0.0,
+                },
+            }],
+        }
+    }
+
+    /// RB-PHYSICS-001-FR-127: the ball's contact sphere stands 1.9 uu off
+    /// Bullet's own, so a kept point stays only 0.005 uu past it, not the
+    /// 1.86 uu of a bare 93.15 uu sphere (`hitjump.jsonl` 20.775-20.800 s).
+    #[test]
+    fn a_ball_point_is_kept_only_within_bullets_slack() {
+        let mut near = resting_point();
+        near.refresh(
+            Vec3::new(0.0, 0.0, 93.154),
+            &Quat::IDENTITY,
+            &SphereLimits::BALL,
+        );
+        assert_eq!(near.len(), 1);
+        let mut far = resting_point();
+        far.refresh(
+            Vec3::new(0.0, 0.0, 93.2),
+            &Quat::IDENTITY,
+            &SphereLimits::BALL,
+        );
+        assert!(far.is_empty(), "0.05 uu clear is past Bullet's threshold");
+        let mut bare = resting_point();
+        bare.refresh(
+            Vec3::new(0.0, 0.0, 93.2),
+            &Quat::IDENTITY,
+            &SphereLimits::plain(93.15),
+        );
+        assert_eq!(bare.len(), 1, "a bare sphere keeps it");
+    }
+
+    /// RB-PHYSICS-001-FR-127: the ball makes a contact only within the same
+    /// 0.005 uu.
+    #[test]
+    fn a_ball_makes_a_mesh_contact_only_within_bullets_slack() {
+        let mesh = floor_quad();
+        let mut clear = BallManifold::default();
+        let none = mesh.sphere_manifold(
+            Vec3::new(0.0, 0.0, 93.159),
+            &Quat::IDENTITY,
+            93.15,
+            &SphereLimits::BALL,
+            &mut clear,
+        );
+        assert!(none.is_empty());
+        let mut touching = BallManifold::default();
+        let one = mesh.sphere_manifold(
+            Vec3::new(0.0, 0.0, 93.152),
+            &Quat::IDENTITY,
+            93.15,
+            &SphereLimits::BALL,
+            &mut touching,
+        );
+        assert_eq!(one.len(), 1);
     }
 }

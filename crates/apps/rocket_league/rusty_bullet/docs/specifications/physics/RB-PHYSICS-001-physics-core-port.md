@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.130.0
+- Version: 0.131.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6340,6 +6340,55 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       (was 104), 104.392 s 4 (was 103), 40.042 s 2 (was 101); one frame
       worse, 20.800 s 109 (was 2), where the warm chain loses the 61.5°
       facet point to an eviction the game does not make. Left as a lead.
+      (Closed by FR-127 and FR-128.)
+- `RB-PHYSICS-001-FR-127` (the ball's mesh contacts are made, kept and
+  folded at Bullet's thresholds; implemented and verified on the owner's
+  capture, ADR-0047): `mesh::SphereLimits` holds a sphere's three limits
+  and `SphereLimits::BALL` the ball's. `body::BALL_BREAKING_THRESHOLD`
+  is Bullet's `getContactBreakingThreshold` for the ball, 0.02 × (91.25 +
+  4) = 1.905 uu, which folds a new point into a kept one
+  (`getCacheEntry`) and drops one that slid sideways.
+  `body::BALL_CONTACT_SLACK` is that threshold less the 1.9 uu the 93.15
+  contact sphere stands off Bullet's 91.25 sphere, 0.005 uu, and is how far
+  past the contact sphere a contact is made (`SphereTriangleDetector`'s
+  `radius + threshold`) and a kept point stays valid
+  (`validContactDistance`). Before, the port made a contact at the 0.01 uu
+  processing tolerance and kept it to 1.863 uu (0.02 × 93.15) past the
+  contact sphere, 1.86 uu longer than Bullet.
+  - Why: with manifolds carried across ticks (FR-128), each recorded
+    ball-corner frame needs the point set the game held. Points that stayed
+    1.86 uu too long filled slots Bullet had already emptied, and the next
+    full-manifold eviction (FR-126) then dropped the wrong point:
+    `hitjump.jsonl` 20.792 s lost the 28.5° facet point the game kept
+    (109 uu/s). The game also folds (`getCacheEntry` returns the nearest
+    point): RocketSim's build never folds, but folding fits the captures
+    far better (hitjump carried one-step 0.435 against 0.506 without), so
+    the recording, taken from the game, decides.
+  - **Verification**:
+    - `mesh` tests `a_ball_point_is_kept_only_within_bullets_slack` and
+      `a_ball_makes_a_mesh_contact_only_within_bullets_slack`.
+    - With FR-128: `hitjump` one-step ball 0.435 (was 0.490, resets
+      excluded), frames over 50 uu/s 18 → 1; k = 30 ball 21.18 (was
+      21.24). `test2`, `front` and `side` unchanged; no car value moves.
+- `RB-PHYSICS-001-FR-128` (a snapped ball keeps its contact history unless
+  it teleported; implemented and verified on the owner's capture,
+  ADR-0047; amends FR-121): `PhysicsWorld::snap_to_frame` clears the
+  ball's mesh manifolds only when the snapped position is more than
+  `BALL_RADIUS` from where the world left the ball. The manifold is hidden
+  state, like the cars' drive state a snap already keeps; a one-step
+  prediction that restarts every tick with none predicts a different
+  contact set than the game's carried one.
+  - Why: from the recorded `hitjump.jsonl` 97.900 s state a fresh manifold
+    bounces at once off the goal fillet while the game's still holds the
+    corner fan from 97.892 s and bounces one tick later (207 uu/s, the
+    worst ball frame); the fillet grind at 104.375–104.408 s needs the
+    carried set tick after tick.
+  - **Verification**:
+    - `world` test `snapping_the_ball_keeps_its_history_unless_it_teleports`.
+    - `hitjump` per frame: 97.908 s 207 → 0, 97.917 s 103 → 2, 97.933 s
+      110 → 2, 73.958 s 104 → 3, 104.392 s 103 → 4, 40.042 s 101 → 2,
+      39.850 s 102 → 3, 20.767 s 59 → 4. Worst regression 20.558 s 3 → 14.
+      The aerial car hit at 77.667 s (135) is now the largest frame.
 
 
 ## Architecture and interfaces
@@ -7831,6 +7880,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.131.0 (2026-10-04): `RB-PHYSICS-001-FR-127` and `FR-128` — the ball's
+  mesh contacts are made, kept and folded at Bullet's thresholds, and a
+  snapped ball keeps its contact history unless it teleported (ADR-0047).
+  437 tests in `rb_physics_bullet`.
 - 0.130.0 (2026-10-04): `RB-PHYSICS-001-FR-126` — the ball's mesh manifold
   drops and folds points in Bullet's slot order (ADR-0046). 435 tests in
   `rb_physics_bullet`.
