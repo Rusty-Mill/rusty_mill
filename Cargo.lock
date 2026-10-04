@@ -8828,6 +8828,7 @@ dependencies = [
  "nexus-types",
  "reqwest 0.13.4",
  "rmcp",
+ "rusty-mcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
