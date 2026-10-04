@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use orch_core::board::Board;
+use orch_core::goal::StopRule;
 use orch_core::task::{Agent, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
@@ -19,6 +20,7 @@ use crate::render;
 pub struct OllamaAgent<C = StdCommand> {
     model: String,
     timeout: Duration,
+    stop: StopRule,
     runner: C,
 }
 
@@ -35,8 +37,16 @@ impl<C: CommandRunner> OllamaAgent<C> {
         Self {
             model: model.into(),
             timeout,
+            stop: StopRule::Checkpoint,
             runner,
         }
+    }
+
+    /// The goal's stop rule, which decides whether cards may ask questions
+    /// (ADR-0011). Defaults to [`StopRule::Checkpoint`].
+    pub fn with_stop_rule(mut self, stop: StopRule) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// The runner, e.g. to inspect a fake in tests.
@@ -86,7 +96,7 @@ impl<C: CommandRunner> OllamaAgent<C> {
                 task.spec().role
             ))));
         }
-        let prompt = render(task, board);
+        let prompt = render(task, board, self.stop);
         // Ollama has no API-key path, so nothing is scrubbed from the child.
         let exit = self
             .runner
@@ -106,7 +116,7 @@ impl<C: CommandRunner> OllamaAgent<C> {
                 "ollama wrote nothing to stdout".to_owned(),
             )));
         }
-        parse(&stdout, task.spec().role).map_err(ClassifiedError::Transient)
+        parse(&stdout, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
     }
 }
 

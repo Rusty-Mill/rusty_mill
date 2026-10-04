@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Best effort runs without a human
+**2026-10-04** · (link once pushed)
+
+- **Added:** `"stop": "best_effort"` is enforced. The shared adapter core withdraws the `question` kind from Research, Triage, and Design cards, the prompt gains two rules (nobody will answer, so do not ask; write an `assumption` entry stating what you take as true, then continue), the strict parser rejects a reply that asks anyway as a transient agent error retried under the card's ceiling, and Codex's structured-output schema omits the `question` variant so a constrained model cannot form one. Under `checkpoint` every prompt, schema, and parse result is byte-identical to before.
+- **Added:** the text report lists live assumptions in an `assumptions (taken as true, unverified)` block when any exist; the JSON report already carried them as `kind: "assumption"`.
+- **Changed:** `CodexAgent` and `OllamaAgent` take the rule through `with_stop_rule` (default `Checkpoint`); the binary parses the goal file first and builds the adapters with its rule (`cli::run_with`; `cli::run` keeps its four-argument form). In-family signature changes: `orch_cli::allowed_kinds`, `format_spec`, `parse` gain a `StopRule` parameter; `orch_ollama::render` and `orch_codex::render` likewise; `orch_codex::output_schema(stop)` replaces the `OUTPUT_SCHEMA` constant. No change to `orch-core`, `orch-dispatch`, the board, or the run loop.
+- **Tests:** orch-cli parser (question rejected and assumption accepted under best effort, review and implement unchanged) and format spec (two rules added, kinds line without `question`, review spec identical under both rules); orch-ollama and orch-codex adapters over fakes (best-effort prompt carries the rules, a question reply is a transient error, the same reply is a question under checkpoint; Codex schema strict under both rules and without a `question` variant under best effort, and in agreement with the parser); rusty_orch run loop (a best-effort goal over an assumption-writing fake finishes without asking the console and the report shows the block; the block is absent otherwise) and entry point (`run_with` receives the goal's rule). Verified locally on rustc 1.97; CI pins 1.98.1. No real Codex or Ollama. ADR-0011.
+- Out of scope, by choice: an orchestrator-authored assumption, a dispatcher-side fallback, per-card overrides, Claude and Gemini adapters, per-step checkpointing.
+
+---
+
 ## Resume a blocked run: `--state <dir>`
 **2026-10-03** · (link once pushed)
 

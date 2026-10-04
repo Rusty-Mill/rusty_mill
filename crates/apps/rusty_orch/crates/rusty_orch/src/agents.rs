@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use orch_codex::CodexAgent;
 use orch_core::board::Board;
+use orch_core::goal::StopRule;
 use orch_core::task::{Agent, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 use orch_ollama::OllamaAgent;
@@ -18,6 +19,8 @@ pub struct AgentsConfig {
     pub ollama_timeout: Duration,
     pub codex_repo: PathBuf,
     pub codex_model: Option<String>,
+    /// The goal's stop rule, handed to both adapters (ADR-0011).
+    pub stop: StopRule,
 }
 
 /// `Agent::Codex` and `Agent::Local`; anything else has no adapter here.
@@ -29,13 +32,14 @@ pub struct Agents {
 impl Agents {
     /// Adapters over the real binaries on `PATH`.
     pub fn new(config: AgentsConfig) -> Self {
-        let mut codex = CodexAgent::new(config.codex_repo);
+        let mut codex = CodexAgent::new(config.codex_repo).with_stop_rule(config.stop);
         if let Some(model) = config.codex_model {
             codex = codex.model(model);
         }
         Self {
             codex,
-            local: OllamaAgent::new(config.ollama_model, config.ollama_timeout),
+            local: OllamaAgent::new(config.ollama_model, config.ollama_timeout)
+                .with_stop_rule(config.stop),
         }
     }
 

@@ -18,7 +18,7 @@ ORCH_OLLAMA_MODEL=llama3.2 cargo run -p orch-codex --example research_review -- 
 | ---- | ---- |
 | `crates/orch-core` | Pure domain: goal contracts, task cards + `Plan`, blackboard. No I/O, no dependencies. |
 | `crates/orch-dispatch` | Application layer: `AgentRunner` port, validated role → agent routing, sequential loop over `Plan` metered by a caller-owned `Ledger`. Depends only on `orch-core`. `FakeAgent` behind the `fake` feature. |
-| `crates/orch-cli` | Shared CLI-adapter core: `CommandRunner`/`StdCommand` seam (hard deadline, group kill, env scrub), strict JSON `parse`, prompt `render` with a per-adapter footer, `fake` test doubles. |
+| `crates/orch-cli` | Shared CLI-adapter core: `CommandRunner`/`StdCommand` seam (hard deadline, group kill, env scrub), strict JSON `parse`, prompt `render` with a per-adapter footer, `fake` test doubles. The kinds a role may write depend on the goal's stop rule: best effort withdraws `question` ([ADR-0011](./docs/adr/0011-best-effort-stop-rule.md)). |
 | `crates/orch-ollama` | `Agent::Local` over `ollama run --format json`: thin adapter on `orch-cli`. `research` example runs one card end to end. |
 | `crates/rusty_orch` | The command: `rusty_orch run <goal.json> [--interactive] [--json]`. Parses the goal file, wires both adapters, enforces the wall clock, prints the board. ADR-0009. |
 | `crates/orch-codex` | `Agent::Codex` over `codex exec --sandbox read-only`, schema-constrained reply via the last-message file, `OPENAI_API_KEY` scrubbed. `research_review` example: Codex researches, a local model reviews. |

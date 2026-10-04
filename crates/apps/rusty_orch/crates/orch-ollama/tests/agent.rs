@@ -210,3 +210,30 @@ fn resumed_card_prompt_carries_the_answer() {
     assert!(prompt.contains("The live referenced finding."));
     assert!(!prompt.contains("Plan::start rejects the author."));
 }
+
+#[test]
+fn best_effort_rejects_a_question_reply_as_transient() {
+    use orch_core::goal::StopRule;
+    use orch_dispatch::ClassifiedError;
+    let (plan, board, _, _) = fixture();
+    let question = r#"{"entries":[{"kind":"question","body":"which branch?","refs":[]}]}"#;
+    let mut a = agent(FakeCommand::ok(question)).with_stop_rule(StopRule::BestEffort);
+
+    let err = a
+        .run_classified(Agent::Local, task(&plan), &board)
+        .expect_err("questions are withdrawn under best effort");
+    assert!(
+        matches!(&err, ClassifiedError::Transient(e) if e.0.contains("question")),
+        "{err:?}"
+    );
+    let (_, stdin, _) = &a_calls(&a)[0];
+    let prompt = String::from_utf8(stdin.clone()).expect("utf8");
+    assert!(prompt.contains("This run is best-effort"));
+
+    // The same reply is a block-worthy question under checkpoint.
+    let mut a = agent(FakeCommand::ok(question));
+    assert_eq!(
+        a.run(Agent::Local, task(&plan), &board).expect("ok").len(),
+        1
+    );
+}

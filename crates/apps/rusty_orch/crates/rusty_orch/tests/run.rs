@@ -353,3 +353,43 @@ fn an_io_error_after_one_of_two_answers_checkpoints_the_partial_round() {
     assert_eq!(answer.content().body.as_str(), "kept answer");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Under best effort the adapters withdraw `question` (orch-cli tests), so a
+/// card that would have asked writes an assumption and finishes. Nothing is
+/// asked of the console, and the report shows the assumption.
+#[test]
+fn a_best_effort_run_records_assumptions_and_never_asks() {
+    let spec = parse(
+        r#"{"goal":"g","done_when":["d"],"out_of_scope":[],"wall_clock_secs":60,"max_calls":3,"stop":"best_effort",
+            "tasks":[{"role":"research","instruction":"i","acceptance":["a"],"max_calls":2}]}"#,
+    )
+    .expect("spec");
+    assert_eq!(
+        spec.goal.budget().stop(),
+        orch_core::goal::StopRule::BestEffort
+    );
+    let fake = FakeAgent::new([Reply::Write(vec![EntryKind::Assumption, finding()])]);
+    let mut console = Scripted::default();
+    let s = execute(spec, fake, &mut console, frozen()).expect("run");
+
+    assert_eq!(s.ended, Ended::Finished);
+    assert!(
+        console.asked.is_empty(),
+        "nobody was asked: {:?}",
+        console.asked
+    );
+    let text = report::text(&s);
+    assert!(
+        text.contains("assumptions (taken as true, unverified):\n  E-1 codex: fake Assumption"),
+        "{text}"
+    );
+    assert!(!report::text(&s).contains("waits on"), "{text}");
+}
+
+#[test]
+fn the_assumptions_block_is_absent_when_none_were_made() {
+    let fake = FakeAgent::new([Reply::Write(vec![finding()])]);
+    let mut console = Scripted::default();
+    let s = execute(spec(3, RESEARCH), fake, &mut console, frozen()).expect("run");
+    assert!(!report::text(&s).contains("assumptions ("));
+}

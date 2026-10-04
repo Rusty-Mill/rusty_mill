@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use common::{fixture, task, FakeCommand, REPLY_ONE, REPLY_TWO};
 use orch_cli::parse;
-use orch_codex::{render, CodexAgent, OUTPUT_SCHEMA, SCRUBBED_ENV};
+use orch_codex::{output_schema, render, CodexAgent, SCRUBBED_ENV};
+use orch_core::goal::StopRule;
 use orch_core::task::Role;
 use orch_core::Ref;
 
@@ -100,13 +101,50 @@ fn assert_strict(node: &rusty_json::Value, path: &str) {
 
 #[test]
 fn schema_is_strict_structured_outputs_compatible() {
-    let schema = rusty_json::Value::parse(OUTPUT_SCHEMA).expect("schema parses");
-    assert_strict(&schema, "$");
+    for stop in [StopRule::Checkpoint, StopRule::BestEffort] {
+        let schema = rusty_json::Value::parse(&output_schema(stop)).expect("schema parses");
+        assert_strict(&schema, "$");
+    }
+}
+
+/// Under best effort the schema itself has no `question` variant, so a
+/// schema-constrained model cannot form one; the parser agrees (ADR-0011).
+#[test]
+fn best_effort_schema_has_no_question_variant() {
+    let schema = rusty_json::Value::parse(&output_schema(StopRule::BestEffort)).expect("parses");
+    let mut kinds = schema_kinds(&schema);
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["assumption", "finding", "review"]);
+    assert_eq!(
+        orch_cli::allowed_kinds(Role::Research, StopRule::BestEffort),
+        ["finding", "assumption"]
+    );
+}
+
+fn schema_kinds(schema: &rusty_json::Value) -> Vec<&str> {
+    schema
+        .get("properties")
+        .and_then(|p| p.get("entries"))
+        .and_then(|e| e.get("items"))
+        .and_then(|i| i.get("anyOf"))
+        .and_then(|a| a.as_array())
+        .expect("one variant per kind")
+        .iter()
+        .filter_map(|v| {
+            v.get("properties")?
+                .get("kind")?
+                .get("enum")?
+                .as_array()?
+                .first()?
+                .as_str()
+        })
+        .collect()
 }
 
 #[test]
 fn schema_agrees_with_the_parser() {
-    let schema = rusty_json::Value::parse(OUTPUT_SCHEMA).expect("schema parses");
+    let schema =
+        rusty_json::Value::parse(&output_schema(StopRule::Checkpoint)).expect("schema parses");
     let variants = schema
         .get("properties")
         .and_then(|p| p.get("entries"))
@@ -145,14 +183,24 @@ fn schema_agrees_with_the_parser() {
     assert!(requires("finding", "confidence") && !requires("question", "confidence"));
     assert!(requires("review", "verdict") && !requires("finding", "verdict"));
     // Both ADR-0004 example replies satisfy the schema's shape and the parser.
-    assert_eq!(parse(REPLY_ONE, Role::Research).expect("one").len(), 1);
-    assert_eq!(parse(REPLY_TWO, Role::Research).expect("two").len(), 2);
+    assert_eq!(
+        parse(REPLY_ONE, Role::Research, StopRule::Checkpoint)
+            .expect("one")
+            .len(),
+        1
+    );
+    assert_eq!(
+        parse(REPLY_TWO, Role::Research, StopRule::Checkpoint)
+            .expect("two")
+            .len(),
+        2
+    );
 }
 
 #[test]
 fn render_keeps_path_refs_as_refs_and_inlines_only_referenced_entries() {
     let (plan, board, referenced, unreferenced) = fixture();
-    let prompt = render(task(&plan), &board);
+    let prompt = render(task(&plan), &board, StopRule::Checkpoint);
 
     assert!(prompt.contains("- path:crates/orch-core/src/task.rs"));
     assert!(
