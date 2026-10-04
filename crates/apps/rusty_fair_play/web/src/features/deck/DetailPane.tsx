@@ -105,7 +105,15 @@ function CardDetail({ card }: { card: Card }) {
   const edit = (next: Draft): void => {
     if (!dirty) setDraftBase(card.etag)
     for (const field of draftFields) {
-      if (!sameDraftValue(draft[field], next[field])) editGenerations.current[field]++
+      if (!sameDraftValue(draft[field], next[field])) {
+        editGenerations.current[field]++
+        // A manual revert with no request in flight is clean again and should follow a later
+        // refresh. During a save, however, the same value can be a deliberate newer edit back
+        // to the pre-save value, so its generation must remain outstanding.
+        if (!saving && sameDraftValue(next[field], draftOf(card)[field])) {
+          cleanGenerations.current[field] = editGenerations.current[field]
+        }
+      }
     }
     setDraft(next)
   }
@@ -362,6 +370,7 @@ function NameField({ card }: { card: Card }) {
   const editBase = useRef(card.etag)
   const submitting = useRef(false)
   const cancelled = useRef(false)
+  const editGeneration = useRef(0)
   const commit = (base = editBase.current, overwrite = false): void => {
     if (submitting.current) return
     setEditing(false)
@@ -377,12 +386,17 @@ function NameField({ card }: { card: Card }) {
       return setValue(card.name)
     }
     submitting.current = true
+    const submittedGeneration = editGeneration.current
     setSaving(true)
     void updateCard(card.id, { name: next }, base)
       .then((saved) => {
-        setValue(saved.name)
-        setHasDraft(false)
-        setConflicted(false)
+        // The name stays editable while the request is pending. Do not let its response erase
+        // a newer draft, even when that draft deliberately equals the old server name.
+        if (editGeneration.current === submittedGeneration) {
+          setValue(saved.name)
+          setHasDraft(false)
+          setConflicted(false)
+        }
         editBase.current = saved.etag
       })
       .catch((error: unknown) => {
@@ -406,6 +420,7 @@ function NameField({ card }: { card: Card }) {
           setEditing(true)
         }}
         onChange={(e) => {
+          editGeneration.current++
           setValue(e.target.value)
           setHasDraft(true)
         }}

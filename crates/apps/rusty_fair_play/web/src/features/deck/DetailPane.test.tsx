@@ -128,6 +128,37 @@ describe('the detail pane', () => {
     expect((await api.getCard(dishes.id)).name).toBe('Third-party name')
   })
 
+  it('keeps a newer rename made while an earlier rename is in flight, including back to the old name', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const name = within(pane()).getByLabelText('Name')
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      const saved = await real(id, patch, etag)
+      await gate
+      return saved
+    })
+
+    await user.clear(name)
+    await user.type(name, 'B{Enter}')
+    await user.click(name)
+    await user.clear(name)
+    await user.type(name, 'C')
+    await user.clear(name)
+    await user.type(name, dishes.name)
+    release()
+
+    await waitFor(() => expect(name).toHaveValue(dishes.name))
+    expect(await api.getCard(dishes.id)).toMatchObject({ name: 'B' })
+    await user.type(name, '{Enter}')
+    await waitFor(async () => expect((await api.getCard(dishes.id)).name).toBe(dishes.name))
+    expect(within(pane()).queryByRole('alert')).toBeNull()
+  })
+
   it('splits a card through the dialog, lists the children, and reorders them', async () => {
     const user = userEvent.setup()
     const { api, router } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
@@ -336,5 +367,25 @@ describe('the detail pane', () => {
     expect(await api.getCard(dishes.id)).toMatchObject({ execution: 'B' })
     await user.click(within(pane()).getByRole('button', { name: 'Save' }))
     await waitFor(async () => expect((await api.getCard(dishes.id)).execution).toBe(dishes.execution))
+  })
+
+  it('follows a refresh after an ordinary edit is manually reverted while no save is pending', async () => {
+    const user = userEvent.setup()
+    const { api, services } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const execution = within(pane()).getByLabelText('Execution')
+
+    await user.clear(execution)
+    await user.type(execution, 'B')
+    await user.clear(execution)
+    await user.type(execution, dishes.execution)
+    expect(within(pane()).queryByRole('button', { name: 'Save' })).toBeNull()
+
+    await api.updateCard(dishes.id, { execution: 'C' }, dishes.etag)
+    await services.store.getState().refresh()
+    await waitFor(() => expect(execution).toHaveValue('C'))
+    expect(within(pane()).queryByRole('alert')).toBeNull()
+    expect(within(pane()).queryByRole('button', { name: 'Save' })).toBeNull()
   })
 })
