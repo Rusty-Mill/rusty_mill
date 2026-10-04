@@ -113,16 +113,6 @@ pub const SLEEP_TIME_THRESHOLD: f32 = 0.5;
 /// `standard_ball`'s own doc comment.
 pub const BALL_RADIUS: f32 = 93.15;
 
-/// The ball's radius for car contacts (uu), `RB-PHYSICS-001-FR-114`.
-/// Calibrated on the owner's captures, not taken from a source. In the
-/// 28 recorded car-ball hits, the game registers a hit only once the car's
-/// hitbox overlaps a `BALL_RADIUS` sphere by at least 1.13 uu, and not at
-/// 0.57 uu (`hitjump.jsonl` 83.19 s). So the radius lies between 92.02 and
-/// 92.58; this is the middle. `BALL_RADIUS` stays the world-contact radius
-/// that rests the ball at the recorded 93.15 uu. RocketSim's 91.25 sphere
-/// rests there through its contact band, but would hit at 0.57 uu.
-pub const BALL_CAR_CONTACT_RADIUS: f32 = 92.3;
-
 /// RocketSim's ball sphere (`BALL_COLLISION_RADIUS_SOCCAR`, uu). Its
 /// world contacts open `BALL_RADIUS - BALL_COLLISION_RADIUS` (1.9 uu)
 /// before this sphere touches, which is where the ball rests; only what

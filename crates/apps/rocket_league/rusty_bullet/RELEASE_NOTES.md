@@ -8,6 +8,19 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The ball meets the rounded hitbox too
+**2026-10-04** · `RB-PHYSICS-001-FR-125` · ADR-0045
+
+- Last cycle found Bullet rounds the car's hitbox corners by a 2 uu
+  margin. Its sphere-vs-box code does the same, and with that the 28
+  recorded hits no longer need the calibrated 92.3 uu ball we fitted in
+  FR-114: RocketSim's own 91.25 sphere, with a contact admitted up to
+  Bullet's 1.8 uu breaking threshold, explains every hit tick and every
+  near miss, including the corner clip at 83.2 s that forced the
+  calibration. The hit recording's ball error over hit frames drops
+  821 → 470 uu/s, nothing gets worse, and one fitted constant is gone.
+  504 tests.
+
 ## Rounded corners on the ramps
 **2026-10-04** · `RB-PHYSICS-001-FR-124` · ADR-0044
 

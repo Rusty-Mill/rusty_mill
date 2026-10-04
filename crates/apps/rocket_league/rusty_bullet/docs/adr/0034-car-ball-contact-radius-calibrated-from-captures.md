@@ -1,10 +1,10 @@
 # ADR-0034: Car-ball contacts use a 92.3 uu ball, calibrated from 28 recorded hits
 
-- Status: Accepted
+- Status: Superseded by ADR-0045
 - Date: 2026-10-03
 - Deciders: baileyrd
 - Related: RB-PHYSICS-001-FR-114, FR-036, FR-107, FR-108; ADR-0026, ADR-0027
-- Supersedes/Superseded by: —
+- Supersedes/Superseded by: superseded by ADR-0045
 
 ## Context
 
