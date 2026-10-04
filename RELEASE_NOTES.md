@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi P1: a self-improvement harness's pure core
+**2026-10-04** · [#472](https://github.com/Rusty-Mill/rusty_mill/pull/472) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `crates/apps/rusty_rsi/crates/rsi-core`, the I/O-free domain of an AIDE²-style self-improvement loop: `Score`/`Grade` confined to `[0, 1]`, a token + wall-clock (+ GPU) `CostMeter` with a hard stop, `NoiseBand` and a `z·√2·σ̂` accept `Margin`, a two-stage fresh-seed accept gate (`screen`/`confirm`), `argmax`/UCB1/softmax helpers, a SplitMix64 PRNG with counter-based seed derivation, and lineage entry types with a SHA-256 hash chain.
+- **Docs:** ADR-0005 accepted.
+- Known limitation: nothing runs yet. Tasks, the sandbox, the inner harness and the outer loop arrive in P2 to P4.
+
+---
+
 ## Foundation spinlocks share one implementation
 **2026-10-02** · [#411](https://github.com/Rusty-Mill/rusty_mill/issues/411)
 
