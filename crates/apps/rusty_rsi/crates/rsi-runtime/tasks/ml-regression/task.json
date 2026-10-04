@@ -1,0 +1,15 @@
+{
+  "id": "ml-regression",
+  "family": "ml",
+  "metric": "r2",
+  "shared": [
+    "train.csv"
+  ],
+  "inputs": "inputs.csv",
+  "floor": 0.0,
+  "limits": {
+    "cpu_secs": 10,
+    "wall_secs": 20,
+    "memory_mb": 512
+  }
+}

@@ -146,6 +146,8 @@ members = [
     "crates/apps/rusty_skillopt/crates/skillopt-envs",
     "crates/apps/rusty_skillopt/crates/skillopt-cli",
     "crates/apps/rusty_rsi/crates/rsi-core",
+    "crates/apps/rusty_rsi/crates/rsi-runtime",
+    "crates/apps/rusty_rsi/crates/rsi-cli",
     "crates/apps/rusty_orch/crates/orch-core",
     "crates/apps/rusty_orch/crates/orch-dispatch",
     "crates/apps/rusty_orch/crates/orch-cli",

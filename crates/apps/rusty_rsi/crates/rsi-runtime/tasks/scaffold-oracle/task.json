@@ -1,0 +1,15 @@
+{
+  "id": "scaffold-oracle",
+  "family": "harness",
+  "metric": "accuracy",
+  "shared": [
+    "oracle.py"
+  ],
+  "inputs": "questions.txt",
+  "floor": 0.0,
+  "limits": {
+    "cpu_secs": 10,
+    "wall_secs": 20,
+    "memory_mb": 512
+  }
+}
