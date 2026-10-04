@@ -1048,11 +1048,13 @@ impl PhysicsWorld {
         )> = Vec::new();
         self.ball_hit_ticks.resize(self.cars.len(), None);
         let mut ball_hit_velocity = Vec3::ZERO;
-        // Car-ball contacts start at `BALL_CAR_CONTACT_RADIUS`, not the
-        // ball's world radius (RB-PHYSICS-001-FR-114).
+        // Car-ball contacts use RocketSim's 91.25 sphere against the
+        // margin-rounded hitbox, admitted up to the pair's breaking
+        // threshold (RB-PHYSICS-001-FR-125); the world radius stays
+        // `BALL_RADIUS`.
         let mut hit_sphere = self.ball;
         hit_sphere.shape = crate::body::Shape::Sphere {
-            radius: crate::body::BALL_CAR_CONTACT_RADIUS,
+            radius: crate::body::BALL_COLLISION_RADIUS,
         };
         for (car_index, car) in self.cars.iter().enumerate() {
             let contacts = collision::contacts_between(&hit_sphere, car);
@@ -2973,8 +2975,9 @@ mod tests {
         );
         let wall_x = StaticPlane::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
         ball.linear_velocity = Vec3::new(-100.0, -100.0, 0.0);
-        // Face at the ball's car-contact reach (RB-PHYSICS-001-FR-114).
-        let reach = ball_radius - crate::body::BALL_CAR_CONTACT_RADIUS;
+        // Face 1 uu inside the ball's reach: within the car-contact band
+        // (RB-PHYSICS-001-FR-125).
+        let reach = 1.0;
         let heavy_car = RigidBody::car_box(
             Vec3::new(1000.0, 1000.0, 1000.0),
             1.0e9,
@@ -3815,13 +3818,42 @@ mod tests {
         world.ball.linear_velocity.length()
     }
 
-    /// RB-PHYSICS-001-FR-114: a car hitbox overlapping the ball's world
-    /// sphere by 0.57 uu doesn't hit it yet (`hitjump.jsonl` 83.19 s); by
-    /// 1.13 uu, the least overlap of any recorded hit, it does.
+    /// RB-PHYSICS-001-FR-125: face-on, a car hits the ball once RocketSim's
+    /// 91.25 sphere is within the pair's 1.825 uu breaking threshold of the
+    /// hitbox, 0.075 uu inside a `BALL_RADIUS` sphere's reach; half a uu
+    /// clear of that reach is no hit.
     #[test]
     fn a_car_hits_the_ball_only_inside_the_car_contact_radius() {
-        assert!(ball_speed_after_a_tick_at_overlap(0.57) < 1e-3);
-        assert!(ball_speed_after_a_tick_at_overlap(1.13) > 100.0);
+        assert!(ball_speed_after_a_tick_at_overlap(-0.5) < 1e-3);
+        assert!(ball_speed_after_a_tick_at_overlap(0.5) > 100.0);
+    }
+
+    /// Like `ball_speed_after_a_tick_at_overlap`, with the ball centred on
+    /// the diagonal off the hitbox's front-top-right corner, `overlap` uu
+    /// inside a `BALL_RADIUS` sphere's reach of the sharp corner.
+    fn ball_speed_after_a_tick_at_corner_overlap(overlap: f32) -> f32 {
+        let car_z = 17.0;
+        let corner = crate::body::CAR_HITBOX_OFFSET + CAR_HALF_EXTENTS + Vec3::new(0.0, 0.0, car_z);
+        let diagonal = Vec3::new(1.0, 1.0, 1.0) * (1.0 / 3.0f32.sqrt());
+        let mut ball =
+            RigidBody::standard_ball(corner + diagonal * (crate::body::BALL_RADIUS - overlap));
+        ball.linear_velocity = Vec3::ZERO;
+        let mut car = RigidBody::standard_car(Vec3::new(0.0, 0.0, car_z));
+        car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+        let mut world = PhysicsWorld::new(ball, flat_ground()).with_car(car);
+        world.gravity = Vec3::ZERO;
+        world.step(1.0 / 120.0);
+        world.ball.linear_velocity.length()
+    }
+
+    /// RB-PHYSICS-001-FR-125: at a hitbox corner the box is rounded by
+    /// Bullet's 2 uu margin, so a ball 1 uu inside the sharp corner's reach
+    /// is not hit (`hitjump.jsonl` 83.19 s, 0.57 uu, is such a corner);
+    /// 2.5 uu inside, it is.
+    #[test]
+    fn a_ball_at_a_hitbox_corner_meets_it_rounded() {
+        assert!(ball_speed_after_a_tick_at_corner_overlap(1.0) < 1e-3);
+        assert!(ball_speed_after_a_tick_at_corner_overlap(2.5) > 100.0);
     }
 
     /// RB-PHYSICS-001-FR-112, from `hitjump.jsonl` 56.3 s: a ball shot into

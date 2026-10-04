@@ -2179,7 +2179,17 @@ mod tests {
     /// test means to check — same reasoning as `downward_impact_bounces_up_
     /// proportional_to_restitution` using an exactly-touching sphere.
     fn touching_ball() -> RigidBody {
-        RigidBody::sphere(93.15, 1.0, Vec3::new(CAR_HALF_EXTENTS.x + 93.15, 0.0, 0.0))
+        // At the hitbox's height, so this is a face contact, not one on
+        // the front-bottom edge the margin rounds (FR-125).
+        RigidBody::sphere(
+            93.15,
+            1.0,
+            Vec3::new(
+                CAR_HALF_EXTENTS.x + 93.15,
+                0.0,
+                crate::body::CAR_HITBOX_OFFSET.z,
+            ),
+        )
     }
 
     #[test]
@@ -2191,9 +2201,13 @@ mod tests {
         car.restitution = 0.0;
         let contacts = contacts_between(&ball, &car);
         resolve_contacts_between(&mut ball, &mut car, &contacts, 1.0 / 60.0);
-        let rel_vel = contacts[0]
-            .normal
-            .dot(&(ball.linear_velocity - car.linear_velocity));
+        // At the contact point: the hitbox sits above the car's origin, so
+        // the hit also spins the car.
+        let point = contacts[0].point;
+        let rel_vel = contacts[0].normal.dot(
+            &(ball.velocity_at_point(&(point - ball.position))
+                - car.velocity_at_point(&(point - car.position))),
+        );
         assert!(
             rel_vel.abs() < 1e-2,
             "expected no residual closing speed, got {rel_vel}"

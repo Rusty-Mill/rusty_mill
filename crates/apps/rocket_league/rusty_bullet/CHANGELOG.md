@@ -5,6 +5,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0045 (`RB-PHYSICS-001-FR-125`): `collision::sphere_vs_box` is
+  Bullet's `getSphereDistance` (core box plus margin, a rounded hitbox);
+  `collision::breaking_threshold` admits a car-ball contact up to the
+  pair's threshold; `PhysicsWorld::step` uses `BALL_COLLISION_RADIUS` for
+  it. Supersedes FR-114 / ADR-0034.
+### Removed
+- `body::BALL_CAR_CONTACT_RADIUS` (FR-114's calibrated 92.3 uu): the
+  source explains the recorded hits (FR-125).
 - ADR-0044 (`RB-PHYSICS-001-FR-124`): `body::BOX_COLLISION_MARGIN`,
   Bullet's 2 uu `CONVEX_DISTANCE_MARGIN` on the car's box; a corner meets
   a mesh facet rounded by it (`collision::BoxCorners::gap`), a static

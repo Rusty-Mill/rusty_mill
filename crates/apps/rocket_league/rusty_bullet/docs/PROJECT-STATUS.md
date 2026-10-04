@@ -219,7 +219,13 @@ version: `a245d35`).
    margin against mesh facets (sharp against planes, as Bullet): the
    `test2` wall ride at 14.292 s 4.7 uu/s (was 31.7), one-step car 0.447
    (was 0.470), k = 30 car 5.53; `hitjump` car 0.484, its four worst ramp
-   contacts under 3 uu/s (were 34–60). Open car-side leads: `test2`
+   contacts under 3 uu/s (were 34–60). `RB-PHYSICS-001-FR-125` (ADR-0045)
+   applies the same margin to the car-ball contact and drops FR-114's
+   calibrated 92.3 uu radius for RocketSim's 91.25 sphere admitted to the
+   1.825 uu breaking threshold: the source now explains all 28 recorded
+   hits; `hitjump` hit-frame ball sum 470 (was 821), one-step ball 0.490,
+   k = 30 ball 21.29; `test2` k = 30 ball 1.39 (was 1.62). Open car-side
+   leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -230,7 +236,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (503 tests: 27 `rb_domain`, 432
+- `cargo test --workspace`: pass (504 tests: 27 `rb_domain`, 433
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

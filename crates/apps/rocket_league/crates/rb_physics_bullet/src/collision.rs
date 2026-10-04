@@ -980,36 +980,53 @@ pub fn raycast(
 /// quaternion normalize (`RB-PHYSICS-001-FR-045`), dividing by a small but
 /// genuinely nonzero `outside_distance` here is numerically stable at any
 /// magnitude a `f32` can represent.
+///
+/// Since `RB-PHYSICS-001-FR-125` the box is Bullet's: `getSphereDistance`
+/// clamps to `getHalfExtentsWithoutMargin` (the core box,
+/// `body::BOX_COLLISION_MARGIN` smaller on every axis) and compares against
+/// `radius + boxMargin`, so the box is its nominal size face-on and rounded
+/// by the margin at its edges and corners. A contact is reported up to
+/// `admit` clear of touching, the pair's contact breaking threshold:
+/// RocketSim's Bullet treats such a point as touching (FR-108).
 fn sphere_vs_box(
     sphere_position: Vec3,
     radius: f32,
     box_position: Vec3,
     box_orientation: Quat,
     half_extents: Vec3,
+    admit: f32,
 ) -> Option<Contact> {
+    let box_margin = crate::body::BOX_COLLISION_MARGIN;
+    let core = Vec3::new(
+        (half_extents.x - box_margin).max(0.0),
+        (half_extents.y - box_margin).max(0.0),
+        (half_extents.z - box_margin).max(0.0),
+    );
+    let reach = radius + box_margin;
     let local_center = box_orientation
         .conjugate()
         .rotate(&(sphere_position - box_position));
 
     let clamped = Vec3::new(
-        local_center.x.clamp(-half_extents.x, half_extents.x),
-        local_center.y.clamp(-half_extents.y, half_extents.y),
-        local_center.z.clamp(-half_extents.z, half_extents.z),
+        local_center.x.clamp(-core.x, core.x),
+        local_center.y.clamp(-core.y, core.y),
+        local_center.z.clamp(-core.z, core.z),
     );
     let outside_offset = local_center - clamped;
     let outside_distance = outside_offset.length();
 
     let (local_point, local_normal, gap) = if outside_distance > 1e-6 {
+        let normal = outside_offset * (1.0 / outside_distance);
         (
-            clamped,
-            outside_offset * (1.0 / outside_distance),
-            outside_distance - radius,
+            clamped + normal * box_margin,
+            normal,
+            outside_distance - reach,
         )
     } else {
         let margin = Vec3::new(
-            half_extents.x - local_center.x.abs(),
-            half_extents.y - local_center.y.abs(),
-            half_extents.z - local_center.z.abs(),
+            core.x - local_center.x.abs(),
+            core.y - local_center.y.abs(),
+            core.z - local_center.z.abs(),
         );
         let sign = |v: f32| if v >= 0.0 { 1.0 } else { -1.0 };
         let (normal, point, depth) = if margin.x <= margin.y && margin.x <= margin.z {
@@ -1034,10 +1051,10 @@ fn sphere_vs_box(
                 margin.z,
             )
         };
-        (point, normal, -depth - radius)
+        (point, normal, -depth - reach)
     };
 
-    if gap > CONTACT_PROCESSING_THRESHOLD {
+    if gap > admit {
         return None;
     }
 
@@ -1046,6 +1063,21 @@ fn sphere_vs_box(
         point: box_position + box_orientation.rotate(&local_point),
         penetration_depth: -gap,
     })
+}
+
+/// A body's contact breaking threshold (`getContactBreakingThreshold`):
+/// `CONTACT_BREAKING_FACTOR` times its angular motion disc, the shape's
+/// bounding radius (margin included for a box) plus its offset from the
+/// body's origin. A pair's manifold uses the smaller of the two.
+fn breaking_threshold(body: &RigidBody) -> f32 {
+    let bounding = match body.shape {
+        Shape::Sphere { radius } => radius,
+        Shape::Box { half_extents } => {
+            let margin = crate::body::BOX_COLLISION_MARGIN;
+            (half_extents + Vec3::new(margin, margin, margin)).length()
+        }
+    };
+    CONTACT_BREAKING_FACTOR * (bounding + body.shape_offset.length())
 }
 
 /// Analytic sphere-vs-sphere contact — trivially closed-form, unlike either
@@ -1568,6 +1600,7 @@ fn box_vs_box(
 /// `RigidBody` rather than this scope's one real ball; two actual balls
 /// never collide in this port, but the shape pairing itself is real now.
 pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
+    let admit = breaking_threshold(a).min(breaking_threshold(b));
     match (a.shape, b.shape) {
         (Shape::Sphere { radius }, Shape::Box { half_extents }) => sphere_vs_box(
             a.shape_center(),
@@ -1575,6 +1608,7 @@ pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
             b.shape_center(),
             b.orientation,
             half_extents,
+            admit,
         )
         .into_iter()
         .collect(),
@@ -1584,6 +1618,7 @@ pub fn contacts_between(a: &RigidBody, b: &RigidBody) -> Vec<Contact> {
             a.shape_center(),
             a.orientation,
             half_extents,
+            admit,
         )
         .map(|c| Contact {
             normal: -c.normal,

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.128.0
+- Version: 0.129.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6016,7 +6016,9 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
 - `RB-PHYSICS-001-FR-020` (back seams), `FR-024`, `FR-026`, `FR-029` and
   `FR-033`: their shapes are out of `standard_arena` since FR-113.
 - `RB-PHYSICS-001-FR-114` (car-ball contacts use a 92.3 uu ball;
-  implemented, calibrated and verified on the owner's captures, ADR-0034):
+  **superseded by FR-125**, which explains the same 28 hits with
+  RocketSim's own 91.25 sphere and Bullet's box margin, ADR-0034 by
+  ADR-0045):
   - `body::BALL_CAR_CONTACT_RADIUS = 92.3`. `PhysicsWorld::step` computes
     car-ball contacts with a copy of the ball at that radius. Everything
     else keeps `BALL_RADIUS`.
@@ -6269,6 +6271,42 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       0.484 (was 0.489), k = 30 car 11.37 (was 11.39). `front` 0.180
       (was 0.178; nothing worse than 2.9 uu/s), `side` 0.192 unchanged.
       Ball errors unchanged.
+- `RB-PHYSICS-001-FR-125` (car-ball contacts are RocketSim's 91.25 sphere
+  against the margin-rounded hitbox, admitted to the breaking threshold;
+  implemented and verified on the owner's captures, ADR-0045; supersedes
+  FR-114): `collision::sphere_vs_box` is Bullet's
+  `btSphereBoxCollisionAlgorithm::getSphereDistance`: the sphere center
+  is clamped to the core box (`body::BOX_COLLISION_MARGIN` smaller on
+  every axis) and the gap measured against `radius + margin`, so the
+  hitbox is its nominal size face-on and rounded by 2 uu at edges and
+  corners. A contact is reported up to the pair's contact breaking
+  threshold (`collision::breaking_threshold`, 0.02 × the smaller angular
+  motion disc: 1.825 uu for the ball), and RocketSim's Bullet solves such
+  a point as touching (FR-108). `PhysicsWorld::step` uses
+  `BALL_COLLISION_RADIUS` (91.25) for the car-ball sphere;
+  `BALL_CAR_CONTACT_RADIUS` is gone.
+  - Why: FR-114's calibrated radius fit the 28 recorded hits with a sharp
+    box: the hit tick overlapped a 93.15 sphere by at least 1.13 uu, the
+    tick before by at most −0.75 except one 0.57 (`hitjump` 83.2 s). That
+    0.57 is a corner contact; rounded, it is 0.04 uu clear. With the
+    rounded box every hit tick is at least 0.67 uu inside 93.15 and every
+    tick before at least 0.04 clear, a band RocketSim's 91.25 + 1.825 =
+    93.075 sits in; the sharp band (92.02–92.58) excludes it. So the
+    source explains the recordings and the calibration is dropped.
+  - **Verification**:
+    - `world` tests `a_car_hits_the_ball_only_inside_the_car_contact_radius`
+      (face-on: no hit 0.5 uu clear of 93.15, hit 0.5 inside) and
+      `a_ball_at_a_hitbox_corner_meets_it_rounded` (corner: no hit 1 uu
+      inside the sharp corner's reach, hit 2.5 inside).
+    - `hitjump` summed over hit frames: ball 470 uu/s (was 821), car 383
+      (was 434); `test2` ball 42 (was 64), car 14 (was 18). Per hit:
+      109.350 s ball 77 → 4, 83.200 s 51 → 5, 229.883 s 51 → 13, 267.117 s
+      43 → 11.
+    - `hitjump` one-step ball 0.490 (was 0.500, resets excluded), car
+      0.482 (was 0.484); k = 30 ball 21.29 (was 21.55), car 11.33 (was
+      11.37). `test2` one-step ball 0.091 (was 0.099), car 0.445 (was
+      0.447); k = 30 ball 1.39 (was 1.62), car 5.46 (was 5.53). `front`,
+      `side` unchanged. No frame worse.
 
 
 ## Architecture and interfaces
@@ -7760,6 +7798,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.129.0 (2026-10-04): `RB-PHYSICS-001-FR-125` — car-ball contacts are
+  RocketSim's 91.25 sphere against the margin-rounded hitbox, admitted to
+  the breaking threshold; supersedes FR-114 (ADR-0045). 433 tests in
+  `rb_physics_bullet`.
 - 0.128.0 (2026-10-04): `RB-PHYSICS-001-FR-124` — a car's hitbox corner
   meets a mesh facet rounded by Bullet's collision margin (ADR-0044).
   432 tests in `rb_physics_bullet`.
