@@ -1,0 +1,15 @@
+[package]
+name = "rsi-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types"
+
+# ADR-0002 tier S: workspace foundation crates only, no external dependencies.
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_err = { workspace = true }
+rusty_rsa = { workspace = true }

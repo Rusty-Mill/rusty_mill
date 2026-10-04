@@ -1,7 +1,17 @@
 # ADR-0005: `rusty_rsi`, an AIDE²-style recursive self-improvement harness
 
-Status: Proposed
-Date: 2026-09-30
+Status: Accepted
+Date: 2026-09-30 (proposed) / 2026-10-04 (accepted)
+
+Accepted by the owner on 2026-10-04 with all four open questions resolved
+as recommended:
+1. Toy-task solutions run on `python3`, standard library only.
+2. This ADR stays in the root series (see Remit).
+3. Hoisting a shared git-CLI crate into `libs/` (from `rsi-runtime`'s
+   adapter and `sessionmgr-git`) is a separate follow-up, not part of
+   P1–P4.
+4. If a CI runner lacks Landlock, the fix is a CI-configuration change
+   raised for sign-off; sandbox tests are never skipped.
 
 ## Remit
 
@@ -89,12 +99,17 @@ inner loop cannot score privately.
 | `Harness` | `run(&PublicTaskView, &Budget, Seed) -> Result<InnerOutcome>` (chosen solution, `CostUsage`, transcript id) | Builds the candidate, spawns it in the sandbox, and serves it over a broker socket. |
 | `Proposer` | `propose(&[LineageEntry], &Workspace) -> Result<Proposal>` | `OpenAiCompatProposer` (HTTP) and `CodexCliProposer` (subprocess); `ScriptedProposer` in tests. |
 | `Executor` | `exec(&SandboxSpec, &Command) -> Result<ExecOutcome>` | Linux: rlimits → Landlock → seccomp → exec. Fails closed where these are unsupported. |
-| `CostMeter` | `charge(tokens) / tick(elapsed) -> Result<(), BudgetExhausted>` | A pure accumulator in core; the broker is its only caller. |
+| `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
 | `LineageStore` | `append(LineageEntry) -> Result<EntryId>`, `iter()`, `verify()` | Append-only JSONL plus a content-addressed blob dir (see §6). |
 
-Types in core: `Candidate`, `Grade`, `Budget`, `CostUsage`,
-`LineageEntry`, `AcceptDecision`, `Seed`, `NoiseBand`. `AcceptPolicy`
-and search helpers are **functions** (`accept(...)`, `ucb1(...)`,
+Each trait lands in `rsi-core` in the same phase as its first adapter
+(P2: `PublicTask`, `PrivateGrader`, `Executor`; P3: `Harness`; P4:
+`Proposer`, `LineageStore`), so no port is defined before something
+implements it.
+
+Types in core: `CandidateId`, `Score`, `Grade`, `Budget`, `CostUsage`,
+`LineageEntry`, `Decision`, `Seed`, `NoiseBand`, `Margin`. The accept
+gate and search helpers are **functions** (`screen`/`confirm`, `ucb1(...)`,
 `softmax_sample(...)`), not traits. Each has one call site (the outer
 loop's parent selection), so a trait now would be speculative. Core also
 carries its own ~20-line SplitMix64, because the workspace has no seeded
