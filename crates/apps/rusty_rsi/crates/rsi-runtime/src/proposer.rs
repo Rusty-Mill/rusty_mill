@@ -11,7 +11,7 @@
 //! data is caught and recorded as a path violation, not silently confined.
 
 use std::cell::{Cell, RefCell};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use rsi_core::{ChatModel, CostUsage, Message, ModelId, Precedent, Proposal, Proposer, Role};
@@ -32,7 +32,41 @@ use crate::git::{HARNESS_DIR, HARNESS_SRC};
 /// # Errors
 /// [`RuntimeError::Model`] for a refused path; [`RuntimeError::Io`] on
 /// write errors.
-pub fn write_inside(workspace: &Path, path: &str, content: &str) -> Result<(), RuntimeError> {
+pub fn write_inside(
+    workspace: &Path,
+    path: &str,
+    content: impl AsRef<[u8]>,
+) -> Result<(), RuntimeError> {
+    let target = clear_leaf(workspace, path)?;
+    std::fs::write(&target, content).map_err(|e| RuntimeError::io(format!("writing {path}"), e))
+}
+
+/// Makes `path` a symlink to `link`, under the same rules as
+/// [`write_inside`]. The link is created, never followed; the allowlist
+/// rejects it afterwards wherever it is.
+///
+/// # Errors
+/// As [`write_inside`].
+#[cfg(unix)]
+pub fn link_inside(workspace: &Path, path: &str, link: &Path) -> Result<(), RuntimeError> {
+    let target = clear_leaf(workspace, path)?;
+    std::os::unix::fs::symlink(link, &target)
+        .map_err(|e| RuntimeError::io(format!("linking {path}"), e))
+}
+
+/// Removes the file or symlink at `path`, under the same rules as
+/// [`write_inside`]; a missing one is fine.
+///
+/// # Errors
+/// As [`write_inside`].
+pub fn remove_inside(workspace: &Path, path: &str) -> Result<(), RuntimeError> {
+    clear_leaf(workspace, path).map(|_| ())
+}
+
+/// Checks `path` and its ancestors as [`write_inside`] describes, creating
+/// missing directories, and removes whatever file or symlink sits at the
+/// leaf. Returns the leaf's full path.
+fn clear_leaf(workspace: &Path, path: &str) -> Result<PathBuf, RuntimeError> {
     let refuse = |why: &str| {
         Err(RuntimeError::Model(format!(
             "refusing to write `{path}`: {why}"
@@ -67,11 +101,14 @@ pub fn write_inside(workspace: &Path, path: &str, content: &str) -> Result<(), R
         }
     }
     let target = dir.join(leaf);
-    if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
-        std::fs::remove_file(&target)
-            .map_err(|e| RuntimeError::io(format!("replacing {path}"), e))?;
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.is_dir() => refuse(&format!("{} is a directory", target.display())),
+        Ok(_) => std::fs::remove_file(&target)
+            .map(|()| target)
+            .map_err(|e| RuntimeError::io(format!("replacing {path}"), e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(target),
+        Err(e) => Err(RuntimeError::io(format!("inspecting {path}"), e)),
     }
-    std::fs::write(&target, content).map_err(|e| RuntimeError::io(format!("writing {path}"), e))
 }
 
 /// The harness source files in `workspace`, as `(repository path,
@@ -166,7 +203,7 @@ impl<'a, M> ModelProposer<'a, M> {
 }
 
 /// The history as the proposer's prompt shows it.
-fn describe(history: &[Precedent]) -> String {
+pub(crate) fn describe(history: &[Precedent]) -> String {
     let mut out = String::from("# Candidates so far\n\n");
     for p in history {
         let grade = p

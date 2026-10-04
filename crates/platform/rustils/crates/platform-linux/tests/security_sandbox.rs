@@ -34,6 +34,16 @@ fn confine_filesystem_enforces_read_write_boundaries() {
 }
 
 #[test]
+fn confine_filesystem_accepts_file_roots() {
+    if env::var(REEXEC_ENV).as_deref() == Ok("file-roots") {
+        run_file_roots_child();
+        return;
+    }
+    let status = reexec("confine_filesystem_accepts_file_roots", "file-roots");
+    assert!(status.success(), "child exited with {status:?}");
+}
+
+#[test]
 fn block_inet_sockets_blocks_inet_allows_unix() {
     if env::var(REEXEC_ENV).as_deref() == Ok("network") {
         run_network_child();
@@ -131,5 +141,40 @@ fn run_network_child() {
     assert!(
         std::os::unix::net::UnixListener::bind(base.join("post.sock")).is_ok(),
         "AF_UNIX must remain unaffected"
+    );
+}
+
+/// A file root grants that file alone: its siblings stay unreachable, and a
+/// read-only file stays unwritable.
+fn run_file_roots_child() {
+    let base = env::temp_dir().join(format!("rustils-sandbox-files-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+    let readable = base.join("read.txt");
+    let writable = base.join("write.txt");
+    let sibling = base.join("sibling.txt");
+    for file in [&readable, &writable, &sibling] {
+        fs::write(file, b"content").unwrap();
+    }
+
+    let sandbox = platform_linux::LinuxSandbox;
+    let status = sandbox
+        .confine_filesystem(&[readable.as_path()], &[writable.as_path()])
+        .unwrap();
+    if status == SandboxStatus::NotEnforced {
+        eprintln!("Landlock unavailable in this environment; degrade path only");
+        return;
+    }
+    assert_eq!(status, SandboxStatus::Enforced);
+
+    assert!(fs::read(&readable).is_ok(), "read-only file: read");
+    assert!(
+        fs::OpenOptions::new().write(true).open(&readable).is_err(),
+        "read-only file must not be writable"
+    );
+    assert!(fs::write(&writable, b"x").is_ok(), "writable file: write");
+    assert!(fs::read(&sibling).is_err(), "a sibling stays unreachable");
+    assert!(
+        fs::write(base.join("new.txt"), b"x").is_err(),
+        "a file root grants no right to create beside it"
     );
 }

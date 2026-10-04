@@ -11,14 +11,16 @@
 //!
 //! Models come from the environment, one set per role: `RSI_INNER_*` for
 //! the agent under test and `RSI_OUTER_*` for the proposer (`_MODEL`,
-//! `_BASE_URL`, `_API_KEY`; see [`crate::config`]). Nothing secret is
-//! accepted as a flag or written to the run.
+//! `_BASE_URL`, `_API_KEY`; or `RSI_OUTER_PROPOSER=codex` for the Codex
+//! CLI; see [`crate::config`]). Nothing secret is accepted as a flag or
+//! written to the run.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rsi_core::{Budget, LineageStore, Margin, ModelId, Seed};
+use rsi_runtime::codex::CodexProposer;
 use rsi_runtime::git::Repo;
 use rsi_runtime::grading::{GraderCommand, SYSTEM_READ_ROOTS};
 use rsi_runtime::lineage_store::{Blobs, JsonlLineage};
@@ -29,7 +31,7 @@ use rsi_runtime::proposer::ModelProposer;
 use rsi_runtime::report::{check, replay, summary, RunStatus};
 use rsi_runtime::{ProcessExecutor, ScriptedModel, SolutionRunner, TaskDir, Toolchain};
 
-use crate::config::{model_from_env, Role};
+use crate::config::{model_from_env, outer_from_env, Outer, Role};
 use crate::flags::Flags;
 
 /// Completion tokens per inner model call.
@@ -240,8 +242,7 @@ pub fn run_main(args: &[OsString]) -> Result<String, String> {
         .map_err(|e| format!("resolving {}: {e}", run_dir.display()))?;
     let setup = Setup::new(&flags)?;
     let inner = model_from_env(Role::Inner)?;
-    let outer = model_from_env(Role::Outer)?;
-    let proposer = ModelProposer::new(&outer, OUTER_COMPLETION_TOKENS, OUTER_TIMEOUT);
+    let outer = outer_from_env(OUTER_TIMEOUT)?;
     let lab = setup.lab(&inner, std::slice::from_ref(&run_dir));
     let config = RunConfig {
         name: run_name(&run_dir)?,
@@ -253,7 +254,23 @@ pub fn run_main(args: &[OsString]) -> Result<String, String> {
         margin,
         grading: grading(&flags)?,
     };
-    let entries = run(&lab, &proposer, &config, &run_dir).map_err(|e| e.to_string())?;
+    let entries = match outer {
+        Outer::Model(model) => {
+            let proposer = ModelProposer::new(&model, OUTER_COMPLETION_TOKENS, OUTER_TIMEOUT);
+            run(&lab, &proposer, &config, &run_dir)
+        }
+        Outer::Codex(codex) => {
+            let proposer = CodexProposer::new(
+                &setup.executor,
+                codex,
+                setup.work.join("codex"),
+                lab.protected.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            run(&lab, &proposer, &config, &run_dir)
+        }
+    }
+    .map_err(|e| e.to_string())?;
     let info = read_run(&run_dir).map_err(|e| e.to_string())?;
     summary(&info, &entries).map_err(|e| e.to_string())
 }
