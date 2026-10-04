@@ -154,7 +154,7 @@ fn run(args: &Args, model: &OpenAiModel) -> Result<String, RuntimeError> {
     );
     match &outcome.submission {
         Some(solution) => {
-            let attempt = public.public_score(solution, seed)?;
+            let attempt = public.public_score(solution, seed, None)?;
             let score = attempt
                 .score
                 .map_or_else(|| "buggy".to_owned(), |s| s.get().to_string());

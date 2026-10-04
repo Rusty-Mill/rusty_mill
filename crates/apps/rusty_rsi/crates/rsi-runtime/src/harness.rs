@@ -28,6 +28,7 @@ use crate::error::RuntimeError;
 use crate::executor::ProcessExecutor;
 use crate::grading::SYSTEM_READ_ROOTS;
 use crate::protocol::{decode_transcript, encode_transcript, Exchange};
+use crate::sandbox::Sockets;
 use crate::task_dir::{DESCRIPTION_FILE, OPEN_FILE_LIMIT, PROCESS_LIMIT};
 
 /// The binary a successful build produces, inside the build's `bin/`.
@@ -178,11 +179,13 @@ pub fn build(
         &binary,
     ]
     .map(str::to_owned);
-    let outcome = executor.exec_without_sockets(
+    // rustc starts its linker over a socketpair (see `Sockets::NoEndpoints`).
+    let outcome = executor.exec_with(
         &spec,
         &toolchain.rustc.display().to_string(),
         &args,
         Stdio::null(),
+        Sockets::NoEndpoints,
     )?;
     let built = HarnessBinary {
         dir: out.join("bin"),
@@ -381,7 +384,7 @@ impl<'a> HarnessProcess<'a> {
         let args = ["--seed".to_owned(), seed.get().to_string()];
         connect_and_run(service, |stdin| {
             self.executor
-                .exec_without_sockets(&spec, &program, &args, stdin)
+                .exec_with(&spec, &program, &args, stdin, Sockets::None)
         })
     }
 
@@ -416,7 +419,7 @@ fn connect_and_run(
     use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
 
-    use crate::broker::serve;
+    use crate::broker::{serve, MAX_TRANSCRIPT_BYTES};
 
     let (ours, theirs) =
         UnixStream::pair().map_err(|e| RuntimeError::io("creating the broker socket", e))?;
@@ -426,7 +429,7 @@ fn connect_and_run(
         let agent = scope.spawn(move || spawn(Stdio::from(OwnedFd::from(theirs))));
         // `serve` takes the stream by value: when it returns, our end
         // closes and an agent still waiting on it reads end-of-file.
-        let served = serve(ours, service);
+        let served = serve(ours, service, MAX_TRANSCRIPT_BYTES);
         let outcome = agent
             .join()
             .map_err(|_| RuntimeError::Sandbox("the agent thread panicked".into()))?;

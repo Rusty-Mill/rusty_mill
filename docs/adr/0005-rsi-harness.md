@@ -104,10 +104,10 @@ inner loop cannot score privately.
 
 | Port | Contract | Adapter (`rsi-runtime`) |
 |---|---|---|
-| `PublicTask` | `baseline()`, `public_score(&Solution, Seed) -> Result<Attempt>` (score or buggy, feedback, wall time) | `LocalTask`: sandboxed run on the public split, scored in-process. |
+| `PublicTask` | `baseline()`, `public_score(&Solution, Seed, time limit) -> Result<Attempt>` (score or buggy, feedback, wall time) | `LocalTask`: sandboxed run on the public split, scored in-process. |
 | `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
 | `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
-| `ChatModel` | `complete(&[Message], max_tokens) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
+| `ChatModel` | `complete(&[Message], max_tokens, timeout) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
 | `Proposer` | `propose(&[LineageEntry], &Workspace) -> Result<Proposal>` | `OpenAiCompatProposer` (HTTP) and `CodexCliProposer` (subprocess); `ScriptedProposer` in tests. |
 | `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
@@ -194,12 +194,22 @@ group. If a task has no submission, it scores the task's declared floor
   builds, lints and unit-tests a0 as an ordinary workspace member. The
   build reads only system directories, the toolchain's sysroot (found once,
   outside the sandbox, with `rustc --print sysroot`) and the copy.
-- **Channel.** The broker socket is one end of a `socketpair`, passed as
-  the agent's standard input. The agent's sandbox adds a seccomp rule that
-  fails `socket(2)` with `EPERM` for every address family, so the inherited
-  socket is its only way out: no network, and no other Unix or abstract
-  socket either (Landlock does not cover those). The same rule applies to
-  the build.
+- **Channel and socket rules.** The broker socket is one end of a
+  `socketpair`, passed as the agent's standard input. The seccomp filter
+  (inherited by every descendant) takes a `Sockets` rule:
+  - **Agent: `None`.** `socket(2)` and `socketpair(2)` fail with `EPERM`,
+    so the inherited socket is the only way out: no network, and no Unix
+    or abstract socket either (Landlock covers neither).
+  - **Build: `NoEndpoints`.** `socket(2)` fails, so nothing can reach an
+    endpoint, but anonymous socketpairs work. rustc starts its linker
+    through std's fork-and-exec path, which reports exec errors over an
+    `AF_UNIX` socketpair, so refusing it breaks every build. A socketpair
+    connects only processes inside the job, and the build runs no
+    candidate code (no build scripts or proc-macros).
+  - **Solutions: `NoInternet`** (P2, unchanged).
+  - **Every sandbox:** `io_uring_setup`, `io_uring_enter` and
+    `io_uring_register` fail with `EPERM`, because `io_uring` operations
+    (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, ...) bypass seccomp.
 - **Frames.** Length-prefixed binary (`u32` big-endian length, a tag byte,
   then length-prefixed UTF-8 fields), because a std-only agent has no JSON
   parser. `rsi-runtime/src/protocol.rs` and `harness/src/broker.rs` each
@@ -211,6 +221,21 @@ group. If a task has no submission, it scores the task's declared floor
   session start and is charged before and after every operation. `submit`
   is free and stays open after exhaustion. The agent process is killed at
   `b_wall + grace`.
+- **Deadline.** No model call or evaluation outlives the wall-clock
+  budget. `ChatModel::complete` and `PublicTask::public_score` each take
+  the time left as a limit. `OpenAiModel` bounds the whole call, not each
+  read, so a server that drips bytes cannot stretch it. An evaluation's
+  limits are cut to the time left, and its process group is killed at that
+  point. A call cut off by the deadline is answered `exhausted`, so the
+  run keeps its earlier submission; a call that fails while time remains
+  is an endpoint failure.
+- **Transcript bound.** The transcript lives in the runtime's memory,
+  outside the agent's limits, so it is capped at 64 MiB. Each exchange
+  is charged its frames plus 256 bytes, so floods of tiny requests are
+  bounded too. A request is served only if a largest-possible exchange
+  still fits, so the cut falls at the same request in a replay, and the
+  last accepted submission is kept. A response larger than a frame is
+  replaced by `refused`.
 - **Model failures** (endpoint down, HTTP error, malformed reply) end the
   run with `RuntimeError::Model`; they are infrastructure, never graded.
 - **Transcript.** Every exchange, in order, encoded as the same frames.
@@ -225,7 +250,11 @@ group. If a task has no submission, it scores the task's declared floor
 - **Models.** `OpenAiModel` speaks OpenAI-compatible `/chat/completions`
   over plain HTTP through `rusty_http`'s sync adapter; `https://` endpoints
   are refused until TLS is wired in. The API key comes from the
-  environment and is redacted from `Debug`. `ScriptedModel` serves CI.
+  environment and is redacted from `Debug`. With a key configured, an
+  error response's body never reaches a diagnostic, because an endpoint
+  may echo a rejected key in full or in part. Every response framing,
+  chunked included, fails as soon as the body passes 16 MiB.
+  `ScriptedModel` serves CI.
   `rsi inner` reads `RSI_INNER_MODEL`, `RSI_INNER_BASE_URL` (default:
   local Ollama) and `RSI_INNER_API_KEY`.
 - **Tests (`rsi-cli/tests/inner.rs`).**
@@ -235,16 +264,35 @@ group. If a task has no submission, it scores the task's declared floor
     submission.
   - Invariant 4: a run replays from its transcript to the same submission
     without calling the model, and a changed task description diverges.
-  - Invariant 1(b): an agent's reads of private labels, public labels, the
-    task directory and the repository, a TCP connect and a Unix socket all
-    fail with `PermissionDenied`. An agent whose sandbox could reach a
-    protected path is not started.
+  - Invariant 1(b): all of these fail with `PermissionDenied`:
+    - reads of private labels, public labels, the task directory and the
+      repository;
+    - a TCP connect, a Unix socket and a socketpair;
+    - a connect to an abstract Unix endpoint the test listens on, which
+      sees no connection.
+
+    An agent whose sandbox could reach a protected path is not started.
+  - Deadline: a model endpoint that accepts and never answers, and an
+    evaluation that sleeps for a minute, both end at the 2 s budget. The
+    earlier submission is kept, and no solution process survives.
   - A candidate that does not compile is a `BuildFailure`.
-- **Mutation check.** Without the socket rule, the isolation test fails
-  (a Unix socket opens). Without the budget admission check, the
-  token-budget test fails.
+- **Unit tests.** A seccomp interpreter checks that the filter refuses
+  exactly the listed syscalls under each rule. Other unit tests cover the
+  transcript cap (a flood of refused submissions and exhausted calls, with
+  a deterministic cut and the submission kept), the model and evaluation
+  deadlines, a silent and a dripping endpoint, oversized bodies in every
+  framing, and a sentinel key echoed by a 401 (absent from `Display`,
+  `Debug` and the CLI's `rsi inner: {error}` line).
+- **Mutation check.** Each defence, removed alone, turns its test red:
+  - the socket rule, then the socketpair half of it (isolation);
+  - the budget admission check (token budget);
+  - the transcript cap;
+  - the model deadline and the evaluation deadline;
+  - the chunked body cap;
+  - the key withholding.
 - **Known limits.** Solutions (not the agent) can still create Unix
-  sockets, as P2 allows. The token cap is admit-then-record, so the last
+  sockets, as P2 allows. A model call cut off by the deadline is not
+  charged tokens, because the endpoint reported none. The token cap is admit-then-record, so the last
   call may overshoot by at most its own prompt tokens (its completion is
   capped at the tokens left).
 

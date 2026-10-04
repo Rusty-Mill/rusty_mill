@@ -15,7 +15,7 @@ use std::time::Duration;
 use rsi_core::{ExecOutcome, Executor, SandboxSpec};
 
 use crate::error::RuntimeError;
-use crate::sandbox::HelperRequest;
+use crate::sandbox::{HelperRequest, Sockets};
 
 /// Bytes of each output stream kept by default.
 pub const DEFAULT_CAPTURE_BYTES: usize = 64 * 1024;
@@ -66,31 +66,21 @@ impl ProcessExecutor {
     }
 
     /// Runs `program` like [`Executor::exec`], but with `stdin` as its
-    /// standard input and with every new socket refused (see
-    /// [`HelperRequest::deny_sockets`]).
+    /// standard input and the stricter socket rule `sockets`.
     ///
-    /// This is how the inner agent runs: `stdin` is its end of the broker
-    /// socket, and it can open no other.
+    /// This is how the harness build ([`Sockets::NoEndpoints`]) and the
+    /// inner agent ([`Sockets::None`]) run; for the agent, `stdin` is its
+    /// end of the broker socket.
     ///
     /// # Errors
     /// As [`Executor::exec`].
-    pub fn exec_without_sockets(
+    pub fn exec_with(
         &self,
         spec: &SandboxSpec,
         program: &str,
         args: &[String],
         stdin: Stdio,
-    ) -> Result<ExecOutcome, RuntimeError> {
-        self.confined(spec, program, args, stdin, true)
-    }
-
-    fn confined(
-        &self,
-        spec: &SandboxSpec,
-        program: &str,
-        args: &[String],
-        stdin: Stdio,
-        deny_sockets: bool,
+        sockets: Sockets,
     ) -> Result<ExecOutcome, RuntimeError> {
         let state_dir = canonical(&self.state_dir)?;
         if spec.can_reach(&state_dir) {
@@ -111,7 +101,7 @@ impl ProcessExecutor {
             read: spec.read_roots().to_vec(),
             write: spec.write_roots().to_vec(),
             env: spec.env().to_vec(),
-            deny_sockets,
+            sockets,
             program: program.into(),
             args: args.iter().map(OsString::from).collect(),
         };
@@ -137,7 +127,7 @@ impl Executor for ProcessExecutor {
         program: &str,
         args: &[String],
     ) -> Result<ExecOutcome, RuntimeError> {
-        self.confined(spec, program, args, Stdio::null(), false)
+        self.exec_with(spec, program, args, Stdio::null(), Sockets::NoInternet)
     }
 }
 

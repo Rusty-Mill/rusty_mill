@@ -13,6 +13,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use rsi_core::{
     Attempt, ExecOutcome, Executor, PrivateGrader, PublicTask, SandboxSpec, Score, Seed, Solution,
@@ -89,7 +90,12 @@ impl<E: Executor<Error = RuntimeError>> SolutionRunner<E> {
         split: Split,
         solution: &Solution,
         seed: Seed,
+        time_limit: Option<Duration>,
     ) -> Result<Run, RuntimeError> {
+        let limits = match time_limit {
+            Some(cap) => task.manifest().limits.capped(cap)?,
+            None => task.manifest().limits,
+        };
         let work = self.scratch.join(format!(
             "run-{}-{}",
             std::process::id(),
@@ -101,7 +107,7 @@ impl<E: Executor<Error = RuntimeError>> SolutionRunner<E> {
             vec![work.clone()],
             work.clone(),
             solution_env(&work, seed),
-            task.manifest().limits,
+            limits,
         )?;
         if spec.can_reach(task.root()) {
             remove_work(&work)?;
@@ -227,8 +233,15 @@ impl<E: Executor<Error = RuntimeError>> PublicTask for LocalTask<'_, E> {
         self.task.description()
     }
 
-    fn public_score(&self, solution: &Solution, seed: Seed) -> Result<Attempt, RuntimeError> {
-        let run = self.runner.run(self.task, Split::Public, solution, seed)?;
+    fn public_score(
+        &self,
+        solution: &Solution,
+        seed: Seed,
+        time_limit: Option<Duration>,
+    ) -> Result<Attempt, RuntimeError> {
+        let run = self
+            .runner
+            .run(self.task, Split::Public, solution, seed, time_limit)?;
         // Inputs and labels come from the task directory, never from the
         // work directory the solution controlled.
         let score = match &run.output {
@@ -332,7 +345,9 @@ impl<E: Executor<Error = RuntimeError>> PrivateGrader for SandboxedGrader<'_, E>
         let Some(solution) = solution else {
             return Ok(task.manifest().floor);
         };
-        let run = self.runner.run(task, Split::Private, solution, seed)?;
+        let run = self
+            .runner
+            .run(task, Split::Private, solution, seed, None)?;
         let score = match &run.output {
             Ok(bytes) => self.grade_out_of_process(task, bytes),
             Err(_) => Ok(task.manifest().floor),

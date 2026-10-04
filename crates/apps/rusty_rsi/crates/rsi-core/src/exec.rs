@@ -101,6 +101,23 @@ impl Limits {
     pub const fn processes(&self) -> u64 {
         self.processes
     }
+
+    /// These limits with the wall clock cut to at most `cap`, for a run that
+    /// must end by a deadline. CPU time is cut to match, but never below the
+    /// one-second minimum; the wall clock is what bounds the run.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidParameter`] if `cap` is zero.
+    pub fn capped(&self, cap: Duration) -> Result<Self, CoreError> {
+        Self::new(
+            self.cpu.min(cap.max(Duration::from_secs(1))),
+            self.wall.min(cap),
+            self.memory_bytes,
+            self.file_bytes,
+            self.open_files,
+            self.processes,
+        )
+    }
 }
 
 /// Where a sandboxed process may read and write, and how it runs.
@@ -299,6 +316,19 @@ mod tests {
             assert!(Limits::new(s, s, v[0], v[1], v[2], v[3]).is_err(), "{i}");
         }
         assert_eq!(limits().memory_bytes(), 1 << 29);
+    }
+
+    #[test]
+    fn capped_limits_end_by_the_deadline() {
+        let secs = Duration::from_secs;
+        let base = Limits::new(secs(10), secs(20), 1, 1, 1, 1).expect("valid");
+        let short = base.capped(secs(3)).expect("valid");
+        assert_eq!((short.cpu(), short.wall()), (secs(3), secs(3)));
+        let tiny = base.capped(Duration::from_millis(200)).expect("valid");
+        assert_eq!(tiny.wall(), Duration::from_millis(200));
+        assert_eq!(tiny.cpu(), secs(1), "CPU never drops below one second");
+        assert_eq!(base.capped(secs(60)).expect("valid"), base, "no cap needed");
+        assert!(base.capped(Duration::ZERO).is_err());
     }
 
     #[test]

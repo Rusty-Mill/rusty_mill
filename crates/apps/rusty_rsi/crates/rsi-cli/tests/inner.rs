@@ -22,8 +22,8 @@ use rsi_core::{Budget, Harness, InnerOutcome, ModelId, PublicTask, Seed, Solutio
 use rsi_runtime::harness::{build, BuildFailure, HarnessBinary};
 use rsi_runtime::protocol::{decode_transcript, Response};
 use rsi_runtime::{
-    HarnessProcess, LocalTask, ProcessExecutor, RuntimeError, SandboxedHarness, ScriptedModel,
-    SolutionRunner, TaskDir, Toolchain,
+    HarnessProcess, LocalTask, OpenAiModel, ProcessExecutor, RuntimeError, SandboxedHarness,
+    ScriptedModel, SolutionRunner, TaskDir, Toolchain,
 };
 
 const SEED: Seed = Seed::new(11);
@@ -193,7 +193,7 @@ fn a0_searches_until_the_token_budget_stops_it() {
     let public = LocalTask::new(&tsp, &runner);
     let score = |s: &Solution| {
         public
-            .public_score(s, SEED)
+            .public_score(s, SEED, None)
             .expect("scores")
             .score
             .expect("valid")
@@ -240,6 +240,110 @@ fn an_agent_that_ignores_the_wall_clock_is_killed_and_keeps_its_submission() {
     );
 }
 
+/// Runs `agent` against the scripted model, or against `model` if given,
+/// with a 2 s wall-clock budget; returns the outcome and the time taken.
+fn run_with_short_wall(
+    scratch: &Scratch,
+    agent: &str,
+    model: Option<&OpenAiModel>,
+) -> (InnerOutcome, Duration) {
+    let binary = build_in(scratch, &source_crate(scratch, &rogue_agent(agent))).expect("builds");
+    let tsp = task(&suite(), "tsp-heuristic");
+    let (executor, runner) = (executor(scratch), runner(scratch));
+    let public = LocalTask::new(&tsp, &runner);
+    let budget = budget(1_000, Duration::from_secs(2));
+    let process = process(&executor, binary, scratch);
+    let started = Instant::now();
+    let outcome = match model {
+        Some(model) => SandboxedHarness::new(process, model, 64).run(&public, &budget, SEED),
+        None => SandboxedHarness::new(process, &scripted(), 64).run(&public, &budget, SEED),
+    }
+    .expect("a deadline is not an error");
+    (outcome, started.elapsed())
+}
+
+fn last_response(outcome: &InnerOutcome) -> Response {
+    let exchanges = decode_transcript(&outcome.transcript).expect("transcript");
+    exchanges.last().expect("exchanges").response.clone()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_hung_model_call_ends_at_the_wall_clock_budget() {
+    let scratch = Scratch::new("a0-slow-model");
+    // An endpoint that accepts and then never answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let hung = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        // Hold the connection until the client gives up.
+        let _ = std::io::Read::read_to_end(&mut stream, &mut Vec::new());
+    });
+    let model = OpenAiModel::new(
+        ModelId::parse("hung").expect("valid"),
+        &format!("http://127.0.0.1:{port}/v1"),
+        None,
+        Duration::from_secs(600),
+    )
+    .expect("valid");
+    let (outcome, elapsed) = run_with_short_wall(
+        &scratch,
+        r#"submit(&mut broker, "print('kept')\n");
+    call(&mut broker, 1, &["user", "hello"]);"#,
+        Some(&model),
+    );
+    hung.join().expect("the endpoint saw the client hang up");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert!(matches!(last_response(&outcome), Response::Exhausted(_)));
+    assert_eq!(
+        outcome.submission.map(|s| s.source().to_owned()),
+        Some("print('kept')\n".to_owned())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_slow_evaluation_ends_at_the_wall_clock_budget_and_leaves_nothing_running() {
+    let scratch = Scratch::new("a0-slow-eval");
+    let (outcome, elapsed) = run_with_short_wall(
+        &scratch,
+        r#"submit(&mut broker, "print('kept')\n");
+    call(&mut broker, 2, &["import time\ntime.sleep(60)\n"]);"#,
+        None,
+    );
+    assert!(elapsed < Duration::from_secs(6), "{elapsed:?}");
+    match last_response(&outcome) {
+        Response::Evaluated { score, feedback } => {
+            assert_eq!(score, None);
+            assert!(feedback.contains("wall-clock"), "{feedback}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        outcome.submission.map(|s| s.source().to_owned()),
+        Some("print('kept')\n".to_owned())
+    );
+    assert!(
+        processes_under(&scratch.0).is_empty(),
+        "the solution's processes were cleaned up"
+    );
+}
+
+/// Live processes whose working directory is under `dir`.
+fn processes_under(dir: &Path) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let cwd = std::fs::read_link(entry.path().join("cwd")).ok()?;
+            cwd.starts_with(dir).then_some(pid)
+        })
+        .collect()
+}
+
 // --- Invariant 4: trajectory replay ---------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -278,14 +382,24 @@ fn rogue_agent(body: &str) -> String {
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 
-fn submit(broker: &mut UnixStream, text: &str) {{
-    let mut body = vec![3u8];
-    body.extend_from_slice(&(text.len() as u32).to_be_bytes());
-    body.extend_from_slice(text.as_bytes());
+/// Sends one request; returns the response's tag.
+fn call(broker: &mut UnixStream, tag: u8, fields: &[&str]) -> u8 {{
+    let mut body = vec![tag];
+    for field in fields {{
+        body.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        body.extend_from_slice(field.as_bytes());
+    }}
     broker.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
     broker.write_all(&body).unwrap();
-    let mut reply = [0u8; 5];
+    let mut len = [0u8; 4];
+    broker.read_exact(&mut len).unwrap();
+    let mut reply = vec![0u8; u32::from_be_bytes(len) as usize];
     broker.read_exact(&mut reply).unwrap();
+    reply[0]
+}}
+
+fn submit(broker: &mut UnixStream, text: &str) {{
+    call(broker, 3, &[text]);
 }}
 
 pub fn main() {{
@@ -319,6 +433,15 @@ fn the_agent_cannot_reach_private_data_the_repository_or_any_socket() {
         .expect("repository root")
         .display()
         .to_string();
+    // An endpoint outside the sandbox that the agent must not reach.
+    let abstract_name = format!("rsi-isolation-{}", std::process::id());
+    let outside = {
+        use std::os::linux::net::SocketAddrExt;
+        let address = std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes())
+            .expect("abstract address");
+        std::os::unix::net::UnixListener::bind_addr(&address).expect("bind")
+    };
+    outside.set_nonblocking(true).expect("non-blocking");
     let body = format!(
         r#"let mut report = String::new();
     for path in ["{root}/private/labels.txt", "{root}/public/labels.txt"] {{
@@ -333,6 +456,12 @@ fn the_agent_cannot_reach_private_data_the_repository_or_any_socket() {
     report += &format!("tcp {{:?}}\n", tcp.map_err(|e| e.kind()));
     let unix = std::os::unix::net::UnixDatagram::unbound().map(|_| ());
     report += &format!("unix {{:?}}\n", unix.map_err(|e| e.kind()));
+    let pair = UnixStream::pair().map(|_| ());
+    report += &format!("socketpair {{:?}}\n", pair.map_err(|e| e.kind()));
+    use std::os::linux::net::SocketAddrExt;
+    let address = std::os::unix::net::SocketAddr::from_abstract_name(b"{abstract_name}").unwrap();
+    let outside = UnixStream::connect_addr(&address).map(|_| ());
+    report += &format!("abstract {{:?}}\n", outside.map_err(|e| e.kind()));
     submit(&mut broker, &report);"#
     );
     let binary = build_in(&scratch, &source_crate(&scratch, &rogue_agent(&body))).expect("builds");
@@ -348,7 +477,12 @@ fn the_agent_cannot_reach_private_data_the_repository_or_any_socket() {
         .source()
         .to_owned();
     let lines: Vec<&str> = report.lines().collect();
-    assert_eq!(lines.len(), 6, "{report}");
+    assert_eq!(lines.len(), 8, "{report}");
+    assert_eq!(
+        outside.accept().map(|_| ()).map_err(|e| e.kind()),
+        Err(std::io::ErrorKind::WouldBlock),
+        "nothing connected to the outside endpoint"
+    );
     for line in lines {
         assert!(
             line.ends_with("Err(PermissionDenied)"),

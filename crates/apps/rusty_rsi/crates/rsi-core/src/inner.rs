@@ -5,6 +5,8 @@
 //! is an untrusted process that reaches both only through the runtime's
 //! broker, which meters every call against a [`Budget`].
 
+use core::time::Duration;
+
 use crate::budget::{Budget, CostUsage};
 use crate::lineage::ModelId;
 use crate::rng::Seed;
@@ -72,11 +74,18 @@ pub trait ChatModel {
     /// The model's identifier, as recorded in lineage.
     fn id(&self) -> &ModelId;
 
-    /// Completes `messages`, producing at most `max_tokens` tokens.
+    /// Completes `messages`, producing at most `max_tokens` tokens and
+    /// giving up after `timeout` (the inner budget's remaining time).
     ///
     /// # Errors
-    /// When the endpoint could not be reached or answered nonsense.
-    fn complete(&self, messages: &[Message], max_tokens: u64) -> Result<Completion, Self::Error>;
+    /// When the endpoint could not be reached, answered nonsense or did not
+    /// answer within `timeout`.
+    fn complete(
+        &self,
+        messages: &[Message],
+        max_tokens: u64,
+        timeout: Duration,
+    ) -> Result<Completion, Self::Error>;
 }
 
 /// What one inner run produced.

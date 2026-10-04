@@ -25,6 +25,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `rsi inner`, one inner run with a live model, configured only from the environment (`RSI_INNER_MODEL`, `RSI_INNER_BASE_URL`, `RSI_INNER_API_KEY`).
 - **Added:** `rsi-core` gains the `Harness` and `ChatModel` ports and `PublicTask::description`; each toy task gains `public/task.md`.
 - **Tests:** end-to-end tests for invariant 2 (the token budget stops a0 after exactly the affordable calls; an agent that ignores the wall clock is killed and keeps its submission), invariant 4 (a run replays to the same submission without the model; a changed task diverges) and invariant 1(b) (the agent cannot read private or public labels, the task or the repository, or open TCP or Unix sockets). A mutation check confirmed the isolation and budget tests fail when the socket rule or the budget check is removed.
+- **Security (review):**
+  - **Socket rules.** The agent can create no socket of any kind; `socketpair` is now refused too. The build refuses `socket` but keeps anonymous socketpairs, which rustc needs to start its linker. Every sandbox, solutions included, refuses `io_uring`, which would bypass seccomp.
+  - **Transcript cap.** The broker's transcript is capped at 64 MiB, charging each exchange its frames plus a fixed overhead. The cut is deterministic, and the last accepted submission is kept.
+  - **Deadline.** Model calls and evaluations get the budget's remaining time as a hard limit. A call cut off at the deadline counts as an exhausted budget, so the run keeps its earlier submission.
+  - **Response size.** Every HTTP response framing, chunked included, is capped at 16 MiB while it is read.
+  - **API key.** With a key configured, an error response's body never reaches a diagnostic.
+  - **Tests and mutation checks.** Each fix has regression tests, and each test was confirmed red with its defence removed.
 - Known limitations:
   - `https://` model endpoints are refused until TLS is wired in.
   - The last model call can overshoot the token budget by its prompt tokens (admit-then-record).
