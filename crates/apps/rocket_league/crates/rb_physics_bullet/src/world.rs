@@ -370,6 +370,30 @@ impl StaticScene<'_> {
 }
 
 impl PhysicsWorld {
+    /// A wheel ray's first hit, against the arena or the ball
+    /// (`RB-PHYSICS-001-FR-129`). The game's wheels meet the ball as they
+    /// meet the floor: suspension and its bottomed-out pushback act on the
+    /// car, which `hitjump.jsonl` 77.667 s shows (a car passing over a
+    /// resting ball is pushed up 95 uu/s, 45 more than the sphere-box
+    /// contact alone gives). The ball is solid at its own 91.25 uu radius here,
+    /// without the 1.9 uu contact band its world contacts stand off by, and
+    /// as a still surface: its velocity does not enter the pushback.
+    fn wheel_ray(&self, origin: Vec3, direction: Vec3, length: f32) -> Option<collision::RayHit> {
+        let ground = self.static_scene().raycast(origin, direction, length);
+        let ball = collision::raycast_sphere(
+            self.ball.position,
+            crate::body::BALL_COLLISION_RADIUS,
+            origin,
+            direction,
+            length,
+        );
+        match (ground, ball) {
+            (Some(ground), Some(ball)) if ball.distance < ground.distance => Some(ball),
+            (None, ball) => ball,
+            (ground, _) => ground,
+        }
+    }
+
     fn static_scene(&self) -> StaticScene<'_> {
         StaticScene {
             ground: &self.ground,
@@ -905,7 +929,7 @@ impl PhysicsWorld {
         let car_wheels: Vec<drive::WheelContacts> = self
             .cars
             .iter()
-            .map(|car| drive::cast_wheels(car, |o, d, l| self.static_scene().raycast(o, d, l), dt))
+            .map(|car| drive::cast_wheels(car, |o, d, l| self.wheel_ray(o, d, l), dt))
             .collect();
         // Same idea as car_wheels, but for walls: the outward push-off
         // direction for a wall jump. Since `RB-PHYSICS-001-FR-039`, a car
@@ -4973,5 +4997,52 @@ mod tests {
         world.step(1.0 / 120.0);
         let dv = world.cars[0].linear_velocity - before;
         assert!(dv.z < 50.0, "popped in the air: {dv:?}");
+    }
+
+    /// RB-PHYSICS-001-FR-129: a wheel ray meets the ball like the floor,
+    /// whichever is nearer.
+    #[test]
+    fn a_wheel_ray_meets_the_ball_or_the_floor_whichever_is_nearer() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.15));
+        let world = PhysicsWorld::standard_arena(ball);
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        let top = 93.15 + crate::body::BALL_COLLISION_RADIUS;
+        let on_ball = world
+            .wheel_ray(Vec3::new(0.0, 0.0, top + 20.0), down, 52.0)
+            .expect("the ball's top is 20 uu below the ray's start");
+        assert!(
+            (on_ball.distance - 20.0).abs() < 1e-3,
+            "got {}",
+            on_ball.distance
+        );
+        assert!((on_ball.normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5);
+        let beside = world
+            .wheel_ray(Vec3::new(400.0, 0.0, 30.0), down, 52.0)
+            .expect("the floor is 30 uu below the ray's start");
+        assert!(
+            (beside.distance - 30.0).abs() < 1e-2,
+            "the floor, got {}",
+            beside.distance
+        );
+        assert!(world
+            .wheel_ray(Vec3::new(400.0, 0.0, 90.0), down, 52.0)
+            .is_none());
+    }
+
+    /// RB-PHYSICS-001-FR-129, `hitjump.jsonl` 77.658 s: a car whose front
+    /// wheels pass 40 uu over a resting ball's top edge, 2158 uu/s fast, is
+    /// pushed up 95 uu/s in the next tick. The sphere-box contact alone
+    /// gives 50; the wheels' bottomed-out suspension gives the rest (92).
+    #[test]
+    fn a_car_passing_over_the_ball_is_pushed_up_by_its_wheels() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, 93.14));
+        let mut car = RigidBody::standard_car(Vec3::new(53.9, 124.0, 159.7));
+        car.orientation = Quat::new(-0.004, -0.002, 0.904, -0.428).normalize();
+        car.linear_velocity = Vec3::new(-1359.3, -1660.2, 309.6);
+        car.update_inertia_tensor();
+        let mut world = PhysicsWorld::standard_arena(ball).with_car(car);
+        world.step(1.0 / 120.0);
+        let dv_z = world.cars[0].linear_velocity.z - 309.6;
+        assert!((80.0..110.0).contains(&dv_z), "pushed up {dv_z:.1} uu/s");
     }
 }

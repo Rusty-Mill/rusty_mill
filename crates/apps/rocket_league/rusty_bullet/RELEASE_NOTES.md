@@ -8,6 +8,21 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Wheels touch the ball
+**2026-10-04** · `RB-PHYSICS-001-FR-129` · ADR-0048
+
+- The last big ball frame in the hit recording (77.667 s) was a car
+  passing over a resting ball with its front wheels about 40 uu above the
+  ball's top edge. Our car's body hit the ball correctly but its wheels
+  ignored it. In the game the wheel rays hit the ball too, and the
+  suspension pushes the car up as it would off the floor (95 uu/s up
+  recorded, 50 without it). With the ball as a ray target the car's error
+  at that tick goes 110 → 8 uu/s, the pitch spin it picked up appears
+  (-1.04 rad/s recorded, -0.05 before, -1.03 now), and the ball's error
+  drops 135 → 46. Nothing else in any recording moves. Wheels on the ball
+  also count toward being grounded, which is how the game gives a flip
+  reset. 512 tests.
+
 ## One-step predictions remember the ball's contacts
 **2026-10-04** · `RB-PHYSICS-001-FR-127`, `FR-128` · ADR-0047
 

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.131.0
+- Version: 0.132.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6389,6 +6389,31 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       110 → 2, 73.958 s 104 → 3, 104.392 s 103 → 4, 40.042 s 101 → 2,
       39.850 s 102 → 3, 20.767 s 59 → 4. Worst regression 20.558 s 3 → 14.
       The aerial car hit at 77.667 s (135) is now the largest frame.
+- `RB-PHYSICS-001-FR-129` (a car's wheel rays hit the ball; implemented
+  and verified on the owner's capture, ADR-0048): `collision::raycast_sphere`
+  and `PhysicsWorld::wheel_ray` cast a wheel ray against the arena and the
+  ball and take the nearer. The ball is solid at its own 91.25 uu radius
+  (`BALL_COLLISION_RADIUS`, not the 93.15 contact sphere) and is a still
+  surface: its velocity does not enter the pushback. A wheel on the ball
+  suspends and pushes back the car exactly as on the floor, and counts
+  toward the three wheels that make a car grounded.
+  - Why: `hitjump.jsonl` 77.658–77.667 s, a car at 2158 uu/s passing over a
+    resting ball with its front wheels 40 uu above the ball's top edge.
+    The sphere-box contact gives the car 50 uu/s upward; the recording has
+    95. With the ball as a ray target the car velocity error goes from 110
+    to 8 uu/s, the pitch spin (recorded −1.04 rad/s, was −0.05, now −1.03)
+    appears, and the ball's error drops from 135 to 46 uu/s, three
+    independent quantities moving toward the game's.
+  - **Verification**:
+    - `collision` tests `a_ray_hits_a_sphere_at_its_near_surface` and
+      `a_ray_misses_a_sphere_beside_it_short_of_it_or_from_inside`;
+      `world` tests `a_wheel_ray_meets_the_ball_or_the_floor_whichever_is_nearer`
+      and `a_car_passing_over_the_ball_is_pushed_up_by_its_wheels` (50 uu/s
+      without the ball ray, 92 with, 95 recorded).
+    - `hitjump` frames 77.667–77.692 s: car 110, 76, 62, 50 → 8, 6, 6, 5;
+      ball 77.667 s 135 → 46; 77.700 s car 0.6 → 5.4. One-step car 0.474
+      (was 0.482), ball 0.433 (was 0.435); k = 30 car 11.24 (was 11.33),
+      ball 21.11 (was 21.18). No other frame in any capture moves.
 
 
 ## Architecture and interfaces
@@ -7880,6 +7905,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.132.0 (2026-10-04): `RB-PHYSICS-001-FR-129` — a car's wheel rays hit
+  the ball (ADR-0048). 441 tests in `rb_physics_bullet`.
 - 0.131.0 (2026-10-04): `RB-PHYSICS-001-FR-127` and `FR-128` — the ball's
   mesh contacts are made, kept and folded at Bullet's thresholds, and a
   snapped ball keeps its contact history unless it teleported (ADR-0047).

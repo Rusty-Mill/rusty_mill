@@ -238,8 +238,11 @@ version: `a245d35`).
    one-step now predicts from the game's own carried contact set:
    `hitjump` one-step ball 0.435 (was 0.490), frames over 50 uu/s 18 → 1
    (97.908 s 207 → 0), k = 30 ball 21.18; `test2`, `front`, `side`
-   unchanged. Largest ball frame now the aerial car hit at 77.667 s (135).
-   Open car-side leads: `test2`
+   unchanged. Largest ball frame was the aerial car hit at 77.667 s (135).
+   `RB-PHYSICS-001-FR-129` (ADR-0048) explains it: the game's wheel rays
+   hit the ball, so a car passing over a resting ball is pushed up by its
+   bottomed-out suspension (car 110 → 8 uu/s, ball 135 → 46, hitjump
+   one-step car 0.474, k = 30 car 11.24). Open car-side leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -250,7 +253,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (508 tests: 27 `rb_domain`, 437
+- `cargo test --workspace`: pass (512 tests: 27 `rb_domain`, 441
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

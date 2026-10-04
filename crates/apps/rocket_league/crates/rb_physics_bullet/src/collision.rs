@@ -894,6 +894,35 @@ pub struct RayHit {
 /// (under 0.001 uu for a 52 uu wheel ray) before the final Newton step.
 const RAY_BISECTION_STEPS: usize = 16;
 
+/// Casts a ray from `origin` along unit `direction` for up to `length`
+/// against a sphere (`RB-PHYSICS-001-FR-129`): the nearest crossing from
+/// outside, with the surface normal pointing back at the ray's start side.
+/// No hit when the start is already inside the sphere (the front-face-only
+/// rule `raycast` shares) or the crossing lies past `length`.
+pub fn raycast_sphere(
+    center: Vec3,
+    radius: f32,
+    origin: Vec3,
+    direction: Vec3,
+    length: f32,
+) -> Option<RayHit> {
+    let offset = origin - center;
+    let along = direction.dot(&offset);
+    let outside = offset.dot(&offset) - radius * radius;
+    let discriminant = along * along - outside;
+    if outside < 0.0 || discriminant < 0.0 {
+        return None;
+    }
+    let distance = -along - discriminant.sqrt();
+    if !(0.0..=length).contains(&distance) {
+        return None;
+    }
+    Some(RayHit {
+        distance,
+        normal: (origin + direction * distance - center) * (1.0 / radius),
+    })
+}
+
 /// Casts a ray from `origin` along unit `direction` for up to `length`,
 /// against whatever static geometry `contact_at` reports a point as being
 /// behind (`RB-PHYSICS-001-FR-102`). `contact_at(p)` must return the
@@ -2465,6 +2494,35 @@ mod tests {
         let down = Vec3::new(0.0, 0.0, -1.0);
         assert!(raycast(floor_probe, Vec3::new(0.0, 0.0, 30.0), down, 29.0).is_none());
         assert!(raycast(floor_probe, Vec3::new(0.0, 0.0, -1.0), down, 50.0).is_none());
+    }
+
+    #[test]
+    fn a_ray_hits_a_sphere_at_its_near_surface() {
+        // RB-PHYSICS-001-FR-129: straight down onto a radius-10 sphere
+        // centred 5 below the origin's x-offset, 8 uu to the side.
+        let center = Vec3::new(8.0, 0.0, 0.0);
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        let hit = raycast_sphere(center, 10.0, Vec3::new(0.0, 0.0, 30.0), down, 50.0).unwrap();
+        let top = (100.0f32 - 64.0).sqrt();
+        assert!(
+            (hit.distance - (30.0 - top)).abs() < 1e-4,
+            "got {}",
+            hit.distance
+        );
+        assert!((hit.normal - Vec3::new(-0.8, 0.0, 0.6)).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_ray_misses_a_sphere_beside_it_short_of_it_or_from_inside() {
+        let center = Vec3::ZERO;
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        let at = |x: f32, z: f32, len: f32| {
+            raycast_sphere(center, 10.0, Vec3::new(x, 0.0, z), down, len)
+        };
+        assert!(at(11.0, 30.0, 50.0).is_none(), "passes beside");
+        assert!(at(0.0, 30.0, 19.0).is_none(), "stops 1 uu short of the top");
+        assert!(at(0.0, 5.0, 50.0).is_none(), "starts inside");
+        assert!(at(0.0, 30.0, 20.0).is_some(), "reaches the top exactly");
     }
 
     #[test]
