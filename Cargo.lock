@@ -12846,6 +12846,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-core"
+version = "0.1.0"
+dependencies = [
+ "rusty_err",
+ "rusty_rsa",
+]
+
+[[package]]
 name = "rsqlite-vfs"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
