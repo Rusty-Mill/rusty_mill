@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0042 (`RB-PHYSICS-001-FR-122`): the wheel pushback's ERP
+  (`drive::wheels::PUSHBACK_ERP`) is 0.1, calibrated from a recorded
+  bottomed-out landing; was Bullet's default 0.2.
 - ADR-0041 (`RB-PHYSICS-001-FR-121`): `mesh::BallManifold` and
   `StaticMesh::sphere_manifold`, Bullet's persistent manifold for the
   ball against each mesh, kept across ticks by `PhysicsWorld` and cleared

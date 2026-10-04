@@ -39,8 +39,12 @@ const WHEELS_DAMPING_RELAXATION: f32 = 40.0;
 /// `m_clippedInvContactDotSuspension` on a surface too steep to measure.
 const STEEP_CONTACT_CLIP: f32 = 10.0;
 
-/// Bullet's default `m_erp`, the pushback's positional correction.
-const PUSHBACK_ERP: f32 = 0.2;
+/// The pushback's positional correction (`RB-PHYSICS-001-FR-122`,
+/// ADR-0042). Bullet's `resolveSingleCollision` uses its default `m_erp`,
+/// 0.2; the owner's bottomed-out landing (`test2.jsonl` 18.358 s) rebounds
+/// as 0.1, and every recording's car error falls with it. A calibration,
+/// not a sourced constant.
+const PUSHBACK_ERP: f32 = 0.1;
 
 /// Wheels whose ray must reach a surface for the car to count as on the
 /// ground: `Car.cpp`'s `numWheelsInContact >= 3`.

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.125.0
+- Version: 0.126.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5506,8 +5506,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     about the origin (`Car::_BulletSetup`'s compound child).
   - `drive::wheels::cast_wheels` (`btVehicleRL::rayCast`): per wheel, the
     hit, normal, suspension length clamped to rest ± 12 uu, its velocity
-    along the normal, and the `resolveSingleCollision` pushback (ERP 0.2)
-    when a wheel sinks past `rest + radius - 2.5`.
+    along the normal, and the `resolveSingleCollision` pushback (ERP 0.2;
+    0.1 since FR-122) when a wheel sinks past `rest + radius - 2.5`.
   - `apply_wheel_forces` (`updateSuspension`, `_UpdateWheels`): spring
     `(rest - length) * 500`, damping 25 compressing / 40 relaxing, scale
     35.75 front / 54.265 back, never pulling; sticky force 0.5 of default
@@ -6197,6 +6197,21 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       `test2` k = 30 ball 0.33 unchanged.
     - RocketSim's `getCacheEntry = -1` (no folding) tried and rejected:
       one-step ball 0.549.
+- `RB-PHYSICS-001-FR-122` (the wheel pushback's ERP is 0.1, calibrated
+  from a recorded landing; implemented and verified on the owner's
+  captures, ADR-0042): `drive::wheels::PUSHBACK_ERP = 0.1` (was Bullet's
+  default `m_erp`, 0.2) in the `resolveSingleCollision` pushback a wheel
+  ray shorter than `rest + radius - 2.5 uu` adds (FR-090).
+  - Why: `test2.jsonl` 18.358–18.400 s, a nose-first landing with the
+    suspension bottomed out, rebounds 24–27 uu/s per tick less in the game
+    than in the simulator; 117 of the simulator's 195 uu/s came from the
+    pushbacks. The sweep in ADR-0042 bottoms out at 0.1.
+  - **Verification**:
+    - `world` test `a_bottomed_out_landing_rebounds_as_recorded`.
+    - `test2` one-step car 0.470 (was 0.895; 116 frames better by more
+      than 3 uu/s, none worse); k = 30 car 5.65 uu/s (was 5.76).
+    - `front` 0.178 (was 0.192), `side` 0.192 (was 0.219), `hitjump` car
+      0.494 (was 0.574). Ball errors unchanged.
 
 
 ## Architecture and interfaces
@@ -7688,6 +7703,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.126.0 (2026-10-04): `RB-PHYSICS-001-FR-122` — the wheel pushback's
+  ERP is 0.1, calibrated from a recorded landing (ADR-0042). 429 tests
+  in `rb_physics_bullet`.
 - 0.125.0 (2026-10-04): `RB-PHYSICS-001-FR-121` — the ball's mesh
   manifolds persist across ticks (ADR-0041). 428 tests in
   `rb_physics_bullet`.
