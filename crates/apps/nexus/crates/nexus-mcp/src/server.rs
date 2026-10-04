@@ -4126,6 +4126,334 @@ impl rmcp::ServerHandler for NexusMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use nexus_kernel::{
+        audit_store::{AuditEntry, AuditQuery, AuditStore},
+        Capability, CapabilitySet, EventBus, InMemoryKvStore, IpcDispatcher, IpcError, KvStore,
+    };
+    use rmcp::model::{ClientInfo, ProtocolVersion, SubscriptionFilter};
+    use rmcp::{ClientLifecycleMode, ClientServiceExt, ServiceExt};
+
+    struct AdapterDispatcher;
+
+    impl IpcDispatcher for AdapterDispatcher {
+        fn dispatch(
+            &self,
+            _caller: &str,
+            target: &str,
+            command: &str,
+            args: &serde_json::Value,
+        ) -> Result<serde_json::Value, IpcError> {
+            match (target, command) {
+                (STORAGE_PLUGIN, "query_files") => Ok(serde_json::Value::Array(
+                    (0..120)
+                        .map(|i| {
+                            serde_json::json!({
+                                "path": format!("notes/{i:03}.md"), "size_bytes": i + 1
+                            })
+                        })
+                        .collect(),
+                )),
+                (STORAGE_PLUGIN, "read_file") => Ok(serde_json::json!({
+                    "bytes": format!("fixture:{}", args["path"].as_str().unwrap_or_default())
+                        .into_bytes()
+                })),
+                (SKILLS_PLUGIN, "list") => Ok(serde_json::Value::Array(
+                    (0..120)
+                        .map(|i| {
+                            serde_json::json!({
+                                "id": format!("skill-{i:03}"),
+                                "name": format!("Skill {i:03}"),
+                                "description": "fixture", "parameters": []
+                            })
+                        })
+                        .collect(),
+                )),
+                ("com.example.fixture", "echo") => Ok(args.clone()),
+                (TERMINAL_PLUGIN, "list_sessions") => Ok(serde_json::json!([])),
+                _ => Err(IpcError::CommandNotFound {
+                    plugin_id: target.to_string(),
+                    command: command.to_string(),
+                }),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct AdapterAuditStore(Mutex<Vec<AuditEntry>>);
+
+    impl AuditStore for AdapterAuditStore {
+        fn append(&self, event_type: &str, plugin_id: Option<&str>, detail: &serde_json::Value) {
+            let mut entries = self.0.lock().unwrap();
+            let id = entries.len() as i64 + 1;
+            entries.push(AuditEntry {
+                id,
+                ts_ms: 0,
+                event_type: event_type.to_string(),
+                plugin_id: plugin_id.map(str::to_string),
+                detail_json: detail.to_string(),
+            });
+        }
+
+        fn query(&self, query: &AuditQuery) -> Vec<AuditEntry> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| {
+                    query
+                        .event_type
+                        .as_ref()
+                        .is_none_or(|kind| &entry.event_type == kind)
+                })
+                .cloned()
+                .collect()
+        }
+
+        fn clear(&self, _before_ts: i64) -> u64 {
+            let mut entries = self.0.lock().unwrap();
+            let count = entries.len() as u64;
+            entries.clear();
+            count
+        }
+    }
+
+    fn adapter_server() -> NexusMcpServer {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let capabilities: CapabilitySet = Capability::ALL.iter().copied().collect();
+        let kv: Arc<dyn KvStore> = Arc::new(InMemoryKvStore::new());
+        let context = KernelPluginContext::new(
+            "com.nexus.mcp",
+            "0.0.1",
+            capabilities,
+            kv,
+            Arc::new(EventBus::new(32)),
+            &dir,
+            Some(Arc::new(AdapterDispatcher)),
+        )
+        .unwrap();
+        NexusMcpServer::new(Arc::new(context))
+    }
+
+    async fn connect_stdio(
+        server: NexusMcpServer,
+    ) -> rmcp::service::RunningService<rmcp::RoleClient, ClientInfo> {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let running = ServiceExt::serve(server, server_transport)
+                .await
+                .expect("server starts");
+            let _ = running.waiting().await;
+        });
+        ClientInfo::default()
+            .serve_with_lifecycle(
+                client_transport,
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+            )
+            .await
+            .expect("client connects")
+    }
+
+    async fn collect_pages<T, F, Fut>(mut next: F) -> Vec<T>
+    where
+        F: FnMut(Option<String>) -> Fut,
+        Fut: std::future::Future<Output = (Vec<T>, Option<String>)>,
+    {
+        let mut all = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (items, following) = next(cursor).await;
+            all.extend(items);
+            cursor = following;
+            if cursor.is_none() {
+                return all;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_stdio_pages_large_tools_resources_and_prompts() {
+        let audit = Arc::new(AdapterAuditStore::default());
+        nexus_kernel::audit_store::install(audit.clone());
+        let registry = crate::dynamic_tools::global();
+        for i in 0..40 {
+            let name = format!("fixture_dynamic_{i:03}");
+            registry.unregister(&name);
+            registry
+                .register(crate::DynamicTool {
+                    name,
+                    description: "fixture".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    plugin_id: "com.example.fixture".into(),
+                    command: "echo".into(),
+                })
+                .unwrap();
+        }
+
+        let client = connect_stdio(adapter_server()).await;
+        let tools = collect_pages(|cursor| {
+            let client = &client;
+            async move {
+                let result = client
+                    .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                    .await
+                    .unwrap();
+                (result.tools, result.next_cursor)
+            }
+        })
+        .await;
+        assert!(tools.len() > 100, "combined static/dynamic tool count");
+
+        let resources = collect_pages(|cursor| {
+            let client = &client;
+            async move {
+                let result = client
+                    .list_resources(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                    .await
+                    .unwrap();
+                (result.resources, result.next_cursor)
+            }
+        })
+        .await;
+        assert_eq!(resources.len(), 120);
+
+        let prompts = collect_pages(|cursor| {
+            let client = &client;
+            async move {
+                let result = client
+                    .list_prompts(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                    .await
+                    .unwrap();
+                (result.prompts, result.next_cursor)
+            }
+        })
+        .await;
+        assert_eq!(prompts.len(), 120);
+
+        assert!(client
+            .list_resources(Some(
+                PaginatedRequestParams::default().with_cursor(Some("malformed".into())),
+            ))
+            .await
+            .is_err());
+        let tool_cursor = client.list_tools(None).await.unwrap().next_cursor.unwrap();
+        assert!(client
+            .list_prompts(Some(
+                PaginatedRequestParams::default().with_cursor(Some(tool_cursor)),
+            ))
+            .await
+            .is_err());
+
+        let dynamic = client
+            .call_tool(
+                CallToolRequestParams::new("fixture_dynamic_000")
+                    .with_arguments(serde_json::json!({"value": 7}).as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert!(!dynamic.is_error.unwrap_or(false));
+
+        registry
+            .register(crate::DynamicTool {
+                name: "fixture_internal_gate".into(),
+                description: "must remain unreachable".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                plugin_id: "com.nexus.ai".into(),
+                command: "resolve_credentials".into(),
+            })
+            .unwrap();
+        assert!(client
+            .call_tool(CallToolRequestParams::new("fixture_internal_gate"))
+            .await
+            .is_err());
+        registry.unregister("fixture_internal_gate");
+
+        client
+            .read_resource(ReadResourceRequestParams::new(
+                "mcp://nexus/notes/notes/000.md",
+            ))
+            .await
+            .unwrap();
+        let entries = audit.0.lock().unwrap();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.event_type == "mcp_tool_call"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.event_type == "mcp_resource_read"));
+        drop(entries);
+
+        for i in 0..40 {
+            registry.unregister(&format!("fixture_dynamic_{i:03}"));
+        }
+        client.cancel().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adapter_http_serves_requests_and_can_be_shut_down() {
+        use rmcp::transport::{
+            streamable_http_client::StreamableHttpClientTransportConfig,
+            StreamableHttpClientTransport,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let task = tokio::spawn(adapter_server().serve(rusty_mcp::ServerConfig::http(addr)));
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+        );
+        let client = ClientInfo::default()
+            .serve_with_lifecycle(
+                transport,
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+            )
+            .await
+            .unwrap();
+        let result = client.list_resources(None).await.unwrap();
+        assert!(!result.resources.is_empty());
+        client.cancel().await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn adapter_delivers_terminal_events_and_disconnects_cleanly() {
+        let server = adapter_server();
+        let changes = server.changes.clone();
+        let client = connect_stdio(server).await;
+        let mut subscription = client
+            .listen(
+                SubscriptionFilter::builder()
+                    .resource_subscription("mcp://nexus/terminal/session-1/screen")
+                    .build(),
+            )
+            .await
+            .unwrap();
+        changes.resource_updated("mcp://nexus/terminal/session-1/screen");
+        let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+            .await
+            .expect("terminal event delivered")
+            .expect("subscription remains connected")
+            .expect("notification succeeds");
+        assert!(matches!(
+            event,
+            rmcp::model::ServerNotification::ResourceUpdatedNotification(_)
+        ));
+        drop(subscription);
+        client.cancel().await.unwrap();
+    }
 
     #[test]
     fn classify_terminal_event_routes_each_kind() {

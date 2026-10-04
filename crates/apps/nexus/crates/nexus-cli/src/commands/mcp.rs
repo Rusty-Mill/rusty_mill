@@ -89,29 +89,6 @@ fn validate_bind(transport: rusty_mcp::TransportArg, bind: SocketAddr) -> Result
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::validate_bind;
-    use rusty_mcp::TransportArg;
-
-    #[test]
-    fn http_requires_loopback_without_authentication() {
-        for addr in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
-            let addr = addr.parse().unwrap();
-            assert!(validate_bind(TransportArg::Http, addr).is_err(), "{addr}");
-        }
-        for addr in ["127.0.0.1:8080", "[::1]:8080"] {
-            let addr = addr.parse().unwrap();
-            validate_bind(TransportArg::Http, addr).unwrap();
-        }
-    }
-
-    #[test]
-    fn stdio_ignores_the_unused_bind_argument() {
-        validate_bind(TransportArg::Stdio, "0.0.0.0:8080".parse().unwrap()).unwrap();
-    }
-}
-
 /// `nexus mcp servers` — enumerate external MCP servers declared in
 /// `.forge/mcp.toml` via the host plugin.
 pub fn host_servers(app: &mut App) -> Result<()> {
@@ -218,4 +195,27 @@ fn call(app: &mut App, command: &str, args: Value) -> Result<Value> {
     let (invoker, rt) = app.invoker()?;
     rt.block_on(invoker.ipc_call(MCP_HOST_PLUGIN, command, args, IPC_TIMEOUT))
         .with_context(|| format!("mcp host ipc call '{command}' failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bind;
+    use rusty_mcp::TransportArg;
+
+    #[test]
+    fn http_requires_loopback_without_authentication() {
+        for addr in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
+            let addr = addr.parse().unwrap();
+            assert!(validate_bind(TransportArg::Http, addr).is_err(), "{addr}");
+        }
+        for addr in ["127.0.0.1:8080", "[::1]:8080"] {
+            let addr = addr.parse().unwrap();
+            validate_bind(TransportArg::Http, addr).unwrap();
+        }
+    }
+
+    #[test]
+    fn stdio_ignores_the_unused_bind_argument() {
+        validate_bind(TransportArg::Stdio, "0.0.0.0:8080".parse().unwrap()).unwrap();
+    }
 }
