@@ -12151,7 +12151,6 @@ name = "remind_me_api"
 version = "0.2.3"
 dependencies = [
  "remind_me_core",
- "rusqlite",
  "serde",
  "serde_json",
 ]
