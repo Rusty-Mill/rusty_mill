@@ -151,6 +151,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-cli",
     "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_orch/crates/orch-codex",
+    "crates/apps/rusty_orch/crates/orch-store",
     "crates/apps/rusty_orch/crates/rusty_orch",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
@@ -507,6 +508,7 @@ orch-dispatch = { path = "crates/apps/rusty_orch/crates/orch-dispatch" }
 orch-cli = { path = "crates/apps/rusty_orch/crates/orch-cli" }
 orch-ollama = { path = "crates/apps/rusty_orch/crates/orch-ollama" }
 orch-codex = { path = "crates/apps/rusty_orch/crates/orch-codex" }
+orch-store = { path = "crates/apps/rusty_orch/crates/orch-store" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [

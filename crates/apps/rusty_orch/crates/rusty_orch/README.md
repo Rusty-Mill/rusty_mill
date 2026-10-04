@@ -15,10 +15,20 @@ cargo run -p rusty_orch -- --help
 | `--codex-model <name>` | model for `Agent::Codex`; default: Codex's own |
 | `--interactive` | when a card blocks on a question, read the answer from stdin and keep going |
 | `--json` | print the report as one JSON object instead of text |
+| `--state <dir>` | save the plan, board, and ledger there after every dispatcher run and answer round, and resume from it on the next run; env `RUSTY_ORCH_STATE`; default: in memory only |
 
 Exit status: `0` finished, `3` blocked on unanswered questions, `4` budget or agent failure, `2` usage, `1` any other error.
 
 Channels: stdout carries the report and nothing else, so `--json` is always one parseable object even through a blocked-and-answered run. Questions, the answer prompt, and progress lines go to stderr; answers are read from stdin. A progress line is built only from a fixed outcome category, task ids, agent names, and counts; adapter or model error text appears only in the report. The questions shown under `--interactive` are model text by nature. A blank line or end of input stops the question round at once: answers already given stay on the board, no further model call is made, and the run exits `3`.
+
+## Resuming
+
+`--state <dir>` keeps the goal's plan, board, and ledger in that directory ([ADR-0010](../../docs/adr/0010-persistence-on-multimodal-db.md)). A run that exits `3` can be continued later with the same goal file and directory, typically with `--interactive` to answer what blocked it. Calls recorded in the recovered checkpoint count against the resumed ceilings. Abrupt termination can repeat work and calls since the last successful checkpoint; those lost charges are not reconstructed. The goal file is fingerprinted: a different file against saved state is refused with exit `1`, so use a fresh directory per goal. One process holds a directory at a time. The wall clock is per invocation. Because persistence is unconditional in the binary, its Rust requirement is 1.89.
+
+```sh
+rusty_orch run goal.json --state .orch            # exit 3: a card asked a question
+rusty_orch run goal.json --state .orch --interactive   # answer, continue, finish
+```
 
 ## Goal file
 
@@ -34,4 +44,4 @@ A review card needs no `refs` to see what it reviews: the shared renderer resolv
 cargo test -p rusty_orch
 ```
 
-Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection and the run loop through finished, blocked, answered, blank answer, wall clock, and dispatcher failure, over `orch_dispatch::fake::FakeAgent`. No real binary is run.
+Unit tests cover the argument parser. Integration tests drive the goal-file parser through every rejection, the run loop through finished, blocked, answered, blank answer, wall clock, dispatcher failure, and a partial answer round whose second read fails. Repeated entry-point calls in one test process cover resume logic over `orch_dispatch::fake::FakeAgent`; a separate subprocess test executes the built binary twice with a scripted local CLI and reopens the state directory. The deterministic store fault test exercises error/drop/reopen recovery, not an OS process crash.

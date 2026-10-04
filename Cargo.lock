@@ -10249,6 +10249,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-store"
+version = "0.1.0"
+dependencies = [
+ "orch-core",
+ "orch-dispatch",
+ "rusty_multimodal_db_engine",
+ "serde",
+]
+
+[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14221,6 +14231,7 @@ dependencies = [
  "orch-core",
  "orch-dispatch",
  "orch-ollama",
+ "orch-store",
  "rusty_json",
 ]
 
