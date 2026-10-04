@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0041 (`RB-PHYSICS-001-FR-121`): `mesh::BallManifold` and
+  `StaticMesh::sphere_manifold`, Bullet's persistent manifold for the
+  ball against each mesh, kept across ticks by `PhysicsWorld` and cleared
+  by `snap_to_frame`.
 - ADR-0040 (`RB-PHYSICS-001-FR-120`): `StaticMesh::classify_seams`
   classifies edges on a seam between meshes across them;
   `arena::standard_meshes` applies it to the 16 arena meshes.

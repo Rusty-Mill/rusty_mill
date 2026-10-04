@@ -8,6 +8,20 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The ball remembers what it touched last tick
+**2026-10-04** · `RB-PHYSICS-001-FR-121` · ADR-0041
+
+- The game engine keeps a ball's touch points from one tick to the next
+  and only drops them once the ball has moved clear. The simulator
+  rebuilt them from scratch each tick, so a ball still inside a corner
+  the tick after a bounce could bounce a second time. It now keeps them
+  the same way. In 30-tick predictions the double bounce after the goal
+  recording's corner hit at 97.9 s is gone (206 → 4 uu/s) and a corner
+  sequence at 40 s improves similarly; the overall 30-tick ball error is
+  20.35 uu (was 20.37), with some bounce timings shifting either way.
+  One-tick checks are unaffected, since each starts from a fresh
+  snapshot. 499 tests.
+
 ## No more sideways nudge on the goal roof's centre line
 **2026-10-04** · `RB-PHYSICS-001-FR-120` · ADR-0040
 

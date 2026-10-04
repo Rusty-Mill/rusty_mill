@@ -8,7 +8,7 @@ use crate::body::{
     StaticQuarterPipe,
 };
 use crate::collision;
-use crate::mesh::StaticMesh;
+use crate::mesh::{self, StaticMesh};
 use crate::net::NetMesh;
 use crate::solver::ContactCache;
 use crate::{drive, integrate, solver};
@@ -298,6 +298,10 @@ pub struct PhysicsWorld {
     /// Bullet's one-point-a-tick manifold (`RB-PHYSICS-001-FR-105`,
     /// ADR-0024; meshes since FR-106). Sized in `step`.
     car_static_manifolds: Vec<Vec<collision::ContactManifold>>,
+    /// The ball's persistent contact with each of `meshes`, Bullet's
+    /// `btPersistentManifold` kept across ticks (`RB-PHYSICS-001-FR-121`,
+    /// ADR-0041). Sized in `step`, cleared by `snap_to_frame`.
+    ball_mesh_manifolds: Vec<mesh::BallManifold>,
 }
 
 /// Borrowed references to every static-shape collection in a `PhysicsWorld`
@@ -408,6 +412,7 @@ impl PhysicsWorld {
             ball_hit_ticks: Vec::new(),
             dynamic_manifold_caches: HashMap::new(),
             car_static_manifolds: Vec::new(),
+            ball_mesh_manifolds: Vec::new(),
         }
     }
 
@@ -730,6 +735,7 @@ impl PhysicsWorld {
         scene: &StaticScene,
         is_car: bool,
         mut persistent: Option<&mut [collision::ContactManifold]>,
+        mut ball_manifolds: Option<&mut [mesh::BallManifold]>,
     ) -> Vec<(solver::StaticMaterial, Vec<collision::Contact>)> {
         let mut stateful = |index: usize,
                             update: &dyn Fn(
@@ -784,13 +790,20 @@ impl PhysicsWorld {
             );
         }
         for (index, mesh) in scene.meshes.iter().enumerate() {
-            push(
-                mesh.restitution,
-                mesh.friction,
-                stateful(1 + scene.walls.len() + index, &|manifold| {
+            // The ball keeps its own persistent manifold per mesh
+            // (RB-PHYSICS-001-FR-121) when the caller carries one.
+            let ball_manifold = ball_manifolds
+                .as_deref_mut()
+                .and_then(|all| all.get_mut(index));
+            let contacts = match (body.shape, ball_manifold) {
+                (crate::body::Shape::Sphere { radius }, Some(manifold)) if !is_car => {
+                    mesh.sphere_manifold(body.position, &body.orientation, radius, manifold)
+                }
+                _ => stateful(1 + scene.walls.len() + index, &|manifold| {
                     manifold.update_mesh(body, mesh)
                 }),
-            );
+            };
+            push(mesh.restitution, mesh.friction, contacts);
         }
         for goal_wall in scene.goal_walls {
             push(
@@ -973,6 +986,8 @@ impl PhysicsWorld {
         let static_count = 1 + self.walls.len() + self.meshes.len();
         self.car_static_manifolds
             .resize_with(self.cars.len(), Vec::new);
+        self.ball_mesh_manifolds
+            .resize_with(self.meshes.len(), Default::default);
         for manifolds in &mut self.car_static_manifolds {
             manifolds.resize_with(static_count, Default::default);
         }
@@ -988,6 +1003,7 @@ impl PhysicsWorld {
                 &static_scene,
                 body_index > 0,
                 plane_manifolds,
+                (body_index == 0).then_some(self.ball_mesh_manifolds.as_mut_slice()),
             );
             if body_index == 0 {
                 // RocketSim keeps every raw point's split-impulse push
@@ -1142,6 +1158,8 @@ impl PhysicsWorld {
                 drive.boost_amount = car_state.boost_amount.clamp(0.0, drive::MAX_BOOST);
             }
         }
+        // A snapped ball has no contact history (RB-PHYSICS-001-FR-121).
+        self.ball_mesh_manifolds.clear();
     }
 
     /// The scene's current state as a `PhysicsFrame`, for consumption by
@@ -3820,7 +3838,7 @@ mod tests {
         let car = RigidBody::standard_car(Vec3::new(0.0, 5325.0, 17.0));
         let world = PhysicsWorld::standard_arena(ball).with_car(car);
         let scene = world.static_scene();
-        let deep = PhysicsWorld::static_contact_manifolds(&world.cars[0], &scene, true, None)
+        let deep = PhysicsWorld::static_contact_manifolds(&world.cars[0], &scene, true, None, None)
             .into_iter()
             .flat_map(|(_, contacts)| contacts)
             .any(|contact| contact.penetration_depth > 5.0);
@@ -4788,5 +4806,22 @@ mod tests {
             "bounce off: {v:?}"
         );
         assert!((w.x + 2.72).abs() < 0.1, "spin off: {w:?}");
+    }
+
+    /// RB-PHYSICS-001-FR-121: a stepped world carries one ball manifold
+    /// per mesh; snapping to a recorded frame forgets them all.
+    #[test]
+    fn snapping_the_ball_forgets_its_contact_history() {
+        let ball = RigidBody::standard_ball(Vec3::new(0.0, 5912.49, 213.35));
+        let mut world = PhysicsWorld::standard_arena(ball);
+        world.step(1.0 / 120.0);
+        assert_eq!(world.ball_mesh_manifolds.len(), world.meshes.len());
+        assert!(
+            world.ball_mesh_manifolds.iter().any(|m| !m.is_empty()),
+            "the ball on the goal slope keeps a point"
+        );
+        let frame = world.frame();
+        world.snap_to_frame(&frame);
+        assert!(world.ball_mesh_manifolds.is_empty());
     }
 }
