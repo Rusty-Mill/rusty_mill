@@ -16,7 +16,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ## rusty_tick: calendar test no longer fails on Sundays
 **2026-10-04** · [#474](https://github.com/Rusty-Mill/rusty_mill/pull/474)
 
-- **Fixed:** `CalendarPage.test.tsx`'s repeating-task test anchored a daily repeat at today in a Monday-start week view; on a Sunday, the week's last day, the task rendered once and `expected 1 to be greater than 1` failed. The repeat now starts on the visible week's first day. Verified with the clock pinned to each weekday: the old test failed only on Sunday, the new one passes on all seven. Test-only; no app code changed.
+- **Fixed:** `CalendarPage.test.tsx`'s repeating-task test anchored a daily repeat at today in a Monday-start week view; on a Sunday, the week's last day, the task rendered once and `expected 1 to be greater than 1` failed. The repeat now starts on the visible week's first day. Verified with the clock pinned to each weekday: the old test failed only on Sunday, the new one passes on all seven. Test-only; no app code changed. The same test change first reached `main` ported into #472.
+
+---
+
+## rusty_rsi P1: a self-improvement harness's pure core
+**2026-10-04** · [#472](https://github.com/Rusty-Mill/rusty_mill/pull/472) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `crates/apps/rusty_rsi/crates/rsi-core`, the I/O-free domain of an AIDE²-style self-improvement loop: `Score`/`Grade` confined to `[0, 1]`, a token + wall-clock (+ GPU) `CostMeter` with a hard stop, `NoiseBand` and a `z·√2·σ̂` accept `Margin`, a two-stage fresh-seed accept gate (`screen`/`confirm`), `argmax`/UCB1/softmax helpers, a SplitMix64 PRNG with counter-based seed derivation, and lineage entry types with a SHA-256 hash chain.
+- **Changed (review):** lineage entries are now validated: `LineageEntry::new` replays the gate on the recorded evaluations and refuses a decision they do not produce; a repeated `(task, seed)` result is rejected rather than double-counted; softmax stays correct at finite extremes (`[f64::MAX, -f64::MAX]` at `T = f64::MAX` gives ≈ `[0.881, 0.119]`, not `[1, 0]`) and for subnormal logits (`[5e-324, 0]` at `T = 5e-324` gives ≈ `[0.731, 0.269]`, not `[0.5, 0.5]`).
+- **Docs:** ADR-0005 accepted.
+- Known limitation: nothing runs yet. Tasks, the sandbox, the inner harness and the outer loop arrive in P2 to P4.
 
 ---
 
