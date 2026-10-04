@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0051 (`RB-PHYSICS-001-FR-132`): `ground::wheel_impulses` applies a
+  tire's side force along the wheel's own axle, not flattened onto the
+  surface.
 - ADR-0050 (`RB-PHYSICS-001-FR-131`): `drive::roll::auto_roll`,
   RocketSim's `_UpdateAutoRoll`: throttle plus partial surface contact
   presses the car down and turns it toward flat.

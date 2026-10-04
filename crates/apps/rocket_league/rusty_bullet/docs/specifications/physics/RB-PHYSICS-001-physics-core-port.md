@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.134.0
+- Version: 0.135.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6461,6 +6461,27 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - Not explained: test2 5.8-5.9 s post-kickoff-jump z bias (~5 uu/s per
       tick); frames at 8.99-9.0 s regress slightly.
 
+- `RB-PHYSICS-001-FR-132` (a tire's side force follows the wheel's own
+  axle; implemented and verified on the owner's captures, ADR-0051):
+  `ground::wheel_impulses` applies the lateral impulse along the wheel's
+  axle (the car's right axis turned by the steer angle) without flattening
+  it onto the contact surface. The rolling direction is still projected.
+  - Why: `test2.jsonl` 5.77-5.92 s, a tilted car with one wheel down at
+    30-47 uu: the recorded sideways acceleration (about 5000 uu/s^2) has
+    the vertical part of the tilted axle; the flattened axle had none.
+  - **Verification**:
+    - `drive` test `tire_side_force_follows_the_cars_own_right_axis`
+      (fails with the flattened axle).
+    - `test2` 5.77-5.92 s mean one-step velocity error 4.87 -> 0.44 uu/s;
+      one-step car 0.45 -> 0.31, k = 30 car 4.73 -> 2.55. `hitjump` k = 30
+      car 11.23 -> 10.82, one-step 0.71 -> 0.62; `side` k = 30 0.51 ->
+      0.45; `front` unchanged.
+    - Two `world` test bounds loosened with it: the bottomed-out landing
+      rebound (5 -> 8 uu/s; the recorded 18.358 s tick goes 6.2 -> 7.3
+      while its neighbours 18.333-18.350 s go 15-21 -> 7-11) and the jump
+      from rest's horizontal speed (1.0 -> 1.5; `front.jsonl` 12.008 s is
+      unchanged).
+
 
 ## Architecture and interfaces
 
@@ -7951,6 +7972,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.135.0 (2026-10-04): `RB-PHYSICS-001-FR-132` — a tire's side force acts
+  along the wheel's own axle, unflattened (ADR-0051). 447 tests in
+  `rb_physics_bullet`.
 - 0.134.0 (2026-10-04): `RB-PHYSICS-001-FR-131` — auto-roll, RocketSim's
   `_UpdateAutoRoll` (ADR-0050). 446 tests in `rb_physics_bullet`.
 - 0.133.0 (2026-10-04): `RB-PHYSICS-001-FR-130` — each body's lever arm runs
