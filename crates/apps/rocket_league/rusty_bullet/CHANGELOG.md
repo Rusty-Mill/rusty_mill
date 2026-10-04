@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0052 (`RB-PHYSICS-001-FR-133`): `boost::update_boosting`; a boost
+  burns for at least `BOOST_MIN_TIME` (0.1 s) after a press.
 - ADR-0051 (`RB-PHYSICS-001-FR-132`): `ground::wheel_impulses` applies a
   tire's side force along the wheel's own axle, not flattened onto the
   surface.

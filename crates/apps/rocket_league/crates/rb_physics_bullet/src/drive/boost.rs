@@ -42,19 +42,40 @@ pub const MAX_BOOST: f32 = 100.0;
 /// (`PhysicsWorld::set_boost_used_per_second`, `RB-PHYSICS-001-FR-111`).
 pub const BOOST_USED_PER_SECOND: f32 = 33.3;
 
-/// Applies boost acceleration along `forward` while `boost_held` and the
-/// tank isn't empty, below `MAX_CAR_SPEED`, and drains the tank by
+/// `BOOST_MIN_TIME` (`RLConst.h`): once boost starts it burns for at least
+/// this long (s), however briefly the button was pressed
+/// (`RB-PHYSICS-001-FR-133`).
+pub(super) const BOOST_MIN_TIME: f32 = 0.1;
+
+/// Whether the car is boosting this tick, `Car::_UpdateBoost`'s timer:
+/// boosting starts on a press with fuel in the tank, continues while held
+/// or until `BOOST_MIN_TIME` has run, and stops at an empty tank.
+/// `boosting_time` counts the seconds of the current burn.
+pub(super) fn update_boosting(
+    held: bool,
+    has_boost: bool,
+    boosting: &mut bool,
+    boosting_time: &mut f32,
+    dt: f32,
+) -> bool {
+    *boosting = has_boost && (held || (*boosting && *boosting_time < BOOST_MIN_TIME));
+    *boosting_time = if *boosting { *boosting_time + dt } else { 0.0 };
+    *boosting
+}
+
+/// Applies boost acceleration along `forward` while `boosting` (see
+/// `update_boosting`), below `MAX_CAR_SPEED`, and drains the tank by
 /// `used_per_second` regardless of whether the force applied.
 pub(super) fn apply_boost(
     car: &mut RigidBody,
-    boost_held: bool,
+    boosting: bool,
     on_ground: bool,
     forward: Vec3,
     boost_amount: &mut f32,
     used_per_second: f32,
     dt: f32,
 ) {
-    if !(boost_held && *boost_amount > 0.0) {
+    if !boosting {
         return;
     }
     let forward_speed = car.linear_velocity.dot(&forward);

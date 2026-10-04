@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.135.0
+- Version: 0.136.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6482,6 +6482,21 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       from rest's horizontal speed (1.0 -> 1.5; `front.jsonl` 12.008 s is
       unchanged).
 
+- `RB-PHYSICS-001-FR-133` (minimum boost burn; implemented and verified on
+  the owner's captures, ADR-0052): `boost::update_boosting` is
+  `Car::_UpdateBoost`'s timer. Boost starts on a press with fuel, continues
+  while held or until `BOOST_MIN_TIME` (0.1 s) of the burn has run, and
+  stops at an empty tank. `DriveState` carries `boosting` and
+  `boosting_time`; `apply_boost` acts on that, not on the raw button.
+  - Why: `test2.jsonl` 8.283-8.325 s, a six-tick boost tap: the next six
+    ticks (8.342-8.383 s) each lacked exactly the air boost acceleration
+    along the car's forward axis (8.8 uu/s per tick, 3175/3 uu/s^2).
+  - **Verification**:
+    - `drive` tests `a_boost_tap_burns_for_the_minimum_time` and
+      `boost_needs_fuel_and_a_held_button_keeps_it_going`.
+    - `test2` one-step error over 8.342-8.383 s 8.8 -> 0; one-step car
+      0.31 -> 0.29, k = 30 car 2.55 -> 2.12. Other captures unchanged.
+
 
 ## Architecture and interfaces
 
@@ -7972,6 +7987,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.136.0 (2026-10-04): `RB-PHYSICS-001-FR-133` — a boost burns for at least
+  0.1 s (ADR-0052). 449 tests in `rb_physics_bullet`.
 - 0.135.0 (2026-10-04): `RB-PHYSICS-001-FR-132` — a tire's side force acts
   along the wheel's own axle, unflattened (ADR-0051). 447 tests in
   `rb_physics_bullet`.
