@@ -7,6 +7,7 @@
 //!     <inputs>            public evaluation inputs
 //!     labels.txt          public evaluation labels (public score)
 //!     baseline.py         the starting solution x0
+//!     task.md             the description shown to the inner agent
 //! <task>/private/         never staged, never reachable from a sandbox
 //!     <inputs>            held-out inputs, staged only for private grading
 //!     labels.txt          held-out labels, read only by the grader process
@@ -27,6 +28,12 @@ use crate::metric::Metric;
 
 /// The file a solution must write its answers to.
 pub const OUTPUT_FILE: &str = "output.txt";
+
+/// The task description file in `public/`.
+pub const DESCRIPTION_FILE: &str = "task.md";
+
+/// The largest task description accepted, in bytes.
+pub const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
 
 /// Open descriptors a solution may hold.
 pub const OPEN_FILE_LIMIT: u64 = 64;
@@ -172,6 +179,7 @@ pub struct TaskDir {
     root: PathBuf,
     manifest: TaskManifest,
     baseline: Solution,
+    description: String,
 }
 
 impl TaskDir {
@@ -194,6 +202,7 @@ impl TaskDir {
         }
         let task = Self {
             baseline: Solution::new(read(&root.join("public").join("baseline.py"))?)?,
+            description: read_description(&root.join("public").join(DESCRIPTION_FILE))?,
             root,
             manifest,
         };
@@ -255,6 +264,12 @@ impl TaskDir {
     #[must_use]
     pub const fn baseline(&self) -> &Solution {
         &self.baseline
+    }
+
+    /// The description shown to the inner agent (`public/task.md`).
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     fn inputs_path(&self, split: Split) -> PathBuf {
@@ -325,6 +340,17 @@ impl TaskDir {
         let labels = read(&self.labels_path(split))?;
         Ok(self.manifest.metric.score(&inputs, &labels, output))
     }
+}
+
+fn read_description(path: &Path) -> Result<String, RuntimeError> {
+    let text = read(path)?;
+    if text.trim().is_empty() || text.len() > MAX_DESCRIPTION_BYTES {
+        return Err(RuntimeError::Task(format!(
+            "{} must be non-empty and at most {MAX_DESCRIPTION_BYTES} bytes",
+            path.display()
+        )));
+    }
+    Ok(text)
 }
 
 fn read(path: &Path) -> Result<String, RuntimeError> {

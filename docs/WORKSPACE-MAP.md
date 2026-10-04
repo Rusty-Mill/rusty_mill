@@ -94,7 +94,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 15 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 16 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
@@ -238,7 +238,8 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_remind_me | rusty-remind-me |  | 0 |
 | apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary and its sandbox and grader entry points | 0 |
 | apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types | 2 |
-| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics and the out-of-process private grader | 1 |
+| apps | rusty_rsi | rsi-harness | a0, the inner agent of the rusty_rsi harness: AIDE0-style tree search over a metered broker; the outer loop's only mutable surface | 1 |
+| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics, the out-of-process private grader, the inner-agent broker and model clients | 1 |
 | apps | rusty_skillopt | skillopt-cli |  | 0 |
 | apps | rusty_skillopt | skillopt-core |  | 3 |
 | apps | rusty_skillopt | skillopt-envs |  | 1 |

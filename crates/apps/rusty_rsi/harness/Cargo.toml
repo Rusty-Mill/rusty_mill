@@ -1,0 +1,16 @@
+[package]
+name = "rsi-harness"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "a0, the inner agent of the rusty_rsi harness: AIDE0-style tree search over a metered broker; the outer loop's only mutable surface"
+
+# FROZEN (ADR-0005 §3): candidates may change `src/**` only. The runtime
+# never reads this manifest; it compiles `src/lib.rs` as a binary with plain
+# `rustc`, so there are no dependencies, build scripts or proc-macros on the
+# candidate path. The manifest exists so CI builds, lints and tests a0.
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]

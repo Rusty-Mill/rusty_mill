@@ -173,6 +173,11 @@ pub mod employee;
 pub mod entity;
 #[cfg(feature = "server")]
 pub mod exposure;
+/// `Fair Play`'s adapters — `person`, `card`, `card_default` —
+/// `server`-gated alone (`FPL-FR-007`, ADR-0137), the `Memory`
+/// precedent: real, deployable capability.
+#[cfg(feature = "server")]
+pub mod fair_play;
 pub mod framing;
 #[cfg(feature = "server")]
 pub mod journal;

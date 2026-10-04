@@ -62,10 +62,10 @@ one is `SERVER-002`.
 > the crate gained durable, concurrency-safe stores (`ProductionStore`,
 > `GenericProductionStore` — "Start here" above), and behind the `server`
 > feature a real network server/query layer with a versioned wire
-> protocol, seven domain adapters, sessions, a redo journal, runtime
+> protocol, eight domain adapters, sessions, a redo journal, runtime
 > insertion/linking/replacement/deletion, several tables on one
 > connection, compaction, MVCC, a query planner, and replication
-> (`ADR-0010` through `ADR-0136`). For how
+> (`ADR-0010` through `ADR-0137`). For how
 > *that* fits together, `src/server/mod.rs`'s module docs and
 > `docs/specifications/server/SERVER-001-query-layer.md` are the current
 > account; this document remains the benchmark's.

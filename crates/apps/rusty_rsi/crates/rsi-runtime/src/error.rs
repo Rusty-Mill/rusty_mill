@@ -25,6 +25,12 @@ pub enum RuntimeError {
     /// The out-of-process grader failed or answered nonsense.
     #[error("grader failed: {0}")]
     Grader(String),
+    /// The model endpoint failed or answered nonsense.
+    #[error("model endpoint: {0}")]
+    Model(String),
+    /// A broker transcript is malformed, or a replay diverged from it.
+    #[error("broker: {0}")]
+    Broker(String),
     /// A domain value was rejected.
     #[error("{0}")]
     Core(#[from] CoreError),

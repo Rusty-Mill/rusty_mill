@@ -20,53 +20,8 @@ use rsi_runtime::{
     TaskDir,
 };
 
-const RSI: &str = env!("CARGO_BIN_EXE_rsi");
-
-/// A per-test directory under the system temp dir, removed on success.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("rsi-it-{name}-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("clearing an old scratch dir");
-        }
-        std::fs::create_dir_all(&dir).expect("creating scratch");
-        Self(dir.canonicalize().expect("canonical scratch"))
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            std::fs::remove_dir_all(&self.0).expect("removing scratch");
-        }
-    }
-}
-
-fn suite_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rsi-runtime/tasks")
-}
-
-fn suite() -> Vec<TaskDir> {
-    TaskDir::load_suite(&suite_dir()).expect("toy suite loads")
-}
-
-fn task(tasks: &[TaskDir], id: &str) -> TaskDir {
-    tasks
-        .iter()
-        .find(|t| t.manifest().id.as_str() == id)
-        .cloned()
-        .expect("task exists")
-}
-
-fn executor(scratch: &Scratch) -> ProcessExecutor {
-    ProcessExecutor::new(RSI.into(), vec!["__sandbox".into()], scratch.path("state"))
-}
+mod common;
+use common::{executor, suite, suite_dir, task, Scratch, RSI};
 
 fn runner(scratch: &Scratch) -> SolutionRunner<ProcessExecutor> {
     let roots: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
@@ -117,7 +72,7 @@ fn a_solution_cannot_read_private_data_during_public_scoring() {
     let task = task(&tasks, "ml-regression");
     let runner = runner(&scratch);
     let attempt = LocalTask::new(&task, &runner)
-        .public_score(&snooping_solution(&task), SEED)
+        .public_score(&snooping_solution(&task), SEED, None)
         .expect("run happens");
     assert!(!attempt.feedback.contains("READ"), "{}", attempt.feedback);
     assert_eq!(
@@ -164,7 +119,7 @@ fn the_runner_refuses_a_sandbox_that_could_reach_the_task() {
     let parent = ml.root().parent().expect("suite dir").to_path_buf();
     let leaky =
         SolutionRunner::new(executor(&scratch), &[parent], &scratch.path("work")).expect("runner");
-    let result = LocalTask::new(&ml, &leaky).public_score(ml.baseline(), SEED);
+    let result = LocalTask::new(&ml, &leaky).public_score(ml.baseline(), SEED, None);
     assert!(
         matches!(result, Err(RuntimeError::Sandbox(_))),
         "{result:?}"
@@ -188,7 +143,7 @@ fn baselines_score_publicly_and_privately() {
     for (task, (id, public, private)) in tasks.iter().zip(expected) {
         assert_eq!(task.manifest().id.as_str(), id);
         let attempt = LocalTask::new(task, &runner)
-            .public_score(task.baseline(), SEED)
+            .public_score(task.baseline(), SEED, None)
             .expect("public run");
         let score = attempt.score.expect(&attempt.feedback).get();
         assert!(public.contains(&score), "{id} public {score}");
@@ -214,7 +169,7 @@ fn better_solutions_score_higher_than_baselines() {
     for (id, source, at_least) in cases {
         let task = task(&tasks, id);
         let attempt = LocalTask::new(&task, &runner)
-            .public_score(&solution(source), SEED)
+            .public_score(&solution(source), SEED, None)
             .expect("public run");
         let score = attempt.score.expect(&attempt.feedback).get();
         assert!(
@@ -244,7 +199,7 @@ fn missing_solution_and_crashes_score_the_floor() {
         .expect("grading");
     assert_eq!(crashed, floor);
     let attempt = LocalTask::new(&tsp, &runner)
-        .public_score(&crash, SEED)
+        .public_score(&crash, SEED, None)
         .expect("run");
     assert_eq!(attempt.score, None);
     assert!(
@@ -311,7 +266,7 @@ fn a_symlinked_output_cannot_forge_a_public_score() {
     // Followed, this link would score a perfect 1.0 against the public labels.
     let link = symlink_output(&ml.root().join("public/labels.txt"));
     let attempt = LocalTask::new(&ml, &runner)
-        .public_score(&link, SEED)
+        .public_score(&link, SEED, None)
         .expect("run");
     assert_eq!(attempt.score, None, "{}", attempt.feedback);
     assert!(
@@ -346,7 +301,7 @@ fn a_fifo_output_is_rejected_promptly() {
     let fifo = solution("import os, sys\nos.mkfifo(sys.argv[2])\n");
     let started = std::time::Instant::now();
     let attempt = LocalTask::new(&ml, &runner)
-        .public_score(&fifo, SEED)
+        .public_score(&fifo, SEED, None)
         .expect("run");
     assert_eq!(attempt.score, None, "{}", attempt.feedback);
     assert!(
@@ -375,10 +330,10 @@ fn a_replaced_staged_input_cannot_leak_into_public_scoring() {
         tsp.root().join("private/instances.txt").display().to_string()
     ));
     let baseline = LocalTask::new(&tsp, &runner)
-        .public_score(tsp.baseline(), SEED)
+        .public_score(tsp.baseline(), SEED, None)
         .expect("run");
     let swapped = LocalTask::new(&tsp, &runner)
-        .public_score(&swap, SEED)
+        .public_score(&swap, SEED, None)
         .expect("run");
     assert_eq!(swapped.score, baseline.score, "{}", swapped.feedback);
 }

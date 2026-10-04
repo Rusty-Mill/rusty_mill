@@ -12719,6 +12719,7 @@ name = "rsi-cli"
 version = "0.1.0"
 dependencies = [
  "rsi-core",
+ "rsi-harness",
  "rsi-runtime",
 ]
 
@@ -12731,6 +12732,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsi-harness"
+version = "0.1.0"
+
+[[package]]
 name = "rsi-runtime"
 version = "0.1.0"
 dependencies = [
@@ -12738,6 +12743,7 @@ dependencies = [
  "platform-linux",
  "rsi-core",
  "rusty_err",
+ "rusty_http",
  "rusty_json",
  "rusty_libc",
 ]
