@@ -1,10 +1,10 @@
 {
-  "total_instances": 295,
+  "total_instances": 288,
   "by_skill": {
     "aerial": 2,
     "boost_steal": 5,
     "ceiling_play": 4,
-    "demo": 80,
+    "demo": 73,
     "double_touch": 2,
     "flick": 2,
     "ground_dribble": 2,
@@ -20,7 +20,7 @@
       "team": 0,
       "skills": {
         "aerial": 1,
-        "demo": 20,
+        "demo": 18,
         "flick": 1,
         "redirect": 2,
         "supersonic": 45,
@@ -34,7 +34,7 @@
       "skills": {
         "boost_steal": 3,
         "ceiling_play": 4,
-        "demo": 28,
+        "demo": 26,
         "double_touch": 2,
         "ground_dribble": 1,
         "kickoff_first_touch": 4,
@@ -49,7 +49,7 @@
       "skills": {
         "aerial": 1,
         "boost_steal": 2,
-        "demo": 32,
+        "demo": 29,
         "flick": 1,
         "ground_dribble": 1,
         "kickoff_first_touch": 3,

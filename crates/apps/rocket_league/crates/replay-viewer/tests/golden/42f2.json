@@ -21,10 +21,10 @@
     ]
   ],
   "events_by_kind": {
-    "demo": 80,
+    "demo": 73,
     "goal": 7,
     "kickoff": 7,
-    "skill": 295,
+    "skill": 288,
     "stat": 23,
     "touch": 219
   }

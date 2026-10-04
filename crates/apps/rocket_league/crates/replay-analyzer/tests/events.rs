@@ -213,3 +213,41 @@ fn demos_dedup_per_victim_refractory_but_keep_distinct() {
         _ => panic!(),
     }
 }
+
+/// The replicated demolish attribute can arrive again up to ~3.5 s after the demolition
+/// (measured on a real 3v3 match: duplicates 2.6, 3.0 and 3.5 s apart). Those are the same
+/// demolition; a second demo of the same victim well after the respawn is a new one.
+#[test]
+fn demo_re_replications_up_to_3_5_s_later_are_one_demolition() {
+    let d = |t: f32| DemoSample {
+        t,
+        attacker_pri: Some(1),
+        victim_pri: Some(2),
+    };
+    let times = |samples: Vec<DemoSample>| -> Vec<f32> {
+        demos(&samples, &[track(1, 0), track(2, 1)])
+            .iter()
+            .map(Event::time)
+            .collect()
+    };
+    assert_eq!(
+        times(vec![d(35.0), d(37.6)]),
+        [35.0],
+        "2.6 s apart: duplicate"
+    );
+    assert_eq!(
+        times(vec![d(100.0), d(103.0)]),
+        [100.0],
+        "3.0 s apart: duplicate"
+    );
+    assert_eq!(
+        times(vec![d(393.0), d(396.5)]),
+        [393.0],
+        "3.5 s apart: duplicate"
+    );
+    assert_eq!(
+        times(vec![d(10.0), d(14.5)]),
+        [10.0, 14.5],
+        "4.5 s apart: a new demolition"
+    );
+}

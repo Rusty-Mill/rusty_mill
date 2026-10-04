@@ -34,8 +34,12 @@ const KICKOFF_MAX_SPEED: f32 = 50.0;
 const KICKOFF_SEPARATION_S: f32 = 1.0;
 
 /// Per-victim refractory window for demos (s): a demolished car is out for the
-/// ~3 s respawn, so it cannot be re-demoed faster; collapses re-replications.
-const DEMO_REFRACTORY_S: f32 = 2.5;
+/// ~3 s respawn and must then be driven into again, so a genuine second demo of the
+/// same victim comes more than ~3.5 s after the first. The replicated attribute is
+/// re-sent up to ~3.5 s after a demolition (duplicates measured 2.6, 3.0 and 3.5 s
+/// apart on a real 3v3 match, where 11 events were 8 real demolitions), so the window
+/// sits just above that.
+const DEMO_REFRACTORY_S: f32 = 4.0;
 
 /// `pri -> (player name, team)` from coalesced tracks.
 fn pri_lookup(tracks: &[PlayerTrack]) -> HashMap<i32, (String, Option<i32>)> {
