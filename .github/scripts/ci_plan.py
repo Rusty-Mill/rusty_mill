@@ -95,8 +95,7 @@ def base_is_ancestor(base: str, head: str = "HEAD", cwd: str | None = None) -> b
 def is_workspace_wide_change(changed_paths: Iterable[str]) -> bool:
     """Whether a path can alter CI behavior for every workspace package."""
     return any(
-        path == "Cargo.lock"
-        or path == "rust-toolchain"
+        path == "rust-toolchain"
         or path == "rust-toolchain.toml"
         or path.startswith(".cargo/")
         or path.startswith(".config/")

@@ -88,7 +88,6 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_global_fallback_entrypoint_covers_lock_and_toolchain_inputs(self) -> None:
         for path in (
             ".github/workflows/ci.yml",
-            "Cargo.lock",
             "rust-toolchain.toml",
             ".cargo/config.toml",
         ):
@@ -98,6 +97,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             self._planner("--requires-full", input="crates/apps/rusty_tick/src/lib.rs\n").returncode,
             1,
         )
+
+    def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
+        self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
+        self.assertIn("lockfile_diff.py", self.workflow)
+        self.assertIn("Cargo.lock changed with a manifest", self.workflow)
+        self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

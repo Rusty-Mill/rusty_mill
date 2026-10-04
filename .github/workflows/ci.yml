@@ -21,8 +21,9 @@ name: CI
 # cargo_toml_diff.py` classifies the change first and only forces the full
 # sweep when it's more than a pure `[workspace.members]` addition (a
 # dependency version bump, a removed/renamed member, a `[profile]` edit,
-# ...). Cargo.lock and toolchain inputs are global: a resolved dependency or
-# compiler change can alter every package and therefore retains the full sweep.
+# ...). Toolchain inputs are global. Cargo.lock changes are selected using the
+# full Cargo resolve graph below, with a conservative full fallback whenever
+# the old/new lockfile impact cannot be established reliably.
 on:
   push:
     branches: [main]
@@ -204,6 +205,34 @@ jobs:
 
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
           packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
+
+          # Cargo.lock has no owning crate. For a lock-only update, select
+          # every workspace consumer of an added, removed, version-changed,
+          # source-changed, or checksum-changed resolved package through the
+          # full Cargo graph (including external nodes), then fold those
+          # consumers and their workspace reverse dependencies into scope.
+          # A simultaneous manifest edit or any unreadable/unknown lock
+          # entry is ambiguous, so deliberately retain the full sweep.
+          if echo "$changed" | grep -Eq '^Cargo\.lock$'; then
+            if echo "$changed" | grep -Eq '(^|/)Cargo\.toml$'; then
+              emit_full "Cargo.lock changed with a manifest"
+              exit 0
+            fi
+            if ! git show "$base:Cargo.lock" > /tmp/old-Cargo.lock; then
+              emit_full "Event base has no readable Cargo.lock"
+              exit 0
+            fi
+            if ! lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock)"; then
+              emit_full "Unable to establish Cargo.lock impact"
+              exit 0
+            fi
+            if [ -z "$lockfile_packages" ]; then
+              emit_full "Cargo.lock changed with no resolvable package impact"
+              exit 0
+            fi
+            echo "Cargo.lock-affected crates: $lockfile_packages"
+            packages="$(printf '%s\n' $packages $lockfile_packages | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+          fi
 
           # Centralize all non-generic job gates here. Path-only front ends
           # are selected directly; Rust jobs use the affected crate plus its
