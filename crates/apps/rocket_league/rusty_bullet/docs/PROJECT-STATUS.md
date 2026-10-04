@@ -255,7 +255,16 @@ version: `a245d35`).
    (best fit 31 at a free scale of 0.05, direction misfit, spin unchanged),
    so one frame stays open. Open car-side leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
-   and the slow lateral drift along the wall after it.
+   and the slow lateral drift along the wall after it (about 1-2% bias,
+   minor). `RB-PHYSICS-001-FR-131` (ADR-0050, auto-roll) fixed the landing
+   spin drift. `test2` 5.77-5.92 s, after the kickoff hit and jump, is
+   narrowed but open: one tilted wheel still touches at origin height
+   30-47 uu (no suspension force, it is fully extended), and the sim's
+   per-tick error there is 3-6 uu/s too much up and 3.5 too little to the
+   car's right (the recorded tire force is about 5000 uu/s^2 sideways, and
+   the up acceleration 1100-1260 against the jump's 1458). Both stop on the
+   same tick as the recording (5.925 s), so wheel contact timing is right;
+   the force from one tilted wheel (tire friction or sticky) is not.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
