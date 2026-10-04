@@ -6,7 +6,8 @@
 //! So the executor never confines itself: it spawns the `rsi` binary with
 //! the `__sandbox` subcommand (single-threaded from birth), which runs
 //! [`run_helper`]: set rlimits, restrict the filesystem to an allowlist,
-//! block internet sockets, verify each step was enforced, then `exec`.
+//! block internet sockets (or, for the inner agent, every new socket),
+//! verify each step was enforced, then `exec`.
 //!
 //! Setup failures are reported through a status file the parent created
 //! and the helper opens *before* confining itself. The descriptor is
@@ -20,6 +21,32 @@ use crate::error::RuntimeError;
 
 /// Exit status of a helper that could not set up the sandbox.
 pub const SETUP_FAILED: u8 = 125;
+
+/// Which sockets a sandboxed process may create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sockets {
+    /// Anything but internet sockets (solutions).
+    NoInternet,
+    /// Nothing that can reach an endpoint: `socket(2)` is refused, so no
+    /// network, Unix or abstract socket. Anonymous `socketpair(2)`s still
+    /// work: they connect only processes inside the job. This is for the
+    /// harness build, because rustc starts its linker through std's
+    /// fork-and-exec path, which reports exec errors over a socketpair.
+    NoEndpoints,
+    /// No new socket of any kind (the inner agent, whose only channel is
+    /// the broker socket it inherits).
+    None,
+}
+
+impl Sockets {
+    const fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::NoInternet => None,
+            Self::NoEndpoints => Some("no-endpoints"),
+            Self::None => Some("none"),
+        }
+    }
+}
 
 /// Everything the helper needs, as decoded from its command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +71,8 @@ pub struct HelperRequest {
     pub write: Vec<PathBuf>,
     /// The program's complete environment.
     pub env: Vec<(String, String)>,
+    /// Which sockets the program may create.
+    pub sockets: Sockets,
     /// The program to execute (looked up on the environment's `PATH`).
     pub program: OsString,
     /// Its arguments.
@@ -75,6 +104,9 @@ impl HelperRequest {
         for (name, value) in &self.env {
             flag("--env", format!("{name}={value}").into());
         }
+        if let Some(rule) = self.sockets.flag() {
+            flag("--sockets", rule.into());
+        }
         out.push("--".into());
         out.push(self.program.clone());
         out.extend(self.args.iter().cloned());
@@ -92,6 +124,7 @@ impl HelperRequest {
         let mut cwd = None;
         let mut limits = [None::<u64>; 5];
         let (mut read, mut write, mut env) = (Vec::new(), Vec::new(), Vec::new());
+        let mut sockets = Sockets::NoInternet;
         let mut iter = args.iter();
         let program = loop {
             let Some(flag) = iter.next() else {
@@ -122,6 +155,14 @@ impl HelperRequest {
                 Some("--nproc") => limits[4] = Some(number(value)?),
                 Some("--read") => read.push(PathBuf::from(value)),
                 Some("--write") => write.push(PathBuf::from(value)),
+                Some("--sockets") => {
+                    sockets = [Sockets::NoEndpoints, Sockets::None]
+                        .into_iter()
+                        .find(|rule| rule.flag().is_some_and(|f| value == f))
+                        .ok_or_else(|| {
+                            bad(format!("unknown --sockets {}", value.to_string_lossy()))
+                        })?;
+                }
                 Some("--env") => {
                     let text = value
                         .to_str()
@@ -150,6 +191,7 @@ impl HelperRequest {
             read,
             write,
             env,
+            sockets,
             program,
             args: iter.cloned().collect(),
         })
@@ -287,24 +329,39 @@ fn confine(request: &HelperRequest) -> Result<(), RuntimeError> {
         .block_inet_sockets()
         .map_err(|error| RuntimeError::Sandbox(format!("seccomp: {error}")))?;
     require_enforced("seccomp socket blocking", net)?;
-    group_lock::install()
+    group_lock::install(request.sockets)
 }
 
-/// Keeps every descendant in the job's process group (review finding 2).
+/// Keeps every descendant in the job's process group (review finding 2),
+/// closes `io_uring`, and refuses sockets per [`Sockets`].
 ///
 /// The executor contains a job by killing its process group, and a process
 /// can only leave a group through `setsid` or `setpgid`. This second
-/// seccomp filter (filters stack; the strictest verdict wins) makes both
-/// fail with `EPERM`, so the group is the whole job. It also refuses every
-/// x32-ABI syscall on x86_64, since those bypass number-based checks.
+/// seccomp filter (filters stack, are inherited by every descendant, and
+/// the strictest verdict wins) makes both fail with `EPERM`, so the group
+/// is the whole job. It also refuses every x32-ABI syscall on x86_64, since
+/// those bypass number-based checks.
+///
+/// `io_uring` is refused for every sandboxed process: its operations
+/// (`IORING_OP_SOCKET`, `IORING_OP_CONNECT`, ...) run without passing
+/// through seccomp, so it would reopen whatever this filter and the socket
+/// filter close.
+///
+/// [`Sockets::NoEndpoints`] makes `socket(2)` fail with `EPERM` for every
+/// address family, and [`Sockets::None`] `socketpair(2)` too. The inner
+/// agent then has no way to talk to anything but the broker socket it
+/// inherited: not the network, and not a local Unix or abstract socket
+/// either, which Landlock does not cover.
 #[cfg(target_os = "linux")]
 mod group_lock {
     use rusty_libc::arch::{nr, syscall3};
 
+    use super::Sockets;
     use crate::error::RuntimeError;
 
     #[repr(C)]
-    struct SockFilter {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct SockFilter {
         code: u16,
         jt: u8,
         jf: u8,
@@ -335,6 +392,16 @@ mod group_lock {
     #[cfg(target_arch = "aarch64")]
     const AUDIT_ARCH: u32 = 0xC000_00B7;
 
+    // Not in rusty_libc's table. io_uring's numbers are the same on every
+    // architecture (asm-generic); socketpair's are per architecture.
+    const IO_URING_SETUP: u32 = 425;
+    const IO_URING_ENTER: u32 = 426;
+    const IO_URING_REGISTER: u32 = 427;
+    #[cfg(target_arch = "x86_64")]
+    pub(super) const SOCKETPAIR: u32 = 53;
+    #[cfg(target_arch = "aarch64")]
+    pub(super) const SOCKETPAIR: u32 = 199;
+
     const fn stmt(code: u16, k: u32) -> SockFilter {
         SockFilter {
             code,
@@ -348,22 +415,55 @@ mod group_lock {
         SockFilter { code, jt, jf, k }
     }
 
+    /// The syscalls refused with `EPERM`.
+    pub(super) fn denied(sockets: Sockets) -> Vec<u32> {
+        let mut denied = vec![
+            nr::SETSID as u32,
+            nr::SETPGID as u32,
+            IO_URING_SETUP,
+            IO_URING_ENTER,
+            IO_URING_REGISTER,
+        ];
+        match sockets {
+            Sockets::NoInternet => {}
+            Sockets::NoEndpoints => denied.push(nr::SOCKET as u32),
+            Sockets::None => denied.extend([nr::SOCKET as u32, SOCKETPAIR]),
+        }
+        denied
+    }
+
+    /// The filter: foreign architecture kills; x32 and `denied` get
+    /// `EPERM`; everything else is allowed. Jump offsets count from the
+    /// next instruction.
+    pub(super) fn program(denied: &[u32]) -> Vec<SockFilter> {
+        let n = denied.len();
+        // Layout: 0 load arch, 1 check arch, 2 load nr, 3 x32 check,
+        // 4..4+n denied checks, then ALLOW, EPERM, KILL.
+        let allow = 4 + n;
+        let (eperm, kill) = (allow + 1, allow + 2);
+        let offset = |from: usize, to: usize| (to - from - 1) as u8;
+        let mut program = vec![
+            stmt(LD_W_ABS, OFFSET_ARCH),
+            jump(JEQ_K, AUDIT_ARCH, 0, offset(1, kill)),
+            stmt(LD_W_ABS, OFFSET_NR),
+            jump(JSET_K, X32_SYSCALL_BIT, offset(3, eperm), 0),
+        ];
+        for (i, &syscall) in denied.iter().enumerate() {
+            program.push(jump(JEQ_K, syscall, offset(4 + i, eperm), 0));
+        }
+        program.extend([
+            stmt(RET_K, RET_ALLOW),
+            stmt(RET_K, RET_EPERM),
+            stmt(RET_K, RET_KILL_PROCESS),
+        ]);
+        program
+    }
+
     /// Installs the filter on the calling thread (inherited by children).
     ///
     /// Requires `no_new_privs`, which the Landlock step has already set.
-    pub(super) fn install() -> Result<(), RuntimeError> {
-        // Jump offsets count from the next instruction.
-        let program = [
-            stmt(LD_W_ABS, OFFSET_ARCH),           // 0
-            jump(JEQ_K, AUDIT_ARCH, 0, 6),         // 1: foreign arch -> 8
-            stmt(LD_W_ABS, OFFSET_NR),             // 2
-            jump(JSET_K, X32_SYSCALL_BIT, 3, 0),   // 3: x32 -> 7
-            jump(JEQ_K, nr::SETSID as u32, 2, 0),  // 4: setsid -> 7
-            jump(JEQ_K, nr::SETPGID as u32, 1, 0), // 5: setpgid -> 7
-            stmt(RET_K, RET_ALLOW),                // 6
-            stmt(RET_K, RET_EPERM),                // 7
-            stmt(RET_K, RET_KILL_PROCESS),         // 8
-        ];
+    pub(super) fn install(sockets: Sockets) -> Result<(), RuntimeError> {
+        let program = program(&denied(sockets));
         let fprog = SockFprog {
             len: program.len() as u16,
             filter: program.as_ptr(),
@@ -383,6 +483,33 @@ mod group_lock {
             RuntimeError::Sandbox(format!("process-group lock (seccomp): {errno}"))
         })
     }
+
+    /// Runs `program` on one syscall the way the kernel would.
+    #[cfg(test)]
+    pub(super) fn verdict(program: &[SockFilter], arch: u32, syscall: u32) -> u32 {
+        let (mut pc, mut acc) = (0usize, 0u32);
+        loop {
+            let ins = program[pc];
+            pc += 1;
+            match ins.code {
+                LD_W_ABS if ins.k == OFFSET_ARCH => acc = arch,
+                LD_W_ABS => acc = syscall,
+                JEQ_K | JSET_K => {
+                    let hit = if ins.code == JEQ_K {
+                        acc == ins.k
+                    } else {
+                        acc & ins.k != 0
+                    };
+                    pc += usize::from(if hit { ins.jt } else { ins.jf });
+                }
+                _ => return ins.k,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) const VERDICTS: (u32, u32, u32, u32) =
+        (AUDIT_ARCH, RET_ALLOW, RET_EPERM, RET_KILL_PROCESS);
 }
 
 #[cfg(test)]
@@ -404,6 +531,7 @@ mod tests {
                 ("PATH".into(), "/usr/bin".into()),
                 ("RSI_SEED".into(), "7".into()),
             ],
+            sockets: Sockets::None,
             program: "python3".into(),
             args: vec!["solution.py".into(), "--".into(), "--cpu".into()],
         }
@@ -451,6 +579,39 @@ mod tests {
         assert!(HelperRequest::decode(&os(&["--cpu"])).is_err());
         let truncated = &encoded[..encoded.len() - 4];
         assert!(HelperRequest::decode(truncated).is_err(), "no program");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_seccomp_program_denies_exactly_what_it_lists() {
+        use rusty_libc::arch::nr;
+        let (arch, allow, eperm, kill) = group_lock::VERDICTS;
+        for sockets in [Sockets::NoInternet, Sockets::NoEndpoints, Sockets::None] {
+            let denied = group_lock::denied(sockets);
+            let program = group_lock::program(&denied);
+            for &syscall in &denied {
+                assert_eq!(group_lock::verdict(&program, arch, syscall), eperm);
+            }
+            let socket = group_lock::verdict(&program, arch, nr::SOCKET as u32);
+            let pair = group_lock::verdict(&program, arch, group_lock::SOCKETPAIR);
+            let expected = match sockets {
+                Sockets::NoInternet => (allow, allow),
+                Sockets::NoEndpoints => (eperm, allow),
+                Sockets::None => (eperm, eperm),
+            };
+            assert_eq!((socket, pair), expected, "{sockets:?}");
+            for syscall in [nr::PRCTL as u32, 0, 1, 300] {
+                assert_eq!(group_lock::verdict(&program, arch, syscall), allow);
+            }
+            let x32 = 0x4000_0000 | nr::SOCKET as u32;
+            assert_eq!(group_lock::verdict(&program, arch, x32), eperm);
+            assert_eq!(group_lock::verdict(&program, arch ^ 1, 0), kill);
+        }
+        assert_eq!(
+            group_lock::denied(Sockets::None).len(),
+            7,
+            "io_uring x3, group x2, sockets x2"
+        );
     }
 
     #[cfg(target_os = "linux")]

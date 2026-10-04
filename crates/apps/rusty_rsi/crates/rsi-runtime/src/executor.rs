@@ -8,13 +8,14 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use rsi_core::{ExecOutcome, Executor, SandboxSpec};
 
 use crate::error::RuntimeError;
-use crate::sandbox::HelperRequest;
+use crate::sandbox::{HelperRequest, Sockets};
 
 /// Bytes of each output stream kept by default.
 pub const DEFAULT_CAPTURE_BYTES: usize = 64 * 1024;
@@ -63,16 +64,23 @@ impl ProcessExecutor {
         std::fs::File::create(&path).map_err(|e| RuntimeError::io("creating a status file", e))?;
         Ok(path)
     }
-}
 
-impl Executor for ProcessExecutor {
-    type Error = RuntimeError;
-
-    fn exec(
+    /// Runs `program` like [`Executor::exec`], but with `stdin` as its
+    /// standard input and the stricter socket rule `sockets`.
+    ///
+    /// This is how the harness build ([`Sockets::NoEndpoints`]) and the
+    /// inner agent ([`Sockets::None`]) run; for the agent, `stdin` is its
+    /// end of the broker socket.
+    ///
+    /// # Errors
+    /// As [`Executor::exec`].
+    pub fn exec_with(
         &self,
         spec: &SandboxSpec,
         program: &str,
         args: &[String],
+        stdin: Stdio,
+        sockets: Sockets,
     ) -> Result<ExecOutcome, RuntimeError> {
         let state_dir = canonical(&self.state_dir)?;
         if spec.can_reach(&state_dir) {
@@ -93,10 +101,11 @@ impl Executor for ProcessExecutor {
             read: spec.read_roots().to_vec(),
             write: spec.write_roots().to_vec(),
             env: spec.env().to_vec(),
+            sockets,
             program: program.into(),
             args: args.iter().map(OsString::from).collect(),
         };
-        let outcome = run(self, &request, spec.limits().wall());
+        let outcome = run(self, &request, spec.limits().wall(), stdin);
         let setup_error = std::fs::read_to_string(&status);
         let removed = std::fs::remove_file(&status);
         let setup_error =
@@ -106,6 +115,19 @@ impl Executor for ProcessExecutor {
         }
         removed.map_err(|e| RuntimeError::io("removing the status file", e))?;
         outcome
+    }
+}
+
+impl Executor for ProcessExecutor {
+    type Error = RuntimeError;
+
+    fn exec(
+        &self,
+        spec: &SandboxSpec,
+        program: &str,
+        args: &[String],
+    ) -> Result<ExecOutcome, RuntimeError> {
+        self.exec_with(spec, program, args, Stdio::null(), Sockets::NoInternet)
     }
 }
 
@@ -120,6 +142,7 @@ fn run(
     _executor: &ProcessExecutor,
     _request: &HelperRequest,
     _wall: Duration,
+    _stdin: Stdio,
 ) -> Result<ExecOutcome, RuntimeError> {
     Err(RuntimeError::Sandbox(
         "sandboxed execution is only implemented on Linux".into(),
@@ -131,9 +154,10 @@ fn run(
     executor: &ProcessExecutor,
     request: &HelperRequest,
     wall: Duration,
+    stdin: Stdio,
 ) -> Result<ExecOutcome, RuntimeError> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     use rsi_core::Termination;
 
@@ -142,7 +166,7 @@ fn run(
         .args(&executor.helper_args)
         .args(request.encode())
         .env_clear()
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)

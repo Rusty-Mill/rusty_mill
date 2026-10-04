@@ -70,13 +70,24 @@ pub trait PublicTask {
     /// The task's starting solution (`x0` in AIDE²'s Algorithm 1).
     fn baseline(&self) -> &Solution;
 
-    /// Runs `solution` on the public split with `seed` and scores it.
+    /// What the agent is told about the task: goal, data formats, the
+    /// solution contract and the metric. Public by construction.
+    fn description(&self) -> &str;
+
+    /// Runs `solution` on the public split with `seed` and scores it. The
+    /// run is killed after `time_limit` if that is sooner than the task's
+    /// own wall-clock limit (the inner budget's remaining time).
     ///
     /// # Errors
     /// Only when the run could not happen (sandbox or I/O failure). A
-    /// solution that crashes or prints nonsense is an [`Attempt`] with no
-    /// score.
-    fn public_score(&self, solution: &Solution, seed: Seed) -> Result<Attempt, Self::Error>;
+    /// solution that crashes, prints nonsense or runs out of time is an
+    /// [`Attempt`] with no score.
+    fn public_score(
+        &self,
+        solution: &Solution,
+        seed: Seed,
+        time_limit: Option<Duration>,
+    ) -> Result<Attempt, Self::Error>;
 }
 
 /// Grades a chosen solution on held-out data the agents never see.

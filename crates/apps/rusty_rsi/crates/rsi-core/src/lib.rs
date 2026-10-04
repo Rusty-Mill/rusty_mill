@@ -14,11 +14,13 @@
 //! - [`lineage`]: lineage entry types and the SHA-256 hash chain.
 //! - [`task`]: the [`PublicTask`] and [`PrivateGrader`] ports.
 //! - [`exec`]: the sandboxed [`Executor`] port and its [`SandboxSpec`].
+//! - [`inner`]: the [`ChatModel`] and [`Harness`] ports of the inner loop.
 
 pub mod accept;
 pub mod budget;
 pub mod error;
 pub mod exec;
+pub mod inner;
 pub mod lineage;
 pub mod noise;
 pub mod rng;
@@ -30,6 +32,7 @@ pub use accept::{confirm, screen, Challenger, Decision, Evaluation, Rejection, S
 pub use budget::{Budget, BudgetExhausted, CostMeter, CostUsage};
 pub use error::CoreError;
 pub use exec::{ExecOutcome, Executor, Limits, SandboxSpec, Termination};
+pub use inner::{ChatModel, Completion, Harness, InnerOutcome, Message, Role};
 pub use lineage::{
     BlobId, CandidateId, ChainError, ChainRecord, CommitSha, EntryFields, EvaluationRecord,
     LineageEntry, ModelId, TaskId, TaskResult,
