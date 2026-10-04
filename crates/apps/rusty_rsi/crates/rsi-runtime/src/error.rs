@@ -1,0 +1,41 @@
+//! The runtime's error type.
+
+use rsi_core::CoreError;
+use rusty_err::Error;
+
+/// An infrastructure failure: something the harness could not do, as
+/// opposed to a solution that ran and failed (which is an outcome).
+#[derive(Debug, Error)]
+pub enum RuntimeError {
+    /// A filesystem or process operation failed.
+    #[error("{context}: {source}")]
+    Io {
+        /// What was being done.
+        context: String,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The sandbox could not be set up, so nothing was run (fail closed).
+    #[error("sandbox unavailable: {0}")]
+    Sandbox(String),
+    /// A task directory or manifest is malformed.
+    #[error("invalid task: {0}")]
+    Task(String),
+    /// The out-of-process grader failed or answered nonsense.
+    #[error("grader failed: {0}")]
+    Grader(String),
+    /// A domain value was rejected.
+    #[error("{0}")]
+    Core(#[from] CoreError),
+}
+
+impl RuntimeError {
+    /// Wraps an I/O error with what was being attempted.
+    pub fn io(context: impl Into<String>, source: std::io::Error) -> Self {
+        Self::Io {
+            context: context.into(),
+            source,
+        }
+    }
+}

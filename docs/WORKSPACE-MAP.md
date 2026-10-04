@@ -24,12 +24,12 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. | 2 |
 | foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 1 |
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
-| foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 15 |
+| foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 16 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
 | foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 22 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
-| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 10 |
+| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 11 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 4 |
@@ -52,9 +52,9 @@ Families are the current directories immediately below `crates/`.
 | platform | portable-runtime | proc-runner |  | 0 |
 | platform | portable-runtime | pty-shell |  | 0 |
 | platform | portable-runtime | stat-tool |  | 0 |
-| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 18 |
+| platform | rustils | platform | Portable trait surface and types for rustils — the api layer. No I/O, no unsafe. | 19 |
 | platform | rustils | platform-bsd | BSD backend (net-only slice, rustils#48/#86): platform::net over libc for macOS, FreeBSD, OpenBSD, NetBSD and DragonFly, mirroring platform-linux's layering. | 2 |
-| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 9 |
+| platform | rustils | platform-linux | Linux backend: libc floor now (RFC v2 §2 D-2); raw-syscall Track P later, feature-gated. | 10 |
 | platform | rustils | platform-mock | In-memory backend implementing every platform trait — the injectable test double (RFC v2 §4.1). | 7 |
 | platform | rustils | platform-parity | Shared behavior-spec assertion sets for the PAL parity suites. Test-support only; never a dependency of a shipped crate. | 4 |
 | platform | rustils | platform-windows | Windows backend: windows-sys floor (RFC v2 §2 D-1); typed handles and safe wrappers above it. | 4 |
@@ -236,7 +236,9 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_remind_me | remind_me_mcp |  | 2 |
 | apps | rusty_remind_me | remind_me_remote |  | 1 |
 | apps | rusty_remind_me | rusty-remind-me |  | 0 |
-| apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types | 0 |
+| apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary and its sandbox and grader entry points | 0 |
+| apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types | 2 |
+| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics and the out-of-process private grader | 1 |
 | apps | rusty_skillopt | skillopt-cli |  | 0 |
 | apps | rusty_skillopt | skillopt-core |  | 3 |
 | apps | rusty_skillopt | skillopt-envs |  | 1 |
