@@ -319,6 +319,11 @@ pub fn convert_with_ffmpeg(bytes: &[u8], tmp_dir: &std::path::Path) -> io::Resul
 /// Shared bounded admission gate used for connections and model loads.
 pub type Slots = rusty_sync::Admission;
 
+/// RAII guard returned by [`Slots::try_acquire`].
+///
+/// Dropping the guard releases its slot back to the admission gate.
+pub type SlotGuard<'a> = rusty_sync::AdmissionPermit<'a>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
