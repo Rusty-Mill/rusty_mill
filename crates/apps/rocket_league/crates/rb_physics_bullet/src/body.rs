@@ -131,6 +131,17 @@ pub const BALL_CAR_CONTACT_RADIUS: f32 = 92.3;
 /// 97.892 s) is pushed out 5.2 uu from 8.3 uu inside `BALL_RADIUS`:
 /// 0.8 x (8.3 - 1.9), not 0.8 x 8.3.
 pub const BALL_COLLISION_RADIUS: f32 = 91.25;
+
+/// Bullet's `CONVEX_DISTANCE_MARGIN` (0.04 BT) on a car's hitbox, uu
+/// (`RB-PHYSICS-001-FR-124`). `btBoxShape` keeps a core box this much
+/// smaller on every axis and pads it back out radially, so the box is its
+/// nominal size face-on but rounded at the corners: a corner's gap to a
+/// surface grows by this times (|n|_1 - 1) for the surface normal `n` in
+/// the box's frame. The recorded wall ride (`test2.jsonl` 14.283 s) has the
+/// nose corner 1.35 uu clear of the next ramp facet by the sharp box,
+/// inside the 2.06 uu breaking threshold, but 2.18 uu clear rounded, and
+/// the game touches one tick later.
+pub const BOX_COLLISION_MARGIN: f32 = 2.0;
 /// Real Rocket League's own ball mass, fetched from RocketSim's own real
 /// source (`src/RLConst.h`: `BALL_MASS_BT = CAR_MASS_BT / 6.f`) — see
 /// `standard_ball`'s own doc comment for the full citation and why this

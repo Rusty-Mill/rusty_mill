@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.127.0
+- Version: 0.128.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6234,6 +6234,41 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       torque is 0.42 rad/s, the game's roll is immediate), the ticks after
       improve. One-step car 0.489 (was 0.494); `test2`, `front`, `side`
       unchanged.
+- `RB-PHYSICS-001-FR-124` (a car's hitbox corner meets a mesh facet
+  rounded by Bullet's collision margin; implemented and verified on the
+  owner's captures, ADR-0044): `body::BOX_COLLISION_MARGIN` is Bullet's
+  `CONVEX_DISTANCE_MARGIN` (0.04 BT, 2 uu) on the car's `btBoxShape`.
+  Against a mesh triangle, Bullet's GJK measures from the margin-shrunk
+  core box and takes the margin back off, so a corner meeting a facet
+  obliquely reads `margin * (|n|_1 - 1)` further away than the sharp
+  corner, for the facet normal `n` in the box's frame
+  (`collision::BoxCorners::gap`, used by `ContactManifold::update_mesh`
+  for detection and refresh). Against a static plane Bullet's
+  `btConvexPlaneCollisionAlgorithm` takes `localGetSupportingVertex`,
+  which adds the margin back axis-wise: the sharp corner, unchanged
+  (`update_plane`). The margin also joins the box's angular motion disc,
+  so its contact breaking threshold is 2.06 uu (was 1.99).
+  - Why: `test2.jsonl` 14.283–14.300 s, a 1850 uu/s wall ride: the sharp
+    nose corner is 1.35 uu clear of the next ramp facet at 14.283 s,
+    inside the breaking threshold, and the simulator took a 31.7 uu/s
+    speculative-contact impulse a tick before the game did. Rounded, the
+    corner is 2.18 uu clear, past the threshold, and touches at 14.292 s
+    (0.98 uu), where the recording's next velocity step carries the
+    (+29, 0, +38) uu/s facet-normal impulse. Floor landings on a corner
+    (`hitjump.jsonl` 119.067 s, 96.783 s, 84.600 s) hit at the sharp
+    corner's tick, which is what rules out rounding the plane path too:
+    rounding it there put those landings a tick late (282 uu/s off).
+  - **Verification**:
+    - `collision` tests `a_corner_meets_a_mesh_facet_rounded_but_a_plane_sharp`,
+      `a_box_corner_below_a_mesh_triangle_gets_one_contact_for_it`.
+    - `test2` 14.292 s car velocity error 4.7 uu/s (was 31.7); 9.083–9.117 s
+      0.0–4.6 (was 11–17). One-step car 0.447 (was 0.470); k = 30 car
+      5.53 (was 5.65).
+    - `hitjump` 170.608 s 0.8 (was 59.5), 170.700 s 1.7 (was 48.5),
+      177.542 s 2.5 (was 36.2), 169.667 s 2.8 (was 33.6); one-step car
+      0.484 (was 0.489), k = 30 car 11.37 (was 11.39). `front` 0.180
+      (was 0.178; nothing worse than 2.9 uu/s), `side` 0.192 unchanged.
+      Ball errors unchanged.
 
 
 ## Architecture and interfaces
@@ -7725,6 +7760,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.128.0 (2026-10-04): `RB-PHYSICS-001-FR-124` — a car's hitbox corner
+  meets a mesh facet rounded by Bullet's collision margin (ADR-0044).
+  432 tests in `rb_physics_bullet`.
 - 0.127.0 (2026-10-04): `RB-PHYSICS-001-FR-123` — a car on its roof pops
   up and rolls over on a jump press, RocketSim's auto-flip (ADR-0043).
   431 tests in `rb_physics_bullet`.

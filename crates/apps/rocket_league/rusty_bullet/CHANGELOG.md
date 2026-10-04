@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0044 (`RB-PHYSICS-001-FR-124`): `body::BOX_COLLISION_MARGIN`,
+  Bullet's 2 uu `CONVEX_DISTANCE_MARGIN` on the car's box; a corner meets
+  a mesh facet rounded by it (`collision::BoxCorners::gap`), a static
+  plane sharp, as Bullet's two algorithms do. The box's contact breaking
+  threshold counts the margin (2.06 uu, was 1.99).
 - ADR-0043 (`RB-PHYSICS-001-FR-123`): `drive::jump::auto_flip`,
   RocketSim's `_UpdateAutoFlip` (a car on its roof pops up 200 uu/s and
   rolls toward upright on a jump press); `drive::AutoFlip`,
