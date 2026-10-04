@@ -65,7 +65,7 @@ test('split a card into two with different owners', async ({ page }) => {
   await expect(kids.nth(0)).toContainText('Bob')
   await expect(kids.nth(1)).toContainText('Bathrooms')
   await expect(page.getByTestId('card-tile')).toHaveCount(102)
-  // Reorder with one position write each, and open a child.
+  // Reorder with one order request, and open a child.
   await kids.nth(1).getByRole('button', { name: 'Move Bathrooms up' }).click()
   await expect(kids.nth(0)).toContainText('Bathrooms')
   await kids.nth(1).getByRole('link', { name: /Floors/ }).click()
@@ -128,4 +128,104 @@ test('create a custom card from the board', async ({ page }) => {
   const ada = page.getByTestId('balance-row').nth(0)
   await expect(ada.getByTestId('count-all')).toHaveText('4')
   await expect(ada.getByLabel('Ada by suit')).toContainText('Out 1')
+})
+
+test('re-parent and re-suit, split, reorder, unsplit, delete a card, and remove a person', async ({ page }) => {
+  await page.goto('/#/deck')
+  await tile(page, /^Dog walking/).click()
+  // Suit and parent go in the same single save.
+  await pane(page).getByLabel('Suit').selectOption('Home')
+  await pane(page).getByLabel('Parent').selectOption({ label: '#3 Dishes' })
+  await pane(page).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(page).getByRole('navigation', { name: 'Breadcrumb' })).toContainText('Dishes')
+  await expect(page.getByRole('list', { name: 'Home cards' }).getByTestId('card-tile').filter({ hasText: /^Dog walking/ })).toBeVisible()
+  await expect(tile(page, /^Dishes/)).toContainText('split · 1')
+
+  await pane(page).getByRole('button', { name: 'Split…' }).click()
+  const dialog = page.getByRole('dialog', { name: /Split/ })
+  await dialog.getByLabel('Child 1 name').fill('Morning')
+  await dialog.getByLabel('Child 2 name').fill('Evening')
+  await dialog.getByRole('button', { name: 'Split', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  const kids = pane(page).getByRole('list', { name: 'Child cards' }).getByRole('listitem')
+  await expect(kids).toHaveCount(2)
+  await expect(page.getByTestId('card-tile')).toHaveCount(105)
+  await kids.nth(1).getByRole('button', { name: 'Move Evening up' }).click()
+  await expect(kids.nth(0)).toContainText('Evening')
+  await page.reload() // the order is on the server
+  await expect(kids.nth(0)).toContainText('Evening')
+  await expect(pane(page).getByRole('button', { name: 'Delete card' })).toBeDisabled()
+
+  await pane(page).getByRole('button', { name: 'Unsplit…' }).click()
+  const unsplit = page.getByRole('dialog', { name: 'Unsplit "Dog walking"?' })
+  await expect(unsplit).toContainText('This removes 2 cards under it')
+  await unsplit.getByRole('button', { name: 'Remove 2 cards' }).click()
+  await expect(unsplit).toBeHidden()
+  await expect(kids).toHaveCount(0)
+  await expect(page.getByTestId('card-tile')).toHaveCount(103)
+
+  await pane(page).getByRole('button', { name: 'Delete card' }).click()
+  await page.getByRole('dialog', { name: 'Delete "Dog walking"?' }).getByRole('button', { name: 'Delete' }).click()
+  // A child's delete lands on its parent.
+  await expect(pane(page).getByLabel('Name')).toHaveValue('Dishes')
+  await expect(page.getByTestId('card-tile')).toHaveCount(102)
+  await expect(tile(page, /^Dishes/)).not.toContainText('split')
+  await page.reload()
+  await expect(page.getByTestId('card-tile')).toHaveCount(102)
+
+  await page.goto('/#/players')
+  const people = page.getByRole('list', { name: 'People' }).getByRole('listitem')
+  await expect(people.nth(0).getByRole('button', { name: 'Remove Ada' })).toBeDisabled()
+  const input = page.getByLabel("New person's name")
+  await input.fill('Cleo')
+  await input.press('Enter')
+  await expect(people).toHaveCount(3)
+  await people.nth(2).getByRole('button', { name: 'Remove Cleo' }).click()
+  await page.getByRole('dialog', { name: 'Remove Cleo?' }).getByRole('button', { name: 'Remove' }).click()
+  await expect(people).toHaveCount(2)
+  await page.reload()
+  await expect(page.getByRole('list', { name: 'People' }).getByRole('listitem')).toHaveCount(2)
+})
+
+test('two tabs edit the same card: the second save is refused, its draft is kept, and Overwrite takes it', async ({ browser }) => {
+  const context = await browser.newContext()
+  const one = await context.newPage()
+  const two = await context.newPage()
+  for (const page of [one, two]) {
+    await page.goto('/#/deck')
+    await tile(page, /^Laundry/).click()
+    await expect(pane(page).getByLabel('Name')).toHaveValue('Laundry')
+  }
+
+  // Both tabs have read the card; the first saves its notes.
+  await pane(one).getByLabel('Notes').fill('first tab')
+  await pane(one).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(one).getByRole('button', { name: 'Save' })).toBeHidden()
+
+  // The second tab, still on the old version, saves a different field. The server refuses it.
+  await pane(two).getByLabel('Planning').fill('second tab plan')
+  await pane(two).getByRole('button', { name: 'Save' }).click()
+  await expect(two.getByRole('status')).toContainText('changed elsewhere')
+  await expect(pane(two).getByRole('alert')).toContainText('changed elsewhere')
+  await expect(pane(two).getByLabel('Planning')).toHaveValue('second tab plan') // the draft is kept
+  await expect(pane(two).getByLabel('Notes')).toHaveValue('first tab') // the rest shows the new version
+
+  // Nothing was written by the refused save.
+  await two.reload()
+  await expect(pane(two).getByLabel('Planning')).not.toHaveValue('second tab plan')
+
+  // Typing again and choosing Overwrite lands it on top of the newer card.
+  await pane(two).getByLabel('Planning').fill('second tab plan')
+  await one.reload() // the first tab changes the card again before the second saves
+  await pane(one).getByLabel('Notes').fill('first tab, again')
+  await pane(one).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(one).getByRole('button', { name: 'Save' })).toBeHidden()
+  await pane(two).getByRole('button', { name: 'Save' }).click()
+  await expect(pane(two).getByRole('alert')).toBeVisible()
+  await pane(two).getByRole('button', { name: 'Overwrite' }).click()
+  await expect(pane(two).getByRole('alert')).toBeHidden()
+  await two.reload()
+  await expect(pane(two).getByLabel('Planning')).toHaveValue('second tab plan')
+  await expect(pane(two).getByLabel('Notes')).toHaveValue('first tab, again')
+  await context.close()
 })

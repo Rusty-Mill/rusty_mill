@@ -232,6 +232,9 @@ pub fn split_card_id(path: &str) -> Uuid {
 pub const PERSON_FILE: &str = "people.mmap";
 pub const CARD_FILE: &str = "cards.mmap";
 pub const CARD_DEFAULT_FILE: &str = "card_defaults.mmap";
+/// The directory lock file: whoever writes the three stores holds it, so
+/// a running service is never written under from a second process.
+pub const LOCK_FILE: &str = "store.lock";
 
 // ---------------------------------------------------------------------
 // Person
@@ -820,9 +823,11 @@ where
     Ok(())
 }
 
-/// Reorder the children of `parent` in one call: `order` must name each
-/// current child exactly once (`CardError::BadOrder` otherwise), and gets
-/// positions `0..n` in that order.
+/// Reorder the children of `parent`: `order` must name each current child
+/// exactly once (`CardError::BadOrder` otherwise, before anything is
+/// written), and gets positions `0..n` in that order. The slots are then
+/// written one at a time, so a crash part way leaves some positions
+/// applied; it is not a transaction.
 pub fn reorder_children<S>(store: &mut S, parent: Uuid, order: &[Uuid]) -> Result<(), CardError>
 where
     S: GetById<Card> + Children<Card, Card, ParentCard> + UpdateField<Card, PositionField>,

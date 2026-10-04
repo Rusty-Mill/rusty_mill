@@ -1,7 +1,7 @@
 /** The real backend: `rusty_fair_play`'s JSON API, same-origin, optional bearer token. */
 import type { ApiClient } from './client'
-import { ApiError, ConflictError, InvalidError, NetworkError, NotFoundError, UnauthorizedError } from './errors'
-import type { BaselineResponse, Card, CardPatch, NewCard, Person, SeedResult, Snapshot, SplitInput, SplitResult } from './types'
+import { ApiError, ConflictError, InvalidError, NetworkError, NotFoundError, StaleError, UnauthorizedError } from './errors'
+import type { BaselineResponse, Card, CardPatch, NewCard, Person, SeedResult, Snapshot, SplitInput, SplitResult, UnsplitResult } from './types'
 
 export interface HttpOptions {
   /** Prefix for every request; empty means same-origin. */
@@ -13,6 +13,8 @@ export interface HttpOptions {
 
 interface ErrorBody {
   error?: { code?: string; message?: string }
+  /** On a 412: the card as stored now. */
+  current?: Card
 }
 
 export class HttpAdapter implements ApiClient {
@@ -26,11 +28,12 @@ export class HttpAdapter implements ApiClient {
     this.timeoutMs = options.timeoutMs ?? 15_000
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, etag?: string): Promise<T> {
     const headers: Record<string, string> = { Accept: 'application/json' }
     const token = this.options.getToken()
     if (token) headers.Authorization = `Bearer ${token}`
     if (body !== undefined) headers['Content-Type'] = 'application/json'
+    if (etag !== undefined) headers['If-Match'] = etag === '*' ? '*' : `"${etag}"`
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -68,27 +71,40 @@ export class HttpAdapter implements ApiClient {
   renamePerson(id: string, name: string): Promise<Person> {
     return this.request('PATCH', `/people/${id}`, { name })
   }
+  deletePerson(id: string): Promise<void> {
+    return this.request('DELETE', `/people/${id}`)
+  }
 
   getCard(id: string): Promise<Card> {
     return this.request('GET', `/cards/${id}`)
   }
-  updateCard(id: string, patch: CardPatch): Promise<Card> {
-    return this.request('PATCH', `/cards/${id}`, patch)
+  updateCard(id: string, patch: CardPatch, etag?: string): Promise<Card> {
+    return this.request('PATCH', `/cards/${id}`, patch, etag)
   }
   createCard(input: NewCard): Promise<Card> {
     return this.request('POST', '/cards', input)
   }
-  split(id: string, input: SplitInput): Promise<SplitResult> {
-    return this.request('POST', `/cards/${id}/split`, input)
+  split(id: string, input: SplitInput, etag?: string): Promise<SplitResult> {
+    return this.request('POST', `/cards/${id}/split`, input, etag)
   }
-  reset(id: string): Promise<Card> {
-    return this.request('POST', `/cards/${id}/reset`)
+  reset(id: string, etag?: string): Promise<Card> {
+    return this.request('POST', `/cards/${id}/reset`, undefined, etag)
   }
   baseline(id: string): Promise<BaselineResponse> {
     return this.request('GET', `/cards/${id}/baseline`)
   }
-  setPosition(id: string, position: number): Promise<void> {
-    return this.request('PUT', `/cards/${id}/position`, { position })
+  setPosition(id: string, position: number, etag?: string): Promise<void> {
+    return this.request('PUT', `/cards/${id}/position`, { position }, etag)
+  }
+  deleteCard(id: string, etag?: string): Promise<void> {
+    return this.request('DELETE', `/cards/${id}`, undefined, etag)
+  }
+  unsplitCard(id: string, treeEtag?: string): Promise<UnsplitResult> {
+    return this.request('POST', `/cards/${id}/unsplit`, undefined, treeEtag)
+  }
+  async reorderChildren(parentId: string, ids: string[], treeEtag?: string): Promise<Card[]> {
+    const { cards } = await this.request<{ cards: Card[] }>('PUT', `/cards/${parentId}/children/order`, { ids }, treeEtag)
+    return cards
   }
 }
 
@@ -101,6 +117,9 @@ function toError(status: number, body: ErrorBody | undefined): Error {
       return new NotFoundError(message)
     case 409:
       return new ConflictError(message)
+    case 412:
+      if (body?.current) return new StaleError(body.current, message)
+      return new ApiError(412, 'precondition_failed', message)
     case 400:
     case 422:
       return new InvalidError(status, message)

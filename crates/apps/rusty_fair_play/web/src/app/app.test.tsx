@@ -38,7 +38,7 @@ describe('App', () => {
     await user.type(screen.getByLabelText('API token'), 'secret-token-0123456789')
     await user.click(screen.getByRole('checkbox', { name: 'Remember on this device' }))
     await user.click(screen.getByRole('button', { name: 'Connect' }))
-    await waitFor(() => expect(screen.getAllByTestId('card-tile')).toHaveLength(12))
+    await waitFor(() => expect(screen.getAllByTestId('card-tile')).toHaveLength(100))
     expect(tokens).toEqual([null, 'secret-token-0123456789'])
     expect(getToken()).toBe('secret-token-0123456789')
     expect(localStorage.getItem('fair-play:token')).toBe('secret-token-0123456789')

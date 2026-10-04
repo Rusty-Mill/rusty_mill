@@ -6,18 +6,18 @@ import { renderApp, seedFamily } from '@/test/renderApp'
 describe('the board', () => {
   it('shows six shelves with counts and a tile per card', async () => {
     await renderApp('/deck', async (api) => void (await seedFamily(api)))
-    expect(screen.getByRole('heading', { name: /Home · 3/ })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: /Unicorn Space · 1/ })).toBeInTheDocument()
-    expect(screen.getAllByTestId('card-tile')).toHaveLength(12)
-    expect(screen.getByText('12 cards')).toBeInTheDocument()
-    expect(within(screen.getByRole('list', { name: 'Home cards' })).getAllByText('Unassigned')).toHaveLength(3)
+    expect(screen.getByRole('heading', { name: /Home · 22/ })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Unicorn Space · 2/ })).toBeInTheDocument()
+    expect(screen.getAllByTestId('card-tile')).toHaveLength(100)
+    expect(screen.getByText('100 cards')).toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Home cards' })).getAllByText('Unassigned')).toHaveLength(22)
   })
 
   it('offers to load the deck when there is none', async () => {
     const user = userEvent.setup()
     await renderApp('/deck')
     await user.click(screen.getByRole('button', { name: 'Load the Fair Play deck' }))
-    await waitFor(() => expect(screen.getAllByTestId('card-tile')).toHaveLength(12))
+    await waitFor(() => expect(screen.getAllByTestId('card-tile')).toHaveLength(100))
   })
 
   it('filters by suit chips, owner chips, state, leaves and search', async () => {
@@ -28,10 +28,10 @@ describe('the board', () => {
       await api.updateCard(cards[0]!.id, { ownerId: ada, execution: 'ours' })
       await api.split(cards[1]!.id, { children: [{ name: 'Floors', ownerId: ada }] })
     })
-    expect(screen.getAllByTestId('card-tile')).toHaveLength(13)
+    expect(screen.getAllByTestId('card-tile')).toHaveLength(101)
     await user.click(screen.getByRole('button', { name: 'Home', pressed: false }))
-    expect(screen.getAllByTestId('card-tile')).toHaveLength(4)
-    expect(screen.getByText('4 of 13 cards')).toBeInTheDocument()
+    expect(screen.getAllByTestId('card-tile')).toHaveLength(23)
+    expect(screen.getByText('23 of 101 cards')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Home', pressed: true })) // toggle off
     await user.click(within(screen.getByRole('group', { name: 'Owner' })).getByRole('button', { name: /Ada/ }))
     expect(screen.getAllByTestId('card-tile').map((t) => t.textContent)).toEqual([expect.stringContaining('Childcare Helpers'), expect.stringContaining('Floors')])
@@ -43,7 +43,7 @@ describe('the board', () => {
     expect(screen.getAllByTestId('card-tile')[0]).toHaveTextContent('custom')
     await user.click(screen.getByRole('button', { name: 'All' }))
     await user.click(screen.getByRole('checkbox', { name: 'Leaves only' }))
-    expect(screen.getAllByTestId('card-tile')).toHaveLength(12)
+    expect(screen.getAllByTestId('card-tile')).toHaveLength(100)
     expect(screen.queryByText('split · 1')).toBeNull()
     await user.click(screen.getByRole('checkbox', { name: 'Leaves only' }))
     expect(screen.getByText('split · 1')).toBeInTheDocument()
@@ -78,7 +78,7 @@ describe('the board', () => {
     const dialog = screen.getByRole('dialog', { name: 'New card' })
     await user.click(within(dialog).getByRole('button', { name: 'Create' }))
     expect(within(dialog).getByRole('alert')).toHaveTextContent('A name is needed.')
-    expect((await api.snapshot()).cards).toHaveLength(12)
+    expect((await api.snapshot()).cards).toHaveLength(100)
     await user.type(within(dialog).getByLabelText('Card name'), 'Dog walking')
     await user.selectOptions(within(dialog).getByLabelText('Suit'), 'Out')
     await user.selectOptions(within(dialog).getByLabelText('Owner'), 'Ada')

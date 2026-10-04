@@ -36,16 +36,19 @@ JSON, camelCase, ids are UUID strings. Errors are
 409 conflict, 412 stale, 422 invalid value, 500. Inputs reject unknown
 fields.
 
-Every Card carries an `etag` that changes whenever the card does. A
-card write may send it back as `If-Match: "<etag>"` (or `*`); a mismatch
-is 412 `precondition_failed` with the current card beside the error:
+Every Card carries an `etag` (the card alone) and a `treeEtag` (the card and
+everything under it). A card write may send the `etag` back as
+`If-Match: "<etag>"` (or `*`); `unsplit` and `children/order`, which act on the
+children too, take the `treeEtag` instead, since the card's own tag does not move
+when a descendant is edited, added or reordered. A mismatch is 412
+`precondition_failed` with the current card beside the error:
 `{"error":{…},"current":Card}`. Without the header the last writer wins.
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/health` | no auth |
 | GET | `/api/v1/snapshot` | `{"people":[Person],"cards":[Card]}` — one boot read |
-| POST | `/api/v1/seed` | load the embedded deck; `{"cardDefaults":{created,existing},"cards":{…}}` |
+| POST | `/api/v1/seed` | (re)load the embedded deck: inserts any missing deck card, never touches an existing one (so it also restores a deleted deck card); `{"cardDefaults":{created,existing},"cards":{…}}` |
 | GET, POST | `/api/v1/people` | POST `{"name"}` → 201 Person; 409 if the name exists |
 | GET, PATCH, DELETE | `/api/v1/people/{id}` | PATCH `{"name"}`; DELETE → 204, 409 while the person holds a card |
 | GET, PATCH, DELETE | `/api/v1/cards/{id}` | DELETE → 204, 409 while the card has children; PATCH any of `name`, `suit`, `conception`, `planning`, `execution`, `minimumStandardOfCare`, `notes`, `ownerId`, `parentCardId`, `position`; absent = keep, `null` clears `ownerId`/`parentCardId` |
@@ -54,7 +57,7 @@ is 412 `precondition_failed` with the current card beside the error:
 | POST | `/api/v1/cards/{id}/reset` | the six text fields back to the baseline; owner, parent, position and notes kept |
 | GET | `/api/v1/cards/{id}/baseline` | `{"baseline":Baseline|null,"diff":[{"field","card","baseline"}]}` |
 | PUT | `/api/v1/cards/{id}/position` | `{"position": n}` → 204 |
-| PUT | `/api/v1/cards/{id}/children/order` | `{"ids":[…]}`, exactly the current children → 200 `{"cards":[Card]}` in that order; 422 otherwise |
+| PUT | `/api/v1/cards/{id}/children/order` | `{"ids":[…]}`, exactly the current children → 200 `{"cards":[Card]}` in that order; 422 otherwise. One request under the service lock, validated first; the slots are then written one at a time, so it is not crash-atomic |
 | POST | `/api/v1/cards/{id}/unsplit` | delete the whole subtree, deepest first, keep the card → 200 `{"parent":Card,"deleted":[id]}` |
 
 ```ts
@@ -74,6 +77,7 @@ interface Card {
   baselineId: string | null
   state: 'original' | 'edited' | 'custom'   // derived against the baseline, never stored
   etag: string                     // send back as If-Match
+  treeEtag: string                 // the same over the card and its whole subtree
 }
 interface Baseline { id; number; name; suit; conception; planning; execution; minimumStandardOfCare }
 ```
@@ -86,6 +90,12 @@ of the six text fields makes a deck card `edited`, while owner, parent,
 position and notes never do. Deletes keep the tree and the ownership
 well-formed: a leaf card and a person holding nothing can go; a parent
 goes through `unsplit`; a holder's cards are reassigned first.
+
+The deck loads on first start and is recorded by a `deck.loaded` marker written
+after the load finishes, not by looking for card 1: a deleted deck card stays
+deleted across restarts, and a first load killed part way is finished on the next
+start. The `seed` subcommand takes the same directory lock as the server and is
+refused while a server has the directory.
 
 Refusals from the domain — a card made its own ancestor, an unknown
 owner, a blank name, a reset on a custom card — are 422.

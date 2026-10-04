@@ -2,11 +2,28 @@
  * The app's data: the server's snapshot (people, cards) and a memoised index
  * over it. Writes await the server and merge the returned records in; there
  * is no offline queue. The snapshot is refreshed on focus and on an interval.
+ *
+ * Every card write sends the version it was based on as `If-Match`: the draft's
+ * own base for an edit (`updateCard`'s `base`), the card as shown for the rest
+ * (its `etag`, or its `treeEtag` for unsplit and reorder). On 412 (`StaleError`)
+ * the current card is merged in and a toast says so; the caller keeps its draft.
+ *
+ * A card's `treeEtag` moves when anything under it does, so a write to a card that
+ * has an ancestor (or that reorders children) is followed by a re-read: the
+ * ancestors' tags then match the server's, and the next unsplit or reorder is not
+ * refused for a change this tab made itself.
+ *
+ * Reads and writes are ordered by a generation counter: a snapshot that was
+ * requested before a write started, or that was still in flight when one
+ * finished, is dropped, so an older read can never roll back an acknowledged
+ * write (or make a freshly created card vanish).
  */
+
+export const STALE_MESSAGE = 'This card changed elsewhere — reloaded, please re-apply your edit.'
 import { createStore, type StoreApi } from 'zustand/vanilla'
 import type { ApiClient } from '@/api/client'
-import { ApiError, NetworkError, UnauthorizedError } from '@/api/errors'
-import type { Card, CardPatch, NewCard, Person, Snapshot, SplitInput, SplitResult } from '@/api/types'
+import { ApiError, NetworkError, StaleError, UnauthorizedError } from '@/api/errors'
+import type { Card, CardPatch, NewCard, Person, Snapshot, SplitInput, SplitResult, UnsplitResult } from '@/api/types'
 import { indexCards, type CardIndex } from './derive'
 
 export type Status = 'loading' | 'ready' | 'error' | 'unauthorized'
@@ -33,13 +50,17 @@ export interface DataActions {
 
   createPerson(name: string): Promise<Person>
   renamePerson(id: string, name: string): Promise<void>
+  deletePerson(id: string): Promise<void>
 
-  updateCard(id: string, patch: CardPatch): Promise<Card>
+  /** `base`: the card's `etag` as the edit was started from, not as the store has it now. */
+  updateCard(id: string, patch: CardPatch, base: string): Promise<Card>
   createCard(input: NewCard): Promise<Card>
   split(id: string, input: SplitInput): Promise<SplitResult>
   reset(id: string): Promise<Card>
-  /** Swap two siblings' positions (two PUTs), then re-read both. */
-  swapPositions(a: Card, b: Card): Promise<void>
+  deleteCard(id: string): Promise<void>
+  unsplit(id: string): Promise<UnsplitResult>
+  /** One request: `ids` is the new order of all of `parentId`'s children (validated whole, applied slot by slot). */
+  reorderChildren(parentId: string, ids: string[]): Promise<void>
 
   notify(kind: Toast['kind'], message: string): void
   dismissToast(id: string): void
@@ -68,6 +89,22 @@ export function createDataStore({ api }: DataOptions): DataStore {
       set({ cards: next, index: indexCards(next) })
     }
 
+    const dropCards = (ids: string[]): void => {
+      const gone = new Set(ids)
+      const next = get().cards.filter((c) => !gone.has(c.id))
+      set({ cards: next, index: indexCards(next) })
+    }
+
+    /** A card's version as this store shows it; absent for a card it does not know. */
+    const etagOf = (id: string): string | undefined => get().index.byId.get(id)?.etag
+    const treeEtagOf = (id: string): string | undefined => get().index.byId.get(id)?.treeEtag
+
+    /** Bumped when a write starts and when it ends; see the header. */
+    let generation = 0
+    /** Reads are numbered too, so a slow older snapshot cannot replace a newer one. */
+    let readSeq = 0
+    let adoptedSeq = 0
+
     const mergePerson = (person: Person): void => {
       const next = get().people.filter((p) => p.id !== person.id)
       next.push(person)
@@ -76,13 +113,27 @@ export function createDataStore({ api }: DataOptions): DataStore {
     }
 
     /** Run a write; failures become a toast (and an unauthorized status) and are rethrown for the caller. */
-    const write = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const hasParent = (id: string): boolean => get().index.byId.get(id)?.parentCardId != null
+
+    /** Run a write; `resync` re-reads the snapshot after it so ancestors' tree tags are current. */
+    const write = async <T>(fn: () => Promise<T>, resync = false): Promise<T> => {
+      generation++
+      let stale = false
       try {
-        return await fn()
+        const result = await fn()
+        if (resync) await get().refresh()
+        return result
       } catch (e) {
         if (e instanceof UnauthorizedError) set({ status: 'unauthorized', error: e.message })
-        else get().notify('error', describe(e))
+        else if (e instanceof StaleError) {
+          stale = true
+          mergeCards(e.current)
+          get().notify('info', STALE_MESSAGE)
+        } else get().notify('error', describe(e))
         throw e
+      } finally {
+        generation++
+        if (stale) void get().refresh() // after the bump, so its answer is kept
       }
     }
 
@@ -97,7 +148,9 @@ export function createDataStore({ api }: DataOptions): DataStore {
       async boot() {
         set({ status: 'loading', error: null })
         try {
-          adopt(await api.snapshot())
+          const snap = await api.snapshot()
+          adoptedSeq = ++readSeq // a refresh asked for earlier must not land over this
+          adopt(snap)
           set({ status: 'ready' })
         } catch (e) {
           set({ status: e instanceof UnauthorizedError ? 'unauthorized' : 'error', error: describe(e) })
@@ -105,8 +158,14 @@ export function createDataStore({ api }: DataOptions): DataStore {
       },
 
       async refresh() {
+        const asked = generation
+        const seq = ++readSeq
         try {
-          adopt(await api.snapshot())
+          const snap = await api.snapshot()
+          if (generation !== asked) return // a write overtook this read; the next one will do
+          if (seq < adoptedSeq) return // a newer read already landed
+          adoptedSeq = seq
+          adopt(snap)
           if (get().status !== 'ready') set({ status: 'ready', error: null })
         } catch (e) {
           if (e instanceof UnauthorizedError) set({ status: 'unauthorized', error: e.message })
@@ -128,37 +187,56 @@ export function createDataStore({ api }: DataOptions): DataStore {
           return person
         }),
       renamePerson: (id, name) => write(async () => mergePerson(await api.renamePerson(id, name))),
+      deletePerson: (id) =>
+        write(async () => {
+          await api.deletePerson(id)
+          set({ people: get().people.filter((p) => p.id !== id) })
+        }),
 
-      updateCard: (id, patch) =>
-        write(async () => {
-          const card = await api.updateCard(id, patch)
-          mergeCards(card)
-          return card
-        }),
+      updateCard: (id, patch, base) =>
+        write(
+          async () => {
+            const card = await api.updateCard(id, patch, base)
+            mergeCards(card)
+            return card
+          },
+          hasParent(id) || patch.parentCardId != null,
+        ),
       createCard: (input) =>
-        write(async () => {
-          const card = await api.createCard(input)
-          mergeCards(card)
-          return card
-        }),
+        write(
+          async () => {
+            const card = await api.createCard(input)
+            mergeCards(card)
+            return card
+          },
+          input.parentCardId != null,
+        ),
       split: (id, input) =>
         write(async () => {
-          const result = await api.split(id, input)
+          const result = await api.split(id, input, etagOf(id))
           mergeCards(result.parent, ...result.children)
           return result
-        }),
+        }, hasParent(id)),
       reset: (id) =>
         write(async () => {
-          const card = await api.reset(id)
+          const card = await api.reset(id, etagOf(id))
           mergeCards(card)
           return card
-        }),
-      swapPositions: (a, b) =>
+        }, hasParent(id)),
+      deleteCard: (id) =>
         write(async () => {
-          await api.setPosition(a.id, b.position)
-          await api.setPosition(b.id, a.position)
-          mergeCards({ ...a, position: b.position }, { ...b, position: a.position })
-        }),
+          await api.deleteCard(id, etagOf(id))
+          dropCards([id])
+        }, hasParent(id)),
+      unsplit: (id) =>
+        write(async () => {
+          const result = await api.unsplitCard(id, treeEtagOf(id))
+          dropCards(result.deleted)
+          mergeCards(result.parent)
+          return result
+        }, hasParent(id)),
+      reorderChildren: (parentId, ids) =>
+        write(async () => mergeCards(...(await api.reorderChildren(parentId, ids, treeEtagOf(parentId)))), true),
 
       notify(kind, message) {
         const id = `t${++toastSeq}`
