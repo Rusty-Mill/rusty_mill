@@ -1,12 +1,14 @@
-import { Plus } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { useMemo, useRef, useState, type FormEvent } from 'react'
 import { ConflictError } from '@/api/errors'
 import type { Person } from '@/api/types'
 import { useActions, useData } from '@/app/services'
 import { initial } from '@/components/badges'
-import { balance } from '@/store/derive'
+import { Confirm } from '@/components/Confirm'
+import { Tooltip } from '@/components/Tooltip'
+import { balance, type Balance } from '@/store/derive'
 
-/** The people cards are dealt to: rename in place, add new ones. */
+/** The people cards are dealt to: rename in place, add new ones, remove one who holds nothing. */
 export function PlayersPage() {
   const people = useData((s) => s.people)
   const cards = useData((s) => s.cards)
@@ -55,6 +57,7 @@ export function PlayersPage() {
                     Player {row.person.player} · holds {row.all} {row.all === 1 ? 'card' : 'cards'} ({row.leaves} {row.leaves === 1 ? 'leaf' : 'leaves'})
                   </span>
                 </div>
+                <RemoveButton row={row} />
               </li>
             ))}
           </ul>
@@ -74,6 +77,34 @@ export function PlayersPage() {
         </div>
       </div>
     </main>
+  )
+}
+
+/** Removes the person once confirmed; while they hold cards it is disabled and says so. */
+function RemoveButton({ row }: { row: Balance }) {
+  const { deletePerson } = useActions()
+  const [confirm, setConfirm] = useState(false)
+  const held = row.all
+  return (
+    <>
+      <Tooltip label={held > 0 ? `holds ${held} ${held === 1 ? 'card' : 'cards'}` : `Remove ${row.person.name}`}>
+        <button type="button" aria-label={`Remove ${row.person.name}`} disabled={held > 0} onClick={() => setConfirm(true)} className="rounded-row p-1.5 text-grey hover:bg-hover hover:text-danger disabled:opacity-40 disabled:hover:bg-transparent">
+          <Trash2 size={16} />
+        </button>
+      </Tooltip>
+      <Confirm
+        open={confirm}
+        title={`Remove ${row.person.name}?`}
+        message="They hold no cards, so nothing else changes. This cannot be undone."
+        confirmLabel="Remove"
+        danger
+        onConfirm={() => {
+          setConfirm(false)
+          void deletePerson(row.person.id).catch(() => undefined)
+        }}
+        onCancel={() => setConfirm(false)}
+      />
+    </>
   )
 }
 

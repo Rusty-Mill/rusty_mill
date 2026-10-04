@@ -12,6 +12,6 @@ describe('MemoryAdapter persistence', () => {
     const b = new MemoryAdapter({ storage: localStorage })
     const snap = await b.snapshot()
     expect(snap.people.map((p) => p.name)).toEqual(['Ada'])
-    expect(snap.cards).toHaveLength(12)
+    expect(snap.cards).toHaveLength(100)
   })
 })
