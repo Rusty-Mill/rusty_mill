@@ -257,7 +257,7 @@ version: `a245d35`).
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it (about 1-2% bias,
    minor). `RB-PHYSICS-001-FR-131` (ADR-0050, auto-roll) fixed the landing
-   spin drift. `RB-PHYSICS-001-FR-132` (ADR-0051) then fixed `test2` 5.77-5.92 s: a tire's side force acts along the wheel's own axle (window error 4.87 -> 0.44 uu/s, test2 k = 30 car 4.73 -> 2.55).
+   spin drift. `RB-PHYSICS-001-FR-132` (ADR-0051) then fixed `test2` 5.77-5.92 s: a tire's side force acts along the wheel's own axle (window error 4.87 -> 0.44 uu/s, test2 k = 30 car 4.73 -> 2.55). The largest remaining non-glitch `test2` frames are hard impacts near the (3800, 4150) corner: 8.958 s (19 uu/s) and 9.125 s (19). The direction is exact; the sim's impulse is 2% short (965 against 984 uu/s). Car restitution 0.3/0.5/0.7 changes nothing on any capture, so the miss is not the bounce.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
