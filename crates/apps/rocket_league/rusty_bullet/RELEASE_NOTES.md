@@ -8,6 +8,18 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Friction on slopes pulls the right way
+**2026-10-04** · `RB-PHYSICS-001-FR-119` · ADR-0039
+
+- When the ball hit a sloped surface (a goal's back, a ramp) at several
+  points, the simulator's friction could pull it the wrong way along the
+  slope and flip its spin, because the averaged contact direction was
+  slightly shorter than it should be and part of the bounce leaked into
+  friction. It is now a proper unit direction. The goal recording's
+  back-slope bounce at 56.6 s is exact (was 163 uu/s off), its 30-tick
+  ball error fell from 20.9 to 20.4 uu, and the driving recording's from
+  0.37 to 0.33. 495 tests.
+
 ## The ball is pushed back out of walls the way the game does it
 **2026-10-04** · `RB-PHYSICS-001-FR-118` · ADR-0038
 

@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0039 (`RB-PHYSICS-001-FR-119`): the combined ball-world normal is
+  renormalized, so the friction direction is orthogonal to the normal
+  row again (amends ADR-0027).
 - ADR-0038 (`RB-PHYSICS-001-FR-118`): `solver::StaticMaterial::PushOnly`
   (split-impulse penetration rows only, at RocketSim's `m_erp2` 0.8) and
   `body::BALL_COLLISION_RADIUS` (91.25 uu); `PhysicsWorld::step` pushes

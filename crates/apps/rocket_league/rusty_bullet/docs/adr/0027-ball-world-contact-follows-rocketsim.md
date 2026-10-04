@@ -6,7 +6,8 @@
 - Related: RB-PHYSICS-001-FR-108, FR-043, FR-048, FR-107; RB-VERIFY-003-FR-007;
   ADR-0026
 - Supersedes/Superseded by: replaces FR-043's averaged ball-world material
-  with RocketSim's combine rule
+  with RocketSim's combine rule; "not renormalized" amended by ADR-0039
+  (the average is renormalized since FR-119)
 
 ## Context
 

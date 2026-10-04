@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.122.0
+- Version: 0.123.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -5871,8 +5871,8 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
   resolution; no speculative term; implemented, verified by tests and the
   owner's capture, ADR-0027): every ball-world contact in a tick folds into
   one (`world::combined_ball_world_contact`, `convertContactSpecial`) at
-  the average normal (not renormalized) and average distance, solved for
-  velocity only, with `world::ball_world_material` (restitution
+  the average normal (not renormalized until FR-119) and average
+  distance, solved for velocity only, with `world::ball_world_material` (restitution
   max(ball, 0.3), friction min(ball, 0.6)). `solver::setup_rows` and
   `setup_two_body_rows` drop Bullet's speculative velocity term, as
   RocketSim does. `friction_directions` normalizes the normal before
@@ -6138,6 +6138,25 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - One-step errors unchanged on every capture (position-only change).
     - Open: `hitjump` 97.908 s (208 uu/s) bounces a tick early; Bullet's
       persistent manifold is not ported.
+- `RB-PHYSICS-001-FR-119` (the combined ball-world normal is
+  renormalized; implemented and verified on the owner's captures,
+  ADR-0039): `world::combined_ball_world_contact` normalizes the averaged
+  normal. The normal impulse is unchanged; the friction direction becomes
+  orthogonal to the normal row again.
+  - Why: `hitjump.jsonl` 56.617 s, the ball on a goal's sloped back with
+    its contact point sliding up the slope. The game's friction pushes it
+    down the slope (spin −1.31 → −2.72); with the 0.99-long average the
+    friction row picked up 30% of the 4,694 uu/s normal impulse and
+    pushed up the slope (spin +1.66).
+  - **Verification**:
+    - `world` test `friction_on_a_goal_slope_opposes_the_contact_points_slide`
+      pins the recorded bounce (0, −1608, 757) and spin −2.72;
+      `ball_world_contacts_fold_into_one_at_the_average_normal_and_distance`
+      expects the unit diagonal.
+    - `hitjump` 56.625 s: under 2 uu/s (was 163). One-step ball 0.501 (was
+      0.513); k = 30 ball 20.41 (was 20.88).
+    - `test2` one-step ball 0.099 (was 0.109); k = 30 ball 0.33 (was
+      0.37). `front` and `side` unchanged.
 
 
 ## Architecture and interfaces
@@ -7629,6 +7648,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.123.0 (2026-10-04): `RB-PHYSICS-001-FR-119` — the combined
+  ball-world normal is renormalized (ADR-0039). 424 tests in
+  `rb_physics_bullet`.
 - 0.122.0 (2026-10-04): `RB-PHYSICS-001-FR-118` — ball-world
   penetration is pushed out per point, from RocketSim's 91.25 uu sphere
   (ADR-0038). 423 tests in `rb_physics_bullet`.
