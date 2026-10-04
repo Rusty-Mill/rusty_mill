@@ -19,14 +19,14 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, GetPromptRequestParams,
     GetPromptResponse, GetPromptResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
     PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams,
-    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents,
-    ResourceUpdatedNotificationParam, Role, ServerCapabilities, ServerInfo,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::schemars;
-use rmcp::service::{Peer, RequestContext};
+use rmcp::service::RequestContext;
 use rmcp::RoleServer;
-use rmcp::ServiceExt as _;
 use rmcp::{tool, tool_router};
+use rusty_mcp::subscriptions::ChangeBroadcaster;
 use serde::{Deserialize, Serialize};
 
 use nexus_types::constants::{IPC_TIMEOUT_EXTENDED, IPC_TIMEOUT_LONG, IPC_TIMEOUT_SHORT};
@@ -205,7 +205,7 @@ fn recv_error_is_terminal(err: &nexus_kernel::RecvError) -> bool {
 /// push per session per `OUTPUT_DEBOUNCE`. Best-effort: a no-op when no tokio
 /// runtime is in scope (e.g. a sync test harness), and it exits quietly when the
 /// bus or the client peer closes.
-fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<RoleServer>) {
+fn spawn_terminal_resource_notifier(context: &KernelPluginContext, changes: ChangeBroadcaster) {
     /// Debounce window for screen pushes driven by the output byte stream.
     const OUTPUT_DEBOUNCE: Duration = Duration::from_millis(750);
 
@@ -246,7 +246,7 @@ fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<Ro
                 // A command finished: screen, exit, and command resources changed.
                 NotifyAction::PushResources(kinds) => {
                     for k in kinds {
-                        notify_terminal_resource(&peer, id, k).await;
+                        notify_terminal_resource(&changes, id, k);
                     }
                     last_screen_push.insert(id.to_string(), Instant::now());
                 }
@@ -257,7 +257,7 @@ fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<Ro
                         .get(id)
                         .is_none_or(|t| now.duration_since(*t) >= OUTPUT_DEBOUNCE);
                     if due {
-                        notify_terminal_resource(&peer, id, "screen").await;
+                        notify_terminal_resource(&changes, id, "screen");
                         last_screen_push.insert(id.to_string(), now);
                     }
                 }
@@ -275,11 +275,9 @@ fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<Ro
 }
 
 /// Push one `notifications/resources/updated` for a terminal VT-grid resource.
-async fn notify_terminal_resource(peer: &Peer<RoleServer>, id: &str, kind: &str) {
+fn notify_terminal_resource(changes: &ChangeBroadcaster, id: &str, kind: &str) {
     let uri = format!("{TERMINAL_URI_PREFIX}{id}/{kind}");
-    let _ = peer
-        .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri))
-        .await;
+    changes.resource_updated(uri);
 }
 
 // ── Input types ──────────────────────────────────────────────────────────────
@@ -1151,9 +1149,11 @@ fn dynamic_tool_to_rmcp(t: &crate::dynamic_tools::DynamicTool) -> rmcp::model::T
 ///
 /// Holds an [`Arc<KernelPluginContext>`] and dispatches every tool call
 /// through `context.ipc_call("com.nexus.storage", …)`.
+#[derive(Clone)]
 pub struct NexusMcpServer {
     context: Arc<KernelPluginContext>,
     tool_router: ToolRouter<Self>,
+    changes: ChangeBroadcaster,
 }
 
 impl NexusMcpServer {
@@ -1163,6 +1163,7 @@ impl NexusMcpServer {
         Self {
             context,
             tool_router: Self::tool_router(),
+            changes: ChangeBroadcaster::new(),
         }
     }
 
@@ -1170,15 +1171,16 @@ impl NexusMcpServer {
     ///
     /// # Errors
     /// Returns an error if the transport or server fails to start.
-    pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error>> {
-        let transport = rmcp::transport::io::stdio();
-        // Clone the context before `serve` consumes `self`, so the terminal
-        // resource-change notifier can subscribe to the kernel bus.
+    pub async fn serve(self, config: rusty_mcp::ServerConfig) -> Result<(), rusty_mcp::ServeError> {
         let context = Arc::clone(&self.context);
-        let server: rmcp::service::RunningService<RoleServer, Self> = self.serve(transport).await?;
-        spawn_terminal_resource_notifier(&context, server.peer().clone());
-        server.waiting().await?;
-        Ok(())
+        let changes = self.changes.clone();
+        spawn_terminal_resource_notifier(&context, changes);
+        rusty_mcp::serve(move || Ok(self.clone()), config).await
+    }
+
+    /// Start the server on stdio transport and block until disconnected.
+    pub async fn serve_stdio(self) -> Result<(), rusty_mcp::ServeError> {
+        self.serve(rusty_mcp::ServerConfig::stdio()).await
     }
 
     async fn storage_call<T: serde::de::DeserializeOwned>(
@@ -3736,21 +3738,24 @@ impl NexusMcpServer {
 
 impl rmcp::ServerHandler for NexusMcpServer {
     fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
-        info.capabilities = ServerCapabilities::builder()
-            .enable_tools()
-            .enable_resources()
-            // RFC 0003 — clients may subscribe to terminal resources and receive
-            // notifications/resources/updated as the VT grid changes.
-            .enable_resources_subscribe()
-            // C32 (#385) — forge skills are also exposed as MCP prompts
-            // (see `list_prompts`/`get_prompt` below) so native prompt
-            // pickers (Claude Desktop, Cursor) surface them directly
-            // instead of requiring the nexus_list_skills /
-            // nexus_render_skill tool workaround.
-            .enable_prompts()
-            .build();
-        info.with_instructions(
+        rusty_mcp::server_info(
+            "nexus-mcp",
+            env!("CARGO_PKG_VERSION"),
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                // RFC 0003 — clients may subscribe to terminal resources and receive
+                // notifications/resources/updated as the VT grid changes.
+                .enable_resources_subscribe()
+                // C32 (#385) — forge skills are also exposed as MCP prompts
+                // (see `list_prompts`/`get_prompt` below) so native prompt
+                // pickers (Claude Desktop, Cursor) surface them directly
+                // instead of requiring the nexus_list_skills /
+                // nexus_render_skill tool workaround.
+                .enable_prompts()
+                .build(),
+        )
+        .with_instructions(
             "Nexus MCP server: manage a personal knowledge base of markdown notes. \
              Use nexus_* tools to create, read, update, delete, search, and query notes; \
              list and render authored skill templates from .forge/skills via \
@@ -3858,8 +3863,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
 
     fn list_tools(
         &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<rmcp::model::PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         // DG-39 / PRD-14 §10 — surface dynamic tools alongside the
@@ -3871,9 +3876,23 @@ impl rmcp::ServerHandler for NexusMcpServer {
         for t in crate::dynamic_tools::global().list() {
             items.push(dynamic_tool_to_rmcp(&t));
         }
-        std::future::ready(Ok(ListToolsResult {
-            tools: items,
-            ..Default::default()
+        let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+        let page = rusty_mcp::pagination::page_owned(
+            &items,
+            |tool| tool.name.as_ref(),
+            rusty_mcp::pagination::CursorKind::Tool,
+            cursor,
+            rusty_mcp::pagination::DEFAULT_PAGE_SIZE,
+        );
+        std::future::ready(page.map(|(tools, next_cursor)| {
+            let mut result = ListToolsResult::with_all_items(tools);
+            result.next_cursor = next_cursor;
+            rusty_mcp::__private::apply_cache_hints(
+                &context,
+                &mut result.ttl_ms,
+                &mut result.cache_scope,
+            );
+            result
         }))
     }
 
@@ -3889,8 +3908,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
 
     async fn list_prompts(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, rmcp::ErrorData> {
         // Mirrors `SkillParameter` (nexus-skills/src/lib.rs) — only the
         // fields that map onto `PromptArgument` are captured.
@@ -3913,7 +3932,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
             .skills_call("list", serde_json::json!({}))
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(format!("list_prompts: {e}"), None))?;
-        let prompts = records
+        let prompts: Vec<Prompt> = records
             .into_iter()
             .map(|r| {
                 let arguments = (!r.parameters.is_empty()).then(|| {
@@ -3936,10 +3955,22 @@ impl rmcp::ServerHandler for NexusMcpServer {
                 Prompt::new(r.id, Some(r.description), arguments).with_title(r.name)
             })
             .collect();
-        Ok(ListPromptsResult {
-            prompts,
-            ..Default::default()
-        })
+        let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+        let (prompts, next_cursor) = rusty_mcp::pagination::page_owned(
+            &prompts,
+            |prompt| prompt.name.as_ref(),
+            rusty_mcp::pagination::CursorKind::Prompt,
+            cursor,
+            rusty_mcp::pagination::DEFAULT_PAGE_SIZE,
+        )?;
+        let mut result = ListPromptsResult::with_all_items(prompts);
+        result.next_cursor = next_cursor;
+        rusty_mcp::__private::apply_cache_hints(
+            &context,
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
     }
 
     async fn get_prompt(
@@ -3970,8 +4001,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
         // Same `query_files` shape as nexus_list_notes (server.rs ~390): the
         // storage handler returns Vec<{ path, size_bytes, modified_at }>.
@@ -4006,10 +4037,22 @@ impl rmcp::ServerHandler for NexusMcpServer {
             }
         }
 
-        Ok(ListResourcesResult {
-            resources,
-            ..Default::default()
-        })
+        let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+        let (resources, next_cursor) = rusty_mcp::pagination::page_owned(
+            &resources,
+            |resource| resource.uri.as_str(),
+            rusty_mcp::pagination::CursorKind::Resource,
+            cursor,
+            rusty_mcp::pagination::DEFAULT_PAGE_SIZE,
+        )?;
+        let mut result = ListResourcesResult::with_all_items(resources);
+        result.next_cursor = next_cursor;
+        rusty_mcp::__private::apply_cache_hints(
+            &context,
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
     }
 
     async fn read_resource(
@@ -4069,6 +4112,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
         }
         outcome.map(ReadResourceResponse::from)
     }
+
+    rusty_mcp::forward_subscription_methods!(changes);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

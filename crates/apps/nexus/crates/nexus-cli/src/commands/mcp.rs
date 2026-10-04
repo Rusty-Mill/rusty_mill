@@ -2,7 +2,7 @@
 //! MCP host (connect to external servers, list tools, invoke tools)
 //! through `com.nexus.mcp.host` over `ipc_call`.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
 use nexus_bootstrap::{build_cli_runtime, Runtime};
@@ -23,7 +23,7 @@ const MCP_HOST_PLUGIN: &str = plugin_ids::MCP;
 /// # Errors
 ///
 /// Returns an error if the forge cannot be opened or the server fails to start.
-pub fn serve(app: &App) -> Result<()> {
+pub fn serve(app: &App, transport: rusty_mcp::TransportArg, bind: SocketAddr) -> Result<()> {
     let forge_root = app.forge_root().to_path_buf();
     let runtime = build_cli_runtime(forge_root.clone())
         .with_context(|| format!("failed to build runtime at {}", forge_root.display()))?;
@@ -60,7 +60,12 @@ pub fn serve(app: &App) -> Result<()> {
         .max_blocking_threads(nexus_types::constants::KERNEL_BLOCKING_POOL_SIZE)
         .enable_all()
         .build()?;
-    let result = rt.block_on(server.serve_stdio());
+    let config = match transport {
+        rusty_mcp::TransportArg::Stdio => rusty_mcp::ServerConfig::stdio(),
+        rusty_mcp::TransportArg::Http => rusty_mcp::ServerConfig::http(bind),
+    };
+    rusty_mcp::telemetry::init(&config.log_filter);
+    let result = rt.block_on(server.serve(config));
 
     // Stop the scheduler before this function (and the process) exits
     // so its worker thread doesn't outlive the kernel it's been

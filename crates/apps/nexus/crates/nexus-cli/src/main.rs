@@ -790,7 +790,7 @@ fn main() {
             }
         },
         Commands::Mcp(args) => match args.command {
-            McpCommand::Serve => commands::mcp::serve(&app),
+            McpCommand::Serve { transport, bind } => commands::mcp::serve(&app, transport, bind),
             McpCommand::Servers => commands::mcp::host_servers(&mut app),
             McpCommand::Tools { server } => commands::mcp::host_tools(&mut app, &server),
             McpCommand::Call {
