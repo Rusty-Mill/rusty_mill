@@ -84,7 +84,9 @@ impl Toolchain {
         let sysroot = sysroot
             .canonicalize()
             .map_err(|e| RuntimeError::io(format!("resolving sysroot {}", sysroot.display()), e))?;
-        let rustc = sysroot.join("bin").join("rustc");
+        let rustc = sysroot
+            .join("bin")
+            .join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
         if !rustc.is_file() {
             return Err(RuntimeError::Sandbox(format!(
                 "no compiler at {}",
