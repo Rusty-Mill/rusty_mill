@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use rusty_json::{Map, Number, Value};
 
+use crate::RenderLimits;
 use crate::ast::{BinOp, Expr, Node};
 use crate::template::JinjaError;
 
@@ -15,11 +16,46 @@ type Scope = BTreeMap<String, Value>;
 
 /// Renders `nodes` against `context` (typically a JSON object holding
 /// `messages`, `add_generation_prompt`, `bos_token`, etc.).
-pub fn render(nodes: &[Node], context: &Value) -> Result<String, JinjaError> {
+pub fn render(nodes: &[Node], context: &Value, limits: RenderLimits) -> Result<String, JinjaError> {
     let mut scopes: Vec<Scope> = alloc::vec![Scope::new()];
     let mut out = String::new();
-    render_nodes(nodes, context, &mut scopes, &mut out)?;
+    let mut budget = RenderBudget::new(limits);
+    render_nodes(nodes, context, &mut scopes, &mut out, &mut budget)?;
     Ok(out)
+}
+
+struct RenderBudget {
+    operations_left: u64,
+    max_output_bytes: usize,
+}
+
+impl RenderBudget {
+    fn new(limits: RenderLimits) -> Self {
+        Self {
+            operations_left: limits.max_operations,
+            max_output_bytes: limits.max_output_bytes,
+        }
+    }
+
+    fn spend(&mut self) -> Result<(), JinjaError> {
+        self.operations_left = self
+            .operations_left
+            .checked_sub(1)
+            .ok_or(JinjaError::Limit("render operation limit exceeded"))?;
+        Ok(())
+    }
+
+    fn push(&self, out: &mut String, value: &str) -> Result<(), JinjaError> {
+        let new_len = out
+            .len()
+            .checked_add(value.len())
+            .ok_or(JinjaError::Limit("rendered output exceeds byte limit"))?;
+        if new_len > self.max_output_bytes {
+            return Err(JinjaError::Limit("rendered output exceeds byte limit"));
+        }
+        out.push_str(value);
+        Ok(())
+    }
 }
 
 fn render_nodes(
@@ -27,13 +63,18 @@ fn render_nodes(
     context: &Value,
     scopes: &mut Vec<Scope>,
     out: &mut String,
+    budget: &mut RenderBudget,
 ) -> Result<(), JinjaError> {
     for node in nodes {
+        budget.spend()?;
         match node {
-            Node::Text(s) => out.push_str(s),
-            Node::Output(expr) => out.push_str(&display(&eval(expr, context, scopes)?)),
+            Node::Text(s) => budget.push(out, s)?,
+            Node::Output(expr) => {
+                let value = display(&eval(expr, context, scopes, budget)?);
+                budget.push(out, &value)?;
+            }
             Node::Set { var, value } => {
-                let v = eval(value, context, scopes)?;
+                let v = eval(value, context, scopes, budget)?;
                 scopes
                     .last_mut()
                     .expect("render always keeps at least one scope")
@@ -45,15 +86,15 @@ fn render_nodes(
             } => {
                 let mut matched = false;
                 for (cond, body) in branches {
-                    if truthy(&eval(cond, context, scopes)?) {
-                        render_nodes(body, context, scopes, out)?;
+                    if truthy(&eval(cond, context, scopes, budget)?) {
+                        render_nodes(body, context, scopes, out, budget)?;
                         matched = true;
                         break;
                     }
                 }
                 if !matched {
                     if let Some(else_body) = else_branch {
-                        render_nodes(else_body, context, scopes, out)?;
+                        render_nodes(else_body, context, scopes, out, budget)?;
                     }
                 }
             }
@@ -62,9 +103,10 @@ fn render_nodes(
                 iterable,
                 body,
             } => {
-                let items = eval_iterable(iterable, context, scopes)?;
+                let items = eval_iterable(iterable, context, scopes, budget)?;
                 let len = items.len();
                 for (i, item) in items.into_iter().enumerate() {
+                    budget.spend()?;
                     let mut scope = Scope::new();
                     scope.insert(var.clone(), item);
                     let mut loop_obj = Map::new();
@@ -75,7 +117,7 @@ fn render_nodes(
                     loop_obj.insert("length".into(), Value::Number(Number::from(len as i64)));
                     scope.insert("loop".into(), Value::Object(loop_obj));
                     scopes.push(scope);
-                    let result = render_nodes(body, context, scopes, out);
+                    let result = render_nodes(body, context, scopes, out, budget);
                     scopes.pop();
                     result?;
                 }
@@ -85,8 +127,13 @@ fn render_nodes(
     Ok(())
 }
 
-fn eval_iterable(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Vec<Value>, JinjaError> {
-    match eval(expr, context, scopes)? {
+fn eval_iterable(
+    expr: &Expr,
+    context: &Value,
+    scopes: &[Scope],
+    budget: &mut RenderBudget,
+) -> Result<Vec<Value>, JinjaError> {
+    match eval(expr, context, scopes, budget)? {
         Value::Array(items) => Ok(items),
         Value::Null => Ok(Vec::new()),
         _ => Err(JinjaError::Expression("'for' target is not iterable")),
@@ -102,17 +149,26 @@ fn lookup_var(name: &str, context: &Value, scopes: &[Scope]) -> Option<Value> {
     context.get(name).cloned()
 }
 
-fn is_defined(expr: &Expr, context: &Value, scopes: &[Scope]) -> bool {
-    match expr {
+fn is_defined(
+    expr: &Expr,
+    context: &Value,
+    scopes: &[Scope],
+    budget: &mut RenderBudget,
+) -> Result<bool, JinjaError> {
+    Ok(match expr {
         Expr::Var(name) => lookup_var(name, context, scopes).is_some(),
-        Expr::Attr(base, name) => eval(base, context, scopes)
-            .map(|v| v.get(name).is_some())
-            .unwrap_or(false),
+        Expr::Attr(base, name) => eval(base, context, scopes, budget)?.get(name).is_some(),
         _ => true,
-    }
+    })
 }
 
-fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaError> {
+fn eval(
+    expr: &Expr,
+    context: &Value,
+    scopes: &[Scope],
+    budget: &mut RenderBudget,
+) -> Result<Value, JinjaError> {
+    budget.spend()?;
     match expr {
         Expr::Str(s) => Ok(Value::String(s.clone())),
         Expr::Num(n) => Ok(f64_to_value(*n)),
@@ -120,12 +176,12 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
         Expr::None => Ok(Value::Null),
         Expr::Var(name) => Ok(lookup_var(name, context, scopes).unwrap_or(Value::Null)),
         Expr::Attr(base, name) => {
-            let base_val = eval(base, context, scopes)?;
+            let base_val = eval(base, context, scopes, budget)?;
             Ok(base_val.get(name).cloned().unwrap_or(Value::Null))
         }
         Expr::Index(base, idx) => {
-            let base_val = eval(base, context, scopes)?;
-            let idx_val = eval(idx, context, scopes)?;
+            let base_val = eval(base, context, scopes, budget)?;
+            let idx_val = eval(idx, context, scopes, budget)?;
             let i = num(&idx_val) as i64;
             if i < 0 {
                 return Ok(Value::Null);
@@ -135,30 +191,30 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
                 .cloned()
                 .unwrap_or(Value::Null))
         }
-        Expr::Not(e) => Ok(Value::Bool(!truthy(&eval(e, context, scopes)?))),
+        Expr::Not(e) => Ok(Value::Bool(!truthy(&eval(e, context, scopes, budget)?))),
         Expr::Concat(a, b) => {
-            let mut s = display(&eval(a, context, scopes)?);
-            s.push_str(&display(&eval(b, context, scopes)?));
+            let mut s = display(&eval(a, context, scopes, budget)?);
+            s.push_str(&display(&eval(b, context, scopes, budget)?));
             Ok(Value::String(s))
         }
-        Expr::BinOp(op, a, b) => eval_binop(op, a, b, context, scopes),
+        Expr::BinOp(op, a, b) => eval_binop(op, a, b, context, scopes, budget),
         Expr::Filter(base, name, args) => {
-            let base_val = eval(base, context, scopes)?;
+            let base_val = eval(base, context, scopes, budget)?;
             let arg_vals: Vec<Value> = args
                 .iter()
-                .map(|a| eval(a, context, scopes))
+                .map(|a| eval(a, context, scopes, budget))
                 .collect::<Result<_, _>>()?;
             apply_filter(name, base_val, &arg_vals)
         }
         Expr::Test(base, name, negate) => {
             let result = match name.as_str() {
-                "defined" => is_defined(base, context, scopes),
-                "none" => matches!(eval(base, context, scopes)?, Value::Null),
-                "string" => eval(base, context, scopes)?.is_string(),
-                "number" => eval(base, context, scopes)?.is_number(),
-                "mapping" => eval(base, context, scopes)?.is_object(),
+                "defined" => is_defined(base, context, scopes, budget)?,
+                "none" => matches!(eval(base, context, scopes, budget)?, Value::Null),
+                "string" => eval(base, context, scopes, budget)?.is_string(),
+                "number" => eval(base, context, scopes, budget)?.is_number(),
+                "mapping" => eval(base, context, scopes, budget)?.is_object(),
                 "iterable" => matches!(
-                    eval(base, context, scopes)?,
+                    eval(base, context, scopes, budget)?,
                     Value::Array(_) | Value::String(_) | Value::Object(_)
                 ),
                 _ => return Err(JinjaError::Expression("unknown 'is' test")),
@@ -166,8 +222,8 @@ fn eval(expr: &Expr, context: &Value, scopes: &[Scope]) -> Result<Value, JinjaEr
             Ok(Value::Bool(result != *negate))
         }
         Expr::In(needle, haystack, negate) => {
-            let n = eval(needle, context, scopes)?;
-            let h = eval(haystack, context, scopes)?;
+            let n = eval(needle, context, scopes, budget)?;
+            let h = eval(haystack, context, scopes, budget)?;
             let result = match &h {
                 Value::Array(items) => items.contains(&n),
                 Value::String(s) => n
@@ -188,24 +244,25 @@ fn eval_binop(
     b: &Expr,
     context: &Value,
     scopes: &[Scope],
+    budget: &mut RenderBudget,
 ) -> Result<Value, JinjaError> {
     if *op == BinOp::And {
-        let av = eval(a, context, scopes)?;
+        let av = eval(a, context, scopes, budget)?;
         if !truthy(&av) {
             return Ok(Value::Bool(false));
         }
-        return Ok(Value::Bool(truthy(&eval(b, context, scopes)?)));
+        return Ok(Value::Bool(truthy(&eval(b, context, scopes, budget)?)));
     }
     if *op == BinOp::Or {
-        let av = eval(a, context, scopes)?;
+        let av = eval(a, context, scopes, budget)?;
         if truthy(&av) {
             return Ok(Value::Bool(true));
         }
-        return Ok(Value::Bool(truthy(&eval(b, context, scopes)?)));
+        return Ok(Value::Bool(truthy(&eval(b, context, scopes, budget)?)));
     }
 
-    let av = eval(a, context, scopes)?;
-    let bv = eval(b, context, scopes)?;
+    let av = eval(a, context, scopes, budget)?;
+    let bv = eval(b, context, scopes, budget)?;
     Ok(match op {
         BinOp::Add => match (&av, &bv) {
             (Value::String(sa), Value::String(sb)) => Value::String(format!("{sa}{sb}")),

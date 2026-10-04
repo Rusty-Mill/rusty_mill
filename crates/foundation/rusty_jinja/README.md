@@ -62,6 +62,13 @@ The `ChatMessage`/`TemplateEnvironment` convenience wrapper still exists for
 the simple "just render a message list as ChatML" case, now backed by this
 real engine instead of hand-formatted strings.
 
+## Render limits
+
+`Template::render` fails closed after 1,000,000 render operations or 8 MiB of
+UTF-8 output. Call `Template::render_with_limits` with a `RenderLimits` value
+when a caller needs a smaller application-specific budget. Both limits return
+`JinjaError::Limit` rather than partially rendered output.
+
 ## Testing
 
 ```

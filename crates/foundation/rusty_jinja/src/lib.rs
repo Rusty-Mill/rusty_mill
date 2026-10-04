@@ -48,6 +48,24 @@ use ast::Node;
 // `render` plus the `TemplateEnvironment` convenience wrapper.
 pub use template::JinjaError;
 
+/// Resource limits applied while rendering a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderLimits {
+    /// Maximum number of AST nodes, loop iterations, and expressions evaluated.
+    pub max_operations: u64,
+    /// Maximum number of UTF-8 bytes in the rendered output.
+    pub max_output_bytes: usize,
+}
+
+impl Default for RenderLimits {
+    fn default() -> Self {
+        Self {
+            max_operations: 1_000_000,
+            max_output_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
 /// A compiled template, ready to render against any context.
 pub struct Template {
     nodes: Vec<Node>,
@@ -64,7 +82,16 @@ impl Template {
     /// Renders this template against `context` (typically a JSON object
     /// holding `messages`, `add_generation_prompt`, `bos_token`, etc.).
     pub fn render(&self, context: &Value) -> Result<String, JinjaError> {
-        render::render(&self.nodes, context)
+        self.render_with_limits(context, RenderLimits::default())
+    }
+
+    /// Renders this template with explicit operation and output limits.
+    pub fn render_with_limits(
+        &self,
+        context: &Value,
+        limits: RenderLimits,
+    ) -> Result<String, JinjaError> {
+        render::render(&self.nodes, context, limits)
     }
 }
 
@@ -151,6 +178,44 @@ mod tests {
     fn quoted_closing_delimiters_render_as_literal_content() {
         assert_eq!(render(r#"{{ "}}" }}"#).unwrap(), "}}");
         assert_eq!(render("{{ '}}' }}").unwrap(), "}}");
+    }
+
+    #[test]
+    fn render_refuses_output_past_the_byte_limit() {
+        let template = Template::compile("four").unwrap();
+        let error = template
+            .render_with_limits(
+                &Value::Object(Map::new()),
+                RenderLimits {
+                    max_operations: 10,
+                    max_output_bytes: 3,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            JinjaError::Limit("rendered output exceeds byte limit")
+        );
+    }
+
+    #[test]
+    fn render_refuses_work_past_the_operation_limit() {
+        let template = Template::compile("{% for item in items %}x{% endfor %}").unwrap();
+        let mut context = Map::new();
+        context.insert(
+            "items".into(),
+            Value::Array(alloc::vec![Value::Null, Value::Null]),
+        );
+        let error = template
+            .render_with_limits(
+                &Value::Object(context),
+                RenderLimits {
+                    max_operations: 3,
+                    max_output_bytes: 100,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, JinjaError::Limit("render operation limit exceeded"));
     }
 
     #[test]
