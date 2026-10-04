@@ -84,6 +84,50 @@ describe('the detail pane', () => {
     expect(name).toHaveValue('Washing up')
   })
 
+  it('renames against the edit-start version and preserves both deliberate conflict choices', async () => {
+    const user = userEvent.setup()
+    const { api, services } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const update = vi.spyOn(api, 'updateCard')
+    const name = within(pane()).getByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'My dishes')
+
+    await api.updateCard(dishes.id, { name: 'Their dishes' }, dishes.etag) // the other client wins first
+    const realSnapshot = api.snapshot.bind(api)
+    let releaseRefresh!: () => void
+    const refreshGate = new Promise<void>((resolve) => (releaseRefresh = resolve))
+    vi.spyOn(api, 'snapshot').mockImplementationOnce(async () => {
+      await refreshGate
+      return realSnapshot()
+    })
+    const refresh = services.store.getState().refresh()
+    releaseRefresh()
+    await refresh
+    expect(name).toHaveValue('My dishes')
+
+    await user.type(name, '{Enter}')
+    expect(await within(pane()).findByRole('alert')).toHaveTextContent(/name changed elsewhere/i)
+    expect(name).toHaveValue('My dishes')
+    expect(update.mock.calls.at(-1)?.[2]).toBe(dishes.etag)
+    await user.click(within(pane()).getByRole('button', { name: 'Overwrite' }))
+    await waitFor(() => expect(name).toHaveValue('My dishes'))
+    await waitFor(async () => expect((await api.getCard(dishes.id)).name).toBe('My dishes'))
+
+    await user.clear(name)
+    await user.type(name, 'Second attempt')
+    const ours = await api.getCard(dishes.id)
+    await api.updateCard(dishes.id, { name: 'Third-party name' }, ours.etag)
+    await services.store.getState().refresh()
+    await user.type(name, '{Enter}')
+    expect(await within(pane()).findByRole('alert')).toBeInTheDocument()
+    expect(name).toHaveValue('Second attempt')
+    await user.click(within(pane()).getByRole('button', { name: 'Discard mine' }))
+    expect(name).toHaveValue('Third-party name')
+    expect((await api.getCard(dishes.id)).name).toBe('Third-party name')
+  })
+
   it('splits a card through the dialog, lists the children, and reorders them', async () => {
     const user = userEvent.setup()
     const { api, router } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
@@ -263,5 +307,34 @@ describe('the detail pane', () => {
     expect(await api.getCard(dishes.id)).toMatchObject({ execution: `${dishes.execution} mine`, notes: '' })
     await user.click(within(pane()).getByRole('button', { name: 'Save' }))
     await waitFor(async () => expect((await api.getCard(dishes.id)).notes).toBe('typed meanwhile'))
+  })
+
+  it('keeps an in-flight edit back to the previous base and saves it next', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const execution = within(pane()).getByLabelText('Execution')
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      const saved = await real(id, patch, etag)
+      await gate
+      return saved
+    })
+
+    await user.clear(execution)
+    await user.type(execution, 'B')
+    await user.click(within(pane()).getByRole('button', { name: 'Save' }))
+    await user.clear(execution)
+    await user.type(execution, dishes.execution) // a real later edit, despite equalling the old base
+    release()
+
+    await waitFor(() => expect(execution).toHaveValue(dishes.execution))
+    expect(within(pane()).getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(await api.getCard(dishes.id)).toMatchObject({ execution: 'B' })
+    await user.click(within(pane()).getByRole('button', { name: 'Save' }))
+    await waitFor(async () => expect((await api.getCard(dishes.id)).execution).toBe(dishes.execution))
   })
 })
