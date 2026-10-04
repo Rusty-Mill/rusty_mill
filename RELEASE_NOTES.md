@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: calendar test no longer fails on Sundays
+**2026-10-04**
+
+- **Fixed:** `CalendarPage.test.tsx`'s repeating-task test anchored a daily repeat at today in a Monday-start week view; on a Sunday, the week's last day, the task rendered once and `expected 1 to be greater than 1` failed. The repeat now starts on the visible week's first day. Verified with the clock pinned to each weekday: the old test failed only on Sunday, the new one passes on all seven. Test-only; no app code changed.
+
+---
+
 ## Foundation spinlocks share one implementation
 **2026-10-02** · [#411](https://github.com/Rusty-Mill/rusty_mill/issues/411)
 
