@@ -6,6 +6,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -83,6 +84,8 @@ pub struct FakeCommand {
     pub calls: Mutex<Vec<Call>>,
     /// The `remove_env` list passed with each call, in the same order.
     pub scrubbed: Mutex<Vec<Vec<String>>>,
+    /// The working directory asked for with each call, in the same order.
+    pub cwds: Mutex<Vec<Option<PathBuf>>>,
 }
 
 impl FakeCommand {
@@ -92,6 +95,7 @@ impl FakeCommand {
             result,
             calls: Mutex::new(Vec::new()),
             scrubbed: Mutex::new(Vec::new()),
+            cwds: Mutex::new(Vec::new()),
         }
     }
 
@@ -111,8 +115,9 @@ pub fn exit(status: i32, stdout: &str, stderr: &str) -> Exit {
 }
 
 impl CommandRunner for FakeCommand {
-    fn run_scrubbed(
+    fn run_in(
         &self,
+        cwd: Option<&Path>,
         argv: &[String],
         stdin: &[u8],
         timeout: Duration,
@@ -120,8 +125,10 @@ impl CommandRunner for FakeCommand {
     ) -> Result<Exit, ExecError> {
         let mut calls = self.calls.lock().map_err(|_| poisoned())?;
         let mut scrubbed = self.scrubbed.lock().map_err(|_| poisoned())?;
+        let mut cwds = self.cwds.lock().map_err(|_| poisoned())?;
         calls.push((argv.to_vec(), stdin.to_vec(), timeout));
         scrubbed.push(remove_env.iter().map(|s| (*s).to_owned()).collect());
+        cwds.push(cwd.map(Path::to_path_buf));
         self.result.clone()
     }
 }

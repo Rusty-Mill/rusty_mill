@@ -10,9 +10,9 @@ use orch_core::goal::StopRule;
 use orch_core::task::{Agent, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
-use orch_cli::{excerpt, parse, CommandRunner, ExecError, StdCommand};
+use orch_cli::{excerpt, output_schema, parse, CommandRunner, ExecError, StdCommand};
 
-use crate::{output_schema, render};
+use crate::render;
 
 /// Codex reads the repo and reasons before answering; ten minutes by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);

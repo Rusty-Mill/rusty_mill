@@ -1,8 +1,8 @@
 //! `Agent::Codex` over the Codex CLI, read-only (ADR-0006).
 //!
 //! A thin adapter on [`orch_cli`]. This crate adds the fixed `codex exec`
-//! argv, the read-only sandbox, the output schema and last-message file
-//! that give one clean JSON object back, the footer, and the mapping of
+//! argv, the read-only sandbox, the shared output schema and last-message
+//! file that give one clean JSON object back, the footer, and the mapping of
 //! Codex's stderr to classified failures so "not logged in" is an unavailable
 //! prerequisite while "rate limited" remains transient.
 //!
@@ -16,8 +16,9 @@
 
 mod agent;
 mod prompt;
-mod schema;
 
 pub use agent::{CodexAgent, DEFAULT_TIMEOUT, SCRUBBED_ENV};
+/// The reply schema handed to `--output-schema`; shared with the Claude
+/// adapter and kept in `orch-cli`.
+pub use orch_cli::output_schema;
 pub use prompt::render;
-pub use schema::output_schema;

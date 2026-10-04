@@ -11,8 +11,9 @@ cargo run -p rusty_orch -- --help
 | Flag | Meaning |
 |---|---|
 | `--ollama-model <name>` | model for `Agent::Local`; env `ORCH_OLLAMA_MODEL`; default `llama3.2` |
-| `--codex-repo <dir>` | repository Codex may read; env `ORCH_CODEX_REPO`; default: current directory |
+| `--repo <dir>` | repository Codex and Claude read, as their working directory; env `ORCH_REPO`; default: current directory. `--codex-repo` and `ORCH_CODEX_REPO` are aliases |
 | `--codex-model <name>` | model for `Agent::Codex`; default: Codex's own |
+| `--claude-model <name>` | model for `Agent::Claude`; default: Claude Code's own |
 | `--interactive` | when a card blocks on a question, read the answer from stdin and keep going |
 | `--json` | print the report as one JSON object instead of text |
 | `--state <dir>` | save the plan, board, and ledger there after every dispatcher run and answer round, and resume from it on the next run; env `RUSTY_ORCH_STATE`; default: in memory only |
@@ -36,7 +37,7 @@ The goal contract fields of `orch_core::goal::GoalDraft` by name (`goal`, `done_
 
 `stop` is `checkpoint` or `best_effort`. Under `checkpoint` a card that asks a question blocks until a human answers (exit `3`, or `--interactive`). Under `best_effort` the adapters withdraw the `question` kind and tell the agent to write an `assumption` entry stating what it takes as true and continue; the run ends without a human and the text report lists every assumption in its own block ([ADR-0011](../../docs/adr/0011-best-effort-stop-rule.md)).
 
-Routing defaults: Codex for research, design, and implement; the local model for triage; reviewers `local` then `codex`. `routing`, when present, must be an object; anything else is rejected. Neither adapter serves `implement` yet, so such a card fails at once (ADR-0007).
+Routing defaults: Codex for research, design, and implement; the local model for triage; reviewers `local` then `codex`. Claude is reached by naming `claude` in `routing` ([ADR-0012](../../docs/adr/0012-claude-adapter.md)); `gemini` has no adapter yet. `routing`, when present, must be an object; anything else is rejected. No adapter serves `implement` yet, so such a card fails at once (ADR-0007).
 
 A review card needs no `refs` to see what it reviews: the shared renderer resolves the reviewed task's live entries, and the answers to them, at render time (`UNDER REVIEW`), so the author never has to guess entry ids.
 

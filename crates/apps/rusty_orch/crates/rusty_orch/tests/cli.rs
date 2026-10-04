@@ -20,8 +20,9 @@ fn args(interactive: bool, json: bool) -> Args {
     Args {
         goal: PathBuf::from("goal.json"),
         ollama_model: "m".into(),
-        codex_repo: PathBuf::from("."),
+        repo: PathBuf::from("."),
         codex_model: None,
+        claude_model: None,
         interactive,
         json,
         state: None,
