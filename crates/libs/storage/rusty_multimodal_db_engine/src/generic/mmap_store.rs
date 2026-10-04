@@ -836,6 +836,16 @@ where
             return Err(InsertError::Duplicate(id));
         }
         self.log_record(&record)?;
+        #[cfg(feature = "test-support")]
+        if crate::test_support::take_fault(|fault| {
+            fault == crate::test_support::Fault::InsertAfterLog
+        })
+        .is_some()
+        {
+            return Err(InsertError::Durability(DurabilityError::Io(
+                std::io::Error::other("injected interruption after record append"),
+            )));
+        }
         let positions = self
             .file
             .append_committed_slots([(id, record.scannable_value())])?;

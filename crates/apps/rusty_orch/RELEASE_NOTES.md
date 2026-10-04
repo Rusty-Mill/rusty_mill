@@ -4,6 +4,18 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Resume a blocked run: `--state <dir>`
+**2026-10-03** · (link once pushed)
+
+- **Added:** `orch-store`, persistence over the embedded `rusty_multimodal_db_engine` (libs layer, the allowed edge). One snapshot record per goal holds the plan, the board, the ledger, and a fingerprint of the goal file; a save is one durable `replace`, so no journal is needed. `load` rebuilds the state through `Plan::add` and the lifecycle transitions, `Board::append`, and the new `Ledger::from_counts`, so every `orch-core` invariant is checked again and a bad snapshot is refused as corrupt. The directory is locked per process.
+- **Added:** `rusty_orch run <goal.json> --state <dir>` (env `RUSTY_ORCH_STATE`). The state is saved after every dispatcher run and every answer round; the next run on the same directory and goal file continues from it, and calls present in the recovered checkpoint count against both ceilings. Abrupt termination can repeat work and calls since the checkpoint. A goal file that no longer matches the saved fingerprint is refused (exit 1). Without the flag the run stays in memory as before. The wall clock is per invocation, so a goal waiting on a human does not spend it.
+- **Changed:** `orch-dispatch`: additive `Ledger::from_counts`. ARCHITECTURE's board-store row and ADR-0003's `rusty_sqlite` row are superseded. Root manifest gains the `orch-store` member and entry; `docs/WORKSPACE-MAP.md` regenerated.
+- **Deviation, stated:** `orch-store` depends on `serde` (the engine's record bound) and carries the engine's pinned registry crates transitively; it and the dependent binary require Rust 1.89. The initial positional-bincode format is `GoalRecord::v1`; layout changes require an explicit reader/migration or a new rejecting tag.
+- **Tests:** store round trip through reopen; deterministic insert- and replace-after-log recovery; populated v1 golden bytes, corrupt-snapshot reconstruction, and wrong-tag rejection; partial-answer I/O failure persistence; repeated in-process entry-point resume calls; and a real two-process binary reopen using a scripted local CLI. The injected faults are not OS process-crash tests. ADR-0010.
+- Out of scope, by choice: per-step saving (needs a dispatcher seam), multi-goal directories, a separate answer command, Claude and Gemini adapters, `StopRule::BestEffort`.
+
+---
+
 ## The command: `rusty_orch run`
 **2026-10-03** · (link once pushed)
 

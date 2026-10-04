@@ -24,10 +24,20 @@ fn args(interactive: bool, json: bool) -> Args {
         codex_model: None,
         interactive,
         json,
+        state: None,
     }
 }
 
 fn run(args: &Args, runner: FakeAgent, stdin: &str) -> (u8, String, String) {
+    run_goal(args, GOAL, runner, stdin).expect("run")
+}
+
+fn run_goal(
+    args: &Args,
+    goal: &str,
+    runner: FakeAgent,
+    stdin: &str,
+) -> Result<(u8, String, String), String> {
     let mut stdin = Cursor::new(stdin.as_bytes().to_vec());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -37,13 +47,13 @@ fn run(args: &Args, runner: FakeAgent, stdin: &str) -> (u8, String, String) {
             stdout: &mut stdout,
             stderr: &mut stderr,
         };
-        cli::run(args, GOAL, runner, &mut streams).expect("run")
+        cli::run(args, goal, runner, &mut streams).map_err(|e| e.to_string())?
     };
-    (
+    Ok((
         code,
         String::from_utf8(stdout).expect("utf8"),
         String::from_utf8(stderr).expect("utf8"),
-    )
+    ))
 }
 
 #[test]
@@ -220,4 +230,114 @@ fn a_malformed_reply_never_reaches_progress() {
     assert!(error.contains(SENTINEL), "{error}");
     assert!(!stderr.contains(SENTINEL), "{stderr}");
     assert_eq!(progress_lines(&stderr).len(), 1);
+}
+
+/// A directory of our own under the OS temp dir; tests run concurrently.
+fn state_dir(label: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("rusty_orch_cli_{label}_{}_{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+fn with_state(mut args: Args, dir: &std::path::Path) -> Args {
+    args.state = Some(dir.to_path_buf());
+    args
+}
+
+fn ended_kind(stdout: &str) -> String {
+    Value::parse(stdout)
+        .expect("one JSON document")
+        .get("ended")
+        .and_then(|e| e.get("kind"))
+        .and_then(|k| k.as_str())
+        .expect("ended.kind")
+        .to_owned()
+}
+
+#[test]
+fn a_blocked_run_resumes_in_the_next_process_with_its_ledger() {
+    let dir = state_dir("resume");
+    // Process one: the card asks a question, nobody answers, exit 3.
+    let first = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
+    let (code, stdout, _) = run(&with_state(args(false, true), &dir), first, "");
+    assert_eq!(code, EXIT_BLOCKED);
+    assert_eq!(ended_kind(&stdout), "blocked");
+
+    // Process two: the answer arrives, the card resumes, and the ledger
+    // already holds the first call. The fake is fresh, so the one reply it
+    // has is the resumed call: no call is replayed from process one.
+    let second = FakeAgent::new([Reply::Write(vec![EntryKind::Finding {
+        confidence: Confidence::High,
+    }])]);
+    let (code, stdout, stderr) = run(&with_state(args(true, true), &dir), second, "go on\n");
+    assert_eq!(code, EXIT_FINISHED, "{stderr}");
+    let json = Value::parse(&stdout).expect("one JSON document");
+    assert_eq!(ended_kind(&stdout), "finished");
+    assert_eq!(json.get("calls").and_then(|c| c.as_u64()), Some(2));
+    assert!(stderr.contains("E-1: fake Question"), "{stderr}");
+    assert!(
+        stderr.contains("run: blocked on 1 card(s) after 1 call(s)"),
+        "the first run of process two makes no call:\n{stderr}"
+    );
+    assert!(stderr.contains("run: finished after 2 call(s)"), "{stderr}");
+
+    // Process three: nothing left to do, nothing called.
+    let third = FakeAgent::new([]);
+    let (code, stdout, _) = run(&with_state(args(false, true), &dir), third, "");
+    assert_eq!(code, EXIT_FINISHED);
+    assert_eq!(ended_kind(&stdout), "finished");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_changed_goal_file_is_refused_against_saved_state() {
+    let dir = state_dir("changed");
+    let first = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
+    let (code, _, _) = run(&with_state(args(false, true), &dir), first, "");
+    assert_eq!(code, EXIT_BLOCKED);
+
+    let changed = GOAL.replace("\"instruction\":\"i\"", "\"instruction\":\"j\"");
+    let err = run_goal(
+        &with_state(args(false, true), &dir),
+        &changed,
+        FakeAgent::new([]),
+        "",
+    )
+    .expect_err("a different goal file must not resume");
+    assert!(err.contains("goal file differs"), "{err}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_answer_given_before_stopping_is_saved() {
+    let dir = state_dir("answer_saved");
+    let goal = GOAL.replace("\"max_calls\":2", "\"max_calls\":3");
+    let first = FakeAgent::new([Reply::Write(vec![EntryKind::Question])]);
+    // The answer lands, the card resumes, and the fake has no reply left:
+    // that call fails transiently (exit 4), but the answer and both calls
+    // are saved for the next process.
+    let (code, _, _) =
+        run_goal(&with_state(args(true, true), &dir), &goal, first, "yes\n").expect("run");
+    assert_eq!(code, EXIT_FAILED);
+
+    let second = FakeAgent::new([Reply::Write(vec![EntryKind::Finding {
+        confidence: Confidence::Low,
+    }])]);
+    let (code, stdout, _) =
+        run_goal(&with_state(args(false, true), &dir), &goal, second, "").expect("run");
+    assert_eq!(code, EXIT_FINISHED, "{stdout}");
+    let json = Value::parse(&stdout).expect("one JSON document");
+    assert_eq!(json.get("calls").and_then(|c| c.as_u64()), Some(3));
+    let kinds: Vec<String> = json
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e.get("kind").and_then(|k| k.as_str()).map(str::to_owned))
+        .collect();
+    assert_eq!(kinds, ["question", "answer", "finding"], "{stdout}");
+    let _ = std::fs::remove_dir_all(dir);
 }

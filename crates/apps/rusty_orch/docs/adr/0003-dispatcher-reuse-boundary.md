@@ -13,7 +13,7 @@ The in-memory dispatcher (`orch-dispatch`) needs a step loop, call metering, rol
 | Agent adapters, Ollama | `rp-providers`, `rusty_llama` | apps / libs | ignore (P1) | `rp-providers` is a forbidden edge and HTTP-only; `rusty_llama` is an in-process inference engine, not a CLI adapter. Revisit when real adapters land. |
 | Worktree isolation | `sessionmgr-git` (`rusty_yirp`) | apps | ignore (P1) | `SystemGit` implements `sessionmgr_core::ports::GitPort::worktree_add`; exactly right, but a forbidden edge today. |
 | Subprocess running | `proc-runner` | platform | ignore; depend on `contract` later | `proc-runner` is a binary. The reusable piece is `contract::ProcessRunner` + `compat::NativeProcessRunner` (platform layer, allowed). Out of scope until a real CLI adapter exists. |
-| Plan/Board persistence | `rusty_sqlite` | libs | depend later | Allowed edge; persistence is out of P1 scope. |
+| Plan/Board persistence | `rusty_sqlite` | libs | depend later | Allowed edge; persistence is out of P1 scope. *Superseded by [ADR-0010](./0010-persistence-on-multimodal-db.md): `orch-store` embeds `rusty_multimodal_db_engine` instead.* |
 
 ## Decision
 - `orch-dispatch` (at `crates/apps/rusty_orch/crates/orch-dispatch`) depends only on `orch-core` in P1. It defines the `AgentRunner` port, a validated routing table, and a call meter.

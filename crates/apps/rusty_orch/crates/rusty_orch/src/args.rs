@@ -15,6 +15,8 @@ options:
   --codex-repo <dir>      repository Codex may read    [env ORCH_CODEX_REPO, default: current dir]
   --codex-model <name>    model for Agent::Codex       [default: Codex's own]
   --interactive           answer open questions from stdin and keep going
+  --state <dir>           save the plan, board, and ledger there and resume
+                          from it on the next run      [env RUSTY_ORCH_STATE]
   --json                  print the report as one JSON object
   -h, --help              this text
 
@@ -29,6 +31,8 @@ pub struct Args {
     pub codex_model: Option<String>,
     pub interactive: bool,
     pub json: bool,
+    /// Where to persist and resume from; `None` keeps the run in memory.
+    pub state: Option<PathBuf>,
 }
 
 /// The two ways parsing can end without an [`Args`].
@@ -60,6 +64,7 @@ pub fn parse(
     let mut codex_model = None;
     let mut interactive = false;
     let mut json = false;
+    let mut state = env("RUSTY_ORCH_STATE").map(PathBuf::from);
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--ollama-model" => ollama_model = Some(value(&arg, argv.next())?),
@@ -67,6 +72,7 @@ pub fn parse(
             "--codex-model" => codex_model = Some(value(&arg, argv.next())?),
             "--interactive" => interactive = true,
             "--json" => json = true,
+            "--state" => state = Some(PathBuf::from(value(&arg, argv.next())?)),
             "-h" | "--help" => return Err(ArgsError::Help),
             flag if flag.starts_with('-') => return Err(usage(format!("unknown option {flag:?}"))),
             _ if goal.is_none() => goal = Some(PathBuf::from(arg)),
@@ -80,6 +86,7 @@ pub fn parse(
         codex_model,
         interactive,
         json,
+        state,
     })
 }
 
@@ -112,6 +119,23 @@ mod tests {
         assert_eq!(a.codex_repo, PathBuf::from("/work"));
         assert_eq!(a.codex_model, None);
         assert!(!a.interactive && !a.json);
+        assert_eq!(a.state, None);
+    }
+
+    #[test]
+    fn state_comes_from_the_flag_or_the_environment() {
+        let env = |k: &str| (k == "RUSTY_ORCH_STATE").then(|| "/env/state".to_owned());
+        let a = parse(argv("run g.json"), env, PathBuf::from("/work")).expect("ok");
+        assert_eq!(a.state, Some(PathBuf::from("/env/state")));
+        let a = parse(
+            argv("run --state .orch g.json"),
+            env,
+            PathBuf::from("/work"),
+        )
+        .expect("ok");
+        assert_eq!(a.state, Some(PathBuf::from(".orch")));
+        let e = parse(argv("run g.json --state"), no_env, PathBuf::from("/work"));
+        assert_eq!(e, Err(ArgsError::Usage("--state needs a value".to_owned())));
     }
 
     #[test]
