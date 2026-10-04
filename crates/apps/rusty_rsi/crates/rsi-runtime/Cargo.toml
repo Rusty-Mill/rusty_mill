@@ -14,7 +14,10 @@ layer = "apps"
 [dependencies]
 rsi-core = { path = "../rsi-core" }
 rusty_err = { workspace = true }
-rusty_json = { workspace = true, default-features = false, features = ["std"] }
+# A path dependency, not `workspace = true`: the workspace entry keeps
+# rusty_json's default features (which pull in external serde), and Cargo
+# ignores `default-features = false` on an inherited dependency.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform = { workspace = true }

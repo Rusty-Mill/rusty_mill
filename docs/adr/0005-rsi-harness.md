@@ -244,6 +244,29 @@ group. If a task has no submission, it scores the task's declared floor
 - **Mutation check.** With the Landlock and seccomp step removed, exactly
   the five confinement tests fail. With the rlimits removed, the memory and
   CPU tests fail.
+- **Untrusted output (review of #476).** The parent reads `output.txt`
+  outside the sandbox, so the file is treated as hostile.
+  `output::read_untrusted` opens it once with `O_NOFOLLOW | O_NONBLOCK`. It
+  accepts only a regular file with one link and reads at most the task's
+  file-size limit from that descriptor.
+  - A symlink to private labels, a FIFO, a device or a hard link scores
+    the floor promptly, and a path swapped after the open has no effect.
+  - The bytes read are the only snapshot: private grading sends them to
+    `rsi __grade` on stdin (`--output -`) and never reopens the path.
+  - Public scoring reads inputs from the task directory, never from the
+    work dir the solution controlled.
+- **Job containment (review of #476).** A process can leave its process
+  group only through `setsid` or `setpgid`. A second seccomp filter, stacked
+  on the socket filter, makes both fail with `EPERM` (and refuses x32-ABI
+  syscalls), so the process group *is* the job.
+  - After every exit or timeout the executor `SIGKILL`s the group, then
+    scans `/proc` until no live member remains.
+  - If any member survives 2 s of that, the run fails closed
+    (`RuntimeError::Sandbox`).
+  - Cost: `subprocess.Popen(..., start_new_session=True)` and similar
+    raise `PermissionError` inside the sandbox.
+  - This stays within this ADR's scope: no cgroups, no namespaces,
+    unprivileged, and it works on CI's kernel.
 - **Known limit.** `RLIMIT_NPROC` counts every process and thread of the
   user, not just the sandboxed tree, and the kernel does not apply it to
   root.

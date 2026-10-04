@@ -30,6 +30,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   - sandbox setup failures fail closed.
 
   A mutation check confirmed these tests fail when the confinement or the rlimits are removed.
+- **Security (review):**
+  - **Output ingestion.** A solution's output is read once, without following links or blocking. Only a regular single-link file within the size limit is accepted, and that snapshot goes to the private grader on stdin.
+  - **Containment.** A seccomp filter forbids `setsid` and `setpgid`, so the process group is the whole job. The executor kills it and verifies through `/proc` that no live member survives.
+  - **Regression tests.** Symlink and FIFO outputs, input swapping, and detached grandchildren at normal exit and at timeout. Each was confirmed red before the fix, and red again when its defence is removed.
+- **Fixed:** `rsi-runtime` now really has no external dependencies. The workspace's `rusty_json` entry was silently re-enabling the serde default feature.
 - Known limitations:
   - Linux only; elsewhere every run fails closed.
   - `RLIMIT_NPROC` does not bind root.

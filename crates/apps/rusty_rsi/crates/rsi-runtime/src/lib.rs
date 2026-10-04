@@ -4,12 +4,14 @@
 //! - [`sandbox`]: the helper process that confines itself and execs.
 //! - [`task_dir`]: the on-disk task format, [`TaskDir`].
 //! - [`metric`]: pure output metrics.
+//! - [`output`]: safe ingestion of files a sandboxed program left behind.
 //! - [`grading`]: [`LocalTask`] (public) and [`SandboxedGrader`] (private).
 
 pub mod error;
 pub mod executor;
 pub mod grading;
 pub mod metric;
+pub mod output;
 pub mod sandbox;
 pub mod task_dir;
 

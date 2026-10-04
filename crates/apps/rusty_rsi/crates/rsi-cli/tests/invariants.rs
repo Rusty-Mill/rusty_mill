@@ -291,6 +291,205 @@ fn the_grader_cli_scores_output_files() {
     assert!(!bad.status.success());
 }
 
+// --- Untrusted output ingestion (review finding 1) --------------------------
+
+/// A solution whose `output.txt` is a symlink to `target`.
+fn symlink_output(target: &Path) -> Solution {
+    solution(&format!(
+        "import os, sys\nos.symlink({:?}, sys.argv[2])\n",
+        target.display().to_string()
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symlinked_output_cannot_forge_a_public_score() {
+    let scratch = Scratch::new("symlink-public");
+    let tasks = suite();
+    let ml = task(&tasks, "ml-regression");
+    let runner = runner(&scratch);
+    // Followed, this link would score a perfect 1.0 against the public labels.
+    let link = symlink_output(&ml.root().join("public/labels.txt"));
+    let attempt = LocalTask::new(&ml, &runner)
+        .public_score(&link, SEED)
+        .expect("run");
+    assert_eq!(attempt.score, None, "{}", attempt.feedback);
+    assert!(
+        attempt.feedback.contains("rejected"),
+        "{}",
+        attempt.feedback
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symlinked_output_cannot_read_private_labels_during_grading() {
+    let scratch = Scratch::new("symlink-private");
+    let tasks = suite();
+    let ml = task(&tasks, "ml-regression");
+    let runner = runner(&scratch);
+    let grader = SandboxedGrader::new(&tasks, &runner, grader_command());
+    let link = symlink_output(&ml.root().join("private/labels.txt"));
+    let score = grader
+        .private_score(&ml.manifest().id, Some(&link), SEED)
+        .expect("grading happens");
+    assert_eq!(score, ml.manifest().floor);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fifo_output_is_rejected_promptly() {
+    let scratch = Scratch::new("fifo");
+    let tasks = suite();
+    let ml = task(&tasks, "ml-regression");
+    let runner = runner(&scratch);
+    let fifo = solution("import os, sys\nos.mkfifo(sys.argv[2])\n");
+    let started = std::time::Instant::now();
+    let attempt = LocalTask::new(&ml, &runner)
+        .public_score(&fifo, SEED)
+        .expect("run");
+    assert_eq!(attempt.score, None, "{}", attempt.feedback);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    let grader = SandboxedGrader::new(&tasks, &runner, grader_command());
+    let score = grader
+        .private_score(&ml.manifest().id, Some(&fifo), SEED)
+        .expect("grading");
+    assert_eq!(score, ml.manifest().floor);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replaced_staged_input_cannot_leak_into_public_scoring() {
+    let scratch = Scratch::new("input-swap");
+    let tasks = suite();
+    let tsp = task(&tasks, "tsp-heuristic");
+    let runner = runner(&scratch);
+    // Writes a valid identity tour, then swaps the staged inputs for a link
+    // the parent would follow if it re-read the work directory.
+    let swap = solution(&format!(
+        "import os, sys\nlines = open(sys.argv[1]).read().split('\\n')\nopen(sys.argv[2], 'w').write(''.join(' '.join(str(i) for i in range(len(l.split()) // 2)) + '\\n' for l in lines if l))\nos.remove(sys.argv[1])\nos.symlink({:?}, sys.argv[1])\n",
+        tsp.root().join("private/instances.txt").display().to_string()
+    ));
+    let baseline = LocalTask::new(&tsp, &runner)
+        .public_score(tsp.baseline(), SEED)
+        .expect("run");
+    let swapped = LocalTask::new(&tsp, &runner)
+        .public_score(&swap, SEED)
+        .expect("run");
+    assert_eq!(swapped.score, baseline.score, "{}", swapped.feedback);
+}
+
+// --- Process containment (review finding 2) --------------------------------
+
+/// Whether `pid` is still a live (non-zombie) process.
+fn alive(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => {
+            let state = stat
+                .rsplit_once(')')
+                .map(|(_, rest)| rest.trim_start().chars().next());
+            !matches!(state, Some(Some('Z' | 'X')))
+        }
+        Err(_) => false,
+    }
+}
+
+/// A snippet that starts a detached-as-possible grandchild recording its
+/// pid, then either exits or sleeps.
+fn detaching_snippet(pidfile: &Path, marker: &Path, then: &str) -> String {
+    format!(
+        r#"
+import os, subprocess, sys, time
+child = """
+import os, time
+for attempt in (os.setsid, lambda: os.setpgid(0, 0)):
+    try:
+        attempt()
+        print("escaped", flush=True)
+    except PermissionError:
+        print("contained", flush=True)
+open({pidfile:?}, "w").write(str(os.getpid()))
+time.sleep(4)
+open({marker:?}, "w").write("survived")
+"""
+p = subprocess.Popen([sys.executable, "-c", child])
+for _ in range(200):
+    if os.path.exists({pidfile:?}):
+        break
+    time.sleep(0.01)
+{then}
+"#,
+        pidfile = pidfile.display().to_string(),
+        marker = marker.display().to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn processes_cannot_leave_the_job_by_changing_session_or_group() {
+    let scratch = Scratch::new("setsid");
+    let code = r#"
+import os
+for name, attempt in (("setsid", os.setsid), ("setpgid", lambda: os.setpgid(0, 0))):
+    try:
+        attempt()
+        print(name, "allowed")
+    except PermissionError:
+        print(name, "denied")
+"#;
+    let outcome =
+        run_python(&scratch, code, limits(2, Duration::from_secs(10), 256)).expect("runs");
+    assert_eq!(
+        stdout(&outcome),
+        "setsid denied
+setpgid denied
+"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_descendants_die_when_the_job_exits_normally() {
+    let scratch = Scratch::new("detach-exit");
+    let pidfile = scratch.path("box/grandchild.pid");
+    let marker = scratch.path("box/grandchild-survived");
+    let code = detaching_snippet(&pidfile, &marker, "sys.exit(0)");
+    let outcome =
+        run_python(&scratch, &code, limits(5, Duration::from_secs(20), 256)).expect("runs");
+    assert_eq!(outcome.termination, Termination::Exited(0));
+    assert!(stdout(&outcome).is_empty() || !stdout(&outcome).contains("escaped"));
+    let pid: u32 = std::fs::read_to_string(&pidfile)
+        .expect("grandchild started")
+        .parse()
+        .expect("pid");
+    assert!(!alive(pid), "grandchild {pid} outlived a normal exit");
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(!marker.exists(), "a delayed write landed after cleanup");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_descendants_die_at_the_wall_clock_limit() {
+    let scratch = Scratch::new("detach-timeout");
+    let pidfile = scratch.path("box/grandchild.pid");
+    let marker = scratch.path("box/grandchild-survived");
+    let code = detaching_snippet(&pidfile, &marker, "time.sleep(60)");
+    let outcome =
+        run_python(&scratch, &code, limits(5, Duration::from_millis(1500), 256)).expect("runs");
+    assert_eq!(outcome.termination, Termination::TimedOut);
+    let pid: u32 = std::fs::read_to_string(&pidfile)
+        .expect("grandchild started")
+        .parse()
+        .expect("pid");
+    assert!(!alive(pid), "grandchild {pid} outlived the timeout");
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(!marker.exists(), "a delayed write landed after cleanup");
+}
+
 // --- Invariant 5: sandbox limits ------------------------------------------
 
 fn limits(cpu_secs: u64, wall: Duration, memory_mb: u64) -> Limits {

@@ -286,7 +286,103 @@ fn confine(request: &HelperRequest) -> Result<(), RuntimeError> {
     let net = sandbox
         .block_inet_sockets()
         .map_err(|error| RuntimeError::Sandbox(format!("seccomp: {error}")))?;
-    require_enforced("seccomp socket blocking", net)
+    require_enforced("seccomp socket blocking", net)?;
+    group_lock::install()
+}
+
+/// Keeps every descendant in the job's process group (review finding 2).
+///
+/// The executor contains a job by killing its process group, and a process
+/// can only leave a group through `setsid` or `setpgid`. This second
+/// seccomp filter (filters stack; the strictest verdict wins) makes both
+/// fail with `EPERM`, so the group is the whole job. It also refuses every
+/// x32-ABI syscall on x86_64, since those bypass number-based checks.
+#[cfg(target_os = "linux")]
+mod group_lock {
+    use rusty_libc::arch::{nr, syscall3};
+
+    use crate::error::RuntimeError;
+
+    #[repr(C)]
+    struct SockFilter {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+
+    #[repr(C)]
+    struct SockFprog {
+        len: u16,
+        filter: *const SockFilter,
+    }
+
+    const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
+    const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+    const JSET_K: u16 = 0x45; // BPF_JMP | BPF_JSET | BPF_K
+    const RET_K: u16 = 0x06; // BPF_RET | BPF_K
+    const RET_ALLOW: u32 = 0x7fff_0000;
+    const RET_KILL_PROCESS: u32 = 0x8000_0000;
+    const RET_EPERM: u32 = 0x0005_0000 | 1; // SECCOMP_RET_ERRNO | EPERM
+    const OFFSET_NR: u32 = 0; // struct seccomp_data.nr
+    const OFFSET_ARCH: u32 = 4; // struct seccomp_data.arch
+    const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+    const PR_SET_SECCOMP: usize = 22;
+    const SECCOMP_MODE_FILTER: usize = 2;
+
+    #[cfg(target_arch = "x86_64")]
+    const AUDIT_ARCH: u32 = 0xC000_003E;
+    #[cfg(target_arch = "aarch64")]
+    const AUDIT_ARCH: u32 = 0xC000_00B7;
+
+    const fn stmt(code: u16, k: u32) -> SockFilter {
+        SockFilter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
+        SockFilter { code, jt, jf, k }
+    }
+
+    /// Installs the filter on the calling thread (inherited by children).
+    ///
+    /// Requires `no_new_privs`, which the Landlock step has already set.
+    pub(super) fn install() -> Result<(), RuntimeError> {
+        // Jump offsets count from the next instruction.
+        let program = [
+            stmt(LD_W_ABS, OFFSET_ARCH),           // 0
+            jump(JEQ_K, AUDIT_ARCH, 0, 6),         // 1: foreign arch -> 8
+            stmt(LD_W_ABS, OFFSET_NR),             // 2
+            jump(JSET_K, X32_SYSCALL_BIT, 3, 0),   // 3: x32 -> 7
+            jump(JEQ_K, nr::SETSID as u32, 2, 0),  // 4: setsid -> 7
+            jump(JEQ_K, nr::SETPGID as u32, 1, 0), // 5: setpgid -> 7
+            stmt(RET_K, RET_ALLOW),                // 6
+            stmt(RET_K, RET_EPERM),                // 7
+            stmt(RET_K, RET_KILL_PROCESS),         // 8
+        ];
+        let fprog = SockFprog {
+            len: program.len() as u16,
+            filter: program.as_ptr(),
+        };
+        // SAFETY: `fprog` points at `program`, a live, correctly laid out
+        // `sock_filter` array of `len` entries that outlives the call; the
+        // kernel copies the program before `prctl` returns.
+        let ret = unsafe {
+            syscall3(
+                nr::PRCTL,
+                PR_SET_SECCOMP,
+                SECCOMP_MODE_FILTER,
+                core::ptr::addr_of!(fprog) as usize,
+            )
+        };
+        rusty_libc::from_ret(ret).map(|_| ()).map_err(|errno| {
+            RuntimeError::Sandbox(format!("process-group lock (seccomp): {errno}"))
+        })
+    }
 }
 
 #[cfg(test)]

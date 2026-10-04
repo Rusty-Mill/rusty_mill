@@ -171,8 +171,9 @@ fn run(
         std::thread::sleep(Duration::from_millis(5));
     };
     let elapsed = start.elapsed();
-    // Anything the program left running in its group dies with it.
-    kill_group(group)?;
+    // Anything the program left running dies with it. The sandbox forbids
+    // leaving the group (sandbox::group_lock), so the group is the job.
+    contain(group)?;
 
     let termination = match (timed_out, status.code(), status.signal()) {
         (true, _, _) => Termination::TimedOut,
@@ -203,6 +204,77 @@ fn kill_group(group: i32) -> Result<(), RuntimeError> {
             "killing process group {group}: {errno}"
         ))),
     }
+}
+
+/// How long [`contain`] keeps killing before declaring the job uncontained.
+#[cfg(target_os = "linux")]
+const CONTAIN_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Kills the group until no live member remains (fail closed otherwise).
+#[cfg(target_os = "linux")]
+fn contain(group: i32) -> Result<(), RuntimeError> {
+    let start = std::time::Instant::now();
+    loop {
+        kill_group(group)?;
+        let survivors = live_members(group)?;
+        if survivors.is_empty() {
+            return Ok(());
+        }
+        if start.elapsed() >= CONTAIN_DEADLINE {
+            return Err(RuntimeError::Sandbox(format!(
+                "processes {survivors:?} of group {group} survived cleanup"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Live (non-zombie) processes whose process group is `group`, from `/proc`.
+#[cfg(target_os = "linux")]
+fn live_members(group: i32) -> Result<Vec<i32>, RuntimeError> {
+    let entries = std::fs::read_dir("/proc").map_err(|e| RuntimeError::io("listing /proc", e))?;
+    let mut members = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| RuntimeError::io("listing /proc", e))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            // The process exited between listing and reading: not a member.
+            Err(e)
+                if matches!(e.kind(), std::io::ErrorKind::NotFound)
+                    || e.raw_os_error() == Some(3) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(RuntimeError::io(format!("reading /proc/{pid}/stat"), e)),
+        };
+        if let Some((state, pgrp)) = parse_stat(&stat) {
+            if pgrp == group && !matches!(state, 'Z' | 'X') {
+                members.push(pid);
+            }
+        }
+    }
+    Ok(members)
+}
+
+/// The state and process group from a `/proc/<pid>/stat` line.
+///
+/// The command name is parenthesised and may itself contain `)` or spaces,
+/// so fields are counted from the *last* `)`.
+#[cfg(target_os = "linux")]
+fn parse_stat(stat: &str) -> Option<(char, i32)> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let _ppid = fields.next()?;
+    let pgrp = fields.next()?.parse().ok()?;
+    Some((state, pgrp))
 }
 
 /// A stream being drained on its own thread, keeping only the first bytes.
@@ -269,6 +341,32 @@ mod tests {
             limits,
         )
         .expect("valid spec")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_stat_lines_with_hostile_command_names() {
+        assert_eq!(parse_stat("42 (python3) S 1 42 42 0"), Some(('S', 42)));
+        assert_eq!(parse_stat("43 (a) b) (c) Z 42 7 7 0"), Some(('Z', 7)));
+        assert_eq!(parse_stat("44 (x y) R 1 -1 0"), Some(('R', -1)));
+        assert_eq!(parse_stat("garbage"), None);
+        assert_eq!(parse_stat("45 (x) S 1"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_live_members_of_a_group() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep");
+        let group = i32::try_from(child.id()).expect("pid");
+        assert_eq!(live_members(group).expect("scan"), vec![group]);
+        contain(group).expect("contained");
+        child.wait().expect("reap");
+        assert!(live_members(group).expect("scan").is_empty());
     }
 
     #[test]

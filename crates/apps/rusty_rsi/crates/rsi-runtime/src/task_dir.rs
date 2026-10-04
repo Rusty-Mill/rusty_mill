@@ -312,10 +312,18 @@ impl TaskDir {
         let Some(output) = output else {
             return Ok(self.manifest.floor);
         };
+        Ok(self.score(split, output)?.unwrap_or(self.manifest.floor))
+    }
+
+    /// Scores `output` on `split` against this task's own inputs and labels;
+    /// `None` when the output is invalid.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Io`] when the task's inputs or labels cannot be read.
+    pub fn score(&self, split: Split, output: &str) -> Result<Option<Score>, RuntimeError> {
         let inputs = read(&self.inputs_path(split))?;
         let labels = read(&self.labels_path(split))?;
-        let score = self.manifest.metric.score(&inputs, &labels, output);
-        Ok(score.unwrap_or(self.manifest.floor))
+        Ok(self.manifest.metric.score(&inputs, &labels, output))
     }
 }
 
