@@ -24,6 +24,7 @@ const MCP_HOST_PLUGIN: &str = plugin_ids::MCP;
 ///
 /// Returns an error if the forge cannot be opened or the server fails to start.
 pub fn serve(app: &App, transport: rusty_mcp::TransportArg, bind: SocketAddr) -> Result<()> {
+    validate_bind(transport, bind)?;
     let forge_root = app.forge_root().to_path_buf();
     let runtime = build_cli_runtime(forge_root.clone())
         .with_context(|| format!("failed to build runtime at {}", forge_root.display()))?;
@@ -64,7 +65,6 @@ pub fn serve(app: &App, transport: rusty_mcp::TransportArg, bind: SocketAddr) ->
         rusty_mcp::TransportArg::Stdio => rusty_mcp::ServerConfig::stdio(),
         rusty_mcp::TransportArg::Http => rusty_mcp::ServerConfig::http(bind),
     };
-    rusty_mcp::telemetry::init(&config.log_filter);
     let result = rt.block_on(server.serve(config));
 
     // Stop the scheduler before this function (and the process) exits
@@ -77,6 +77,39 @@ pub fn serve(app: &App, transport: rusty_mcp::TransportArg, bind: SocketAddr) ->
     result.map_err(|e| anyhow::anyhow!("MCP server error: {e}"))?;
 
     Ok(())
+}
+
+/// Reject an unauthenticated MCP endpoint that is reachable off-host.
+fn validate_bind(transport: rusty_mcp::TransportArg, bind: SocketAddr) -> Result<()> {
+    if matches!(transport, rusty_mcp::TransportArg::Http) && !bind.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing unauthenticated MCP HTTP bind {bind}: use an IPv4 or IPv6 loopback address"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bind;
+    use rusty_mcp::TransportArg;
+
+    #[test]
+    fn http_requires_loopback_without_authentication() {
+        for addr in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
+            let addr = addr.parse().unwrap();
+            assert!(validate_bind(TransportArg::Http, addr).is_err(), "{addr}");
+        }
+        for addr in ["127.0.0.1:8080", "[::1]:8080"] {
+            let addr = addr.parse().unwrap();
+            validate_bind(TransportArg::Http, addr).unwrap();
+        }
+    }
+
+    #[test]
+    fn stdio_ignores_the_unused_bind_argument() {
+        validate_bind(TransportArg::Stdio, "0.0.0.0:8080".parse().unwrap()).unwrap();
+    }
 }
 
 /// `nexus mcp servers` — enumerate external MCP servers declared in

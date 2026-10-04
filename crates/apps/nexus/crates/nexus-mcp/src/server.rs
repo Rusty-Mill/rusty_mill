@@ -1179,6 +1179,11 @@ impl NexusMcpServer {
     }
 
     /// Start the server on stdio transport and block until disconnected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stdio transport cannot start or terminates with
+    /// a protocol I/O failure.
     pub async fn serve_stdio(self) -> Result<(), rusty_mcp::ServeError> {
         self.serve(rusty_mcp::ServerConfig::stdio()).await
     }
