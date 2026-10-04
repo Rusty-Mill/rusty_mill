@@ -14,8 +14,7 @@ fn temp_dir() -> std::path::PathBuf {
     dir
 }
 
-/// The scripted CLI first, then the system path the script's own tools
-/// (`sh`, `cat`) live on.
+/// The scripted CLI first, then the inherited system path.
 fn path_with(bin: &std::path::Path) -> std::ffi::OsString {
     let mut path = bin.as_os_str().to_owned();
     if let Some(system) = std::env::var_os("PATH") {
@@ -69,7 +68,7 @@ fn built_binary_reopens_state_in_a_second_os_process() {
     std::fs::write(
         &ollama,
         format!(
-            "#!/bin/sh\ncat >/dev/null\nif [ -e '{}' ]; then\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"finding\",\"confidence\":\"high\",\"body\":\"done\",\"refs\":[]}}]}}'\nelse\n  : > '{}'\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"question\",\"body\":\"continue?\",\"refs\":[]}}]}}'\nfi\n",
+            "#!/bin/sh\nset -eu\nwhile IFS= read -r _line; do :; done\nif [ -e '{}' ]; then\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"finding\",\"confidence\":\"high\",\"body\":\"done\",\"refs\":[]}}]}}'\nelse\n  : > '{}'\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"question\",\"body\":\"continue?\",\"refs\":[]}}]}}'\nfi\n",
             marker.display(), marker.display()
         ),
     )

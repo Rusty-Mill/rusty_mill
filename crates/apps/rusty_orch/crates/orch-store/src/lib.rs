@@ -151,11 +151,13 @@ impl Store {
             .transpose()
     }
 
-    /// The last successfully completed checkpoint generation, or zero.
+    /// The persisted scannable checkpoint generation, or zero.
     ///
-    /// Recovery after a failed replacement may expose the replacement's
-    /// aggregate payload with the preceding generation, because the engine
-    /// logs the record before rewriting its separate scannable slot.
+    /// It may lag a recovered replacement because the record log is durable
+    /// before the separate slot is rewritten. Conversely, recovery after an
+    /// interrupted initial insert may synthesize generation one from its
+    /// logged record even though `save` returned an error. It is therefore
+    /// not a count of successfully returned saves.
     pub fn revision(&self, goal: GoalId) -> u64 {
         self.goals
             .get(record::key(goal))
