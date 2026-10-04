@@ -69,20 +69,18 @@ pub fn ucb1(arms: &[Arm], exploration: f64) -> Result<Option<usize>, CoreError> 
     argmax(&bounds)
 }
 
-/// Samples an index with probability proportional to `exp(logit / temperature)`.
+/// Softmax probabilities `exp(logit / temperature) / Σ exp(logit_j / temperature)`.
 ///
-/// Lower temperatures approach greedy; higher ones approach uniform. The
-/// maximum logit is subtracted first, so large logits cannot overflow.
-/// Returns `Ok(None)` for no logits.
+/// Lower temperatures approach greedy; higher ones approach uniform. Each
+/// exponent is computed as `(logit/2 - max/2) / temperature * 2`, which is
+/// exact for ordinary inputs and never overflows to `inf - inf` or NaN for
+/// finite extremes such as `[f64::MAX, -f64::MAX]`. Returns an empty vector
+/// for no logits.
 ///
 /// # Errors
 /// [`CoreError::InvalidParameter`] if `temperature` is not finite and
 /// positive, or a logit is not finite.
-pub fn softmax_sample(
-    logits: &[f64],
-    temperature: f64,
-    rng: &mut SplitMix64,
-) -> Result<Option<usize>, CoreError> {
+pub fn softmax(logits: &[f64], temperature: f64) -> Result<Vec<f64>, CoreError> {
     if !(temperature.is_finite() && temperature > 0.0) {
         return Err(CoreError::InvalidParameter {
             name: "temperature",
@@ -90,23 +88,44 @@ pub fn softmax_sample(
         });
     }
     let Some(top) = argmax(logits)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let max = logits[top];
+    let half_max = logits[top] / 2.0;
+    // `l/2 - max/2` lies in [-f64::MAX, 0], so it cannot overflow; dividing by
+    // a positive temperature can only push it towards -inf, where exp is 0.
     let weights: Vec<f64> = logits
         .iter()
-        .map(|&l| ((l - max) / temperature).exp())
+        .map(|&l| ((l / 2.0 - half_max) / temperature * 2.0).exp())
         .collect();
-    // The maximum's weight is exactly 1, so the total is at least 1.
-    let mut target = rng.next_f64() * weights.iter().sum::<f64>();
-    for (i, weight) in weights.iter().enumerate() {
-        if target < *weight {
+    // The maximum's weight is exactly exp(0) = 1, so the total is at least 1.
+    let total: f64 = weights.iter().sum();
+    Ok(weights.into_iter().map(|w| w / total).collect())
+}
+
+/// Samples an index with the [`softmax`] probabilities of `logits`.
+///
+/// Returns `Ok(None)` for no logits.
+///
+/// # Errors
+/// As [`softmax`].
+pub fn softmax_sample(
+    logits: &[f64],
+    temperature: f64,
+    rng: &mut SplitMix64,
+) -> Result<Option<usize>, CoreError> {
+    let probabilities = softmax(logits, temperature)?;
+    let Some(mode) = argmax(&probabilities)? else {
+        return Ok(None);
+    };
+    let mut target = rng.next_f64();
+    for (i, p) in probabilities.iter().enumerate() {
+        if target < *p {
             return Ok(Some(i));
         }
-        target -= weight;
+        target -= p;
     }
     // Rounding can leave a sliver past the last bucket; fall back to the mode.
-    Ok(Some(top))
+    Ok(Some(mode))
 }
 
 fn check_finite(name: &'static str, values: &[f64]) -> Result<(), CoreError> {
@@ -226,6 +245,55 @@ mod tests {
         let mut rng = SplitMix64::new(Seed::new(1));
         let pick = softmax_sample(&[1e300, 1e300 - 1.0], 1.0, &mut rng);
         assert!(matches!(pick, Ok(Some(0 | 1))));
+    }
+
+    #[test]
+    fn softmax_handles_finite_extremes() {
+        // Exponents MAX/MAX = 1 and -MAX/MAX = -1: p = 1/(1+e^-2), not [1, 0].
+        let p = softmax(&[f64::MAX, -f64::MAX], f64::MAX).expect("finite inputs");
+        assert!((p[0] - 0.880_797).abs() < 1e-6, "{p:?}");
+        assert!((p[1] - 0.119_203).abs() < 1e-6, "{p:?}");
+        assert!(((p[0] + p[1]) - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn softmax_extremes_never_produce_nan() {
+        let cases: [(&[f64], f64); 4] = [
+            (&[f64::MAX, -f64::MAX], f64::MIN_POSITIVE),
+            (&[f64::MAX, f64::MAX], f64::MAX),
+            (&[-f64::MAX, -f64::MAX, 0.0], 1.0),
+            (&[1e-320, -1e-320], 1e-300),
+        ];
+        for (logits, temperature) in cases {
+            let p = softmax(logits, temperature).expect("finite inputs");
+            assert!(
+                p.iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)),
+                "{p:?}"
+            );
+            assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-12, "{p:?}");
+        }
+        let greedy = softmax(&[f64::MAX, -f64::MAX], f64::MIN_POSITIVE).expect("finite");
+        assert_eq!(greedy, vec![1.0, 0.0]);
+        let tie = softmax(&[f64::MAX, f64::MAX], f64::MAX).expect("finite");
+        assert_eq!(tie, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn softmax_matches_textbook_values() {
+        let p = softmax(&[0.0, 2f64.ln()], 1.0).expect("finite");
+        assert!((p[0] - 1.0 / 3.0).abs() < 1e-15 && (p[1] - 2.0 / 3.0).abs() < 1e-15);
+        assert_eq!(softmax(&[], 1.0), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn softmax_sample_at_finite_extremes_follows_probabilities() {
+        let mut rng = SplitMix64::new(Seed::new(4));
+        let draws = 40_000;
+        let firsts = (0..draws)
+            .filter(|_| softmax_sample(&[f64::MAX, -f64::MAX], f64::MAX, &mut rng) == Ok(Some(0)))
+            .count();
+        let share = firsts as f64 / draws as f64;
+        assert!((share - 0.880_797).abs() < 0.01, "{share}");
     }
 
     #[test]

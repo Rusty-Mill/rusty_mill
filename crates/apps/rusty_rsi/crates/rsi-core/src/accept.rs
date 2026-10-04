@@ -78,15 +78,17 @@ pub enum Screen {
 pub enum Rejection {
     /// The first grade did not exceed the incumbent's.
     NotBetter {
+        /// The incumbent's grade it was compared with.
+        incumbent: Grade,
         /// The first grade.
         first: Grade,
     },
     /// The fresh grade's lead over the incumbent was within the noise margin.
     WithinNoise {
+        /// The incumbent's grade it was compared with.
+        incumbent: Grade,
         /// The fresh grade.
         fresh: Grade,
-        /// `fresh - incumbent`.
-        delta: f64,
         /// The margin it had to exceed.
         margin: Margin,
     },
@@ -103,16 +105,21 @@ pub enum Rejection {
 }
 
 /// The recorded verdict on a lineage entry.
+///
+/// Gate verdicts carry the incumbent grade and margin they were decided
+/// with, so a lineage entry can replay the gate on its own evidence
+/// ([`crate::LineageEntry::new`]); the lead over the incumbent is derived
+/// ([`Decision::delta`]) rather than stored.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     /// The initial agent `a0`, accepted by definition.
     Baseline,
     /// Became the new incumbent.
     Accepted {
+        /// The incumbent's grade it was compared with.
+        incumbent: Grade,
         /// The fresh grade it was accepted on.
         fresh: Grade,
-        /// `fresh - incumbent`.
-        delta: f64,
         /// The margin it exceeded.
         margin: Margin,
     },
@@ -126,6 +133,20 @@ impl Decision {
     pub const fn is_incumbent(&self) -> bool {
         matches!(self, Self::Baseline | Self::Accepted { .. })
     }
+
+    /// `fresh - incumbent` for a verdict reached in stage 2, else `None`.
+    #[must_use]
+    pub fn delta(&self) -> Option<f64> {
+        match self {
+            Self::Accepted {
+                incumbent, fresh, ..
+            }
+            | Self::Rejected(Rejection::WithinNoise {
+                incumbent, fresh, ..
+            }) => Some(fresh.delta(*incumbent)),
+            _ => None,
+        }
+    }
 }
 
 /// Stage 1: lets a candidate through only if its first grade strictly beats
@@ -135,7 +156,10 @@ pub fn screen(incumbent: Grade, first: Evaluation) -> Screen {
     if first.grade > incumbent {
         return Screen::Reevaluate(Challenger { first });
     }
-    Screen::Reject(Rejection::NotBetter { first: first.grade })
+    Screen::Reject(Rejection::NotBetter {
+        incumbent,
+        first: first.grade,
+    })
 }
 
 /// Stage 2: accepts iff the fresh grade beats the incumbent by strictly more
@@ -157,17 +181,16 @@ pub fn confirm(
     {
         return Err(CoreError::SeedReused(seed.get()));
     }
-    let delta = fresh.grade.delta(incumbent);
-    if delta > margin.get() {
+    if fresh.grade.delta(incumbent) > margin.get() {
         return Ok(Decision::Accepted {
+            incumbent,
             fresh: fresh.grade,
-            delta,
             margin,
         });
     }
     Ok(Decision::Rejected(Rejection::WithinNoise {
+        incumbent,
         fresh: fresh.grade,
-        delta,
         margin,
     }))
 }
@@ -210,6 +233,7 @@ mod tests {
             assert_eq!(
                 screen(grade(0.5), eval(first, &[1])),
                 Screen::Reject(Rejection::NotBetter {
+                    incumbent: grade(0.5),
                     first: grade(first)
                 })
             );
@@ -230,18 +254,17 @@ mod tests {
             eval(0.6, &[3, 4]),
             margin(0.05),
         );
-        match decision {
-            Ok(Decision::Accepted {
-                fresh,
-                delta,
-                margin: m,
-            }) => {
-                assert_eq!(fresh, grade(0.6));
-                assert!((delta - 0.1).abs() < 1e-12);
-                assert_eq!(m, margin(0.05));
+        let decision = decision.expect("seeds are fresh");
+        assert_eq!(
+            decision,
+            Decision::Accepted {
+                incumbent: grade(0.5),
+                fresh: grade(0.6),
+                margin: margin(0.05),
             }
-            other => panic!("expected acceptance, got {other:?}"),
-        }
+        );
+        let delta = decision.delta().expect("stage-2 verdict");
+        assert!((delta - 0.1).abs() < 1e-12);
     }
 
     #[test]
@@ -300,10 +323,12 @@ mod tests {
             eval(0.3, &[3]),
             Margin::ZERO,
         );
+        let decision = decision.expect("seeds are fresh");
         assert!(matches!(
             decision,
-            Ok(Decision::Rejected(Rejection::WithinNoise { delta, .. })) if delta < 0.0
+            Decision::Rejected(Rejection::WithinNoise { .. })
         ));
+        assert!(decision.delta().is_some_and(|delta| delta < 0.0));
     }
 
     #[test]
@@ -321,14 +346,16 @@ mod tests {
     fn incumbency() {
         assert!(Decision::Baseline.is_incumbent());
         assert!(Decision::Accepted {
+            incumbent: grade(0.5),
             fresh: grade(0.6),
-            delta: 0.1,
             margin: Margin::ZERO
         }
         .is_incumbent());
-        assert!(!Decision::Rejected(Rejection::Buggy {
-            reason: "rustc failed".into()
-        })
-        .is_incumbent());
+        let buggy = Decision::Rejected(Rejection::Buggy {
+            reason: "rustc failed".into(),
+        });
+        assert!(!buggy.is_incumbent());
+        assert_eq!(buggy.delta(), None);
+        assert_eq!(Decision::Baseline.delta(), None);
     }
 }

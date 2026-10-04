@@ -31,7 +31,10 @@ Design, reuse decisions and scope: [ADR-0005](../../../docs/adr/0005-rsi-harness
   incumbent. `confirm` accepts only on a fresh-seed grade that beats it by
   more than the calibrated margin, and refuses reused seeds.
 - **Lineage (4):** entries carry results rather than grades, so the grade is
-  always recomputed; `verify_chain` detects edits, deletions and reordering.
+  always recomputed, and a repeated `(task, seed)` result is an error.
+  `LineageEntry::new` replays the gate on that evidence and refuses a
+  decision that does not follow from it. `verify_chain` detects edits,
+  deletions and reordering.
 
 Private isolation (1) and sandbox limits (5) arrive with the executor in P2.
 

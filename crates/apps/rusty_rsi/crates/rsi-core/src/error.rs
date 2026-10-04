@@ -38,6 +38,21 @@ pub enum CoreError {
     /// An evaluation carried no seeds.
     #[error("an evaluation must carry at least one seed")]
     NoSeeds,
+    /// A grading round recorded the same task and seed more than once.
+    #[error("task `{task}` has more than one result for seed {seed}")]
+    DuplicateResult {
+        /// The task.
+        task: String,
+        /// The repeated seed.
+        seed: u64,
+    },
+    /// A lineage entry's evaluations do not have the shape its decision needs.
+    #[error("lineage evidence is inconsistent: {0}")]
+    InconsistentEvidence(&'static str),
+    /// Replaying the accept gate on an entry's evidence gives a different
+    /// decision from the one recorded.
+    #[error("recorded decision does not follow from its evidence")]
+    DecisionMismatch,
     /// An identifier failed validation.
     #[error("invalid {kind}: `{value}`")]
     InvalidId {

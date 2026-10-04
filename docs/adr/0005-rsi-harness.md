@@ -71,7 +71,7 @@ A new family at `crates/apps/rusty_rsi/`, with `layer = "apps"`:
 
 | Member | Path | Role | Deps (workspace → external) |
 |---|---|---|---|
-| `rsi-core` | `crates/rsi-core` | Pure domain: no I/O, no async, no clock. | `rusty_err`, `rusty_serde` (derive) → none |
+| `rsi-core` | `crates/rsi-core` | Pure domain: no I/O, no async, no clock. | `rusty_err`, `rusty_rsa` (sha256 for the lineage hash chain) → none |
 | `rsi-runtime` | `crates/rsi-runtime` | Adapters for every port. | `rsi-core`, `rusty_http`, `rusty_json`/`rusty_serde`, `rusty_rsa` (sha256), `platform-linux` (Landlock/seccomp), `rusty_libc` (rlimit) → none planned |
 | `rsi-cli` | `crates/rsi-cli` | Composition root: `rsi run \| calibrate \| report`, plus hidden `rsi __sandbox` / `rsi __grade` entry points. | the two above |
 | `rsi-harness` | `harness/` | **The only mutable surface**: the inner agent. It has zero dependencies (std only). | none |
@@ -134,7 +134,7 @@ Consequences of building with plain `rustc`:
   and tests a0. Its manifest is **frozen**: the allowlist is
   `crates/apps/rusty_rsi/harness/src/**`.
 - A compile error is a graded **buggy** candidate
-  (`AcceptDecision::Buggy`, grade `None`), never a runtime error.
+  (`Rejection::Buggy`, no evaluations), never a runtime error.
 
 The harness has **no network and no filesystem access beyond its work
 dir**. It talks to one Unix socket, the broker, which is owned by
@@ -238,6 +238,15 @@ solutions, full broker transcripts. Every entry records the following:
 - the accept decision with the margin used
 - a host fingerprint (wall-clock budgets depend on the machine)
 
+**Evidence binding.** A `LineageEntry` can only be built by
+`LineageEntry::new`, which re-runs the accept gate (`screen`, then
+`confirm`) on the entry's recorded evaluations with the recorded incumbent
+grade and margin. It refuses the entry unless the result equals the
+recorded decision. A gate verdict therefore cannot carry a grade the
+evidence does not produce, and a duplicated `(task, seed)` result is an
+error rather than extra weight. Verdicts for candidates that were never
+graded (`Buggy`, `PathViolation`) must have no evaluations.
+
 **Replay** (`rsi report --replay`) works at two levels:
 
 - *Grade replay.* It re-runs `rsi __grade` on the stored `x̂_t` blobs
@@ -266,8 +275,8 @@ For step k:
    public transcripts.
 4. It commits the result and checks that the changed paths (`git diff
    --name-only` plus untracked files, symlinks rejected) are all under
-   the allowlist. A path outside it gives `AcceptDecision::Rejected
-   (PathViolation)` and is recorded, not applied.
+   the allowlist. A path outside it gives
+   `Rejection::PathViolation` and is recorded, not applied.
 5. It builds, grades, gates and appends.
 
 Both the `CodexCliProposer` subprocess and the HTTP proposer run under

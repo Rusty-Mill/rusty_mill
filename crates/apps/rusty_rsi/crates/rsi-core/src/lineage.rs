@@ -9,16 +9,19 @@
 //!
 //! An entry stores task results, never an aggregated grade: the grade is
 //! recomputed from results ([`EvaluationRecord::evaluation`]), so the two
-//! cannot disagree.
+//! cannot disagree. A [`LineageEntry`] can only be built by
+//! [`LineageEntry::new`], which replays the accept gate on those results and
+//! refuses an entry whose recorded decision does not follow from them.
 
 use core::fmt;
 
 use rusty_err::Error;
 use rusty_rsa::{sha256, Digest, Sha256};
 
-use crate::accept::{Decision, Evaluation};
+use crate::accept::{confirm, screen, Decision, Evaluation, Rejection, Screen};
 use crate::budget::{Budget, CostUsage};
 use crate::error::CoreError;
+use crate::noise::Margin;
 use crate::rng::Seed;
 use crate::score::{Grade, Score};
 
@@ -292,30 +295,45 @@ pub struct TaskResult {
 pub struct EvaluationRecord {
     /// `0` for the first grading, `1` for the fresh-seed re-evaluation.
     pub round: u32,
-    /// One result per task and seed.
+    /// One result per task and seed; a `(task, seed)` pair appears at most once.
     pub results: Vec<TaskResult>,
 }
 
 impl EvaluationRecord {
     /// Recomputes the round's grade and collects its distinct seeds.
     ///
-    /// Tasks are grouped in order of first appearance.
+    /// Tasks are grouped in order of first appearance. The same seed may be
+    /// used by several tasks, but each `(task, seed)` run is counted once:
+    /// a repeated row would otherwise weigh that run twice in the grade.
     ///
     /// # Errors
-    /// [`CoreError::EmptyGrade`] for a round with no results.
+    /// [`CoreError::DuplicateResult`] if a `(task, seed)` pair repeats, even
+    /// with identical contents; [`CoreError::EmptyGrade`] for a round with
+    /// no results.
     pub fn evaluation(&self) -> Result<Evaluation, CoreError> {
-        let mut tasks: Vec<(&str, Vec<Score>)> = Vec::new();
+        let mut tasks: Vec<(&str, Vec<(Seed, Score)>)> = Vec::new();
         let mut seeds: Vec<Seed> = Vec::new();
         for result in &self.results {
             let name = result.task.as_str();
+            let run = (result.seed, result.private);
             match tasks.iter_mut().find(|(task, _)| *task == name) {
-                Some((_, scores)) => scores.push(result.private),
-                None => tasks.push((name, vec![result.private])),
+                Some((_, runs)) if runs.iter().any(|(seed, _)| *seed == result.seed) => {
+                    return Err(CoreError::DuplicateResult {
+                        task: name.to_owned(),
+                        seed: result.seed.get(),
+                    });
+                }
+                Some((_, runs)) => runs.push(run),
+                None => tasks.push((name, vec![run])),
             }
             if !seeds.contains(&result.seed) {
                 seeds.push(result.seed);
             }
         }
+        let tasks: Vec<(&str, Vec<Score>)> = tasks
+            .into_iter()
+            .map(|(task, runs)| (task, runs.into_iter().map(|(_, score)| score).collect()))
+            .collect();
         let grade = Grade::from_tasks(
             tasks
                 .iter()
@@ -333,9 +351,11 @@ impl EvaluationRecord {
     }
 }
 
-/// Everything needed to reproduce one candidate's grade and verdict.
+/// The contents of a lineage entry, not yet checked against each other.
+///
+/// Turn it into a [`LineageEntry`] with [`LineageEntry::new`].
 #[derive(Debug, Clone, PartialEq)]
-pub struct LineageEntry {
+pub struct EntryFields {
     /// This candidate.
     pub candidate: CandidateId,
     /// The candidate it was proposed from; `None` for the baseline.
@@ -358,12 +378,143 @@ pub struct LineageEntry {
     pub host: String,
 }
 
+/// Everything needed to reproduce one candidate's grade and verdict, with
+/// the verdict proven to follow from the recorded evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineageEntry(EntryFields);
+
+impl LineageEntry {
+    /// Validates `fields` and wraps them.
+    ///
+    /// - A gate verdict ([`Decision::Accepted`], [`Rejection::NotBetter`],
+    ///   [`Rejection::WithinNoise`]) is re-derived by running [`screen`] and
+    ///   [`confirm`] on the recorded evaluations with the recorded incumbent
+    ///   grade and margin; it must equal the recorded decision exactly.
+    /// - [`Decision::Baseline`] needs exactly one valid evaluation.
+    /// - [`Rejection::Buggy`] and [`Rejection::PathViolation`] need no
+    ///   evaluations (and must have none), plus a reason or at least one path.
+    /// - Evaluation rounds must be numbered `0, 1, …` in order.
+    ///
+    /// # Errors
+    /// [`CoreError::InconsistentEvidence`] when the evaluations have the
+    /// wrong shape for the decision, [`CoreError::DecisionMismatch`] when the
+    /// replayed decision differs, and any error from recomputing a grade
+    /// ([`EvaluationRecord::evaluation`]) or from [`confirm`].
+    pub fn new(fields: EntryFields) -> Result<Self, CoreError> {
+        verify_decision(&fields.decision, &fields.evaluations)?;
+        Ok(Self(fields))
+    }
+
+    /// The validated contents.
+    #[must_use]
+    pub const fn fields(&self) -> &EntryFields {
+        &self.0
+    }
+
+    /// Gives the contents back, for example to serialise them.
+    #[must_use]
+    pub fn into_fields(self) -> EntryFields {
+        self.0
+    }
+}
+
+fn verify_decision(decision: &Decision, evaluations: &[EvaluationRecord]) -> Result<(), CoreError> {
+    let in_order = evaluations
+        .iter()
+        .enumerate()
+        .all(|(index, record)| u32::try_from(index).is_ok_and(|i| i == record.round));
+    if !in_order {
+        return Err(CoreError::InconsistentEvidence(
+            "evaluation rounds must be numbered 0, 1, ... in order",
+        ));
+    }
+    let (incumbent, margin) = match decision {
+        Decision::Baseline => {
+            let [only] = evaluations else {
+                return Err(CoreError::InconsistentEvidence(
+                    "a baseline needs exactly one evaluation",
+                ));
+            };
+            return only.evaluation().map(|_| ());
+        }
+        Decision::Rejected(Rejection::Buggy { reason }) => {
+            require_no_evaluations(evaluations)?;
+            if reason.trim().is_empty() {
+                return Err(CoreError::InconsistentEvidence(
+                    "a buggy verdict needs a reason",
+                ));
+            }
+            return Ok(());
+        }
+        Decision::Rejected(Rejection::PathViolation { paths }) => {
+            require_no_evaluations(evaluations)?;
+            if paths.is_empty() {
+                return Err(CoreError::InconsistentEvidence(
+                    "a path violation needs at least one path",
+                ));
+            }
+            return Ok(());
+        }
+        Decision::Rejected(Rejection::NotBetter { incumbent, .. }) => (*incumbent, None),
+        Decision::Accepted {
+            incumbent, margin, ..
+        }
+        | Decision::Rejected(Rejection::WithinNoise {
+            incumbent, margin, ..
+        }) => (*incumbent, Some(*margin)),
+    };
+    if replay_gate(incumbent, margin, evaluations)? != *decision {
+        return Err(CoreError::DecisionMismatch);
+    }
+    Ok(())
+}
+
+fn require_no_evaluations(evaluations: &[EvaluationRecord]) -> Result<(), CoreError> {
+    if !evaluations.is_empty() {
+        return Err(CoreError::InconsistentEvidence(
+            "a candidate that was never graded has no evaluations",
+        ));
+    }
+    Ok(())
+}
+
+/// Runs the accept gate on recorded evaluations, as the outer loop did.
+fn replay_gate(
+    incumbent: Grade,
+    margin: Option<Margin>,
+    evaluations: &[EvaluationRecord],
+) -> Result<Decision, CoreError> {
+    let [first, rest @ ..] = evaluations else {
+        return Err(CoreError::InconsistentEvidence(
+            "a gate verdict needs its first evaluation",
+        ));
+    };
+    let challenger = match screen(incumbent, first.evaluation()?) {
+        Screen::Reject(rejection) if rest.is_empty() => return Ok(Decision::Rejected(rejection)),
+        Screen::Reject(_) => {
+            return Err(CoreError::InconsistentEvidence(
+                "a candidate rejected in stage 1 has no re-evaluation",
+            ));
+        }
+        Screen::Reevaluate(challenger) => challenger,
+    };
+    // A recorded stage-1 rejection whose evidence actually passed stage 1.
+    let Some(margin) = margin else {
+        return Err(CoreError::DecisionMismatch);
+    };
+    let [fresh] = rest else {
+        return Err(CoreError::InconsistentEvidence(
+            "a candidate that passed stage 1 needs exactly one fresh re-evaluation",
+        ));
+    };
+    confirm(incumbent, challenger, fresh.evaluation()?, margin)
+}
+
 #[cfg(test)]
 mod tests {
     use core::time::Duration;
 
     use super::*;
-    use crate::accept::Rejection;
 
     const SHA1: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -518,8 +669,45 @@ mod tests {
     }
 
     #[test]
-    fn buggy_entry_is_representable_without_evaluations() {
-        let entry = LineageEntry {
+    fn duplicate_task_seed_rows_are_rejected() {
+        let duplicate = Err(CoreError::DuplicateResult {
+            task: "ml".to_owned(),
+            seed: 1,
+        });
+        let identical = round(0, &[("ml", 1, 0.4), ("tsp", 1, 0.5), ("ml", 1, 0.4)]);
+        assert_eq!(identical.evaluation(), duplicate);
+        let differing = round(0, &[("ml", 1, 0.0), ("ml", 1, 1.0)]);
+        assert_eq!(differing.evaluation(), duplicate);
+    }
+
+    #[test]
+    fn same_seed_across_tasks_is_allowed() {
+        let record = round(0, &[("ml", 7, 1.0), ("tsp", 7, 0.0), ("ml", 8, 0.0)]);
+        let evaluation = record.evaluation().expect("distinct (task, seed) pairs");
+        assert_eq!(evaluation.grade().get(), 0.25, "ml 0.5 and tsp 0.0");
+        assert_eq!(evaluation.seeds(), &[Seed::new(7), Seed::new(8)]);
+    }
+
+    fn round(number: u32, rows: &[(&str, u64, f64)]) -> EvaluationRecord {
+        EvaluationRecord {
+            round: number,
+            results: rows
+                .iter()
+                .map(|&(task, seed, private)| result(task, seed, private))
+                .collect(),
+        }
+    }
+
+    fn grade(value: f64) -> Grade {
+        Grade::new(value).expect("valid grade")
+    }
+
+    fn margin(value: f64) -> Margin {
+        Margin::new(value).expect("valid margin")
+    }
+
+    fn fields(evaluations: Vec<EvaluationRecord>, decision: Decision) -> EntryFields {
+        EntryFields {
             candidate: CandidateId::new(3),
             parent: Some(CandidateId::BASELINE),
             harness_commit: CommitSha::parse(SHA1).expect("valid sha"),
@@ -527,13 +715,205 @@ mod tests {
             inner_model: ModelId::parse("llama3.1").expect("valid model"),
             outer_model: Some(ModelId::parse("gpt-5-codex").expect("valid model")),
             budget: Budget::new(1_000, Duration::from_secs(60), None).expect("valid budget"),
-            evaluations: Vec::new(),
-            decision: Decision::Rejected(Rejection::Buggy {
-                reason: "rustc: E0308".into(),
-            }),
+            evaluations,
+            decision,
             host: "test-host".into(),
+        }
+    }
+
+    /// Runs the gate the way the outer loop will, to record a genuine decision.
+    fn decide(incumbent: Grade, margin: Margin, evaluations: &[EvaluationRecord]) -> Decision {
+        let first = evaluations[0].evaluation().expect("valid first round");
+        match screen(incumbent, first) {
+            Screen::Reject(rejection) => Decision::Rejected(rejection),
+            Screen::Reevaluate(challenger) => {
+                let fresh = evaluations[1].evaluation().expect("valid fresh round");
+                confirm(incumbent, challenger, fresh, margin).expect("fresh seeds")
+            }
+        }
+    }
+
+    /// First round grades 0.7 on seed 1; the fresh round grades 0.6 on seed 3.
+    fn winning_rounds() -> Vec<EvaluationRecord> {
+        vec![
+            round(0, &[("ml", 1, 0.8), ("tsp", 1, 0.6)]),
+            round(1, &[("ml", 3, 0.7), ("tsp", 3, 0.5)]),
+        ]
+    }
+
+    fn accepted_entry() -> LineageEntry {
+        let evaluations = winning_rounds();
+        let decision = decide(grade(0.5), margin(0.05), &evaluations);
+        assert!(matches!(decision, Decision::Accepted { .. }));
+        LineageEntry::new(fields(evaluations, decision)).expect("decision follows from evidence")
+    }
+
+    #[test]
+    fn genuine_gate_verdicts_are_accepted() {
+        let entry = accepted_entry();
+        assert!(entry.fields().decision.is_incumbent());
+
+        let within_noise = decide(grade(0.5), margin(0.2), &winning_rounds());
+        assert!(matches!(
+            within_noise,
+            Decision::Rejected(Rejection::WithinNoise { .. })
+        ));
+        assert!(LineageEntry::new(fields(winning_rounds(), within_noise)).is_ok());
+
+        let first_only = vec![round(0, &[("ml", 1, 0.4)])];
+        let not_better = decide(grade(0.5), margin(0.05), &first_only);
+        assert!(matches!(
+            not_better,
+            Decision::Rejected(Rejection::NotBetter { .. })
+        ));
+        assert!(LineageEntry::new(fields(first_only, not_better)).is_ok());
+    }
+
+    #[test]
+    fn gate_verdict_with_empty_evidence_is_rejected() {
+        let decision = accepted_entry().into_fields().decision;
+        assert!(matches!(
+            LineageEntry::new(fields(Vec::new(), decision)),
+            Err(CoreError::InconsistentEvidence(_))
+        ));
+        let empty_round = vec![round(0, &[])];
+        let not_better = Decision::Rejected(Rejection::NotBetter {
+            incumbent: grade(0.5),
+            first: grade(0.4),
+        });
+        assert_eq!(
+            LineageEntry::new(fields(empty_round, not_better)),
+            Err(CoreError::EmptyGrade)
+        );
+    }
+
+    #[test]
+    fn decision_that_does_not_match_its_evidence_is_rejected() {
+        let mismatch = Err(CoreError::DecisionMismatch);
+        // An independent grade: evidence says 0.6, the record claims 0.9.
+        let inflated = Decision::Accepted {
+            incumbent: grade(0.5),
+            fresh: grade(0.9),
+            margin: margin(0.05),
         };
-        assert!(!entry.decision.is_incumbent());
-        assert!(entry.evaluations.is_empty());
+        assert_eq!(
+            LineageEntry::new(fields(winning_rounds(), inflated)),
+            mismatch
+        );
+        // Accepted, though the fresh lead of 0.1 is inside a 0.2 margin.
+        let fresh = winning_rounds()[1].evaluation().expect("valid").grade();
+        let lenient = Decision::Accepted {
+            incumbent: grade(0.5),
+            fresh,
+            margin: margin(0.2),
+        };
+        assert_eq!(
+            LineageEntry::new(fields(winning_rounds(), lenient)),
+            mismatch
+        );
+        // A stage-1 rejection whose evidence actually beat the incumbent.
+        let first = winning_rounds()[0].evaluation().expect("valid").grade();
+        let not_better = Decision::Rejected(Rejection::NotBetter {
+            incumbent: grade(0.5),
+            first,
+        });
+        assert_eq!(
+            LineageEntry::new(fields(winning_rounds()[..1].to_vec(), not_better)),
+            mismatch
+        );
+        // Evidence from an unrelated, losing candidate under an Accepted verdict.
+        let unrelated = vec![round(0, &[("ml", 1, 0.1)]), round(1, &[("ml", 3, 0.1)])];
+        let decision = accepted_entry().into_fields().decision;
+        assert!(matches!(
+            LineageEntry::new(fields(unrelated, decision)),
+            Err(CoreError::InconsistentEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn changing_valid_evidence_invalidates_the_entry() {
+        let valid = accepted_entry().into_fields();
+
+        let mut rescored = valid.clone();
+        rescored.evaluations[1].results[0].private = Score::new(0.2).expect("valid");
+        assert_eq!(
+            LineageEntry::new(rescored),
+            Err(CoreError::DecisionMismatch)
+        );
+
+        let mut reseeded = valid.clone();
+        for result in &mut reseeded.evaluations[1].results {
+            result.seed = Seed::new(1);
+        }
+        assert_eq!(LineageEntry::new(reseeded), Err(CoreError::SeedReused(1)));
+
+        let mut truncated = valid.clone();
+        truncated.evaluations.pop();
+        assert!(matches!(
+            LineageEntry::new(truncated),
+            Err(CoreError::InconsistentEvidence(_))
+        ));
+
+        let mut duplicated = valid.clone();
+        let row = duplicated.evaluations[0].results[0].clone();
+        duplicated.evaluations[0].results.push(row);
+        assert!(matches!(
+            LineageEntry::new(duplicated),
+            Err(CoreError::DuplicateResult { .. })
+        ));
+
+        let mut renumbered = valid;
+        renumbered.evaluations[1].round = 5;
+        assert!(matches!(
+            LineageEntry::new(renumbered),
+            Err(CoreError::InconsistentEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn ungraded_verdicts_need_no_evaluations() {
+        let buggy = Decision::Rejected(Rejection::Buggy {
+            reason: "rustc: E0308".into(),
+        });
+        let entry = LineageEntry::new(fields(Vec::new(), buggy.clone())).expect("valid buggy");
+        assert!(!entry.fields().decision.is_incumbent());
+        let paths = Decision::Rejected(Rejection::PathViolation {
+            paths: vec!["Cargo.toml".into()],
+        });
+        assert!(LineageEntry::new(fields(Vec::new(), paths.clone())).is_ok());
+
+        for decision in [buggy, paths] {
+            assert!(matches!(
+                LineageEntry::new(fields(winning_rounds(), decision)),
+                Err(CoreError::InconsistentEvidence(_))
+            ));
+        }
+        let no_reason = Decision::Rejected(Rejection::Buggy {
+            reason: "  ".into(),
+        });
+        let no_paths = Decision::Rejected(Rejection::PathViolation { paths: Vec::new() });
+        for decision in [no_reason, no_paths] {
+            assert!(matches!(
+                LineageEntry::new(fields(Vec::new(), decision)),
+                Err(CoreError::InconsistentEvidence(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn baseline_needs_exactly_one_valid_evaluation() {
+        let one = winning_rounds()[..1].to_vec();
+        assert!(LineageEntry::new(fields(one, Decision::Baseline)).is_ok());
+        for evaluations in [Vec::new(), winning_rounds()] {
+            assert!(matches!(
+                LineageEntry::new(fields(evaluations, Decision::Baseline)),
+                Err(CoreError::InconsistentEvidence(_))
+            ));
+        }
+        let duplicated = vec![round(0, &[("ml", 1, 0.5), ("ml", 1, 0.5)])];
+        assert!(matches!(
+            LineageEntry::new(fields(duplicated, Decision::Baseline)),
+            Err(CoreError::DuplicateResult { .. })
+        ));
     }
 }

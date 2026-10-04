@@ -26,10 +26,10 @@ pub use accept::{confirm, screen, Challenger, Decision, Evaluation, Rejection, S
 pub use budget::{Budget, BudgetExhausted, CostMeter, CostUsage};
 pub use error::CoreError;
 pub use lineage::{
-    BlobId, CandidateId, ChainError, ChainRecord, CommitSha, EvaluationRecord, LineageEntry,
-    ModelId, TaskId, TaskResult,
+    BlobId, CandidateId, ChainError, ChainRecord, CommitSha, EntryFields, EvaluationRecord,
+    LineageEntry, ModelId, TaskId, TaskResult,
 };
 pub use noise::{Margin, NoiseBand};
 pub use rng::{derive_seed, seed_set, Seed, SplitMix64};
 pub use score::{Grade, Score};
-pub use search::{argmax, softmax_sample, ucb1, Arm};
+pub use search::{argmax, softmax, softmax_sample, ucb1, Arm};
