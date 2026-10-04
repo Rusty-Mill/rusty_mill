@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.132.0
+- Version: 0.133.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6414,6 +6414,33 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       ball 77.667 s 135 → 46; 77.700 s car 0.6 → 5.4. One-step car 0.474
       (was 0.482), ball 0.433 (was 0.435); k = 30 car 11.24 (was 11.33),
       ball 21.11 (was 21.18). No other frame in any capture moves.
+- `RB-PHYSICS-001-FR-130` (each body's lever arm runs to its own contact
+  point; implemented and verified on the owner's captures, ADR-0049):
+  `Contact::point_on_a` is `btManifoldPoint::m_positionWorldOnA`, the
+  contact point on the first body's own surface, `point - normal *
+  penetration_depth`; `solver::setup_two_body_rows` measures body A's
+  lever arm to it, body B's to `point` as before. Before, both lever arms
+  ran to the point on B, so a ball sunk 12 uu into a hitbox edge had a
+  79 uu arm instead of its 91 uu radius.
+  - Why: `hitjump.jsonl` 274.208 s, a car at 2300 uu/s into a resting ball
+    with its top-front edge 12 uu inside it. The remaining ball error
+    (46 uu/s) pointed exactly along the friction direction at the contact
+    (forward and down, 21 and −41 uu/s). The ball's rotational inverse
+    mass scales with the square of its lever arm, so a 13% short arm gave
+    the sticking friction 22% more impulse to drag the ball with.
+  - **Verification**:
+    - `collision` test `a_contacts_point_on_a_lies_a_penetration_back_along_the_normal`;
+      `world` test `a_deep_edge_hit_uses_the_balls_own_lever_arm`
+      (ball leaves at (2887, 908) before, (2871, 939) now, (2863, 959)
+      recorded, in a bare world; fails with the old arm).
+    - `hitjump` ball per frame: 274.217 s 47 → 10, 37.400 s 36 → 5,
+      223.200 s 30 → 8, 235.267 s 28 → 9, 102.317 s 25 → 7, 260.250 s
+      18 → 8, 215.942 s 17 → 6, 95.383 s 16 → 5, 27.625 s 12 → 2. One-step
+      ball 0.428 (was 0.433), car 0.473 (was 0.474); k = 30 ball 20.96
+      (was 21.11), car 11.22.
+    - `test2` ball 12.267 s 16 → 5, 5.758 s (kickoff) 17 → 10; one-step
+      0.084 (was 0.091), k = 30 ball 1.27 (was 1.39). `front`, `side`
+      unchanged. Worst regression 77.667 s ball 46 → 58 (car 8 → 6).
 
 
 ## Architecture and interfaces
@@ -7905,6 +7932,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.133.0 (2026-10-04): `RB-PHYSICS-001-FR-130` — each body's lever arm runs
+  to its own contact point (ADR-0049). 443 tests in `rb_physics_bullet`.
 - 0.132.0 (2026-10-04): `RB-PHYSICS-001-FR-129` — a car's wheel rays hit
   the ball (ADR-0048). 441 tests in `rb_physics_bullet`.
 - 0.131.0 (2026-10-04): `RB-PHYSICS-001-FR-127` and `FR-128` — the ball's

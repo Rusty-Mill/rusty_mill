@@ -242,7 +242,12 @@ version: `a245d35`).
    `RB-PHYSICS-001-FR-129` (ADR-0048) explains it: the game's wheel rays
    hit the ball, so a car passing over a resting ball is pushed up by its
    bottomed-out suspension (car 110 → 8 uu/s, ball 135 → 46, hitjump
-   one-step car 0.474, k = 30 car 11.24). Open car-side leads: `test2`
+   one-step car 0.474, k = 30 car 11.24). `RB-PHYSICS-001-FR-130`
+   (ADR-0049) runs each body's lever arm to its own contact point (the
+   ball's, not the box's), which lowers every car-ball hit: `hitjump`
+   274.217 s ball 47 → 10, 37.4 s 36 → 5, 223.2 s 30 → 8; one-step ball
+   0.428, k = 30 ball 20.96; `test2` k = 30 ball 1.27. Frames over 20
+   uu/s in `hitjump`: 1 (77.667 s, 58). Open car-side leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -253,7 +258,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (512 tests: 27 `rb_domain`, 441
+- `cargo test --workspace`: pass (514 tests: 27 `rb_domain`, 443
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

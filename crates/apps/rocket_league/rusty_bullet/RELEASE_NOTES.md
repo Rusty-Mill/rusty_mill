@@ -8,6 +8,20 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The ball's lever arm is its own radius
+**2026-10-04** · `RB-PHYSICS-001-FR-130` · ADR-0049
+
+- When a car sinks into the ball, the engine measures each body's leverage
+  to its own contact point: the ball's on the ball's surface, the car's on
+  the car's. Ours measured both to the point on the car, so a ball 12 uu
+  into a hitbox edge had a 79 uu arm instead of its 91 uu radius and
+  sticking friction dragged it about 20% too hard, bending hits forward
+  and down. Found by the shape of the last 46 uu/s ball error, which lay
+  exactly along the friction direction. Every deep car-ball hit improves:
+  the kickoff-style frame at 274.2 s goes 47 → 10 uu/s, 37.4 s 36 → 5,
+  223.2 s 30 → 8; the driving recording's kickoff hit 17 → 10. The only
+  worse frame is the wheel-over-ball hit at 77.7 s, 46 → 58. 514 tests.
+
 ## Wheels touch the ball
 **2026-10-04** · `RB-PHYSICS-001-FR-129` · ADR-0048
 
