@@ -391,6 +391,10 @@ pub struct DriveState {
     /// Remaining boost fuel, `0.0..=MAX_BOOST`. Drained while boost is held,
     /// even when the force itself doesn't apply.
     pub boost_amount: f32,
+    /// Boost is burning (`RB-PHYSICS-001-FR-133`), and for how long (s):
+    /// a burn lasts at least `boost::BOOST_MIN_TIME`.
+    pub boosting: bool,
+    pub boosting_time: f32,
     /// The car's `input.jump` as of the *previous* call. Every jump variant
     /// fires only on a rising edge (`input.jump && !jump_held`), so a
     /// continued press doesn't re-fire every step; updated on every call,
@@ -444,6 +448,8 @@ impl DriveState {
     pub fn new() -> DriveState {
         DriveState {
             boost_amount: MAX_BOOST,
+            boosting: false,
+            boosting_time: 0.0,
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
@@ -615,9 +621,16 @@ pub fn apply_driven_forces(
 
     state.was_on_ground = on_ground;
 
+    let boosting = boost::update_boosting(
+        input.boost,
+        state.boost_amount > 0.0,
+        &mut state.boosting,
+        &mut state.boosting_time,
+        dt,
+    );
     boost::apply_boost(
         car,
-        input.boost,
+        boosting,
         on_ground,
         forward,
         &mut state.boost_amount,

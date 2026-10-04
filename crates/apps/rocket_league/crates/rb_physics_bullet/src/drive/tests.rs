@@ -148,6 +148,8 @@ fn step_with_input_and_dodge_flip(
     // call and unpack afterward.
     let mut state = DriveState {
         boost_amount: *boost_amount,
+        boosting: false,
+        boosting_time: 0.0,
         jump_held: *jump_held,
         double_jump_available: *double_jump_available,
         jump_hold_time_remaining: *jump_hold_time_remaining,
@@ -2419,6 +2421,8 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
         state,
         DriveState {
             boost_amount: MAX_BOOST,
+            boosting: false,
+            boosting_time: 0.0,
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
@@ -3482,4 +3486,60 @@ fn tire_side_force_follows_the_cars_own_right_axis() {
         change.z,
         right.z
     );
+}
+
+/// RB-PHYSICS-001-FR-133: a boost tap burns for `BOOST_MIN_TIME` (0.1 s)
+/// however briefly it was held; with the tank empty it never starts, and a
+/// held button keeps it going.
+#[test]
+fn a_boost_tap_burns_for_the_minimum_time() {
+    let (mut boosting, mut time) = (false, 0.0);
+    let dt = 1.0 / 120.0;
+    let mut burned = 0;
+    for tick in 0..40 {
+        let held = tick == 0;
+        if super::boost::update_boosting(held, true, &mut boosting, &mut time, dt) {
+            burned += 1;
+        }
+    }
+    // The 0.1 s minimum is 12 ticks (the f32 timer may close one late).
+    assert!((12..=13).contains(&burned), "burned {burned} ticks");
+}
+
+#[test]
+fn boost_needs_fuel_and_a_held_button_keeps_it_going() {
+    let dt = 1.0 / 120.0;
+    let (mut boosting, mut time) = (false, 0.0);
+    assert!(!super::boost::update_boosting(
+        true,
+        false,
+        &mut boosting,
+        &mut time,
+        dt
+    ));
+    assert!(!super::boost::update_boosting(
+        false,
+        true,
+        &mut boosting,
+        &mut time,
+        dt
+    ));
+    for _ in 0..60 {
+        assert!(super::boost::update_boosting(
+            true,
+            true,
+            &mut boosting,
+            &mut time,
+            dt
+        ));
+    }
+    // Running dry stops it at once, even inside the minimum time.
+    assert!(!super::boost::update_boosting(
+        true,
+        false,
+        &mut boosting,
+        &mut time,
+        dt
+    ));
+    assert_eq!(time, 0.0);
 }

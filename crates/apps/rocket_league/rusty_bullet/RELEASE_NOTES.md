@@ -8,6 +8,15 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## A boost tap burns for a tenth of a second
+**2026-10-04** · `RB-PHYSICS-001-FR-133` · ADR-0052
+
+- The game keeps boosting for at least 0.1 s once boost starts, however
+  briefly the button was pressed. We stopped the moment it was released, so
+  after a short tap the car lost 8.8 uu/s per tick of forward push for six
+  ticks. Ported RocketSim's boost timer; the driving recording's 0.5 s-ahead
+  car error 2.55 -> 2.12 uu/s. 520 tests.
+
 ## Tires push along their own axle
 **2026-10-04** · `RB-PHYSICS-001-FR-132` · ADR-0051
 
