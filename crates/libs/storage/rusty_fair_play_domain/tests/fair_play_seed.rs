@@ -1,20 +1,19 @@
 //! `FPL-FR-006` (ADR-0137): the seed loader against the supplied deck —
-//! shares its logic with `examples/fair_play_seed.rs` via `#[path]`, so
-//! this exercises the code the CLI runs. Proves the 100-card load, the
-//! suit and uniqueness checks, line-numbered refusals, idempotency by
-//! number with a family's edits surviving a rerun, and splits by path.
+//! the library module the CLI (`examples/fair_play_seed.rs`) runs. Proves
+//! the 100-card load, the suit and uniqueness checks, line-numbered
+//! refusals, idempotency by number with a family's edits surviving a
+//! rerun, and splits by path.
 
-#[path = "../examples/support/fair_play_seed_lib.rs"]
-mod loader;
-
-use loader::{parse_csv, seed, SeedError, SeedInputs, DECK_SIZE};
-use rusty_multimodal_db::generic::fair_play::{
+use rusty_fair_play_domain::seed::{
+    parse_cards, parse_people, parse_splits, seed, SeedData, SeedError, DECK_SIZE,
+};
+use rusty_fair_play_domain::{
     balance, cards_by_suit, cards_held_by, children_ordered, deck_card_id,
     open_card_default_production_stack_portable, open_card_production_stack_portable,
     open_person_production_stack_portable, person_id, replace_card, split_card_id, state_counts,
     CardState, Suit, CARD_DEFAULT_FILE, CARD_FILE, PERSON_FILE,
 };
-use rusty_multimodal_db::generic::query::GetById;
+use rusty_multimodal_db_engine::generic::query::GetById;
 use std::path::{Path, PathBuf};
 
 fn unique_dir(label: &str) -> PathBuf {
@@ -39,26 +38,29 @@ fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
     path
 }
 
-#[test]
-fn csv_parser_handles_quotes_doubled_quotes_and_crlf() {
-    let rows = parse_csv("a,b\r\n1,\"x, \"\"y\"\"\"\n\"multi\nline\",\n").unwrap();
-    assert_eq!(rows.len(), 3);
-    assert_eq!(rows[1].fields, vec!["1", "x, \"y\""]);
-    assert_eq!(rows[2].fields, vec!["multi\nline", ""]);
-    assert_eq!(rows[2].line, 3);
-    assert_eq!(parse_csv("a,\"open\n").unwrap_err().0, 1);
+/// The CLI's shape: parse the files, then load.
+fn seed_files(
+    store: &Path,
+    people: Option<&Path>,
+    cards: &Path,
+    splits: Option<&Path>,
+) -> Result<rusty_fair_play_domain::seed::SeedReport, SeedError> {
+    let data = SeedData {
+        people: people.map(parse_people).transpose()?.unwrap_or_default(),
+        deck: parse_cards(cards)?,
+        splits: splits.map(parse_splits).transpose()?.unwrap_or_default(),
+        splits_label: splits.map(|p| p.display().to_string()).unwrap_or_default(),
+    };
+    seed(store, &data)
 }
 
 #[test]
 fn the_supplied_deck_loads_verbatim_and_a_rerun_creates_nothing() {
     let dir = unique_dir("deck");
     let store = dir.join("store");
-    let inputs = SeedInputs {
-        people: Some(write(&dir, "people.csv", "name\nAda\nBob\n")),
-        cards: data("fair-play-cards.csv"),
-        splits: None,
-    };
-    let report = seed(&store, &inputs).unwrap();
+    let people_csv = write(&dir, "people.csv", "name\nAda\nBob\n");
+    let cards_path = data("fair-play-cards.csv");
+    let report = seed_files(&store, Some(&people_csv), &cards_path, None).unwrap();
     assert_eq!(
         (
             report.people.created,
@@ -104,7 +106,7 @@ fn the_supplied_deck_loads_verbatim_and_a_rerun_creates_nothing() {
     edited.owner_id = Some(person_id("Ada"));
     replace_card(&mut cards, edited).unwrap();
     drop(cards);
-    let rerun = seed(&store, &inputs).unwrap();
+    let rerun = seed_files(&store, Some(&people_csv), &cards_path, None).unwrap();
     assert_eq!((rerun.cards.created, rerun.cards.existing), (0, DECK_SIZE));
     assert_eq!(
         (rerun.card_defaults.created, rerun.card_defaults.existing),
@@ -136,12 +138,15 @@ fn splits_resolve_by_path_and_owner_name_in_file_order() {
          2/Floors,Mopping,,Mopped Sundays\n\
          2/Floors,Vacuuming,Ada,\n",
     );
-    let inputs = SeedInputs {
-        people: Some(write(&dir, "people.csv", "name\nAda\nBob\n")),
-        cards: data("fair-play-cards.csv"),
-        splits: Some(splits.clone()),
-    };
-    assert_eq!(seed(&store, &inputs).unwrap().splits.created, 4);
+    let people = write(&dir, "people.csv", "name\nAda\nBob\n");
+    let cards_path = data("fair-play-cards.csv");
+    assert_eq!(
+        seed_files(&store, Some(&people), &cards_path, Some(&splits))
+            .unwrap()
+            .splits
+            .created,
+        4
+    );
     let cards = open_card_production_stack_portable(&store.join(CARD_FILE)).unwrap();
     let kids = children_ordered(&cards, deck_card_id(2));
     assert_eq!(
@@ -171,7 +176,7 @@ fn splits_resolve_by_path_and_owner_name_in_file_order() {
     );
     drop(cards);
     // Rerun: all four exist, none duplicated.
-    let rerun = seed(&store, &inputs).unwrap();
+    let rerun = seed_files(&store, Some(&people), &cards_path, Some(&splits)).unwrap();
     assert_eq!((rerun.splits.created, rerun.splits.existing), (0, 4));
     let cards = open_card_production_stack_portable(&store.join(CARD_FILE)).unwrap();
     assert_eq!(children_ordered(&cards, deck_card_id(2)).len(), 2);
@@ -184,14 +189,7 @@ fn malformed_rows_are_refused_by_line_and_nothing_is_written() {
     let deck = std::fs::read_to_string(data("fair-play-cards.csv")).unwrap();
     let cards_path = |label: &str, text: &str| write(&dir, &format!("{label}.csv"), text);
     let run = |cards: PathBuf, people: Option<PathBuf>, splits: Option<PathBuf>| {
-        seed(
-            &store,
-            &SeedInputs {
-                people,
-                cards,
-                splits,
-            },
-        )
+        seed_files(&store, people.as_deref(), &cards, splits.as_deref())
     };
     let line_of = |err: SeedError| match err {
         SeedError::Row { line, .. } => line,

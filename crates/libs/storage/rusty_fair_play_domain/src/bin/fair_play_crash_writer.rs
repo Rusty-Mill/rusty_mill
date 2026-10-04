@@ -14,11 +14,11 @@
 //! and either exits `0` (the control run) or sleeps forever (so the kill
 //! always lands on a live process).
 
-use rusty_multimodal_db::generic::fair_play::{
+use rusty_fair_play_domain::{
     deck_card_id, open_card_production_stack_portable, person_id, split_card_id, split_card_with,
     SplitSpec, SplitStep, CARD_FILE,
 };
-use rusty_multimodal_db::generic::query::GetById;
+use rusty_multimodal_db_engine::generic::query::GetById;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;

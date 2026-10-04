@@ -75,8 +75,8 @@ recurrence, reminders.
 ## Layout
 
 `api` (pure router) and `dto` (wire shapes) sit over `service` (rules), which
-sits over `store`/`lists` (the engine). `server` is the only file that touches
-a socket.
+sits over `store`/`lists` (the engine). `server` binds `Backend` to
+`rusty_serve`, the shared blocking HTTP server that also serves `web/dist`.
 
 ```
 cargo test -p rusty_tick

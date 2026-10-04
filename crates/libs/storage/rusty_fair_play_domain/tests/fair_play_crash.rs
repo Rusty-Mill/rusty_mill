@@ -6,13 +6,13 @@
 //! resumable from where it stopped.
 #![cfg(unix)]
 
-use rusty_multimodal_db::generic::fair_play::{
+use rusty_fair_play_domain::{
     card_tree, chain_to_root, children_ordered, create_card_default_production_stack,
     create_card_production_stack, create_person_production_stack, deck_card_id,
     open_card_production_stack_portable, person_id, split_card, split_card_id, CardDefault, Origin,
     Person, SplitSpec, Suit, CARD_DEFAULT_FILE, CARD_FILE, PERSON_FILE,
 };
-use rusty_multimodal_db::generic::query::{AllIds, GetById};
+use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -49,7 +49,7 @@ fn writer() -> &'static str {
 fn seed(dir: &Path) {
     let defaults: Vec<CardDefault> = (1..=3)
         .map(|n| CardDefault {
-            id: rusty_multimodal_db::generic::fair_play::card_default_id(n),
+            id: rusty_fair_play_domain::card_default_id(n),
             number: n,
             name: format!("Card {n}"),
             suit: Suit::Home,

@@ -87,7 +87,7 @@ from the graph the way the README prose has.
 | Subdirectory | Families |
 |---|---|
 | `libs/async/` | `rusty_tokio` (+ `rusty_tokio-macros`), `rusty_stream` |
-| `libs/net/` | `rusty_http`, `rusty_h2`, `rusty_tls`, `rusty_request`, `rusty_kafka`, `rusty_rdp`, `rusty_oauth` |
+| `libs/net/` | `rusty_http`, `rusty_serve`, `rusty_h2`, `rusty_tls`, `rusty_request`, `rusty_kafka`, `rusty_rdp`, `rusty_oauth` |
 | `libs/protocol/` | `rusty_mcp` (+ `rusty-mcp-demo`), `rusty_a2a`, `rusty_acp`, `rusty_lsp` |
 | `libs/storage/` | `rusty_sqlite`, `rusty_rusqlite`, `rusty_db` (6 crates), `rusty_search` (12 crates) |
 | `libs/ui/` | `rusty_font`, `rusty_gpu`, `rusty_gui`, `rusty_vulkan`, `rusty_audio`, `rusty_ansi`, `rusty_lines`, `rusty_term` (+ `rusty_term_l13`) |

@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_fair_play: a web front end for the Fair Play domain
+**2026-10-04** · [ADR-0001](crates/apps/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md) · follows [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md)
+
+- **Added:** `rusty_fair_play` (`crates/apps/rusty_fair_play`), a JSON HTTP API over the embedded `fair_play` stacks on `rusty_http`/`rusty_json`/`rusty_url` (rusty_tick's sans-IO router and thread-per-connection adapter): one boot read with every card's derived state, people, card patch/create/split/reset/baseline/position, and an idempotent `/seed`. The deck ships in the binary and loads on first start. An optional bearer token; without one the server is loopback-only.
+- **Added:** the web UI in its `web/`: React/TypeScript/Vite/Tailwind/Zustand with hash routes — a deck board in six suit shelves with owner chips and `edited`/`custom`/split badges, filters and search; a card pane with dealing, CPE editing, minimum standards, notes, a baseline diff and reset, ordered children and a split dialog; a players page; a balance page with all-cards and leaf-only bars and the "still undealt" leaves. An in-browser `MemoryAdapter` runs the same rules for unit tests and a demo mode; the contract runs against the real binary; Playwright drives the built UI against it. Two CI jobs mirror rusty_tick's.
+- **Changed:** the Fair Play domain is its own libs crate, `rusty_fair_play_domain` (`crates/libs/storage/`), re-exported by `rusty_multimodal_db` as `generic::fair_play` the way the engine is (ADR-0124), so the app depends on no other app crate (ADR-0003's layer rule). The seed loader moved from `examples/support/` into it as `seed` (pure text parsing, file wrappers beside it, `DECK_CSV` embedded); the seed CLI, the benchmark example, the crash writer and the domain's tests moved with it; the `fair_play_seed` example's `--cards` is now optional.
+- **Added:** the gaps the first cut named, closed. The domain crate gains guarded deletes — `delete_card` (leaves only), `unsplit_card` (ADR-0137's merge/unsplit hook: the subtree, deepest first, parent kept), `delete_person` (holding nothing) — and `reorder_children` (one call, exact set). The API exposes them (`DELETE /cards/{id}`, `POST …/unsplit`, `PUT …/children/order`, `DELETE /people/{id}`; 409 when a guard refuses), and every card carries an `etag` that a write may send as `If-Match` (412 with the current card on a mismatch). The web UI uses all of it: delete and unsplit with confirmation, re-parent and suit selects in the card pane, atomic child reorder, reload-on-412, and the full 100-card deck in demo mode.
+- **Added:** `rusty_serve` (`crates/libs/net/rusty_serve`): the blocking `rusty_http` HTTP/1.1 server and path-safe static file loader that rusty_tick and rusty_fair_play both carried, now one crate with a sans-IO `Handler` trait; each app's `server.rs` is a few lines binding its router to it.
+- Known limitations: `If-Match` is optional on the wire, so a client that omits it still wins last-writer; the web UI always sends it.
+
+---
+
 ## rusty_rsi P3: the inner agent a0, its broker and model clients
 **2026-10-04** · [#478](https://github.com/Rusty-Mill/rusty_mill/pull/478) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

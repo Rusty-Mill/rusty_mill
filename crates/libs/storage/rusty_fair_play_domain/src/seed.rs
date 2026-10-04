@@ -1,39 +1,49 @@
-//! The Fair Play seed loader (`FPL-FR-006`, ADR-0137): three CSV inputs
-//! — people, the supplied 100-card deck, and optional splits — into a
-//! data directory of the three `fair_play` stacks. Included via `#[path]`
-//! by the CLI and its integration test, the `restore_backup` placement.
-//! Hand-rolled CSV (quoted fields, doubled quotes, newlines inside
-//! quotes) rather than a new dependency: the files are three, small and
-//! ours.
+//! The Fair Play seed loader (`FPL-FR-006`, ADR-0137): people, the
+//! supplied 100-card deck, and optional splits — parsed from CSV text —
+//! into a data directory of the three stacks. Parsing is pure (text in,
+//! rows or a line-numbered refusal out); only [`seed`] and the `*_file`
+//! helpers touch the filesystem, so the CLI (`examples/fair_play_seed.rs`)
+//! and a server can share it. Hand-rolled CSV (quoted fields, doubled
+//! quotes, newlines inside quotes) rather than a new dependency: the
+//! files are three, small and ours.
+//!
+//! The deck ships inside the library ([`DECK_CSV`](crate::seed::DECK_CSV), the supplied file
+//! verbatim), so a binary can seed itself with no file on disk.
 //!
 //! Idempotent by id: every row's id is deterministic (`person_id`,
 //! `card_default_id`, `deck_card_id`, `split_card_id`), so a rerun finds
 //! what it wrote before and skips it. A live card that already exists is
 //! never overwritten — a family's edits, owners and splits survive a
 //! rerun — and is counted in the report as `existing`. A baseline that
-//! already exists is likewise left alone, even if the file's text
-//! changed: the baseline is what the family's cards were measured against
-//! when they were dealt.
+//! already exists is likewise left alone, even if the text changed: the
+//! baseline is what the family's cards were measured against when they
+//! were dealt.
 
-use rusty_multimodal_db::durability::DurabilityError;
-use rusty_multimodal_db::generic::fair_play::{
+use crate::{
     card_default_id, children_ordered, deck_card_id, insert_card,
     open_or_create_card_default_production_stack, open_or_create_card_production_stack,
     open_or_create_person_production_stack, person_id, split_card, split_card_id, CardDefault,
     CardError, CardProductionStack, NameField, Person, SplitSpec, Suit, CARD_DEFAULT_FILE,
     CARD_FILE, PERSON_FILE,
 };
-use rusty_multimodal_db::generic::query::{FilterEq, GetById};
+use rusty_multimodal_db_engine::durability::DurabilityError;
+use rusty_multimodal_db_engine::generic::query::{FilterEq, GetById};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Where the inputs are. `cards` is required; the other two are loaded
-/// when given.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedInputs {
-    pub people: Option<PathBuf>,
-    pub cards: PathBuf,
-    pub splits: Option<PathBuf>,
+/// The supplied deck, verbatim: `data/fair-play-cards.csv`.
+pub const DECK_CSV: &str = include_str!("../data/fair-play-cards.csv");
+
+/// What one load writes: people, the deck's baselines and live cards,
+/// and splits, in that order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SeedData {
+    pub people: Vec<Person>,
+    /// One baseline plus the row's `notes` (which goes on the live card only).
+    pub deck: Vec<(CardDefault, String)>,
+    pub splits: Vec<SplitRow>,
+    /// Names the splits in a refusal (`<label>:<line>`).
+    pub splits_label: String,
 }
 
 /// How many rows each input produced — written, or found already there.
@@ -51,7 +61,7 @@ pub struct SeedReport {
     pub splits: Tally,
 }
 
-/// Every refusal names the file and the 1-based line of the row (the
+/// Every refusal names the input and the 1-based line of the row (the
 /// header is line 1), so a malformed row is fixed rather than skipped.
 #[derive(Debug)]
 pub enum SeedError {
@@ -59,15 +69,15 @@ pub enum SeedError {
         path: PathBuf,
         source: std::io::Error,
     },
-    /// `<file>:<line>: <what is wrong>`.
+    /// `<label>:<line>: <what is wrong>`.
     Row {
-        path: PathBuf,
+        label: String,
         line: usize,
         message: String,
     },
-    /// A whole-file check: the row count, the suit counts, a repeated number.
+    /// A whole-input check: the row count, the suit counts.
     File {
-        path: PathBuf,
+        label: String,
         message: String,
     },
     Store(DurabilityError),
@@ -79,11 +89,11 @@ impl std::fmt::Display for SeedError {
         match self {
             SeedError::Io { path, source } => write!(f, "{}: {source}", path.display()),
             SeedError::Row {
-                path,
+                label,
                 line,
                 message,
-            } => write!(f, "{}:{line}: {message}", path.display()),
-            SeedError::File { path, message } => write!(f, "{}: {message}", path.display()),
+            } => write!(f, "{label}:{line}: {message}"),
+            SeedError::File { label, message } => write!(f, "{label}: {message}"),
             SeedError::Store(e) => write!(f, "store: {e}"),
             SeedError::Card(e) => write!(f, "card: {e}"),
         }
@@ -185,52 +195,59 @@ pub fn parse_csv(text: &str) -> Result<Vec<Row>, (usize, String)> {
     Ok(rows)
 }
 
-fn read_rows(path: &Path, header: &[&str]) -> Result<Vec<Row>, SeedError> {
-    let text = std::fs::read_to_string(path).map_err(|source| SeedError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut rows = parse_csv(&text).map_err(|(line, message)| SeedError::Row {
-        path: path.to_path_buf(),
+fn rows(text: &str, label: &str, header: &[&str]) -> Result<Vec<Row>, SeedError> {
+    let mut rows = parse_csv(text).map_err(|(line, message)| SeedError::Row {
+        label: label.to_string(),
         line,
         message,
     })?;
     let Some(first) = rows.first() else {
         return Err(SeedError::File {
-            path: path.to_path_buf(),
-            message: "empty file; expected a header row".into(),
+            label: label.to_string(),
+            message: "empty input; expected a header row".into(),
         });
     };
     if first.fields != header {
-        return Err(SeedError::Row {
-            path: path.to_path_buf(),
-            line: first.line,
-            message: format!(
+        return Err(row_error(
+            label,
+            first.line,
+            format!(
                 "header must be `{}`, got `{}`",
                 header.join(","),
                 first.fields.join(",")
             ),
-        });
+        ));
     }
     rows.remove(0);
     for row in &rows {
         if row.fields.len() != header.len() {
-            return Err(SeedError::Row {
-                path: path.to_path_buf(),
-                line: row.line,
-                message: format!("expected {} fields, got {}", header.len(), row.fields.len()),
-            });
+            return Err(row_error(
+                label,
+                row.line,
+                format!("expected {} fields, got {}", header.len(), row.fields.len()),
+            ));
         }
     }
     Ok(rows)
 }
 
-fn row_error(path: &Path, line: usize, message: impl Into<String>) -> SeedError {
+fn row_error(label: &str, line: usize, message: impl Into<String>) -> SeedError {
     SeedError::Row {
-        path: path.to_path_buf(),
+        label: label.to_string(),
         line,
         message: message.into(),
     }
+}
+
+fn read(path: &Path) -> Result<String, SeedError> {
+    std::fs::read_to_string(path).map_err(|source| SeedError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn label(path: &Path) -> String {
+    path.display().to_string()
 }
 
 // ---------------------------------------------------------------------
@@ -240,19 +257,19 @@ fn row_error(path: &Path, line: usize, message: impl Into<String>) -> SeedError 
 pub const PEOPLE_HEADER: [&str; 1] = ["name"];
 
 /// `name` per row; `player` is the row's 1-based order.
-pub fn parse_people(path: &Path) -> Result<Vec<Person>, SeedError> {
+pub fn parse_people_text(text: &str, label: &str) -> Result<Vec<Person>, SeedError> {
     let mut seen = HashSet::new();
-    read_rows(path, &PEOPLE_HEADER)?
+    rows(text, label, &PEOPLE_HEADER)?
         .into_iter()
         .enumerate()
         .map(|(i, row)| {
             let name = row.fields[0].trim();
             if name.is_empty() {
-                return Err(row_error(path, row.line, "empty name"));
+                return Err(row_error(label, row.line, "empty name"));
             }
             if !seen.insert(name.to_string()) {
                 return Err(row_error(
-                    path,
+                    label,
                     row.line,
                     format!("duplicate name `{name}`"),
                 ));
@@ -264,6 +281,10 @@ pub fn parse_people(path: &Path) -> Result<Vec<Person>, SeedError> {
             })
         })
         .collect()
+}
+
+pub fn parse_people(path: &Path) -> Result<Vec<Person>, SeedError> {
+    parse_people_text(&read(path)?, &label(path))
 }
 
 // ---------------------------------------------------------------------
@@ -301,10 +322,10 @@ pub fn parse_standards(cell: &str) -> Vec<String> {
         .collect()
 }
 
-/// One deck row as a baseline plus the row's `notes` (which goes on the
-/// live card only).
-pub fn parse_cards(path: &Path) -> Result<Vec<(CardDefault, String)>, SeedError> {
-    let rows = read_rows(path, &CARDS_HEADER)?;
+/// One deck row as a baseline plus the row's `notes`. The whole deck is
+/// checked: 100 rows, the suit counts, unique numbers in 1..=100.
+pub fn parse_cards_text(text: &str, label: &str) -> Result<Vec<(CardDefault, String)>, SeedError> {
+    let rows = rows(text, label, &CARDS_HEADER)?;
     let mut numbers = BTreeMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -316,22 +337,22 @@ pub fn parse_cards(path: &Path) -> Result<Vec<(CardDefault, String)>, SeedError>
             .filter(|n| (1..=100).contains(n))
             .ok_or_else(|| {
                 row_error(
-                    path,
+                    label,
                     row.line,
                     format!("number must be 1..=100, got `{}`", f[0]),
                 )
             })?;
         if let Some(first) = numbers.insert(number, row.line) {
             return Err(row_error(
-                path,
+                label,
                 row.line,
                 format!("number {number} already used on line {first}"),
             ));
         }
         let suit = Suit::parse(f[2].trim())
-            .ok_or_else(|| row_error(path, row.line, format!("unknown suit `{}`", f[2])))?;
+            .ok_or_else(|| row_error(label, row.line, format!("unknown suit `{}`", f[2])))?;
         if f[1].trim().is_empty() {
-            return Err(row_error(path, row.line, "empty name"));
+            return Err(row_error(label, row.line, "empty name"));
         }
         out.push((
             CardDefault {
@@ -349,7 +370,7 @@ pub fn parse_cards(path: &Path) -> Result<Vec<(CardDefault, String)>, SeedError>
     }
     if out.len() != DECK_SIZE {
         return Err(SeedError::File {
-            path: path.to_path_buf(),
+            label: label.to_string(),
             message: format!("expected {DECK_SIZE} cards, got {}", out.len()),
         });
     }
@@ -357,12 +378,21 @@ pub fn parse_cards(path: &Path) -> Result<Vec<(CardDefault, String)>, SeedError>
         let got = out.iter().filter(|(c, _)| c.suit == suit).count();
         if got != expected {
             return Err(SeedError::File {
-                path: path.to_path_buf(),
+                label: label.to_string(),
                 message: format!("expected {expected} {} cards, got {got}", suit.as_str()),
             });
         }
     }
     Ok(out)
+}
+
+pub fn parse_cards(path: &Path) -> Result<Vec<(CardDefault, String)>, SeedError> {
+    parse_cards_text(&read(path)?, &label(path))
+}
+
+/// The deck that ships with the library.
+pub fn deck() -> Result<Vec<(CardDefault, String)>, SeedError> {
+    parse_cards_text(DECK_CSV, "fair-play-cards.csv")
 }
 
 // ---------------------------------------------------------------------
@@ -386,25 +416,25 @@ pub struct SplitRow {
     pub minimum_standard_of_care: Vec<String>,
 }
 
-pub fn parse_splits(path: &Path) -> Result<Vec<SplitRow>, SeedError> {
-    read_rows(path, &SPLITS_HEADER)?
+pub fn parse_splits_text(text: &str, label: &str) -> Result<Vec<SplitRow>, SeedError> {
+    rows(text, label, &SPLITS_HEADER)?
         .into_iter()
         .map(|row| {
             let f = &row.fields;
             let parent_path = f[0].trim().to_string();
             let Some(first) = parent_path.split('/').next() else {
-                return Err(row_error(path, row.line, "empty parent_path"));
+                return Err(row_error(label, row.line, "empty parent_path"));
             };
             if first.parse::<u16>().is_err() {
                 return Err(row_error(
-                    path,
+                    label,
                     row.line,
                     format!("parent_path must start with a deck number, got `{parent_path}`"),
                 ));
             }
             if parent_path.split('/').any(|seg| seg.trim().is_empty()) {
                 return Err(row_error(
-                    path,
+                    label,
                     row.line,
                     format!("parent_path has an empty segment: `{parent_path}`"),
                 ));
@@ -412,7 +442,7 @@ pub fn parse_splits(path: &Path) -> Result<Vec<SplitRow>, SeedError> {
             let name = f[1].trim().to_string();
             if name.is_empty() || name.contains('/') {
                 return Err(row_error(
-                    path,
+                    label,
                     row.line,
                     "name must be non-empty and contain no `/`",
                 ));
@@ -429,22 +459,26 @@ pub fn parse_splits(path: &Path) -> Result<Vec<SplitRow>, SeedError> {
         .collect()
 }
 
+pub fn parse_splits(path: &Path) -> Result<Vec<SplitRow>, SeedError> {
+    parse_splits_text(&read(path)?, &label(path))
+}
+
 /// `17/Bathrooms/Tub` → the card: the deck card, then one child by name
 /// per segment. Ambiguous or missing names are errors on the row.
 fn resolve_parent(
     cards: &CardProductionStack,
-    path: &Path,
+    label: &str,
     row: &SplitRow,
 ) -> Result<uuid::Uuid, SeedError> {
     let mut segments = row.parent_path.split('/');
     let number: u16 = segments
         .next()
         .and_then(|n| n.parse().ok())
-        .ok_or_else(|| row_error(path, row.line, "bad deck number"))?;
+        .ok_or_else(|| row_error(label, row.line, "bad deck number"))?;
     let mut current = deck_card_id(number);
     if cards.get(current).is_none() {
         return Err(row_error(
-            path,
+            label,
             row.line,
             format!("deck card {number} is not loaded"),
         ));
@@ -458,14 +492,14 @@ fn resolve_parent(
             [one] => one.id,
             [] => {
                 return Err(row_error(
-                    path,
+                    label,
                     row.line,
                     format!("`{}` has no child named `{name}`", row.parent_path),
                 ))
             }
             _ => {
                 return Err(row_error(
-                    path,
+                    label,
                     row.line,
                     format!(
                         "`{}` has more than one child named `{name}`",
@@ -482,47 +516,44 @@ fn resolve_parent(
 // The load
 // ---------------------------------------------------------------------
 
-/// Load `inputs` into the stacks under `store_dir`, creating them if
-/// absent. Every input is parsed and checked in full before the first
-/// write, so a malformed file writes nothing. Writes go people, then
-/// baselines, then live cards, then splits in file order.
-pub fn seed(store_dir: &Path, inputs: &SeedInputs) -> Result<SeedReport, SeedError> {
-    let people = inputs
-        .people
-        .as_deref()
-        .map(parse_people)
-        .transpose()?
-        .unwrap_or_default();
-    let deck = parse_cards(&inputs.cards)?;
-    let splits = inputs
-        .splits
-        .as_deref()
-        .map(parse_splits)
-        .transpose()?
-        .unwrap_or_default();
-
+/// Load `data` into the stacks under `store_dir`, creating them if
+/// absent. Writes go people, then baselines, then live cards, then
+/// splits in order; nothing is written for an input that failed to
+/// parse, since parsing happens before this is called.
+pub fn seed(store_dir: &Path, data: &SeedData) -> Result<SeedReport, SeedError> {
     std::fs::create_dir_all(store_dir).map_err(|source| SeedError::Io {
         path: store_dir.to_path_buf(),
         source,
     })?;
-    let mut people_store = open_or_create_person_production_stack(&store_dir.join(PERSON_FILE))?;
+    let mut people = open_or_create_person_production_stack(&store_dir.join(PERSON_FILE))?;
     let mut defaults =
         open_or_create_card_default_production_stack(&store_dir.join(CARD_DEFAULT_FILE))?;
     let mut cards = open_or_create_card_production_stack(&store_dir.join(CARD_FILE))?;
+    seed_into(&mut people, &mut defaults, &mut cards, data)
+}
+
+/// [`seed`] on stacks the caller already holds open — what a running
+/// server uses, since it owns the stacks for its lifetime.
+pub fn seed_into(
+    people: &mut super::PersonProductionStack,
+    defaults: &mut super::CardDefaultProductionStack,
+    cards: &mut CardProductionStack,
+    data: &SeedData,
+) -> Result<SeedReport, SeedError> {
     let mut report = SeedReport::default();
 
-    for person in people {
-        if people_store.get(person.id).is_some() {
+    for person in &data.people {
+        if people.get(person.id).is_some() {
             report.people.existing += 1;
             continue;
         }
-        people_store
-            .insert(person)
+        people
+            .insert(person.clone())
             .map_err(|e| SeedError::Card(CardError::Insert(e)))?;
         report.people.created += 1;
     }
 
-    for (baseline, notes) in deck {
+    for (baseline, notes) in &data.deck {
         if defaults.get(baseline.id).is_some() {
             report.card_defaults.existing += 1;
         } else {
@@ -532,46 +563,43 @@ pub fn seed(store_dir: &Path, inputs: &SeedInputs) -> Result<SeedReport, SeedErr
             report.card_defaults.created += 1;
         }
         let mut card = baseline.to_card();
-        card.notes = notes;
+        card.notes = notes.clone();
         if cards.get(card.id).is_some() {
             report.cards.existing += 1;
             continue;
         }
-        insert_card(&mut cards, card)?;
+        insert_card(cards, card)?;
         report.cards.created += 1;
     }
 
-    for row in splits {
-        let splits_path = inputs.splits.as_deref().unwrap_or(Path::new("splits"));
+    for row in &data.splits {
         let id = split_card_id(&format!("{}/{}", row.parent_path, row.name));
         if cards.get(id).is_some() {
             report.splits.existing += 1;
             continue;
         }
-        let parent = resolve_parent(&cards, splits_path, &row)?;
+        let parent = resolve_parent(cards, &data.splits_label, row)?;
         let owner_id = match &row.owner_name {
             None => None,
-            Some(name) => {
-                match FilterEq::<Person, NameField>::filter_eq(&people_store, name).as_slice() {
-                    [one] => Some(*one),
-                    _ => {
-                        return Err(row_error(
-                            splits_path,
-                            row.line,
-                            format!("unknown owner `{name}`"),
-                        ))
-                    }
+            Some(name) => match FilterEq::<Person, NameField>::filter_eq(people, name).as_slice() {
+                [one] => Some(*one),
+                _ => {
+                    return Err(row_error(
+                        &data.splits_label,
+                        row.line,
+                        format!("unknown owner `{name}`"),
+                    ))
                 }
-            }
+            },
         };
         split_card(
-            &mut cards,
+            cards,
             parent,
             vec![SplitSpec {
                 id,
-                name: row.name,
+                name: row.name.clone(),
                 owner_id,
-                minimum_standard_of_care: row.minimum_standard_of_care,
+                minimum_standard_of_care: row.minimum_standard_of_care.clone(),
                 ..SplitSpec::default()
             }],
             None,
@@ -579,4 +607,27 @@ pub fn seed(store_dir: &Path, inputs: &SeedInputs) -> Result<SeedReport, SeedErr
         report.splits.created += 1;
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_embedded_deck_parses_and_matches_the_counts() {
+        let deck = deck().unwrap();
+        assert_eq!(deck.len(), DECK_SIZE);
+        assert_eq!(deck[16].0.name, "Meals (Weekday Dinner)");
+        assert_eq!(deck[16].0.number, 17);
+    }
+
+    #[test]
+    fn csv_parser_handles_quotes_doubled_quotes_and_crlf() {
+        let rows = parse_csv("a,b\r\n1,\"x, \"\"y\"\"\"\n\"multi\nline\",\n").unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].fields, vec!["1", "x, \"y\""]);
+        assert_eq!(rows[2].fields, vec!["multi\nline", ""]);
+        assert_eq!(rows[2].line, 3);
+        assert_eq!(parse_csv("a,\"open\n").unwrap_err().0, 1);
+    }
 }

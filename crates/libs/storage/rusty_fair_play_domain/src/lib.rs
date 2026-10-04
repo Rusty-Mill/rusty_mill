@@ -1,16 +1,19 @@
-//! `Fair Play` — this crate's seventh domain and fourth front-door one
-//! (`FPL-FR-001`, ADR-0137): Eve Rodsky's household-task card system as
-//! three tables — `Person`, `Card`, `CardDefault` — on the one-index/
-//! one-scan stack `Memory` (ADR-0048) and `Reminder` (ADR-0036) use,
-//! plus the optional-parent `ChildOf` tree `Rule`/`Source` validated
-//! (`crate::generic_spike::{rule_trace, source}`). The database layer
-//! only: a card-style front end sits on top of it later.
+//! `Fair Play` — `rusty_multimodal_db`'s seventh domain and fourth
+//! front-door one (`FPL-FR-001`, ADR-0137), as its own libs crate: Eve
+//! Rodsky's household-task card system as three tables — `Person`,
+//! `Card`, `CardDefault` — on the engine's one-index/one-scan stack (the
+//! shape `Memory`, ADR-0048, and `Reminder`, ADR-0036, use), plus the
+//! optional-parent `ChildOf` tree the `Rule`/`Source` spikes validated.
+//! A library, not an app, so that `rusty_multimodal_db` (its wire
+//! adapters, re-exported there as `generic::fair_play`) and
+//! `rusty_fair_play` (the web app) can both depend on it under ADR-0003's
+//! layer rule.
 //!
 //! # Shape — the two Fair Play rules that drive it
 //!
 //! **Whoever holds a card owns all of Conception, Planning and
 //! Execution (CPE) for it.** CPE is never assigned separately, so it is
-//! three text fields on [`Card`](crate::generic::fair_play::Card), not a child table.
+//! three text fields on [`Card`], not a child table.
 //!
 //! **A card can be split into cards with different owners.** "Cleaning"
 //! can become "Bathrooms" held by one partner and "Floors" by the other,
@@ -23,21 +26,21 @@
 //!
 //! # Origin and baseline — customization is derived, never stored
 //!
-//! Every deck card has a [`CardDefault`](crate::generic::fair_play::CardDefault) holding its text as shipped,
+//! Every deck card has a [`CardDefault`] holding its text as shipped,
 //! written once by the seed loader (`examples/fair_play_seed.rs`) and
 //! then **read-only by convention**: this module exposes no update or
 //! replace path for it, but the library has no enforced immutability —
 //! a caller reaching for `Replace<CardDefault>` on the raw stack can
-//! still write it. A card's state — [`CardState::Original`](crate::generic::fair_play::CardState::Original), `Edited`
-//! or `Custom` — is computed by [`card_state`](crate::generic::fair_play::card_state) from `origin` and a
+//! still write it. A card's state — [`CardState::Original`], `Edited`
+//! or `Custom` — is computed by [`card_state`] from `origin` and a
 //! six-field comparison against the baseline (`name`, `suit`,
 //! `conception`, `planning`, `execution`, `minimum_standard_of_care`),
 //! never from a stored flag that could drift. `notes`, `owner_id`,
 //! `parent_card_id` and `position` are play state or annotation and
 //! never make a card `Edited`. Invariant: `origin == Deck` iff
 //! `number.is_some()` iff `baseline_id.is_some()` — checked by
-//! [`Card::validate`](crate::generic::fair_play::Card::validate) on every write that goes through [`insert_card`](crate::generic::fair_play::insert_card)/
-//! [`replace_card`](crate::generic::fair_play::replace_card); a write through the raw `Insert`/`Replace` traits
+//! [`Card::validate`] on every write that goes through [`insert_card`]/
+//! [`replace_card`]; a write through the raw `Insert`/`Replace` traits
 //! bypasses it (a documented gap, tested).
 //!
 //! # Ownership — explicit on every card, never inherited
@@ -47,9 +50,9 @@
 //! *that* card. A parent may have a different owner from its children,
 //! or none; the parent's owner holds what is left at that level. The
 //! real "still undealt" list is therefore the **unowned leaf cards**
-//! ([`unassigned_leaf_cards`](crate::generic::fair_play::unassigned_leaf_cards)), and a balance that counts a split parent
+//! ([`unassigned_leaf_cards`]), and a balance that counts a split parent
 //! and its children would double-count the same work, so
-//! [`balance`](crate::generic::fair_play::balance) has a leaf-only variant. CPE text is not copied from
+//! [`balance`] has a leaf-only variant. CPE text is not copied from
 //! parent to child on a split; a "default from parent" is a hook for
 //! later.
 //!
@@ -69,7 +72,7 @@
 //!
 //! # `split_card` is not atomic
 //!
-//! The library has no multi-record transaction. [`split_card`](crate::generic::fair_play::split_card) inserts
+//! The library has no multi-record transaction. [`split_card`] inserts
 //! the children first — each already pointing at an existing parent —
 //! and replaces the parent last, so a crash at any point leaves a valid
 //! store: some or all children present under an unchanged parent, or
@@ -82,12 +85,20 @@
 //! layered over `Replace`), and per-card status or recurrence (Fair
 //! Play divides ownership; it is not a checklist).
 
-use super::mmap_store::GenericMmapStore;
-use super::query::{AllIds, Children, FilterEq, GetById, Insert, Parent, Replace, UpdateField};
-use super::store::Reversed;
-use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag};
-use super::{InsertError, NotFound, ReplaceError};
-use crate::durability::DurabilityError;
+/// The seed loader: the supplied deck, people and splits, from CSV text
+/// or files, into a data directory (`FPL-FR-006`).
+pub mod seed;
+
+use rusty_multimodal_db_engine::durability::DurabilityError;
+use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
+use rusty_multimodal_db_engine::generic::query::{
+    AllIds, Children, Delete, FilterEq, GetById, Insert, Parent, Replace, UpdateField,
+};
+use rusty_multimodal_db_engine::generic::store::Reversed;
+use rusty_multimodal_db_engine::generic::traits::{
+    ChildOf, IndexedField, Record, ScannableField, SchemaTag,
+};
+use rusty_multimodal_db_engine::generic::{DeleteError, InsertError, NotFound, ReplaceError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -524,6 +535,14 @@ pub enum CardError {
     Insert(#[from] InsertError<Uuid>),
     #[error("{0}")]
     Replace(#[from] ReplaceError<Uuid>),
+    #[error("card {0} still has children; unsplit it first")]
+    HasChildren(Uuid),
+    #[error("person {person} still holds {cards} card(s); reassign them first")]
+    HoldsCards { person: Uuid, cards: usize },
+    #[error("card {0}: the order must name each current child exactly once")]
+    BadOrder(Uuid),
+    #[error("{0}")]
+    Delete(#[from] DeleteError<Uuid>),
 }
 
 impl Card {
@@ -738,6 +757,90 @@ where
     S: UpdateField<Card, PositionField>,
 {
     store.update(id, position)
+}
+
+/// Delete a leaf card. A card with children is refused
+/// (`CardError::HasChildren`): delete its subtree with [`unsplit_card`]
+/// first, so no child is left pointing at a missing parent.
+pub fn delete_card<S>(store: &mut S, id: Uuid) -> Result<(), CardError>
+where
+    S: GetById<Card> + Delete<Card> + Children<Card, Card, ParentCard>,
+{
+    if store.get(id).is_none() {
+        return Err(CardError::NotFound(id));
+    }
+    if !is_leaf(store, id) {
+        return Err(CardError::HasChildren(id));
+    }
+    store.delete(id)?;
+    Ok(())
+}
+
+/// Undo a split: delete every card under `id`, deepest first, and keep
+/// `id` itself. Returns the deleted ids in deletion order. An
+/// interrupted unsplit leaves a smaller, still well-formed subtree, so a
+/// rerun finishes the job.
+pub fn unsplit_card<S>(store: &mut S, id: Uuid) -> Result<Vec<Uuid>, CardError>
+where
+    S: GetById<Card> + Delete<Card> + Children<Card, Card, ParentCard>,
+{
+    let tree = card_tree(store, id).map_err(|NotFound(id)| CardError::NotFound(id))?;
+    fn post_order(node: &CardTree, out: &mut Vec<Uuid>) {
+        for child in &node.children {
+            post_order(child, out);
+            out.push(child.card.id);
+        }
+    }
+    let mut order = Vec::new();
+    post_order(&tree, &mut order);
+    for child in &order {
+        store.delete(*child)?;
+    }
+    Ok(order)
+}
+
+/// Delete a person who holds no card (`CardError::HoldsCards` otherwise),
+/// so no card is left owned by a missing person.
+pub fn delete_person<P, C>(people: &mut P, cards: &C, id: Uuid) -> Result<(), CardError>
+where
+    P: GetById<Person> + Delete<Person>,
+    C: Children<Person, Card, OwnedBy>,
+{
+    if people.get(id).is_none() {
+        return Err(CardError::NotFound(id));
+    }
+    let held = cards_held_by(cards, id).len();
+    if held > 0 {
+        return Err(CardError::HoldsCards {
+            person: id,
+            cards: held,
+        });
+    }
+    people.delete(id)?;
+    Ok(())
+}
+
+/// Reorder the children of `parent` in one call: `order` must name each
+/// current child exactly once (`CardError::BadOrder` otherwise), and gets
+/// positions `0..n` in that order.
+pub fn reorder_children<S>(store: &mut S, parent: Uuid, order: &[Uuid]) -> Result<(), CardError>
+where
+    S: GetById<Card> + Children<Card, Card, ParentCard> + UpdateField<Card, PositionField>,
+{
+    if store.get(parent).is_none() {
+        return Err(CardError::NotFound(parent));
+    }
+    let current: HashSet<Uuid> = Children::<Card, Card, ParentCard>::children(store, parent)
+        .into_iter()
+        .collect();
+    let given: HashSet<Uuid> = order.iter().copied().collect();
+    if given.len() != order.len() || given != current {
+        return Err(CardError::BadOrder(parent));
+    }
+    for (position, id) in (0u32..).zip(order) {
+        set_position(store, *id, position).map_err(|NotFound(id)| CardError::NotFound(id))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -1285,13 +1388,12 @@ where
     Ok(card)
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// Small fixtures shared with dependents' tests (`rusty_multimodal_db`'s
+/// wire adapters): a six-card deck, two people, a split spec.
+pub mod fixtures {
     use super::*;
-    use crate::generic::production::GenericProductionStore;
-    use crate::test_support::fresh_temp_dir;
 
-    pub(crate) fn default(n: u16, suit: Suit) -> CardDefault {
+    pub fn default(n: u16, suit: Suit) -> CardDefault {
         CardDefault {
             id: card_default_id(n),
             number: n,
@@ -1305,7 +1407,7 @@ pub(crate) mod tests {
     }
 
     /// Six deck cards: 1–3 Home, 4–5 Out, 6 Wild.
-    pub(crate) fn deck() -> Vec<CardDefault> {
+    pub fn deck() -> Vec<CardDefault> {
         vec![
             default(1, Suit::Home),
             default(2, Suit::Home),
@@ -1316,7 +1418,7 @@ pub(crate) mod tests {
         ]
     }
 
-    pub(crate) fn people() -> Vec<Person> {
+    pub fn people() -> Vec<Person> {
         vec![
             Person {
                 id: person_id("Ada"),
@@ -1331,7 +1433,7 @@ pub(crate) mod tests {
         ]
     }
 
-    pub(crate) fn spec(path: &str, name: &str, owner: Option<Uuid>) -> SplitSpec {
+    pub fn spec(path: &str, name: &str, owner: Option<Uuid>) -> SplitSpec {
         SplitSpec {
             id: split_card_id(path),
             name: name.into(),
@@ -1339,6 +1441,26 @@ pub(crate) mod tests {
             minimum_standard_of_care: vec![format!("{name} done")],
             ..SplitSpec::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{deck, default, people, spec};
+    use super::*;
+    use rusty_multimodal_db_engine::generic::production::GenericProductionStore;
+
+    /// A fresh, uniquely named directory under the OS temp dir.
+    fn fresh_temp_dir(label: &str) -> std::io::Result<std::path::PathBuf> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_fair_play_domain_{label}_{}_{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
     struct Fixture {
@@ -1986,11 +2108,12 @@ pub(crate) mod tests {
     /// names an id with no record, `chain_to_root` stops where the trail
     /// goes cold, and the children index still lists the orphans under
     /// the deleted id — live and after a reopen, since it is rebuilt from
-    /// the children's own fields. This documents current behaviour; the
-    /// domain exposes no delete of its own.
+    /// the children's own fields. This documents what a raw engine
+    /// delete leaves, and why the domain's own `delete_card` refuses a
+    /// parent.
     #[test]
     fn deleting_a_parent_leaves_its_children_pointing_at_nothing() {
-        use crate::generic::query::Delete;
+        use rusty_multimodal_db_engine::generic::query::Delete;
         let mut f = fixture("fp_orphan");
         split_card(
             &mut f.cards,
@@ -2069,5 +2192,85 @@ pub(crate) mod tests {
             balance(&reopened, &[ada(), bob()], true),
             vec![(ada(), 0), (bob(), 1)]
         );
+    }
+
+    #[test]
+    fn delete_unsplit_delete_person_and_reorder() {
+        let mut f = fixture("fp_delete");
+        split_card(
+            &mut f.cards,
+            n(1),
+            vec![spec("1/a", "a", Some(ada())), spec("1/b", "b", None)],
+            None,
+        )
+        .unwrap();
+        split_card(
+            &mut f.cards,
+            split_card_id("1/a"),
+            vec![spec("1/a/x", "x", None)],
+            None,
+        )
+        .unwrap();
+        let (a, b, x) = (
+            split_card_id("1/a"),
+            split_card_id("1/b"),
+            split_card_id("1/a/x"),
+        );
+
+        // A parent is never deleted from under its children.
+        assert!(matches!(
+            delete_card(&mut f.cards, n(1)),
+            Err(CardError::HasChildren(id)) if id == n(1)
+        ));
+        assert!(matches!(
+            delete_card(&mut f.cards, Uuid::from_u128(5)),
+            Err(CardError::NotFound(_))
+        ));
+        // Reorder: the set must match exactly.
+        assert!(matches!(
+            reorder_children(&mut f.cards, n(1), &[a]),
+            Err(CardError::BadOrder(_))
+        ));
+        assert!(matches!(
+            reorder_children(&mut f.cards, n(1), &[a, a]),
+            Err(CardError::BadOrder(_))
+        ));
+        assert!(matches!(
+            reorder_children(&mut f.cards, n(1), &[a, b, x]),
+            Err(CardError::BadOrder(_))
+        ));
+        reorder_children(&mut f.cards, n(1), &[b, a]).unwrap();
+        assert_eq!(
+            children_ordered(&f.cards, n(1))
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![b, a]
+        );
+        assert_eq!(f.cards.get(b).unwrap().position, 0);
+        assert_eq!(f.cards.get(a).unwrap().position, 1);
+
+        // A leaf goes; a person holding a card stays.
+        delete_card(&mut f.cards, b).unwrap();
+        assert!(f.cards.get(b).is_none());
+        assert!(matches!(
+            delete_person(&mut f.people, &f.cards, ada()),
+            Err(CardError::HoldsCards { person, cards: 1 }) if person == ada()
+        ));
+        delete_person(&mut f.people, &f.cards, bob()).unwrap();
+        assert!(f.people.get(bob()).is_none());
+        assert!(matches!(
+            delete_person(&mut f.people, &f.cards, bob()),
+            Err(CardError::NotFound(_))
+        ));
+
+        // Unsplit removes the subtree deepest first and keeps the parent.
+        assert_eq!(unsplit_card(&mut f.cards, n(1)).unwrap(), vec![x, a]);
+        assert!(f.cards.get(a).is_none() && f.cards.get(x).is_none());
+        assert!(f.cards.get(n(1)).is_some());
+        assert!(is_leaf(&f.cards, n(1)));
+        assert!(unsplit_card(&mut f.cards, n(1)).unwrap().is_empty());
+        assert!(cards_held_by(&f.cards, ada()).is_empty());
+        delete_person(&mut f.people, &f.cards, ada()).unwrap();
     }
 }

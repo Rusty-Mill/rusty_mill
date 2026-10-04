@@ -1,0 +1,70 @@
+@import './tokens.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    overflow: hidden; /* panes scroll independently; the page never does */
+    background: rgb(var(--surface));
+    color: rgb(var(--text));
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif,
+      'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji';
+    font-size: 14px;
+    line-height: 21px;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--primary));
+    outline-offset: 1px;
+  }
+  ::selection {
+    background: rgb(var(--primary) / 0.25);
+  }
+}
+
+@layer components {
+  .field {
+    @apply w-full rounded-row border border-line bg-surface px-3 py-1.5 outline-none focus:border-primary;
+  }
+  .btn {
+    @apply inline-flex h-8 items-center justify-center gap-1.5 rounded-row border border-line px-3 hover:bg-hover disabled:opacity-40 disabled:hover:bg-transparent;
+  }
+  .btn-primary {
+    @apply inline-flex h-8 items-center justify-center gap-1.5 rounded-row bg-primary px-3 text-white hover:opacity-90 disabled:opacity-40;
+  }
+  .chip {
+    @apply inline-flex h-7 items-center gap-1.5 rounded-full border border-line px-2.5 text-s hover:bg-hover;
+  }
+  .chip-on {
+    @apply border-primary bg-primary/10 text-primary;
+  }
+}
+
+@layer utilities {
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line)) transparent;
+  }
+  .pop-shadow {
+    box-shadow: var(--shadow-pop);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0ms !important; animation-duration: 0ms !important; animation-delay: 0ms !important; }
+}

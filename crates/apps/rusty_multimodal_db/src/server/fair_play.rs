@@ -68,7 +68,7 @@ use crate::generic::fair_play::{
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic::traits::ScannableField;
-use crate::generic::{GuardedReplace, InsertError, ReplaceError};
+use crate::generic::{DeleteError, GuardedReplace, InsertError, ReplaceError};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------
@@ -555,11 +555,17 @@ impl CardConnectionStore {
             | CardError::Cycle(_)
             | CardError::ImmutableChanged(_)
             | CardError::BaselineMissing(..)
-            | CardError::NotADeckCard(_) => Err(ErrorCode::Malformed),
-            CardError::NotFound(_) | CardError::Replace(ReplaceError::NotFound(_)) => Ok(None),
+            | CardError::NotADeckCard(_)
+            | CardError::HasChildren(_)
+            | CardError::HoldsCards { .. }
+            | CardError::BadOrder(_) => Err(ErrorCode::Malformed),
+            CardError::NotFound(_)
+            | CardError::Replace(ReplaceError::NotFound(_))
+            | CardError::Delete(DeleteError::NotFound(_)) => Ok(None),
             CardError::Insert(InsertError::Duplicate(_)) => Ok(Some(InsertOutcome::Duplicate)),
             CardError::Insert(InsertError::Durability(_))
-            | CardError::Replace(ReplaceError::Durability(_)) => Err(ErrorCode::Storage),
+            | CardError::Replace(ReplaceError::Durability(_))
+            | CardError::Delete(DeleteError::Durability(_)) => Err(ErrorCode::Storage),
         }
     }
 }
@@ -959,7 +965,7 @@ impl ConnectionStore for CardDefaultConnectionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::fair_play::tests::{deck, people, spec};
+    use crate::generic::fair_play::fixtures::{deck, people, spec};
     use crate::generic::fair_play::{
         card_default_id, create_card_default_production_stack, create_card_production_stack,
         create_person_production_stack, deck_card_id, person_id, split_card, split_card_id,

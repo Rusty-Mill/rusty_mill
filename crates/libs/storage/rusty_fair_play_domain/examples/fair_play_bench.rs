@@ -15,12 +15,12 @@
 //! Numbers are wall-clock medians over repeated runs on whatever machine
 //! runs this; the ADR records one run and says so.
 
-use rusty_multimodal_db::generic::fair_play::{
+use rusty_fair_play_domain::{
     card_tree, cards_by_state, create_card_default_production_stack, create_card_production_stack,
     deck_card_id, leaf_cards_under, root_card_id, split_card, state_counts, Card, CardDefault,
     CardState, SplitSpec, Suit,
 };
-use rusty_multimodal_db::generic::query::GetById;
+use rusty_multimodal_db_engine::generic::query::GetById;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -45,7 +45,7 @@ fn deck(n: usize) -> Vec<CardDefault> {
 
 fn spec(key: &str) -> SplitSpec {
     SplitSpec {
-        id: rusty_multimodal_db::generic::fair_play::split_card_id(key),
+        id: rusty_fair_play_domain::split_card_id(key),
         name: key.to_string(),
         conception: "conceive".into(),
         planning: "plan".into(),
@@ -102,7 +102,7 @@ fn main() {
         let specs = (0..3).map(|i| spec(&format!("{n}/{i}"))).collect();
         split_card(&mut stack, deck_card_id(n), specs, None).unwrap();
     }
-    let total = rusty_multimodal_db::generic::query::AllIds::<Card>::all_ids(&stack).len();
+    let total = rusty_multimodal_db_engine::generic::query::AllIds::<Card>::all_ids(&stack).len();
     println!("## chain walk vs denormalized root ({total} cards)\n");
     println!("| depth | chain walk (`root_card_id`) | one `GetById` (denormalized) | ratio |");
     println!("|---|---|---|---|");
