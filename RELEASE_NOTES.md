@@ -13,6 +13,39 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi P4: the outer loop, calibration and run reports
+**2026-10-04** · [#483](https://github.com/Rusty-Mill/rusty_mill/pull/483) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `rsi run`, the outer loop. Each step:
+  - checks the incumbent out in a sparse, detached git worktree that holds only the harness;
+  - lets a proposer rewrite it;
+  - commits the result under `refs/rsi/<run>/<step>`, never on a branch, and rejects it as a path violation if anything but a regular file under `harness/src/` changed;
+  - builds it, grades it on fresh seeds, gates it (`screen`, then `confirm` on another fresh seed set) and appends the result to the run's lineage.
+- **Added:** `rsi-runtime`:
+  - `JsonlLineage`, an append-only, hash-chained `lineage.jsonl` with content-addressed `blobs/`. Every read re-verifies the chain and each entry's verdict.
+  - A git adapter.
+  - `ModelProposer`, whole-file rewrites from any chat model, and `ScriptedProposer`.
+  - `outer::run` and `outer::calibrate`.
+  - `report::summary` and `report::replay`.
+- **Added:** `rsi calibrate`. It grades the base harness on N disjoint seed sets and writes the noise band and the margin `z·√2·σ̂`.
+- **Added:** `rsi report [--replay]`. Replay re-grades every stored submission bit for bit and re-runs every inner run from its transcript.
+- **Added:** `rsi-core` gains the `Proposer` and `LineageStore` ports. The proposer sees only `Precedent`s (verdicts, grades, public scores), so a per-task private score cannot reach it.
+- **Changed:** model configuration is per role, from `RSI_INNER_*` and `RSI_OUTER_*` (`_MODEL`, `_BASE_URL`, `_API_KEY`).
+- **Tests:**
+  - **10-step run.** A 10-step run on the real suite in a throwaway repository, with scripted models, gets every verdict right: not better, within noise, path violation (manifest, symlink, private labels), buggy and accepted. The acceptance comes from a fresh, disjoint seed set.
+  - **Replay and tampering.** Replay reproduces all 27 grades and 27 trajectories. An altered blob, a forged verdict and an overwritten run are all caught.
+  - **Mutation checks.** The run test fails when the allowlist is removed, when re-evaluation reuses seeds, or when the proposer gets stale history.
+- **Fixed (review):**
+  - Proposer writes refuse a symlinked ancestor directory, not just a symlinked leaf, so a write cannot escape the worktree.
+  - Refs are create-only, and a run claims `refs/rsi/<run>/base` first: a second run directory with the same name is refused instead of overwriting the first run's refs.
+  - A missing or baseline-less lineage is an error, not a successful replay. A partial run is reported as `INCOMPLETE`, and `--replay` on it fails after checking what was recorded.
+- Known limitations:
+  - The outer model must be a local OpenAI-compatible endpoint (there is no TLS yet). A Codex CLI proposer is deferred.
+  - The parent is always the incumbent.
+  - The outer model's token cost is not yet recorded in lineage.
+
+---
+
 ## rusty_fair_play: a web front end for the Fair Play domain
 **2026-10-04** · [ADR-0001](crates/apps/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md) · follows [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md)
 

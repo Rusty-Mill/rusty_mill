@@ -31,6 +31,16 @@ pub enum RuntimeError {
     /// A broker transcript is malformed, or a replay diverged from it.
     #[error("broker: {0}")]
     Broker(String),
+    /// A harness that must build (the baseline, or one being replayed)
+    /// did not; the compiler's output.
+    #[error("the harness does not build: {0}")]
+    Harness(String),
+    /// A git command failed.
+    #[error("git: {0}")]
+    Git(String),
+    /// The run's lineage or a blob is malformed, inconsistent or altered.
+    #[error("lineage: {0}")]
+    Lineage(String),
     /// A domain value was rejected.
     #[error("{0}")]
     Core(#[from] CoreError),

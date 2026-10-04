@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **The `rusty_rsi` outer loop** (`crates/apps/rusty_rsi`, ADR-0005 P4): `rsi run` (sparse git worktrees, a path allowlist, fresh-seed accept gate, hash-chained JSONL lineage with content-addressed blobs), `rsi calibrate` (noise band and margin), `rsi report --replay` (bit-for-bit grade replay and trajectory replay); `rsi-core` gains the `Proposer` and `LineageStore` ports.
 - **`rusty_serve`** (`crates/libs/net/rusty_serve`): the blocking `rusty_http` server plus static file loader extracted from `rusty_tick`, now shared with `rusty_fair_play` through a sans-IO `Handler`.
 - **`rusty_fair_play`** (`crates/apps/rusty_fair_play`, its ADR-0001): a JSON HTTP API and a React web UI for the Fair Play domain; two CI jobs. Cards carry an `etag` (`If-Match` → 412 with the current card); guarded deletes (`delete_card`, `unsplit_card`, `delete_person`) and an atomic `reorder_children` in `rusty_fair_play_domain`, as routes, and in the UI. **`rusty_fair_play_domain`** (`crates/libs/storage/`): the domain extracted from `rusty_multimodal_db` (re-exported there as `generic::fair_play`) with the seed loader and the deck embedded, so the app depends on no other app crate.
 - **`rsi-harness` (a0) and the inner loop** (`crates/apps/rusty_rsi`, ADR-0005 P3): a std-only AIDE0 agent compiled with plain `rustc` in the sandbox; a metered broker over an inherited socket with transcript replay; OpenAI-compatible and scripted model clients; `rsi inner`; `rsi-core` gains the `Harness` and `ChatModel` ports.

@@ -16,7 +16,8 @@
 use core::fmt;
 
 use rusty_err::Error;
-use rusty_rsa::{sha256, Digest, Sha256};
+pub use rusty_rsa::Digest;
+use rusty_rsa::{sha256, Sha256};
 
 use crate::accept::{confirm, screen, Decision, Evaluation, Rejection, Screen};
 use crate::budget::{Budget, CostUsage};

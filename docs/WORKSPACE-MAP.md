@@ -239,10 +239,10 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_remind_me | remind_me_mcp |  | 2 |
 | apps | rusty_remind_me | remind_me_remote |  | 1 |
 | apps | rusty_remind_me | rusty-remind-me |  | 0 |
-| apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary and its sandbox and grader entry points | 0 |
+| apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary (calibrate, run, report, inner) and its sandbox and grader entry points | 0 |
 | apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types | 2 |
 | apps | rusty_rsi | rsi-harness | a0, the inner agent of the rusty_rsi harness: AIDE0-style tree search over a metered broker; the outer loop's only mutable surface | 1 |
-| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics, the out-of-process private grader, the inner-agent broker and model clients | 1 |
+| apps | rusty_rsi | rsi-runtime | Adapters for the rusty_rsi harness: Landlock/seccomp sandboxed executor, task directories, metrics, the out-of-process private grader, the inner-agent broker, model clients, the outer loop, the hash-chained lineage store, the git candidate adapter and run reports | 1 |
 | apps | rusty_skillopt | skillopt-cli |  | 0 |
 | apps | rusty_skillopt | skillopt-core |  | 3 |
 | apps | rusty_skillopt | skillopt-envs |  | 1 |

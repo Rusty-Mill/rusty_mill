@@ -5,20 +5,17 @@
 //!           [--seed N] [--work DIR] [--transcript FILE]
 //! ```
 //!
-//! The inner model comes from the environment, never from flags or files
-//! that might be logged:
-//!
-//! - `RSI_INNER_MODEL` (required): the model id, e.g. `qwen2.5-coder:7b`.
-//! - `RSI_INNER_BASE_URL`: an OpenAI-compatible base URL; defaults to a
-//!   local Ollama, `http://127.0.0.1:11434/v1`.
-//! - `RSI_INNER_API_KEY`: a bearer token, if the endpoint needs one.
-//! - `RSI_RUSTC`: the compiler that builds the harness; defaults to `rustc`.
+//! The inner model comes from the environment (`RSI_INNER_*`, see
+//! [`crate::config`]), never from flags or files that might be logged.
+//! `RSI_RUSTC` names the compiler that builds the harness (default
+//! `rustc`).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rsi_core::{Budget, Harness, ModelId, PublicTask, Seed};
+use crate::config::{model_from_env, Role};
+use rsi_core::{Budget, Harness, PublicTask, Seed};
 use rsi_runtime::grading::SYSTEM_READ_ROOTS;
 use rsi_runtime::harness::build;
 use rsi_runtime::{
@@ -26,14 +23,10 @@ use rsi_runtime::{
     SolutionRunner, TaskDir, Toolchain,
 };
 
-/// The default inner endpoint: a local Ollama.
-const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 /// Completion tokens asked for per model call.
 const MAX_COMPLETION_TOKENS: u64 = 4096;
 /// How long past its wall-clock budget the agent may run.
 const GRACE: Duration = Duration::from_secs(5);
-/// How long one model call may take.
-const MODEL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Parsed `rsi inner` arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -88,18 +81,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
 /// A usage or configuration message, or the run's infrastructure error.
 pub fn main(args: &[OsString]) -> Result<String, String> {
     let args = parse(args)?;
-    let model_id =
-        std::env::var("RSI_INNER_MODEL").map_err(|_| "RSI_INNER_MODEL is not set".to_owned())?;
-    let base_url =
-        std::env::var("RSI_INNER_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
-    let api_key = std::env::var("RSI_INNER_API_KEY").ok();
-    let model = OpenAiModel::new(
-        ModelId::parse(&model_id).map_err(|e| e.to_string())?,
-        &base_url,
-        api_key,
-        MODEL_TIMEOUT,
-    )
-    .map_err(|e| e.to_string())?;
+    let model = model_from_env(Role::Inner)?;
     run(&args, &model).map_err(|e| e.to_string())
 }
 
