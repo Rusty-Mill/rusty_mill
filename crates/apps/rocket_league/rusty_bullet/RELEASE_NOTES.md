@@ -8,6 +8,19 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Rounded corners on the ramps
+**2026-10-04** · `RB-PHYSICS-001-FR-124` · ADR-0044
+
+- Bullet pads every convex shape by a small margin and, against a
+  triangle mesh, treats the car's box as a slightly smaller box with
+  rounded corners of that radius. Ours was sharp, so on a fast wall ride
+  the nose corner "touched" the next ramp facet a tick before the game's
+  did and took a 32 uu/s kick there. Against the flat floor and walls
+  Bullet uses the sharp corner, and the recordings' corner landings
+  confirm that, so only the mesh path changed. The driving recording's
+  car error drops 0.470 → 0.447 uu/s per tick, the hit recording's four
+  worst ramp contacts go from 34–60 uu/s to under 3. 503 tests.
+
 ## Jumping off your roof
 **2026-10-04** · `RB-PHYSICS-001-FR-123` · ADR-0043
 

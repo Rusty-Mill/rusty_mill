@@ -241,8 +241,9 @@ impl BoxCorners<'_> {
         let Shape::Box { half_extents } = body.shape else {
             return None;
         };
-        let breaking =
-            CONTACT_BREAKING_FACTOR * (half_extents.length() + body.shape_offset.length());
+        let margin = crate::body::BOX_COLLISION_MARGIN;
+        let padded = half_extents + Vec3::new(margin, margin, margin);
+        let breaking = CONTACT_BREAKING_FACTOR * (padded.length() + body.shape_offset.length());
         Some(BoxCorners {
             body,
             half_extents,
@@ -252,6 +253,25 @@ impl BoxCorners<'_> {
 
     fn world(&self, local: &Vec3) -> Vec3 {
         self.body.shape_center() + self.body.orientation.rotate(local)
+    }
+
+    /// The corner in world space and its gap to the plane `normal . p =
+    /// offset`. `rounded` measures it as Bullet's GJK does against a mesh
+    /// triangle: from the corner of the margin-shrunk core box, less the
+    /// margin (`body::BOX_COLLISION_MARGIN`), so a corner meeting a facet
+    /// obliquely reads further away than the sharp corner does. Against a
+    /// static plane Bullet takes the sharp corner
+    /// (`btBoxShape::localGetSupportingVertex` adds the margin axis-wise).
+    fn gap(&self, local: &Vec3, normal: &Vec3, offset: f32, rounded: bool) -> (Vec3, f32) {
+        let corner = self.world(local);
+        let sharp = normal.dot(&corner) - offset;
+        if !rounded {
+            return (corner, sharp);
+        }
+        let local_normal = self.body.orientation.conjugate().rotate(normal);
+        let signs = Vec3::new(local.x.signum(), local.y.signum(), local.z.signum());
+        let rounding = crate::body::BOX_COLLISION_MARGIN * (signs.dot(&local_normal) + 1.0);
+        (corner, sharp - rounding)
     }
 
     fn locals(&self) -> [Vec3; 8] {
@@ -283,6 +303,7 @@ impl ContactManifold {
         self.tick(
             &corners,
             [(local_corner, plane.normal, plane.offset)].into_iter(),
+            false,
         )
     }
 
@@ -299,7 +320,9 @@ impl ContactManifold {
         };
         let locals = corners.locals();
         let worlds = locals.map(|local| corners.world(&local));
-        let pad = Vec3::new(corners.breaking, corners.breaking, corners.breaking);
+        let margin = crate::body::BOX_COLLISION_MARGIN;
+        let pad = Vec3::new(corners.breaking, corners.breaking, corners.breaking)
+            + Vec3::new(margin, margin, margin);
         let min = worlds.iter().fold(worlds[0], |m, p| {
             Vec3::new(m.x.min(p.x), m.y.min(p.y), m.z.min(p.z))
         }) - pad;
@@ -311,8 +334,11 @@ impl ContactManifold {
             .filter_map(|triangle| {
                 locals
                     .iter()
-                    .zip(worlds.iter())
-                    .map(|(local, world)| (local, world, triangle.signed_distance(world)))
+                    .map(|local| {
+                        let (world, gap) =
+                            corners.gap(local, &triangle.normal, triangle.offset(), true);
+                        (local, world, gap)
+                    })
                     .filter(|(_, world, gap)| {
                         *gap < corners.breaking
                             && *gap > -MESH_MAX_DEPTH
@@ -322,7 +348,7 @@ impl ContactManifold {
                     .map(|(local, _, _)| (*local, triangle.normal, triangle.offset()))
             })
             .collect();
-        self.tick(&corners, candidates.into_iter())
+        self.tick(&corners, candidates.into_iter(), true)
     }
 
     /// Adds this tick's detections, refreshes every stored point against
@@ -336,10 +362,10 @@ impl ContactManifold {
         &mut self,
         corners: &BoxCorners,
         detected: impl Iterator<Item = (Vec3, Vec3, f32)>,
+        rounded: bool,
     ) -> Vec<Contact> {
         for (local_corner, normal, offset) in detected {
-            let corner = corners.world(&local_corner);
-            let gap = normal.dot(&corner) - offset;
+            let (corner, gap) = corners.gap(&local_corner, &normal, offset, rounded);
             if gap < corners.breaking {
                 self.add(ManifoldPoint {
                     local_corner,
@@ -350,8 +376,7 @@ impl ContactManifold {
             }
         }
         let gap_of = |point: &ManifoldPoint| {
-            let corner = corners.world(&point.local_corner);
-            (corner, point.normal.dot(&corner) - point.offset)
+            corners.gap(&point.local_corner, &point.normal, point.offset, rounded)
         };
         self.points.retain(|point| {
             let (corner, gap) = gap_of(point);
@@ -2429,7 +2454,7 @@ mod tests {
     }
 
     /// A car box with its nose tipped `pitch` rad down and rolled `roll`
-    /// rad, its lowest corner `gap` uu above the floor.
+    /// rad, its lowest sharp corner `gap` uu above the floor.
     fn tipped_box(pitch: f32, roll: f32, gap: f32) -> RigidBody {
         let half = |angle: f32| (angle * 0.5).sin_cos();
         let (sp, cp) = half(pitch);
@@ -2515,7 +2540,7 @@ mod tests {
         // RB-PHYSICS-001-FR-106: one point per triangle a tick, like
         // Bullet's btConvexTriangleCallback; the tipped box's lowest corner
         // lies over one of the two floor triangles.
-        let car = tipped_box(0.6, 0.2, -1.0);
+        let car = tipped_box(0.6, 0.2, -2.0);
         let mut manifold = ContactManifold::default();
         let contacts = manifold.update_mesh(&car, &floor_mesh());
         let touching: Vec<&Contact> = contacts
@@ -2523,8 +2548,44 @@ mod tests {
             .filter(|c| c.penetration_depth > 0.0)
             .collect();
         assert_eq!(touching.len(), 1, "{contacts:?}");
-        assert!((touching[0].penetration_depth - 1.0).abs() < 1e-3);
+        // Shallower than the sharp corner's 2 uu: the mesh sees the
+        // margin-rounded corner (FR-124).
+        assert!(touching[0].penetration_depth > 0.0 && touching[0].penetration_depth < 2.0);
         assert!((touching[0].normal - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_corner_meets_a_mesh_facet_rounded_but_a_plane_sharp() {
+        // RB-PHYSICS-001-FR-124: Bullet's GJK against a triangle rounds
+        // the box corner by its margin, so a box tipped 45 degrees (and
+        // rolled a little, so one corner is lowest) with its sharp corner
+        // 1 uu into the floor is margin x (|n|_1 - 1) shallower against the
+        // mesh floor, for the floor normal n in the box's frame;
+        // `btConvexPlaneCollisionAlgorithm` takes the sharp corner against
+        // a plane.
+        let car = tipped_box(std::f32::consts::FRAC_PI_4, 0.1, -1.0);
+        let floor = StaticPlane::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+        let on_plane = ContactManifold::default().update_plane(&car, &floor);
+        let on_mesh: Vec<Contact> = ContactManifold::default()
+            .update_mesh(&car, &floor_mesh())
+            .into_iter()
+            .filter(|c| c.penetration_depth > 0.0)
+            .collect();
+        assert_eq!((on_plane.len(), on_mesh.len()), (1, 1));
+        assert!((on_plane[0].penetration_depth - 1.0).abs() < 1e-3);
+        let n = car
+            .orientation
+            .conjugate()
+            .rotate(&Vec3::new(0.0, 0.0, 1.0));
+        let rounding =
+            crate::body::BOX_COLLISION_MARGIN * (n.x.abs() + n.y.abs() + n.z.abs() - 1.0);
+        assert!(rounding > 0.8, "rounding {rounding}");
+        let expected = 1.0 - rounding;
+        assert!(
+            (on_mesh[0].penetration_depth - expected).abs() < 1e-3,
+            "mesh depth {} vs {expected}",
+            on_mesh[0].penetration_depth
+        );
     }
 
     #[test]

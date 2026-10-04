@@ -547,6 +547,7 @@ pub fn standard_curves() -> Vec<StaticQuarterPipe> {
 
 /// Inside the arena, for orienting mesh triangles: the arena is convex, so
 /// every boundary triangle faces this point.
+#[cfg(test)]
 const ARENA_INSIDE: Vec3 = Vec3::new(0.0, 0.0, CEILING_Z * 0.5);
 
 /// The arena's curved parts as Rocket League's own collision triangles

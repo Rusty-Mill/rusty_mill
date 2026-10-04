@@ -214,8 +214,14 @@ version: `a245d35`).
    ports RocketSim's auto-flip, the pop and roll a car on its roof gets
    from a jump press: `hitjump` 279.75 s 12.6 uu/s (was 205), its spin
    error on the press tick still 4.1 rad/s (one sample; RocketSim's
-   torque ramps where the game's roll is immediate). Open car-side lead:
-   the `test2` wall ride at 14.3–14.4 s.
+   torque ramps where the game's roll is immediate). `RB-PHYSICS-001-FR-124`
+   (ADR-0044) rounds the car's hitbox corners by Bullet's 2 uu collision
+   margin against mesh facets (sharp against planes, as Bullet): the
+   `test2` wall ride at 14.292 s 4.7 uu/s (was 31.7), one-step car 0.447
+   (was 0.470), k = 30 car 5.53; `hitjump` car 0.484, its four worst ramp
+   contacts under 3 uu/s (were 34–60). Open car-side leads: `test2`
+   14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
+   and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
@@ -224,7 +230,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (502 tests: 27 `rb_domain`, 431
+- `cargo test --workspace`: pass (503 tests: 27 `rb_domain`, 432
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):
