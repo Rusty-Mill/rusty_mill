@@ -92,13 +92,13 @@ pub mod seed;
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::mmap_store::GenericMmapStore;
 use rusty_multimodal_db_engine::generic::query::{
-    AllIds, Children, FilterEq, GetById, Insert, Parent, Replace, UpdateField,
+    AllIds, Children, Delete, FilterEq, GetById, Insert, Parent, Replace, UpdateField,
 };
 use rusty_multimodal_db_engine::generic::store::Reversed;
 use rusty_multimodal_db_engine::generic::traits::{
     ChildOf, IndexedField, Record, ScannableField, SchemaTag,
 };
-use rusty_multimodal_db_engine::generic::{InsertError, NotFound, ReplaceError};
+use rusty_multimodal_db_engine::generic::{DeleteError, InsertError, NotFound, ReplaceError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -535,6 +535,14 @@ pub enum CardError {
     Insert(#[from] InsertError<Uuid>),
     #[error("{0}")]
     Replace(#[from] ReplaceError<Uuid>),
+    #[error("card {0} still has children; unsplit it first")]
+    HasChildren(Uuid),
+    #[error("person {person} still holds {cards} card(s); reassign them first")]
+    HoldsCards { person: Uuid, cards: usize },
+    #[error("card {0}: the order must name each current child exactly once")]
+    BadOrder(Uuid),
+    #[error("{0}")]
+    Delete(#[from] DeleteError<Uuid>),
 }
 
 impl Card {
@@ -749,6 +757,90 @@ where
     S: UpdateField<Card, PositionField>,
 {
     store.update(id, position)
+}
+
+/// Delete a leaf card. A card with children is refused
+/// (`CardError::HasChildren`): delete its subtree with [`unsplit_card`]
+/// first, so no child is left pointing at a missing parent.
+pub fn delete_card<S>(store: &mut S, id: Uuid) -> Result<(), CardError>
+where
+    S: GetById<Card> + Delete<Card> + Children<Card, Card, ParentCard>,
+{
+    if store.get(id).is_none() {
+        return Err(CardError::NotFound(id));
+    }
+    if !is_leaf(store, id) {
+        return Err(CardError::HasChildren(id));
+    }
+    store.delete(id)?;
+    Ok(())
+}
+
+/// Undo a split: delete every card under `id`, deepest first, and keep
+/// `id` itself. Returns the deleted ids in deletion order. An
+/// interrupted unsplit leaves a smaller, still well-formed subtree, so a
+/// rerun finishes the job.
+pub fn unsplit_card<S>(store: &mut S, id: Uuid) -> Result<Vec<Uuid>, CardError>
+where
+    S: GetById<Card> + Delete<Card> + Children<Card, Card, ParentCard>,
+{
+    let tree = card_tree(store, id).map_err(|NotFound(id)| CardError::NotFound(id))?;
+    fn post_order(node: &CardTree, out: &mut Vec<Uuid>) {
+        for child in &node.children {
+            post_order(child, out);
+            out.push(child.card.id);
+        }
+    }
+    let mut order = Vec::new();
+    post_order(&tree, &mut order);
+    for child in &order {
+        store.delete(*child)?;
+    }
+    Ok(order)
+}
+
+/// Delete a person who holds no card (`CardError::HoldsCards` otherwise),
+/// so no card is left owned by a missing person.
+pub fn delete_person<P, C>(people: &mut P, cards: &C, id: Uuid) -> Result<(), CardError>
+where
+    P: GetById<Person> + Delete<Person>,
+    C: Children<Person, Card, OwnedBy>,
+{
+    if people.get(id).is_none() {
+        return Err(CardError::NotFound(id));
+    }
+    let held = cards_held_by(cards, id).len();
+    if held > 0 {
+        return Err(CardError::HoldsCards {
+            person: id,
+            cards: held,
+        });
+    }
+    people.delete(id)?;
+    Ok(())
+}
+
+/// Reorder the children of `parent` in one call: `order` must name each
+/// current child exactly once (`CardError::BadOrder` otherwise), and gets
+/// positions `0..n` in that order.
+pub fn reorder_children<S>(store: &mut S, parent: Uuid, order: &[Uuid]) -> Result<(), CardError>
+where
+    S: GetById<Card> + Children<Card, Card, ParentCard> + UpdateField<Card, PositionField>,
+{
+    if store.get(parent).is_none() {
+        return Err(CardError::NotFound(parent));
+    }
+    let current: HashSet<Uuid> = Children::<Card, Card, ParentCard>::children(store, parent)
+        .into_iter()
+        .collect();
+    let given: HashSet<Uuid> = order.iter().copied().collect();
+    if given.len() != order.len() || given != current {
+        return Err(CardError::BadOrder(parent));
+    }
+    for (position, id) in (0u32..).zip(order) {
+        set_position(store, *id, position).map_err(|NotFound(id)| CardError::NotFound(id))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -2099,5 +2191,85 @@ mod tests {
             balance(&reopened, &[ada(), bob()], true),
             vec![(ada(), 0), (bob(), 1)]
         );
+    }
+
+    #[test]
+    fn delete_unsplit_delete_person_and_reorder() {
+        let mut f = fixture("fp_delete");
+        split_card(
+            &mut f.cards,
+            n(1),
+            vec![spec("1/a", "a", Some(ada())), spec("1/b", "b", None)],
+            None,
+        )
+        .unwrap();
+        split_card(
+            &mut f.cards,
+            split_card_id("1/a"),
+            vec![spec("1/a/x", "x", None)],
+            None,
+        )
+        .unwrap();
+        let (a, b, x) = (
+            split_card_id("1/a"),
+            split_card_id("1/b"),
+            split_card_id("1/a/x"),
+        );
+
+        // A parent is never deleted from under its children.
+        assert!(matches!(
+            delete_card(&mut f.cards, n(1)),
+            Err(CardError::HasChildren(id)) if id == n(1)
+        ));
+        assert!(matches!(
+            delete_card(&mut f.cards, Uuid::from_u128(5)),
+            Err(CardError::NotFound(_))
+        ));
+        // Reorder: the set must match exactly.
+        assert!(matches!(
+            reorder_children(&mut f.cards, n(1), &[a]),
+            Err(CardError::BadOrder(_))
+        ));
+        assert!(matches!(
+            reorder_children(&mut f.cards, n(1), &[a, a]),
+            Err(CardError::BadOrder(_))
+        ));
+        assert!(matches!(
+            reorder_children(&mut f.cards, n(1), &[a, b, x]),
+            Err(CardError::BadOrder(_))
+        ));
+        reorder_children(&mut f.cards, n(1), &[b, a]).unwrap();
+        assert_eq!(
+            children_ordered(&f.cards, n(1))
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![b, a]
+        );
+        assert_eq!(f.cards.get(b).unwrap().position, 0);
+        assert_eq!(f.cards.get(a).unwrap().position, 1);
+
+        // A leaf goes; a person holding a card stays.
+        delete_card(&mut f.cards, b).unwrap();
+        assert!(f.cards.get(b).is_none());
+        assert!(matches!(
+            delete_person(&mut f.people, &f.cards, ada()),
+            Err(CardError::HoldsCards { person, cards: 1 }) if person == ada()
+        ));
+        delete_person(&mut f.people, &f.cards, bob()).unwrap();
+        assert!(f.people.get(bob()).is_none());
+        assert!(matches!(
+            delete_person(&mut f.people, &f.cards, bob()),
+            Err(CardError::NotFound(_))
+        ));
+
+        // Unsplit removes the subtree deepest first and keeps the parent.
+        assert_eq!(unsplit_card(&mut f.cards, n(1)).unwrap(), vec![x, a]);
+        assert!(f.cards.get(a).is_none() && f.cards.get(x).is_none());
+        assert!(f.cards.get(n(1)).is_some());
+        assert!(is_leaf(&f.cards, n(1)));
+        assert!(unsplit_card(&mut f.cards, n(1)).unwrap().is_empty());
+        assert!(cards_held_by(&f.cards, ada()).is_empty());
+        delete_person(&mut f.people, &f.cards, ada()).unwrap();
     }
 }
