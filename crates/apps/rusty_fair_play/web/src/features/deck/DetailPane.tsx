@@ -372,13 +372,13 @@ function NameField({ card }: { card: Card }) {
   const cancelled = useRef(false)
   const editGeneration = useRef(0)
   const commit = (base = editBase.current, overwrite = false): void => {
-    if (submitting.current) return
     setEditing(false)
     if (cancelled.current) {
       cancelled.current = false
       setHasDraft(false)
       return setValue(card.name)
     }
+    if (submitting.current) return
     if (conflicted && !overwrite) return
     const next = value.trim()
     if (!next || next === card.name) {
@@ -397,10 +397,14 @@ function NameField({ card }: { card: Card }) {
           setHasDraft(false)
           setConflicted(false)
         }
+        // A newer draft was still made against this request's result once it succeeds.
+        // Advancing only its base preserves that draft without letting the old value replace it.
         editBase.current = saved.etag
       })
       .catch((error: unknown) => {
-        if (error instanceof StaleError) setConflicted(true)
+        // A discarded or superseded draft must not be brought back as a conflict by an
+        // older request that happens to finish after it.
+        if (error instanceof StaleError && editGeneration.current === submittedGeneration) setConflicted(true)
       })
       .finally(() => {
         submitting.current = false
@@ -429,6 +433,9 @@ function NameField({ card }: { card: Card }) {
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
           if (e.key === 'Escape') {
             e.stopPropagation()
+            // Invalidate an in-flight request before blur. commit consumes the cancellation
+            // even while another submission is pending, so it cannot leak into the next edit.
+            editGeneration.current++
             cancelled.current = true
             setConflicted(false)
             ;(e.target as HTMLInputElement).blur()

@@ -159,6 +159,68 @@ describe('the detail pane', () => {
     expect(within(pane()).queryByRole('alert')).toBeNull()
   })
 
+  it('cancels a newer rename while an earlier successful rename is in flight without leaking cancellation', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const name = within(pane()).getByLabelText('Name')
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      const saved = await real(id, patch, etag)
+      await gate
+      return saved
+    })
+
+    await user.clear(name)
+    await user.type(name, 'B{Enter}')
+    await user.click(name)
+    await user.clear(name)
+    await user.type(name, 'C{Escape}')
+    expect(name).toHaveValue(dishes.name)
+
+    release()
+    await waitFor(() => expect(name).toHaveValue('B'))
+    expect(within(pane()).queryByRole('alert')).toBeNull()
+
+    await user.clear(name)
+    await user.type(name, 'D{Enter}')
+    await waitFor(async () => expect((await api.getCard(dishes.id)).name).toBe('D'))
+  })
+
+  it('cancels a newer rename while an earlier stale rename is in flight without resurrecting a conflict', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const name = within(pane()).getByLabelText('Name')
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      await gate
+      return real(id, patch, etag)
+    })
+
+    await user.clear(name)
+    await user.type(name, 'B{Enter}')
+    await user.click(name)
+    await user.clear(name)
+    await user.type(name, 'C{Escape}')
+    expect(name).toHaveValue(dishes.name)
+
+    await real(dishes.id, { name: 'Their dishes' }, dishes.etag)
+    release()
+    await waitFor(() => expect(name).toHaveValue('Their dishes'))
+    expect(within(pane()).queryByRole('alert')).toBeNull()
+
+    await user.clear(name)
+    await user.type(name, 'D{Enter}')
+    await waitFor(async () => expect((await api.getCard(dishes.id)).name).toBe('D'))
+  })
+
   it('splits a card through the dialog, lists the children, and reorders them', async () => {
     const user = userEvent.setup()
     const { api, router } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
