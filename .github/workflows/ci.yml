@@ -10,9 +10,9 @@ name: CI
 # touches (plus everything that transitively depends on them) and every
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
-# Pushes to main, and PRs that touch this CI config itself or workspace-wide
-# tooling config under .config/ (e.g. nextest's), still get the full sweep --
-# those can change how every crate builds or tests. A root Cargo.toml edit
+# PRs and main pushes use their event's base-to-head range; CI/config changes,
+# missing history, and manual dispatches still get the full sweep -- those can
+# change how every crate builds or tests. A root Cargo.toml edit
 # used to force the same full sweep unconditionally, but the single most
 # common edit to that file is adding a handful of brand-new, independent
 # workspace members with nothing else in the file touched (e.g. #170's
@@ -21,10 +21,8 @@ name: CI
 # cargo_toml_diff.py` classifies the change first and only forces the full
 # sweep when it's more than a pure `[workspace.members]` addition (a
 # dependency version bump, a removed/renamed member, a `[profile]` edit,
-# ...). A Cargo.lock-only change (no Cargo.toml edit -- a plain `cargo
-# update`) is narrower still: only the workspace crates whose dependency
-# graph actually includes whatever package moved, per `.github/scripts/
-# lockfile_diff.py`.
+# ...). Cargo.lock and toolchain inputs are global: a resolved dependency or
+# compiler change can alter every package and therefore retains the full sweep.
 on:
   push:
     branches: [main]
@@ -135,10 +133,20 @@ jobs:
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
+      tick: ${{ steps.plan.outputs.tick }}
+      fair_play: ${{ steps.plan.outputs.fair_play }}
       remind_me: ${{ steps.plan.outputs.remind_me }}
+      win32: ${{ steps.plan.outputs.win32 }}
+      multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
+      rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The planner verifies the event base is an ancestor before it
+          # selects a narrow range. A shallow checkout cannot prove that for
+          # a multi-commit push, so fetch complete history here.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -153,33 +161,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Event is ${{ github.event_name }}, not pull_request -- running the full workspace sweep."
-            echo "full=true" >> "$GITHUB_OUTPUT"
-            echo "packages=" >> "$GITHUB_OUTPUT"
-            echo "dashboard=true" >> "$GITHUB_OUTPUT"
-            echo "term_web=true" >> "$GITHUB_OUTPUT"
-            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-            echo "remind_me=true" >> "$GITHUB_OUTPUT"
-            echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+          emit_full() {
+            echo "$1 -- running the full workspace sweep."
+            python3 .github/scripts/ci_plan.py --emit-full >> "$GITHUB_OUTPUT"
+          }
+          mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
+            --event "${{ github.event_name }}" \
+            --pr-base "${{ github.event.pull_request.base.sha }}" \
+            --push-before "${{ github.event.before }}")
+          mode="${event_plan[0]#mode=}"
+          base="${event_plan[1]#base=}"
+          if [ "$mode" = "full" ]; then
+            emit_full "Event has no usable scoped base"
             exit 0
           fi
-
-          base="${{ github.event.pull_request.base.sha }}"
-          git fetch --no-tags --depth=1 origin "$base"
-          changed="$(git diff --name-only "$base" HEAD)"
+          if ! git fetch --no-tags --depth=1 origin "$base" || ! git cat-file -e "$base^{commit}"; then
+            emit_full "Unable to obtain event base $base"
+            exit 0
+          fi
+          if ! python3 .github/scripts/ci_plan.py --verify-base "$base"; then
+            emit_full "Event base is not an ancestor of this checkout"
+            exit 0
+          fi
+          changed="$(python3 .github/scripts/ci_plan.py --changed-from "$base")"
           echo "Changed files:"
           echo "$changed"
 
-          if echo "$changed" | grep -Eq '^(\.config/|\.github/(workflows|actions|scripts)/)'; then
-            echo "Workspace-wide CI/tooling config changed -- running the full workspace sweep."
-            echo "full=true" >> "$GITHUB_OUTPUT"
-            echo "packages=" >> "$GITHUB_OUTPUT"
-            echo "dashboard=true" >> "$GITHUB_OUTPUT"
-            echo "term_web=true" >> "$GITHUB_OUTPUT"
-            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-            echo "remind_me=true" >> "$GITHUB_OUTPUT"
-            echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+          if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --requires-full; then
+            emit_full "Workspace-wide CI/tooling config changed"
             exit 0
           fi
 
@@ -187,80 +196,19 @@ jobs:
             git show "$base:Cargo.toml" > /tmp/old-Cargo.toml
             classification="$(python3 .github/scripts/cargo_toml_diff.py /tmp/old-Cargo.toml Cargo.toml)"
             if [ "$classification" != "safe" ]; then
-              echo "Root Cargo.toml changed beyond a pure [workspace.members] addition -- running the full workspace sweep."
-              echo "full=true" >> "$GITHUB_OUTPUT"
-              echo "packages=" >> "$GITHUB_OUTPUT"
-              echo "dashboard=true" >> "$GITHUB_OUTPUT"
-              echo "term_web=true" >> "$GITHUB_OUTPUT"
-              echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-              echo "remind_me=true" >> "$GITHUB_OUTPUT"
-              echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+              emit_full "Root Cargo.toml changed beyond a pure [workspace.members] addition"
               exit 0
             fi
             echo "Root Cargo.toml changed, but only added new [workspace.members] entries -- narrowing normally instead of a full sweep."
           fi
 
-          # rusty_meshed's vendored data-mesh-monitor (Vite/React) isn't a
-          # Cargo crate, so affected_crates.py can't see it -- gate its own
-          # job on a plain path match instead.
-          if echo "$changed" | grep -q '^crates/apps/rusty_meshed/data-mesh-monitor/'; then
-            echo "dashboard=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "dashboard=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # Same for rusty_term's vendored web front end (Vite/React): not
-          # a Cargo crate, so gate its build job on its own path too.
-          if echo "$changed" | grep -q '^crates/libs/ui/rusty_term/web/'; then
-            echo "term_web=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "term_web=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # And rusty_key's Tauri front end (Vite/Solid), the third
-          # vendored npm app -- same gate, same reason.
-          if echo "$changed" | grep -q '^crates/apps/rusty_key/desktop/'; then
-            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "key_desktop=false" >> "$GITHUB_OUTPUT"
-          fi
-
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
           packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
 
-          # Cargo.lock isn't owned by any single crate, so affected_crates.py
-          # can't attribute it -- but unlike Cargo.toml/CI-config changes
-          # above, a lockfile-only change (a plain `cargo update` bumping one
-          # transitive dependency, no Cargo.toml edit at all) has a real,
-          # narrower blast radius: exactly the workspace crates whose
-          # dependency graph actually includes the package(s) that moved.
-          # lockfile_diff.py computes that from the full resolve graph
-          # (including external packages, which affected_crates.py's own
-          # graph deliberately excludes) and falls back to every workspace
-          # crate itself if a changed lockfile entry can't be placed in the
-          # current metadata snapshot -- this step never forces `full=true`
-          # past that, it just folds the (possibly full) result into
-          # `packages`.
-          if echo "$changed" | grep -Eq '^Cargo\.lock$'; then
-            echo "Cargo.lock changed -- narrowing to crates whose dependency graph actually moved."
-            git show "$base:Cargo.lock" > /tmp/old-Cargo.lock
-            lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock)"
-            echo "Lockfile-narrowed crates: ${lockfile_packages:-<none>}"
-            packages="$(printf '%s\n' $packages $lockfile_packages | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
-          fi
-
-          # rusty_remind_me's crates are excluded from the generic clippy/test
-          # jobs and run by the remind-me-* jobs below instead. Those run when
-          # one of its crates is affected (including via a lockfile move) or
-          # anything under its directory changed -- scripts/, .claude-plugin/
-          # and hooks/ belong to no crate, so the affected-crates filter alone
-          # would miss them.
-          if echo "$changed" | grep -q '^crates/apps/rusty_remind_me/' \
-            || printf ' %s ' "$packages" | grep -Eq ' (rusty-remind-me|remind_me_[a-z]+) '; then
-            echo "remind_me=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "remind_me=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Centralize all non-generic job gates here. Path-only front ends
+          # are selected directly; Rust jobs use the affected crate plus its
+          # reverse dependents.
+          printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --packages "$packages" >> "$GITHUB_OUTPUT"
 
           if [ -z "$packages" ]; then
             echo "No workspace crate touched by this PR -- build/test/clippy will be skipped."
@@ -568,6 +516,8 @@ jobs:
   # the real binary is the rusty-tick-e2e job below.
   rusty-tick-web:
     name: rusty_tick web (typecheck, test, build)
+    needs: plan
+    if: needs.plan.outputs.tick == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -588,6 +538,8 @@ jobs:
   # the real rusty_tick binary (single-user and per-user-token servers).
   rusty-tick-e2e:
     name: rusty_tick e2e (Playwright)
+    needs: plan
+    if: needs.plan.outputs.tick == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -621,6 +573,8 @@ jobs:
   # in-memory adapter) and the production build. Mirrors rusty-tick-web.
   rusty-fair-play-web:
     name: rusty_fair_play web (typecheck, test, build)
+    needs: plan
+    if: needs.plan.outputs.fair_play == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -641,6 +595,8 @@ jobs:
   # against the real rusty_fair_play binary serving the built UI.
   rusty-fair-play-e2e:
     name: rusty_fair_play e2e (Playwright)
+    needs: plan
+    if: needs.plan.outputs.fair_play == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -701,7 +657,7 @@ jobs:
   win32-cross-compile-check:
     name: rusty_win32 cross-compile check (mingw, Linux)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_win32')
+    if: needs.plan.outputs.win32 == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -749,7 +705,7 @@ jobs:
   multimodal-db-feature-sets:
     name: rusty_multimodal_db feature sets (default, client, server, research)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -799,7 +755,7 @@ jobs:
     # bump does not rename a check a branch protection might require.
     name: rusty_multimodal_db msrv (rust-version)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -813,7 +769,7 @@ jobs:
   rusty-config-no-std-check:
     name: rusty_config no_std (--no-default-features)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_config')
+    if: needs.plan.outputs.rusty_config_no_std == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
