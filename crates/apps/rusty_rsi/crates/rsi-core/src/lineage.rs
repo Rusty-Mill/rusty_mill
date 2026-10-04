@@ -109,10 +109,11 @@ pub fn from_hex(text: &str) -> Result<Digest, CoreError> {
     if text.len() != 64 || !is_lower_hex(text) {
         return Err(invalid());
     }
+    let bytes = text.as_bytes();
+    let pairs = bytes.iter().step_by(2).zip(bytes.iter().skip(1).step_by(2));
     let mut digest = [0u8; 32];
-    for (byte, pair) in digest.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
-        let pair = core::str::from_utf8(pair).map_err(|_| invalid())?;
-        *byte = u8::from_str_radix(pair, 16).map_err(|_| invalid())?;
+    for (byte, (&high, &low)) in digest.iter_mut().zip(pairs) {
+        *byte = (nibble(high) << 4) | nibble(low);
     }
     Ok(digest)
 }
@@ -120,6 +121,14 @@ pub fn from_hex(text: &str) -> Result<Digest, CoreError> {
 fn is_lower_hex(text: &str) -> bool {
     text.bytes()
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The value of one lowercase hex digit; callers check [`is_lower_hex`] first.
+const fn nibble(digit: u8) -> u8 {
+    match digit {
+        b'0'..=b'9' => digit - b'0',
+        _ => digit - b'a' + 10,
+    }
 }
 
 /// The content address of a stored artefact: the SHA-256 of its bytes.
