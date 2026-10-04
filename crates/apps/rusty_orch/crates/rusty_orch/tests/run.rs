@@ -7,9 +7,10 @@ use orch_core::board::{Confidence, EntryKind};
 use orch_core::task::Status;
 use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_dispatch::{Ceiling, DispatchError};
+use orch_store::{fingerprint, Store};
 use rusty_orch::input::parse;
 use rusty_orch::report;
-use rusty_orch::run::{execute, Console, Ended};
+use rusty_orch::run::{execute, execute_resumable, Console, Ended, Resume, RunError};
 
 /// A console that hands out scripted answers and records what it saw.
 #[derive(Default)]
@@ -292,4 +293,63 @@ fn progress_notes_name_the_category_and_never_the_agents_message() {
         report::text(&s).contains(SENTINEL),
         "the report still carries the detail"
     );
+}
+
+#[test]
+fn an_io_error_after_one_of_two_answers_checkpoints_the_partial_round() {
+    struct FailSecond {
+        asks: usize,
+    }
+    impl Console for FailSecond {
+        fn note(&mut self, _line: &str) {}
+        fn ask(&mut self, _question: &str) -> io::Result<Option<String>> {
+            self.asks += 1;
+            if self.asks == 1 {
+                Ok(Some("kept answer".to_owned()))
+            } else {
+                Err(io::Error::other("input disappeared"))
+            }
+        }
+    }
+
+    let two = r#"[{"role":"research","instruction":"i","acceptance":["a"],"max_calls":2},
+                  {"role":"research","instruction":"j","acceptance":["a"],"max_calls":2}]"#;
+    let spec = spec(10, two);
+    let dir =
+        std::env::temp_dir().join(format!("rusty_orch_partial_answers_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut store = Store::open(&dir).expect("open");
+    let fake = FakeAgent::new([
+        Reply::Write(vec![EntryKind::Question]),
+        Reply::Write(vec![EntryKind::Question]),
+    ]);
+    let err = execute_resumable(
+        spec,
+        fake,
+        &mut FailSecond { asks: 0 },
+        frozen(),
+        Some(Resume {
+            store: &mut store,
+            fingerprint: fingerprint("two-question-goal"),
+        }),
+    )
+    .expect_err("second read fails");
+    assert!(matches!(err, RunError::Io(_)));
+    drop(store);
+
+    let store = Store::open(&dir).expect("reopen");
+    let saved = store
+        .load(orch_core::GoalId::from_raw(1))
+        .expect("load")
+        .expect("saved state");
+    assert_eq!(saved.ledger.calls(), 2, "no dispatcher call was replayed");
+    assert_eq!(saved.board.open_questions().len(), 1);
+    let answer = saved
+        .board
+        .entries()
+        .iter()
+        .find(|entry| matches!(entry.content().kind, EntryKind::Answer { .. }))
+        .expect("first answer persisted");
+    assert_eq!(answer.content().body.as_str(), "kept answer");
+    let _ = std::fs::remove_dir_all(dir);
 }

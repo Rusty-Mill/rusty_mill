@@ -1,0 +1,23 @@
+[package]
+name = "orch-store"
+version = "0.1.0"
+edition = "2021"
+# The engine's floor; the rest of the family declares 1.75.
+rust-version = "1.89"
+description = "Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+orch-core = { workspace = true }
+orch-dispatch = { workspace = true }
+# The record store (ADR-0010). Its record bound needs `serde` derives on the
+# snapshot types, which is the one registry dependency this family carries.
+rusty_multimodal_db_engine = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+orch-dispatch = { workspace = true, features = ["fake"] }
+rusty_multimodal_db_engine = { workspace = true, features = ["test-support"] }

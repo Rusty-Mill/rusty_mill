@@ -101,7 +101,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
 | libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
-| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 4 |
+| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 5 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 0 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
@@ -218,9 +218,10 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 3 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
-| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 5 |
-| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 4 |
+| apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 6 |
+| apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. | 5 |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. | 2 |
+| apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. | 1 |
 | apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex and Ollama adapters and prints the board. | 0 |
 | apps | rusty_provider | rp-cli |  | 0 |
 | apps | rusty_provider | rp-core |  | 4 |

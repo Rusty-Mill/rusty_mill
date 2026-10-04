@@ -15,6 +15,7 @@ pub enum Fault {
     InsertSync,
     CheckpointAfterRename,
     BatchApply(usize),
+    InsertAfterLog,
     ReplaceAfterLog,
     GroupSync,
     SlotFlush,
