@@ -356,7 +356,7 @@ function render() {
   $("meta").innerHTML =
     stat("Map", esc(d.map || "—")) +
     stat("Mode", d.team_size ? d.team_size + "v" + d.team_size : "—") +
-    stat("Duration", fmt(d.duration_s, 0) + "s") +
+    stat("Duration", fmt(d.duration_s, 0) + `s <span class="muted" style="font-size:12px">· ${fmt(d.live_time_s, 0)}s live</span>`) +
     stat("Players", (d.scores || []).length) +
     `<div class="stat"><div class="k">Score</div><div class="scoreboard">${scoreboard}</div></div>`;
   $("nonstd").style.display = d.standard_map ? "none" : "flex";

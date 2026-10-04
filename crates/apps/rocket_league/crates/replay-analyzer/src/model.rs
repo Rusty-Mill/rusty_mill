@@ -312,6 +312,83 @@ impl Event {
     }
 }
 
+/// How much of each post-goal gap (goal → next kickoff) is kept as play: the 3 s
+/// countdown that leads into the kickoff. The rest is celebration and goal replay.
+pub const KICKOFF_COUNTDOWN_S: f32 = 3.0;
+
+/// Seconds of play in a tracked span `[first_t, last_t]`: the span minus, for every goal
+/// followed by a kickoff, the part of the gap between them beyond the countdown.
+/// A goal with no later kickoff (the match's last) removes nothing.
+pub fn live_time(first_t: f32, last_t: f32, goals: &[f32], kickoffs: &[f32]) -> f32 {
+    let stoppage: f32 = goals
+        .iter()
+        .filter_map(|g| kickoffs.iter().find(|k| **k > *g).map(|k| k - g))
+        .map(|gap| (gap - KICKOFF_COUNTDOWN_S).max(0.0))
+        .sum();
+    (last_t - first_t - stoppage).max(0.0)
+}
+
+impl CanonicalMatch {
+    /// Seconds of actual play: the tracked span without the post-goal celebration and
+    /// replay (see [`live_time`]). [`CanonicalMatch::duration_s`] is the time of the last
+    /// frame and also counts the lead-in before the first frame and those stoppages, so
+    /// per-minute rates should divide by this instead.
+    pub fn live_time_s(&self) -> f32 {
+        let (Some(first), Some(last)) =
+            (self.resampled.frames.first(), self.resampled.frames.last())
+        else {
+            return self.duration_s;
+        };
+        let times = |pick: fn(&Event) -> Option<f32>| -> Vec<f32> {
+            self.events.iter().filter_map(pick).collect()
+        };
+        let goals = times(|e| matches!(e, Event::Goal { .. }).then(|| e.time()));
+        let kickoffs = times(|e| matches!(e, Event::Kickoff { .. }).then(|| e.time()));
+        live_time(first.t, last.t, &goals, &kickoffs)
+    }
+}
+
+#[cfg(test)]
+mod live_time_tests {
+    use super::live_time;
+
+    /// Recorded from two real matches; Spire's own "playback length" (frames analysed / 15 fps)
+    /// for the same matches was 353 s and 334 s.
+    #[test]
+    fn matches_spires_playback_length_on_two_real_matches() {
+        let three_v_three = live_time(
+            7.97,
+            406.77,
+            &[165.9, 266.9, 300.3, 323.9, 344.8, 403.8],
+            &[8.0, 177.9, 278.9, 312.3, 335.9, 356.9],
+        );
+        let two_v_two = live_time(
+            6.01,
+            367.78,
+            &[59.9, 234.6, 269.1],
+            &[6.0, 71.9, 246.5, 281.1],
+        );
+        assert!((three_v_three - 353.0).abs() < 1.0, "{three_v_three}");
+        assert!((two_v_two - 334.0).abs() < 1.5, "{two_v_two}");
+    }
+
+    #[test]
+    fn a_goal_without_a_later_kickoff_removes_nothing_and_no_goals_means_the_whole_span() {
+        assert_eq!(live_time(0.0, 100.0, &[90.0], &[]), 100.0);
+        assert_eq!(live_time(10.0, 110.0, &[], &[10.0, 60.0]), 100.0);
+    }
+
+    #[test]
+    fn a_gap_shorter_than_the_countdown_removes_nothing() {
+        assert_eq!(live_time(0.0, 100.0, &[50.0], &[52.0]), 100.0);
+        assert_eq!(
+            live_time(0.0, 100.0, &[50.0], &[62.0]),
+            91.0,
+            "12 s gap keeps 3 s"
+        );
+    }
+}
+
 /// An **authoritative** boost-pad pickup (T6), from the replicated
 /// `TAGame.VehiclePickup_TA` event — the real pickup the replay records, not the
 /// gauge-step inference in [`crate::analyze::boost_pads`]. Carries exact counts

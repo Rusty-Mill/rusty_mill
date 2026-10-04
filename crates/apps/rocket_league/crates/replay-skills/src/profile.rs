@@ -29,7 +29,7 @@ use crate::skill::Skill;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillStat {
     pub count: usize,
-    /// Occurrences per minute of match time.
+    /// Occurrences per minute of live play (see `CanonicalMatch::live_time_s`).
     pub per_min: f32,
     /// Mean detection confidence (`0.0..=1.0`) for this player's reps of the
     /// skill — a normalized certainty proxy.

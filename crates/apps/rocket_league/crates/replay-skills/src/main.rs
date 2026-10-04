@@ -137,7 +137,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         Some(key) => verify(&report, key, &args)?,
         None => {
             if args.profile {
-                print_profiles(&report, canonical.duration_s, args.player.as_deref());
+                print_profiles(&report, canonical.live_time_s(), args.player.as_deref());
             } else if args.outcomes {
                 print_outcomes(&report, &canonical.events, args.player.as_deref());
             } else if args.value {

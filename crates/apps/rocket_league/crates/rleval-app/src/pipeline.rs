@@ -48,6 +48,8 @@ pub struct Analysis {
     pub map: Option<String>,
     pub team_size: Option<i32>,
     pub duration_s: f32,
+    /// Seconds of play (no post-goal celebration/replay); the denominator of per-minute rates.
+    pub live_time_s: f32,
     pub team_scores: Vec<(i32, i32)>,
     /// `false` for Hoops/Dropshot/etc. — the UI surfaces a low-confidence banner.
     pub standard_map: bool,
@@ -256,7 +258,7 @@ pub fn analyze(
 
     // 3. Mechanical skills: detect, then distil per-player proficiency profiles.
     let skill_report: SkillReport = detect_all(&canonical, &SkillConfig::default());
-    let skill_profiles = profiles(&skill_report, canonical.duration_s);
+    let skill_profiles = profiles(&skill_report, canonical.live_time_s());
 
     // 4. Value model (ΔV) — trained in-process on this match, no model file.
     let value_cfg = ValueConfig::default();
@@ -387,6 +389,7 @@ pub fn analyze(
         map: canonical.map.clone(),
         team_size: canonical.team_size,
         duration_s: canonical.duration_s,
+        live_time_s: canonical.live_time_s(),
         team_scores: canonical
             .team_scores
             .iter()
