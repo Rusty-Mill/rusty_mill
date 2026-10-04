@@ -257,7 +257,7 @@ version: `a245d35`).
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it (about 1-2% bias,
    minor). `RB-PHYSICS-001-FR-131` (ADR-0050, auto-roll) fixed the landing
-   spin drift. `RB-PHYSICS-001-FR-132` (ADR-0051) then fixed `test2` 5.77-5.92 s: a tire's side force acts along the wheel's own axle (window error 4.87 -> 0.44 uu/s, test2 k = 30 car 4.73 -> 2.55). The largest remaining non-glitch `test2` frames are hard impacts near the (3800, 4150) corner: 8.958 s (19 uu/s) and 9.125 s (19). The direction is exact; the sim's impulse is 2% short (965 against 984 uu/s). Car restitution 0.3/0.5/0.7 changes nothing on any capture, so the miss is not the bounce.
+   spin drift. `RB-PHYSICS-001-FR-132` (ADR-0051) then fixed `test2` 5.77-5.92 s: a tire's side force acts along the wheel's own axle (window error 4.87 -> 0.44 uu/s, test2 k = 30 car 4.73 -> 2.55). The largest remaining non-glitch `test2` frames are hard impacts near the (3800, 4150) corner: 8.958 s (19 uu/s) and 9.125 s (19). The direction is exact; the sim's impulse is 2% short (965 against 984 uu/s). The car-world material (`CAR_WORLD_MATERIAL`, RocketSim's 0.3 restitution and 0.3 friction) is at the captures' optimum: restitution 0.2/0.32/0.34/0.4 and friction 0.1/0.28/0.32/0.6 all leave `test2` k = 30 car at 2.55 or worse (to 8.5), and 9.125 s stays at 18-21 uu/s throughout; 8.958 s is a sharp, chaotic frame (4-730 uu/s over the sweep). The miss is not the material.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
    single-timestamp cross-checks for `RB-VERIFY-001`/`RB-VERIFY-002` (see
    Blocked).
