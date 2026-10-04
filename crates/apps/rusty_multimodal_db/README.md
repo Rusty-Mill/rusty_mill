@@ -14,7 +14,7 @@ libs crate, `crates/libs/storage/rusty_multimodal_db_engine`
 (`ADR-0124`), so another product can embed the store without this app
 crate; this crate re-exports all of it under the original
 `rusty_multimodal_db::generic::*` paths. The server, the domain adapters
-(`Memory`, `Entity`, `Relation`, `Reminder`, and the reference domains),
+(`Memory`, `Entity`, `Relation`, `Reminder`, `Fair Play`, and the reference domains),
 the clients and the benchmark harness stay here.
 
 ## Getting started
@@ -112,6 +112,8 @@ cargo test --features server,research       # + Order/Customer and Employee, the
 cargo run --features server --bin dog_server      # a minimal local server, Dog domain
 cargo run --features server --bin entity_server   # Entity: a labeled graph with open relation labels
 cargo run --features server --bin memory_server   # Memory and Entity, two tables on one listener
+cargo run --example fair_play_seed -- /tmp/fp data/fair-play-cards.csv   # seed the Fair Play deck
+cargo run --features server --bin fair_play_server                      # Fair Play: card, person, card_default
 ```
 
 The client half stands alone behind the `client` feature (`server`
@@ -168,13 +170,15 @@ stage record writes (`ADR-0130`) and commit strictly, all or nothing
 manual promotion; a table over 8 MiB bootstraps by chunked snapshot,
 `ADR-0136`).
 
-Seven domain adapters validate the protocol. Four are front-door, built as
+Eight domain adapters validate the protocol. Five are front-door; four were built as
 a real backend for the owner's `rusty_remind_me` memory service:
 `Reminder` (a fixed-schema record), `Entity` (a labeled graph with
 name lookup, aliases, and relation labels created at runtime),
 `Memory` (the consumer's `memories` table, with a `mentions` relation
 whose far end lives in the `entity` table), and `Relation` (the hub's
-directed, open-label edges as a record table, `ADR-0058`). Three are reference material:
+directed, open-label edges as a record table, `ADR-0058`); the fifth, `Fair Play`
+(`ADR-0137`), is a household-task card tree with an owner per card over a
+read-only baseline, served as three tables. Three are reference material:
 `Dog` (`Neighbors` only), `Order`/`Customer` (`Parent`/`Children` only),
 and `Employee` (both relation kinds on one self-referential record).
 
@@ -280,7 +284,7 @@ at the right file:
     group commit, read-your-writes, class-from-certificate, audit and
     access logs, rate limiting, stage-time validation, snapshot
     isolation, `ServeOptions`, and the SQL `SELECT`/`GROUP BY` subset
-  - `ADR-0053`–`ADR-0136` — everything after: the durable data directory,
+  - `ADR-0053`–`ADR-0137` — everything after: the durable data directory,
     guarded replace, ordered pages, `WriteBatch` and its crash atomicity,
     metrics, backup, restore and replication, real MVCC, the query
     planner steps, connection limits and exposure guards, the crash-safety
@@ -289,8 +293,8 @@ at the right file:
     graceful drain (`ADR-0127`), nullable columns (`ADR-0128`), equality
     intersection (`ADR-0129`), sessions over record writes (`ADR-0130`),
     continuous replication (`ADR-0131`), the planner cost-model decision
-    (`ADR-0132`), strict commit (`ADR-0133`), and chunked snapshots
-    (`ADR-0136`)
+    (`ADR-0132`), strict commit (`ADR-0133`), chunked snapshots
+    (`ADR-0136`), and the `Fair Play` domain (`ADR-0137`)
   - `ADR-0036`–`ADR-0052` — the `rusty_remind_me` line: the `Reminder`,
     `Entity`, and `Memory` domains; aliases and name lookup; the wire
     specification and Python client (`ADR-0043`); relation `JOIN`

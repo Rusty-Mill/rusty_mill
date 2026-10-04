@@ -138,6 +138,14 @@ required-features = ["server"]
 name = "server_memory_integration"
 required-features = ["server"]
 
+# `FPL-FR-007` (ADR-0137): the three `Fair Play` tables over
+# `serve_tables`, driven by the Rust client and by the Python reference
+# client (`clients/python/fair_play_driver.py`; needs a CPython 3
+# interpreter on `PATH`, fails loudly without one).
+[[test]]
+name = "server_fair_play_integration"
+required-features = ["server"]
+
 # `ECO-FR-003` (ADR-0043): proves the client-only feature set builds and
 # works with no server compiled — framing + protocol round trips and the
 # client library's own refusals, connecting to nothing.
@@ -319,6 +327,16 @@ name = "restore_backup"
 [[test]]
 name = "restore_backup"
 
+# `ADR-0137`: the Fair Play seed loader — the supplied deck, people and
+# splits into a data directory. No required-features: `generic::fair_play`
+# is front-door; the shared main-less module lives under examples/support/
+# like the restore and migration tools' own.
+[[example]]
+name = "fair_play_seed"
+
+[[test]]
+name = "fair_play_seed"
+
 # `ADR-0118`: the replica-refresh CLI — `FetchSnapshot` into a fresh,
 # verified directory, once or on an interval. Needs the client half
 # (`SchemaDrivenClient`); the shared main-less module lives under
@@ -360,6 +378,15 @@ required-features = ["research"]
 name = "crash_safety_harness"
 required-features = ["research"]
 
+# `ADR-0137` (`FPL-FR-005`): the child `tests/fair_play_crash.rs` spawns
+# and `SIGKILL`s mid-`split_card`. Front-door only, so no
+# `required-features`; listed for the same reason every other target is.
+[[bin]]
+name = "fair_play_crash_writer"
+
+[[test]]
+name = "fair_play_crash"
+
 # `multiprocess_writer`/`multiprocess_harness` (the multi-process access
 # diagnosis harness) — same reason as `crash_writer`/`crash_safety_harness`
 # above.
@@ -398,6 +425,13 @@ required-features = ["server"]
 # alone is sufficient, since `Memory` is front-door, not `research`-gated.
 [[bin]]
 name = "memory_server"
+required-features = ["server"]
+
+# A minimal, real server binary for the `Fair Play` domain — `memory_server`'s
+# multi-table shape over `serve_tables` with `card` primary (FPL-FR-007,
+# ADR-0137); `server` alone is sufficient, since `Fair Play` is front-door.
+[[bin]]
+name = "fair_play_server"
 required-features = ["server"]
 
 [dependencies]

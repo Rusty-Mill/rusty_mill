@@ -110,6 +110,12 @@ pub use rusty_multimodal_db_engine::generic::*;
 /// module's own doc comment for the full account.
 pub mod entity;
 
+/// `Fair Play` — this library's fourth front-door domain (`FPL-FR-001`,
+/// ADR-0137): Eve Rodsky's household-task cards as `Person`, `Card` (a
+/// self-referential tree with an owner) and `CardDefault` (the shipped
+/// baseline). See the module's own doc comment.
+pub mod fair_play;
+
 /// `Memory` — this library's third front-door domain (`MEM-FR-001`,
 /// ADR-0048): the consumer's own `memories` table, bounded to the eleven
 /// fields a memory is. See the module's own doc comment.

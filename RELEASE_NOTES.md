@@ -40,6 +40,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_multimodal_db: the Fair Play domain (ADR-0137)
+**2026-10-04** · [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md) · no wire change
+
+- **Added:** `generic::fair_play` — Eve Rodsky's household-task cards as three tables on the one-index/one-scan stack: `Person`, `CardDefault` (the shipped text, read-only by convention) and `Card`, a self-referential tree with an explicit owner per card, CPE as three fields, and a state (`Original`/`Edited`/`Custom`) derived against the baseline rather than stored. Queries over the generic traits: held by, unassigned and unassigned leaves, by suit, by number, balance (all or leaf-only), reassign, ordered children, chain to root, nested tree, leaves under, owner coverage, split, custom card, state, diff, reset, counts.
+- **Added:** `split_card`, ordered so every crash prefix is a valid store (children first, parent last), proven by `tests/fair_play_crash.rs` with a real `SIGKILL` after each step; the seed loader `examples/fair_play_seed.rs` for the supplied 100-card deck (hand-rolled CSV, refusals by file and line, idempotent by deterministic id, never overwriting a family's edits); `examples/fair_play_bench.rs`.
+- **Added:** `server::fair_play` — `card`, `person` and `card_default` adapters through `serve_tables`, `fair_play_server`, the socket suite and a Python driver against the three-table server.
+- **Changed:** `rusty_multimodal_db_engine`: `Reversed::inner`, so a stack with two `Reversed` layers reaches the inner one's `Children`.
+- **Measured:** a depth-5 parent-chain walk costs 1.3 µs against 160 ns for one read, so no denormalized `root_card_id`; state queries scan at about 1 µs a card (100 cards 0.1 ms, 5 000 cards 18 ms), so no second index.
+- Known limitations: the stack cannot enforce `number` uniqueness, acyclicity or the origin/number/baseline invariant (the domain functions do; the raw traits bypass them, tested); the wire carries one relation per table, so `owner_id` is a filterable field there, not an index; `card_default` is read-only on the wire and by convention in-process; no delete in the domain (merge/unsplit and deal history are named hooks).
+
+---
+
 ## rusty_rsi P2: sandboxed execution, toy tasks and private grading
 **2026-10-04** · [#476](https://github.com/Rusty-Mill/rusty_mill/pull/476) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

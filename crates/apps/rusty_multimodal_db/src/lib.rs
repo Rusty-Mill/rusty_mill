@@ -61,11 +61,12 @@
 //! framing, thread-per-connection, reusing whichever `RwLock` the wrapped
 //! store already manages (no new lock at this layer). Off by default
 //! behind its own `server` feature (distinct from `research` — this is new
-//! capability, not a benchmarked alternative), and validated against six
-//! domains. Three are front-door — `Reminder`, `Entity`, and `Memory`
+//! capability, not a benchmarked alternative), and validated against seven
+//! domains. Four are front-door — `Reminder`, `Entity`, and `Memory`
 //! ([`server::reminder`], [`server::entity`], [`server::memory`]), built
 //! since ADR-0036 as a real backend for the owner's `rusty_remind_me`
-//! memory service. Three are reference material: `Dog`
+//! memory service, and `Fair Play` ([`server::fair_play`], ADR-0137), a
+//! household-task card tree served as three tables. Three are reference material: `Dog`
 //! ([`server::dog::DogConnectionStore`], `Neighbors` only),
 //! `Order`/`Customer` ([`server::order::OrderConnectionStore`],
 //! `Parent`/`Children` only), and `Employee`
