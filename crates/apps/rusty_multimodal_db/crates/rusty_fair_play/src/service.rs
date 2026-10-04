@@ -444,7 +444,7 @@ fn clean_standards(list: Vec<String>) -> Result<Vec<String>> {
         )));
     }
     list.into_iter()
-        .map(|s| clean_text(s))
+        .map(clean_text)
         .filter(|s| !matches!(s, Ok(s) if s.is_empty()))
         .collect()
 }

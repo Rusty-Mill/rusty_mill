@@ -114,6 +114,7 @@ cargo run --features server --bin entity_server   # Entity: a labeled graph with
 cargo run --features server --bin memory_server   # Memory and Entity, two tables on one listener
 cargo run --example fair_play_seed -- /tmp/fp data/fair-play-cards.csv   # seed the Fair Play deck
 cargo run --features server --bin fair_play_server                      # Fair Play: card, person, card_default
+cargo run -p rusty_fair_play -- --web-dir crates/rusty_fair_play/web/dist   # Fair Play's HTTP API and web UI (crates/rusty_fair_play)
 ```
 
 The client half stands alone behind the `client` feature (`server`

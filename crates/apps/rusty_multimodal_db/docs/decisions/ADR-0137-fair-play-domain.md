@@ -319,3 +319,11 @@ CPE as three child rows** — lets the data say what the game forbids.
   line), three for the crash harness (control, kill after each step ×3
   trials, resume), the adapter's unit tests, and the socket suite with
   the Python driver. `SERVER-001` v0.110.0 / `FR-123`, `FPL-FR-001`–`008`.
+- 2026-10-04: the front end, as a second crate of this family —
+  `crates/rusty_fair_play` (ADR-0003's nested shape; an app crate may
+  depend on an app crate only within its family): a JSON HTTP API over
+  the embedded stacks on `rusty_http` (rusty_tick's sans-IO router and
+  TCP adapter) and a React web UI in its `web/`. The seed loader moved
+  from `examples/support/` into `generic::fair_play::seed` with the deck
+  embedded as `DECK_CSV`, so the CLI example and the server share it.
+  Its own decision record is `crates/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md`.

@@ -27,7 +27,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 16 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 22 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 23 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 11 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
@@ -42,7 +42,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 15 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 1 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
-| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
+| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 5 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 11 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
@@ -94,14 +94,14 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_gpu | rusty_gpu | A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer | 3 |
 | libs | rusty_gui | rusty_gui | A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate | 4 |
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust | 0 |
-| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 15 |
+| libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem | 16 |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. | 5 |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
 | libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
-| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 5 |
+| libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 6 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 0 |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. | 1 |
 | libs | rusty_proxmox | rusty_proxmox | Async client for the Proxmox VE REST API: nodes, guest lifecycle, snapshots, cluster resources, storage, and backups. | 1 |
@@ -215,7 +215,8 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_meshed | rusty-meshed-schema-registry | Confluent Schema Registry client and compatibility-mode enforcement, ported from meshed.schema_registry. | 5 |
 | apps | rusty_meshed | rusty-meshed-sdk | The data-product producer/consumer SDK, transactional outbox, and topic lifecycle management, ported from meshed.sdk and meshed.infrastructure. | 2 |
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. | 0 |
-| apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 0 |
+| apps | rusty_multimodal_db | rusty_fair_play | Fair Play household cards: a JSON HTTP API and web UI over rusty_multimodal_db's fair_play domain | 0 |
+| apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends | 1 |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. | 3 |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. | 1 |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. | 6 |

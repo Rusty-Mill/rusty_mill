@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_fair_play`** (`crates/apps/rusty_multimodal_db/crates/rusty_fair_play`, its ADR-0001): a JSON HTTP API and a React web UI for the Fair Play domain, nested in the `rusty_multimodal_db` family; two CI jobs; the seed loader promoted into `generic::fair_play::seed` with the deck embedded.
 - **`rusty_multimodal_db`: the Fair Play domain** (ADR-0137, no wire change): `generic::fair_play` (`Person`/`Card`/`CardDefault`, a card tree with an owner per card over a read-only baseline, derived state, crash-ordered `split_card`), the seed loader for the supplied deck, `fair_play_server` through `serve_tables`, and `Reversed::inner` in the engine.
 - **`rsi-runtime` and `rsi-cli`** (`crates/apps/rusty_rsi`, ADR-0005 P2): a fail-closed Landlock/seccomp/rlimit sandboxed executor, a JSON task format and a three-family toy task suite, R²/tour-ratio/accuracy metrics, and an out-of-process private grader (`rsi __grade`); `rsi-core` gains the `Executor`, `PublicTask` and `PrivateGrader` ports.
 - **`rsi-core`** (`crates/apps/rusty_rsi`, ADR-0005): pure domain core of an AIDE²-style self-improvement harness: noise-aware accept gate, token/wall-clock budget meter, UCB1/softmax helpers, seeded PRNG, lineage hash chain.

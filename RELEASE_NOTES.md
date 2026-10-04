@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_fair_play: a web front end for the Fair Play domain
+**2026-10-04** · [ADR-0001](crates/apps/rusty_multimodal_db/crates/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md) · follows [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md)
+
+- **Added:** `rusty_fair_play`, the second crate of the `rusty_multimodal_db` family (nested per ADR-0003: an app crate may depend on an app crate only within its family). A JSON HTTP API over the embedded `fair_play` stacks on `rusty_http`/`rusty_json`/`rusty_url` (rusty_tick's sans-IO router and thread-per-connection adapter): one boot read with every card's derived state, people, card patch/create/split/reset/baseline/position, and an idempotent `/seed`. The deck ships in the binary and loads on first start. An optional bearer token; without one the server is loopback-only.
+- **Added:** the web UI in its `web/`: React/TypeScript/Vite/Tailwind/Zustand with hash routes — a deck board in six suit shelves with owner chips and `edited`/`custom`/split badges, filters and search; a card pane with dealing, CPE editing, minimum standards, notes, a baseline diff and reset, ordered children and a split dialog; a players page; a balance page with all-cards and leaf-only bars and the "still undealt" leaves. An in-browser `MemoryAdapter` runs the same rules for unit tests and a demo mode; the contract runs against the real binary; Playwright drives the built UI against it. Two CI jobs mirror rusty_tick's.
+- **Changed:** `rusty_multimodal_db`'s seed loader moved from `examples/support/` into `generic::fair_play::seed` (pure text parsing, file wrappers beside it, `DECK_CSV` embedded); the `fair_play_seed` example's `--cards` is now optional.
+- Known limitations: no delete (the domain has none); writes are last-writer-wins (no `If-Match`); the server and static-file adapter are a second copy of rusty_tick's, the dedupe candidate once a third appears.
+
+---
+
 ## rusty_multimodal_db: the Fair Play domain (ADR-0137)
 **2026-10-04** · [ADR-0137](crates/apps/rusty_multimodal_db/docs/decisions/ADR-0137-fair-play-domain.md) · no wire change
 

@@ -588,6 +588,61 @@ jobs:
           name: rusty-tick-e2e-results
           path: crates/apps/rusty_tick/web/test-results
 
+  # rusty_fair_play's web UI (Vite/React), the Fair Play front end in the
+  # rusty_multimodal_db family: typecheck, unit tests (jsdom over the
+  # in-memory adapter) and the production build. Mirrors rusty-tick-web.
+  rusty-fair-play-web:
+    name: rusty_fair_play web (typecheck, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # rusty_fair_play end to end: the API contract and the Playwright flows
+  # against the real rusty_fair_play binary serving the built UI.
+  rusty-fair-play-e2e:
+    name: rusty_fair_play e2e (Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-fair-play-e2e
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web/package-lock.json
+      - run: cargo build -p rusty_fair_play
+        working-directory: .
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm run test:integration
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rusty-fair-play-e2e-results
+          path: crates/apps/rusty_multimodal_db/crates/rusty_fair_play/web/test-results
+
   # rusty_key's desktop front end: a vendored Vite/Solid app inside a
   # Tauri shell (not a Cargo crate; the Rust side is its own crate). Build
   # only -- `npm run build` bundles the web assets without needing the
