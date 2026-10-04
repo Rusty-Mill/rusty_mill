@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_rsi: Codex CLI as the outer proposer
-**2026-10-04** · [#PR](https://github.com/Rusty-Mill/rusty_mill/pull/PR) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+**2026-10-04** · [#485](https://github.com/Rusty-Mill/rusty_mill/pull/485) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `CodexProposer` (`rsi-runtime::codex`), selected with `RSI_OUTER_PROPOSER=codex`.
   - It runs `codex exec` inside `rsi`'s own sandbox. Codex's bubblewrap sandbox cannot start inside Landlock, so Codex runs in its documented external-sandbox mode (`--dangerously-bypass-approvals-and-sandbox`, plus `--ephemeral`, `--ignore-user-config` and `--ignore-rules`).
