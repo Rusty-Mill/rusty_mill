@@ -3451,3 +3451,35 @@ fn a_car_touching_with_its_body_alone_rolls_toward_that_surface() {
     assert!(car.angular_velocity.length() > 0.01);
     assert!(car.total_force().z < 0.0);
 }
+
+/// RB-PHYSICS-001-FR-132: a tilted car's tire sideways force acts along the
+/// car's own right axis, not along that axis flattened onto the floor, so it
+/// has the vertical part the recording shows (`test2.jsonl` 5.77-5.92 s).
+#[test]
+fn tire_side_force_follows_the_cars_own_right_axis() {
+    let mut car = rolled_car_on_the_floor(0.5);
+    let wheels = cast_wheels(&car, plane_contact(&floor()), TICK);
+    let right = right_axis(&car);
+    assert!(right.z.abs() > 0.3, "right axis {right:?} should be tilted");
+    car.linear_velocity = right * 100.0;
+    car.clear_forces();
+    let before = car.linear_velocity;
+    let forward = forward_axis(&car);
+    apply_ground_control(
+        &mut car,
+        &wheels,
+        &ControllerInput::default(),
+        0.0,
+        forward,
+        0.0,
+        TICK,
+    );
+    let change = car.linear_velocity - before;
+    assert!(change.dot(&right) < 0.0, "side force opposes the slide");
+    assert!(
+        change.z * right.z < 0.0,
+        "vertical part {} follows the tilted axis {}",
+        change.z,
+        right.z
+    );
+}

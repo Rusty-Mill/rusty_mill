@@ -8,6 +8,17 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Tires push along their own axle
+**2026-10-04** · `RB-PHYSICS-001-FR-132` · ADR-0051
+
+- A tilted car with one wheel on the ground pushed sideways along the
+  floor; the game pushes along the wheel's own axle, which tilts with the
+  car and so also pushes up or down. One line removed (the flattening), and
+  the driving recording's 5.8-5.9 s window after the kickoff jump goes from
+  4.9 to 0.4 uu/s per tick, its 0.5 s-ahead car error 4.73 -> 2.55 uu/s,
+  and the jumping recording's 11.23 -> 10.82. Two test bounds loosened
+  (details in the spec). 518 tests.
+
 ## Cars right themselves under throttle
 **2026-10-04** · `RB-PHYSICS-001-FR-131` · ADR-0050
 

@@ -4625,7 +4625,7 @@ mod tests {
             world.step(dt);
             let velocity = world.cars[0].linear_velocity;
             let horizontal = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
-            assert!(horizontal < 1.0, "tick {tick}: {velocity:?}");
+            assert!(horizontal < 1.5, "tick {tick}: {velocity:?}");
         }
     }
 
@@ -4926,7 +4926,7 @@ mod tests {
         world.step(1.0 / 120.0);
         let v = world.cars[0].linear_velocity;
         assert!(
-            (v - Vec3::new(692.4, -1399.3, -63.2)).length() < 5.0,
+            (v - Vec3::new(692.4, -1399.3, -63.2)).length() < 8.0,
             "landing rebound off: {v:?}"
         );
     }

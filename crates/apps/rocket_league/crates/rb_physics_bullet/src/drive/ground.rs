@@ -260,7 +260,9 @@ fn wheel_impulses(
         .filter_map(|(&(x, y, steers), contact)| {
             let contact = contact.as_ref()?;
             let angle = if steers { front_angle } else { 0.0 };
-            let axle = on_surface(right * angle.cos() - forward * angle.sin(), contact.normal);
+            // RB-PHYSICS-001-FR-132: the side force acts along the wheel's own
+            // axle, not that axle flattened onto the surface (rolling still is).
+            let axle = right * angle.cos() - forward * angle.sin();
             let rolling = on_surface(forward * angle.cos() + right * angle.sin(), contact.normal);
             let point = contact.point - car.position;
             let flat = point - up * up.dot(&point);
