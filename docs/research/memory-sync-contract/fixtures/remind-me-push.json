@@ -1,0 +1,33 @@
+{
+  "node_id": "synthetic-remind-me-node",
+  "records": [
+    {
+      "id": "mem_00000000000000000000000000000445",
+      "content": "synthetic compatibility evidence",
+      "category": "research",
+      "tags": ["synthetic", "issue-445"],
+      "source": "manual",
+      "metadata": {"fixture": true},
+      "created_at": "2026-09-24T10:30:00+00:00",
+      "updated_at": "2026-09-24T10:31:00+00:00",
+      "capture_id": null,
+      "node_id": "synthetic-remind-me-node",
+      "client": "remind_me",
+      "accessed_at": null,
+      "access_count": 0,
+      "decay_rate": 0.1,
+      "vitality": 1.0,
+      "base_weight": 1.0,
+      "status": "active",
+      "memory_type": "decision",
+      "source_capture_id": null,
+      "subject": null,
+      "predicate": null,
+      "object": null,
+      "superseded_by": null,
+      "deleted_at": "2026-09-24T10:31:00+00:00",
+      "sensitive": true,
+      "remind_at": "2026-09-25T09:00:00+00:00"
+    }
+  ]
+}
