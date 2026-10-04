@@ -26,8 +26,12 @@ routing come from the goal file, which the next process reads again.
   id, replaced on every save. The aggregate payload cannot split across
   versions. The revision is a separate scannable mmap slot, however: a
   replacement interrupted after its durable log append can reopen with the
-  new payload and preceding revision. Thus only a successful save return
-  guarantees the new payload and revision are durable; no journal is added.
+  new payload and preceding revision. After an initial insert is interrupted
+  following its durable log append, reopen can synthesize a generation-1 slot
+  even though that save returned an error. Revision is therefore the persisted
+  scannable checkpoint generation, not a count of successful save returns. Only
+  a successful save return guarantees the submitted payload and revision are
+  durable; no journal is added.
   Per-aggregate records with a journal batch are the upgrade when a
   second reader of the board exists; none does yet.
 - **Rebuilt, not trusted.** `load` replays the snapshot through the

@@ -15,7 +15,7 @@ store.save(&GoalState { fingerprint, plan, board, ledger })?; // durable on retu
 
 The engine's record bound needs `serde` derives on the snapshot rows, which makes this the one crate in the family with registry dependencies, and its `rust-version` is the engine's 1.89. The initial format is tagged `rusty_orch::GoalRecord::v1`. Positional bincode makes the complete row layout the format; adding fields is not compatible. A future incompatible layout must either have an explicit supported reader that migrates v1 or use a new tag and reject v1 before decoding.
 
-Plan, board, and ledger share one record payload and therefore cannot come from different snapshots. The revision is narrower: it is the last successfully completed checkpoint generation. If replacement fails after its durable log append but before its separate scannable slot update, portable reopen can recover the new aggregate payload with the preceding revision. Only a successful `save` return guarantees the new payload and revision are durable.
+Plan, board, and ledger share one record payload and therefore cannot come from different snapshots. The revision is narrower: it is the persisted scannable checkpoint generation. It may lag a replacement recovered from the durable log; after an interrupted initial insert, recovery can instead synthesize a slot at generation 1 even though `save` returned an error. Revision therefore does not prove how many saves returned successfully. Only a successful `save` return guarantees the submitted payload and revision are durable.
 
 ```sh
 cargo test -p orch-store

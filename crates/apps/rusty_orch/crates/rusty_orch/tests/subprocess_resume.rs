@@ -58,7 +58,7 @@ fn built_binary_reopens_state_in_a_second_os_process() {
     std::fs::write(
         &ollama,
         format!(
-            "#!/bin/sh\ncat >/dev/null\nif [ -e '{}' ]; then\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"finding\",\"confidence\":\"high\",\"body\":\"done\",\"refs\":[]}}]}}'\nelse\n  : > '{}'\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"question\",\"body\":\"continue?\",\"refs\":[]}}]}}'\nfi\n",
+            "#!/bin/sh\nset -eu\nwhile IFS= read -r _line; do :; done\nif [ -e '{}' ]; then\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"finding\",\"confidence\":\"high\",\"body\":\"done\",\"refs\":[]}}]}}'\nelse\n  : > '{}'\n  printf '%s\\n' '{{\"entries\":[{{\"kind\":\"question\",\"body\":\"continue?\",\"refs\":[]}}]}}'\nfi\n",
             marker.display(), marker.display()
         ),
     )

@@ -464,6 +464,182 @@ mod format_tests {
         )
     }
 
+    fn populated_v1() -> GoalRecord {
+        let task = |id, role, state| TaskRow {
+            id,
+            role,
+            instruction: format!("instruction {id}"),
+            acceptance: vec![format!("acceptance {id}")],
+            refs: vec![],
+            depends_on: vec![],
+            max_calls: 3,
+            state,
+        };
+        let entry = |id, task, author, kind, body: &str| EntryRow {
+            id,
+            task,
+            author,
+            kind,
+            body: body.to_owned(),
+            refs: vec![],
+            supersedes: None,
+        };
+
+        let mut tasks = vec![
+            task(
+                1,
+                RoleRow::Research,
+                StateRow::Done {
+                    agent: AgentRow::Codex,
+                    outputs: vec![1],
+                },
+            ),
+            task(
+                2,
+                RoleRow::Design,
+                StateRow::Blocked {
+                    agent: AgentRow::Claude,
+                    question: 2,
+                },
+            ),
+            task(
+                3,
+                RoleRow::Triage,
+                StateRow::Running {
+                    agent: AgentRow::Gemini,
+                },
+            ),
+            task(
+                4,
+                RoleRow::Implement,
+                StateRow::Failed {
+                    agent: AgentRow::Codex,
+                    reason: "failed".to_owned(),
+                },
+            ),
+            task(
+                5,
+                RoleRow::Review { target: 1 },
+                StateRow::Done {
+                    agent: AgentRow::Local,
+                    outputs: vec![4],
+                },
+            ),
+            task(6, RoleRow::Research, StateRow::Pending),
+        ];
+        tasks[0].refs = vec![
+            RefRow::Path("src/lib.rs".to_owned()),
+            RefRow::Commit("abc123".to_owned()),
+            RefRow::Url("https://example.invalid".to_owned()),
+        ];
+        tasks[1].depends_on = vec![1];
+
+        let mut entries = vec![
+            entry(
+                1,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Finding {
+                    confidence: ConfidenceRow::Medium,
+                },
+                "finding",
+            ),
+            entry(
+                2,
+                Some(2),
+                AuthorRow::Agent(AgentRow::Claude),
+                KindRow::Question,
+                "question",
+            ),
+            entry(
+                3,
+                None,
+                AuthorRow::Human,
+                KindRow::Answer { to: 2 },
+                "answer",
+            ),
+            entry(
+                4,
+                Some(5),
+                AuthorRow::Agent(AgentRow::Local),
+                KindRow::Review {
+                    of: 1,
+                    verdict: VerdictRow::Approve,
+                },
+                "approved",
+            ),
+            entry(
+                5,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Decision,
+                "decision",
+            ),
+            entry(
+                6,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Artifact,
+                "artifact",
+            ),
+            entry(
+                7,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Assumption,
+                "old assumption",
+            ),
+            entry(
+                8,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Codex),
+                KindRow::Assumption,
+                "new assumption",
+            ),
+            entry(
+                9,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Gemini),
+                KindRow::Finding {
+                    confidence: ConfidenceRow::Low,
+                },
+                "low finding",
+            ),
+            entry(
+                10,
+                Some(1),
+                AuthorRow::Agent(AgentRow::Claude),
+                KindRow::Finding {
+                    confidence: ConfidenceRow::High,
+                },
+                "high finding",
+            ),
+            entry(
+                11,
+                Some(5),
+                AuthorRow::Agent(AgentRow::Local),
+                KindRow::Review {
+                    of: 1,
+                    verdict: VerdictRow::ChangesRequested,
+                },
+                "changes",
+            ),
+        ];
+        entries[4].refs = vec![RefRow::Entry(4)];
+        entries[5].refs = vec![RefRow::Path("out.md".to_owned())];
+        entries[7].supersedes = Some(7);
+
+        GoalRecord {
+            id: 1,
+            revision: 9,
+            fingerprint: 0x0102_0304_0506_0708,
+            tasks,
+            entries,
+            goal_calls: 7,
+            task_calls: vec![(1, 2), (2, 1), (4, 3), (5, 1)],
+        }
+    }
+
     #[test]
     fn v1_empty_record_has_stable_golden_bytes() {
         const GOLDEN: &[u8] = &[
@@ -477,6 +653,58 @@ mod format_tests {
         );
         let decoded: GoalRecord = codec::decode(GOLDEN).expect("decode golden");
         assert_eq!(codec::encode(&decoded).expect("re-encode"), GOLDEN);
+    }
+
+    #[test]
+    fn v1_populated_record_has_stable_golden_bytes_and_rebuilds_domain() {
+        let golden = include_bytes!("fixtures/goal_record_v1_populated.bin");
+        let record = populated_v1();
+        let bytes = codec::encode(&record).expect("encode");
+        assert_eq!(
+            bytes.as_slice(),
+            golden,
+            "change only with an explicit format decision"
+        );
+
+        let decoded: GoalRecord = codec::decode(golden).expect("decode golden");
+        let state = decoded.into_state().expect("rebuild domain");
+        assert_eq!(state.goal(), GoalId::from_raw(1));
+        assert_eq!(state.fingerprint, 0x0102_0304_0506_0708);
+        assert_eq!(state.plan.tasks().len(), 6);
+        assert_eq!(state.board.entries().len(), 11);
+        assert_eq!(state.ledger.calls(), 7);
+        assert_eq!(state.ledger.task_calls(TaskId::from_raw(4)), 3);
+    }
+
+    #[test]
+    fn corrupt_snapshot_rows_are_rejected_during_domain_reconstruction() {
+        let mut fixtures = Vec::new();
+
+        let mut invalid_order = populated_v1();
+        invalid_order.tasks[1].depends_on = vec![99];
+        fixtures.push(("invalid task prerequisite/order", invalid_order));
+
+        let mut blank_text = populated_v1();
+        blank_text.tasks[0].instruction.clear();
+        fixtures.push(("blank text", blank_text));
+
+        let mut invalid_board_ref = populated_v1();
+        invalid_board_ref.entries[0].refs = vec![RefRow::Entry(99)];
+        fixtures.push(("invalid board reference", invalid_board_ref));
+
+        let mut empty_done_outputs = populated_v1();
+        empty_done_outputs.tasks[0].state = StateRow::Done {
+            agent: AgentRow::Codex,
+            outputs: vec![],
+        };
+        fixtures.push(("empty Done outputs", empty_done_outputs));
+
+        for (label, fixture) in fixtures {
+            assert!(
+                matches!(fixture.into_state(), Err(StoreError::Corrupt(_))),
+                "{label} must be reported as corrupt"
+            );
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
