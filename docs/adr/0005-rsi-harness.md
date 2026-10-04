@@ -244,10 +244,16 @@ group. If a task has no submission, it scores the task's declared floor
 - **Mutation check.** With the Landlock and seccomp step removed, exactly
   the five confinement tests fail. With the rlimits removed, the memory and
   CPU tests fail.
-- **Known limit.** The process limit is per-UID, and the kernel does not
-  apply it to root. In a root container it does not stop a fork bomb (the
-  wall-clock kill still does). This is one more reason cgroups stay listed
-  under Out of scope.
+- **Known limit.** `RLIMIT_NPROC` counts every process and thread of the
+  user, not just the sandboxed tree, and the kernel does not apply it to
+  root.
+  - It is therefore set high: `PROCESS_LIMIT` = 4096. CI showed why. At 64,
+    `subprocess.Popen` failed with `EAGAIN` because the runner's
+    (non-root) user already had that many threads; locally the run was
+    root and unaffected.
+  - It is a fork-bomb brake, not a quota. The wall-clock kill of the
+    process group is what bounds a run, which is one more reason cgroups
+    stay listed under Out of scope.
 
 ### 5. Budget, noise and the accept gate (invariants 2, 3)
 

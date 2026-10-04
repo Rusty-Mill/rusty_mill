@@ -28,6 +28,18 @@ use crate::metric::Metric;
 /// The file a solution must write its answers to.
 pub const OUTPUT_FILE: &str = "output.txt";
 
+/// Open descriptors a solution may hold.
+pub const OPEN_FILE_LIMIT: u64 = 64;
+
+/// The process limit given to every solution.
+///
+/// Linux counts `RLIMIT_NPROC` against *every* process and thread of the
+/// user, not just the sandboxed tree, so a tight value fails ordinary
+/// spawns on a busy machine: CI's runner user broke `subprocess.Popen` at
+/// 64. It is a fork-bomb brake, not a quota; the wall-clock kill of the
+/// process group is what bounds a run.
+pub const PROCESS_LIMIT: u64 = 4096;
+
 /// Which data a run sees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Split {
@@ -139,8 +151,8 @@ impl TaskManifest {
                 Duration::from_secs(limit("wall_secs")?),
                 limit("memory_mb")?.saturating_mul(1 << 20),
                 limit("output_mb").unwrap_or(16).saturating_mul(1 << 20),
-                64,
-                64,
+                OPEN_FILE_LIMIT,
+                PROCESS_LIMIT,
             )?,
         })
     }

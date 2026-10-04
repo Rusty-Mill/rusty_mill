@@ -14,6 +14,7 @@ use rsi_core::{
     Executor, Limits, PrivateGrader, PublicTask, SandboxSpec, Seed, Solution, Termination,
 };
 use rsi_runtime::grading::SYSTEM_READ_ROOTS;
+use rsi_runtime::task_dir::{OPEN_FILE_LIMIT, PROCESS_LIMIT};
 use rsi_runtime::{
     GraderCommand, LocalTask, ProcessExecutor, RuntimeError, SandboxedGrader, SolutionRunner,
     TaskDir,
@@ -298,8 +299,8 @@ fn limits(cpu_secs: u64, wall: Duration, memory_mb: u64) -> Limits {
         wall,
         memory_mb << 20,
         1 << 20,
-        64,
-        64,
+        OPEN_FILE_LIMIT,
+        PROCESS_LIMIT,
     )
     .expect("valid limits")
 }
@@ -396,17 +397,24 @@ fn the_cpu_limit_kills_a_busy_loop() {
 #[test]
 fn the_wall_clock_limit_kills_the_whole_process_group() {
     let scratch = Scratch::new("wall");
-    let marker = scratch.path("box/child-survived");
+    let started = scratch.path("box/child-started");
+    let survived = scratch.path("box/child-survived");
+    let child = format!(
+        "import time; open({:?}, 'w'); time.sleep(3); open({:?}, 'w')",
+        started.display().to_string(),
+        survived.display().to_string()
+    );
     let code = format!(
-        "import subprocess, time\nsubprocess.Popen(['python3', '-c', 'import time; time.sleep(3); open({:?}, \"w\")'])\ntime.sleep(60)\n",
-        marker.display().to_string()
+        "import subprocess, time\nsubprocess.Popen(['python3', '-c', {child:?}])\ntime.sleep(60)\n"
     );
     let outcome =
         run_python(&scratch, &code, limits(5, Duration::from_millis(1500), 256)).expect("runs");
-    assert_eq!(outcome.termination, Termination::TimedOut);
+    let stderr = String::from_utf8_lossy(&outcome.stderr);
+    assert_eq!(outcome.termination, Termination::TimedOut, "{stderr}");
     assert!(outcome.wall < Duration::from_secs(5), "{:?}", outcome.wall);
+    assert!(started.exists(), "the grandchild never started: {stderr}");
     std::thread::sleep(Duration::from_secs(3));
-    assert!(!marker.exists(), "a child outlived the timeout");
+    assert!(!survived.exists(), "a child outlived the timeout");
 }
 
 #[cfg(target_os = "linux")]
