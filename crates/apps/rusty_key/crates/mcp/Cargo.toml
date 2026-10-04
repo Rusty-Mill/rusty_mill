@@ -20,7 +20,7 @@ serde_json.workspace = true
 thiserror = "2"
 toml.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "process"] }
-rmcp = { version = "0.9", features = [
+rmcp = { version = "3.1", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",

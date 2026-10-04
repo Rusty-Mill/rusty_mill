@@ -29,7 +29,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", 
 # workspace's root ("3.1"/"0.8" respectively) -- see the matching notes in
 # the root Cargo.toml's "Hoisted from rusty_key"/"Hoisted from rusty_adk"
 # comment blocks for why these are tracked as migrations, not drift.
-rmcp = { version = "0.9", features = ["server", "transport-io"], optional = true }
+rmcp = { version = "3.1", features = ["server", "transport-io"], optional = true }
 axum = { version = "0.7", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
