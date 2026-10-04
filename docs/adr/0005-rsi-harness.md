@@ -108,10 +108,10 @@ inner loop cannot score privately.
 | `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
 | `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
 | `ChatModel` | `complete(&[Message], max_tokens, timeout) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
-| `Proposer` | `propose(&[LineageEntry], &Workspace) -> Result<Proposal>` | `OpenAiCompatProposer` (HTTP) and `CodexCliProposer` (subprocess); `ScriptedProposer` in tests. |
+| `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests. A Codex CLI proposer is deferred (§7, as built). |
 | `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
-| `LineageStore` | `append(LineageEntry) -> Result<EntryId>`, `iter()`, `verify()` | Append-only JSONL plus a content-addressed blob dir (see §6). |
+| `LineageStore` | `append(&LineageEntry) -> Result<Digest>` (the entry's chain hash), `entries()` (verifies the chain first) | `JsonlLineage`: append-only JSONL plus a content-addressed blob dir (see §6). |
 
 Each trait lands in `rsi-core` in the same phase as its first adapter
 (P2: `PublicTask`, `PrivateGrader`, `Executor`; P3: `Harness`, `ChatModel`; P4:
@@ -489,6 +489,119 @@ For step k:
 Both the `CodexCliProposer` subprocess and the HTTP proposer run under
 the same Landlock read allowlist. Network is allowed there, since that
 is the outer model's endpoint.
+
+**As built (P4).**
+- **Ports.** `Proposer::propose(&[Precedent], &Path)` edits the worktree in
+  place. `rsi_core::precedents` is the only way to build its input: per
+  candidate, the verdict, the first-round grade, a build or path note, and
+  the first round's public scores. A per-task private score has no field
+  to live in. Inner-run transcripts are not passed (they are large); the
+  public scores stand in for them.
+- **Worktrees.** `git worktree add --detach --no-checkout`, then
+  `sparse-checkout set --no-cone /crates/apps/rusty_rsi/harness/`, then
+  `checkout`, so the proposer sees only the harness crate.
+  - `git add --all --sparse` stages everything, including files created
+    outside the sparse checkout, without mistaking unchecked-out files for
+    deletions.
+  - `git diff --cached --raw -z --no-renames` lists each path with its new
+    mode.
+  - The allowlist accepts only regular files (modes `100644`, `100755`,
+    or a deletion) under `crates/apps/rusty_rsi/harness/src/`.
+  - A violation is committed (for the audit trail) and recorded as
+    `PathViolation`, and never built.
+  - Every git call runs with hooks disabled (`core.hooksPath=/dev/null`),
+    no signing and a fixed identity.
+- **Refs and run names.** Candidates are committed under
+  `refs/rsi/<run>/<step>`, where `<run>` is the run directory's name
+  (lowercase, digits, `-`, `_`). `rusty_uuid` is not used: an explicit
+  directory is simpler to find and to reason about.
+- **Loop.** The parent is always the incumbent (AIDE²'s rule). `ucb1` and
+  `softmax` selection stay in core, unused until a run needs them.
+  - **Each step:** propose, stage, commit, check the allowlist, build
+    (a compile error is `Buggy`, with the first 4,000 characters of the
+    compiler output), grade round 0, `screen`, grade round 1 on a fresh
+    seed set, `confirm`, append.
+  - **The incumbent's grade** after an acceptance is the fresh grade.
+  - **Infrastructure failures** end the run; entries already appended
+    stay valid.
+- **Grading.**
+  - **Runs.** Each round runs every task once per seed
+    (`seed_set(run_seed, candidate, round, n)`), all under the same budget.
+  - **Recorded per task:** the submission's public score, its private
+    score (the floor if there was no submission), the submission and
+    transcript blobs, and the inner cost.
+- **Lineage file.** Each line is
+  `{"hash":"<64 hex>","prev":"<64 hex>","entry":<entry>}`.
+  - **Exact bytes.** The fixed-width prefix lets a reader recover the
+    entry's exact bytes, which `hash` covers.
+  - **Encoding.** Scores, grades, margins and 64-bit seeds are decimal
+    strings, which round-trip exactly; durations are integer nanoseconds.
+  - **Validation.** Reading re-runs `LineageEntry::new`, so a recorded
+    verdict must still follow from its evidence.
+  - **Appends** use `O_APPEND` plus `fsync`. **Blobs** are written aside
+    and renamed, and checked against their address on every read.
+- **Configuration.** Command-line flags plus a calibration JSON file
+  (`rsi calibrate --out`, `rsi run --calibration`), not `rsi.toml`: the
+  workspace has no first-party TOML parser, as with `task.json`. Each
+  role reads `RSI_<ROLE>_MODEL`, `_BASE_URL` and `_API_KEY`, with `INNER`
+  for the agent and `OUTER` for the proposer. `run.json` records the
+  model ids, never a key.
+- **Proposer.** `ModelProposer` sends the system contract, the
+  precedents and the current harness source.
+  - **Reply format.** The model replies with whole files as
+    `<<<FILE path` ... `>>>END`.
+  - **Writing.** Files are written only inside the worktree: absolute
+    paths, `..` and `.git` are refused, and a planted symlink is replaced
+    rather than followed. The allowlist decides afterwards.
+  - **Codex CLI (deferred).** Running `codex exec` safely needs its own
+    sandbox profile (Landlock plus network), and plain-HTTP-only model
+    access rules out hosted endpoints. Remote outer models therefore wait
+    on that adapter or on TLS, and an outer model is a local
+    OpenAI-compatible endpoint for now.
+- **Replay** (`rsi report --replay`).
+  - **Grade replay.** Every stored submission is re-graded through the
+    out-of-process grader, and each private score must match bit for bit.
+  - **Trajectory replay.** Every graded candidate is rebuilt from its
+    commit and re-run against each recorded transcript; the same
+    submission must come out.
+  - **Failures.** A missing or altered blob is an error; a disagreement
+    is listed, and the command fails.
+- **Calibration.** `rsi calibrate` grades the base harness on N rounds
+  (default 5) of candidate 0 and writes the band and
+  `margin = z · √2 · σ̂`. It warns that σ̂ from N = 5 is rough.
+- **Tests (`rsi-cli/tests/outer.rs`).** A 10-step run in a throwaway repo
+  holding a copy of the harness, on the real three-task suite, with the
+  scripted inner model and scripted proposals of known strength. Each
+  proposal gets its verdict:
+  - not better (equal);
+  - within noise (+0.20 against a 0.30 margin);
+  - path violation (the harness manifest);
+  - buggy;
+  - accepted (+0.61 on a fresh, disjoint seed set);
+  - not better (after the incumbent changed);
+  - path violation (a symlink in `src/`);
+  - not better (no change);
+  - path violation (a task's private labels);
+  - not better (identical to the incumbent).
+
+  The test also checks:
+  - parents and refs, and that no new branches were created;
+  - that each proposal saw the lineage so far;
+  - that the stored lineage equals the returned one;
+  - that replay reproduces all 27 private scores and 27 trajectories;
+  - that an altered submission blob and a forged verdict are both caught;
+  - that a finished run cannot be overwritten.
+
+  A second test calibrates on three rounds.
+- **Mutation check.** Each of these, removed alone, fails the run test:
+  - the allowlist;
+  - fresh seeds for the re-evaluation;
+  - passing the full history to the proposer.
+- **Known limits.**
+  - `run.json` keeps the run seed. Calibrating and running with the same
+    `--seed` makes calibration's round 0 and the baseline share seeds,
+    which is harmless: neither is a gate decision.
+  - Cost of the outer model is not yet recorded in lineage.
 
 ### 8. Models and configuration
 

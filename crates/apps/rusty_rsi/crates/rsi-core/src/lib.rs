@@ -15,6 +15,7 @@
 //! - [`task`]: the [`PublicTask`] and [`PrivateGrader`] ports.
 //! - [`exec`]: the sandboxed [`Executor`] port and its [`SandboxSpec`].
 //! - [`inner`]: the [`ChatModel`] and [`Harness`] ports of the inner loop.
+//! - [`outer`]: the [`Proposer`] and [`LineageStore`] ports of the outer loop.
 
 pub mod accept;
 pub mod budget;
@@ -23,6 +24,7 @@ pub mod exec;
 pub mod inner;
 pub mod lineage;
 pub mod noise;
+pub mod outer;
 pub mod rng;
 pub mod score;
 pub mod search;
@@ -38,6 +40,7 @@ pub use lineage::{
     LineageEntry, ModelId, TaskId, TaskResult,
 };
 pub use noise::{Margin, NoiseBand};
+pub use outer::{precedents, LineageStore, Precedent, Proposal, Proposer, PublicResult, Verdict};
 pub use rng::{derive_seed, seed_set, Seed, SplitMix64};
 pub use score::{Grade, Score};
 pub use search::{argmax, softmax, softmax_sample, ucb1, Arm};

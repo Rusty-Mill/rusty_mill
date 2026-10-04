@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **The `rusty_rsi` outer loop** (`crates/apps/rusty_rsi`, ADR-0005 P4): `rsi run` (sparse git worktrees, a path allowlist, fresh-seed accept gate, hash-chained JSONL lineage with content-addressed blobs), `rsi calibrate` (noise band and margin), `rsi report --replay` (bit-for-bit grade replay and trajectory replay); `rsi-core` gains the `Proposer` and `LineageStore` ports.
 - **`rsi-harness` (a0) and the inner loop** (`crates/apps/rusty_rsi`, ADR-0005 P3): a std-only AIDE0 agent compiled with plain `rustc` in the sandbox; a metered broker over an inherited socket with transcript replay; OpenAI-compatible and scripted model clients; `rsi inner`; `rsi-core` gains the `Harness` and `ChatModel` ports.
 - **`rusty_multimodal_db`: the Fair Play domain** (ADR-0137, no wire change): `generic::fair_play` (`Person`/`Card`/`CardDefault`, a card tree with an owner per card over a read-only baseline, derived state, crash-ordered `split_card`), the seed loader for the supplied deck, `fair_play_server` through `serve_tables`, and `Reversed::inner` in the engine.
 - **`rsi-runtime` and `rsi-cli`** (`crates/apps/rusty_rsi`, ADR-0005 P2): a fail-closed Landlock/seccomp/rlimit sandboxed executor, a JSON task format and a three-family toy task suite, R²/tour-ratio/accuracy metrics, and an out-of-process private grader (`rsi __grade`); `rsi-core` gains the `Executor`, `PublicTask` and `PrivateGrader` ports.

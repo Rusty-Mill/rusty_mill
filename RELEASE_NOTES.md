@@ -13,6 +13,35 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi P4: the outer loop, calibration and run reports
+**2026-10-04** · [#PR](https://github.com/Rusty-Mill/rusty_mill/pull/PR) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `rsi run`, the outer loop. Each step:
+  - checks the incumbent out in a sparse, detached git worktree that holds only the harness;
+  - lets a proposer rewrite it;
+  - commits the result under `refs/rsi/<run>/<step>`, never on a branch, and rejects it as a path violation if anything but a regular file under `harness/src/` changed;
+  - builds it, grades it on fresh seeds, gates it (`screen`, then `confirm` on another fresh seed set) and appends the result to the run's lineage.
+- **Added:** `rsi-runtime`:
+  - `JsonlLineage`, an append-only, hash-chained `lineage.jsonl` with content-addressed `blobs/`. Every read re-verifies the chain and each entry's verdict.
+  - A git adapter.
+  - `ModelProposer`, whole-file rewrites from any chat model, and `ScriptedProposer`.
+  - `outer::run` and `outer::calibrate`.
+  - `report::summary` and `report::replay`.
+- **Added:** `rsi calibrate`. It grades the base harness on N disjoint seed sets and writes the noise band and the margin `z·√2·σ̂`.
+- **Added:** `rsi report [--replay]`. Replay re-grades every stored submission bit for bit and re-runs every inner run from its transcript.
+- **Added:** `rsi-core` gains the `Proposer` and `LineageStore` ports. The proposer sees only `Precedent`s (verdicts, grades, public scores), so a per-task private score cannot reach it.
+- **Changed:** model configuration is per role, from `RSI_INNER_*` and `RSI_OUTER_*` (`_MODEL`, `_BASE_URL`, `_API_KEY`).
+- **Tests:**
+  - **10-step run.** A 10-step run on the real suite in a throwaway repository, with scripted models, gets every verdict right: not better, within noise, path violation (manifest, symlink, private labels), buggy and accepted. The acceptance comes from a fresh, disjoint seed set.
+  - **Replay and tampering.** Replay reproduces all 27 grades and 27 trajectories. An altered blob, a forged verdict and an overwritten run are all caught.
+  - **Mutation checks.** The run test fails when the allowlist is removed, when re-evaluation reuses seeds, or when the proposer gets stale history.
+- Known limitations:
+  - The outer model must be a local OpenAI-compatible endpoint (there is no TLS yet). A Codex CLI proposer is deferred.
+  - The parent is always the incumbent.
+  - The outer model's token cost is not yet recorded in lineage.
+
+---
+
 ## rusty_rsi P3: the inner agent a0, its broker and model clients
 **2026-10-04** · [#478](https://github.com/Rusty-Mill/rusty_mill/pull/478) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
