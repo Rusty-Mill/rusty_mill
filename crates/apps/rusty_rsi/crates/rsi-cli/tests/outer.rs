@@ -309,7 +309,7 @@ fn a_ten_step_run_gates_rejects_records_and_replays() {
         world.repo.root(),
         &["for-each-ref", "--format=%(refname)", "refs/rsi/ten-steps/"],
     );
-    assert_eq!(refs.lines().count(), 10, "{refs}");
+    assert_eq!(refs.lines().count(), 11, "base plus ten candidates: {refs}");
     assert_eq!(
         git(world.repo.root(), &["branch", "--list"])
             .lines()
@@ -362,6 +362,84 @@ fn a_ten_step_run_gates_rejects_records_and_replays() {
     // A finished run cannot be overwritten.
     assert!(matches!(
         run(&lab, &proposer, &config, &run_dir),
+        Err(RuntimeError::Lineage(_))
+    ));
+
+    // Nor can its refs be taken over by another run directory with the
+    // same name (as `rsi run` derives it from /elsewhere/ten-steps): the
+    // second run is refused before it writes anything, and every
+    // candidate of the first stays retained.
+    let refs_before = git(
+        world.repo.root(),
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/rsi/",
+        ],
+    );
+    let elsewhere = world.scratch.path("elsewhere");
+    let refused = run(&lab, &proposer, &config, &elsewhere).expect_err("name in use");
+    assert!(refused.to_string().contains("already used"), "{refused}");
+    assert!(!elsewhere.join("run.json").exists());
+    assert_eq!(
+        git(
+            world.repo.root(),
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/rsi/"
+            ]
+        ),
+        refs_before
+    );
+    assert_eq!(refs_before.lines().count(), 11, "base plus ten candidates");
+}
+
+#[test]
+fn a_run_that_fails_before_its_baseline_is_not_a_reproducible_run() {
+    let world = World::new("outer-early-failure");
+    let lab = world.lab();
+    // A base harness that does not compile: the run stops before the
+    // baseline entry, after run.json and an empty lineage exist.
+    let root = world.repo.root().to_path_buf();
+    std::fs::write(
+        root.join(HARNESS_SRC).join("lib.rs"),
+        "pub fn main() { let x: u8 = \"no\"; }\n",
+    )
+    .expect("break");
+    git(&root, &["commit", "--quiet", "--all", "-m", "broken"]);
+    let config = RunConfig {
+        name: "early".into(),
+        base: world.repo.resolve("HEAD").expect("head"),
+        steps: 2,
+        margin: Margin::new(0.1).expect("margin"),
+        grading: grading(),
+    };
+    let run_dir = world.scratch.path("early");
+    let proposer = ScriptedProposer::new(vec![]);
+    let error = run(&lab, &proposer, &config, &run_dir).expect_err("no baseline");
+    assert!(matches!(error, RuntimeError::Harness(_)), "{error}");
+
+    let info = read_run(&run_dir).expect("run.json was written");
+    let entries = JsonlLineage::open(&run_dir)
+        .expect("an empty, valid lineage")
+        .entries()
+        .expect("entries");
+    assert!(entries.is_empty());
+    let blobs = Blobs::open(&run_dir).expect("blobs");
+    for refused in [
+        summary(&info, &entries).map(|_| ()),
+        replay(&lab, &info, &entries, &blobs).map(|_| ()),
+    ] {
+        let error = refused.expect_err("nothing to report or reproduce");
+        assert!(error.to_string().contains("no baseline"), "{error}");
+    }
+
+    // run.json with no lineage file at all is an error too, never an
+    // empty run.
+    std::fs::remove_file(run_dir.join(LINEAGE_FILE)).expect("remove");
+    assert!(matches!(
+        JsonlLineage::open(&run_dir),
         Err(RuntimeError::Lineage(_))
     ));
 }

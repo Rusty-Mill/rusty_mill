@@ -515,6 +515,11 @@ is the outer model's endpoint.
   `refs/rsi/<run>/<step>`, where `<run>` is the run directory's name
   (lowercase, digits, `-`, `_`). `rusty_uuid` is not used: an explicit
   directory is simpler to find and to reason about.
+  - **Claims.** Every ref is created with `git update-ref --stdin`
+    `create`, which fails if the ref exists. A run first claims
+    `refs/rsi/<run>/base`, before writing anything, so a second run
+    directory with the same name is refused and the first run's refs and
+    candidates are never overwritten.
 - **Loop.** The parent is always the incumbent (AIDE²'s rule). `ucb1` and
   `softmax` selection stay in core, unused until a run needs them.
   - **Each step:** propose, stage, commit, check the allowlist, build
@@ -538,6 +543,15 @@ is the outer model's endpoint.
     strings, which round-trip exactly; durations are integer nanoseconds.
   - **Validation.** Reading re-runs `LineageEntry::new`, so a recorded
     verdict must still follow from its evidence.
+  - **Create vs open.** `JsonlLineage::create` makes a new, empty
+    lineage and fails if one exists; `open` fails if there is none, so a
+    missing lineage is never read as an empty run.
+  - **Completeness.** `report::check` requires a baseline first, then
+    candidates in step order, at most `steps` of them. A run without a
+    baseline has nothing to report or reproduce. A valid prefix is
+    reported as `INCOMPLETE, k of n`, and `--replay` on it fails after
+    replaying what was recorded. The hash chain does not detect a
+    truncated suffix; the step count in `run.json` does, for the tail.
   - **Appends** use `O_APPEND` plus `fsync`. **Blobs** are written aside
     and renamed, and checked against their address on every read.
 - **Configuration.** Command-line flags plus a calibration JSON file
@@ -551,8 +565,10 @@ is the outer model's endpoint.
   - **Reply format.** The model replies with whole files as
     `<<<FILE path` ... `>>>END`.
   - **Writing.** Files are written only inside the worktree: absolute
-    paths, `..` and `.git` are refused, and a planted symlink is replaced
-    rather than followed. The allowlist decides afterwards.
+    paths, `..` and `.git` (in any case) are refused, every ancestor
+    directory must be a real directory (a symlinked parent is refused,
+    and missing ones are created one level at a time), and a planted
+    symlink at the leaf is replaced rather than followed. The allowlist decides afterwards.
   - **Codex CLI (deferred).** Running `codex exec` safely needs its own
     sandbox profile (Landlock plus network), and plain-HTTP-only model
     access rules out hosted endpoints. Remote outer models therefore wait

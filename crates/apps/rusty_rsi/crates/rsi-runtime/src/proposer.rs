@@ -19,30 +19,54 @@ use rsi_core::{ChatModel, CostUsage, Message, ModelId, Precedent, Proposal, Prop
 use crate::error::RuntimeError;
 use crate::git::{HARNESS_DIR, HARNESS_SRC};
 
-/// Writes `content` to `path` (relative to `workspace`), refusing any path
-/// that would leave the workspace or touch git's own files.
+/// Writes `content` to `path` (relative to `workspace`) without ever
+/// leaving the workspace.
+///
+/// The path must be plain and relative, with no `.git` component in any
+/// letter case. Each directory on the way is checked without following
+/// links: an existing symlink (or a non-directory) refuses the write, so a
+/// symlinked ancestor checked out from a candidate cannot redirect it, and
+/// a missing directory is created one level at a time. A symlink at the
+/// leaf is replaced, never written through.
 ///
 /// # Errors
-/// [`RuntimeError::Model`] for such a path; [`RuntimeError::Io`] on write
-/// errors.
+/// [`RuntimeError::Model`] for a refused path; [`RuntimeError::Io`] on
+/// write errors.
 pub fn write_inside(workspace: &Path, path: &str, content: &str) -> Result<(), RuntimeError> {
-    let relative = Path::new(path);
-    let safe = !path.is_empty()
-        && relative.components().all(|c| match c {
-            Component::Normal(name) => name != ".git",
-            _ => false,
-        });
-    if !safe {
-        return Err(RuntimeError::Model(format!(
-            "refusing to write `{path}`: not a plain relative path"
-        )));
+    let refuse = |why: &str| {
+        Err(RuntimeError::Model(format!(
+            "refusing to write `{path}`: {why}"
+        )))
+    };
+    let mut parts = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(name) if !name.eq_ignore_ascii_case(".git") => parts.push(name),
+            _ => return refuse("not a plain relative path"),
+        }
     }
-    let target = workspace.join(relative);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| RuntimeError::io(format!("creating {}", parent.display()), e))?;
+    let Some((leaf, ancestors)) = parts.split_last() else {
+        return refuse("empty path");
+    };
+    let mut dir = workspace.to_path_buf();
+    for name in ancestors {
+        dir.push(name);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return refuse(&format!("{} is a symlink", dir.display()));
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return refuse(&format!("{} is not a directory", dir.display()));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&dir)
+                    .map_err(|e| RuntimeError::io(format!("creating {}", dir.display()), e))?;
+            }
+            Err(e) => return Err(RuntimeError::io(format!("inspecting {}", dir.display()), e)),
+        }
     }
-    // Never write through a symlink planted earlier.
+    let target = dir.join(leaf);
     if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
         std::fs::remove_file(&target)
             .map_err(|e| RuntimeError::io(format!("replacing {path}"), e))?;
@@ -362,6 +386,8 @@ mod tests {
             "a/../../b",
             ".git/config",
             "a/.git/x",
+            ".GIT/config",
+            "a/.Git/x",
             "",
         ] {
             assert!(write_inside(&dir.0, bad, "x").is_err(), "{bad}");
@@ -375,6 +401,45 @@ mod tests {
             write_inside(&dir.0, &format!("{HARNESS_SRC}link.rs"), "new").expect("replaces");
             assert_eq!(std::fs::read_to_string(&target).expect("target"), "keep");
         }
+    }
+
+    /// A symlinked directory checked out from a candidate must not carry a
+    /// write outside the workspace, whether into an existing file or a new
+    /// directory under it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_ancestor_cannot_redirect_a_write() {
+        let dir = Dir::new("ancestor");
+        let outside = dir.0.with_extension("outside");
+        if outside.exists() {
+            std::fs::remove_dir_all(&outside).expect("clear");
+        }
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("sentinel.txt"), "keep").expect("sentinel");
+        let workspace = dir.0.join("ws");
+        std::fs::create_dir_all(workspace.join("crates")).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, workspace.join("crates/link")).expect("symlink");
+        for path in [
+            "crates/link/sentinel.txt",
+            "crates/link/new/deeper/file.rs",
+            "crates/link/new.rs",
+        ] {
+            assert!(write_inside(&workspace, path, "pwned").is_err(), "{path}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).expect("read"),
+            "keep"
+        );
+        let entries: Vec<_> = std::fs::read_dir(&outside).expect("list").collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "nothing was created outside the workspace"
+        );
+        // A file where a directory is needed is refused too.
+        std::fs::write(workspace.join("plain"), "x").expect("file");
+        assert!(write_inside(&workspace, "plain/child.rs", "x").is_err());
+        std::fs::remove_dir_all(&outside).expect("cleanup");
     }
 
     #[test]

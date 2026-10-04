@@ -53,17 +53,40 @@ pub struct JsonlLineage {
 }
 
 impl JsonlLineage {
-    /// Opens (creating if absent) the lineage in `run_dir` and verifies it.
+    /// Starts a new, empty lineage in `run_dir`.
     ///
     /// # Errors
-    /// [`RuntimeError::Lineage`] if the existing chain is broken or an
-    /// entry is invalid; [`RuntimeError::Io`] on file errors.
-    pub fn open(run_dir: &Path) -> Result<Self, RuntimeError> {
+    /// [`RuntimeError::Lineage`] if `run_dir` already has a lineage;
+    /// [`RuntimeError::Io`] on file errors.
+    pub fn create(run_dir: &Path) -> Result<Self, RuntimeError> {
         std::fs::create_dir_all(run_dir)
             .map_err(|e| RuntimeError::io(format!("creating {}", run_dir.display()), e))?;
         let path = run_dir.join(LINEAGE_FILE);
-        let mut store = Self {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    bad(format!("{} already exists", path.display()))
+                }
+                _ => RuntimeError::io("creating the lineage", e),
+            })?;
+        Ok(Self {
             path,
+            head: GENESIS,
+        })
+    }
+
+    /// Opens the existing lineage in `run_dir` and verifies it. A missing
+    /// lineage is an error, never an empty run.
+    ///
+    /// # Errors
+    /// [`RuntimeError::Lineage`] if there is no lineage, the chain is
+    /// broken or an entry is invalid; [`RuntimeError::Io`] on file errors.
+    pub fn open(run_dir: &Path) -> Result<Self, RuntimeError> {
+        let mut store = Self {
+            path: run_dir.join(LINEAGE_FILE),
             head: GENESIS,
         };
         let (_, head) = store.read()?;
@@ -72,11 +95,10 @@ impl JsonlLineage {
     }
 
     fn read(&self) -> Result<(Vec<LineageEntry>, Digest), RuntimeError> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(RuntimeError::io("reading the lineage", e)),
-        };
+        let text = std::fs::read_to_string(&self.path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => bad(format!("{} does not exist", self.path.display())),
+            _ => RuntimeError::io("reading the lineage", e),
+        })?;
         if !text.is_empty() && !text.ends_with('\n') {
             return Err(bad("the last lineage line is incomplete"));
         }
@@ -672,7 +694,16 @@ mod tests {
     #[test]
     fn appends_and_verifies_the_chain() {
         let dir = Dir::new("chain");
-        let mut store = JsonlLineage::open(&dir.0).expect("open");
+        assert!(
+            matches!(JsonlLineage::open(&dir.0), Err(RuntimeError::Lineage(_))),
+            "a missing lineage is not an empty one"
+        );
+        let mut store = JsonlLineage::create(&dir.0).expect("create");
+        assert!(store.entries().expect("empty").is_empty());
+        assert!(
+            matches!(JsonlLineage::create(&dir.0), Err(RuntimeError::Lineage(_))),
+            "never started twice"
+        );
         let originals = entries();
         for e in &originals {
             store.append(e).expect("append");
@@ -697,7 +728,7 @@ mod tests {
     #[test]
     fn edits_deletions_reordering_and_truncation_are_detected() {
         let dir = Dir::new("tamper");
-        let mut store = JsonlLineage::open(&dir.0).expect("open");
+        let mut store = JsonlLineage::create(&dir.0).expect("create");
         for e in &entries() {
             store.append(e).expect("append");
         }

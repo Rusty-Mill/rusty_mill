@@ -6,7 +6,8 @@
 //! sparse checkout, and lists the changes; [`violations`] then checks them
 //! against the allowlist: only regular files under
 //! [`HARNESS_SRC`] may change. Commits are kept under `refs/rsi/...`, never
-//! on a branch, so a run never clutters `git branch`.
+//! on a branch, so a run never clutters `git branch`; those refs are only
+//! ever created, never moved ([`Repo::create_ref`]).
 //!
 //! Every command runs with hooks disabled, a fixed identity and no commit
 //! signing, so the user's git configuration cannot run code or prompt.
@@ -166,16 +167,39 @@ impl Repo {
         Ok(worktree)
     }
 
-    /// Points `name` (a full ref such as `refs/rsi/run/3`) at `commit`.
+    /// Creates `name` (a full ref such as `refs/rsi/run/3`) pointing at
+    /// `commit`, atomically, failing if it already exists. A ref is never
+    /// moved: another run's retained candidates stay reachable.
     ///
     /// # Errors
-    /// [`RuntimeError::Git`] if git refuses.
-    pub fn set_ref(&self, name: &str, commit: &CommitSha) -> Result<(), RuntimeError> {
-        run(
-            git(&self.root).args(["update-ref", name, commit.as_str()]),
-            "record a candidate ref",
-        )
-        .map(|_| ())
+    /// [`RuntimeError::Git`] if the ref exists or git refuses.
+    pub fn create_ref(&self, name: &str, commit: &CommitSha) -> Result<(), RuntimeError> {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let mut child = git(&self.root)
+            .args(["update-ref", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| RuntimeError::io("running git to create a ref", e))?;
+        let written = match child.stdin.take() {
+            // `create` succeeds only if the ref does not exist yet.
+            Some(mut stdin) => writeln!(stdin, "create {name} {}", commit.as_str()),
+            None => Err(std::io::Error::other("git stdin was not piped")),
+        };
+        let output = child
+            .wait_with_output()
+            .map_err(|e| RuntimeError::io("waiting for git", e))?;
+        written.map_err(|e| RuntimeError::io("writing to git", e))?;
+        if !output.status.success() {
+            return Err(RuntimeError::Git(format!(
+                "create {name}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
     }
 }
 

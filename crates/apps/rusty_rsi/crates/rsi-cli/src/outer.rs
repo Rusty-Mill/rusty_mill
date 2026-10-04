@@ -26,7 +26,7 @@ use rsi_runtime::outer::{
     calibrate, calibrated_margin, encode_calibration, read_run, run, Grading, Lab, RunConfig,
 };
 use rsi_runtime::proposer::ModelProposer;
-use rsi_runtime::report::{replay, summary};
+use rsi_runtime::report::{check, replay, summary, RunStatus};
 use rsi_runtime::{ProcessExecutor, ScriptedModel, SolutionRunner, TaskDir, Toolchain};
 
 use crate::config::{model_from_env, Role};
@@ -297,14 +297,22 @@ pub fn report_main(args: &[OsString]) -> Result<String, String> {
         "\n## Replay\n\n- {} private scores re-graded\n- {} inner runs replayed from transcripts\n",
         replayed.grades, replayed.trajectories
     ));
-    if replayed.mismatches.is_empty() {
-        report.push_str("- everything reproduced\n");
-        return Ok(report);
+    if !replayed.mismatches.is_empty() {
+        return Err(format!(
+            "{report}\nthe run did not reproduce:\n{}",
+            replayed.mismatches.join("\n")
+        ));
     }
-    Err(format!(
-        "{report}\nthe run did not reproduce:\n{}",
-        replayed.mismatches.join("\n")
-    ))
+    match check(&info, &entries).map_err(|e| e.to_string())? {
+        RunStatus::Complete => {
+            report.push_str("- everything reproduced\n");
+            Ok(report)
+        }
+        RunStatus::Incomplete { recorded, expected } => Err(format!(
+            "{report}- the {recorded} recorded candidates reproduced, but the run is \
+             incomplete ({recorded} of {expected}); this is not a reproduction of the run\n"
+        )),
+    }
 }
 
 #[cfg(test)]

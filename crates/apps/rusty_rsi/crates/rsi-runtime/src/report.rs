@@ -22,16 +22,73 @@ use crate::harness::HarnessProcess;
 use crate::lineage_store::Blobs;
 use crate::outer::{Lab, RunInfo};
 
+/// How much of its run a lineage holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    /// The baseline and every configured proposal.
+    Complete,
+    /// A valid history from the baseline that stops early: the run failed
+    /// part-way, or its last entries are missing. (The hash chain detects
+    /// an edit or a gap, not a cut-off tail; `run.json`'s step count does.)
+    Incomplete {
+        /// Candidates recorded.
+        recorded: usize,
+        /// Candidates the run was configured for.
+        expected: usize,
+    },
+}
+
+/// Checks that `entries` are a run's history from its baseline: candidate
+/// 0 is the baseline, candidates follow in order, and there are no more
+/// than configured.
+///
+/// # Errors
+/// [`RuntimeError::Lineage`] when there is no baseline (so nothing to
+/// report or reproduce), the numbering is broken, or there are too many.
+pub fn check(info: &RunInfo, entries: &[LineageEntry]) -> Result<RunStatus, RuntimeError> {
+    let bad = |what: String| RuntimeError::Lineage(format!("run `{}`: {what}", info.name));
+    match entries.first().map(|e| &e.fields().decision) {
+        Some(Decision::Baseline) => {}
+        Some(_) => return Err(bad("the first entry is not the baseline".into())),
+        None => {
+            return Err(bad(
+                "no baseline was recorded, so there is nothing to report or reproduce".into(),
+            ));
+        }
+    }
+    if let Some((index, entry)) = entries
+        .iter()
+        .enumerate()
+        .find(|(index, e)| e.fields().candidate.get() != *index as u64)
+    {
+        return Err(bad(format!(
+            "entry {index} is candidate {}, out of order",
+            entry.fields().candidate.get()
+        )));
+    }
+    let expected = info.steps as usize + 1;
+    match entries.len() {
+        n if n == expected => Ok(RunStatus::Complete),
+        n if n < expected => Ok(RunStatus::Incomplete {
+            recorded: n,
+            expected,
+        }),
+        n => Err(bad(format!(
+            "{n} candidates, but the run was configured for {expected}"
+        ))),
+    }
+}
+
 fn grade_text(grade: Option<Grade>) -> String {
     grade.map_or_else(|| "–".to_owned(), |g| format!("{:.4}", g.get()))
 }
 
-/// The run as a Markdown report.
+/// The run as a Markdown report, saying plainly whether it is complete.
 ///
 /// # Errors
-/// Only if a recorded evaluation cannot be graded, which a validated entry
-/// rules out.
+/// What [`check`] rejects.
 pub fn summary(info: &RunInfo, entries: &[LineageEntry]) -> Result<String, RuntimeError> {
+    let status = check(info, entries)?;
     let mut out = String::new();
     let accepted = entries
         .iter()
@@ -99,7 +156,19 @@ pub fn summary(info: &RunInfo, entries: &[LineageEntry]) -> Result<String, Runti
         cost.tokens(),
         cost.wall.as_secs_f64()
     );
-    let _ = writeln!(out, "- **Lineage:** hash chain verified\n");
+    let _ = writeln!(out, "- **Lineage:** hash chain verified");
+    match status {
+        RunStatus::Complete => {
+            let _ = writeln!(out, "- **Status:** complete\n");
+        }
+        RunStatus::Incomplete { recorded, expected } => {
+            let _ = writeln!(
+                out,
+                "- **Status:** INCOMPLETE, {recorded} of {expected} candidates recorded \
+                 (the run stopped early, or its last entries are missing)\n"
+            );
+        }
+    }
     out.push_str(
         "| # | parent | verdict | grade | fresh grade | Δ incumbent | tokens | wall | commit |\n\
          |---|---|---|---|---|---|---|---|---|\n",
@@ -133,7 +202,8 @@ pub struct Replayed {
 /// Replays the run's grades and trajectories.
 ///
 /// # Errors
-/// Infrastructure failures, and [`RuntimeError::Lineage`] for a missing or
+/// What [`check`] rejects (a history without a baseline proves nothing),
+/// infrastructure failures, and [`RuntimeError::Lineage`] for a missing or
 /// altered blob. Disagreements are reported in [`Replayed::mismatches`].
 pub fn replay<M>(
     lab: &Lab<'_, M>,
@@ -145,6 +215,7 @@ where
     M: ChatModel,
     M::Error: std::fmt::Display,
 {
+    check(info, entries)?;
     let mut replayed = Replayed::default();
     let grader = SandboxedGrader::new(lab.tasks, lab.runner, lab.grader.clone());
     for entry in entries {
@@ -226,4 +297,102 @@ where
         }
     }
     Ok(replayed)
+}
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use rsi_core::{
+        Budget, CandidateId, CommitSha, CostUsage, EntryFields, EvaluationRecord, Margin, ModelId,
+        Rejection, Score, Seed, TaskId, TaskResult,
+    };
+
+    use super::*;
+
+    fn info(steps: u32) -> RunInfo {
+        RunInfo {
+            name: "r".into(),
+            steps,
+            margin: Margin::new(0.1).expect("margin"),
+            grace: Duration::from_secs(1),
+            tasks: vec!["t".into()],
+        }
+    }
+
+    fn entry(candidate: u64, decision: Decision) -> LineageEntry {
+        let graded = matches!(decision, Decision::Baseline);
+        LineageEntry::new(EntryFields {
+            candidate: CandidateId::new(candidate),
+            parent: candidate.checked_sub(1).map(|_| CandidateId::BASELINE),
+            harness_commit: CommitSha::parse(&"c".repeat(40)).expect("sha"),
+            diff: None,
+            inner_model: ModelId::parse("m").expect("model"),
+            outer_model: None,
+            budget: Budget::new(1, Duration::from_secs(1), None).expect("budget"),
+            evaluations: if graded {
+                vec![EvaluationRecord {
+                    round: 0,
+                    results: vec![TaskResult {
+                        task: TaskId::parse("t").expect("task"),
+                        seed: Seed::new(1),
+                        public: None,
+                        private: Score::new(0.5).expect("score"),
+                        solution: None,
+                        transcript: None,
+                        cost: CostUsage::default(),
+                    }],
+                }]
+            } else {
+                vec![]
+            },
+            decision,
+            host: "h".into(),
+        })
+        .expect("valid")
+    }
+
+    fn buggy(candidate: u64) -> LineageEntry {
+        entry(
+            candidate,
+            Decision::Rejected(Rejection::Buggy {
+                reason: "no".into(),
+            }),
+        )
+    }
+
+    #[test]
+    fn a_run_without_a_baseline_reports_and_reproduces_nothing() {
+        let error = check(&info(2), &[]).expect_err("empty");
+        assert!(error.to_string().contains("no baseline"), "{error}");
+        assert!(summary(&info(2), &[]).is_err());
+        assert!(
+            check(&info(2), &[buggy(0)]).is_err(),
+            "first entry not a baseline"
+        );
+    }
+
+    #[test]
+    fn a_partial_history_is_flagged_incomplete() {
+        let partial = [entry(0, Decision::Baseline), buggy(1)];
+        assert_eq!(
+            check(&info(3), &partial).expect("valid"),
+            RunStatus::Incomplete {
+                recorded: 2,
+                expected: 4
+            }
+        );
+        let report = summary(&info(3), &partial).expect("inspectable");
+        assert!(report.contains("INCOMPLETE, 2 of 4"), "{report}");
+        assert_eq!(
+            check(&info(1), &partial).expect("valid"),
+            RunStatus::Complete
+        );
+        assert!(summary(&info(1), &partial)
+            .expect("ok")
+            .contains("**Status:** complete"));
+        assert!(check(&info(0), &partial).is_err(), "more than configured");
+        let gap = [entry(0, Decision::Baseline), buggy(2)];
+        assert!(check(&info(3), &gap).is_err(), "out of order");
+    }
 }

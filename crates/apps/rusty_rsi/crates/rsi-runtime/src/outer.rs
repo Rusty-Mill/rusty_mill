@@ -285,12 +285,24 @@ where
         )));
     }
     std::fs::create_dir_all(run_dir).map_err(|e| RuntimeError::io("creating the run dir", e))?;
+    // Claim the run's ref namespace before writing anything: two run
+    // directories with the same name must not share (and overwrite)
+    // refs/rsi/<name>/*.
+    lab.repo
+        .create_ref(&format!("refs/rsi/{}/base", config.name), &config.base)
+        .map_err(|e| {
+            RuntimeError::Lineage(format!(
+                "run name `{}` is already used in this repository; \
+                 choose another run directory name ({e})",
+                config.name
+            ))
+        })?;
     std::fs::write(
         run_dir.join(RUN_FILE),
         encode_run(config, lab, proposer).to_json_string_pretty(),
     )
     .map_err(|e| RuntimeError::io("writing run.json", e))?;
-    let mut store = JsonlLineage::open(run_dir)?;
+    let mut store = JsonlLineage::create(run_dir)?;
     let blobs = Blobs::open(run_dir)?;
     let host = host();
     let fields = |candidate: u64, parent: Option<CandidateId>, commit: CommitSha| EntryFields {
@@ -385,7 +397,7 @@ where
     };
     let commit = worktree.commit(&summary)?;
     lab.repo
-        .set_ref(&format!("refs/rsi/{}/{step}", config.name), &commit)?;
+        .create_ref(&format!("refs/rsi/{}/{step}", config.name), &commit)?;
     Ok(Committed {
         commit,
         diff,
@@ -491,6 +503,8 @@ fn encode_run<M: ChatModel, P: Proposer>(
 pub struct RunInfo {
     /// The run's name.
     pub name: String,
+    /// Proposals the run was configured to make after the baseline.
+    pub steps: u32,
     /// The accept margin.
     pub margin: Margin,
     /// The kill grace period.
@@ -512,6 +526,11 @@ pub fn read_run(run_dir: &Path) -> Result<RunInfo, RuntimeError> {
         .and_then(Value::as_str)
         .and_then(|m| m.parse::<f64>().ok())
         .ok_or_else(|| bad("`margin` is missing"))?;
+    let steps = json
+        .get("steps")
+        .and_then(Value::as_u64)
+        .and_then(|s| u32::try_from(s).ok())
+        .ok_or_else(|| bad("`steps` is missing"))?;
     let grace = json
         .pointer("/grading/grace_ns")
         .and_then(Value::as_u64)
@@ -522,6 +541,7 @@ pub fn read_run(run_dir: &Path) -> Result<RunInfo, RuntimeError> {
             .and_then(Value::as_str)
             .ok_or_else(|| bad("`name` is missing"))?
             .to_owned(),
+        steps,
         margin: Margin::new(margin)?,
         grace: Duration::from_nanos(grace),
         tasks: json

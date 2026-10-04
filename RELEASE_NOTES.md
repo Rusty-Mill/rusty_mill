@@ -35,6 +35,10 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
   - **10-step run.** A 10-step run on the real suite in a throwaway repository, with scripted models, gets every verdict right: not better, within noise, path violation (manifest, symlink, private labels), buggy and accepted. The acceptance comes from a fresh, disjoint seed set.
   - **Replay and tampering.** Replay reproduces all 27 grades and 27 trajectories. An altered blob, a forged verdict and an overwritten run are all caught.
   - **Mutation checks.** The run test fails when the allowlist is removed, when re-evaluation reuses seeds, or when the proposer gets stale history.
+- **Fixed (review):**
+  - Proposer writes refuse a symlinked ancestor directory, not just a symlinked leaf, so a write cannot escape the worktree.
+  - Refs are create-only, and a run claims `refs/rsi/<run>/base` first: a second run directory with the same name is refused instead of overwriting the first run's refs.
+  - A missing or baseline-less lineage is an error, not a successful replay. A partial run is reported as `INCOMPLETE`, and `--replay` on it fails after checking what was recorded.
 - Known limitations:
   - The outer model must be a local OpenAI-compatible endpoint (there is no TLS yet). A Codex CLI proposer is deferred.
   - The parent is always the incumbent.
