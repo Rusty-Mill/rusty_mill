@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.129.0
+- Version: 0.130.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6307,6 +6307,39 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       11.37). `test2` one-step ball 0.091 (was 0.099), car 0.445 (was
       0.447); k = 30 ball 1.39 (was 1.62), car 5.46 (was 5.53). `front`,
       `side` unchanged. No frame worse.
+- `RB-PHYSICS-001-FR-126` (the ball's mesh manifold drops and folds points
+  in Bullet's slot order; implemented and verified on the owner's capture,
+  ADR-0046): `mesh::BallManifold::refresh` removes a stale slot as
+  `btPersistentManifold::removeContactPoint` does, walking from the last
+  slot down and moving the last entry into the hole, instead of keeping
+  the survivors in order; `mesh::add_manifold_point` folds a new point
+  into the nearest kept one within the threshold (`getCacheEntry`), not
+  the first. `sortCachedPoints`'s area terms pair slots by position, so
+  the order a refresh leaves decides which point a full manifold gives up
+  on the next tick.
+  - Why: `hitjump.jsonl` 104.375–104.408 s, the ball grinding up a back
+    wall fillet. Per tick, the recorded impulse needs a manifold of 3 of
+    the 4 facet points the port finds (the game's average normal is
+    24.6° at 104.383 s, two points on the 28.5° facet and one on the
+    17.3°). With manifolds carried across ticks the port had the right 3
+    at 104.383 s but then the wrong set (191 and 357 uu/s); with Bullet's
+    slot order the carried chain reads 4, 3, 3, 2, 2 uu/s on the five
+    ticks. The same mechanism explains the 97.908 s one-step frame: from
+    the recorded 97.900 s state a fresh manifold bounces at once while
+    the game's still holds the corner fan from 97.892 s.
+  - **Verification**:
+    - `mesh` tests `a_dropped_slot_takes_the_last_entry`,
+      `a_new_point_folds_into_the_nearest_kept_one`.
+    - `hitjump` k = 30 ball 21.24 (was 21.29): 20.767 s 26 uu/s (was 164),
+      20.942 s 4 (was 131), 20.983 s 1 (was 112), 20.917 s 4 (was 98),
+      111.308 s 497 (was 687). Car unchanged; `test2` unchanged.
+    - One-step is unchanged by construction (a snapped ball starts with no
+      manifold, FR-121). Carrying manifolds through snaps as an experiment
+      gives `hitjump` ball 0.464 (was 0.490, resets excluded): 97.908 s 0
+      (was 207), 97.917 s 2 (was 103), 97.933 s 2 (was 110), 73.958 s 3
+      (was 104), 104.392 s 4 (was 103), 40.042 s 2 (was 101); one frame
+      worse, 20.800 s 109 (was 2), where the warm chain loses the 61.5°
+      facet point to an eviction the game does not make. Left as a lead.
 
 
 ## Architecture and interfaces
@@ -7798,6 +7831,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.130.0 (2026-10-04): `RB-PHYSICS-001-FR-126` — the ball's mesh manifold
+  drops and folds points in Bullet's slot order (ADR-0046). 435 tests in
+  `rb_physics_bullet`.
 - 0.129.0 (2026-10-04): `RB-PHYSICS-001-FR-125` — car-ball contacts are
   RocketSim's 91.25 sphere against the margin-rounded hitbox, admitted to
   the breaking threshold; supersedes FR-114 (ADR-0045). 433 tests in

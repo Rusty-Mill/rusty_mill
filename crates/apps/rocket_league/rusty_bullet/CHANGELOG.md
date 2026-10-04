@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0046 (`RB-PHYSICS-001-FR-126`): `mesh::BallManifold::refresh`
+  drops a slot as Bullet's `removeContactPoint` does (last entry moves
+  into the hole) and `mesh::add_manifold_point` folds into the nearest
+  kept point (`getCacheEntry`); the slot order decides what a full
+  manifold gives up next tick.
 - ADR-0045 (`RB-PHYSICS-001-FR-125`): `collision::sphere_vs_box` is
   Bullet's `getSphereDistance` (core box plus margin, a rounded hitbox);
   `collision::breaking_threshold` admits a car-ball contact up to the

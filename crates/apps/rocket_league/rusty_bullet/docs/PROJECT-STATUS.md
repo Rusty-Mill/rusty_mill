@@ -224,8 +224,14 @@ version: `a245d35`).
    calibrated 92.3 uu radius for RocketSim's 91.25 sphere admitted to the
    1.825 uu breaking threshold: the source now explains all 28 recorded
    hits; `hitjump` hit-frame ball sum 470 (was 821), one-step ball 0.490,
-   k = 30 ball 21.29; `test2` k = 30 ball 1.39 (was 1.62). Open car-side
-   leads: `test2`
+   k = 30 ball 21.29; `test2` k = 30 ball 1.39 (was 1.62).
+   `RB-PHYSICS-001-FR-126` (ADR-0046) drops and folds the ball's mesh
+   manifold points in Bullet's slot order, found by matching the game's
+   per-tick contact set on the 104.4 s fillet grind: k = 30 ball 21.24,
+   the 20.7–21.0 s frames from 98–164 uu/s to under 30; with manifolds
+   carried through snaps the one-step ball would read 0.464 (97.908 s
+   207 → 0) but 20.800 s regresses (2 → 109), left as a lead with the
+   cold one-step unchanged. Open car-side leads: `test2`
    14.408 s (25 uu/s, a one-tick recording glitch in spin and velocity)
    and the slow lateral drift along the wall after it.
 2. (Optional, owner-side, non-blocking) The manual BakkesMod-overlay
@@ -236,7 +242,7 @@ version: `a245d35`).
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (504 tests: 27 `rb_domain`, 433
+- `cargo test --workspace`: pass (506 tests: 27 `rb_domain`, 435
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

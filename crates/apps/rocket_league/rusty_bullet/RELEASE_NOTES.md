@@ -8,6 +8,20 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## Manifold slots in Bullet's order
+**2026-10-04** · `RB-PHYSICS-001-FR-126` · ADR-0046
+
+- When the ball grinds along a curved wall, Bullet keeps up to four
+  contact points and, when a fifth arrives, gives one up by an area rule
+  that depends on which slot holds which point. Our port kept the
+  survivors of a refresh in their old order; Bullet moves the last point
+  into the vacated slot. Matching the game tick by tick on a fillet grind
+  showed that order is what decides the next eviction. With Bullet's
+  order (and folding a repeat contact into the nearest kept point, not
+  the first) the carried manifold reproduces all five recorded ticks of
+  that grind, and the quarter-second view of the hit recording improves
+  on a dozen corner frames. 506 tests.
+
 ## The ball meets the rounded hitbox too
 **2026-10-04** · `RB-PHYSICS-001-FR-125` · ADR-0045
 

@@ -532,20 +532,25 @@ impl BallManifold {
     /// transform; a point further than `breaking` from its triangle along
     /// its normal, or slid further than that sideways, is dropped.
     fn refresh(&mut self, center: Vec3, orientation: &Quat, breaking: f32) {
-        self.entries.retain_mut(|entry| {
+        // Bullet's `removeContactPoint` (RB-PHYSICS-001-FR-126): walking
+        // from the last slot down, a dropped slot takes the last entry.
+        // `sortCachedPoints`'s area terms pair slots by position, so the
+        // order a refresh leaves decides which point a full manifold gives
+        // up next tick.
+        let mut slot = self.entries.len();
+        while slot > 0 {
+            slot -= 1;
+            let entry = &mut self.entries[slot];
             let on_ball = center + orientation.rotate(&entry.local_on_ball);
             let distance = (on_ball - entry.on_mesh).dot(&entry.contact.normal);
-            if distance > breaking {
-                return false;
-            }
             let drift = entry.on_mesh - (on_ball - entry.contact.normal * distance);
-            if drift.length_squared() > breaking * breaking {
-                return false;
+            if distance > breaking || drift.length_squared() > breaking * breaking {
+                self.entries.swap_remove(slot);
+                continue;
             }
             entry.on_ball = on_ball;
             entry.contact.penetration_depth = -distance;
-            true
-        });
+        }
     }
 
     /// Points kept.
@@ -569,9 +574,20 @@ impl BallManifold {
 /// ball point, so they fold into one contact, the last one reported.
 fn add_manifold_point(kept: &mut Vec<ManifoldEntry>, entry: ManifoldEntry, breaking: f32) {
     let limit = breaking * breaking;
+    // `getCacheEntry`: the nearest kept point within the threshold, not
+    // the first (FR-126).
     let near = kept
         .iter()
-        .position(|k| (k.local_on_ball - entry.local_on_ball).length_squared() < limit);
+        .enumerate()
+        .map(|(slot, k)| {
+            (
+                slot,
+                (k.local_on_ball - entry.local_on_ball).length_squared(),
+            )
+        })
+        .filter(|(_, d)| *d < limit)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(slot, _)| slot);
     let sorted = |e: &ManifoldEntry| (e.local_on_ball, e.contact.penetration_depth);
     if let Some(slot) = near {
         kept[slot] = entry;
@@ -1013,6 +1029,55 @@ mod tests {
         let mut slid = resting();
         slid.refresh(Vec3::new(5.0, 0.0, 90.0), &Quat::IDENTITY, breaking);
         assert!(slid.is_empty(), "5 uu sideways is past the threshold");
+    }
+
+    /// RB-PHYSICS-001-FR-126: a refresh drops a slot the way Bullet's
+    /// `removeContactPoint` does, moving the last entry into it, so the
+    /// survivors' order is [0, 3, 2] when slot 1 leaves, not [0, 2, 3].
+    #[test]
+    fn a_dropped_slot_takes_the_last_entry() {
+        let entry = |x: f32, mesh_z: f32| ManifoldEntry {
+            on_ball: Vec3::new(x, 0.0, -3.15),
+            local_on_ball: Vec3::new(x, 0.0, -93.15),
+            on_mesh: Vec3::new(x, 0.0, mesh_z),
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point: Vec3::new(x, 0.0, mesh_z),
+                penetration_depth: 3.15 + mesh_z,
+            },
+        };
+        let mut manifold = BallManifold {
+            entries: vec![
+                entry(0.0, 0.0),
+                entry(10.0, -6.0),
+                entry(20.0, 0.0),
+                entry(30.0, 0.0),
+            ],
+        };
+        manifold.refresh(Vec3::new(0.0, 0.0, 90.0), &Quat::IDENTITY, 1.86);
+        let order: Vec<f32> = manifold.entries.iter().map(|e| e.on_mesh.x).collect();
+        assert_eq!(order, vec![0.0, 30.0, 20.0]);
+    }
+
+    /// RB-PHYSICS-001-FR-126: a new point within the threshold of two kept
+    /// ones refreshes the nearer (`getCacheEntry`), not the first found.
+    #[test]
+    fn a_new_point_folds_into_the_nearest_kept_one() {
+        let at = |x: f32, depth: f32| ManifoldEntry {
+            on_ball: Vec3::new(x, 0.0, 0.0),
+            local_on_ball: Vec3::new(x, 0.0, 0.0),
+            on_mesh: Vec3::new(x, 0.0, -depth),
+            contact: Contact {
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                point: Vec3::new(x, 0.0, -depth),
+                penetration_depth: depth,
+            },
+        };
+        let mut kept = vec![at(0.0, 1.0), at(1.5, 2.0)];
+        add_manifold_point(&mut kept, at(1.2, 3.0), 1.86);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].contact.penetration_depth, 1.0);
+        assert_eq!(kept[1].contact.penetration_depth, 3.0);
     }
 
     /// RB-PHYSICS-001-FR-121: the kept point turns with the ball, so a
