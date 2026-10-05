@@ -6,7 +6,7 @@
 use rusty_fair_play_domain::seed::{self, SeedData, SeedError, SeedReport};
 use rusty_fair_play_domain::{
     baseline_diff, baseline_of, card_state, card_tree, create_custom_card, delete_card,
-    delete_person, fair_play_id, open_or_create_card_default_production_stack,
+    delete_person, fair_play_id, is_leaf, open_or_create_card_default_production_stack,
     open_or_create_card_production_stack, open_or_create_person_production_stack, person_id,
     reorder_children, replace_card, reset_to_baseline, set_position, split_card, unsplit_card,
     Card, CardDefault, CardDefaultProductionStack, CardError, CardProductionStack, CardState,
@@ -17,7 +17,9 @@ use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::DurabilityError;
 use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use rusty_multimodal_db_engine::generic::{DeleteError, InsertError, ReplaceError};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -25,6 +27,11 @@ use uuid::Uuid;
 /// loaded must not be read off the live cards: a card can be deleted,
 /// and a first load can be interrupted part way.
 pub const DECK_MARKER: &str = "deck.loaded";
+/// The cards the family has set aside: not in their deck. A small file of
+/// ids beside the stores rather than a field on `Card`, so the stored
+/// record keeps its layout (no migration) and the choice is the family's
+/// configuration, not part of the deck. Written by rename.
+pub const SET_ASIDE_FILE: &str = "set-aside.json";
 /// Longest text a single field accepts; a card is a card, not a document.
 pub const MAX_TEXT_LEN: usize = 10_000;
 /// Most standards one card lists.
@@ -97,19 +104,31 @@ pub struct CardView {
     /// subtree operations (`unsplit`, `reorder`) that the card's own tag
     /// cannot.
     pub tree_etag: String,
+    /// In the family's deck. A card set aside is out of play: no owner, no
+    /// children, and left out of the undealt list and the balance.
+    pub in_play: bool,
+    etag: String,
 }
 
 impl CardView {
-    /// The card's etag: SHA-256 over its serialized form, shortened. Two
-    /// reads of the same stored card agree; any field change changes it.
+    /// The card's etag: SHA-256 over its serialized form (and whether it is
+    /// set aside), shortened. Two reads of the same stored card agree; any
+    /// field change, or a change of deck membership, changes it.
     pub fn etag(&self) -> String {
-        card_etag(&self.card)
+        self.etag.clone()
     }
 }
 
-/// See [`CardView::etag`].
+/// The etag of a card in play; see [`CardView::etag`].
 pub fn card_etag(card: &Card) -> String {
-    let text = rusty_json::to_string(card).unwrap_or_default();
+    etag_of(card, true)
+}
+
+fn etag_of(card: &Card, in_play: bool) -> String {
+    let mut text = rusty_json::to_string(card).unwrap_or_default();
+    if !in_play {
+        text.push_str("\u{0}set-aside");
+    }
     let digest = Sha256::digest(text.as_bytes());
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -135,6 +154,9 @@ pub struct CardPatch {
     pub owner_id: Option<Option<Uuid>>,
     pub parent_card_id: Option<Option<Uuid>>,
     pub position: Option<u32>,
+    /// `Some(false)` sets the card aside (taking it back from its owner);
+    /// `Some(true)` adds it back to the family's deck.
+    pub in_play: Option<bool>,
 }
 
 /// A brand-new family card.
@@ -185,6 +207,12 @@ pub struct Service {
     people: PersonProductionStack,
     defaults: CardDefaultProductionStack,
     cards: CardProductionStack,
+    set_aside: BTreeSet<Uuid>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SetAsideFile {
+    cards: Vec<Uuid>,
 }
 
 impl Service {
@@ -192,7 +220,9 @@ impl Service {
     /// the service's lifetime.
     pub fn open(dir: &Path) -> Result<Self> {
         let lock = DirLock::acquire(dir, LOCK_FILE)?;
+        let set_aside = read_set_aside(dir)?;
         Ok(Self {
+            set_aside,
             dir: dir.to_path_buf(),
             _lock: lock,
             people: open_or_create_person_production_stack(&dir.join(PERSON_FILE))?,
@@ -205,11 +235,53 @@ impl Service {
         let baseline = baseline_of(&self.cards, &self.defaults, card.id)?;
         let state = card_state(&card, baseline.as_ref())?;
         let tree_etag = self.tree_etag(card.id);
+        let in_play = self.in_play(card.id);
+        let etag = etag_of(&card, in_play);
         Ok(CardView {
             card,
             state,
             tree_etag,
+            in_play,
+            etag,
         })
+    }
+
+    /// Whether the card is in the family's deck.
+    pub fn in_play(&self, id: Uuid) -> bool {
+        !self.set_aside.contains(&id)
+    }
+
+    /// Write the set-aside ids (sorted) by rename.
+    fn save_set_aside(&mut self, next: BTreeSet<Uuid>) -> Result<()> {
+        let file = SetAsideFile {
+            cards: next.iter().copied().collect(),
+        };
+        let text = rusty_json::to_string(&file)
+            .map_err(|e| ServiceError::Storage(format!("{SET_ASIDE_FILE}: {e}")))?;
+        write_by_rename(&self.dir, SET_ASIDE_FILE, text.as_bytes())?;
+        self.set_aside = next;
+        Ok(())
+    }
+
+    /// A deleted card is no longer set aside.
+    fn forget(&mut self, ids: &[Uuid]) -> Result<()> {
+        let mut next = self.set_aside.clone();
+        for id in ids {
+            next.remove(id);
+        }
+        if next == self.set_aside {
+            return Ok(());
+        }
+        self.save_set_aside(next)
+    }
+
+    fn refuse_if_aside(&self, id: Uuid, what: &str) -> Result<()> {
+        if self.in_play(id) {
+            return Ok(());
+        }
+        Err(ServiceError::Invalid(format!(
+            "a card that is set aside cannot {what}; add it back to the deck first"
+        )))
     }
 
     /// [`CardView::tree_etag`]: SHA-256 over the card tags of the card and
@@ -220,7 +292,7 @@ impl Service {
         };
         let mut hash = Sha256::new();
         for card in tree.flatten() {
-            hash.update(card_etag(card).as_bytes());
+            hash.update(etag_of(card, self.in_play(card.id)).as_bytes());
         }
         hash.finalize()[..8]
             .iter()
@@ -347,7 +419,16 @@ impl Service {
         }
         if let Some(owner) = patch.owner_id {
             self.check_owner(owner)?;
+            // Adding back must be durably acknowledged before assigning an owner.
+            // Otherwise the card store could commit an owner while the sidecar
+            // still marks the card set aside after an interruption.
+            if owner.is_some() {
+                self.refuse_if_aside(id, "be dealt")?;
+            }
             card.owner_id = owner;
+        }
+        if let Some(Some(parent)) = patch.parent_card_id {
+            self.refuse_if_aside(parent, "have cards under it")?;
         }
         if let Some(parent) = patch.parent_card_id {
             card.parent_card_id = parent;
@@ -355,12 +436,44 @@ impl Service {
         if let Some(position) = patch.position {
             card.position = position;
         }
+        let aside_next = match patch.in_play {
+            Some(false) => {
+                if !is_leaf(&self.cards, id) {
+                    return Err(ServiceError::Conflict(
+                        "the card is split; unsplit it before setting it aside".into(),
+                    ));
+                }
+                if patch.owner_id.is_some_and(|o| o.is_some()) {
+                    return Err(ServiceError::Invalid(
+                        "a card that is set aside cannot be dealt".into(),
+                    ));
+                }
+                card.owner_id = None; // taken back from its owner in the same write
+                true
+            }
+            Some(true) => false,
+            None => !self.in_play(id),
+        };
+        // Card first is safe because assigning a set-aside card is refused above.
+        // A failed sidecar save leaves membership unchanged in memory and on disk.
         replace_card(&mut self.cards, card)?;
+        if aside_next != !self.in_play(id) {
+            let mut next = self.set_aside.clone();
+            if aside_next {
+                next.insert(id);
+            } else {
+                next.remove(&id);
+            }
+            self.save_set_aside(next)?;
+        }
         self.card_view(id)
     }
 
     pub fn create_card(&mut self, new: NewCard) -> Result<CardView> {
         self.check_owner(new.owner_id)?;
+        if let Some(parent) = new.parent_card_id {
+            self.refuse_if_aside(parent, "have cards under it")?;
+        }
         let name = clean_name(&new.name)?;
         let id = new
             .id
@@ -390,6 +503,7 @@ impl Service {
             ));
         }
         let mut parent = self.cards.get(id).ok_or(ServiceError::NotFound("card"))?;
+        self.refuse_if_aside(id, "be split")?;
         let mut specs = Vec::with_capacity(request.children.len());
         for child in request.children {
             self.check_owner(child.owner_id)?;
@@ -451,12 +565,29 @@ impl Service {
 
     /// Delete a leaf card; a split parent is refused (`Conflict`).
     pub fn delete_card(&mut self, id: Uuid) -> Result<()> {
+        self.card(id)?;
+        if !is_leaf(&self.cards, id) {
+            return Err(ServiceError::Conflict(
+                "the card is split; unsplit it first".into(),
+            ));
+        }
+        // Clean membership first so a sidecar failure leaves the card available
+        // for retry. An interruption can only leave an unowned card back in play.
+        self.forget(&[id])?;
         Ok(delete_card(&mut self.cards, id)?)
     }
 
     /// Merge a split back: every card under `id` goes, deepest first;
     /// `id` stays. Returns the parent and the deleted ids.
     pub fn unsplit(&mut self, id: Uuid) -> Result<(CardView, Vec<Uuid>)> {
+        let descendants: Vec<Uuid> = card_tree(&self.cards, id)
+            .map_err(|_| ServiceError::NotFound("card"))?
+            .flatten()
+            .into_iter()
+            .filter(|card| card.id != id)
+            .map(|card| card.id)
+            .collect();
+        self.forget(&descendants)?;
         let deleted = unsplit_card(&mut self.cards, id)?;
         Ok((self.card_view(id)?, deleted))
     }
@@ -498,11 +629,7 @@ impl Service {
 
     /// Write the marker by rename, so it is either absent or complete.
     fn mark_deck_loaded(&self) -> Result<()> {
-        let io = |e: std::io::Error| ServiceError::Storage(format!("deck marker: {e}"));
-        let tmp = self.dir.join(format!("{DECK_MARKER}.tmp"));
-        let file = std::fs::File::create(&tmp).map_err(io)?;
-        file.sync_all().map_err(io)?;
-        std::fs::rename(&tmp, self.dir.join(DECK_MARKER)).map_err(io)
+        write_by_rename(&self.dir, DECK_MARKER, b"")
     }
 }
 
@@ -511,6 +638,30 @@ fn now_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+fn read_set_aside(dir: &Path) -> Result<BTreeSet<Uuid>> {
+    let path = dir.join(SET_ASIDE_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(ServiceError::Storage(format!("{}: {e}", path.display()))),
+    };
+    // A damaged file is an error, not an empty deck: reading it as "nothing
+    // set aside" would quietly put back every card the family removed.
+    let file: SetAsideFile = rusty_json::from_slice(&bytes)
+        .map_err(|e| ServiceError::Storage(format!("{}: {e}", path.display())))?;
+    Ok(file.cards.into_iter().collect())
+}
+
+/// Replace `dir/name` with `bytes`: written and synced beside it, then renamed.
+fn write_by_rename(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let io = |e: std::io::Error| ServiceError::Storage(format!("{name}: {e}"));
+    let tmp = dir.join(format!("{name}.tmp"));
+    let mut file = std::fs::File::create(&tmp).map_err(io)?;
+    std::io::Write::write_all(&mut file, bytes).map_err(io)?;
+    file.sync_all().map_err(io)?;
+    std::fs::rename(&tmp, dir.join(name)).map_err(io)
 }
 
 fn clean_name(name: &str) -> Result<String> {
@@ -556,6 +707,153 @@ mod tests {
         let mut s = Service::open(dir.path()).unwrap();
         s.seed_deck().unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn sidecar_failures_keep_membership_retryable_across_reopen() {
+        for (in_play, reopen) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (dir, mut s) = service();
+            let id = deck_card_id(3);
+            s.patch_card(id, aside(!in_play)).unwrap();
+            if !in_play {
+                let ada = s.create_person("Ada").unwrap();
+                s.patch_card(
+                    id,
+                    CardPatch {
+                        owner_id: Some(Some(ada.id)),
+                        ..CardPatch::default()
+                    },
+                )
+                .unwrap();
+            }
+            let blocked = dir.path().join(format!("{SET_ASIDE_FILE}.tmp"));
+            std::fs::create_dir(&blocked).unwrap();
+            assert!(matches!(
+                s.patch_card(id, aside(in_play)),
+                Err(ServiceError::Storage(_))
+            ));
+            assert_eq!(s.card(id).unwrap().in_play, !in_play);
+            assert_eq!(s.card(id).unwrap().card.owner_id, None);
+            assert_eq!(read_set_aside(dir.path()).unwrap().contains(&id), in_play);
+            if reopen {
+                drop(s);
+                s = Service::open(dir.path()).unwrap();
+            }
+            assert_eq!(s.card(id).unwrap().in_play, !in_play);
+            std::fs::remove_dir(&blocked).unwrap();
+            s.patch_card(id, aside(in_play)).unwrap();
+            drop(s);
+            let s = Service::open(dir.path()).unwrap();
+            assert_eq!(s.card(id).unwrap().in_play, in_play);
+        }
+    }
+
+    #[test]
+    fn combined_add_back_and_owner_is_refused_before_any_durable_write() {
+        let (dir, mut s) = service();
+        let id = deck_card_id(3);
+        let ada = s.create_person("Ada").unwrap();
+        s.patch_card(id, aside(false)).unwrap();
+        let blocked = dir.path().join(format!("{SET_ASIDE_FILE}.tmp"));
+        std::fs::create_dir(&blocked).unwrap();
+        let combined = CardPatch {
+            in_play: Some(true),
+            owner_id: Some(Some(ada.id)),
+            ..CardPatch::default()
+        };
+        assert!(matches!(
+            s.patch_card(id, combined),
+            Err(ServiceError::Invalid(_))
+        ));
+        assert!(matches!(
+            s.patch_card(id, aside(true)),
+            Err(ServiceError::Storage(_))
+        ));
+        assert!(matches!(
+            s.patch_card(
+                id,
+                CardPatch {
+                    owner_id: Some(Some(ada.id)),
+                    ..CardPatch::default()
+                }
+            ),
+            Err(ServiceError::Invalid(_))
+        ));
+        drop(s);
+        let mut s = Service::open(dir.path()).unwrap();
+        let card = s.card(id).unwrap();
+        assert!(!card.in_play);
+        assert_eq!(card.card.owner_id, None);
+        std::fs::remove_dir(&blocked).unwrap();
+        s.patch_card(id, aside(true)).unwrap();
+        s.patch_card(
+            id,
+            CardPatch {
+                owner_id: Some(Some(ada.id)),
+                ..CardPatch::default()
+            },
+        )
+        .unwrap();
+        drop(s);
+        let s = Service::open(dir.path()).unwrap();
+        assert!(s.card(id).unwrap().in_play);
+        assert_eq!(s.card(id).unwrap().card.owner_id, Some(ada.id));
+    }
+
+    #[test]
+    fn deletion_cleanup_failure_preserves_cards_for_retry_and_reopen() {
+        for (unsplit, reopen) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (dir, mut s) = service();
+            let parent = deck_card_id(2);
+            let id = if unsplit {
+                s.split(
+                    parent,
+                    SplitRequest {
+                        children: vec![SplitChild {
+                            name: "Child".into(),
+                            ..SplitChild::default()
+                        }],
+                        ..SplitRequest::default()
+                    },
+                )
+                .unwrap()
+                .children[0]
+                    .card
+                    .id
+            } else {
+                deck_card_id(3)
+            };
+            s.patch_card(id, aside(false)).unwrap();
+            let blocked = dir.path().join(format!("{SET_ASIDE_FILE}.tmp"));
+            std::fs::create_dir(&blocked).unwrap();
+            let result = if unsplit {
+                s.unsplit(parent).map(|_| ())
+            } else {
+                s.delete_card(id)
+            };
+            assert!(matches!(result, Err(ServiceError::Storage(_))));
+            assert!(!s.card(id).unwrap().in_play);
+            if reopen {
+                drop(s);
+                s = Service::open(dir.path()).unwrap();
+            }
+            assert!(!s.card(id).unwrap().in_play);
+            std::fs::remove_dir(&blocked).unwrap();
+            if unsplit {
+                s.unsplit(parent).unwrap();
+            } else {
+                s.delete_card(id).unwrap();
+            }
+            assert!(!read_set_aside(dir.path()).unwrap().contains(&id));
+            drop(s);
+            let mut s = Service::open(dir.path()).unwrap();
+            assert!(matches!(s.card(id), Err(ServiceError::NotFound(_))));
+            assert!(!read_set_aside(dir.path()).unwrap().contains(&id));
+            s.seed_deck().unwrap();
+            if !unsplit {
+                assert!(s.card(id).unwrap().in_play);
+            }
+        }
     }
 
     #[test]
@@ -659,6 +957,177 @@ mod tests {
             s.card(a).unwrap().tree_etag,
             "a leaf's tags are stable between reads"
         );
+    }
+
+    fn aside(in_play: bool) -> CardPatch {
+        CardPatch {
+            in_play: Some(in_play),
+            ..CardPatch::default()
+        }
+    }
+
+    #[test]
+    fn a_card_set_aside_is_out_of_play_and_stays_so_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Service::open(dir.path()).unwrap();
+        s.seed_deck().unwrap();
+        let ada = s.create_person("Ada").unwrap();
+        let (dishes, mail) = (deck_card_id(3), deck_card_id(14));
+        s.patch_card(
+            dishes,
+            CardPatch {
+                owner_id: Some(Some(ada.id)),
+                ..CardPatch::default()
+            },
+        )
+        .unwrap();
+        let before = s.card(dishes).unwrap();
+        assert!(before.in_play);
+
+        // Setting aside takes the card back from its owner in the same write.
+        let after = s.patch_card(dishes, aside(false)).unwrap();
+        assert!(!after.in_play);
+        assert_eq!(after.card.owner_id, None);
+        assert_ne!(
+            after.etag(),
+            before.etag(),
+            "deck membership is part of the version"
+        );
+        assert!(s.card(mail).unwrap().in_play);
+        assert_eq!(
+            s.snapshot()
+                .unwrap()
+                .cards
+                .iter()
+                .filter(|c| !c.in_play)
+                .count(),
+            1
+        );
+
+        // Out of play: not dealt, not split, not a parent.
+        let deal = CardPatch {
+            owner_id: Some(Some(ada.id)),
+            ..CardPatch::default()
+        };
+        assert!(matches!(
+            s.patch_card(dishes, deal),
+            Err(ServiceError::Invalid(_))
+        ));
+        let split = SplitRequest {
+            children: vec![SplitChild {
+                name: "x".into(),
+                ..SplitChild::default()
+            }],
+            ..SplitRequest::default()
+        };
+        assert!(matches!(
+            s.split(dishes, split),
+            Err(ServiceError::Invalid(_))
+        ));
+        let under = CardPatch {
+            parent_card_id: Some(Some(dishes)),
+            ..CardPatch::default()
+        };
+        assert!(matches!(
+            s.patch_card(mail, under),
+            Err(ServiceError::Invalid(_))
+        ));
+        let new = NewCard {
+            id: None,
+            name: "Child".into(),
+            suit: Suit::Home,
+            parent_card_id: Some(dishes),
+            owner_id: None,
+            conception: String::new(),
+            planning: String::new(),
+            execution: String::new(),
+            minimum_standard_of_care: vec![],
+            notes: String::new(),
+        };
+        assert!(matches!(s.create_card(new), Err(ServiceError::Invalid(_))));
+        // Dealing and setting aside in one request is a contradiction, not a coin toss.
+        let both = CardPatch {
+            owner_id: Some(Some(ada.id)),
+            in_play: Some(false),
+            ..CardPatch::default()
+        };
+        assert!(matches!(
+            s.patch_card(mail, both),
+            Err(ServiceError::Invalid(_))
+        ));
+        assert!(s.card(mail).unwrap().in_play);
+        drop(s);
+
+        // The choice is on disk.
+        let mut s = Service::open(dir.path()).unwrap();
+        assert!(!s.card(dishes).unwrap().in_play);
+        assert!(s.card(mail).unwrap().in_play);
+
+        // Adding it back; an edit while set aside keeps it set aside.
+        let note = CardPatch {
+            notes: Some("later".into()),
+            ..CardPatch::default()
+        };
+        assert!(!s.patch_card(dishes, note).unwrap().in_play);
+        assert!(s.patch_card(dishes, aside(true)).unwrap().in_play);
+        drop(s);
+        let s = Service::open(dir.path()).unwrap();
+        assert!(s.snapshot().unwrap().cards.iter().all(|c| c.in_play));
+    }
+
+    #[test]
+    fn a_split_card_cannot_be_set_aside_and_a_deleted_one_is_forgotten() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Service::open(dir.path()).unwrap();
+        s.seed_deck().unwrap();
+        let cleaning = deck_card_id(2);
+        let made = s
+            .split(
+                cleaning,
+                SplitRequest {
+                    children: vec![
+                        SplitChild {
+                            name: "A".into(),
+                            ..SplitChild::default()
+                        },
+                        SplitChild {
+                            name: "B".into(),
+                            ..SplitChild::default()
+                        },
+                    ],
+                    ..SplitRequest::default()
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            s.patch_card(cleaning, aside(false)),
+            Err(ServiceError::Conflict(_))
+        ));
+        let (a, b) = (made.children[0].card.id, made.children[1].card.id);
+        s.patch_card(a, aside(false)).unwrap();
+        let file = || std::fs::read_to_string(dir.path().join(SET_ASIDE_FILE)).unwrap();
+        assert!(file().contains(&a.to_string()));
+        s.delete_card(a).unwrap();
+        assert!(
+            !file().contains(&a.to_string()),
+            "a deleted card is dropped from the file"
+        );
+        s.patch_card(b, aside(false)).unwrap();
+        s.unsplit(cleaning).unwrap();
+        assert!(
+            !file().contains(&b.to_string()),
+            "so is one removed by an unsplit"
+        );
+    }
+
+    #[test]
+    fn a_damaged_set_aside_file_refuses_to_open_rather_than_reading_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SET_ASIDE_FILE), b"{not json").unwrap();
+        assert!(matches!(
+            Service::open(dir.path()),
+            Err(ServiceError::Storage(_))
+        ));
     }
 
     #[test]

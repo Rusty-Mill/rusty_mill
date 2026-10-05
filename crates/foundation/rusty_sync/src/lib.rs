@@ -22,6 +22,57 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use rusty_std::sync::{Mutex, MutexGuard};
 
+/// A non-blocking admission gate with a fixed maximum number of holders.
+///
+/// [`Admission::try_acquire`] atomically reserves capacity and returns an
+/// [`AdmissionPermit`] that releases it on drop, including during unwinding.
+/// This makes the gate suitable for bounding work that must be refused rather
+/// than queued when all slots are occupied.
+#[derive(Debug)]
+pub struct Admission {
+    in_use: AtomicUsize,
+    capacity: usize,
+}
+
+impl Admission {
+    /// Creates an admission gate that allows at most `capacity` holders.
+    pub const fn new(capacity: usize) -> Self {
+        Self {
+            in_use: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    /// Attempts to reserve one slot, returning `None` when the gate is full.
+    pub fn try_acquire(&self) -> Option<AdmissionPermit<'_>> {
+        let mut current = self.in_use.load(Ordering::Acquire);
+        while current < self.capacity {
+            match self.in_use.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(AdmissionPermit { admission: self }),
+                Err(observed) => current = observed,
+            }
+        }
+        None
+    }
+}
+
+/// A slot held from an [`Admission`] gate and released automatically on drop.
+#[derive(Debug)]
+pub struct AdmissionPermit<'a> {
+    admission: &'a Admission,
+}
+
+impl Drop for AdmissionPermit<'_> {
+    fn drop(&mut self) {
+        self.admission.in_use.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Compatibility facade for the canonical [`Mutex`] spinlock.
 ///
 /// This nominally distinct type preserves the historical `rusty_sync` API and
@@ -297,6 +348,44 @@ impl<T> Drop for Receiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_permit_releases_on_return_and_unwind() {
+        let admission = Admission::new(1);
+        {
+            let _permit = admission.try_acquire().expect("first slot");
+            assert!(admission.try_acquire().is_none());
+        }
+        assert!(admission.try_acquire().is_some());
+
+        let admission = Admission::new(1);
+        let result = std::panic::catch_unwind(|| {
+            let _permit = admission.try_acquire().expect("first slot");
+            panic!("exercise permit drop during unwinding");
+        });
+        assert!(result.is_err());
+        assert!(admission.try_acquire().is_some());
+    }
+
+    #[test]
+    fn admission_never_exceeds_capacity_under_contention() {
+        let admission = Admission::new(3);
+        let admitted = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let mut workers = alloc::vec::Vec::new();
+            for _ in 0..32 {
+                workers.push(scope.spawn(|| admission.try_acquire()));
+            }
+            let permits = workers
+                .into_iter()
+                .filter_map(|worker| worker.join().unwrap())
+                .collect::<alloc::vec::Vec<_>>();
+            admitted.store(permits.len(), Ordering::SeqCst);
+            assert_eq!(permits.len(), 3);
+        });
+        assert_eq!(admitted.load(Ordering::SeqCst), 3);
+        assert!(admission.try_acquire().is_some());
+    }
 
     #[test]
     fn spinlock_mutual_exclusion() {

@@ -17,6 +17,7 @@ const STATES: { value: StateFilter; label: string }[] = [
 /** Suit, owner and state chips, the leaves-only toggle, and the search box. */
 export function FilterBar() {
   const people = useData((s) => s.people)
+  const asideCount = useData((s) => s.cards.filter((c) => !c.inPlay).length)
   const filters = useUi((s) => s.filters)
   const { toggleSuit, toggleOwner, setFilters, clearFilters } = useUi.getState()
   const searchFocus = useUi((s) => s.searchFocus)
@@ -52,6 +53,11 @@ export function FilterBar() {
           <input type="checkbox" checked={filters.leavesOnly} onChange={(e) => setFilters({ leavesOnly: e.target.checked })} className="accent-primary" />
           Leaves only
         </label>
+        {asideCount > 0 && (
+          <button type="button" aria-pressed={filters.setAside} onClick={() => setFilters({ setAside: !filters.setAside })} className={`chip ${filters.setAside ? 'chip-on' : ''}`}>
+            Set aside · {asideCount}
+          </button>
+        )}
         {isFiltering(filters) && (
           <button type="button" onClick={clearFilters} className="chip text-grey">
             <X size={13} aria-hidden /> Clear

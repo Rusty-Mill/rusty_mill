@@ -51,6 +51,8 @@ pub struct CardDto {
     pub etag: String,
     /// Like `etag`, but over the card and everything under it.
     pub tree_etag: String,
+    /// In the family's deck; `false` for a card set aside.
+    pub in_play: bool,
 }
 
 pub fn state_name(state: CardState) -> &'static str {
@@ -65,6 +67,7 @@ impl From<CardView> for CardDto {
     fn from(v: CardView) -> Self {
         let etag = v.etag();
         let tree_etag = v.tree_etag;
+        let in_play = v.in_play;
         let c: Card = v.card;
         Self {
             id: c.id,
@@ -87,6 +90,7 @@ impl From<CardView> for CardDto {
             state: state_name(v.state),
             etag,
             tree_etag,
+            in_play,
         }
     }
 }
@@ -228,6 +232,7 @@ pub struct PatchCard {
     #[serde(deserialize_with = "nullable")]
     pub parent_card_id: Option<Option<Uuid>>,
     pub position: Option<u32>,
+    pub in_play: Option<bool>,
 }
 
 #[derive(Deserialize)]

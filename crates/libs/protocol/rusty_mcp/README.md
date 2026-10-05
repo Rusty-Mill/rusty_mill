@@ -52,6 +52,7 @@ Inside the scaffold:
 | `cli` | `--transport`, `--bind`, `--path`, allow-lists, log filter (with env fallbacks) |
 | `config` | `ServerConfig` / `HttpConfig`, if you build config yourself |
 | `runtime` | `serve()` — wires a handler to stdio or Streamable HTTP |
+| `client` / `client_auth` *(feature: `client`)* | Protocol-only MCP Host client for stdio children and Streamable HTTP, bearer/API-key/OAuth client-credentials auth, pagination, bounded handshake, and graceful shutdown. |
 | `telemetry` | Logging to **stderr**, never stdout |
 | `shutdown` | SIGINT / SIGTERM handling |
 | `error` | `ServeError`, plus `ToolError` for tool bodies |

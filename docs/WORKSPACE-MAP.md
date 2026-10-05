@@ -40,7 +40,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_sha1 | rusty_sha1 | A zero-dependency SHA-1 (FIPS 180-1) implementation, shared by rusty_git's object hashing and rusty_term's WebSocket handshake | 2 |
 | foundation | rusty_simd | rusty_simd | A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference | 5 |
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 15 |
-| foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 1 |
+| foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 3 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 5 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 13 |
@@ -100,7 +100,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
-| libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
+| libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 8 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 7 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 0 |
