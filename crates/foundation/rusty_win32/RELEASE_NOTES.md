@@ -6,6 +6,20 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## Windows process and socket fixture cleanup
+**2026-10-05** — [rusty_mill #264](https://github.com/Rusty-Mill/rusty_mill/issues/264) — local review, no PR yet
+
+- **Fixed:** The affinity test resumes and waits for its suspended child; long
+  running process fixtures launch ping directly so terminating the owned process
+  cannot leave a shell's ping grandchild holding nextest output pipes open.
+- **Fixed:** The Ctrl+Break fixture waits for an explicit child-handler readiness
+  event, asserts the handler's exit code, and reaps the child even on assertion failure.
+- **Fixed:** Six socket fixtures use OS-assigned ports, queried while still bound,
+  preserving exact peer/source-address assertions without colliding with local
+  services or other test processes. Production APIs are unchanged.
+
+---
+
 ## process: add memory (GetProcessMemoryInfo)
 **2026-10-01** · branch `claude/peaceful-brown-r44bh2-t5` (no PR number yet)
 

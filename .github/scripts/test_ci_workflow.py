@@ -1,13 +1,8 @@
-"""Regression checks for CI event planning and full-sweep scheduling.
-
-These checks intentionally inspect the checked-in workflow text rather than
-requiring a GitHub Actions runner. The expressions are GitHub-specific, but
-the behavior they encode is simple and important: PR updates cancel obsolete
-work, while main keeps an active full sweep and lets Actions replace only
-older pending work in that shared group.
-"""
+"""Regression checks for event planning, coverage and component scheduling."""
 
 from pathlib import Path
+import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,8 +32,9 @@ PLAN_KEYS = {
     "multimodal_db",
     "rusty_config_no_std",
     "shards",
+    "components",
 }
-SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards"}
+SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards", "components"}
 
 
 class CiWorkflowSchedulingTests(unittest.TestCase):
@@ -72,6 +68,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertEqual(outputs["ci_only"], "false")
         self.assertEqual(outputs["packages"], "")
         self.assertEqual(outputs["shards"], "[1,2,3]")
+        self.assertEqual(json.loads(outputs["components"]), [{"component": "workspace", "packages": ""}])
         self.assertTrue(all(outputs[key] == "true" for key in SPECIALIZED_KEYS))
 
     def test_event_entrypoint_handles_manual_and_unusable_bases(self) -> None:
@@ -118,6 +115,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertEqual(smoke["ci_only"], "true")
         self.assertEqual(smoke["full"], "false")
         self.assertEqual(smoke["packages"], "")
+        self.assertEqual(json.loads(smoke["components"]), [])
         self.assertTrue(all(smoke[key] == "false" for key in SPECIALIZED_KEYS))
         self.assertIn("CI-only smoke (${{ matrix.os }})", self.workflow)
         self.assertIn('checksums.txt "$base/actionlint_${version}_checksums.txt"', self.workflow)
@@ -326,13 +324,47 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_pr_runs_cancel_but_main_and_manual_runs_are_isolated(self) -> None:
         self.assertIn(
-            "group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || 'main' }}",
+            "group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}",
             self.workflow,
         )
         self.assertIn(
             "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
             self.workflow,
         )
+
+    def test_all_scoped_jobs_retain_pending_main_work(self) -> None:
+        jobs = re.split(r"^  ([a-z][a-z0-9-]+):\n", self.workflow.split("\njobs:\n", 1)[1], flags=re.M)
+        groups = []
+        for job, body in zip(jobs[1::2], jobs[2::2]):
+            if job in {"fmt", "plan-tests", "workflow-lint", "dependency-policy", "plan"}:
+                self.assertNotIn("    concurrency:", body)
+                continue  # These start for every SHA, without a coalescing lock.
+            with self.subTest(job=job):
+                self.assertIn("      queue: max\n      cancel-in-progress: false", body)
+                group = re.search(r"^      group: (.+)$", body, re.M).group(1)
+                self.assertIn("github.ref == 'refs/heads/main'", group)
+                self.assertIn("format('run-{0}', github.run_id)", group)
+                self.assertIn(f"-{job}", group)
+                groups.append(group)
+        self.assertEqual(len(groups), len(set(groups)))
+
+    def test_generic_matrix_uses_component_scope_and_unique_artifacts(self) -> None:
+        for job, end in (("clippy", "ci-smoke"), ("test", "data-mesh-monitor")):
+            body = self.workflow.split(f"  {job}:\n")[1].split(f"  {end}:\n")[0]
+            self.assertIn("scope: ${{ fromJson(needs.plan.outputs.components) }}", body)
+            self.assertIn("packages: ${{ matrix.scope.packages }}", body)
+            self.assertIn(f"-{job}-${{{{ matrix.scope.component }}}}-${{{{ matrix.os }}}}", body)
+        self.assertIn("name: nextest-${{ matrix.scope.component }}-${{ matrix.os }}-shard-${{ matrix.shard }}", self.workflow)
+        self.assertIn("--partition count:{0}/3", self.workflow)
+        self.assertIn("--test-threads 2", self.workflow)
+        self.assertIn("--no-fail-fast", self.workflow)
+        self.assertIn("matrix.scope.packages, 'mill-term'", self.workflow)
+        self.assertIn("matrix.scope.packages, 'rusty_lines'", self.workflow)
+
+    def test_queue_lint_extension_preserves_the_pinned_tool(self) -> None:
+        self.assertIn("version=1.7.12", self.workflow)
+        self.assertIn("lint_workflows.py --actionlint ./actionlint .github/workflows/*.yml", self.workflow)
+        self.assertIn("test_lint_workflows.py --actionlint ./actionlint", self.workflow)
 
     def test_nextest_reports_use_the_configured_junit_profile(self) -> None:
         with NEXTEST_CONFIG.open("rb") as nextest_file:

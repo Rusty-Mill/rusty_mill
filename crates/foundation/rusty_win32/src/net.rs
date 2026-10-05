@@ -1286,27 +1286,31 @@ mod tests {
 
         let sock = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
             .expect("socket should succeed creating a TCP/IPv4 socket");
-        // A fixed (not port-0/ephemeral) port -- this crate doesn't have
-        // `connect`/`getsockname` yet (later round-2 items), so the test's
-        // `std::net::TcpStream` client below needs a port number it can
-        // already know in advance.
-        const TEST_PORT: u16 = 47950;
+        // Keep the socket bound while querying its OS-assigned port so
+        // concurrent test processes and local services cannot take it.
         let addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: TEST_PORT,
+            port: 0,
         };
         // SAFETY: `sock` was just created above and hasn't been closed
         // yet.
-        unsafe { bind(sock, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        unsafe { bind(sock, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+        // SAFETY: `sock` is still open and bound.
+        let addr =
+            unsafe { local_addr(sock) }.expect("getsockname should report the assigned port");
+        let SocketAddr::V4 { port, .. } = addr else {
+            panic!("expected an IPv4 listener, got: {addr:?}");
+        };
+        assert_ne!(port, 0);
         // SAFETY: `sock` is still open, now bound.
         unsafe { listen(sock, 1) }.expect("listen should succeed on a freshly bound TCP socket");
 
         // A real client connection, via `std::net` (always linked in
         // this test harness) rather than this crate's own `connect`
-        // (not yet implemented) -- run on a background thread since
-        // `accept` below blocks until a connection arrives.
+        // -- run on a background thread since `accept` below blocks until
+        // a connection arrives.
         let client_thread = std::thread::spawn(move || {
-            std::net::TcpStream::connect(("127.0.0.1", TEST_PORT))
+            std::net::TcpStream::connect(("127.0.0.1", port))
                 .expect("the std::net client should succeed connecting to our listening socket")
         });
 
@@ -1343,14 +1347,16 @@ mod tests {
 
         let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
             .expect("socket should succeed creating the server's TCP/IPv4 socket");
-        const TEST_PORT: u16 = 47951;
         let addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: TEST_PORT,
+            port: 0,
         };
         // SAFETY: `server` was just created above and hasn't been closed
         // yet.
-        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+        // SAFETY: `server` is still open and bound; retain ownership of its port.
+        let addr =
+            unsafe { local_addr(server) }.expect("getsockname should report the assigned port");
         // SAFETY: `server` is still open, now bound.
         unsafe { listen(server, 1) }
             .expect("listen should succeed on the freshly bound server socket");
@@ -1397,14 +1403,16 @@ mod tests {
 
         let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
             .expect("socket should succeed creating the server's TCP/IPv4 socket");
-        const TEST_PORT: u16 = 47952;
         let addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: TEST_PORT,
+            port: 0,
         };
         // SAFETY: `server` was just created above and hasn't been closed
         // yet.
-        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+        // SAFETY: `server` is still open and bound; retain ownership of its port.
+        let addr =
+            unsafe { local_addr(server) }.expect("getsockname should report the assigned port");
         // SAFETY: `server` is still open, now bound.
         unsafe { listen(server, 1) }
             .expect("listen should succeed on the freshly bound server socket");
@@ -1464,31 +1472,34 @@ mod tests {
 
         let receiver = socket(AddressFamily::Inet, SocketKind::Dgram, Protocol::Udp)
             .expect("socket should succeed creating the receiver's UDP/IPv4 socket");
-        const RECEIVER_PORT: u16 = 47953;
-        const SENDER_PORT: u16 = 47954;
         let receiver_addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: RECEIVER_PORT,
+            port: 0,
         };
         let sender_addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: SENDER_PORT,
+            port: 0,
         };
         // SAFETY: `receiver` was just created above and hasn't been
         // closed yet.
         unsafe { bind(receiver, &receiver_addr) }
-            .expect("bind should succeed on the receiver's fixed loopback port");
+            .expect("bind should succeed on an ephemeral loopback port");
+        // SAFETY: `receiver` is still open and bound.
+        let receiver_addr = unsafe { local_addr(receiver) }
+            .expect("getsockname should report the receiver's assigned port");
 
         let sender = socket(AddressFamily::Inet, SocketKind::Dgram, Protocol::Udp)
             .expect("socket should succeed creating the sender's UDP/IPv4 socket");
-        // Binding the sender to its own fixed port (rather than an
-        // ephemeral one) lets this test assert the exact source port
-        // `recvfrom` reports, without needing `getsockname` (not yet
-        // implemented -- a later round-2 item).
+        // Query the sender's assigned port to retain the exact source-address
+        // assertion without claiming a port another process might be using.
         // SAFETY: `sender` was just created above and hasn't been closed
         // yet.
         unsafe { bind(sender, &sender_addr) }
-            .expect("bind should succeed on the sender's fixed loopback port");
+            .expect("bind should succeed on an ephemeral loopback port");
+        // SAFETY: `sender` is still open and bound.
+        let sender_addr = unsafe { local_addr(sender) }
+            .expect("getsockname should report the sender's assigned port");
+        assert_ne!(sender_addr, receiver_addr);
 
         const MESSAGE: &[u8] = b"hello over rusty_win32 net::sendto/recvfrom";
         // SAFETY: `sender` is bound from the call above.
@@ -1530,14 +1541,16 @@ mod tests {
 
         let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
             .expect("socket should succeed creating the server's TCP/IPv4 socket");
-        const TEST_PORT: u16 = 47955;
         let addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: TEST_PORT,
+            port: 0,
         };
         // SAFETY: `server` was just created above and hasn't been closed
         // yet.
-        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+        // SAFETY: `server` is still open and bound; retain ownership of its port.
+        let addr =
+            unsafe { local_addr(server) }.expect("getsockname should report the assigned port");
         // SAFETY: `server` is still open, now bound.
         unsafe { listen(server, 1) }
             .expect("listen should succeed on the freshly bound server socket");
@@ -1726,14 +1739,16 @@ mod tests {
 
         let server = socket(AddressFamily::Inet, SocketKind::Stream, Protocol::Tcp)
             .expect("socket should succeed creating the server's TCP/IPv4 socket");
-        const TEST_PORT: u16 = 47956;
         let addr = SocketAddr::V4 {
             ip: [127, 0, 0, 1],
-            port: TEST_PORT,
+            port: 0,
         };
         // SAFETY: `server` was just created above and hasn't been closed
         // yet.
-        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:TEST_PORT");
+        unsafe { bind(server, &addr) }.expect("bind should succeed on 127.0.0.1:0");
+        // SAFETY: `server` is still open and bound; retain ownership of its port.
+        let addr =
+            unsafe { local_addr(server) }.expect("getsockname should report the assigned port");
         // SAFETY: `server` is still open, now bound.
         unsafe { listen(server, 1) }
             .expect("listen should succeed on the freshly bound server socket");

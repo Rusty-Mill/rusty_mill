@@ -54,6 +54,19 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## CI: retain scoped main work by application and check
+**2026-10-05** — [#264](https://github.com/Rusty-Mill/rusty_mill/issues/264) — local review, no PR yet
+
+- **Changed:** Main pushes start planning independently and retain pending jobs
+  in component/check queues. Different applications can run concurrently; PR
+  revisions still supersede the same PR. Cargo reverse-consumer selection and
+  existing full-sweep coverage remain intact.
+- **Added:** Strict queue-policy validation alongside pinned actionlint, which
+  predates GitHub's `queue` key. See [ADR-0006](docs/adr/0006-ci-component-queues.md)
+  for the 100-pending-job limit and exact-SHA validation contract.
+
+---
+
 ## rusty_rsi: Codex as the inner model, Claude Code as the outer proposer
 **2026-10-05** · [#504](https://github.com/Rusty-Mill/rusty_mill/pull/504) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

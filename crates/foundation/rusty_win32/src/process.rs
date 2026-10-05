@@ -1802,15 +1802,41 @@ pub unsafe fn thread_times(thread: RawHandle) -> Result<ThreadTimes, Win32Error>
 
 #[cfg(test)]
 mod tests {
-    /// A well-known long-running system command, by absolute path: in a
-    /// full-workspace `cargo test`/nextest run cargo prepends dozens of
-    /// `target\...` entries to `PATH`, pushing it past the 8,191
-    /// characters `cmd.exe` reads, so a bare `ping` is "not recognized"
-    /// there while the same test passes when this crate runs alone.
-    /// `%SystemRoot%` is short and always expands.
-    const PING_30S: &str = "cmd.exe /c %SystemRoot%\\System32\\ping.exe -n 30 127.0.0.1 >nul";
+    /// Start the workload itself: terminating cmd.exe would leave its ping
+    /// child alive and holding nextest's output pipes open. An absolute,
+    /// quoted path also works with Cargo's long full-workspace PATH.
+    fn ping_30s_command() -> alloc::string::String {
+        let system_root = std::env::var("SystemRoot").expect("Windows sets SystemRoot");
+        alloc::format!("\"{system_root}\\System32\\ping.exe\" -n 30 127.0.0.1")
+    }
 
     use super::*;
+
+    #[test]
+    fn long_running_fixture_starts_ping_without_a_shell() {
+        // TerminateProcess only terminates the process named by its handle.
+        // A shell here would leave its ping child alive, holding test output
+        // pipes open. Check the actual image before allowing it to run.
+        // SAFETY: a correctly quoted command line for a system binary.
+        let spawned = unsafe { spawn_suspended(&ping_30s_command(), false, false, None) }
+            .expect("CreateProcessW should succeed");
+        // SAFETY: the process handle is valid and has full access rights.
+        let image = unsafe { image_path(spawned.process) };
+        // Clean up even if the image assertion below fails. The process is
+        // still suspended, so it cannot have started any descendants.
+        // SAFETY: all handles are valid and closed exactly once after wait.
+        unsafe {
+            terminate(spawned.process, 0).expect("TerminateProcess should succeed");
+            assert_eq!(wait(spawned.process, Some(5_000)).unwrap(), Some(0));
+            crate::handle::close(spawned.thread).unwrap();
+            crate::handle::close(spawned.process).unwrap();
+        }
+        let image = image.expect("QueryFullProcessImageNameW should succeed");
+        assert!(
+            image.to_ascii_lowercase().ends_with("\\ping.exe"),
+            "the fixture must start ping directly, got: {image}"
+        );
+    }
 
     #[test]
     fn spawn_suspended_resume_wait_round_trip() {
@@ -2040,7 +2066,7 @@ mod tests {
         // resulting exit code.
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned = unsafe { spawn_suspended(PING_30S, false, false, None) }
+        let spawned = unsafe { spawn_suspended(&ping_30s_command(), false, false, None) }
             .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
@@ -2084,10 +2110,86 @@ mod tests {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn AllocConsole() -> i32;
+        fn CreateEventW(
+            attributes: *const core::ffi::c_void,
+            manual_reset: i32,
+            initial_state: i32,
+            name: *const u16,
+        ) -> RawHandle;
+        fn SetEvent(event: RawHandle) -> i32;
+        fn ExitProcess(exit_code: u32) -> !;
+    }
+
+    /// Owns a fixture process even when readiness, signaling or assertions fail.
+    struct TestChild(SpawnedProcess);
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            // SAFETY: this guard exclusively owns both live handles. Killing
+            // an already-exited child may fail harmlessly; always reap/close.
+            unsafe {
+                let _ = terminate(self.0.process, 1);
+                let _ = wait(self.0.process, Some(5_000));
+                let _ = crate::handle::close(self.0.thread);
+                let _ = crate::handle::close(self.0.process);
+            }
+        }
+    }
+
+    fn ctrl_break_ready_event(name: &str) -> std::os::windows::io::OwnedHandle {
+        use std::os::windows::io::FromRawHandle;
+        let name = to_wide(name).unwrap();
+        // SAFETY: valid name, default security, initially unsignaled manual
+        // reset event. The child's call opens the parent's existing event.
+        let event = unsafe { CreateEventW(core::ptr::null(), 1, 0, name.as_ptr()) };
+        assert!(!event.is_null(), "CreateEventW: {}", Win32Error::last());
+        // SAFETY: exclusive ownership of the valid handle returned above.
+        unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(event) }
+    }
+
+    #[test]
+    fn fixture_child_is_reaped_when_an_assertion_panics() {
+        // SAFETY: a quoted system command; the child remains suspended.
+        let spawned = unsafe { spawn_suspended(&ping_30s_command(), false, false, None) }.unwrap();
+        let child = TestChild(spawned);
+        let observer = open_by_pid(
+            spawned.process_id,
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+        )
+        .unwrap();
+        let failure = std::panic::catch_unwind(|| {
+            let _child = child;
+            panic!("exercise fixture cleanup during assertion unwinding");
+        });
+        // SAFETY: the independently opened observer stays valid after cleanup.
+        let exit = unsafe { wait(observer, Some(5_000)) };
+        // SAFETY: release our observer exactly once before asserting.
+        unsafe { crate::handle::close(observer) }.unwrap();
+        assert!(failure.is_err());
+        assert_eq!(exit.unwrap(), Some(1));
     }
 
     #[test]
     fn new_process_group_receives_a_targeted_ctrl_break() {
+        use std::os::windows::io::AsRawHandle;
+        const READY_ENV: &str = "RUSTY_WIN32_CTRL_BREAK_READY";
+        const SIGNAL_EXIT: u32 = 42;
+        if let Ok(event_name) = std::env::var(READY_ENV) {
+            extern "system" fn exit_on_break(event: u32) -> i32 {
+                if event == crate::console::CTRL_BREAK_EVENT {
+                    // SAFETY: terminate only this dedicated fixture process.
+                    unsafe { ExitProcess(SIGNAL_EXIT) };
+                }
+                0
+            }
+            crate::console::install_ctrl_handler(exit_on_break).unwrap();
+            let ready = ctrl_break_ready_event(&event_name);
+            // SAFETY: valid event handle owned until this child exits.
+            assert_ne!(unsafe { SetEvent(ready.as_raw_handle()) }, 0);
+            loop {
+                std::thread::park();
+            }
+        }
         // The scenario `new_process_group` exists for: start a child in its
         // own console process group, then interrupt *just* that group via
         // `console::generate_ctrl_event(CTRL_BREAK_EVENT, group_id)` —
@@ -2104,14 +2206,36 @@ mod tests {
         // `GenerateConsoleCtrlEvent` requires.
         unsafe { AllocConsole() };
 
-        // SAFETY: a hand-built, correctly quoted command line for a
-        // well-known long-running system command.
-        let spawned = unsafe { spawn_suspended(PING_30S, false, true, None) }
-            .expect("CreateProcessW should succeed");
+        // Ping deliberately continues after Ctrl+Break. Re-enter only this
+        // test as a child with an explicit handler and readiness handshake.
+        let event_name = alloc::format!("Local\\rusty-win32-ctrl-break-{}", current_pid());
+        let ready = ctrl_break_ready_event(&event_name);
+        let mut environment = environment_snapshot().unwrap();
+        environment.push((READY_ENV.into(), event_name));
+        environment.sort_by_key(|(name, _)| name.to_ascii_lowercase());
+        let block = environment_block(environment.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let executable = std::env::current_exe().unwrap();
+        let command = alloc::format!(
+            "\"{}\" --exact process::tests::new_process_group_receives_a_targeted_ctrl_break --nocapture",
+            executable.display()
+        );
+        // SAFETY: quoted absolute executable path and double-NUL environment.
+        let child = TestChild(
+            unsafe { spawn_suspended(&command, false, true, Some(&block)) }
+                .expect("CreateProcessW should succeed"),
+        );
+        let spawned = &child.0;
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
         unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
 
+        let handles = [ready.as_raw_handle(), spawned.process];
+        // SAFETY: both handles are valid until the guard/event owners drop.
+        assert_eq!(
+            unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, 10_000) },
+            WAIT_OBJECT_0,
+            "the child must install its handler before signaling readiness"
+        );
         crate::console::generate_ctrl_event(crate::console::CTRL_BREAK_EVENT, spawned.process_id)
             .expect(
                 "GenerateConsoleCtrlEvent should succeed for a process group this process just created",
@@ -2119,16 +2243,11 @@ mod tests {
 
         // SAFETY: `spawned.process` is a valid, currently-open handle.
         let exit_code = unsafe { wait(spawned.process, Some(10_000)) }.unwrap();
-        assert!(
-            exit_code.is_some(),
-            "the child should have exited in response to CTRL_BREAK_EVENT within the timeout"
+        assert_eq!(
+            exit_code,
+            Some(SIGNAL_EXIT),
+            "the initialized child's handler must exit in response to CTRL_BREAK_EVENT"
         );
-
-        // SAFETY: both handles are valid and each closed exactly once.
-        unsafe {
-            crate::handle::close(spawned.process).unwrap();
-            crate::handle::close(spawned.thread).unwrap();
-        }
     }
 
     #[test]
@@ -2548,6 +2667,15 @@ mod tests {
             unsafe { affinity(spawned.process) }.expect("GetProcessAffinityMask should succeed");
         assert_eq!(process_mask, one_cpu);
 
+        // Closing handles does not terminate a suspended process. Let the
+        // command finish and observe its exit before releasing ownership.
+        // SAFETY: both freshly created handles are still valid.
+        unsafe { resume(spawned.thread) }.expect("ResumeThread should succeed");
+        assert_eq!(
+            unsafe { wait(spawned.process, Some(5_000)) }.unwrap(),
+            Some(0)
+        );
+
         // SAFETY: both handles are valid and each closed exactly once.
         unsafe {
             crate::handle::close(spawned.process).unwrap();
@@ -2559,7 +2687,7 @@ mod tests {
     fn list_threads_open_thread_suspend_and_resume_round_trip() {
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned = unsafe { spawn_suspended(PING_30S, false, false, None) }
+        let spawned = unsafe { spawn_suspended(&ping_30s_command(), false, false, None) }
             .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.
@@ -2585,7 +2713,10 @@ mod tests {
         // full access rights (CreateProcessW itself opened it).
         unsafe { terminate(spawned.process, 0) }.expect("TerminateProcess should succeed");
         // SAFETY: still the same valid handle.
-        unsafe { wait(spawned.process, Some(5_000)) }.unwrap();
+        assert_eq!(
+            unsafe { wait(spawned.process, Some(5_000)) }.unwrap(),
+            Some(0)
+        );
 
         // SAFETY: every handle here is valid and each closed exactly once.
         unsafe {
@@ -2601,7 +2732,7 @@ mod tests {
 
         // SAFETY: a hand-built, correctly quoted command line for a
         // well-known long-running system command.
-        let spawned = unsafe { spawn_suspended(PING_30S, false, false, None) }
+        let spawned = unsafe { spawn_suspended(&ping_30s_command(), false, false, None) }
             .expect("CreateProcessW should succeed");
         // SAFETY: `spawned.thread` is freshly created, valid, not yet
         // resumed.

@@ -48,6 +48,7 @@ def full_plan_outputs() -> dict[str, str]:
         "ci_only": "false",
         **{job: "true" for job in SPECIALIZED_JOB_NAMES},
         "shards": "[1,2,3]",
+        "components": '[{"component":"workspace","packages":""}]',
     }
 
 
@@ -59,6 +60,7 @@ def ci_smoke_plan_outputs() -> dict[str, str]:
         "ci_only": "true",
         **{job: "false" for job in SPECIALIZED_JOB_NAMES},
         "shards": "[1]",
+        "components": '[]',
     }
 
 
