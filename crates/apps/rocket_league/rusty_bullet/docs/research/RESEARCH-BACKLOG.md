@@ -243,8 +243,51 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 - **Status**: Started: [MECHANICS-CATALOGUE.md](MECHANICS-CATALOGUE.md)
   holds the first list. **Owner**: baileyrd.
 
+### RB-RESEARCH-O007 — Long term: RLBot in Rust, over this physics engine
+
+- **Why**: the owner wants to redo RLBot in Rust as a long-term growth item.
+  "Redo RLBot" can mean two different things; they should not be mixed.
+- **Reading A, a Rust replacement for RLBot core against the real game.**
+  Core (C#) is the v5 server: it talks to the game, launches bots and
+  scripts, and speaks FlatBuffers over sockets
+  ([core](https://github.com/RLBot/core)). Its game-facing part is a
+  native bridge (`Bridge.dll` in `RLBotCS/lib`), and the old v4 repo says
+  the source behind `RLBot.exe` is withheld "to meet the legal needs of the
+  Psyonix API" ([RLBot](https://github.com/RLBot/RLBot)). A Rust core would
+  still need that bridge as a binary, so the rewrite would replace only the
+  parts around it, for little gain. Not recommended.
+- **Reading B, an RLBot v5-compatible server backed by `rb_physics_bullet`
+  instead of the game (recommended direction).** A new adapter crate
+  (working name `rb_rlbot_core`) would speak the same FlatBuffers protocol
+  ([flatbuffers-schema](https://github.com/RLBot/flatbuffers-schema):
+  `GamePacket`, `ControllerState`, `DesiredGameState`, `MatchConfiguration`,
+  `FieldInfo`, `BallPrediction`, plus socket framing), build a `GamePacket`
+  from `PhysicsFrame`s each tick, step `PhysicsWorld` with the bots'
+  controller inputs, and apply `DesiredGameState`. Any v5 bot (the Rust
+  `rlbot` crate's examples, Python bots, Nexto-class bots, the scripted tape
+  player in `BOT-CAPTURE-PLAN.md`) could then run headless on Linux with no
+  game, for regression tests, scenario sweeps and training. It also gives
+  the port a second driver beyond recorded inputs.
+- **Not in the port today**: boost pads and pickup, goals and scoring,
+  kickoff and countdown, match phases and clock, demolitions and bumps, the
+  other game modes, ball prediction. Each is a real piece of work; the
+  physics ones are tracked as gaps in the mechanics catalogue.
+- **Open questions**: the licence terms of the FlatBuffers schema; whether
+  the protocol is stable across v5 releases; how much of the packet bots
+  actually read (start with players, ball, boost, match info); tick pacing.
+- **Phasing (unscheduled)**: (1) finish the capture spike and the tape
+  player; (2) read the schema and write a protocol crate (packet types and
+  framing only); (3) a minimal server that runs one car and the ball, so a
+  `rlbot` crate bot drives `rb_physics_bullet`; (4) boost pads and match
+  rules; (5) compare bot runs on the game and on the port.
+- **Status**: Open, long term, not scheduled. Needs an ADR before work
+  (new adapter crate, new dependencies, public protocol surface).
+  **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-05: Added RB-RESEARCH-O007 (long term, RLBot in Rust over this
+  engine) from the owner's note; reading B recommended, nothing scheduled.
 - 2026-10-05: Added RB-RESEARCH-O004 (replay corpus sources),
   O005 (high-level bot) and O006 (mechanics catalogue) from the owner's
   notes; nothing downloaded or built yet.
