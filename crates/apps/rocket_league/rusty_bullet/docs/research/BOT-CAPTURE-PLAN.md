@@ -118,6 +118,17 @@ justification for the PR: it is the only maintained Rust client for the
 v5 socket API, MIT licensed; hand-rolling a FlatBuffers client is worse.
 It reads the scenario JSON and has no dependency on the physics crates.
 
+## Built (2026-10-05, not yet run against the game)
+
+`tools/rb_tape_bot` (standalone package, `rlbot` 0.6.0): scenario reader
+with tests (`src/lib.rs`), a `BotAgent` tape player (`src/main.rs`) that
+sets the start state with a `DesiredGameState` on its first packet and then
+sends one `PlayerInput` per packet, `bot.toml`, and two scenarios
+(`prompt_dodge.json` control, `late_dodge.json` for the 1.25 s rule). One
+bot does both jobs, so no script/bot timing sync is needed; whether core
+accepts state setting from a bot is an open risk. Run steps and scenario
+format are in `tools/rb_tape_bot/README.md`.
+
 ## Next
 
 Run risk spikes 1 and 2 on the owner's machine with a trivial tape (jump
