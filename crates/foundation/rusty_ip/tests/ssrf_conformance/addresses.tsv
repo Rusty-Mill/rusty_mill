@@ -1,0 +1,85 @@
+# #418 characterization at dab8499d034c5ccc61182f3c9c40ef23f4157bb1.
+# Decisions are from the pre-extraction production predicates listed in the review ledger, not an IANA-global policy.
+# IPv4 rows are also tested as mapped, NAT64 /96, and compatible IPv6 by policy.rs.
+# address	a2a	memory	linkpreview	reason
+0.0.0.0	block	block	block	unspecified; lower this-network boundary
+0.0.0.1	block	block	block	this-network; compatible form becomes ::1
+0.255.255.255	block	block	block	upper this-network boundary
+1.0.0.0	pass	pass	pass	after this-network
+8.8.8.8	pass	pass	pass	ordinary unicast control
+9.255.255.255	pass	pass	pass	before private 10/8
+10.0.0.0	block	block	block	lower private 10/8 boundary
+10.255.255.255	block	block	block	upper private 10/8 boundary
+11.0.0.0	pass	pass	pass	after private 10/8
+100.63.255.255	pass	pass	pass	before shared /10
+100.64.0.0	block	block	block	lower shared /10 boundary
+100.127.255.255	block	block	block	upper shared /10 boundary
+100.128.0.0	pass	pass	pass	after shared /10
+126.255.255.255	pass	pass	pass	before loopback /8
+127.0.0.0	block	block	block	lower loopback /8 boundary
+127.0.0.1	block	block	block	loopback interior
+127.255.255.255	block	block	block	upper loopback /8 boundary
+128.0.0.0	pass	pass	pass	after loopback /8
+169.253.255.255	pass	pass	pass	before link-local /16
+169.254.0.0	block	block	block	lower link-local /16 boundary
+169.254.169.254	block	block	block	metadata address; classifier only, never contacted
+169.254.255.255	block	block	block	upper link-local /16 boundary
+169.255.0.0	pass	pass	pass	after link-local /16
+172.15.255.255	pass	pass	pass	before private 172.16/12
+172.16.0.0	block	block	block	lower private 172.16/12 boundary
+172.31.255.255	block	block	block	upper private 172.16/12 boundary
+172.32.0.0	pass	pass	pass	after private 172.16/12
+191.255.255.255	pass	pass	pass	before protocol assignments /24
+192.0.0.0	block	pass	pass	lower protocol assignments /24 boundary; policy differs
+192.0.0.8	block	pass	pass	protocol assignments interior; policy differs
+192.0.0.9	block	pass	pass	A2A blocks the whole /24 including this address
+192.0.0.10	block	pass	pass	A2A blocks the whole /24 including this address
+192.0.0.255	block	pass	pass	upper protocol assignments /24 boundary; policy differs
+192.0.1.0	pass	pass	pass	after protocol assignments /24
+192.0.2.0	pass	pass	pass	documentation /24 is not denied by current classifiers
+192.0.2.255	pass	pass	pass	documentation /24 upper boundary
+192.167.255.255	pass	pass	pass	before private 192.168/16
+192.168.0.0	block	block	block	lower private 192.168/16 boundary
+192.168.255.255	block	block	block	upper private 192.168/16 boundary
+192.169.0.0	pass	pass	pass	after private 192.168/16
+198.17.255.255	pass	pass	pass	before benchmarking /15
+198.18.0.0	block	pass	pass	lower benchmarking /15 boundary; policy differs
+198.19.255.255	block	pass	pass	upper benchmarking /15 boundary; policy differs
+198.20.0.0	pass	pass	pass	after benchmarking /15
+198.51.100.0	pass	pass	pass	documentation /24 control
+198.51.100.255	pass	pass	pass	documentation /24 upper boundary
+203.0.113.0	pass	pass	pass	documentation /24 control
+203.0.113.5	pass	pass	pass	existing A2A validate_webhook_url unit-test literal
+203.0.113.255	pass	pass	pass	documentation /24 upper boundary
+223.255.255.255	pass	pass	pass	before multicast /4
+224.0.0.0	block	block	block	lower multicast /4 boundary
+239.255.255.255	block	block	block	upper multicast /4 boundary
+240.0.0.0	block	pass	pass	lower reserved /4 boundary; policy differs
+255.255.255.254	block	pass	pass	reserved just before limited broadcast; policy differs
+255.255.255.255	block	block	block	limited broadcast takes precedence over reserved difference
+::	block	block	block	IPv6 unspecified
+::1	block	block	block	IPv6 loopback
+::2	pass	pass	pass	after IPv6 loopback
+::fffe:ffff:ffff	pass	pass	pass	immediately before IPv4-mapped /96
+::ffff:0:0	block	block	block	first IPv4-mapped address is IPv4 unspecified
+::ffff:ffff:ffff	block	block	block	last IPv4-mapped address is limited broadcast
+::1:0:0:0	pass	pass	pass	immediately after IPv4-mapped /96
+64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff	pass	pass	pass	immediately before well-known NAT64 /96
+64:ff9b::	block	pass	pass	first well-known NAT64 /96 embeds IPv4 unspecified
+64:ff9b::ffff:ffff	block	pass	pass	last well-known NAT64 /96 embeds limited broadcast
+64:ff9b::1:0:0	pass	pass	pass	immediately after well-known NAT64 /96
+64:ff9b:1::a9fe:a9fe	pass	pass	pass	local-use NAT64 /48 is not decoded by any current caller
+2001:db8::	pass	pass	pass	IPv6 documentation prefix is not denied by current callers
+2001:db8:ffff:ffff:ffff:ffff:ffff:ffff	pass	pass	pass	IPv6 documentation upper boundary
+2606:4700::1111	pass	pass	pass	ordinary IPv6 unicast control
+fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff	pass	pass	pass	before ULA /7
+fc00::	block	block	block	lower ULA /7 boundary
+fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff	block	block	block	upper ULA /7 boundary
+fe00::	pass	pass	pass	after ULA /7
+fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff	pass	pass	pass	before IPv6 link-local /10
+fe80::	block	block	block	lower IPv6 link-local /10 boundary
+febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff	block	block	block	upper IPv6 link-local /10 boundary
+fec0::	block	pass	pass	after link-local and lower site-local /10 boundary; policy differs
+feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff	block	pass	pass	upper site-local /10 boundary; policy differs
+ff00::	block	block	block	after site-local and lower multicast /8 boundary
+ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff	block	block	block	upper IPv6 multicast /8 boundary
