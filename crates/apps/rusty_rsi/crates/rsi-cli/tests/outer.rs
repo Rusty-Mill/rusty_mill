@@ -326,6 +326,12 @@ fn a_ten_step_run_gates_rejects_records_and_replays() {
     let report = summary(&info, &entries).expect("summary");
     println!("{report}");
     assert!(report.contains("| 5 | 0 | accepted |"), "{report}");
+    // The outer agent's cost is kept for every proposal, never the baseline.
+    assert_eq!(entries[0].fields().outer_cost, None);
+    assert!(entries[1..]
+        .iter()
+        .all(|e| e.fields().outer_cost.is_some_and(|cost| cost.tokens() == 0)));
+    assert!(report.contains("**Outer cost:** 0 tokens"), "{report}");
     assert!(
         report.contains("11 (baseline + 10 proposals), 1 accepted"),
         "{report}"

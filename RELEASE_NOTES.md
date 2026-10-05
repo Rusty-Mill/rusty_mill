@@ -13,6 +13,20 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi: record the outer agent's cost
+**2026-10-05** · [#507](https://github.com/Rusty-Mill/rusty_mill/pull/507) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `outer_cost` on each proposal's lineage entry: the proposer's prompt and completion tokens, and the wall time the outer loop measured around the proposal. `rsi report` adds an **Outer cost** line beside the inner cost.
+  - **Codex** proposals now run with `--json`; tokens are summed from the `turn.completed` events, as for `CodexModel`.
+  - **Claude Code** tokens come from the JSON envelope's `usage`; prompt tokens include the cache writes and reads Claude Code counts apart.
+  - A Codex or Claude run that reports no usage is now an error, never a free proposal.
+- **Changed:** `CliProposer` owns a copy of the executor (it keeps 8 MiB of output for Codex's event stream) and has no lifetime parameter.
+- **Compatibility:** entries written before this change keep their bytes and hashes, decode with no outer cost, and are counted apart in the report. A baseline with an outer cost is refused.
+- **Tests:** codec round trip and legacy decoding, report totals, both fake agents metered, an unmetered Codex run refused, and the ten-step run recording a cost for every proposal. Mutation check: dropping the cost in the loop fails the run test.
+- Known limitations: the outer cost is recorded, not budgeted; the budget bounds each inner run.
+
+---
+
 ## rusty-mcp: public cache-hint helper; nexus-mcp sheds a private API and two dependencies
 **2026-10-05** · [#505](https://github.com/Rusty-Mill/rusty_mill/pull/505) · [#479](https://github.com/Rusty-Mill/rusty_mill/issues/479)
 

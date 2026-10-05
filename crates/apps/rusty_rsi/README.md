@@ -96,7 +96,8 @@ TASKS=crates/apps/rusty_rsi/crates/rsi-runtime/tasks
 `--repo` defaults to the current repository. Candidates are committed under
 `refs/rsi/<run>/<step>`, never on a branch; the run directory holds
 `run.json`, the hash-chained `lineage.jsonl` and content-addressed
-`blobs/`. Each role reads its own `RSI_<ROLE>_MODEL`, `_BASE_URL` and
+`blobs/`. Each proposal's entry records what the outer agent spent
+(tokens and wall time), and `rsi report` totals it beside the inner cost. Each role reads its own `RSI_<ROLE>_MODEL`, `_BASE_URL` and
 `_API_KEY` (`INNER` for the agent, `OUTER` for the proposer). Running the
 outer loop also needs `git` 2.25 or later.
 

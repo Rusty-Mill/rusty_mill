@@ -360,6 +360,7 @@ pub fn encode_entry(entry: &LineageEntry) -> Value {
             "outer_model",
             opt(f.outer_model.as_ref(), |m| Value::from(m.as_str())),
         ),
+        ("outer_cost", opt(f.outer_cost.as_ref(), encode_cost)),
         ("budget", budget),
         ("evaluations", Value::from(evaluations)),
         ("decision", encode_decision(&f.decision)),
@@ -393,6 +394,19 @@ fn nullable<'a, T>(
     match field(json, key)? {
         Value::Null => Ok(None),
         value => f(value).map(Some),
+    }
+}
+
+/// Like [`nullable`], but a missing key is `None` too: for fields added
+/// after lineages were first written.
+fn optional<'a, T>(
+    json: &'a Value,
+    key: &str,
+    f: impl FnOnce(&'a Value) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    match json.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => f(value).map(Some),
     }
 }
 
@@ -529,6 +543,7 @@ pub fn decode_entry(json: &Value) -> Result<LineageEntry, String> {
         diff: nullable(json, "diff", blob)?,
         inner_model: model(string(json, "inner_model")?)?,
         outer_model: nullable(json, "outer_model", |v| model(as_str(v)?))?,
+        outer_cost: optional(json, "outer_cost", decode_cost)?,
         budget,
         evaluations,
         decision: decode_decision(field(json, "decision")?)?,
@@ -587,6 +602,12 @@ mod tests {
             diff: Some(BlobId::of(b"diff")),
             inner_model: ModelId::parse("qwen2.5-coder:7b").expect("model"),
             outer_model: Some(ModelId::parse("outer").expect("model")),
+            outer_cost: (candidate > 0).then(|| CostUsage {
+                prompt_tokens: 4_000 + candidate,
+                completion_tokens: 300,
+                wall: Duration::from_millis(2_500),
+                gpu: None,
+            }),
             budget: Budget::new(1000, Duration::from_secs(60), None).expect("budget"),
             evaluations: rounds
                 .into_iter()
@@ -679,6 +700,21 @@ mod tests {
                 "stable bytes"
             );
         }
+    }
+
+    #[test]
+    fn an_entry_written_before_outer_cost_decodes_without_one() {
+        let proposal = &entries()[1];
+        let old = LineageEntry::new(EntryFields {
+            outer_cost: None,
+            ..proposal.fields().clone()
+        })
+        .expect("valid");
+        let text = encode_entry(&old).to_json_string();
+        let legacy = text.replace(",\"outer_cost\":null", "");
+        assert_ne!(legacy, text, "the key was present to remove");
+        let decoded = decode_entry(&Value::parse(&legacy).expect("json")).expect("decodes");
+        assert_eq!(decoded, old);
     }
 
     #[test]

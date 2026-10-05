@@ -138,7 +138,8 @@ pub fn precedents(entries: &[LineageEntry]) -> Result<Vec<Precedent>, crate::Cor
 pub struct Proposal {
     /// A one-line description, used as the commit message.
     pub summary: String,
-    /// Tokens the outer model consumed.
+    /// Tokens the outer model consumed. The outer loop measures the wall
+    /// time itself and records both in lineage.
     pub usage: CostUsage,
 }
 
@@ -214,6 +215,7 @@ mod tests {
             diff: None,
             inner_model: ModelId::parse("m").expect("model"),
             outer_model: None,
+            outer_cost: None,
             budget: Budget::new(1, Duration::from_secs(1), None).expect("budget"),
             evaluations,
             decision,

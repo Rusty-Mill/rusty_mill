@@ -95,6 +95,8 @@ pub fn summary(info: &RunInfo, entries: &[LineageEntry]) -> Result<String, Runti
         .filter(|e| matches!(e.fields().decision, Decision::Accepted { .. }))
         .count();
     let mut cost = CostUsage::default();
+    let mut outer = CostUsage::default();
+    let mut unrecorded = 0usize;
     let mut incumbent = (0, None);
     let mut rows = String::new();
     for entry in entries {
@@ -111,6 +113,11 @@ pub fn summary(info: &RunInfo, entries: &[LineageEntry]) -> Result<String, Runti
                 total.plus(round.cost())
             });
         cost = cost.plus(round_cost);
+        match (f.parent, f.outer_cost) {
+            (_, Some(spent)) => outer = outer.plus(spent),
+            (Some(_), None) => unrecorded += 1,
+            (None, None) => {}
+        }
         let delta = f
             .decision
             .delta()
@@ -155,6 +162,17 @@ pub fn summary(info: &RunInfo, entries: &[LineageEntry]) -> Result<String, Runti
         "- **Inner cost:** {} tokens, {:.1} s",
         cost.tokens(),
         cost.wall.as_secs_f64()
+    );
+    let _ = writeln!(
+        out,
+        "- **Outer cost:** {} tokens, {:.1} s{}",
+        outer.tokens(),
+        outer.wall.as_secs_f64(),
+        match unrecorded {
+            0 => String::new(),
+            1 => " (not recorded for 1 older proposal)".to_owned(),
+            n => format!(" (not recorded for {n} older proposals)"),
+        }
     );
     let _ = writeln!(out, "- **Lineage:** hash chain verified");
     match status {
@@ -329,6 +347,12 @@ mod tests {
             diff: None,
             inner_model: ModelId::parse("m").expect("model"),
             outer_model: None,
+            outer_cost: (candidate > 0).then(|| CostUsage {
+                prompt_tokens: 100 * candidate,
+                completion_tokens: 10,
+                wall: Duration::from_secs(2),
+                gpu: None,
+            }),
             budget: Budget::new(1, Duration::from_secs(1), None).expect("budget"),
             evaluations: if graded {
                 vec![EvaluationRecord {
@@ -394,5 +418,27 @@ mod tests {
         assert!(check(&info(0), &partial).is_err(), "more than configured");
         let gap = [entry(0, Decision::Baseline), buggy(2)];
         assert!(check(&info(3), &gap).is_err(), "out of order");
+    }
+
+    #[test]
+    fn the_outer_cost_is_totalled_and_older_proposals_are_flagged() {
+        let legacy = LineageEntry::new(EntryFields {
+            outer_cost: None,
+            ..buggy(3).into_fields()
+        })
+        .expect("valid");
+        let entries = [entry(0, Decision::Baseline), buggy(1), buggy(2)];
+        let report = summary(&info(2), &entries).expect("report");
+        assert!(
+            report.contains("**Outer cost:** 320 tokens, 4.0 s\n"),
+            "{report}"
+        );
+        let mut older = entries.to_vec();
+        older.push(legacy);
+        let report = summary(&info(3), &older).expect("report");
+        assert!(
+            report.contains("320 tokens, 4.0 s (not recorded for 1 older proposal)"),
+            "{report}"
+        );
     }
 }

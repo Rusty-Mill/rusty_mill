@@ -19,15 +19,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rsi_core::{ChatModel, Completion, Message, ModelId};
-use rusty_json::Value;
 
-use crate::agent_cli::{CliAgent, CliConfig, Staging};
+use crate::agent_cli::{codex_usage, CliAgent, CliConfig, Staging, EVENT_BYTES};
 use crate::error::RuntimeError;
 use crate::executor::ProcessExecutor;
-
-/// Bytes of Codex's event stream kept: enough for a long turn, whose
-/// `turn.completed` event comes last.
-const EVENT_BYTES: usize = 8 << 20;
 
 const CONTRACT: &str = "You are the language model behind an automated \
 agent. Reply to the conversation below as the assistant: text only. Do not \
@@ -95,7 +90,7 @@ impl ChatModel for CodexModel {
         let staging = Staging::create(&self.scratch, CliAgent::Codex)?;
         let prompt = staging.write_prompt(&render(messages))?;
         let reply = staging.tmp().join("reply.md");
-        let args = self.config.codex_args(&staging.tree(), &reply, true);
+        let args = self.config.codex_args(&staging.tree(), &reply);
         let outcome = self.config.run(
             &self.executor,
             &staging,
@@ -107,7 +102,7 @@ impl ChatModel for CodexModel {
         if !outcome.termination.succeeded() {
             return Err(self.config.failure(&outcome));
         }
-        let (prompt_tokens, completion_tokens) = usage(&outcome.stdout)?;
+        let (prompt_tokens, completion_tokens) = codex_usage(&outcome.stdout)?;
         let text = read_reply(&reply)?;
         Ok(Completion {
             text,
@@ -132,50 +127,6 @@ fn render(messages: &[Message]) -> String {
     out
 }
 
-/// Prompt and completion tokens from the `turn.completed` events in
-/// Codex's JSONL output, summed.
-///
-/// # Errors
-/// [`RuntimeError::Model`] for a `turn.failed` event, or when no turn
-/// reported its usage.
-fn usage(stdout: &[u8]) -> Result<(u64, u64), RuntimeError> {
-    let text = String::from_utf8_lossy(stdout);
-    let mut total: Option<(u64, u64)> = None;
-    for line in text.lines().map(str::trim).filter(|l| l.starts_with('{')) {
-        let Ok(event) = Value::parse(line) else {
-            continue;
-        };
-        match event.pointer("/type").and_then(Value::as_str) {
-            Some("turn.failed") => {
-                let message = event
-                    .pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("no message");
-                return Err(RuntimeError::Model(format!("codex turn failed: {message}")));
-            }
-            Some("turn.completed") => {
-                let count = |key: &str| {
-                    event
-                        .pointer(&format!("/usage/{key}"))
-                        .and_then(Value::as_u64)
-                };
-                let (Some(input), Some(output)) = (count("input_tokens"), count("output_tokens"))
-                else {
-                    return Err(RuntimeError::Model(
-                        "codex's turn.completed event has no usage".into(),
-                    ));
-                };
-                let (p, c) = total.unwrap_or((0, 0));
-                total = Some((p.saturating_add(input), c.saturating_add(output)));
-            }
-            _ => {}
-        }
-    }
-    total.ok_or_else(|| {
-        RuntimeError::Model("codex reported no token usage, so the call cannot be metered".into())
-    })
-}
-
 fn read_reply(reply: &Path) -> Result<String, RuntimeError> {
     std::fs::read_to_string(reply)
         .map_err(|e| RuntimeError::Model(format!("codex wrote no reply ({e})")))
@@ -186,22 +137,6 @@ mod tests {
     use rsi_core::Role;
 
     use super::*;
-
-    #[test]
-    fn usage_comes_from_turn_completed_and_is_required() {
-        let events = b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n\
-{\"type\":\"turn.started\"}\n\
-{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hi\"}}\n\
-{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":100,\"output_tokens\":7}}\n";
-        assert_eq!(usage(events).expect("usage"), (120, 7));
-        let e = usage(b"{\"type\":\"turn.started\"}\n").expect_err("no usage");
-        assert!(e.to_string().contains("cannot be metered"), "{e}");
-        let e = usage(b"{\"type\":\"turn.failed\",\"error\":{\"message\":\"quota\"}}\n")
-            .expect_err("failed");
-        assert!(e.to_string().contains("quota"), "{e}");
-        let e = usage(b"{\"type\":\"turn.completed\",\"usage\":{}}\n").expect_err("empty");
-        assert!(e.to_string().contains("no usage"), "{e}");
-    }
 
     #[test]
     fn the_prompt_keeps_every_message_under_its_role() {
