@@ -229,3 +229,46 @@ test('two tabs edit the same card: the second save is refused, its draft is kept
   await expect(pane(two).getByLabel('Notes')).toHaveValue('first tab, again')
   await context.close()
 })
+
+test('tiles are one size, the detail pane folds away, and the family chooses its deck', async ({ page }) => {
+  await page.goto('/#/deck')
+  await tile(page, /^Garbage/).click()
+  await expect(pane(page).getByLabel('Name')).toHaveValue('Garbage')
+
+  // Every tile on the board has the same width and height, whatever its name or badges.
+  const sizes = await page.getByTestId('card-tile').evaluateAll((els) => [...new Set(els.map((e) => `${Math.round(e.getBoundingClientRect().width)}x${Math.round(e.getBoundingClientRect().height)}`))])
+  expect(sizes).toHaveLength(1)
+
+  // The pane folds to a rail and the board takes the room; opening a card brings it back.
+  const board = page.getByRole('main', { name: 'Deck' })
+  const before = (await board.boundingBox())!.width
+  await pane(page).getByLabel('Notes').fill('Keep this unsaved draft while folded')
+  await pane(page).getByRole('button', { name: 'Hide details' }).click()
+  await expect(pane(page).getByLabel('Name')).toBeHidden()
+  expect((await board.boundingBox())!.width).toBeGreaterThan(before + 300)
+  await pane(page).getByRole('button', { name: 'Show details' }).click()
+  await expect(pane(page).getByLabel('Notes')).toHaveValue('Keep this unsaved draft while folded')
+  await pane(page).getByRole('button', { name: 'Cancel' }).click()
+  await pane(page).getByRole('button', { name: 'Hide details' }).click()
+  await page.reload() // remembered
+  await expect(pane(page).getByRole('button', { name: 'Show details' })).toBeVisible()
+  await tile(page, /^Mail/).click()
+  await expect(pane(page).getByLabel('Name')).toHaveValue('Mail')
+
+  // Choose the deck: put the Unicorn Space suit out, see it leave the board, and get it back.
+  const total = await page.getByTestId('card-tile').count()
+  await page.getByRole('button', { name: 'Choose cards' }).click()
+  await page.getByRole('button', { name: 'Set aside every Unicorn Space card' }).click()
+  await expect(page.getByRole('list', { name: 'Unicorn Space cards' }).getByRole('checkbox', { checked: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Done choosing' }).click()
+  await expect(page.getByTestId('card-tile')).toHaveCount(total - 2)
+  await expect(page.getByText('· 2 set aside')).toBeVisible()
+  await page.reload() // on the server, not just on screen
+  await expect(page.getByTestId('card-tile')).toHaveCount(total - 2)
+  await page.getByRole('button', { name: 'Set aside · 2' }).click()
+  await expect(page.getByTestId('card-tile')).toHaveCount(2)
+  await page.getByRole('button', { name: 'Choose cards' }).click()
+  await page.getByRole('button', { name: 'Put every Unicorn Space card in the deck' }).click()
+  await page.getByRole('button', { name: 'Done choosing' }).click()
+  await expect(page.getByTestId('card-tile')).toHaveCount(total)
+})

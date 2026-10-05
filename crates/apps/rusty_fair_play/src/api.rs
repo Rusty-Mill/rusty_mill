@@ -425,6 +425,7 @@ fn route_cards(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 owner_id: input.owner_id,
                 parent_card_id: input.parent_card_id,
                 position: input.position,
+                in_play: input.in_play,
             };
             let view = service.patch_card(parse_id(id)?, patch)?;
             Ok(Response::json(StatusCode::OK, &CardDto::from(view)))

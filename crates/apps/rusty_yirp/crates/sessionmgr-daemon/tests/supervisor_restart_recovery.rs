@@ -30,6 +30,25 @@ fn a_session_survives_the_daemon_being_killed_and_is_adopted_by_its_replacement(
     assert!(is_alive(worker), "the worker should be running");
     assert_eq!(session_status(root.path(), &id), "running");
 
+    // Establish that the workload is genuinely long-lived before killing
+    // anything.  The old Windows full sweep reached the final adoption
+    // assertion with an `Errored` session because cargo's oversized PATH
+    // made `cmd /C ping` exit 1 almost immediately.  The worker itself had
+    // survived, so without this precondition a launch-environment failure
+    // looked like a daemon/job-object survival failure.  Holding the exact
+    // worker and child pids live across this settling interval makes the
+    // boundary under test unambiguous.
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        is_alive(worker),
+        "the original worker must remain live before the daemon is killed"
+    );
+    assert!(
+        is_alive(child),
+        "the original session process must remain live before the daemon is killed"
+    );
+    assert_eq!(session_status(root.path(), &id), "running");
+
     // Kill the manager the way a user closing the app (or a crash) would:
     // no warning, no graceful path.
     force_kill(daemon);

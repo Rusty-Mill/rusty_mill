@@ -13,6 +13,7 @@ layer = "apps"
 nexus-kernel = { path = "../nexus-kernel" }
 nexus-plugins = { path = "../nexus-plugins" }
 nexus-types = { path = "../nexus-types" }
+rusty-mcp = { workspace = true, features = ["client"] }
 # BL-023 — `http` for typed HeaderName/HeaderValue parsing on the
 # Streamable HTTP transport. The HTTP client itself is provided by
 # rmcp's `transport-streamable-http-client-reqwest` feature, which
@@ -26,7 +27,6 @@ http = "1"
 # split with rmcp's reqwest doesn't matter.
 reqwest = { workspace = true }
 rmcp = { version = "3.1", features = ["server", "client", "transport-io", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest-native-tls", "client-side-sse", "macros"] }
-rusty-mcp = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

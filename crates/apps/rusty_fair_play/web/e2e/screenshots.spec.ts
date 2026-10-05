@@ -30,3 +30,16 @@ test('players', async ({ page }) => {
   await expect(page.getByRole('list', { name: 'People' }).getByRole('listitem')).toHaveCount(2)
   await shot(page, 'players')
 })
+
+test('choose the family deck, with the detail pane folded away', async ({ page }) => {
+  await page.goto('/#/deck')
+  await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
+  await page.getByRole('button', { name: 'Choose cards' }).click()
+  await page.getByRole('button', { name: 'Set aside every Unicorn Space card' }).click()
+  await expect(page.getByRole('list', { name: 'Unicorn Space cards' }).getByRole('checkbox', { checked: false })).toHaveCount(2)
+  await page.getByRole('complementary', { name: 'Card details' }).getByRole('button', { name: 'Hide details' }).click()
+  await shot(page, 'choose-deck')
+  // Leave the data as the other screenshots expect it.
+  await page.getByRole('button', { name: 'Put every Unicorn Space card in the deck' }).click()
+  await page.getByRole('button', { name: 'Done choosing' }).click()
+})

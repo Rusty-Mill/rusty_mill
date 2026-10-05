@@ -101,6 +101,31 @@ Three things in the workspace fix the shape:
    opening any stack, so the command is refused while a server holds the
    directory (a second writer would leave the server's in-memory
    indexes stale). `seed_into` is for callers that already hold it.
+10. **The family's deck is a set of ids, not a field on the card.**
+    Families play with the cards they choose, so a card can be *set aside*
+    (`inPlay: false`). The ids live in `set-aside.json` beside the stores,
+    written by rename. Why not a `Card` field: records are `bincode`-
+    positional, so a new field changes the stored layout and breaks every
+    existing data directory, and the wire adapters in `rusty_multimodal_db`
+    would need a column (a protocol change). The cost: the set is outside
+    the engine's durability. Setting aside clears the owner before saving
+    membership; adding back and assigning an owner in the same request is
+    refused (422): persist the add-back first, then deal with its new etag.
+    Memory membership changes only after the sidecar save succeeds, so a
+    failed save can be retried without falsely reporting success. Deletion
+    and unsplit remove membership before deleting cards, so a failed cleanup
+    leaves the cards available for retry. These operations are not atomic
+    across stores: interruption may leave an unowned card in play, but never
+    a dealt card set aside. An unreadable file fails the open.
+    Rules: a set-aside card has no owner and no
+    children, cannot be dealt, split or parented under, and a split card
+    cannot be set aside. It is part of the etag. If another app ever needs
+    the choice, promote it to a `Card` field with a versioned migration.
+
+    Deck selection retains each selected card's etag through confirmation
+    and the entire batch, stopping on the first failure rather than rebasing
+    to refreshed versions. Folding the pane hides, but does not unmount, its
+    editor, preserving unsaved drafts and pending-save state.
 
 ## Consequences
 
