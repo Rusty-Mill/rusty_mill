@@ -528,6 +528,8 @@ pub enum CardError {
     Cycle(Uuid),
     #[error("card {0}: number, origin and baseline_id never change")]
     ImmutableChanged(Uuid),
+    #[error("deck card number {0} is already in use")]
+    DuplicateNumber(u16),
     #[error("card {0} has no record")]
     NotFound(Uuid),
     #[error("card {0}: a deck card's baseline {1} has no record")]
@@ -710,16 +712,27 @@ where
     Ok(())
 }
 
-/// `Insert` with the domain's checks first: [`Card::validate`], the
-/// parent exists, and the parent chain does not already reach this id.
+/// `Insert` with the domain's checks first: [`Card::validate`], a unique
+/// deck number, the parent exists, and the parent chain does not already
+/// reach this id.
 /// The owner and baseline are other tables' records and are not
 /// checked here (the caller holds those stores).
 pub fn insert_card<S>(store: &mut S, card: Card) -> Result<(), CardError>
 where
-    S: GetById<Card> + Insert<Card>,
+    S: AllIds<Card> + GetById<Card> + Insert<Card>,
 {
     card.validate()?;
     check_parent(store, &card)?;
+    if let Some(number) = card.number {
+        if store
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| store.get(id))
+            .any(|stored| stored.number == Some(number))
+        {
+            return Err(CardError::DuplicateNumber(number));
+        }
+    }
     store.insert(card)?;
     Ok(())
 }
@@ -1124,7 +1137,11 @@ pub fn split_card<S>(
     parent_update: Option<Card>,
 ) -> Result<Vec<Uuid>, CardError>
 where
-    S: GetById<Card> + Insert<Card> + Replace<Card> + Children<Card, Card, ParentCard>,
+    S: AllIds<Card>
+        + GetById<Card>
+        + Insert<Card>
+        + Replace<Card>
+        + Children<Card, Card, ParentCard>,
 {
     split_card_with(store, parent_id, specs, parent_update, |_| {})
 }
@@ -1147,7 +1164,11 @@ pub fn split_card_with<S>(
     mut on_step: impl FnMut(SplitStep),
 ) -> Result<Vec<Uuid>, CardError>
 where
-    S: GetById<Card> + Insert<Card> + Replace<Card> + Children<Card, Card, ParentCard>,
+    S: AllIds<Card>
+        + GetById<Card>
+        + Insert<Card>
+        + Replace<Card>
+        + Children<Card, Card, ParentCard>,
 {
     let parent = store.get(parent_id).ok_or(CardError::NotFound(parent_id))?;
     if let Some(update) = &parent_update {
@@ -1266,6 +1287,18 @@ pub fn baseline_diff(card: &Card, baseline: &CardDefault) -> Vec<FieldDiff> {
     TextField::ALL
         .into_iter()
         .filter_map(|field| {
+            if field == TextField::MinimumStandardOfCare {
+                return (card.minimum_standard_of_care != baseline.minimum_standard_of_care).then(
+                    || FieldDiff {
+                        field,
+                        // Debug list syntax preserves element boundaries and escaping;
+                        // unlike the seed-file `|` display it cannot conflate two
+                        // entries with one delimiter-containing entry.
+                        card: format!("{:?}", card.minimum_standard_of_care),
+                        baseline: format!("{:?}", baseline.minimum_standard_of_care),
+                    },
+                );
+            }
             let (c, b) = (card.text_field(field), baseline.text_field(field));
             (c != b).then_some(FieldDiff {
                 field,
@@ -1801,7 +1834,12 @@ mod tests {
             );
             assert_eq!(diff.len(), 1);
             assert_eq!(diff[0].field, field);
-            assert_eq!(diff[0].baseline, default(3, Suit::Home).text_field(field));
+            let expected_baseline = if field == TextField::MinimumStandardOfCare {
+                format!("{:?}", default(3, Suit::Home).minimum_standard_of_care)
+            } else {
+                default(3, Suit::Home).text_field(field)
+            };
+            assert_eq!(diff[0].baseline, expected_baseline);
             replace_card(&mut f.cards, before).unwrap();
             assert_eq!(
                 state_of(&f.cards, &f.defaults, n(3)).unwrap(),
@@ -1895,6 +1933,76 @@ mod tests {
         assert_eq!(counts.by_suit[&Suit::Out][&CardState::Original], 1);
         assert_eq!(counts.by_suit[&Suit::Magic][&CardState::Custom], 2);
         assert_eq!(counts.by_suit[&Suit::Home][&CardState::Original], 3);
+    }
+
+    #[test]
+    fn standards_diff_preserves_vector_boundaries_and_exact_restoration() {
+        let mut baseline = default(1, Suit::Home);
+        baseline.minimum_standard_of_care = vec!["a".into(), "b".into()];
+        let mut card = baseline.to_card();
+
+        card.minimum_standard_of_care = vec!["a|b".into()];
+        let diff = baseline_diff(&card, &baseline);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].field, TextField::MinimumStandardOfCare);
+        assert_eq!(diff[0].card, "[\"a|b\"]");
+        assert_eq!(diff[0].baseline, "[\"a\", \"b\"]");
+        assert_eq!(
+            card_state(&card, Some(&baseline)).unwrap(),
+            CardState::Edited
+        );
+
+        baseline.minimum_standard_of_care.clear();
+        card.minimum_standard_of_care = vec![String::new()];
+        let diff = baseline_diff(&card, &baseline);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].card, "[\"\"]");
+        assert_eq!(diff[0].baseline, "[]");
+        assert_eq!(
+            card_state(&card, Some(&baseline)).unwrap(),
+            CardState::Edited
+        );
+
+        card.minimum_standard_of_care.clear();
+        assert!(baseline_diff(&card, &baseline).is_empty());
+        assert_eq!(
+            card_state(&card, Some(&baseline)).unwrap(),
+            CardState::Original
+        );
+    }
+
+    #[test]
+    fn validated_insert_requires_a_unique_deck_number_but_allows_family_cards() {
+        let mut f = fixture("fp_unique_number");
+        let before = f.cards.all_ids().len();
+        let mut duplicate = f.cards.get(n(1)).unwrap();
+        duplicate.id = Uuid::from_u128(0xd001);
+        assert!(matches!(
+            insert_card(&mut f.cards, duplicate),
+            Err(CardError::DuplicateNumber(1))
+        ));
+        assert_eq!(f.cards.all_ids().len(), before);
+
+        let mut unique = f.cards.get(n(1)).unwrap();
+        unique.id = Uuid::from_u128(0xd002);
+        unique.number = Some(99);
+        insert_card(&mut f.cards, unique.clone()).unwrap();
+        assert_eq!(cards_by_number(&f.cards, 99), vec![unique.id]);
+
+        let family = NewCustomCard {
+            id: Uuid::from_u128(0xd003),
+            name: "Family work".into(),
+            suit: Suit::Magic,
+            parent_card_id: None,
+            owner_id: None,
+            conception: String::new(),
+            planning: String::new(),
+            execution: String::new(),
+            minimum_standard_of_care: Vec::new(),
+            notes: String::new(),
+        };
+        create_custom_card(&mut f.cards, family).unwrap();
+        assert_eq!(f.cards.get(Uuid::from_u128(0xd003)).unwrap().number, None);
     }
 
     /// Persist, drop, reopen through the production store: ownership,

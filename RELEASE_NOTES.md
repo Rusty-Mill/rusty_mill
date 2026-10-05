@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_fair_play: choose the family deck, equal tiles, a collapsible side panel
+**2026-10-04** · [ADR-0001](crates/apps/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md) (decision 10)
+
+- **Added:** a family chooses which cards are in its deck. `PATCH {"inPlay": false}` sets a card aside (taking it back from its owner in the same write); `true` adds it back. A set-aside card cannot be dealt, split or made a parent, and a split card cannot be set aside. The choice is a `set-aside.json` beside the stores, written by rename, so the stored `Card` keeps its layout and no data directory is migrated; it is part of the card's etag. The UI: an "In our deck" checkbox in the pane, a **Choose cards** mode with a checkbox tile per card and "All in / All out" per suit, a "Set aside · N" view to bring cards back, and the board, undealt list and balance counting only the cards in play.
+- **Changed:** every card tile is the same size (it was as wide as its content), and the detail pane folds to a thin rail with a button, remembered across reloads; opening a card brings it back.
+- Corrections: a set-aside card must be added back successfully before assigning an owner (a combined request is 422). Membership updates reach memory only after saving the sidecar; deletion/unsplit clean membership before removing cards so failed cleanup remains retryable. Confirmed and bulk deck changes retain selection-time ETags, and folding details preserves drafts and pending saves.
+- Known limitations: the set-aside file is outside the engine's durability; operations across the card store and sidecar are not atomic and interruption can leave an unowned card in play. Only another app needing the choice would justify a stored `Card` field and a migration. Setting a split card aside needs an unsplit first.
+
+---
+
 ## rusty_rsi P4: the outer loop, calibration and run reports
 **2026-10-04** · [#483](https://github.com/Rusty-Mill/rusty_mill/pull/483) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

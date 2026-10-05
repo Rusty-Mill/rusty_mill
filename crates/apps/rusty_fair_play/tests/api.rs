@@ -555,3 +555,62 @@ fn subtree_writes_are_guarded_by_the_tree_etag() {
     );
     assert_eq!(status, 412, "the reorder moved the tree tag again");
 }
+
+#[test]
+fn a_family_chooses_its_deck_over_the_api() {
+    let (_d, mut h) = harness();
+    let ada = h.person("Ada");
+    let dishes = card(3);
+    let path = format!("/api/v1/cards/{dishes}");
+    let (_, v) = h.call(Method::Get, &path, "");
+    assert_eq!(v["inPlay"].as_bool(), Some(true));
+    let etag = v["etag"].as_str().unwrap().to_string();
+    h.call(Method::Patch, &path, &format!(r#"{{"ownerId":"{ada}"}}"#));
+
+    let (status, v) = h.call(Method::Patch, &path, r#"{"inPlay":false}"#);
+    assert_eq!(status, 200, "{v:?}");
+    assert_eq!(v["inPlay"].as_bool(), Some(false));
+    assert!(v["ownerId"].is_null(), "taken back from Ada");
+    assert_ne!(v["etag"].as_str(), Some(etag.as_str()));
+    let (_, snap) = h.call(Method::Get, "/api/v1/snapshot", "");
+    let out: Vec<_> = snap["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["inPlay"] == false)
+        .collect();
+    assert_eq!(out.len(), 1);
+
+    // Out of play: 422 to deal or split; a split parent is 409.
+    let deal = format!(r#"{{"ownerId":"{ada}"}}"#);
+    assert_eq!(h.call(Method::Patch, &path, &deal).0, 422);
+    assert_eq!(
+        h.call(
+            Method::Post,
+            &format!("{path}/split"),
+            r#"{"children":[{"name":"x"}]}"#
+        )
+        .0,
+        422
+    );
+    let cleaning = card(2);
+    h.call(
+        Method::Post,
+        &format!("/api/v1/cards/{cleaning}/split"),
+        r#"{"children":[{"name":"A"}]}"#,
+    );
+    assert_eq!(
+        h.call(
+            Method::Patch,
+            &format!("/api/v1/cards/{cleaning}"),
+            r#"{"inPlay":false}"#
+        )
+        .0,
+        409
+    );
+    assert_eq!(h.call(Method::Patch, &path, r#"{"inPlay":"no"}"#).0, 400);
+
+    let (status, v) = h.call(Method::Patch, &path, r#"{"inPlay":true}"#);
+    assert_eq!((status, v["inPlay"].as_bool()), (200, Some(true)));
+    assert_eq!(h.call(Method::Patch, &path, &deal).0, 200);
+}
