@@ -6,7 +6,9 @@ state, so the BakkesMod capture plugin
 mechanic. Plan and reasoning: `docs/research/BOT-CAPTURE-PLAN.md`.
 
 Standalone package, not in the root workspace (its own `[workspace]`), so the
-`rlbot` dependency stays out of the main build and CI.
+`rlbot` dependency stays out of the main build and CI. The scenario format
+lives in the workspace crate `crates/rb_scenario`, which this package and
+`rb-verify --scenario` share.
 
 Status: builds, scenario reader tested; **never run against the game**.
 
@@ -32,8 +34,9 @@ after `settle_ticks` neutral packets. Rotation is radians in RLBot's
 convention (yaw 0 faces +x). Pitch -1 is nose down (a forward dodge).
 
 Shipped scenarios. "Port predicts" is what `rb_physics_bullet` does with the
-same start and tape (a scratch simulation, not committed); the capture is
-the test of that prediction.
+same start and tape, reproducible with
+`rb-verify --scenario scenarios/<name>.json` from the repository root; the
+capture is the test of that prediction.
 
 | File | What it does | Port predicts | Targets |
 |---|---|---|---|

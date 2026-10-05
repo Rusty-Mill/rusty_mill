@@ -11,8 +11,8 @@ publish = false
 [workspace]
 
 [dependencies]
+# Scenario files, shared with `rb-verify --scenario` (workspace crate).
+rb_scenario = { path = "../../crates/rb_scenario" }
 # The only maintained Rust client for the RLBot v5 socket API (MIT);
 # hand-rolling a FlatBuffers client is worse.
 rlbot = "0.6.0"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"

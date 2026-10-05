@@ -132,7 +132,9 @@ format are in `tools/rb_tape_bot/README.md`.
 Scenarios (11, 2026-10-05): prompt and late dodge, three wavedash timings,
 speed flip, half flip, pogo, and reproductions of the `test2.jsonl` 18.308 s
 landing and 8.95 s corner slide and the `hitjump.jsonl` 77.642 s car over
-the ball. Each has a port prediction in `tools/rb_tape_bot/README.md`.
+the ball. Each has a port prediction in `tools/rb_tape_bot/README.md`, reproducible with
+`rb-verify --scenario tools/rb_tape_bot/scenarios/<name>.json` (`rb_scenario`
+crate, ADR-0056).
 
 ## Next
 

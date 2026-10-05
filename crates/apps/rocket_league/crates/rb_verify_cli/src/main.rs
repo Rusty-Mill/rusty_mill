@@ -29,6 +29,10 @@
 //!   at every frame in that window, with the recorded input and the
 //!   recorded vs. simulated state side by side, on the same time axis
 //!   `--self-growth` prints.
+//! - `rb-verify --scenario <scenario.json> [every]`: what the port does with
+//!   a scripted scenario (`simulate_scenario`, `docs/research/BOT-CAPTURE-PLAN.md`):
+//!   the car's position, velocity and spin every `every` ticks (default 12)
+//!   and on every tick a jump is pressed.
 //! - `rb-verify --self-kstep <capture-file> [k] [count]`: every frame
 //!   predicted `k` ticks ahead (default 30) from the recorded frame `k`
 //!   before it, scored like `--self` (`k_step_score`,
@@ -37,10 +41,11 @@
 
 use rb_domain::divergence::DivergenceScore;
 use rb_domain::{ControllerInput, Vec3};
+use rb_scenario::Scenario;
 use rb_verify_cli::{
     car_frame_spin, k_step_capture, k_step_score, one_step_capture, rotation_rate,
     score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP,
+    simulate_scenario, trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP,
     DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
@@ -180,6 +185,32 @@ fn print_worst_steps(rows: &[TraceRow], count: usize) {
     }
 }
 
+/// Runs a scenario through the port and prints the car's trajectory.
+fn run_scenario(path: &str, every: usize) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let scenario = Scenario::from_json(&text).map_err(|e| format!("{path}: {e}"))?;
+    println!("{}", scenario.name);
+    println!("tick  car position (x, y, z)        velocity (x, y, z)             spin (x, y, z)         input");
+    let frames = simulate_scenario(&scenario);
+    for (tick, frame) in frames.iter().enumerate() {
+        let Some(car) = frame.cars.first() else {
+            continue;
+        };
+        let jump = car.input.is_some_and(|input| input.jump);
+        if tick % every.max(1) != 0 && !jump {
+            continue;
+        }
+        println!(
+            "{tick:>4}  {pos}  {vel}  {spin}  {input}",
+            pos = fmt_vec(&car.position),
+            vel = fmt_vec(&car.velocity),
+            spin = fmt_spin(&car.angular_velocity),
+            input = fmt_input(car.input),
+        );
+    }
+    Ok(())
+}
+
 fn parse_secs(name: &str, raw: Option<String>) -> Result<f32, String> {
     let raw = raw.ok_or_else(|| format!("missing {name}"))?;
     raw.parse::<f32>()
@@ -205,7 +236,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]"
+    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]"
 }
 
 fn main() -> ExitCode {
@@ -214,6 +245,28 @@ fn main() -> ExitCode {
         eprintln!("{}", usage());
         return ExitCode::FAILURE;
     };
+
+    if first == "--scenario" {
+        let Some(path) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let every = match args.next().map(|raw| raw.parse::<usize>()) {
+            None => 12,
+            Some(Ok(every)) => every,
+            Some(Err(_)) => {
+                eprintln!("invalid every\n{}", usage());
+                return ExitCode::FAILURE;
+            }
+        };
+        return match run_scenario(&path, every) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     if first == "--self-trace" {
         let Some(capture_path) = args.next() else {
