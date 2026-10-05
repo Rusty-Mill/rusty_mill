@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
+import { AMBIENT, isAmbient } from './ambient'
 import type { FocusSettings } from './logic'
 
-const FIELDS: { key: keyof FocusSettings; label: string; unit: string }[] = [
+const FIELDS: { key: Exclude<keyof FocusSettings, 'ambient'>; label: string; unit: string }[] = [
   { key: 'focusMin', label: 'Focus', unit: 'min' },
   { key: 'shortMin', label: 'Short break', unit: 'min' },
   { key: 'longMin', label: 'Long break', unit: 'min' },
@@ -19,6 +20,21 @@ export function SettingsRow({ settings, onChange }: Props) {
       {FIELDS.map((f) => (
         <NumberField key={f.key} label={f.label} unit={f.unit} value={settings[f.key]} onCommit={(v) => onChange({ [f.key]: v })} />
       ))}
+      <label className="flex items-center gap-1.5 text-s text-grey">
+        Sound
+        <select
+          value={settings.ambient}
+          aria-label="Ambient sound"
+          onChange={(e) => isAmbient(e.target.value) && onChange({ ambient: e.target.value })}
+          className="h-7 rounded-row border border-line bg-surface px-2 text-base text-text outline-none focus:border-primary"
+        >
+          {AMBIENT.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.label}
+            </option>
+          ))}
+        </select>
+      </label>
     </div>
   )
 }
