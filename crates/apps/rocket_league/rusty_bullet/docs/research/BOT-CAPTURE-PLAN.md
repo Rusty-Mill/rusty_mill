@@ -9,6 +9,41 @@ only; nothing built. Sources: [RLBot FAQ](https://rlbot.org/faq/),
 [RLBotTraining](https://pypi.org/project/rlbottraining),
 [state setting (v4 wiki)](https://github.com/RLBot/RLBotPythonExample/wiki/Manipulating-Game-State).
 
+## What the RLBot repositories show (read 2026-10-05)
+
+Sources: [core](https://github.com/RLBot/core),
+[rust-interface](https://github.com/RLBot/rust-interface),
+[gui](https://github.com/RLBot/gui),
+[botpack](https://github.com/RLBot/botpack),
+[wiki](https://github.com/RLBot/wiki),
+[RLBot](https://github.com/RLBot/RLBot) (the old v4 repo).
+
+- **v5 is the current framework; the `RLBot/RLBot` repo is v4**, and says
+  it is missing the source behind `RLBot.exe` for legal reasons. Use v5.
+- **core** (C#, .NET 10) is the v5 server. It talks to the game, bots and
+  scripts over FlatBuffers sockets, and builds on Windows and Linux. The
+  game itself still needs to be installed; whether the game runs on Linux
+  for this is not established.
+- **gui** (Go, Wails, Svelte) launches matches, downloads the botpack, and
+  has a **state-setting sandbox** (drag cars on the field, replay
+  scenarios). Windows and Linux builds.
+- **botpack**: community bots capped at about Nexto strength; no list of
+  scripted mechanic bots found. Licence MIT unless a bot says otherwise.
+- **rust-interface** (crate `rlbot`, MIT) is a Rust client for the v5
+  socket API, which fits this repo's language. Its `high_jump_script`
+  example (verbatim read) shows everything the tape player needs: a
+  `ScriptAgent` with `tick(game_packet, packet_queue)` that pushes a
+  `DesiredGameState` of `DesiredCarState { physics: Some(DesiredPhysics {
+  velocity: ... }) }`, reading `player.last_input.jump` and
+  `player.physics.velocity` from the `GamePacket`. A bot example,
+  `atba_agent`, returns controller inputs from the same loop shape. I did
+  not read the controller struct's field names; they come from `cargo doc`.
+  Other examples: `atba_hivemind`, `atba_raw`, `packet_logger`,
+  `start_match`, `stop_match`.
+
+This makes the plan concrete: write the tape player and the state-setting
+script in Rust with the `rlbot` crate.
+
 ## Why scripted, not skilled
 
 For physics validation the bot needs to replay the same inputs from the
@@ -25,10 +60,8 @@ mechanic.
    handbrake}`. Same fields as the `input` object in the capture format
    (ADR-0005). Plain JSON; one file per mechanic.
 2. **RLBot script** (v5 scripts run beside a match, declared in a
-   `script.toml`, and can manipulate game state) sets the initial state
-   when the scenario starts. Exact class and call names to be confirmed
-   from the RLBot python-interface repository (the v5 wiki pages did not
-   show them).
+   `script.toml`) sets the initial state with a `DesiredGameState` when the
+   scenario starts, as in the `high_jump_script` example.
 3. **RLBot bot** replays the input timeline tick by tick: a deliberately
    dumb "tape player".
 4. **BakkesMod plugin** (`bakkesmod-plugin/rusty_bullet_capture`, already
@@ -75,6 +108,15 @@ Rows 1 to 3 and 6 target open questions already recorded in
   decisions (see `RB-RESEARCH-O005`).
 - A reusable harness. Same stance as ADR-0005: a one-off script per spike
   until a second use shows it is needed.
+
+## Where the code would live
+
+A standalone Cargo package outside the workspace (for example
+`tools/rb_tape_bot`), so the `rlbot` dependency and its transitive crates
+stay out of the workspace build, CI and `rb_domain`. Dependency
+justification for the PR: it is the only maintained Rust client for the
+v5 socket API, MIT licensed; hand-rolling a FlatBuffers client is worse.
+It reads the scenario JSON and has no dependency on the physics crates.
 
 ## Next
 
