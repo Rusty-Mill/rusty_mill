@@ -129,6 +129,11 @@ bot does both jobs, so no script/bot timing sync is needed; whether core
 accepts state setting from a bot is an open risk. Run steps and scenario
 format are in `tools/rb_tape_bot/README.md`.
 
+Scenarios (11, 2026-10-05): prompt and late dodge, three wavedash timings,
+speed flip, half flip, pogo, and reproductions of the `test2.jsonl` 18.308 s
+landing and 8.95 s corner slide and the `hitjump.jsonl` 77.642 s car over
+the ball. Each has a port prediction in `tools/rb_tape_bot/README.md`.
+
 ## Next
 
 Run risk spikes 1 and 2 on the owner's machine with a trivial tape (jump
