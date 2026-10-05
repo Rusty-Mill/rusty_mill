@@ -13,6 +13,30 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi: Codex CLI as the outer proposer
+**2026-10-04** · [#485](https://github.com/Rusty-Mill/rusty_mill/pull/485) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `CodexProposer` (`rsi-runtime::codex`), selected with `RSI_OUTER_PROPOSER=codex`.
+  - It runs `codex exec` inside `rsi`'s own sandbox. Codex's bubblewrap sandbox cannot start inside Landlock, so Codex runs in its documented external-sandbox mode (`--dangerously-bypass-approvals-and-sandbox`, plus `--ephemeral`, `--ignore-user-config` and `--ignore-rules`).
+  - Codex edits a staging copy of the worktree that has no `.git`. It may write only that copy, `CODEX_HOME`, a private `TMPDIR` and `/dev/null`, and it uses the network.
+  - It cannot reach the tasks, the repository or the run directory: the proposer refuses to start if its sandbox could.
+  - Changes come back through the same no-follow, no-`.git` writer the model proposer uses, so the allowlist still decides.
+  - Codex signs in with its own login; no key passes through `rsi`. Configuration: `RSI_OUTER_CODEX` (the native binary, default `codex` on `PATH`), `RSI_OUTER_MODEL` (optional) and `CODEX_HOME`.
+- **Added:** `Sockets::Internet`, a sandbox socket rule for the Codex proposer only. It skips the internet-socket filter but keeps the process-group, `io_uring` and x32 locks.
+- **Fixed:** rustils 0.27.2 (`platform-linux`). `Sandbox::confine_filesystem` accepted only directory roots: a file root failed with `EINVAL`. A file root now grants that file alone.
+- **Tests:**
+  - **Fake `codex`.** A fake `codex` script runs through the real sandbox. Its edits, additions and deletions come back. `.git` is untouched. It cannot write outside, read private labels or open devices other than `/dev/null` and `/dev/urandom`, while internet sockets work. Failures name their cause, such as `codex login`.
+  - **Protected paths.** A protected path within reach stops the run before Codex starts.
+  - **Mutation checks.** Each check catches its mutation: running without the internet rule, and dropping the protected-path check.
+  - **Real Codex.** An `#[ignore]`d test runs a real, logged-in Codex.
+- Known limitations:
+  - Codex's token use is not recorded.
+  - Network access is not restricted to the model's host.
+  - Codex reads `/etc` whole.
+  - No real Codex run was possible in CI or in the session that built this (no login).
+
+---
+
 ## rusty_fair_play: choose the family deck, equal tiles, a collapsible side panel
 **2026-10-04** · [ADR-0001](crates/apps/rusty_fair_play/docs/decisions/ADR-0001-front-end-shape.md) (decision 10)
 

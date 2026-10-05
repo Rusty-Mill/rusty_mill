@@ -20,6 +20,18 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.27.2
+
+- **`Sandbox::confine_filesystem` accepts file roots (`platform-linux`).**
+  A readable or writable root that is a single file (say `/dev/null`)
+  used to fail with `EINVAL`, because the kernel refuses directory-only
+  rights in a rule on a non-directory. The grant is now masked to the
+  file rights (execute, read, and for a writable root write), so the
+  root grants that file alone: nothing beside it can be created, read or
+  removed. Directory roots are unchanged. Consumer: `rusty_rsi`'s Codex
+  proposer sandbox, which must allow `/dev/null` without opening all of
+  `/dev`. No public item changes shape, hence the patch-level bump.
+
 ### 0.27.1
 
 - **Fixed `LinuxPty::spawn`'s resize race (`platform-linux`).** The

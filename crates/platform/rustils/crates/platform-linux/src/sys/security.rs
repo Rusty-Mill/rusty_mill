@@ -122,6 +122,25 @@ const ABI_V1_ALL_ACCESS: u64 = ACCESS_FS_EXECUTE
 /// directory's entries, execute a file. No write/create/delete rights.
 const READ_ONLY_ACCESS: u64 = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
 
+/// The rights that apply to a file itself. The kernel rejects a rule on a
+/// non-directory that names any other right (`EINVAL`), so a root that is
+/// a file (say `/dev/null`) gets its grant masked to these.
+const FILE_ACCESS: u64 = ACCESS_FS_EXECUTE | ACCESS_FS_WRITE_FILE | ACCESS_FS_READ_FILE;
+
+/// `allowed_access` as a rule on `path` may carry it: unchanged for a
+/// directory, masked to [`FILE_ACCESS`] for anything else.
+fn rule_access(path: &Path, allowed_access: u64) -> Result<u64> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        let code = e.raw_os_error().unwrap_or(0);
+        errno_err("stat", code).with_path(path)
+    })?;
+    Ok(if meta.is_dir() {
+        allowed_access
+    } else {
+        allowed_access & FILE_ACCESS
+    })
+}
+
 fn open_path_fd(path: &Path) -> Result<i32> {
     let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         PlatformError::new(ErrorKind::InvalidInput, OsCode::None, "confine_filesystem")
@@ -188,6 +207,7 @@ fn create_ruleset() -> Result<Option<i32>> {
 }
 
 fn add_rule(ruleset_fd: i32, path: &Path, allowed_access: u64) -> Result<()> {
+    let allowed_access = rule_access(path, allowed_access)?;
     let parent_fd = open_path_fd(path)?;
     let rule_attr = LandlockPathBeneathAttr {
         allowed_access,

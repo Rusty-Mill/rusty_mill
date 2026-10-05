@@ -152,8 +152,11 @@ pub enum SandboxStatus {
 pub trait Sandbox {
     /// Deny all filesystem access except read+execute under
     /// `readable_roots` and read+write+create+delete under
-    /// `writable_roots`. Call from a single-threaded context (see the
-    /// trait doc comment).
+    /// `writable_roots`. A root may also be a single file (say
+    /// `/dev/null`): it then grants that file alone, with the file rights
+    /// of its kind (read and execute, or read, write and execute), and no
+    /// right to create or remove anything beside it. Call from a
+    /// single-threaded context (see the trait doc comment).
     fn confine_filesystem(
         &self,
         readable_roots: &[&Path],

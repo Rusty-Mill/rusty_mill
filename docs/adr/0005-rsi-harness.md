@@ -108,7 +108,7 @@ inner loop cannot score privately.
 | `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
 | `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
 | `ChatModel` | `complete(&[Message], max_tokens, timeout) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
-| `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests. A Codex CLI proposer is deferred (§7, as built). |
+| `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests; `CodexProposer` over `codex exec` in the sandbox (§7, as built). |
 | `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
 | `LineageStore` | `append(&LineageEntry) -> Result<Digest>` (the entry's chain hash), `entries()` (verifies the chain first) | `JsonlLineage`: append-only JSONL plus a content-addressed blob dir (see §6). |
@@ -488,7 +488,8 @@ For step k:
 
 Both the `CodexCliProposer` subprocess and the HTTP proposer run under
 the same Landlock read allowlist. Network is allowed there, since that
-is the outer model's endpoint.
+is the outer model's endpoint. (As built, the HTTP proposer runs in the
+`rsi` process and only `codex exec` is sandboxed; see below.)
 
 **As built (P4).**
 - **Ports.** `Proposer::propose(&[Precedent], &Path)` edits the worktree in
@@ -569,11 +570,44 @@ is the outer model's endpoint.
     directory must be a real directory (a symlinked parent is refused,
     and missing ones are created one level at a time), and a planted
     symlink at the leaf is replaced rather than followed. The allowlist decides afterwards.
-  - **Codex CLI (deferred).** Running `codex exec` safely needs its own
-    sandbox profile (Landlock plus network), and plain-HTTP-only model
-    access rules out hosted endpoints. Remote outer models therefore wait
-    on that adapter or on TLS, and an outer model is a local
-    OpenAI-compatible endpoint for now.
+- **Codex CLI proposer** (`CodexProposer`, `RSI_OUTER_PROPOSER=codex`).
+  It runs `codex exec` under the sandbox helper, in its own profile.
+  - **Why our sandbox only.** Codex's Linux sandbox (bubblewrap) cannot
+    start inside a Landlock domain ("error building bubblewrap command:
+    Permission denied" with codex-cli 0.160.0), and running Codex outside
+    ours would let the commands it runs read private task data, since its
+    own `workspace-write` mode reads the whole disk. So Codex runs with
+    `--dangerously-bypass-approvals-and-sandbox` (its documented mode for
+    an external sandbox), plus `--ephemeral`, `--ignore-user-config`,
+    `--ignore-rules` and `--skip-git-repo-check`, and this sandbox is the
+    boundary.
+  - **Files.** Codex edits a staging copy of the worktree with no `.git`,
+    so it cannot redirect the commit. It may write only that copy, its
+    `CODEX_HOME`, a private `TMPDIR` and `/dev/null`. It may read the
+    system directories, `/etc` (DNS and certificates), `/dev/urandom`,
+    its install directory and the directory of `SSL_CERT_FILE`. The
+    proposer refuses to start if that spec could reach a protected path
+    (the tasks, the repository, the run directory, the executor's state).
+    File roots such as `/dev/null` need rustils 0.27.2, whose Landlock
+    rules accept a single file.
+  - **Network.** A new socket rule, `Sockets::Internet`, skips the
+    internet-socket filter; the process-group, `io_uring` and x32 locks
+    stay. Proxy and certificate variables (`HTTPS_PROXY`, `NO_PROXY`,
+    `SSL_CERT_FILE`, ...) pass through; nothing else from the
+    environment does.
+  - **Back into the worktree.** Each change in the copy is replayed with
+    `write_inside`, `link_inside` or `remove_inside`, which keep the
+    no-follow, no-`.git` rules above, so a symlink Codex makes is
+    recreated for the allowlist to reject, never followed.
+  - **Login and cost.** Codex signs in with its own login under
+    `CODEX_HOME`; no key passes through `rsi`. Its token use is not
+    reported back, so the proposal's usage is zero (the outer cost was
+    already unrecorded).
+  - **Tests.** A fake `codex` script runs through the real helper and
+    checks the edits that come back, that `.git` is untouched, and that
+    it cannot write outside, read private data or open devices other
+    than `/dev/null` and `/dev/urandom`, while internet sockets work. An
+    `#[ignore]`d test runs a real, logged-in Codex.
 - **Replay** (`rsi report --replay`).
   - **Grade replay.** Every stored submission is re-graded through the
     out-of-process grader, and each private score must match bit for bit.
