@@ -80,6 +80,7 @@ fn add(path: &Path, content: &str) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()

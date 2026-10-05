@@ -7,6 +7,14 @@ app crate (its [ADR-0124](../../../apps/rusty_multimodal_db/docs/decisions/ADR-0
 The first consumer outside `rusty_multimodal_db` is `rusty_remind_me`'s hub
 ([its ADR-0021](../../../apps/rusty_remind_me/docs/adr/0021-hub-storage-moves-to-rusty-multimodal-db.md)).
 
+## Versioning
+
+The crate version tracks the API and behaviour; see `CHANGELOG.md`. File formats
+are versioned in the files themselves, by a header version and, for each record
+type, a schema tag. A consumer that changes a record's layout changes that
+record's tag and upgrades old files when it opens them; the engine refuses a
+table whose tag it does not expect rather than reading it wrongly.
+
 ## What's here
 
 - `generic::traits`: what a record type implements (`Record`,

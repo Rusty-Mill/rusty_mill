@@ -4,16 +4,23 @@ cargo metadata.
 Run from the repo root:
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 """
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from lockfile_diff import (
     affected_by_lockfile_changes,
     changed_package_keys,
     full_dependency_closure,
     lockfile_package_keys,
+    reliable_lockfile_impact,
 )
 
 ROOT = "/repo"
+SCRIPT = Path(__file__).with_name("lockfile_diff.py")
 
 
 def lock(entries: list[tuple[str, str, str | None, str | None]]) -> str:
@@ -62,12 +69,39 @@ class LockfilePackageKeysTests(unittest.TestCase):
         text = lock([("serde", "1.0.0", "registry+https://x", "abc123")])
         self.assertEqual(
             lockfile_package_keys(text),
-            {("serde", "1.0.0"): ("registry+https://x", "abc123")},
+            {("serde", "1.0.0"): ("registry+https://x", "abc123", ())},
         )
 
     def test_missing_source_and_checksum_are_none(self) -> None:
         text = lock([("local_crate", "0.1.0", None, None)])
-        self.assertEqual(lockfile_package_keys(text), {("local_crate", "0.1.0"): (None, None)})
+        self.assertEqual(lockfile_package_keys(text), {("local_crate", "0.1.0"): (None, None, ())})
+
+    def test_duplicate_name_version_with_different_sources_is_ambiguous(self) -> None:
+        text = """[[package]]
+name = "same"
+version = "1.0.0"
+source = "registry+https://example.invalid"
+
+[[package]]
+name = "same"
+version = "1.0.0"
+source = "git+https://example.invalid/same"
+"""
+        with self.assertRaisesRegex(ValueError, "ambiguous duplicate"):
+            lockfile_package_keys(text)
+
+    def test_dependency_list_change_is_detected(self) -> None:
+        old = '''[[package]]
+name = "app"
+version = "1.0.0"
+dependencies = ["dep_a 1.0.0"]
+'''
+        new = '''[[package]]
+name = "app"
+version = "1.0.0"
+dependencies = ["dep_b 1.0.0"]
+'''
+        self.assertEqual(changed_package_keys(old, new), {("app", "1.0.0")})
 
 
 class ChangedPackageKeysTests(unittest.TestCase):
@@ -122,12 +156,66 @@ class FullDependencyClosureTests(unittest.TestCase):
         closures = full_dependency_closure(md)
         self.assertEqual(closures["leaf"], set())
 
+    def test_cycle_reaches_external_dependency_from_every_member(self) -> None:
+        md = metadata(
+            {"a": ("crates/a", ["b", "external"]), "b": ("crates/b", ["a"])},
+            external={"external": "1.0.0"},
+        )
+        closures = full_dependency_closure(md)
+        self.assertIn("external", closures["a"])
+        self.assertIn("external", closures["b"])
+
 
 class AffectedByLockfileChangesTests(unittest.TestCase):
     def test_direct_dependent_of_a_bumped_external_crate_is_affected(self) -> None:
         md = metadata({"a": ("crates/a", ["serde"])}, external={"serde": "1.0.1"})
         affected = affected_by_lockfile_changes(md, {("serde", "1.0.0"), ("serde", "1.0.1")})
         self.assertEqual(affected, ["a"])
+
+    def test_app_only_dependency_update_stays_narrow(self) -> None:
+        md = metadata(
+            {
+                "rusty_fair_play": ("crates/apps/rusty_fair_play", ["web_dep"]),
+                "unrelated": ("crates/apps/unrelated", []),
+            },
+            external={"web_dep": "2.0.0"},
+        )
+        self.assertEqual(
+            affected_by_lockfile_changes(md, {("web_dep", "1.0.0"), ("web_dep", "2.0.0")} ),
+            ["rusty_fair_play"],
+        )
+
+    def test_shared_dependency_selects_all_workspace_consumers(self) -> None:
+        md = metadata(
+            {
+                "rusty_fair_play": ("crates/apps/rusty_fair_play", ["shared"]),
+                "rusty_tick": ("crates/apps/rusty_tick", ["shared"]),
+            },
+            external={"shared": "2.0.0"},
+        )
+        self.assertEqual(
+            affected_by_lockfile_changes(md, {("shared", "1.0.0"), ("shared", "2.0.0")} ),
+            ["rusty_fair_play", "rusty_tick"],
+        )
+
+    def test_removed_dependency_missing_from_head_metadata_falls_back_to_all(self) -> None:
+        md = metadata(
+            {"rusty_fair_play": ("crates/apps/rusty_fair_play", []), "rusty_tick": ("crates/apps/rusty_tick", [])},
+            external={},
+        )
+        self.assertEqual(
+            affected_by_lockfile_changes(md, {("removed_dependency", "1.0.0")} ),
+            ["rusty_fair_play", "rusty_tick"],
+        )
+
+    def test_mixed_known_update_and_unknown_removal_is_not_narrowed(self) -> None:
+        md = metadata(
+            {"rusty_fair_play": ("crates/apps/rusty_fair_play", ["known"])},
+            external={"known": "2.0.0"},
+        )
+        changed = {("known", "1.0.0"), ("known", "2.0.0"), ("unknown_removed", "1.0.0")}
+        self.assertIsNone(reliable_lockfile_impact(md, changed))
+        self.assertEqual(affected_by_lockfile_changes(md, changed), ["rusty_fair_play"])
 
     def test_transitive_dependent_through_another_workspace_crate_is_affected(self) -> None:
         md = metadata(
@@ -158,6 +246,7 @@ class AffectedByLockfileChangesTests(unittest.TestCase):
         )
         affected = affected_by_lockfile_changes(md, {("unknown_pkg", "9.9.9")})
         self.assertEqual(affected, ["a", "b"])
+        self.assertIsNone(reliable_lockfile_impact(md, {("unknown_pkg", "9.9.9")}))
 
     def test_a_workspace_members_own_version_pin_changing_counts_directly(self) -> None:
         md = metadata({"a": ("crates/a", []), "b": ("crates/b", ["a"])}, external={})
@@ -165,6 +254,42 @@ class AffectedByLockfileChangesTests(unittest.TestCase):
         # metadata() helper; simulate its own key changing.
         affected = affected_by_lockfile_changes(md, {("a", "0.0.0")})
         self.assertEqual(affected, ["a", "b"])
+
+    def test_cli_narrows_valid_input_and_rejects_malformed_or_mixed_unknown_input(self) -> None:
+        md = metadata(
+            {"rusty_fair_play": ("crates/apps/rusty_fair_play", ["known"])},
+            external={"known": "2.0.0"},
+        )
+        old = lock([("known", "1.0.0", None, None)])
+        new = lock([("known", "2.0.0", None, None)])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata_path = root / "metadata.json"
+            old_path = root / "old.lock"
+            new_path = root / "new.lock"
+            metadata_path.write_text(json.dumps(md), encoding="utf-8")
+            old_path.write_text(old, encoding="utf-8")
+            new_path.write_text(new, encoding="utf-8")
+            valid = self._run_cli(metadata_path, old_path, new_path)
+            self.assertEqual(valid.returncode, 0)
+            self.assertEqual(valid.stdout, "rusty_fair_play\n")
+
+            old_path.write_text(old + lock([("unknown", "1.0.0", None, None)]), encoding="utf-8")
+            mixed = self._run_cli(metadata_path, old_path, new_path)
+            self.assertNotEqual(mixed.returncode, 0)
+
+            new_path.write_text("not = [valid", encoding="utf-8")
+            malformed = self._run_cli(metadata_path, old_path, new_path)
+            self.assertNotEqual(malformed.returncode, 0)
+
+    @staticmethod
+    def _run_cli(metadata_path: Path, old_path: Path, new_path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), str(metadata_path), str(old_path), str(new_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
 
 if __name__ == "__main__":

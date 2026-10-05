@@ -65,6 +65,12 @@ interface Draft {
 }
 
 const draftOf = (c: Card): Draft => ({ suit: c.suit, parentCardId: c.parentCardId, conception: c.conception, planning: c.planning, execution: c.execution, minimumStandardOfCare: [...c.minimumStandardOfCare], notes: c.notes })
+type DraftField = keyof Draft
+const draftFields: DraftField[] = ['suit', 'parentCardId', 'conception', 'planning', 'execution', 'minimumStandardOfCare', 'notes']
+const sameDraftValue = (left: Draft[DraftField], right: Draft[DraftField]): boolean =>
+  Array.isArray(left) && Array.isArray(right) ? left.join('\u0000') === right.join('\u0000') : left === right
+
+const zeroGenerations = (): Record<DraftField, number> => ({ suit: 0, parentCardId: 0, conception: 0, planning: 0, execution: 0, minimumStandardOfCare: 0, notes: 0 })
 
 function CardDetail({ card }: { card: Card }) {
   const navigate = useNavigate()
@@ -72,20 +78,19 @@ function CardDetail({ card }: { card: Card }) {
   const index = useData((s) => s.index)
   const { updateCard, reorderChildren, deleteCard, unsplit, setInPlay } = useActions()
   const [draft, setDraft] = useState<Draft>(() => draftOf(card))
+  // Equality with the previous server value cannot tell an untouched field from a real edit
+  // back to that value. Generations make that distinction, including while Save is in flight.
+  const editGenerations = useRef(zeroGenerations())
+  const cleanGenerations = useRef(zeroGenerations())
   // When the card changes under the draft (a reset, a background refresh), fields the user has not touched follow it.
   const [base, setBase] = useState(card)
   if (base !== card) {
-    const was = draftOf(base)
     const now = draftOf(card)
-    setDraft({
-      suit: draft.suit === was.suit ? now.suit : draft.suit,
-      parentCardId: draft.parentCardId === was.parentCardId ? now.parentCardId : draft.parentCardId,
-      conception: draft.conception === was.conception ? now.conception : draft.conception,
-      planning: draft.planning === was.planning ? now.planning : draft.planning,
-      execution: draft.execution === was.execution ? now.execution : draft.execution,
-      minimumStandardOfCare: draft.minimumStandardOfCare.join('\u0000') === was.minimumStandardOfCare.join('\u0000') ? now.minimumStandardOfCare : draft.minimumStandardOfCare,
-      notes: draft.notes === was.notes ? now.notes : draft.notes,
-    })
+    const next = { ...draft }
+    for (const field of draftFields) {
+      if (editGenerations.current[field] === cleanGenerations.current[field]) Object.assign(next, { [field]: now[field] })
+    }
+    setDraft(next)
     setBase(card)
   }
   // The version the edit was started from. It stays put while the card moves on underneath (a
@@ -120,15 +125,37 @@ function CardDetail({ card }: { card: Card }) {
   /** The first change of a clean draft records which version it is based on. */
   const edit = (next: Draft): void => {
     if (!dirty) setDraftBase(card.etag)
+    for (const field of draftFields) {
+      if (!sameDraftValue(draft[field], next[field])) {
+        editGenerations.current[field]++
+        // A manual revert with no request in flight is clean again and should follow a later
+        // refresh. During a save, however, the same value can be a deliberate newer edit back
+        // to the pre-save value, so its generation must remain outstanding.
+        if (!saving && sameDraftValue(next[field], draftOf(card)[field])) {
+          cleanGenerations.current[field] = editGenerations.current[field]
+        }
+      }
+    }
     setDraft(next)
   }
 
   const save = async (base: string): Promise<void> => {
+    const submittedChanges = changes
+    const submittedGenerations = { ...editGenerations.current }
     setSaving(true)
     try {
       // The store merges the saved card in; the follow-the-card logic above then clears the
       // fields that were just saved and keeps anything typed while the request was in flight.
-      const saved = await updateCard(card.id, changes, base)
+      const saved = await updateCard(card.id, submittedChanges, base)
+      setDraft((current) => {
+        const next = { ...current }
+        for (const field of draftFields) {
+          if (!(field in submittedChanges) || editGenerations.current[field] !== submittedGenerations[field]) continue
+          Object.assign(next, { [field]: draftOf(saved)[field] })
+          cleanGenerations.current[field] = submittedGenerations[field]
+        }
+        return next
+      })
       setDraftBase(saved.etag)
     } catch (e) {
       // Toasted by the store. The draft stays; on a 412 the card is now the newer one, so the
@@ -271,7 +298,11 @@ function CardDetail({ card }: { card: Card }) {
               </p>
             )}
             <div className="flex items-center justify-end gap-2">
-              <button type="button" onClick={() => setDraft(draftOf(card))} className="btn border-transparent">
+              <button type="button" onClick={() => {
+                setDraft(draftOf(card))
+                cleanGenerations.current = { ...editGenerations.current }
+                setDraftBase(card.etag)
+              }} className="btn border-transparent">
                 {conflicted ? 'Discard mine' : 'Cancel'}
               </button>
               <button type="button" onClick={() => void save(conflicted ? card.etag : draftBase)} disabled={saving} className="btn-primary">
@@ -379,36 +410,102 @@ function NameField({ card }: { card: Card }) {
   const { updateCard } = useActions()
   const [value, setValue] = useState(card.name)
   const [editing, setEditing] = useState(false)
+  const [hasDraft, setHasDraft] = useState(false)
+  const [conflicted, setConflicted] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const editBase = useRef(card.etag)
+  const submitting = useRef(false)
   const cancelled = useRef(false)
-  const commit = (): void => {
+  const editGeneration = useRef(0)
+  const commit = (base = editBase.current, overwrite = false): void => {
     setEditing(false)
     if (cancelled.current) {
       cancelled.current = false
+      setHasDraft(false)
       return setValue(card.name)
     }
+    if (submitting.current) return
+    if (conflicted && !overwrite) return
     const next = value.trim()
-    if (!next || next === card.name) return setValue(card.name)
-    void updateCard(card.id, { name: next }, card.etag).catch(() => setValue(card.name))
+    if (!next || next === card.name) {
+      setHasDraft(false)
+      return setValue(card.name)
+    }
+    submitting.current = true
+    const submittedGeneration = editGeneration.current
+    setSaving(true)
+    void updateCard(card.id, { name: next }, base)
+      .then((saved) => {
+        // The name stays editable while the request is pending. Do not let its response erase
+        // a newer draft, even when that draft deliberately equals the old server name.
+        if (editGeneration.current === submittedGeneration) {
+          setValue(saved.name)
+          setHasDraft(false)
+          setConflicted(false)
+        }
+        // A newer draft was still made against this request's result once it succeeds.
+        // Advancing only its base preserves that draft without letting the old value replace it.
+        editBase.current = saved.etag
+      })
+      .catch((error: unknown) => {
+        // A discarded or superseded draft must not be brought back as a conflict by an
+        // older request that happens to finish after it.
+        if (error instanceof StaleError && editGeneration.current === submittedGeneration) setConflicted(true)
+      })
+      .finally(() => {
+        submitting.current = false
+        setSaving(false)
+      })
   }
   return (
-    <input
-      aria-label="Name"
-      value={editing ? value : card.name}
-      onFocus={() => {
-        setValue(card.name)
-        setEditing(true)
-      }}
-      onChange={(e) => setValue(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        if (e.key === 'Escape') {
-          e.stopPropagation()
-          cancelled.current = true
-          ;(e.target as HTMLInputElement).blur()
-        }
-      }}
-      className="w-full rounded-row border border-transparent bg-transparent px-1 text-title font-semibold outline-none hover:border-line focus:border-primary"
-    />
+    <div className="flex flex-col gap-1.5">
+      <input
+        aria-label="Name"
+        value={editing || hasDraft ? value : card.name}
+        onFocus={() => {
+          if (!hasDraft) {
+            setValue(card.name)
+            editBase.current = card.etag
+          }
+          setEditing(true)
+        }}
+        onChange={(e) => {
+          editGeneration.current++
+          setValue(e.target.value)
+          setHasDraft(true)
+        }}
+        onBlur={() => commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          if (e.key === 'Escape') {
+            e.stopPropagation()
+            // Invalidate an in-flight request before blur. commit consumes the cancellation
+            // even while another submission is pending, so it cannot leak into the next edit.
+            editGeneration.current++
+            cancelled.current = true
+            setConflicted(false)
+            ;(e.target as HTMLInputElement).blur()
+          }
+        }}
+        className="w-full rounded-row border border-transparent bg-transparent px-1 text-title font-semibold outline-none hover:border-line focus:border-primary"
+      />
+      {conflicted && (
+        <div className="flex flex-col gap-1.5">
+          <p role="alert" className="m-0 text-s text-danger">This name changed elsewhere. Your name is kept; overwrite the newer name or discard yours.</p>
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn border-transparent" onClick={() => {
+              setValue(card.name)
+              setHasDraft(false)
+              setConflicted(false)
+              editBase.current = card.etag
+            }}>Discard mine</button>
+            <button type="button" className="btn-primary" disabled={saving} onClick={() => {
+              setConflicted(false)
+              commit(card.etag, true)
+            }}>Overwrite</button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

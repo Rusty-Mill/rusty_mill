@@ -81,6 +81,7 @@ fn a_store_without_imports_has_nothing_to_normalize() {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap();
@@ -465,6 +466,7 @@ fn the_distillation_is_searchable() {
     let found = queries::search_memories(
         &store,
         &remind_me_core::MemorySearchInput {
+            scope: Default::default(),
             strategy: Default::default(),
             include_sensitive: false,
             query: "quokka".into(),
@@ -480,6 +482,8 @@ fn the_distillation_is_searchable() {
             include_neighbors: false,
             expand_co_retrieval: false,
             bootstrap: false,
+            include_expired: true,
+            min_confidence: 0.0,
         },
     )
     .unwrap();
