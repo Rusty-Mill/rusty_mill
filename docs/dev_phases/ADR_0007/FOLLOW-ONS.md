@@ -4,17 +4,17 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged, steps 1 to 4 of the build order below are done and
-step 5 has its first two channels:
+ADR-0007 is merged and steps 1 to 5 of the build order below are done:
 the workspace speaks AG-UI on both sides, the reference TypeScript client
 accepts what the server sends, a headless TypeScript core mirrors the
 crate against shared fixtures, a React binding sits on the core,
 `rusty_tick` ships an assistant on it, the gateway can front any AG-UI
 endpoint with a deny-by-default rule set and an audit record either side
-of the run, and any AG-UI endpoint can be a Slack or Teams bot.
+of the run, and any AG-UI endpoint can be a Slack, Teams or SMS bot.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 5, SMS | `sms::Twilio`: HMAC-SHA1 webhook signature on `rusty_sha1`, one conversation per pair of numbers, TwiML ack, `Messages.json` reply; the `ack` hook on `Channel` |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Teams | `teams::Teams` over the Azure Bot Framework (JWT verified with `rusty_oauth`, replies with a client-credentials token); the runner hoisted into `bot::Bot` for both examples |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Slack | `rusty_channel`: the sans-IO `Channel` trait, a `Thread` per conversation, the Slack Events API adapter, and a bot example on `rusty_serve` that runs any AG-UI endpoint |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 4 | `rusty_agent_gateway`'s `agui` route policy (`agentgateway-agui`): CEL rules over the run input, the request and the caller's claims, deny by default; a decision record before the upstream call and an outcome record when the stream ends |
@@ -80,7 +80,7 @@ Both targets start with the same two pieces, so they come first.
 | 2 | **Done.** `@rusty-mill/agui-core` (TypeScript, headless): parser, SSE decoder, JSON patch, verifier, reducer, `runAgent`; `fixtures/` shared with the Rust tests | 1 PR | No |
 | 3 | **Done.** React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function, `respond` for human in the loop), `useSharedState`; `rusty_tick` as the first consumer | 2 PRs | No |
 | 4 | **Done.** Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1 PR, touches `rusty_agent_gateway` | Given |
-| 5 | **Slack and Teams done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given for Slack and Teams; SMS still needs it |
+| 5 | **Done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given |
 | 6 | Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
 | 7 | Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Yes: ADR-0005 scoped the executor to `rsi` |
 | 8 | Angular and Vue bindings over `agui-core` | 1 PR each, when a consumer exists | No |
@@ -130,6 +130,12 @@ before: the hooks are the API, the components are one rendering of it.
   credential fetch before each reply. That fetch is a `Channel` hook with
   a default (`credential` returns `Ready`), so Slack did not change; the
   trait grew by what the second service needed and nothing more.
+- **Step 5's SMS channel is Twilio only.** The `Channel` trait is the
+  seam; another carrier is another adapter. Twilio's signature covers the
+  webhook's own public URL, which is why `sms::Twilio` is told that URL
+  rather than reading it off the request: the request's `Host` is
+  whatever the tunnel or proxy set, and trusting it would let a forwarded
+  request be signed for a different address.
 - **Step 5 ignores Slack's retries.** Slack re-sends an event it got no
   `200` for within three seconds; an agent run can take longer. The
   runner answers first and runs after, and a delivery marked as a retry
