@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Context for every agent working in this repo (Claude Code, Codex, Gemini CLI, local models). Single source of truth; `CLAUDE.md` imports it.
+Context for every agent working in this repo (Claude Code, Codex, local models). Single source of truth; `CLAUDE.md` imports it.
 
 ## What this is
 rusty_orch: a multi-model orchestrator built on a shared blackboard instead of agent messaging. Read ARCHITECTURE.md and docs/adr/ before changing structure.
