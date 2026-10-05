@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
+**2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
+
+- **Added:** `Status::WontDo` (`status: "wontdo"`, `?status=wontdo`), appended last so stored tasks still decode. Closing stamps `completedMs` and keeps the first stamp; the task menu has Won't Do and Mark as open; closed tasks list under Completed.
+- **Added:** a Countdown page over a `countdown` doc kind; pomo estimates over an `estimate` doc kind (a stepper on the Pomodoro page and an estimated-against-actual list); an Interrupted button whose count is stored on the focus record.
+- **Added:** `.ics` import from the Calendar view menu: events and todos become Inbox tasks (all-day end dates exclusive, `TZID` converted, cancelled/completed skipped, unsupported repeat rules imported once), capped at 500 per file.
+- **Changed:** a shared `createDocStore` backs filters, countdowns and estimates.
+- **Verified:** `cargo fmt --check`, `clippy -D warnings`, `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (616), `npm run build`.
+- Known limitations: no calendar subscription by URL (needs a server-side fetcher); re-importing a file duplicates its tasks; an estimate for a purged task stays stored; a new web UI needs a new server (an old one rejects `wontdo` and the new doc kinds); doc saves are reported but not retried.
+
+---
+
 ## rusty_baseline: honest measurement status
 **2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
 
