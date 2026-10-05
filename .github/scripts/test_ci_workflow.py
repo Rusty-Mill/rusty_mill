@@ -283,6 +283,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
+    def test_agui_package_change_selects_tick_web_too(self) -> None:
+        flags = specialized_job_flags(["crates/libs/protocol/rusty_agui/packages/agui-react/src/hooks.tsx"], [])
+        self.assertTrue(flags["agui"])
+        self.assertTrue(flags["tick"])
+
     def test_shared_and_specialized_package_rules(self) -> None:
         flags = specialized_job_flags(
             [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "remind_me_hub"]

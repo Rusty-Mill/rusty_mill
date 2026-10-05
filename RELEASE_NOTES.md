@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: the assistant, the React binding's first consumer
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, second PR
+
+- **Added:** `rusty_tick::assistant`, an AG-UI agent served at `POST /api/agent` through `rusty_agui::AgentHandler`, behind the same bearer token as every other route (`Backend::authorize`; the streaming route lives in `server.rs` because it cannot return the buffered API response). It is deterministic and holds no store: it reads the thread, the context the UI exposes and the tools the UI offers, and answers as a pure function (`decide`). "add buy milk" becomes a `create_task` tool call the browser runs; a tool message answering it becomes "Added “buy milk”."; "what's due?" reads the open view; anything else gets help. An LLM-backed agent can replace it behind the same trait.
+- **Added:** the web UI's Assistant panel (`src/features/assistant`, a rail button, `assistantOpen` in the UI store), on `@rusty-mill/agui-react`: `useReadable` for the open view and its tasks, `useAction` for `create_task` against the app's own store, `useAgent` for the thread. The agui packages are linked as `file:` dependencies; Vite dedupes React and inlines them in tests.
+- **Tests:** three Rust tests on `decide` and one over a socket (a bad token gets 401, a good one streams a run with the tool call); two web tests through the real panel, store and hooks over a scripted agent (the task lands in the store and the confirmation shows; a 404 is shown and the panel stays usable).
+- **CI:** the `rusty_tick web` and `rusty_tick e2e` jobs build the agui packages first; a change under `packages/` also selects the tick jobs.
+
+---
+
 ## rusty_agui: the React binding
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, first PR
 

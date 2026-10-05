@@ -152,6 +152,11 @@ def specialized_job_flags(
         flags[job] = flags.get(job, False) or any(
             package.startswith(prefix) for package in package_set for prefix in prefixes
         )
+    # rusty_tick's web UI links the agui TypeScript packages, which no Cargo
+    # edge represents.
+    flags["tick"] = flags.get("tick", False) or any(
+        path.startswith("crates/libs/protocol/rusty_agui/packages/") for path in paths
+    )
     flags["remind_me"] = any(
         path.startswith("crates/apps/rusty_remind_me/") for path in paths
     ) or any(

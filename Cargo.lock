@@ -14359,6 +14359,7 @@ dependencies = [
 name = "rusty_tick"
 version = "0.0.1"
 dependencies = [
+ "rusty_agui",
  "rusty_atomic_file",
  "rusty_base64",
  "rusty_http",

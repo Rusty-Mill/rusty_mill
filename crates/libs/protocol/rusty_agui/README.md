@@ -86,7 +86,9 @@ types, SSE decoder, verifier with chunk expansion and reducer, plus
 `runAgent`/`streamAgent` over `fetch`. [`packages/agui-react`](packages/agui-react/README.md)
 is the React binding on it: an `AgentProvider` and the `useAgent`,
 `useReadable`, `useAction` (frontend tools, generative UI, human in the
-loop) and `useSharedState` hooks, headless. [`fixtures/`](fixtures/) is shared by both sides: event samples
+loop) and `useSharedState` hooks, headless. `rusty_tick`'s assistant
+(`crates/apps/rusty_tick/src/assistant.rs` and its web panel) is the
+first consumer of both the server and the binding. [`fixtures/`](fixtures/) is shared by both sides: event samples
 round-trip, chunk sequences expand and whole runs reduce identically in
 Rust and TypeScript.
 

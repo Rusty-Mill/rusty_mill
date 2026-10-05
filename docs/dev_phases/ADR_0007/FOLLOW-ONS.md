@@ -4,14 +4,15 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged, and steps 1, 2 and the first half of 3 of the build
-order below are done: the workspace speaks AG-UI on both sides, the
-reference TypeScript client accepts what the server sends, a headless
-TypeScript core mirrors the crate against shared fixtures, and a React
-binding sits on the core.
+ADR-0007 is merged, and steps 1 to 3 of the build order below are done:
+the workspace speaks AG-UI on both sides, the reference TypeScript client
+accepts what the server sends, a headless TypeScript core mirrors the
+crate against shared fixtures, a React binding sits on the core, and
+`rusty_tick` ships an assistant on it.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, second PR | `rusty_tick`'s assistant: a store-free agent at `POST /api/agent`, and the web UI's Assistant panel on the React binding (view as context, `create_task` as a frontend tool) |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, first PR | `@rusty-mill/agui-react`: `AgentProvider`, `useAgent`, `useReadable`, `useAction` (handler, or render-only with `respond` for human in the loop), `useSharedState` |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 2 | `@rusty-mill/agui-core`, the headless TypeScript core; shared `fixtures/`; the core run in conformance beside the reference client |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 1 | `rusty_agui`'s `client` feature (`HttpAgent`, blocking, on `rusty_http`); the `echo_agent` example; `conformance/`, where `@ag-ui/client` drives the example in CI |
@@ -71,7 +72,7 @@ Both targets start with the same two pieces, so they come first.
 | --- | --- | --- | --- |
 | 1 | **Done.** `rusty_agui` client and a conformance test against the reference client (`@ag-ui/client`, the package CopilotKit's React SDK and OpenBot drive agents with) | 1 PR | No |
 | 2 | **Done.** `@rusty-mill/agui-core` (TypeScript, headless): parser, SSE decoder, JSON patch, verifier, reducer, `runAgent`; `fixtures/` shared with the Rust tests | 1 PR | No |
-| 3 | **Binding done.** React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function, `respond` for human in the loop), `useSharedState`. **Open:** `rusty_tick` as the first consumer, the second PR | 2 PRs | No |
+| 3 | **Done.** React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function, `respond` for human in the loop), `useSharedState`; `rusty_tick` as the first consumer | 2 PRs | No |
 | 4 | Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1–2 PRs, touches `rusty_agent_gateway` | Yes: new gateway surface |
 | 5 | Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Yes: external service credentials and dependencies |
 | 6 | Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
@@ -127,6 +128,7 @@ before: the hooks are the API, the components are one rendering of it.
    tests. Publishing to a registry is a later decision.
 2. Where does the bot registry persist? `rusty_multimodal_db_engine` is the
    workspace's own store and already backs `rusty_tick` and `remind_me`.
-3. Which agent is the first bot? `rusty_adk`'s weather example is the
-   smallest with human-in-the-loop; `rusty_key` has the richest existing
-   contract.
+3. Which agent is the first bot? `rusty_tick`'s assistant now exists and
+   is the simplest candidate (store-free, deterministic); `rusty_adk`'s
+   weather example is the smallest with human-in-the-loop; `rusty_key`
+   has the richest existing contract.

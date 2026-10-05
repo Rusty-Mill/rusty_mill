@@ -7,6 +7,7 @@ import { Toasts } from '@/components/Toasts'
 import { Reminders } from '@/features/reminders/Reminders'
 import { SearchModal } from '@/features/search/SearchModal'
 import { Sidebar } from '@/features/lists/Sidebar'
+import { AssistantPanel } from '@/features/assistant/AssistantPanel'
 
 // Settings is fetched the first time it is opened.
 const SettingsModal = lazy(() => import('@/features/settings/SettingsModal').then((m) => ({ default: m.SettingsModal })))
@@ -36,6 +37,7 @@ export function Shell() {
         </Suspense>
       )}
       <Reminders />
+      <AssistantPanel />
       <Toasts />
     </div>
   )
