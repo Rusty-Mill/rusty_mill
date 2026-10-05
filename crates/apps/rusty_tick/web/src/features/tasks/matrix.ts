@@ -1,7 +1,7 @@
 /**
  * Eisenhower matrix: which of four quadrants a task falls in, and what dropping
- * it in another quadrant changes. Important = medium or high priority; urgent =
- * due today or overdue. Pure, like `kanban.ts`.
+ * it in another quadrant changes. Important = any priority set; urgent =
+ * due by tomorrow (overdue included). Pure, like `kanban.ts`.
  */
 import type { Task, TaskPatch } from '@/api/types'
 import { dropPatch } from './kanban'
@@ -16,8 +16,8 @@ export const QUADRANTS: { key: Quadrant; label: string; hint: string; important:
   { key: 'drop', label: 'Eliminate', hint: 'Not important · Not urgent', important: false, urgent: false },
 ]
 
-const isImportant = (t: Task): boolean => t.priority >= 3
-const isUrgent = (t: Task, now: number): boolean => ['overdue', 'today'].includes(dateBucket(t, now))
+const isImportant = (t: Task): boolean => t.priority > 0
+const isUrgent = (t: Task, now: number): boolean => ['overdue', 'today', 'tomorrow'].includes(dateBucket(t, now))
 
 export function quadrantOf(t: Task, now: number): Quadrant {
   const imp = isImportant(t)
@@ -34,7 +34,7 @@ export function splitQuadrants(tasks: Task[], now: number): Record<Quadrant, Tas
 
 /**
  * The patch for dropping `task` on quadrant `to`, or `null` if nothing changes.
- * Only the axes that differ are touched: importance sets high priority (or none),
+ * Only the axes that differ are touched: importance sets high priority (or clears it),
  * urgency sets the due date to today (or moves an urgent task into the next 7 days).
  */
 export function matrixDropPatch(task: Task, to: Quadrant, now: number): TaskPatch | null {

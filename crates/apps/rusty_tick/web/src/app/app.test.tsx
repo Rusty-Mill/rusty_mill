@@ -668,6 +668,25 @@ describe('large lists', () => {
     expect(quadrant('Eliminate').getByText('noise')).toBeInTheDocument()
     expect(quadrant('Delegate').queryByRole('button')).toBeNull()
   })
+  it('saves a filter, shows its tasks in the sidebar view, and deletes it', async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'urgent thing', priority: 5 })
+      await a.createTask({ listId: INBOX_ID, title: 'idle thing' })
+    })
+    await user.click(screen.getByRole('button', { name: 'Add filter' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByPlaceholderText('Filter name'), 'Big stuff')
+    await user.click(within(dialog).getByRole('button', { name: 'High' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+    expect(await screen.findByRole('heading', { name: 'Big stuff' })).toBeInTheDocument()
+    expect(within(tasksList()).getByText('urgent thing')).toBeInTheDocument()
+    expect(within(tasksList()).queryByText('idle thing')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Big stuff options' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }))
+    expect(screen.queryByRole('link', { name: /Big stuff/ })).toBeNull()
+  })
   it('keeps comments on a task: add one, reopen the task, delete it', async () => {
     const user = userEvent.setup()
     const { api } = await renderApp('/p/inbox/tasks', async (a) => {

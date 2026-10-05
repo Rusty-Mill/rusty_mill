@@ -1,9 +1,9 @@
-import { AlignJustify, Archive, CheckCircle2, ChevronDown, ChevronRight, Crown, FileText, Inbox, Layers, MoreHorizontal, Pencil, Plus, Trash2, Undo2 } from 'lucide-react'
-import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { AlignJustify, Archive, CheckCircle2, ChevronDown, ChevronRight, Crown, FileText, Filter as FilterIcon, Inbox, Layers, MoreHorizontal, Pencil, Plus, Trash2, Undo2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import type { List, Tag } from '@/api/types'
 import { PATHS, viewPath } from '@/app/paths'
-import { useActions, useData } from '@/app/services'
+import { useActions, useData, useServices } from '@/app/services'
 import { Confirm } from '@/components/Confirm'
 import { DateIcon } from '@/components/DateIcon'
 import { FunnelArt, TagArt } from '@/components/Illustrations'
@@ -12,6 +12,9 @@ import { useNow } from '@/lib/hooks'
 import { useReorderDrag } from '@/lib/useReorderDrag'
 import { useUi } from '@/store/ui'
 import { reorderItems, tasksForView, type ViewSpec } from '@/features/tasks/organize'
+import { FilterDialog } from '../filters/FilterDialog'
+import type { Filter } from '../filters/logic'
+import { useFilters } from '../filters/store'
 import { TagDialog } from '../tags/TagDialog'
 import { ListDialog } from './ListDialog'
 
@@ -89,13 +92,18 @@ export function Sidebar() {
   const { pathname } = useLocation()
   const now = useNow(60_000)
   const actions = useActions()
+  const { api } = useServices()
+  const filters = useFilters((s) => s.filters)
   const inboxId = useData((s) => s.inboxId)
   const listMap = useData((s) => s.lists)
   const taskMap = useData((s) => s.tasks)
   const tagMap = useData((s) => s.tags)
   const lists = useMemo(() => Object.values(listMap).sort((a, b) => a.sortOrder - b.sortOrder), [listMap])
   const tags = useMemo(() => Object.values(tagMap).sort((a, b) => a.sortOrder - b.sortOrder), [tagMap])
-  const entities = useMemo(() => ({ tasks: Object.values(taskMap), lists, tags, inboxId }), [taskMap, lists, tags, inboxId])
+  const entities = useMemo(() => ({ tasks: Object.values(taskMap), lists, tags, inboxId, filters }), [taskMap, lists, tags, inboxId, filters])
+  useEffect(() => {
+    void useFilters.getState().load(api, actions.notify)
+  }, [api, actions.notify])
   const isCollapsed = useUiSection()
 
   const count = (spec: ViewSpec): number => tasksForView(spec, entities, now).length
@@ -105,6 +113,8 @@ export function Sidebar() {
 
   const [listDialog, setListDialog] = useState<{ list: List | null } | null>(null)
   const [tagDialog, setTagDialog] = useState<{ tag: Tag | null } | null>(null)
+  const [filterDialog, setFilterDialog] = useState<{ filter: Filter | null } | null>(null)
+  const [deletingFilter, setDeletingFilter] = useState<Filter | null>(null)
   const [deleting, setDeleting] = useState<List | null>(null)
   const [deletingTag, setDeletingTag] = useState<Tag | null>(null)
 
@@ -128,6 +138,12 @@ export function Sidebar() {
       : { id: 'archive', label: 'Archive', icon: <Archive size={16} />, onSelect: () => void actions.updateList(l.id, { archived: true }) },
     'separator',
     { id: 'delete', label: 'Delete', icon: <Trash2 size={16} />, danger: true, onSelect: () => setDeleting(l) },
+  ]
+
+  const filterMenu = (f: Filter): MenuEntry[] => [
+    { id: 'edit', label: 'Edit', icon: <Pencil size={16} />, onSelect: () => setFilterDialog({ filter: f }) },
+    'separator',
+    { id: 'delete', label: 'Delete', icon: <Trash2 size={16} />, danger: true, onSelect: () => setDeletingFilter(f) },
   ]
 
   const tagMenu = (t: Tag): MenuEntry[] => [
@@ -173,11 +189,25 @@ export function Sidebar() {
           </>
         )}
 
-        <SectionHeader label="Filters" />
-        <div className="mx-1 flex items-center gap-3 rounded-row bg-black/[.03] px-3 py-3 text-s text-grey">
-          <FunnelArt />
-          <p>Display tasks filtered by list, date, priority, tag, and more</p>
-        </div>
+        <SectionHeader label="Filters" onAdd={() => setFilterDialog({ filter: null })} addLabel="Add filter" />
+        {filters.length === 0 ? (
+          <div className="mx-1 flex items-center gap-3 rounded-row bg-black/[.03] px-3 py-3 text-s text-grey">
+            <FunnelArt />
+            <p>Display tasks filtered by list, date, priority, tag, and more</p>
+          </div>
+        ) : (
+          filters.map((f) => (
+            <Row
+              key={f.id}
+              to={viewPath({ kind: 'filter', id: f.id })}
+              active={active(viewPath({ kind: 'filter', id: f.id }))}
+              icon={<FilterIcon size={18} />}
+              label={f.name}
+              count={count({ kind: 'filter', id: f.id })}
+              menu={filterMenu(f)}
+            />
+          ))
+        )}
 
         <SectionHeader label="Tags" onAdd={() => setTagDialog({ tag: null })} addLabel="Add tag" />
         {tags.length === 0 ? (
@@ -221,6 +251,34 @@ export function Sidebar() {
           setListDialog(null)
           if (editing) void actions.updateList(editing.id, input)
           else void actions.createList(input).then((l) => navigate(viewPath({ kind: 'list', id: l.id }))).catch((e: Error) => actions.notify('error', e.message))
+        }}
+      />
+      <FilterDialog
+        open={!!filterDialog}
+        filter={filterDialog?.filter ?? null}
+        lists={lists}
+        tags={tags}
+        onClose={() => setFilterDialog(null)}
+        onSubmit={(input) => {
+          const editing = filterDialog?.filter
+          setFilterDialog(null)
+          if (editing) useFilters.getState().update(editing.id, input)
+          else navigate(viewPath({ kind: 'filter', id: useFilters.getState().add(input) }))
+        }}
+      />
+      <Confirm
+        open={!!deletingFilter}
+        title="Delete filter?"
+        message={`"${deletingFilter?.name}" will be deleted. Its tasks are not affected.`}
+        confirmLabel="Delete"
+        danger
+        onCancel={() => setDeletingFilter(null)}
+        onConfirm={() => {
+          const filter = deletingFilter
+          setDeletingFilter(null)
+          if (!filter) return
+          if (pathname.startsWith(`/f/${filter.id}/`)) navigate('/q/all/tasks')
+          useFilters.getState().remove(filter.id)
         }}
       />
       <TagDialog

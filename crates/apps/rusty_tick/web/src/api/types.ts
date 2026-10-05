@@ -76,7 +76,7 @@ export interface Snapshot {
   tags: Tag[]
 }
 
-export type DocKind = 'habit' | 'habit_checkin' | 'focus' | 'prefs' | 'summary_template' | 'comment'
+export type DocKind = 'habit' | 'habit_checkin' | 'focus' | 'prefs' | 'summary_template' | 'comment' | 'filter'
 
 export interface Doc<T = unknown> {
   id: string

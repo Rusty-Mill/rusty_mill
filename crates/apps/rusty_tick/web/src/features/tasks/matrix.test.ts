@@ -12,12 +12,15 @@ const task = (o: Partial<Task> = {}): Task => ({
 })
 
 describe('quadrantOf', () => {
-  it('important means medium or high priority; urgent means due today or overdue', () => {
+  it('important means any priority; urgent means due by tomorrow or overdue', () => {
     expect(quadrantOf(task({ priority: 5, dueMs: TODAY, isAllDay: true }), NOW)).toBe('do')
     expect(quadrantOf(task({ priority: 3, dueMs: addDays(TODAY, -2), isAllDay: true }), NOW)).toBe('do')
     expect(quadrantOf(task({ priority: 5 }), NOW)).toBe('plan')
     expect(quadrantOf(task({ priority: 3, dueMs: addDays(TODAY, 3), isAllDay: true }), NOW)).toBe('plan')
-    expect(quadrantOf(task({ priority: 1, dueMs: TODAY, isAllDay: true }), NOW)).toBe('delegate')
+    expect(quadrantOf(task({ priority: 1, dueMs: TODAY, isAllDay: true }), NOW)).toBe('do')
+    expect(quadrantOf(task({ priority: 1 }), NOW)).toBe('plan')
+    expect(quadrantOf(task({ dueMs: addDays(TODAY, 1), isAllDay: true }), NOW)).toBe('delegate')
+    expect(quadrantOf(task({ dueMs: addDays(TODAY, 2), isAllDay: true }), NOW)).toBe('drop')
     expect(quadrantOf(task(), NOW)).toBe('drop')
   })
 })
@@ -37,7 +40,7 @@ describe('matrixDropPatch', () => {
   })
   it('importance only touches priority', () => {
     expect(matrixDropPatch(task(), 'plan', NOW)).toEqual({ priority: 5 })
-    expect(matrixDropPatch(task({ priority: 3 }), 'drop', NOW)).toEqual({ priority: 0 })
+    expect(matrixDropPatch(task({ priority: 1 }), 'drop', NOW)).toEqual({ priority: 0 })
   })
   it('urgency only touches the due date', () => {
     expect(matrixDropPatch(task(), 'delegate', NOW)).toEqual({ dueMs: TODAY, isAllDay: true })
