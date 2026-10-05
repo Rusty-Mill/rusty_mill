@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_http and rusty_request: head cap, chunked body bound, no hidden pool replay
+**2026-10-05** · PR pending (branch `claude/new-session-cihrd9`) · consolidation review first batch B1, B2(a), B3
+
+- **Fixed:** `rusty_http::head::parse_request_head`/`parse_response_head` enforce `max_head_len` on a head that completes, not only on one that has not; a terminated head over the cap is `HeadTooLarge`. Only the head's own bytes count, so body or upgrade bytes buffered after the blank line never trip it. All three transport adapters inherit the fix.
+- **Fixed:** `read_body` on the `sync`, `async_tokio` and `tokio_native` adapters bounds a chunked body's decoded total by `DEFAULT_MAX_BODY_LEN` (1 MiB), as it already did for `Content-Length` and close-delimited framing, with a checked addition before each extend. `read_chunked_body` stays a line-bounded primitive with no aggregate cap and is documented as such.
+- **Fixed:** `rusty_request` no longer replays a failed pooled-connection attempt on a fresh connection. That replay ignored method, retry policy and how far the request had got, so a `POST` the server accepted and then dropped could be submitted twice. The configured `RetryPolicy` is now the only replay authority; `send_streaming` keeps ignoring retry policy; a `Body::Stream` factory is opened zero times on a head-write failure and once otherwise.
+- **Changed:** a `rusty_request` request with no retry policy that lands on a pooled connection the server has since closed returns `Error::Io` where it used to succeed on a second connection. Set `pool_idle_timeout` below the server's keep-alive timeout or configure a `RetryPolicy`.
+- **Tests:** cap−1/cap/cap+1 for complete and fragmented heads with trailing body and upgrade bytes; chunked boundaries across chunk and read splits, extensions, trailers, empty body, premature EOF, and the unbounded primitive pinned; scripted-transport tests for head-write, partial head-write and post-body failures counting body-factory opens; loopback tests for a stale pooled connection without and with a policy, for streaming, and for a `POST` the peer accepts then drops reaching the server exactly once.
+- **Known limitations:** no per-client body limit in `rusty_request` (a 1 MiB chunked response is now an error); no idle-connection liveness probe, which is a separate improvement.
+
+---
+
 ## rusty_channel: Microsoft Teams
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, second channel
 
