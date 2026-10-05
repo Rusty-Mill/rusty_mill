@@ -23,7 +23,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-# rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
+## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
 **2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
 
 - **Added:** `Status::WontDo` (`status: "wontdo"`, `?status=wontdo`), appended last so stored tasks still decode. Closing stamps `completedMs` and keeps the first stamp; the task menu has Won't Do and Mark as open; closed tasks list under Completed.
