@@ -14,13 +14,13 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::{model_from_env, Role};
+use crate::config::inner_from_env;
 use rsi_core::{Budget, Harness, PublicTask, Seed};
 use rsi_runtime::grading::SYSTEM_READ_ROOTS;
 use rsi_runtime::harness::build;
 use rsi_runtime::{
-    HarnessProcess, LocalTask, OpenAiModel, ProcessExecutor, RuntimeError, SandboxedHarness,
-    SolutionRunner, TaskDir, Toolchain,
+    HarnessProcess, LocalTask, ProcessExecutor, RuntimeError, SandboxedHarness, SolutionRunner,
+    TaskDir, Toolchain,
 };
 
 /// Completion tokens asked for per model call.
@@ -81,11 +81,10 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
 /// A usage or configuration message, or the run's infrastructure error.
 pub fn main(args: &[OsString]) -> Result<String, String> {
     let args = parse(args)?;
-    let model = model_from_env(Role::Inner)?;
-    run(&args, &model).map_err(|e| e.to_string())
+    run(&args).map_err(|e| e.to_string())
 }
 
-fn run(args: &Args, model: &OpenAiModel) -> Result<String, RuntimeError> {
+fn run(args: &Args) -> Result<String, RuntimeError> {
     let task = TaskDir::load(&args.task)?;
     let work = args
         .work
@@ -95,6 +94,12 @@ fn run(args: &Args, model: &OpenAiModel) -> Result<String, RuntimeError> {
     std::fs::create_dir_all(&state).map_err(|e| RuntimeError::io("creating the work dir", e))?;
     let rsi = std::env::current_exe().map_err(|e| RuntimeError::io("locating rsi", e))?;
     let executor = ProcessExecutor::new(rsi, vec!["__sandbox".into()], state.clone());
+    let model = inner_from_env(
+        &executor,
+        work.join("inner-model"),
+        vec![args.task.clone(), state.clone()],
+    )
+    .map_err(RuntimeError::Model)?;
 
     let rustc = std::env::var_os("RSI_RUSTC").unwrap_or_else(|| "rustc".into());
     let binary = match build(
@@ -116,7 +121,7 @@ fn run(args: &Args, model: &OpenAiModel) -> Result<String, RuntimeError> {
         &[task.root().to_path_buf(), state],
         GRACE,
     )?;
-    let harness = SandboxedHarness::new(process, model, MAX_COMPLETION_TOKENS);
+    let harness = SandboxedHarness::new(process, &model, MAX_COMPLETION_TOKENS);
     let budget = Budget::new(args.tokens, args.wall, None)?;
     let seed = Seed::new(args.seed);
     let outcome = harness.run(&public, &budget, seed)?;

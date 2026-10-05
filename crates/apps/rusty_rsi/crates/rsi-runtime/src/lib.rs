@@ -13,12 +13,14 @@
 //! - [`git`]: sparse candidate worktrees and the path allowlist.
 //! - [`lineage_store`]: the hash-chained run record and its blobs.
 //! - [`proposer`]: harness rewrites by a chat model, or scripted.
-//! - [`codex`]: harness rewrites by the Codex CLI, in the sandbox.
+//! - [`agent_cli`]: harness rewrites by Codex or Claude Code, in the sandbox.
+//! - [`codex_model`]: Codex as the inner agent's model, in the sandbox.
 //! - [`outer`]: the outer loop and noise calibration.
 //! - [`report`]: a run's summary, and its grade and trajectory replay.
 
+pub mod agent_cli;
 pub mod broker;
-pub mod codex;
+pub mod codex_model;
 pub mod error;
 pub mod executor;
 pub mod git;
