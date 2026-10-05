@@ -176,7 +176,7 @@ impl CliConfig {
     #[must_use]
     pub fn proposer_args(&self, tree: &Path, reply: &Path) -> Vec<String> {
         match self.agent {
-            CliAgent::Codex => self.codex_args(tree, reply, false),
+            CliAgent::Codex => self.codex_args(tree, reply),
             CliAgent::Claude => {
                 let mut args: Vec<String> = [
                     "-p",
@@ -209,9 +209,8 @@ impl CliConfig {
     }
 
     /// `codex exec` in `tree`, the reply to `reply`, the prompt on
-    /// standard input; with `json`, events (and token usage) on standard
-    /// output.
-    pub(crate) fn codex_args(&self, tree: &Path, reply: &Path, json: bool) -> Vec<String> {
+    /// standard input, and events (with token usage) on standard output.
+    pub(crate) fn codex_args(&self, tree: &Path, reply: &Path) -> Vec<String> {
         let mut args: Vec<String> = [
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -221,13 +220,11 @@ impl CliConfig {
             "--skip-git-repo-check",
             "--color",
             "never",
+            "--json",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect();
-        if json {
-            args.push("--json".to_owned());
-        }
         args.extend(["-C".to_owned(), tree.display().to_string()]);
         if let Some(model) = &self.model {
             args.extend(["-m".to_owned(), model.clone()]);
@@ -381,17 +378,65 @@ impl CliConfig {
     }
 }
 
+/// Bytes of an agent's output kept: enough for a long Codex event stream,
+/// whose `turn.completed` event comes last.
+pub(crate) const EVENT_BYTES: usize = 8 << 20;
+
+/// Prompt and completion tokens from the `turn.completed` events in
+/// Codex's JSONL output, summed.
+///
+/// # Errors
+/// [`RuntimeError::Model`] for a `turn.failed` event, or when no turn
+/// reported its usage.
+pub(crate) fn codex_usage(stdout: &[u8]) -> Result<(u64, u64), RuntimeError> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut total: Option<(u64, u64)> = None;
+    for line in text.lines().map(str::trim).filter(|l| l.starts_with('{')) {
+        let Ok(event) = Value::parse(line) else {
+            continue;
+        };
+        match event.pointer("/type").and_then(Value::as_str) {
+            Some("turn.failed") => {
+                let message = event
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no message");
+                return Err(RuntimeError::Model(format!("codex turn failed: {message}")));
+            }
+            Some("turn.completed") => {
+                let count = |key: &str| {
+                    event
+                        .pointer(&format!("/usage/{key}"))
+                        .and_then(Value::as_u64)
+                };
+                let (Some(input), Some(output)) = (count("input_tokens"), count("output_tokens"))
+                else {
+                    return Err(RuntimeError::Model(
+                        "codex's turn.completed event has no usage".into(),
+                    ));
+                };
+                let (p, c) = total.unwrap_or((0, 0));
+                total = Some((p.saturating_add(input), c.saturating_add(output)));
+            }
+            _ => {}
+        }
+    }
+    total.ok_or_else(|| {
+        RuntimeError::Model("codex reported no token usage, so the run cannot be metered".into())
+    })
+}
+
 /// Rewrites the harness with a coding-agent CLI, confined by the sandbox.
 #[derive(Debug)]
-pub struct CliProposer<'a> {
-    executor: &'a ProcessExecutor,
+pub struct CliProposer {
+    executor: ProcessExecutor,
     config: CliConfig,
     scratch: PathBuf,
     protected: Vec<PathBuf>,
     id: ModelId,
 }
 
-impl<'a> CliProposer<'a> {
+impl CliProposer {
     /// A proposer that stages each proposal under `scratch` and refuses to
     /// run the agent if its sandbox could reach any `protected` path.
     ///
@@ -399,7 +444,7 @@ impl<'a> CliProposer<'a> {
     /// [`RuntimeError::Model`] if the program, home or scratch path is
     /// relative, or the model name is not a valid id.
     pub fn new(
-        executor: &'a ProcessExecutor,
+        executor: &ProcessExecutor,
         config: CliConfig,
         scratch: PathBuf,
         protected: Vec<PathBuf>,
@@ -407,7 +452,7 @@ impl<'a> CliProposer<'a> {
         config.check_paths(&scratch)?;
         let id = config.model_id()?;
         Ok(Self {
-            executor,
+            executor: executor.clone().with_capture_bytes(EVENT_BYTES),
             config,
             scratch,
             protected,
@@ -415,22 +460,29 @@ impl<'a> CliProposer<'a> {
         })
     }
 
-    /// The reply text: Codex's last-message file, or the `result` of
-    /// Claude Code's JSON envelope.
-    fn reply(&self, outcome: &ExecOutcome, reply: &Path) -> Result<String, RuntimeError> {
+    /// The reply text and the prompt and completion tokens: Codex's
+    /// last-message file and event stream, or Claude Code's JSON envelope.
+    fn reply(
+        &self,
+        outcome: &ExecOutcome,
+        reply: &Path,
+    ) -> Result<(String, (u64, u64)), RuntimeError> {
         match self.config.agent {
-            CliAgent::Codex => std::fs::read_to_string(reply).map_err(|e| {
-                RuntimeError::Model(format!(
-                    "codex wrote no reply ({e}): {}",
-                    excerpt(&outcome.stderr, &outcome.stdout)
-                ))
-            }),
+            CliAgent::Codex => {
+                let text = std::fs::read_to_string(reply).map_err(|e| {
+                    RuntimeError::Model(format!(
+                        "codex wrote no reply ({e}): {}",
+                        excerpt(&outcome.stderr, &outcome.stdout)
+                    ))
+                })?;
+                Ok((text, codex_usage(&outcome.stdout)?))
+            }
             CliAgent::Claude => claude_result(&outcome.stdout),
         }
     }
 }
 
-impl Proposer for CliProposer<'_> {
+impl Proposer for CliProposer {
     type Error = RuntimeError;
 
     fn model(&self) -> Option<&ModelId> {
@@ -444,7 +496,7 @@ impl Proposer for CliProposer<'_> {
         let reply = staging.tmp().join("reply.md");
         let args = self.config.proposer_args(&staging.tree(), &reply);
         let outcome = self.config.run(
-            self.executor,
+            &self.executor,
             &staging,
             &args,
             &prompt,
@@ -454,18 +506,27 @@ impl Proposer for CliProposer<'_> {
         if !outcome.termination.succeeded() {
             return Err(self.config.failure(&outcome));
         }
-        let text = self.reply(&outcome, &reply)?;
+        let (text, (prompt_tokens, completion_tokens)) = self.reply(&outcome, &reply)?;
         mirror(&staging.tree(), workspace)?;
         Ok(Proposal {
             summary: summary_line(&text),
-            usage: CostUsage::default(),
+            usage: CostUsage {
+                prompt_tokens,
+                completion_tokens,
+                ..CostUsage::default()
+            },
         })
     }
 }
 
-/// The `result` of Claude Code's `--output-format json` envelope; an
-/// envelope marked `is_error` is an error carrying that result.
-fn claude_result(stdout: &[u8]) -> Result<String, RuntimeError> {
+/// The `result` of Claude Code's `--output-format json` envelope and its
+/// prompt and completion tokens. Prompt tokens include cache writes and
+/// reads, which Claude Code counts apart from `input_tokens`.
+///
+/// # Errors
+/// [`RuntimeError::Model`] for an envelope marked `is_error` (carrying its
+/// result), or one without its token usage.
+fn claude_result(stdout: &[u8]) -> Result<(String, (u64, u64)), RuntimeError> {
     let text = String::from_utf8_lossy(stdout);
     let envelope = Value::parse(text.trim()).map_err(|e| {
         RuntimeError::Model(format!(
@@ -483,7 +544,21 @@ fn claude_result(stdout: &[u8]) -> Result<String, RuntimeError> {
             "claude reported an error: {result}"
         )));
     }
-    Ok(result)
+    let count = |key: &str| {
+        envelope
+            .pointer(&format!("/usage/{key}"))
+            .and_then(Value::as_u64)
+    };
+    let (Some(input), Some(output)) = (count("input_tokens"), count("output_tokens")) else {
+        return Err(RuntimeError::Model(
+            "claude reported no token usage, so the run cannot be metered".into(),
+        ));
+    };
+    let prompt = ["cache_creation_input_tokens", "cache_read_input_tokens"]
+        .into_iter()
+        .filter_map(count)
+        .fold(input, u64::saturating_add);
+    Ok((result, (prompt, output)))
 }
 
 /// The end of `stderr`, or of `stdout` when stderr is empty.
@@ -797,6 +872,7 @@ mod tests {
                 "--skip-git-repo-check",
                 "--color",
                 "never",
+                "--json",
                 "-C",
                 "/s/tree",
                 "-m",
@@ -806,8 +882,6 @@ mod tests {
                 "-",
             ]
         );
-        let json = config.codex_args(Path::new("/t"), Path::new("/r"), true);
-        assert_eq!(json[8], "--json", "{json:?}");
         assert_eq!(config.install_root(), PathBuf::from("/opt/codex"));
         assert_eq!(config.model_id().expect("id").as_str(), "codex:gpt-x");
         let bare = CliConfig {
@@ -859,12 +933,32 @@ mod tests {
     }
 
     #[test]
+    fn usage_comes_from_turn_completed_and_is_required() {
+        let events = b"{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n\
+{\"type\":\"turn.started\"}\n\
+{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hi\"}}\n\
+{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":100,\"output_tokens\":7}}\n";
+        assert_eq!(codex_usage(events).expect("usage"), (120, 7));
+        let e = codex_usage(b"{\"type\":\"turn.started\"}\n").expect_err("no usage");
+        assert!(e.to_string().contains("cannot be metered"), "{e}");
+        let e = codex_usage(b"{\"type\":\"turn.failed\",\"error\":{\"message\":\"quota\"}}\n")
+            .expect_err("failed");
+        assert!(e.to_string().contains("quota"), "{e}");
+        let e = codex_usage(b"{\"type\":\"turn.completed\",\"usage\":{}}\n").expect_err("empty");
+        assert!(e.to_string().contains("no usage"), "{e}");
+    }
+
+    #[test]
     fn the_claude_envelope_gives_the_result_or_its_error() {
-        let ok = br#"{"type":"result","is_error":false,"result":"Tuned the search.\nmore"}"#;
+        let ok = br#"{"type":"result","is_error":false,"result":"Tuned the search.\nmore",
+"usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":4000,"output_tokens":90}}"#;
         assert_eq!(
             claude_result(ok).expect("result"),
-            "Tuned the search.\nmore"
+            ("Tuned the search.\nmore".to_owned(), (4_312, 90))
         );
+        let unmetered = br#"{"type":"result","is_error":false,"result":"done"}"#;
+        let e = claude_result(unmetered).expect_err("no usage");
+        assert!(e.to_string().contains("no token usage"), "{e}");
         let failed = br#"{"type":"result","is_error":true,"result":"Prompt is too long"}"#;
         let e = claude_result(failed).expect_err("an error");
         assert!(e.to_string().contains("Prompt is too long"), "{e}");

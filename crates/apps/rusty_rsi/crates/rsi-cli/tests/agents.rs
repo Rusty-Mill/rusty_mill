@@ -52,6 +52,7 @@ echo 'pub fn added() {}' > "$tree/crates/apps/rusty_rsi/harness/src/added.rs"
 rm "$tree/crates/apps/rusty_rsi/harness/src/gone.rs"
 mkdir -p "$tree/.git/hooks" && echo evil > "$tree/.git/hooks/post-commit"
 echo 'Tuned the search loop.' > "$reply"
+echo '{"type":"turn.completed","usage":{"input_tokens":5000,"cached_input_tokens":4000,"output_tokens":250}}'
 "#;
 
 struct World {
@@ -140,6 +141,14 @@ fn codex_edits_a_copy_and_only_its_harness_changes_come_back() {
 
     let proposal = proposer.propose(&[], &world.workspace).expect("proposal");
     assert_eq!(proposal.summary, "Tuned the search loop.");
+    assert_eq!(
+        (
+            proposal.usage.prompt_tokens,
+            proposal.usage.completion_tokens
+        ),
+        (5_000, 250),
+        "metered from the turn.completed event"
+    );
 
     assert_eq!(
         world.read(LIB).as_deref(),
@@ -201,6 +210,10 @@ fn a_failed_codex_run_is_an_error_that_names_the_cause() {
             "codex login",
         ),
         ("cat > /dev/null\nexit 0\n", "wrote no reply"),
+        (
+            "cat > /dev/null\nfor a; do case \"$p\" in -o) echo hi > \"$a\";; esac; p=\"$a\"; done\n",
+            "no token usage",
+        ),
     ] {
         let proposer = CliProposer::new(
             &executor,
@@ -254,7 +267,7 @@ probe() { name="$1"; shift; if "$@" 2>/dev/null; then echo "$name ok"; else echo
 } > "$CLAUDE_CONFIG_DIR/probes"
 echo '// claude was here' >> crates/apps/rusty_rsi/harness/src/lib.rs
 mkdir -p .git && echo evil > .git/config
-printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"Pruned the tree search.\nDetails follow."}'
+printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"Pruned the tree search.\nDetails follow.","usage":{"input_tokens":7,"cache_read_input_tokens":2000,"output_tokens":40}}'
 "#;
 
 #[test]
@@ -275,6 +288,14 @@ fn claude_edits_a_copy_with_file_tools_only() {
 
     let proposal = proposer.propose(&[], &world.workspace).expect("proposal");
     assert_eq!(proposal.summary, "Pruned the tree search.");
+    assert_eq!(
+        (
+            proposal.usage.prompt_tokens,
+            proposal.usage.completion_tokens
+        ),
+        (2_007, 40),
+        "metered from the envelope, cache reads included"
+    );
     assert_eq!(
         world.read(LIB).as_deref(),
         Some("pub fn main() {}\n// claude was here\n")

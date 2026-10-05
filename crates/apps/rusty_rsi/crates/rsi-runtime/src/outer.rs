@@ -17,12 +17,12 @@
 //! measure the noise the accept margin has to beat.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rsi_core::{
-    confirm, precedents, screen, seed_set, Budget, CandidateId, ChatModel, CommitSha, Decision,
-    EntryFields, EvaluationRecord, Grade, Harness, LineageEntry, LineageStore, Margin, NoiseBand,
-    PrivateGrader, Proposer, PublicTask, Rejection, Screen, Seed, TaskId, TaskResult,
+    confirm, precedents, screen, seed_set, Budget, CandidateId, ChatModel, CommitSha, CostUsage,
+    Decision, EntryFields, EvaluationRecord, Grade, Harness, LineageEntry, LineageStore, Margin,
+    NoiseBand, PrivateGrader, Proposer, PublicTask, Rejection, Screen, Seed, TaskId, TaskResult,
 };
 use rusty_json::Value;
 
@@ -312,6 +312,7 @@ where
         diff: None,
         inner_model: lab.model.id().clone(),
         outer_model: proposer.model().cloned(),
+        outer_cost: None,
         budget: config.grading.budget,
         evaluations: Vec::new(),
         decision: Decision::Baseline,
@@ -344,10 +345,12 @@ where
             commit,
             diff,
             violations,
+            cost,
         } = proposed?;
         removal?;
         entry.harness_commit = commit.clone();
         entry.diff = Some(diff);
+        entry.outer_cost = Some(cost);
         if violations.is_empty() {
             gate(lab, config, &blobs, step, &commit, &incumbent, &mut entry)?;
         } else {
@@ -371,6 +374,8 @@ struct Committed {
     diff: rsi_core::BlobId,
     /// The changed paths the allowlist forbids; empty when it passes.
     violations: Vec<String>,
+    /// The proposer's tokens, with the wall time the proposal took.
+    cost: CostUsage,
 }
 
 /// Lets the proposer edit `worktree`, then stages, records and commits the
@@ -387,7 +392,12 @@ fn propose_and_commit<M, P>(
 where
     P: Proposer<Error = RuntimeError>,
 {
+    let started = Instant::now();
     let proposal = proposer.propose(&precedents(history)?, worktree.path())?;
+    let cost = CostUsage {
+        wall: started.elapsed(),
+        ..proposal.usage
+    };
     let staged = worktree.stage()?;
     let diff = blobs.put(&staged.diff)?;
     let summary = if proposal.summary.trim().is_empty() {
@@ -402,6 +412,7 @@ where
         commit,
         diff,
         violations: git::violations(&staged.changes),
+        cost,
     })
 }
 
