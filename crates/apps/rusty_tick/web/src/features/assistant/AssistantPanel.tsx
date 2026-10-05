@@ -12,6 +12,7 @@ import { contentText, type Message } from '@rusty-mill/agui-core'
 import { getToken } from '@/app/env'
 import { useActions, useData, useServices } from '@/app/services'
 import { useView } from '@/app/useView'
+import { useFilters } from '@/features/filters/store'
 import { tasksForView } from '@/features/tasks/organize'
 import { useUi } from '@/store/ui'
 
@@ -106,10 +107,11 @@ function useViewContext(): void {
   const lists = useData((s) => s.lists)
   const tags = useData((s) => s.tags)
   const inboxId = useData((s) => s.inboxId)
+  const filters = useFilters((s) => s.filters)
   const visible = useMemo(() => {
     if (!spec) return []
-    return tasksForView(spec, { tasks: Object.values(tasks), lists: Object.values(lists), tags: Object.values(tags), inboxId }, Date.now())
-  }, [spec, tasks, lists, tags, inboxId])
+    return tasksForView(spec, { tasks: Object.values(tasks), lists: Object.values(lists), tags: Object.values(tags), inboxId, filters }, Date.now())
+  }, [spec, tasks, lists, tags, inboxId, filters])
   useReadable('view', spec ?? { kind: 'none' })
   useReadable(
     'tasks in view',
