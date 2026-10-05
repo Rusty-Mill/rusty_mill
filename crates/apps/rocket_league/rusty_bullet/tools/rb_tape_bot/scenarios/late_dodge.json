@@ -1,0 +1,12 @@
+{
+  "name": "late dodge: jump, wait 1.6 s, dodge forward (expect no dodge past the 1.25 s window)",
+  "settle_ticks": 240,
+  "car": { "location": [0, -2000, 17], "rotation": [0, 1.5708, 0], "velocity": [0, 0, 0], "angular_velocity": [0, 0, 0], "boost": 0 },
+  "steps": [
+    { "ticks": 12, "jump": true },
+    { "ticks": 12 },
+    { "ticks": 168 },
+    { "ticks": 1, "jump": true, "pitch": -1 },
+    { "ticks": 240 }
+  ]
+}

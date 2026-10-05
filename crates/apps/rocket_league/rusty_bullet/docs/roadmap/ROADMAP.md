@@ -17,6 +17,13 @@ applicable, per ADR-0002's verification-first ordering.
 | `PHASE-3-NETCODE` | Server-authoritative simulation with client prediction/rollback, per ADR-0001. Est. 2-3 months part-time. | `PHASE-2-DETERMINISM` | RB-NET-001 | Own client/server pair reproduces the GDC talk's documented reconciliation behavior under simulated network conditions; owner can play an online-style match against a friend. | Not Started | — |
 | `PHASE-4-POLISH` | Open-ended: UX, content, tooling, whatever remains once Phase 3 is playable. | `PHASE-3-NETCODE` | (spec'd when reached) | Defined when reached — deliberately not spec'd in detail at bootstrap. | Not Started | — |
 
+## Future (unscheduled)
+
+- A Rust, RLBot v5-compatible server backed by `rb_physics_bullet`, so
+  existing bots run headless against this engine. Analysis and phasing in
+  `docs/research/RESEARCH-BACKLOG.md` (`RB-RESEARCH-O007`); needs an ADR
+  and the capture spike (`docs/research/BOT-CAPTURE-PLAN.md`) first.
+
 ## Notes
 
 - Total estimate for Phases 1-3: ~6-9 months, part-time. Not a deadline —

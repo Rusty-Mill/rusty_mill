@@ -1,0 +1,15 @@
+#:schema https://rlbot.org/schemas/agent.json
+
+[settings]
+name = "RB Tape Bot"
+agent_id = "rusty_bullet/tape_bot"
+run_command = "target\\release\\rb_tape_bot.exe"
+run_command_linux = "target/release/rb_tape_bot"
+# One process per car; the bot only plays the tape on car index 0.
+hivemind = false
+
+[details]
+description = "Replays a scripted input tape from a known start state, for repeatable mechanic captures."
+developer = "rusty_bullet"
+language = "rust"
+tags = []
