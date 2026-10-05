@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_agui: a client, and conformance against the reference TypeScript client
-**2026-10-05** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 1
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 1
 
 - **Added:** `rusty_agui`'s `client` feature: `HttpAgent::new(url).run(&input)` posts a `RunAgentInput` and returns a `RunStream`, an iterator of verified events (through the same `Verifier` the server uses). Blocking, on `rusty_http`'s sync transport over `std::net`, plain `http://`; `Error::Status` for a refused run, `Error::Transport` for a closed socket, a non-SSE response or a stream that ends early.
 - **Added:** the `echo_agent` example (`--features serve`): state snapshot and delta, a step, a tool call when the client offers a tool, an echoed assistant message; `fail` ends the run with `RUN_ERROR`.
