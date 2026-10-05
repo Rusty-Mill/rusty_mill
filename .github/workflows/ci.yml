@@ -268,7 +268,7 @@ jobs:
               exit 0
             fi
             echo "Cargo.lock-affected crates: $lockfile_packages"
-            packages="$(printf '%s\n' $packages $lockfile_packages | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+            packages="$(printf '%s\n' "$packages" "$lockfile_packages" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
           fi
 
           # Centralize all non-generic job gates here. Path-only front ends
@@ -291,19 +291,21 @@ jobs:
       - name: Summary
         shell: bash
         run: |
-          if [ "${{ steps.plan.outputs.full }}" = "true" ]; then
-            echo "### CI scope: full workspace sweep" >> "$GITHUB_STEP_SUMMARY"
-          elif [ "${{ steps.plan.outputs.ci_only }}" = "true" ]; then
-            echo "### CI scope: CI-only smoke validation" >> "$GITHUB_STEP_SUMMARY"
-            echo "Planner tests, workflow lint, and representative Linux/Windows smoke tests ran; this is not full workspace coverage." >> "$GITHUB_STEP_SUMMARY"
-          elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
-            echo "### CI scope: no workspace crate affected -- build/test/clippy skipped" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### CI scope: affected crates" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "${{ steps.plan.outputs.packages }}" | tr ' ' '\n' >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            if [ "${{ steps.plan.outputs.full }}" = "true" ]; then
+              echo "### CI scope: full workspace sweep"
+            elif [ "${{ steps.plan.outputs.ci_only }}" = "true" ]; then
+              echo "### CI scope: CI-only smoke validation"
+              echo "Planner tests, workflow lint, and representative Linux/Windows smoke tests ran; this is not full workspace coverage."
+            elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
+              echo "### CI scope: no workspace crate affected -- build/test/clippy skipped"
+            else
+              echo "### CI scope: affected crates"
+              echo '```'
+              echo "${{ steps.plan.outputs.packages }}" | tr ' ' '\n'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
     name: clippy (${{ matrix.os }})
@@ -539,14 +541,15 @@ jobs:
             cargo test --doc ${{ steps.scope.outputs.args }} --all-features
           else
             lib_pkgs="$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.targets[]?.kind[]? == "lib") | .name')"
-            args=""
-            for p in ${{ steps.scope.outputs.packages }}; do
+            read -r -a args <<< "${{ steps.scope.outputs.packages }}"
+            doc_args=()
+            for p in "${args[@]}"; do
               if echo "$lib_pkgs" | grep -qx "$p"; then
-                args="$args -p $p"
+                doc_args+=(-p "$p")
               fi
             done
-            if [ -n "$args" ]; then
-              cargo test --doc $args --all-features
+            if [ "${#doc_args[@]}" -gt 0 ]; then
+              cargo test --doc "${doc_args[@]}" --all-features
             else
               echo "No affected package declares a library target -- nothing to doc-test."
             fi
