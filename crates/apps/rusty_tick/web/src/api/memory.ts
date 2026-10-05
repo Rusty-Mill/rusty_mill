@@ -254,7 +254,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.kind !== undefined) task.kind = patch.kind
     if (patch.status !== undefined && patch.status !== task.status) {
       task.status = patch.status
-      task.completedMs = patch.status === 'done' ? this.now() : null
+      task.completedMs = patch.status === 'open' ? null : (task.completedMs ?? this.now())
     }
     if (patch.priority !== undefined) task.priority = cleanPriority(patch.priority)
     if (patch.startMs !== undefined) task.startMs = patch.startMs

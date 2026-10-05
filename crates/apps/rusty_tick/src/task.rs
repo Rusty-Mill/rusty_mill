@@ -14,6 +14,8 @@ pub const NO_DUE: i64 = i64::MAX;
 pub enum Status {
     Open,
     Done,
+    /// Closed without doing it (TickTick's "Won't Do"). Appended last so stored tasks still decode.
+    WontDo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

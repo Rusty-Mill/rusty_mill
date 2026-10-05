@@ -825,13 +825,16 @@ impl Service {
     }
 }
 
-/// Completing a task stamps `completed_ms`; reopening clears it.
+/// Closing a task (done or won't do) stamps `completed_ms`, keeping the first stamp; reopening clears it.
 fn apply_status(task: &mut Task, status: Status, now: i64) {
     if task.status == status {
         return;
     }
     task.status = status;
-    task.completed_ms = (status == Status::Done).then_some(now);
+    task.completed_ms = match status {
+        Status::Open => None,
+        Status::Done | Status::WontDo => task.completed_ms.or(Some(now)),
+    };
 }
 
 /// `[start, end)` of the local day containing `now_ms`, in UTC milliseconds.
@@ -1092,6 +1095,17 @@ mod tests {
             "completing twice keeps the first stamp"
         );
         apply_status(&mut task, Status::Open, 100);
+        assert_eq!(task.completed_ms, None);
+    }
+
+    #[test]
+    fn wont_do_closes_like_done_and_reopens() {
+        let mut task = Task::new(Uuid::now_v7(), INBOX_ID, "t", 0, 0);
+        apply_status(&mut task, Status::WontDo, 7);
+        assert_eq!((task.status, task.completed_ms), (Status::WontDo, Some(7)));
+        apply_status(&mut task, Status::Done, 9);
+        assert_eq!(task.completed_ms, Some(7), "closed to closed keeps the stamp");
+        apply_status(&mut task, Status::Open, 10);
         assert_eq!(task.completed_ms, None);
     }
 

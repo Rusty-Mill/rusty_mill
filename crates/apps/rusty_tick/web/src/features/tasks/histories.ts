@@ -79,7 +79,7 @@ export interface CompletedFilter {
 export function completedGroups(tasks: Task[], filter: CompletedFilter, now: number, weekStart: WeekStart): DayGroup[] {
   const picked = tasks.filter(
     (t) =>
-      t.status === 'done' &&
+      t.status !== 'open' &&
       t.deletedMs === null &&
       t.completedMs !== null &&
       (filter.listId === null || t.listId === filter.listId) &&

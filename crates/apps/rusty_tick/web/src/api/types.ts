@@ -7,7 +7,7 @@
  * the UI follows its contract instead; see README "Where this differs".)
  */
 
-export type Status = 'open' | 'done'
+export type Status = 'open' | 'done' | 'wontdo'
 export type Priority = 0 | 1 | 3 | 5
 export type TaskKind = 'text' | 'checklist' | 'note'
 export type ViewMode = 'list' | 'kanban' | 'timeline' | 'matrix'
