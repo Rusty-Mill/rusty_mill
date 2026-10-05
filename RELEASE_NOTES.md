@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi: follow-ons document
+**2026-10-05** · PR pending · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added (docs only):** [`docs/dev_phases/ADR_0005/FOLLOW-ONS.md`](docs/dev_phases/ADR_0005/FOLLOW-ONS.md) records where `rusty_rsi` stands after #509: the shipped PRs, the WSL2 steps for the first real-agent smoke run, the open follow-on options, the native Windows analysis (AppContainer plus Job Object, a probe first), and the decisions still needed.
+
+---
+
 ## rusty_rsi: ADR-0005 configuration matches the code
 **2026-10-05** · [#509](https://github.com/Rusty-Mill/rusty_mill/pull/509) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
