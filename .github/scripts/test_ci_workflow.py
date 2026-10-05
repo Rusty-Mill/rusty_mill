@@ -32,6 +32,7 @@ PLAN_KEYS = {
     "tick",
     "fair_play",
     "remind_me",
+    "remind_me_legacy_import",
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
@@ -198,7 +199,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_fair_play_reverse_dependencies_select_its_specialized_jobs(self) -> None:
@@ -276,11 +277,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_shared_and_specialized_package_rules(self) -> None:
@@ -291,6 +292,37 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertTrue(flags["multimodal_db"])
         self.assertTrue(flags["rusty_config_no_std"])
         self.assertTrue(flags["remind_me"])
+
+    def test_legacy_import_routes_sources_contracts_and_dependencies(self) -> None:
+        hub = "crates/apps/rusty_remind_me/crates/remind_me_hub/"
+        for path in ("src/import/postgres.rs", "src/record.rs", "src/store/multimodal/rows.rs",
+                     "tests/fixtures/postgres_hub.sql", "tests/suite/recorded.rs",
+                     "Cargo.toml", "Containerfile", "setup.sh"):
+            with self.subTest(path=path):
+                self.assertTrue(specialized_job_flags([hub + path], [])["remind_me_legacy_import"])
+        self.assertTrue(specialized_job_flags(["Cargo.lock"], [])["remind_me_legacy_import"])
+        self.assertTrue(specialized_job_flags([], ["remind_me_hub"])["remind_me_legacy_import"])
+        flags = specialized_job_flags(
+            ["crates/apps/rusty_remind_me/crates/remind_me_core/src/lib.rs"], ["remind_me_core"]
+        )
+        self.assertTrue(flags["remind_me"])
+        self.assertFalse(flags["remind_me_legacy_import"])
+
+    def test_node_wire_contract_selects_import_even_without_hub_cargo_impact(self) -> None:
+        core = "crates/apps/rusty_remind_me/crates/remind_me_core/src/"
+        for path in ("sync/record.rs", "sync/push.rs", "db/engine/rows.rs", "models.rs"):
+            with self.subTest(path=path):
+                flags = specialized_job_flags([core + path], ["remind_me_core"])
+                self.assertTrue(flags["remind_me_legacy_import"])
+
+    def test_engine_checks_do_not_need_a_postgres_service(self) -> None:
+        engine = self.workflow.split("  remind-me-hub:\n")[1].split("  remind-me-legacy-import:\n")[0]
+        self.assertNotIn("services:", engine)
+        self.assertIn("--no-default-features", engine)
+        legacy = self.workflow.split("  remind-me-legacy-import:\n")[1].split("  remind-me-windows:\n")[0]
+        self.assertIn("if: needs.plan.outputs.remind_me_legacy_import == 'true'", legacy)
+        self.assertIn('REMIND_ME_HUB_REQUIRE_POSTGRES: "1"', legacy)
+        self.assertIn("--features postgres-import --test hub_postgres_copy_test", legacy)
 
     def test_pr_runs_cancel_but_main_and_manual_runs_are_isolated(self) -> None:
         self.assertIn(
