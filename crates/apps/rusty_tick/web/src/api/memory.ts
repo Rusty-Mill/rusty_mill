@@ -29,7 +29,7 @@ import type {
 export const INBOX_ID = '00000000-0000-7000-8000-000000000001'
 export const STORAGE_KEY = 'tick-local:memory:v1'
 const STEP = 1024
-const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment']
+const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter']
 const MAX_DOC_BYTES = 64 * 1024
 
 interface State {
@@ -167,7 +167,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.color !== undefined) list.color = cleanColor(patch.color)
     if (patch.archived !== undefined) list.archived = patch.archived
     if (patch.viewMode !== undefined) {
-      if (!['list', 'kanban', 'timeline'].includes(patch.viewMode)) throw new InvalidError(400, 'unknown viewMode')
+      if (!['list', 'kanban', 'timeline', 'matrix'].includes(patch.viewMode)) throw new InvalidError(400, 'unknown viewMode')
       list.viewMode = patch.viewMode
     }
     if (patch.sortType !== undefined) list.sortType = patch.sortType

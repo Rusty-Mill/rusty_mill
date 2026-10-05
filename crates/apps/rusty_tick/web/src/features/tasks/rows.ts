@@ -1,5 +1,6 @@
 /** Flatten groups into the rows the list draws, and pick which of them are on screen. */
 import type { List, Tag, Task } from '@/api/types'
+import type { Filter } from '../filters/logic'
 import type { Group, ViewSpec } from './organize'
 
 export const HEADER_HEIGHT = 36
@@ -55,7 +56,7 @@ export function windowRows(rows: Row[], scrollTop: number, viewport: number, ove
 }
 
 /** The title shown above a view. */
-export function viewTitle(spec: ViewSpec, lists: List[], tags: Tag[], inboxId: string): string {
+export function viewTitle(spec: ViewSpec, lists: List[], tags: Tag[], filters: Filter[], inboxId: string): string {
   switch (spec.kind) {
     case 'all':
       return 'All'
@@ -69,5 +70,7 @@ export function viewTitle(spec: ViewSpec, lists: List[], tags: Tag[], inboxId: s
       return lists.find((l) => l.id === spec.id)?.name ?? 'List'
     case 'tag':
       return tags.find((t) => t.name === spec.name)?.label ?? spec.name
+    case 'filter':
+      return filters.find((f) => f.id === spec.id)?.name ?? 'Filter'
   }
 }
