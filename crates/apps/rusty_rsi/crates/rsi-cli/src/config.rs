@@ -9,22 +9,24 @@
 //! `<ROLE>` is `INNER` (the agent under test) or `OUTER` (the proposer).
 //! Secrets come only from the environment and are never written anywhere.
 //!
-//! The proposer may instead be the Codex CLI, with `RSI_OUTER_PROPOSER=codex`:
+//! A coding-agent CLI may serve instead, each with its own login (`codex
+//! login`, or `/login` in `claude`), so no key passes through `rsi`:
 //!
 //! | Variable | Meaning |
 //! |---|---|
-//! | `RSI_OUTER_MODEL` | the Codex model (`-m`); Codex's default if unset |
-//! | `RSI_OUTER_CODEX` | the native `codex` binary; default `codex` on `PATH` |
-//! | `CODEX_HOME` | Codex's login and state; default `~/.codex` |
-//!
-//! Codex uses its own login (`codex login`); no key passes through `rsi`.
+//! | `RSI_OUTER_PROVIDER` | `model` (default), `codex` or `claude` |
+//! | `RSI_INNER_PROVIDER` | `openai` (default) or `codex` |
+//! | `RSI_<ROLE>_CODEX`, `RSI_OUTER_CLAUDE` | the native binary; default `codex` / `claude` on `PATH` |
+//! | `RSI_<ROLE>_MODEL` | the agent's model; its default if unset |
+//! | `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | the login and state; default `~/.codex`, `~/.claude` |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rsi_core::ModelId;
-use rsi_runtime::codex::{CodexConfig, PASSED_ENV};
-use rsi_runtime::OpenAiModel;
+use rsi_core::{ChatModel, Completion, Message, ModelId};
+use rsi_runtime::agent_cli::{CliAgent, CliConfig, PASSED_ENV};
+use rsi_runtime::codex_model::CodexModel;
+use rsi_runtime::{OpenAiModel, ProcessExecutor, RuntimeError};
 
 /// The default endpoint: a local Ollama.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1";
@@ -72,57 +74,136 @@ pub fn model_from_env(role: Role) -> Result<OpenAiModel, String> {
 pub enum Outer {
     /// A chat model over an OpenAI-compatible endpoint.
     Model(OpenAiModel),
-    /// The Codex CLI.
-    Codex(CodexConfig),
+    /// A coding-agent CLI (Codex or Claude Code).
+    Cli(CliConfig),
 }
 
-/// The proposer from `RSI_OUTER_PROPOSER` (`model`, the default, or
-/// `codex`) and its variables.
+/// The proposer from `RSI_OUTER_PROVIDER` (`model`, the default, `codex`
+/// or `claude`) and its variables.
 ///
 /// # Errors
-/// An unknown proposer, or a missing or invalid setting for the chosen one.
+/// The retired `RSI_OUTER_PROPOSER`, an unknown proposer, or a missing or
+/// invalid setting for the chosen one.
 pub fn outer_from_env(wall: Duration) -> Result<Outer, String> {
+    outer_from(&|name: &str| std::env::var(name).ok(), wall)
+}
+
+/// [`outer_from_env`], reading variables through `var`.
+fn outer_from(var: &dyn Fn(&str) -> Option<String>, wall: Duration) -> Result<Outer, String> {
+    if var("RSI_OUTER_PROPOSER").is_some() {
+        return Err("RSI_OUTER_PROPOSER is now RSI_OUTER_PROVIDER; rename it".into());
+    }
+    let agent = match var("RSI_OUTER_PROVIDER").as_deref() {
+        None | Some("model") => return model_from_env(Role::Outer).map(Outer::Model),
+        Some("codex") => CliAgent::Codex,
+        Some("claude") => CliAgent::Claude,
+        Some(other) => {
+            return Err(format!(
+                "RSI_OUTER_PROVIDER={other}: expected `model`, `codex` or `claude`"
+            ))
+        }
+    };
+    cli_config(var, agent, Role::Outer, wall).map(Outer::Cli)
+}
+
+/// The inner agent's model: an OpenAI-compatible endpoint or Codex.
+#[derive(Debug)]
+pub enum Inner {
+    /// An OpenAI-compatible endpoint.
+    OpenAi(OpenAiModel),
+    /// The Codex CLI, in the sandbox.
+    Codex(CodexModel),
+}
+
+impl ChatModel for Inner {
+    type Error = RuntimeError;
+
+    fn id(&self) -> &ModelId {
+        match self {
+            Self::OpenAi(model) => model.id(),
+            Self::Codex(model) => model.id(),
+        }
+    }
+
+    fn complete(
+        &self,
+        messages: &[Message],
+        max_tokens: u64,
+        timeout: Duration,
+    ) -> Result<Completion, RuntimeError> {
+        match self {
+            Self::OpenAi(model) => model.complete(messages, max_tokens, timeout),
+            Self::Codex(model) => model.complete(messages, max_tokens, timeout),
+        }
+    }
+}
+
+/// The inner model from `RSI_INNER_PROVIDER` (`openai`, the default, or
+/// `codex`). Codex runs through `executor`, staging each call under
+/// `scratch`, and refuses to start if its sandbox could reach a
+/// `protected` path.
+///
+/// # Errors
+/// An unknown provider, or a missing or invalid setting for the chosen one.
+pub fn inner_from_env(
+    executor: &ProcessExecutor,
+    scratch: PathBuf,
+    protected: Vec<PathBuf>,
+) -> Result<Inner, String> {
     let var = |name: &str| std::env::var(name).ok();
-    match var("RSI_OUTER_PROPOSER").as_deref() {
-        None | Some("model") => model_from_env(Role::Outer).map(Outer::Model),
-        Some("codex") => codex_config(&var, wall).map(Outer::Codex),
+    match var("RSI_INNER_PROVIDER").as_deref() {
+        None | Some("openai") => model_from_env(Role::Inner).map(Inner::OpenAi),
+        Some("codex") => {
+            let config = cli_config(&var, CliAgent::Codex, Role::Inner, MODEL_TIMEOUT)?;
+            CodexModel::new(executor, config, scratch, protected)
+                .map(Inner::Codex)
+                .map_err(|e| e.to_string())
+        }
         Some(other) => Err(format!(
-            "RSI_OUTER_PROPOSER={other}: expected `model` or `codex`"
+            "RSI_INNER_PROVIDER={other}: expected `openai` or `codex`"
         )),
     }
 }
 
-/// The Codex settings, reading variables through `var`.
-fn codex_config(
+/// A coding-agent CLI's settings for `role`, reading variables through
+/// `var`.
+fn cli_config(
     var: &dyn Fn(&str) -> Option<String>,
+    agent: CliAgent,
+    role: Role,
     wall: Duration,
-) -> Result<CodexConfig, String> {
-    let program = match var("RSI_OUTER_CODEX") {
+) -> Result<CliConfig, String> {
+    let name = agent.name();
+    let program_var = format!("{}_{}", role.prefix(), name.to_uppercase());
+    let program = match var(&program_var) {
         Some(path) => PathBuf::from(path),
         None => var("PATH")
-            .and_then(|path| on_path(&path, "codex"))
-            .ok_or("codex is not on PATH; set RSI_OUTER_CODEX")?,
+            .and_then(|path| on_path(&path, name))
+            .ok_or_else(|| format!("{name} is not on PATH; set {program_var}"))?,
     };
     let program = program
         .canonicalize()
         .map_err(|e| format!("resolving {}: {e}", program.display()))?;
     if is_script(&program) {
         return Err(format!(
-            "{} is a script; set RSI_OUTER_CODEX to the native codex binary \
-             (in an npm install: vendor/<target>/bin/codex)",
+            "{} is a script; set {program_var} to the native {name} binary",
             program.display()
         ));
     }
-    let home = match var("CODEX_HOME") {
+    let home_var = agent.home_var();
+    let home = match var(home_var) {
         Some(path) => PathBuf::from(path),
         None => var("HOME")
-            .map(|home| Path::new(&home).join(".codex"))
-            .ok_or("neither CODEX_HOME nor HOME is set")?,
+            .map(|home| Path::new(&home).join(format!(".{name}")))
+            .ok_or_else(|| format!("neither {home_var} nor HOME is set"))?,
     };
-    let home = home
-        .canonicalize()
-        .map_err(|e| format!("CODEX_HOME {}: {e} (run `codex login`)", home.display()))?;
-    let model = var("RSI_OUTER_MODEL");
+    let home = home.canonicalize().map_err(|e| {
+        format!(
+            "{home_var} {}: {e} (log in to {name} first)",
+            home.display()
+        )
+    })?;
+    let model = var(&format!("{}_MODEL", role.prefix()));
     if let Some(model) = &model {
         ModelId::parse(model).map_err(|e| e.to_string())?;
     }
@@ -130,7 +211,8 @@ fn codex_config(
         .iter()
         .filter_map(|name| var(name).map(|v| ((*name).to_owned(), v)))
         .collect();
-    Ok(CodexConfig {
+    Ok(CliConfig {
+        agent,
         program,
         model,
         home,
@@ -162,6 +244,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).expect("bin");
         std::fs::create_dir_all(dir.join("home/.codex")).expect("home");
+        std::fs::create_dir_all(dir.join("home/.claude")).expect("claude home");
         dir.canonicalize().expect("canonical")
     }
 
@@ -190,7 +273,13 @@ mod tests {
             ("HTTPS_PROXY", "http://proxy:3128".to_owned()),
             ("OPENAI_API_KEY", "never-passed".to_owned()),
         ];
-        let config = codex_config(&lookup(&vars), Duration::from_secs(9)).expect("config");
+        let config = cli_config(
+            &lookup(&vars),
+            CliAgent::Codex,
+            Role::Outer,
+            Duration::from_secs(9),
+        )
+        .expect("config");
         let canonical = |path: PathBuf| path.canonicalize().expect("exists");
         assert_eq!(config.program, canonical(dir.join("bin").join("codex")));
         assert_eq!(config.home, canonical(dir.join("home").join(".codex")));
@@ -217,7 +306,7 @@ mod tests {
                     codex("bin/native"),
                     ("CODEX_HOME", "/nonexistent".to_owned()),
                 ],
-                "codex login",
+                "log in to codex",
             ),
             (
                 vec![
@@ -230,9 +319,87 @@ mod tests {
             (vec![("PATH", "/nonexistent".to_owned())], "not on PATH"),
         ];
         for (vars, expected) in cases {
-            let error = codex_config(&lookup(&vars), Duration::from_secs(1)).expect_err(expected);
+            let error = cli_config(
+                &lookup(&vars),
+                CliAgent::Codex,
+                Role::Outer,
+                Duration::from_secs(1),
+            )
+            .expect_err(expected);
             assert!(error.contains(expected), "{error}");
         }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn each_agent_and_role_reads_its_own_variables() {
+        let dir = scratch("roles");
+        std::fs::write(dir.join("bin/claude"), b"\x7fELF").expect("claude");
+        std::fs::write(dir.join("bin/codex"), b"\x7fELF").expect("codex");
+        let vars = [
+            (
+                "RSI_OUTER_CLAUDE",
+                dir.join("bin/claude").display().to_string(),
+            ),
+            (
+                "RSI_INNER_CODEX",
+                dir.join("bin/codex").display().to_string(),
+            ),
+            ("HOME", dir.join("home").display().to_string()),
+            ("RSI_OUTER_MODEL", "opus".to_owned()),
+            ("RSI_INNER_MODEL", "gpt-mini".to_owned()),
+        ];
+        let canonical = |path: PathBuf| path.canonicalize().expect("exists");
+        let claude = cli_config(
+            &lookup(&vars),
+            CliAgent::Claude,
+            Role::Outer,
+            Duration::from_secs(1),
+        )
+        .expect("claude");
+        assert_eq!(claude.home, canonical(dir.join("home").join(".claude")));
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        let inner = cli_config(
+            &lookup(&vars),
+            CliAgent::Codex,
+            Role::Inner,
+            Duration::from_secs(1),
+        )
+        .expect("inner codex");
+        assert_eq!(inner.program, canonical(dir.join("bin").join("codex")));
+        assert_eq!(inner.model.as_deref(), Some("gpt-mini"));
+        let e = cli_config(
+            &lookup(&vars[2..]),
+            CliAgent::Claude,
+            Role::Outer,
+            Duration::from_secs(1),
+        )
+        .expect_err("no binary");
+        assert!(e.contains("RSI_OUTER_CLAUDE"), "{e}");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_outer_provider_is_chosen_by_name_and_the_old_name_is_refused() {
+        let dir = scratch("outer");
+        std::fs::write(dir.join("bin/claude"), b"\x7fELF").expect("claude");
+        let wall = Duration::from_secs(1);
+        let vars = [
+            ("RSI_OUTER_PROVIDER", "claude".to_owned()),
+            (
+                "RSI_OUTER_CLAUDE",
+                dir.join("bin/claude").display().to_string(),
+            ),
+            ("HOME", dir.join("home").display().to_string()),
+            ("RSI_OUTER_PROPOSER", "claude".to_owned()),
+        ];
+        let outer = outer_from(&lookup(&vars[..3]), wall).expect("claude");
+        assert!(matches!(outer, Outer::Cli(c) if c.agent == CliAgent::Claude));
+        let e = outer_from(&lookup(&vars), wall).expect_err("old name");
+        assert!(e.contains("RSI_OUTER_PROVIDER"), "{e}");
+        let bad = [("RSI_OUTER_PROVIDER", "gemini".to_owned())];
+        let e = outer_from(&lookup(&bad), wall).expect_err("unknown");
+        assert!(e.contains("expected `model`"), "{e}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
