@@ -29,7 +29,7 @@ import type {
 export const INBOX_ID = '00000000-0000-7000-8000-000000000001'
 export const STORAGE_KEY = 'tick-local:memory:v1'
 const STEP = 1024
-const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter']
+const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter', 'countdown', 'estimate']
 const MAX_DOC_BYTES = 64 * 1024
 
 interface State {

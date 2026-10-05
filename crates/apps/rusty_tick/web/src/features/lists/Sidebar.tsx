@@ -93,7 +93,7 @@ export function Sidebar() {
   const now = useNow(60_000)
   const actions = useActions()
   const { api } = useServices()
-  const filters = useFilters((s) => s.filters)
+  const filters = useFilters((s) => s.items)
   const inboxId = useData((s) => s.inboxId)
   const listMap = useData((s) => s.lists)
   const taskMap = useData((s) => s.tasks)
@@ -262,7 +262,7 @@ export function Sidebar() {
         onSubmit={(input) => {
           const editing = filterDialog?.filter
           setFilterDialog(null)
-          if (editing) useFilters.getState().update(editing.id, input)
+          if (editing) useFilters.getState().put(editing.id, input)
           else navigate(viewPath({ kind: 'filter', id: useFilters.getState().add(input) }))
         }}
       />

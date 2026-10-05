@@ -27,7 +27,7 @@ export function useViewData(spec: ViewSpec | null): ViewData {
   const listMap = useData((s) => s.lists)
   const tagMap = useData((s) => s.tags)
   const taskMap = useData((s) => s.tasks)
-  const filters = useFilters((s) => s.filters)
+  const filters = useFilters((s) => s.items)
   const stored = useUi((s) => (spec ? s.options[viewKey(spec)] : undefined))
   const view = spec ?? NONE
 

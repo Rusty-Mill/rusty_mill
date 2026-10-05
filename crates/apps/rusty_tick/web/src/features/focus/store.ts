@@ -41,6 +41,8 @@ interface FocusState {
   setMode(mode: FocusMode): void
   updateSettings(patch: Partial<FocusSettings>): void
   start(task: { id: string; title: string } | null): void
+  /** Log that the user was pulled away from the running focus session. */
+  interrupt(): void
   pause(): void
   resume(): void
   /** Stop the stopwatch (records it) or give up a pomo / break (records nothing). */
@@ -160,9 +162,15 @@ export const useFocus = create<FocusState>()((set, get) => {
           pausedTotalMs: 0,
           taskId: task?.id ?? null,
           taskTitle: task?.title ?? null,
+          interruptions: 0,
         },
       })
       armTimer()
+    },
+
+    interrupt() {
+      const s = get().session
+      if (s && s.phase === 'focus') set({ session: { ...s, interruptions: s.interruptions + 1 } })
     },
 
     pause() {
@@ -184,7 +192,7 @@ export const useFocus = create<FocusState>()((set, get) => {
       const now = Date.now()
       if (s.phase === 'focus' && s.mode === 'stopwatch') {
         const sec = Math.round(elapsedMs(s, now) / 1000)
-        if (sec >= 1) commit({ startMs: s.startedMs, endMs: s.pausedAt ?? now, durationSec: sec, kind: 'stopwatch', taskId: s.taskId, taskTitle: s.taskTitle })
+        if (sec >= 1) commit({ startMs: s.startedMs, endMs: s.pausedAt ?? now, durationSec: sec, kind: 'stopwatch', taskId: s.taskId, taskTitle: s.taskTitle, interruptions: s.interruptions })
       }
       set({ session: null, offer: null })
     },
@@ -197,7 +205,7 @@ export const useFocus = create<FocusState>()((set, get) => {
       if (s.phase === 'break') return set({ session: null, offer: null, lastCompleted: now })
       // The end is when the countdown ran out, not when we noticed.
       const endMs = s.startedMs + s.pausedTotalMs + (s.targetSec ?? 0) * 1000
-      commit({ startMs: s.startedMs, endMs, durationSec: s.targetSec ?? 0, kind: 'pomo', taskId: s.taskId, taskTitle: s.taskTitle })
+      commit({ startMs: s.startedMs, endMs, durationSec: s.targetSec ?? 0, kind: 'pomo', taskId: s.taskId, taskTitle: s.taskTitle, interruptions: s.interruptions })
       set({ session: null, offer: breakFor(pomosToday(get().records, now), get().settings), lastCompleted: now })
     },
 
@@ -206,7 +214,7 @@ export const useFocus = create<FocusState>()((set, get) => {
       if (!offer) return
       set({
         offer: null,
-        session: { mode: 'pomo', phase: 'break', targetSec: offer.sec, startedMs: Date.now(), pausedAt: null, pausedTotalMs: 0, taskId: null, taskTitle: null },
+        session: { mode: 'pomo', phase: 'break', targetSec: offer.sec, startedMs: Date.now(), pausedAt: null, pausedTotalMs: 0, taskId: null, taskTitle: null, interruptions: 0 },
       })
       armTimer()
     },
