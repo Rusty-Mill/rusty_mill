@@ -51,7 +51,7 @@ localStorage, nothing sent anywhere.
   every card as a checkbox tile with "All in" / "All out" per suit. A "Set aside · N"
   chip shows only the cards left out, to bring them back. The board, the undealt list
   and the balance count only the cards in play.
-- **Layout.** Every tile is the same size (two lines of name at most). The detail pane
+- **Layout.** Every tile is the same size (two lines of name at most, the full name on hover), styled after the printed deck: a blush-cream card, the name in spaced serif capitals, the suit up the left edge. The detail pane
   folds to a thin rail with its »/« button, remembered across reloads, and opening a
   card brings it back.
 - `#/players` — people with "holds N cards (M leaves)", inline rename, add (a

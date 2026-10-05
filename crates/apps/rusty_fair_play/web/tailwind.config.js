@@ -12,6 +12,7 @@ export default {
         grey: v('grey'),
         line: v('line'),
         surface: v('surface'),
+        paper: v('paper'),
         rail: v('rail'),
         side: v('side'),
         hover: v('hover'),
