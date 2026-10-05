@@ -744,4 +744,23 @@ describe("won't do, countdowns and calendar import", () => {
     const tasks = (await api.snapshot()).tasks
     expect(tasks.map((t) => [t.title, t.listId, t.isAllDay])).toContainEqual(['Dentist', INBOX_ID, true])
   })
+  it('assigns a task to someone, shows them on the row, and filters by assignee', async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'review draft' })
+      await a.createTask({ listId: INBOX_ID, title: 'water plants' })
+    })
+    await user.click(screen.getByText('review draft'))
+    await user.type(await screen.findByLabelText('Assignee'), 'Ada{Enter}')
+    expect(await within(tasksList()).findByTitle('Assigned to Ada')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add filter' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByPlaceholderText('Filter name'), 'Ada work')
+    await user.click(within(dialog).getByRole('button', { name: 'Ada' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+    expect(await screen.findByRole('heading', { name: 'Ada work' })).toBeInTheDocument()
+    expect(within(tasksList()).getByText('review draft')).toBeInTheDocument()
+    expect(within(tasksList()).queryByText('water plants')).toBeNull()
+  })
 })

@@ -70,7 +70,7 @@ describe('windowRows', () => {
 describe('viewTitle', () => {
   const lists = [{ id: 'i', name: 'Inbox' }, { id: 'w', name: 'Work' }] as never
   const tags = [{ name: 'q4', label: 'Q4' }] as never
-  const filters = [{ id: 'f', name: 'Soon', rule: { lists: [], tags: [], priorities: [], dates: [] } }]
+  const filters = [{ id: 'f', name: 'Soon', rule: { lists: [], tags: [], priorities: [], dates: [], assignees: [] } }]
   it('names each kind of view', () => {
     expect(viewTitle({ kind: 'all' }, lists, tags, filters, 'i')).toBe('All')
     expect(viewTitle({ kind: 'week' }, lists, tags, filters, 'i')).toBe('Next 7 Days')

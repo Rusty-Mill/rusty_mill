@@ -1,4 +1,5 @@
 import { ArrowLeft, Calendar, Copy, FileText, History, Link2, ListChecks, ListPlus, MessageSquare, MoreHorizontal, Paperclip, Pin, Plus, Printer, RotateCcw, StickyNote, Tag, Target, Trash2, Type, Upload, X, XCircle } from 'lucide-react'
+import { AssigneeField } from '../../assignees/AssigneeField'
 import { useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Task } from '@/api/types'
@@ -183,6 +184,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
           className={`w-full resize-none bg-transparent text-h1 font-semibold outline-none ${task.status !== 'open' ? 'text-grey line-through' : ''}`}
         />
 
+        <AssigneeField taskId={task.id} disabled={trashed} />
         <div className="relative flex-1">
           <button
             type="button"
