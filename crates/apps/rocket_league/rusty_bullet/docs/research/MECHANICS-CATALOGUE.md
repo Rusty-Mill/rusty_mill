@@ -25,6 +25,7 @@ it), `Modelled` (the port has the mechanic), `Needs capture`.
 |---|---|---|---|---|
 | Jump (held for height) | 0.2 s hold accel | jump hold, impulse | jump input timing | Captured, Modelled |
 | Double jump | Second jump, no direction | double-jump impulse | two jump presses, no flip torque | Modelled |
+| Double-jump / dodge window | The second jump must come within 1.25 s of the first jump finishing (`DOUBLEJUMP_MAX_DELAY`); one dodge or double jump per airtime | jump timer | second jump timing | **Not modelled** (found 2026-10-05, see below) |
 | Flip / dodge (front, back, side, diagonal) | Second jump with direction | flip impulse, flip torque, damping | pitch/yaw/roll inputs at second jump | Captured, Modelled |
 | Flip cancel | Cancel the flip rotation | flip torque timing | opposite pitch input after flip | Needs capture |
 | Stall | Tilt car to cancel a flip mid-air | flip torque, air control | roll plus pitch at second jump | Needs capture |
@@ -55,9 +56,30 @@ it), `Modelled` (the port has the mechanic), `Needs capture`.
 | Double tap | Hit ball off the wall, then again | wall bounce, car-ball | two touches around a wall bounce | Needs capture |
 | Ceiling shot | Drop from ceiling holding the dodge | ceiling contact, flip availability | ceiling plus later flip touch | Needs capture |
 | Flip reset | All four wheels touch the ball in the air, refunding the flip | wheel-ball contact, jump re-arm | four wheel contacts on ball | Needs capture; wheel-ball Modelled (rays), reset not |
-| Pogo | Bounce off the ground with a corner of the car, springing back up | hard landings, pushback, jump on contact | repeated ground contact plus jump within a few ticks | Needs capture (see residuals in PROJECT-STATUS) |
+| Pogo | Bounce the car's nose or tail (a corner) off the ground repeatedly to keep height and act on the ball | hard landings, pushback, jump on contact | repeated ground contact plus jump within a few ticks | Needs capture (see residuals in PROJECT-STATUS) |
 | Redirect, bump, demo, 50/50 | Contact play | car-ball, car-car, demolition | contacts, demos | Bumps and demos not modelled |
+| Catch / scoop | Settle a bounce onto the roof; lift the ball with the car's underside | car-ball friction 2.0, contact persistence | slow relative speed, ball z rising on the nose | Needs capture |
+| Breezi flick | Air roll upside down mid-dribble, then front flip | air torque, flick hit | roll plus flip while carrying | Needs capture |
+| Flick variants (45, 90, 180, front, side, reset flick, double flip reset) | Dodge direction and carry position decide the angle | extra hit impulse, flip | flip direction vs ball offset | Needs capture |
+| Pinch / ground pinch / ceiling pinch / Kuxir pinch | Squeeze the ball between car and a surface at speed for a fast, odd bounce | ball-car-world three-body contact | ball speed jump with car and surface contact in one tick | Needs capture |
+| Dunk, redirect, backboard read, power shot | Downward aerial touch; change a pass's direction; read the rebound | car-ball hit | touch geometry and speed | Needs capture |
+| Roll shot, psycho, YEET shot, turtle | Named shot and recovery styles from the community wheel; "turtle" is landing on the roof | auto-flip, car-ball | roof contact, inputs | Needs capture; turtle partly Modelled (auto-flip) |
 | Bicycle hit, juggle, clear, center, epic save | Statistic-level labels | various | ballchasing detail stats | n/a |
+
+## Found while reading the glossaries
+
+- RocketSim's `Car::_UpdateDoubleJumpOrFlip` only allows the second jump or
+  dodge while `airTimeSinceJump < DOUBLEJUMP_MAX_DELAY` (1.25 s, counted
+  from when the jump's hold ends, only after a jump). The port's
+  `drive::jump` never expires the second jump, so a late dodge would still
+  fire. No capture of the owner's is known to exceed the window; the next
+  physics cycle should add the timer and a test (and check a capture with a
+  late jump, if one exists).
+- Liquipedia's glossary and CoinLooting returned HTTP 403 to the fetch
+  tool, so they are not in this list; the terms above came from
+  Harmonicode and the community "mechanics wheel" at spinthewheel.app, plus
+  the sources below. Tactical terms (rotation, shadow defense, cheating,
+  overcommit, kickoff roles) are left out as not physics.
 
 ## Sources for the names
 
@@ -69,11 +91,12 @@ it), `Modelled` (the port has the mechanic), `Needs capture`.
 [rocketprices freestyle guide](https://www.rocketprices.com/news/983--rocket-league-freestyle-shot-guide--how-to-ceiling-shot-double-tap-air-dribble-flip-reset),
 [10 flip resets](https://gamersrdy.com/blog/2021/02/03/10-flip-resets-you-need-to-learn-in-rocket-league/),
 [Harmonicode dictionary](https://harmonicode.com/2026/03/25/rocket-league-terms-the-complete-dictionary-every-player-must-know-in-2026/),
+[spinthewheel mechanics](https://spinthewheel.app/rocket-league-mechanics),
 [ballchasing API](https://ballchasing.com/doc/api).
 
 ## Gaps to fill next
 
-- Fetch the Liquipedia glossary in full and diff it against this list.
+- Get the Liquipedia glossary by another route (a saved copy from the owner; the fetch tool is refused) and diff it against this list.
 - Add variants (e.g. the ten flip-reset kinds, flick variants, kickoff
   types) as sub-rows once each has a detector.
 - For each row marked `Needs capture`, define the minimal capture (what
