@@ -17,9 +17,10 @@ pub enum Error {
     /// The request line, status line, or a header line didn't parse.
     InvalidHead(String),
     /// The head (request line/status line + headers, up to and including
-    /// the blank line) exceeded the caller-supplied size bound before a
-    /// terminator was found -- a line that never arrives can't be allowed
-    /// to grow a caller's buffer forever.
+    /// the blank line) exceeded the caller-supplied size bound -- either
+    /// before a terminator was found (a line that never arrives can't be
+    /// allowed to grow a caller's buffer forever) or, once it did
+    /// complete, because the head itself occupied more than the bound.
     HeadTooLarge,
     /// A `Content-Length` header's value wasn't a valid, non-negative
     /// integer.
@@ -31,14 +32,13 @@ pub enum Error {
     /// reasoning as [`Error::HeadTooLarge`], applied to chunked-body
     /// framing lines instead of the head.
     ChunkFramingTooLarge,
-    /// A `Content-Length`-framed or close-delimited body exceeded the
-    /// caller-supplied `max_body_len` bound -- for `Content-Length`
-    /// framing this is reported before a single body byte is read (the
-    /// declared length alone is enough to know it's too large); for
-    /// close-delimited framing it's reported once the running total
-    /// crosses the bound, since there's no declared length to check
-    /// upfront. Same reasoning as [`Error::HeadTooLarge`], applied to
-    /// the body instead of the head.
+    /// A body exceeded the caller-supplied `max_body_len` bound -- for
+    /// `Content-Length` framing this is reported before a single body
+    /// byte is read (the declared length alone is enough to know it's
+    /// too large); for close-delimited and chunked framing it's reported
+    /// once the running (decoded) total crosses the bound, since there's
+    /// no declared length to check upfront. Same reasoning as
+    /// [`Error::HeadTooLarge`], applied to the body instead of the head.
     BodyTooLarge,
 }
 

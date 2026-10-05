@@ -117,9 +117,12 @@ fn write_headers(headers: &HeaderMap, out: &mut Vec<u8>) {
 }
 
 /// Parses a request line + headers from the start of `buf`. `max_head_len`
-/// bounds the total size of the head (see [`DEFAULT_MAX_HEAD_LEN`]); a
+/// bounds the total size of the head (see [`DEFAULT_MAX_HEAD_LEN`]): a
 /// head that never completes within that bound is
-/// [`Error::HeadTooLarge`], not an endless `Incomplete`.
+/// [`Error::HeadTooLarge`], not an endless `Incomplete`, and a head
+/// that does complete but occupies more than `max_head_len` bytes is
+/// rejected the same way. Only the head's own bytes count -- whatever
+/// follows the blank line (body, upgrade payload) never does.
 pub fn parse_request_head(buf: &[u8], max_head_len: usize) -> Result<Outcome<RequestHead>> {
     let Some((line, first_line_len)) = next_line(buf) else {
         return incomplete_or_too_large(buf.len(), max_head_len);
@@ -144,6 +147,7 @@ pub fn parse_request_head(buf: &[u8], max_head_len: usize) -> Result<Outcome<Req
         return incomplete_or_too_large(buf.len(), max_head_len);
     };
 
+    let consumed = head_len_within(first_line_len + headers_len, max_head_len)?;
     Ok(Outcome::Complete {
         head: RequestHead {
             method: Method::parse(method_tok),
@@ -151,7 +155,7 @@ pub fn parse_request_head(buf: &[u8], max_head_len: usize) -> Result<Outcome<Req
             version,
             headers,
         },
-        consumed: first_line_len + headers_len,
+        consumed,
     })
 }
 
@@ -181,6 +185,7 @@ pub fn parse_response_head(buf: &[u8], max_head_len: usize) -> Result<Outcome<Re
         return incomplete_or_too_large(buf.len(), max_head_len);
     };
 
+    let consumed = head_len_within(first_line_len + headers_len, max_head_len)?;
     Ok(Outcome::Complete {
         head: ResponseHead {
             status: StatusCode::from_u16(code),
@@ -188,7 +193,7 @@ pub fn parse_response_head(buf: &[u8], max_head_len: usize) -> Result<Outcome<Re
             version,
             headers,
         },
-        consumed: first_line_len + headers_len,
+        consumed,
     })
 }
 
@@ -222,6 +227,17 @@ fn incomplete_or_too_large<T>(buf_len: usize, max_head_len: usize) -> Result<Out
     } else {
         Ok(Outcome::Incomplete)
     }
+}
+
+/// The cap applied to a head that *did* complete: `consumed` is exactly
+/// the head's own length, so comparing it (and not the whole buffer,
+/// which may already hold body or upgrade bytes) keeps the byte-exact
+/// upgrade contract intact while still refusing an oversized head.
+fn head_len_within(consumed: usize, max_head_len: usize) -> Result<usize> {
+    if consumed > max_head_len {
+        return Err(Error::HeadTooLarge);
+    }
+    Ok(consumed)
 }
 
 #[cfg(test)]
@@ -320,6 +336,116 @@ mod tests {
     fn request_head_over_max_len_without_terminator_is_an_error() {
         let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n"; // no blank line yet
         assert_eq!(parse_request_head(buf, 8).unwrap_err(), Error::HeadTooLarge);
+    }
+
+    /// A request head padded with one `X-Pad` header so the whole head
+    /// (through the blank line) is exactly `len` bytes.
+    fn request_head_of_len(len: usize) -> Vec<u8> {
+        let prefix = b"GET / HTTP/1.1\r\nX-Pad: ";
+        let suffix = b"\r\n\r\n";
+        let pad = len - prefix.len() - suffix.len();
+        [&prefix[..], &b"p".repeat(pad), &suffix[..]].concat()
+    }
+
+    fn response_head_of_len(len: usize) -> Vec<u8> {
+        let prefix = b"HTTP/1.1 200 OK\r\nX-Pad: ";
+        let suffix = b"\r\n\r\n";
+        let pad = len - prefix.len() - suffix.len();
+        [&prefix[..], &b"p".repeat(pad), &suffix[..]].concat()
+    }
+
+    #[test]
+    fn complete_request_head_at_or_under_the_cap_is_accepted() {
+        const CAP: usize = 256;
+        for len in [CAP - 1, CAP] {
+            let buf = request_head_of_len(len);
+            let Outcome::Complete { consumed, .. } = parse_request_head(&buf, CAP).unwrap() else {
+                panic!("expected Complete for a {len}-byte head under a {CAP}-byte cap");
+            };
+            assert_eq!(consumed, len);
+        }
+    }
+
+    #[test]
+    fn complete_request_head_over_the_cap_is_an_error() {
+        // The whole head, terminator included, is present in one buffer:
+        // before the fix this parsed fine, since the cap was only ever
+        // checked on the `Incomplete` path.
+        const CAP: usize = 256;
+        let buf = request_head_of_len(CAP + 1);
+        assert_eq!(
+            parse_request_head(&buf, CAP).unwrap_err(),
+            Error::HeadTooLarge
+        );
+    }
+
+    #[test]
+    fn complete_response_head_at_or_under_the_cap_is_accepted() {
+        const CAP: usize = 256;
+        for len in [CAP - 1, CAP] {
+            let buf = response_head_of_len(len);
+            let Outcome::Complete { consumed, .. } = parse_response_head(&buf, CAP).unwrap() else {
+                panic!("expected Complete for a {len}-byte head under a {CAP}-byte cap");
+            };
+            assert_eq!(consumed, len);
+        }
+    }
+
+    #[test]
+    fn complete_response_head_over_the_cap_is_an_error() {
+        const CAP: usize = 256;
+        let buf = response_head_of_len(CAP + 1);
+        assert_eq!(
+            parse_response_head(&buf, CAP).unwrap_err(),
+            Error::HeadTooLarge
+        );
+    }
+
+    #[test]
+    fn fragmented_head_over_the_cap_errors_before_or_at_the_terminator() {
+        // Fed the way an adapter feeds it -- a growing prefix of the same
+        // over-cap head -- the parser must report `HeadTooLarge` at some
+        // point and never `Complete`, whichever branch catches it.
+        const CAP: usize = 256;
+        let full = request_head_of_len(CAP + 1);
+        let mut outcome = None;
+        for end in 1..=full.len() {
+            match parse_request_head(&full[..end], CAP) {
+                Ok(Outcome::Incomplete) => continue,
+                other => {
+                    outcome = Some(other);
+                    break;
+                }
+            }
+        }
+        assert!(
+            matches!(outcome, Some(Err(Error::HeadTooLarge))),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn head_cap_counts_only_the_head_not_trailing_body_or_upgrade_bytes() {
+        // A head exactly at the cap followed by far more than the cap in
+        // body/upgrade bytes: the head is accepted, `consumed` stops at
+        // the blank line, and the trailing bytes are untouched.
+        const CAP: usize = 256;
+        let head = request_head_of_len(CAP);
+        let trailing = vec![0xffu8; CAP * 4];
+        let buf = [&head[..], &trailing[..]].concat();
+        let Outcome::Complete { consumed, .. } = parse_request_head(&buf, CAP).unwrap() else {
+            panic!("expected Complete");
+        };
+        assert_eq!(consumed, head.len());
+        assert_eq!(&buf[consumed..], &trailing[..]);
+
+        let head = response_head_of_len(CAP);
+        let buf = [&head[..], &trailing[..]].concat();
+        let Outcome::Complete { consumed, .. } = parse_response_head(&buf, CAP).unwrap() else {
+            panic!("expected Complete");
+        };
+        assert_eq!(consumed, head.len());
+        assert_eq!(&buf[consumed..], &trailing[..]);
     }
 
     #[test]
