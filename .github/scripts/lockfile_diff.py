@@ -25,15 +25,23 @@ import tomllib
 from pathlib import Path
 
 PackageKey = tuple[str, str]  # (name, version)
+PackageSignature = tuple[str | None, str | None, tuple[str, ...]]
 
 
-def lockfile_package_keys(lock_text: str) -> dict[PackageKey, tuple[str | None, str | None]]:
-    """Map every `[[package]]` entry to its (source, checksum) signature."""
+def lockfile_package_keys(lock_text: str) -> dict[PackageKey, PackageSignature]:
+    """Map every `[[package]]` entry to its source, checksum, and edges."""
     doc = tomllib.loads(lock_text)
-    return {
-        (pkg["name"], pkg["version"]): (pkg.get("source"), pkg.get("checksum"))
-        for pkg in doc.get("package", [])
-    }
+    result: dict[PackageKey, PackageSignature] = {}
+    for pkg in doc.get("package", []):
+        key = (pkg["name"], pkg["version"])
+        if key in result:
+            raise ValueError(f"ambiguous duplicate Cargo.lock identity: {key}")
+        result[key] = (
+            pkg.get("source"),
+            pkg.get("checksum"),
+            tuple(sorted(pkg.get("dependencies", []))),
+        )
+    return result
 
 
 def changed_package_keys(old_lock_text: str, new_lock_text: str) -> set[PackageKey]:
@@ -59,55 +67,60 @@ def full_dependency_closure(metadata: dict) -> dict[str, set[str]]:
     -- an external package is exactly what a lockfile-only change touches.
     """
     resolve_nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-    memo: dict[str, set[str]] = {}
-
-    def closure(pkg_id: str, visiting: set[str]) -> set[str]:
-        if pkg_id in memo:
-            return memo[pkg_id]
-        if pkg_id in visiting:
-            return set()  # defensive cycle guard; a real resolve graph is a DAG
-        visiting.add(pkg_id)
+    def closure(pkg_id: str) -> set[str]:
+        # Do not memoize recursive partial results: dev-dependency cycles can
+        # otherwise cache a closure before another edge in the cycle is seen.
+        seen = {pkg_id}
+        pending = [pkg_id]
         result: set[str] = set()
-        node = resolve_nodes.get(pkg_id)
-        if node:
+        while pending:
+            node = resolve_nodes.get(pending.pop())
+            if not node:
+                continue
             for dep in node["deps"]:
                 dep_id = dep["pkg"]
+                if dep_id in seen:
+                    continue
+                seen.add(dep_id)
                 result.add(dep_id)
-                result |= closure(dep_id, visiting)
-        visiting.discard(pkg_id)
-        memo[pkg_id] = result
+                pending.append(dep_id)
         return result
 
-    return {pkg_id: closure(pkg_id, set()) for pkg_id in resolve_nodes}
+    return {pkg_id: closure(pkg_id) for pkg_id in resolve_nodes}
 
 
-def affected_by_lockfile_changes(metadata: dict, changed_keys: set[PackageKey]) -> list[str]:
-    """Sorted workspace package names whose dependency closure includes a
-    package matching one of `changed_keys` (or that a changed key names
-    directly -- a workspace member's own version pin changing counts too).
-    """
+def reliable_lockfile_impact(
+    metadata: dict, changed_keys: set[PackageKey]
+) -> list[str] | None:
+    """Return affected workspace packages, or None when the impact is unknown."""
     if not changed_keys:
-        return []
+        return None
 
     key_to_ids: dict[PackageKey, set[str]] = {}
     for pkg in metadata["packages"]:
         key_to_ids.setdefault((pkg["name"], pkg["version"]), set()).add(pkg["id"])
     changed_ids: set[str] = set()
+    unmatched: list[PackageKey] = []
     for key in changed_keys:
-        changed_ids |= key_to_ids.get(key, set())
+        matched_ids = key_to_ids.get(key, set())
+        if matched_ids:
+            changed_ids |= matched_ids
+        else:
+            unmatched.append(key)
+    for name, _version in unmatched:
+        # A lock-only version replacement removes the old key from head
+        # metadata, but the same package name has exactly one changed,
+        # resolved replacement in head. Anything else (a removed dependency,
+        # multiple candidates, or an unrelated unknown entry) is ambiguous.
+        replacements = [
+            key
+            for key in changed_keys
+            if key[0] == name and key in key_to_ids
+        ]
+        if len(replacements) != 1:
+            return None
     if not changed_ids:
-        # A changed lockfile entry cargo metadata's resolve doesn't know
-        # about at all (e.g. a dev-only/build-only dependency that
-        # --all-features metadata still excludes, or a stale/partial
-        # metadata snapshot) is exactly the "can't prove it's safe" case --
-        # never silently narrow past it. Caller should fall back to a full
-        # sweep when this returns something unexpected; returning every
-        # workspace member here makes that fallback the safe default even
-        # if a caller forgets the check.
-        workspace_ids = set(metadata["workspace_members"])
-        return sorted(
-            pkg["name"] for pkg in metadata["packages"] if pkg["id"] in workspace_ids
-        )
+        return None
 
     closures = full_dependency_closure(metadata)
     workspace_ids = set(metadata["workspace_members"])
@@ -121,6 +134,31 @@ def affected_by_lockfile_changes(metadata: dict, changed_keys: set[PackageKey]) 
     return sorted(packages_by_id[pkg_id]["name"] for pkg_id in affected)
 
 
+def affected_by_lockfile_changes(metadata: dict, changed_keys: set[PackageKey]) -> list[str]:
+    """Sorted workspace package names whose dependency closure includes a
+    package matching one of `changed_keys` (or that a changed key names
+    directly -- a workspace member's own version pin changing counts too).
+    """
+    if not changed_keys:
+        return []
+    impact = reliable_lockfile_impact(metadata, changed_keys)
+    if impact is None:
+        # A changed lockfile entry cargo metadata's resolve doesn't know
+        # about at all (e.g. a dev-only/build-only dependency that
+        # --all-features metadata still excludes, or a stale/partial
+        # metadata snapshot) is exactly the "can't prove it's safe" case --
+        # never silently narrow past it. Caller should fall back to a full
+        # sweep when this returns something unexpected; returning every
+        # workspace member here makes that fallback the safe default even
+        # if a caller forgets the check.
+        workspace_ids = set(metadata["workspace_members"])
+        return sorted(
+            pkg["name"] for pkg in metadata["packages"] if pkg["id"] in workspace_ids
+        )
+
+    return impact
+
+
 def main() -> None:
     metadata_path, old_lock_path, new_lock_path = sys.argv[1], sys.argv[2], sys.argv[3]
     import json
@@ -129,7 +167,11 @@ def main() -> None:
     old_lock_text = Path(old_lock_path).read_text()
     new_lock_text = Path(new_lock_path).read_text()
     changed = changed_package_keys(old_lock_text, new_lock_text)
-    print(" ".join(affected_by_lockfile_changes(metadata, changed)))
+    impact = reliable_lockfile_impact(metadata, changed)
+    if impact is None:
+        print("Cargo.lock impact is not reliably represented by head metadata", file=sys.stderr)
+        raise SystemExit(2)
+    print(" ".join(impact))
 
 
 if __name__ == "__main__":

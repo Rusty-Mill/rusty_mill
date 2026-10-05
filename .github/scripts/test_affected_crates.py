@@ -72,6 +72,19 @@ class ReverseDependencyTests(unittest.TestCase):
         md = metadata({"a": ("crates/a", []), "b": ("crates/b", ["a"]), "c": ("crates/c", ["b"])})
         self.assertEqual(affected_packages(md, ["crates/a/src/lib.rs"]), ["a", "b", "c"])
 
+    def test_shared_server_selects_each_dependent_application(self) -> None:
+        md = metadata(
+            {
+                "rusty_serve": ("crates/libs/net/rusty_serve", []),
+                "rusty_fair_play": ("crates/apps/rusty_fair_play", ["rusty_serve"]),
+                "rusty_tick": ("crates/apps/rusty_tick", ["rusty_serve"]),
+            }
+        )
+        self.assertEqual(
+            affected_packages(md, ["crates/libs/net/rusty_serve/src/lib.rs"]),
+            ["rusty_fair_play", "rusty_serve", "rusty_tick"],
+        )
+
     def test_changing_a_leaf_does_not_pull_in_its_dependencies(self) -> None:
         md = metadata({"a": ("crates/a", []), "b": ("crates/b", ["a"])})
         self.assertEqual(affected_packages(md, ["crates/b/src/lib.rs"]), ["b"])
