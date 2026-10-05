@@ -107,41 +107,26 @@ pub enum FetchError {
 /// without standing up an HTTP server.
 #[must_use]
 pub fn is_blocked_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            if v4.is_loopback() || v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast() {
-                return true;
-            }
-            // RFC1918 private + link-local + shared (CGNAT).
-            let octs = v4.octets();
-            v4.is_private()
-                || v4.is_link_local()
-                // 100.64.0.0/10 — RFC6598 carrier-grade NAT.
-                || (octs[0] == 100 && (64..128).contains(&octs[1]))
-                // 0.0.0.0/8 — "this network" reserved.
-                || octs[0] == 0
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
-                return true;
-            }
-            // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) — recurse into the
-            // v4 check so attackers can't bypass the guard by smuggling
-            // 127.0.0.1 as `::ffff:127.0.0.1`.
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_blocked_address(IpAddr::V4(mapped));
-            }
-            // fc00::/7 — Unique Local Addresses (RFC4193).
-            let segs = v6.segments();
-            if (segs[0] & 0xfe00) == 0xfc00 {
-                return true;
-            }
-            // fe80::/10 — link-local.
-            if (segs[0] & 0xffc0) == 0xfe80 {
-                return true;
-            }
-            false
-        }
+    use rusty_ip::{classify, AddressClass as Class};
+
+    // Preserve Nexus's policy: mapped IPv4 is interpreted, NAT64 is not.
+    match classify(ip) {
+        Class::Ipv4Mapped(v4) => is_blocked_address(IpAddr::V4(v4)),
+        Class::Unspecified
+        | Class::Loopback
+        | Class::Private
+        | Class::LinkLocal
+        | Class::Shared
+        | Class::Broadcast
+        | Class::Multicast
+        | Class::ThisNetwork
+        | Class::UniqueLocal => true,
+        Class::ProtocolAssignment
+        | Class::Benchmarking
+        | Class::Reserved
+        | Class::SiteLocal
+        | Class::Nat64(_)
+        | Class::Other => false,
     }
 }
 
@@ -537,6 +522,18 @@ fn regex_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod address_conformance {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../foundation/rusty_ip/tests/ssrf_conformance/policy.rs"
+        ));
+    }
+
+    #[test]
+    fn ssrf_address_conformance() {
+        address_conformance::assert_policy("linkpreview", super::is_blocked_address);
+    }
+
     use super::*;
 
     #[test]

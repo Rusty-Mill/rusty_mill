@@ -263,44 +263,32 @@ pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<Vec<S
     }
 }
 
-/// Whether a webhook may not be delivered to `ip`: anything not a
-/// globally routed unicast address (design review 3.6 widened this; IPv6
-/// unique-local `fc00::/7`, for one, used to pass). An IPv4 address
+/// Address classes rejected by this caller's opt-in webhook policy (design
+/// review 3.6 widened this; IPv6 unique-local `fc00::/7`, for one, used to pass).
+/// This is not an exhaustive global-routability test. An IPv4 address
 /// embedded in IPv6 (mapped `::ffff:0:0/96`, NAT64 `64:ff9b::/96`) is
 /// judged as the IPv4 address it reaches.
 fn is_disallowed(ip: IpAddr) -> bool {
-    match ip.to_canonical() {
-        IpAddr::V4(v4) => is_disallowed_v4(v4),
-        IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            if seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-                let [a, b] = seg[6].to_be_bytes();
-                let [c, d] = seg[7].to_be_bytes();
-                return is_disallowed_v4(std::net::Ipv4Addr::new(a, b, c, d));
-            }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || v6.is_unicast_link_local()
-                || (seg[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
-                || (seg[0] & 0xffc0) == 0xfec0 // deprecated site-local, fec0::/10
-        }
-    }
-}
+    use rusty_ip::{classify, AddressClass as Class};
 
-fn is_disallowed_v4(v4: std::net::Ipv4Addr) -> bool {
-    let [a, b, ..] = v4.octets();
-    v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local() // includes the 169.254.169.254 metadata service
-        || v4.is_unspecified()
-        || v4.is_broadcast()
-        || v4.is_multicast()
-        || a == 0 // "this network", 0.0.0.0/8
-        || (a == 100 && (64..128).contains(&b)) // shared address space, 100.64.0.0/10
-        || (a == 192 && b == 0 && v4.octets()[2] == 0) // IETF protocol assignments
-        || (a == 198 && (b == 18 || b == 19)) // benchmarking, 198.18.0.0/15
-        || a >= 240 // reserved, 240.0.0.0/4
+    // A2A deliberately interprets both mapped and well-known NAT64 IPv4.
+    match classify(ip) {
+        Class::Ipv4Mapped(v4) | Class::Nat64(v4) => is_disallowed(IpAddr::V4(v4)),
+        Class::Unspecified
+        | Class::Loopback
+        | Class::Private
+        | Class::LinkLocal
+        | Class::Shared
+        | Class::Broadcast
+        | Class::Multicast
+        | Class::ThisNetwork
+        | Class::UniqueLocal
+        | Class::ProtocolAssignment
+        | Class::Benchmarking
+        | Class::Reserved
+        | Class::SiteLocal => true,
+        Class::Other => false,
+    }
 }
 
 /// Builds a one-off HTTP client whose only allowed DNS resolution for the
@@ -329,6 +317,18 @@ fn pinned_client(url: &str, addrs: &[SocketAddr]) -> std::result::Result<Client,
 
 #[cfg(test)]
 mod tests {
+    mod address_conformance {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../foundation/rusty_ip/tests/ssrf_conformance/policy.rs"
+        ));
+    }
+
+    #[test]
+    fn ssrf_address_conformance() {
+        address_conformance::assert_policy("a2a", super::is_disallowed);
+    }
+
     use std::net::Ipv4Addr;
 
     use super::*;
