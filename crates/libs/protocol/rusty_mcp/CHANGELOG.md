@@ -18,6 +18,14 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ### Added
 
+- `rusty_mcp::apply_cache_hints` is now public API. It sets the 2026-07-28
+  `ttlMs` and `cacheScope` hints on a list result, and only for peers that
+  negotiated that revision. A server whose `list_tools`, `list_prompts` or
+  `list_resources` merges entries before paging, so cannot use the `routers`
+  macros, previously had to reach into the `#[doc(hidden)]` `__private`
+  module, which is documented as not stable. `__private::apply_cache_hints`
+  remains as a re-export for the macros.
+
 - `workflow_dispatch` on the CI workflow ([#35]), so CI can be run deliberately
   rather than only as a side effect of a push.
 
