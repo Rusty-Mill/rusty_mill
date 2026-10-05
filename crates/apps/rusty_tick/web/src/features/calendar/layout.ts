@@ -40,7 +40,7 @@ export interface CalEvent {
 /** The event a task draws as, or `null` if it has no place on a calendar. */
 export function toEvent(task: Task, showDone = false): CalEvent | null {
   if (task.deletedMs !== null || task.dueMs === null) return null
-  const done = task.status === 'done'
+  const done = task.status !== 'open'
   if (done && !showDone) return null
   const due = task.dueMs
   // A start after the due date is bad data, not a reversed span.

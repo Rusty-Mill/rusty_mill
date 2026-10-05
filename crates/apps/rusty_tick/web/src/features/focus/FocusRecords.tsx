@@ -32,6 +32,7 @@ export function FocusRecords({ records, now, hour12, onDelete }: Props) {
                   <div className="truncate">{r.taskTitle ?? (r.kind === 'pomo' ? 'Focus' : 'Stopwatch')}</div>
                   <div className="text-s text-grey">
                     {formatTime(r.startMs, hour12)} – {formatTime(r.endMs, hour12)}
+                    {r.interruptions > 0 && ` · ${r.interruptions} ${r.interruptions === 1 ? 'interruption' : 'interruptions'}`}
                   </div>
                 </div>
                 <span className="tabular-nums text-grey">{formatDuration(r.durationSec)}</span>

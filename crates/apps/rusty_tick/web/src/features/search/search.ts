@@ -66,7 +66,7 @@ export function searchTasks(query: string, tasks: Task[], limit = MAX_RESULTS): 
     const inTitle = words.every((w) => title.includes(w))
     hits.push({ task, inTitle, snippet: inTitle || !task.notes ? null : snippet(task.notes, words.find((w) => task.notes.toLowerCase().includes(w)) ?? words[0]!) })
   }
-  hits.sort((a, b) => Number(b.inTitle) - Number(a.inTitle) || Number(a.task.status === 'done') - Number(b.task.status === 'done') || b.task.updatedMs - a.task.updatedMs)
+  hits.sort((a, b) => Number(b.inTitle) - Number(a.inTitle) || Number(a.task.status !== 'open') - Number(b.task.status !== 'open') || b.task.updatedMs - a.task.updatedMs)
   return hits.slice(0, limit).map(({ task, snippet: s }) => ({ task, snippet: s }))
 }
 

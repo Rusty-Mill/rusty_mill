@@ -11,7 +11,7 @@
 //! | GET | `/snapshot` | lists, tasks (trash and completed included), tags: one boot read |
 //! | GET, POST | `/lists` | POST accepts a client-chosen `id` |
 //! | GET, PATCH, DELETE | `/lists/{id}` | delete sends its tasks to the trash; the Inbox is permanent |
-//! | GET | `/lists/{id}/tasks?status=open\|done&sort=manual\|due` | |
+//! | GET | `/lists/{id}/tasks?status=open\|done\|wontdo&sort=manual\|due` | |
 //! | POST | `/tasks` | accepts a client-chosen `id` |
 //! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes; `?permanent=true` purges |
 //! | POST | `/tasks/{id}/complete`, `/reopen`, `/restore` | |
@@ -426,7 +426,12 @@ fn route_lists(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 None => None,
                 Some("open") => Some(Status::Open),
                 Some("done") => Some(Status::Done),
-                Some(_) => return Err(ApiError::BadRequest("status must be open or done".into())),
+                Some("wontdo") => Some(Status::WontDo),
+                Some(_) => {
+                    return Err(ApiError::BadRequest(
+                        "status must be open, done or wontdo".into(),
+                    ))
+                }
             };
             let order = match cx.query.get("sort") {
                 None | Some("manual") => ListOrderBy::Manual,

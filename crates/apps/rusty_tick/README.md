@@ -6,8 +6,8 @@ A clean-room design: it is written from the product's public behaviour and
 documented API, not from its code.
 
 Status: storage, a JSON HTTP API for one user or several, and a web UI in [`web/`](web/README.md)
-(lists, tags, Kanban, timeline and Eisenhower-matrix views, saved filters, calendar, focus timer,
-habits, summaries). Sync is by polling; there is no push channel.
+(lists, tags, Kanban, timeline and Eisenhower-matrix views, saved filters, Won't Do, calendar with
+`.ics` import, focus timer with pomo estimates and interruption tracking, countdowns, habits, summaries). Sync is by polling; there is no push channel.
 Engine findings are in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) (issue
 [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)); the HTTP stack
 choice is in [ADR-0001](docs/decisions/ADR-0001-http-stack.md); the
@@ -62,7 +62,7 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | GET | `/api/v1/snapshot` | lists, tags and tasks in one read |
 | GET, POST | `/api/v1/lists` | `{"name"}` |
 | GET, PATCH, DELETE | `/api/v1/lists/{id}` | PATCH `{"name","color","archived","viewMode","sortType","sortOrder"}` (`viewMode`: `list`, `kanban`, `timeline`, `matrix`); delete removes its tasks |
-| GET | `/api/v1/lists/{id}/tasks` | `?status=open\|done&sort=manual\|due` |
+| GET | `/api/v1/lists/{id}/tasks` | `?status=open\|done\|wontdo&sort=manual\|due` |
 | POST | `/api/v1/tasks` | `{"listId","title","notes","priority","startMs","dueMs","isAllDay","timeZone","reminders","repeatFlag","items","tags","parentId"}` |
 | GET, PATCH, DELETE | `/api/v1/tasks/{id}` | PATCH: absent = keep, `"dueMs":null` = clear; delete removes subtasks |
 | POST | `/api/v1/tasks/{id}/complete`, `/reopen`, `/restore` | `DELETE /tasks/{id}` moves to the trash; `?purge=true` removes it for good |
@@ -71,10 +71,10 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`) |
 | GET, POST | `/api/v1/tags` | PATCH `/tags/{name}`, POST `/tags/{name}/rename` |
 | GET | `/api/v1/tags/{tag}/tasks` | |
-| GET | `/api/v1/docs/{kind}` | client documents: `PUT`/`DELETE /docs/{kind}/{id}`; kinds `habit`, `habit_checkin`, `focus`, `prefs`, `summary_template`, `comment`, `filter` |
+| GET | `/api/v1/docs/{kind}` | client documents: `PUT`/`DELETE /docs/{kind}/{id}`; kinds `habit`, `habit_checkin`, `focus`, `prefs`, `summary_template`, `comment`, `filter`, `countdown`, `estimate` |
 | GET | `/api/v1/smart/today`, `/next7`, `/overdue` | `?utcOffsetMin=` (default 0); open tasks in non-archived lists |
 
-Priority is 0, 1, 3 or 5. Times are Unix milliseconds. Subtasks nest one level
+Priority is 0, 1, 3 or 5. A task's status is `open`, `done` or `wontdo` (PATCH `status`; closing stamps `completedMs`, reopening clears it). Times are Unix milliseconds. Subtasks nest one level
 and stay in their parent's list (moving a parent moves them). `repeatFlag` is an RFC 5545
 `RRULE` and `reminders` are `TRIGGER:` strings; the server stores both, and the web UI expands
 recurrence and raises reminders as browser notifications.

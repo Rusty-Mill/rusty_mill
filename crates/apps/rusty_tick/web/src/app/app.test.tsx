@@ -703,3 +703,45 @@ describe('large lists', () => {
     await waitFor(async () => expect(await api.listDocs('comment')).toHaveLength(0))
   })
 })
+
+describe("won't do, countdowns and calendar import", () => {
+  it("closes a task as won't do from the task menu, lists it under Completed, and reopens it", async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'skip me' })
+    })
+    await user.click(screen.getByText('skip me'))
+    await screen.findByLabelText('Title')
+    await user.click(pane().getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('menuitem', { name: "Won't Do" }))
+    await waitFor(async () => expect((await api.snapshot()).tasks[0]?.status).toBe('wontdo'))
+    await user.click(pane().getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Mark as open' }))
+    await waitFor(async () => expect((await api.snapshot()).tasks[0]?.status).toBe('open'))
+  })
+
+  it('adds a countdown, shows the days left, and deletes it', async () => {
+    const user = userEvent.setup()
+    await renderApp('/countdown')
+    await user.type(await screen.findByPlaceholderText('Exam, launch, birthday'), 'Launch')
+    const day = within(screen.getByRole('main')).getByLabelText('Date')
+    await user.clear(day)
+    await user.type(day, '2999-01-01')
+    await user.click(screen.getByRole('button', { name: 'Add countdown' }))
+    const list = await screen.findByRole('list', { name: 'Countdowns' })
+    expect(within(list).getByText('Launch')).toBeInTheDocument()
+    expect(within(list).getByText(/days left/)).toBeInTheDocument()
+    await user.click(within(list).getByRole('button', { name: 'Delete Launch' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Countdowns' })).toBeNull())
+  })
+
+  it('imports an .ics file as Inbox tasks', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    const ics = ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'SUMMARY:Dentist', 'DTSTART;VALUE=DATE:20261010', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n')
+    await user.upload(await screen.findByLabelText('Import calendar file'), new File([ics], 'cal.ics', { type: 'text/calendar' }))
+    expect(await screen.findByText(/Imported 1 from cal\.ics into Inbox/)).toBeInTheDocument()
+    const tasks = (await api.snapshot()).tasks
+    expect(tasks.map((t) => [t.title, t.listId, t.isAllDay])).toContainEqual(['Dentist', INBOX_ID, true])
+  })
+})

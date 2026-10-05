@@ -13,7 +13,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// The document kinds the API accepts.
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 9] = [
     "habit",
     "habit_checkin",
     "focus",
@@ -21,6 +21,8 @@ pub const KINDS: [&str; 7] = [
     "summary_template",
     "comment",
     "filter",
+    "countdown",
+    "estimate",
 ];
 /// Largest accepted body, in bytes.
 pub const MAX_DOC_BYTES: usize = 64 * 1024;

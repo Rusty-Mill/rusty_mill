@@ -29,7 +29,7 @@ import type {
 export const INBOX_ID = '00000000-0000-7000-8000-000000000001'
 export const STORAGE_KEY = 'tick-local:memory:v1'
 const STEP = 1024
-const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter']
+const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter', 'countdown', 'estimate']
 const MAX_DOC_BYTES = 64 * 1024
 
 interface State {
@@ -254,7 +254,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.kind !== undefined) task.kind = patch.kind
     if (patch.status !== undefined && patch.status !== task.status) {
       task.status = patch.status
-      task.completedMs = patch.status === 'done' ? this.now() : null
+      task.completedMs = patch.status === 'open' ? null : (task.completedMs ?? this.now())
     }
     if (patch.priority !== undefined) task.priority = cleanPriority(patch.priority)
     if (patch.startMs !== undefined) task.startMs = patch.startMs

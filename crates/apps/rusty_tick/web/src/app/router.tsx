@@ -28,6 +28,7 @@ export const routes: RouteObject[] = [
         },
         { path: 'c/all/calendar/:mode?', lazy: page(() => import('@/features/calendar/CalendarPage'), 'CalendarPage') },
         { path: 'focus', lazy: page(() => import('@/features/focus/FocusPage'), 'FocusPage') },
+        { path: 'countdown', lazy: page(() => import('@/features/countdown/CountdownPage'), 'CountdownPage') },
         { path: 'q/all/habit', lazy: page(() => import('@/features/habits/HabitsPage'), 'HabitsPage') },
         { path: '*', element: home },
       ],

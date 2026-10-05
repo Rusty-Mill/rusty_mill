@@ -1,4 +1,4 @@
-import { Bell, HelpCircle, RefreshCw, Sparkles, WifiOff } from 'lucide-react'
+import { Bell, HelpCircle, Hourglass, RefreshCw, Sparkles, WifiOff } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { calendarPath, HOME, PATHS, railSection } from '@/app/paths'
@@ -64,6 +64,9 @@ export function IconRail() {
       </RailButton>
       <RailButton label="Habit Tracker" active={section === 'habit'} onClick={() => navigate(PATHS.habit)}>
         <HabitIcon />
+      </RailButton>
+      <RailButton label="Countdown" active={section === 'countdown'} onClick={() => navigate(PATHS.countdown)}>
+        <Hourglass size={ICON} strokeWidth={STROKE} />
       </RailButton>
       <RailButton label="Search" onClick={() => setSearchOpen(true)}>
         <SearchIcon />

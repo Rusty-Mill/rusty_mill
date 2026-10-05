@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
+**2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
+
+- **Added:** `Status::WontDo` (`status: "wontdo"`, `?status=wontdo`), appended last so stored tasks still decode. Closing stamps `completedMs` and keeps the first stamp; the task menu has Won't Do and Mark as open; closed tasks list under Completed.
+- **Added:** a Countdown page over a `countdown` doc kind; pomo estimates over an `estimate` doc kind (a stepper on the Pomodoro page and an estimated-against-actual list); an Interrupted button whose count is stored on the focus record.
+- **Added:** `.ics` import from the Calendar view menu: events and todos become Inbox tasks (all-day end dates exclusive, `TZID` converted, cancelled/completed skipped, unsupported repeat rules imported once), capped at 500 per file.
+- **Changed:** a shared `createDocStore` backs filters, countdowns and estimates.
+- **Verified:** `cargo fmt --check`, `clippy -D warnings`, `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (616), `npm run build`.
+- Known limitations: no calendar subscription by URL (needs a server-side fetcher); re-importing a file duplicates its tasks; an estimate for a purged task stays stored; a new web UI needs a new server (an old one rejects `wontdo` and the new doc kinds); doc saves are reported but not retried.
+
+---
+
 ## rusty_channel: Microsoft Teams
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, second channel
 
@@ -86,6 +98,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `crates/libs/protocol/rusty_agui/conformance/`, a Node project where `@ag-ui/client` 1.0.2, the reference client CopilotKit's SDK and OpenBot embed, runs the example: a full run the reference client verifies and reduces (state, result, new messages), a frontend tool call with streamed arguments, and an agent failure delivered as `RUN_ERROR`. CI job `rusty_agui conformance (@ag-ui/client)`; planner flag `agui` (path and package).
 - **Verified:** `cargo test -p rusty_agui --all-features` (27, plus the client doc test), `clippy -D warnings` with examples, `fmt --check`, the CI script tests (35), the three conformance tests locally against the built example, workspace map and layer checks.
 - Two departures from the follow-ons document, recorded there: the client is on `rusty_http` directly rather than `rusty_request` (sync, mirroring `serve`; the gateway is async on its own stack), and the smoke test uses the reference `@ag-ui/client` rather than a browser-driven React app, since that client is what the React SDK drives agents with.
+---
+
 ## rusty_baseline: honest measurement status
 **2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
 
