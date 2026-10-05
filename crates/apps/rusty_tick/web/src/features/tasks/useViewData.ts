@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useData } from '@/app/services'
 import { useNow } from '@/lib/hooks'
+import { useFilters } from '../filters/store'
 import { useUi } from '@/store/ui'
 import { defaultOptions, groupTasks, sortTasks, tasksForView, viewKey, type Group, type ViewOptions, type ViewSpec } from './organize'
 import { viewTitle } from './rows'
@@ -26,6 +27,7 @@ export function useViewData(spec: ViewSpec | null): ViewData {
   const listMap = useData((s) => s.lists)
   const tagMap = useData((s) => s.tags)
   const taskMap = useData((s) => s.tasks)
+  const filters = useFilters((s) => s.filters)
   const stored = useUi((s) => (spec ? s.options[viewKey(spec)] : undefined))
   const view = spec ?? NONE
 
@@ -34,13 +36,13 @@ export function useViewData(spec: ViewSpec | null): ViewData {
   const options = useMemo(() => ({ ...defaultOptions(view), ...stored }), [view, stored])
 
   return useMemo(() => {
-    const entities = { tasks: Object.values(taskMap), lists, tags, inboxId }
+    const entities = { tasks: Object.values(taskMap), lists, tags, inboxId, filters }
     const open = sortTasks(tasksForView(view, entities, now), options.sortBy, options.order)
     const groups = groupTasks(open, options.groupBy, { now, lists, tags })
     if (options.showCompleted) {
       const done = tasksForView(view, entities, now, true).filter((t) => t.status === 'done').sort((a, b) => (b.completedMs ?? 0) - (a.completedMs ?? 0))
       if (done.length) groups.push({ key: 'done', label: 'Completed', tasks: done })
     }
-    return { title: viewTitle(view, lists, tags, inboxId), options, tasks: open, groups, lists, tags, now }
-  }, [view, taskMap, lists, tags, inboxId, now, options])
+    return { title: viewTitle(view, lists, tags, filters, inboxId), options, tasks: open, groups, lists, tags, now }
+  }, [view, taskMap, lists, tags, filters, inboxId, now, options])
 }

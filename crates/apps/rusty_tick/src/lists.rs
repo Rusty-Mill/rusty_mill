@@ -19,6 +19,7 @@ pub enum ViewMode {
     List,
     Kanban,
     Timeline,
+    Matrix,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

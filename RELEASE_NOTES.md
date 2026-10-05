@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: Eisenhower matrix view and saved filters
+**2026-10-05** · [#516](https://github.com/Rusty-Mill/rusty_mill/pull/516)
+
+- **Added:** an Eisenhower matrix view mode (`viewMode: "matrix"`) beside list, Kanban and timeline. Important = any priority set; urgent = due by tomorrow or overdue. Dropping a card on a quadrant edits only the axes that differ (priority, due date). Kanban and matrix share one `TaskCard`.
+- **Added:** saved filters: `filter` client documents holding a rule over lists, tags, priorities and due-date buckets (any-of within a field, all fields must match), a sidebar section with add/edit/delete, and a `/f/<id>/tasks` view with the usual grouping, sorting and view modes. The sidebar Filters placeholder is gone.
+- **Changed:** `rusty_tick`'s README describes the web UI and the full route and field set; it had said "no web UI" and "not yet: recurrence, reminders".
+- **Verified:** `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (594) and `npm run build`.
+- Known limitations: a filter that fails to save is reported but not retried (habits are); filters are not cached offline; no Playwright e2e or real-binary integration test covers the new views; a filter cannot match "no tag" or use text or completion-state rules.
+
+---
+
 ## rusty_agui: follow-ons document
 **2026-10-05** · [#513](https://github.com/Rusty-Mill/rusty_mill/pull/513) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
 

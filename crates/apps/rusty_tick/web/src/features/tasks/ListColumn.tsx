@@ -11,6 +11,7 @@ import { NARROW } from '@/app/Shell'
 import { useUi } from '@/store/ui'
 import { usePrefs } from '../settings/prefs'
 import { KanbanBoard } from './KanbanBoard'
+import { MatrixBoard } from './MatrixBoard'
 import { TimelineView } from './TimelineView'
 import { QuickAdd } from './QuickAdd'
 import { TaskRow, type RowActions } from './TaskRow'
@@ -101,6 +102,8 @@ export function ListColumn({ spec, selectedId }: Props) {
 
       {viewMode === 'kanban' ? (
         <KanbanBoard spec={spec} data={data} selectedId={selectedId} />
+      ) : viewMode === 'matrix' ? (
+        <MatrixBoard spec={spec} data={data} selectedId={selectedId} />
       ) : viewMode === 'timeline' ? (
         <TimelineView spec={spec} data={data} selectedId={selectedId} />
       ) : total === 0 ? (
