@@ -83,8 +83,10 @@ socket, a non-SSE response or a stream that ends before `RUN_FINISHED` is
 [`packages/agui-core`](packages/agui-core/README.md) is this crate's
 headless mirror in TypeScript, with no runtime dependencies: the same
 types, SSE decoder, verifier with chunk expansion and reducer, plus
-`runAgent`/`streamAgent` over `fetch`. Framework bindings (React first)
-sit on it. [`fixtures/`](fixtures/) is shared by both sides: event samples
+`runAgent`/`streamAgent` over `fetch`. [`packages/agui-react`](packages/agui-react/README.md)
+is the React binding on it: an `AgentProvider` and the `useAgent`,
+`useReadable`, `useAction` (frontend tools, generative UI, human in the
+loop) and `useSharedState` hooks, headless. [`fixtures/`](fixtures/) is shared by both sides: event samples
 round-trip, chunk sequences expand and whole runs reduce identically in
 Rust and TypeScript.
 

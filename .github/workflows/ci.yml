@@ -690,7 +690,8 @@ jobs:
           path: crates/apps/rusty_tick/web/test-results
 
   # rusty_agui conformance: the headless TypeScript core (packages/agui-core)
-  # is unit-tested and built, then it and the reference AG-UI client
+  # and the React binding (packages/agui-react) are unit-tested and built,
+  # then the core and the reference AG-UI client
   # (@ag-ui/client, which CopilotKit's SDK and OpenBot embed) each drive the
   # `echo_agent` example served by rusty_agui's AgentHandler. Proves the wire
   # format against the client that matters, not only against our own.
@@ -720,6 +721,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             crates/libs/protocol/rusty_agui/packages/agui-core/package-lock.json
+            crates/libs/protocol/rusty_agui/packages/agui-react/package-lock.json
             crates/libs/protocol/rusty_agui/conformance/package-lock.json
       - run: cargo build -p rusty_agui --features serve --example echo_agent
         working-directory: .
@@ -733,6 +735,16 @@ jobs:
         working-directory: crates/libs/protocol/rusty_agui/packages/agui-core
       - run: npm run build
         working-directory: crates/libs/protocol/rusty_agui/packages/agui-core
+      # The React binding over the built core: typecheck, hook tests under
+      # jsdom against a scripted agent, build.
+      - run: npm ci --no-audit --no-fund
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-react
+      - run: npm run typecheck
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-react
+      - run: npm test
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-react
+      - run: npm run build
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-react
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test

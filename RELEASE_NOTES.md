@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_agui: the React binding
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, first PR
+
+- **Added:** `@rusty-mill/agui-react` at `crates/libs/protocol/rusty_agui/packages/agui-react`, headless hooks over the core. `AgentProvider` holds one thread with one agent in a `useSyncExternalStore` store. `useAgent` gives messages, state, running and error plus `send`, `run`, `stop`, the thread's tool calls and `renderToolCall`. `useReadable` exposes application context for as long as the component lives. `useAction` registers a frontend tool: with a `handler` the agent's call is answered and a follow-up run starts; with only a `render` the call stays pending until the rendered UI calls `respond`, the human-in-the-loop pattern; `render` is the generative UI, given the parsed arguments, the call's status and its result. `useSharedState` sets state the next run sends and receives the agent's snapshots and deltas.
+- **Tests:** four hook tests under jsdom against a scripted fake agent: a streamed reply and a `RUN_ERROR`; context and state sent and state received; a handled tool call answered and followed up with the tool message in the next run's thread; a render-only call that waits for the person and then continues.
+- **Changed:** the `rusty_agui conformance` CI job typechecks, tests and builds the binding after the core.
+- Not in this PR, by choice: the first consumer. Wiring an agent and a chat panel into `rusty_tick` is step 3's second PR, so it can be reviewed as an app change.
+
+---
+
 ## rusty_agui: the headless TypeScript core
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 2
 
