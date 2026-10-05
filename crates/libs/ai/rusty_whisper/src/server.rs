@@ -316,57 +316,13 @@ pub fn convert_with_ffmpeg(bytes: &[u8], tmp_dir: &std::path::Path) -> io::Resul
     wav_bytes
 }
 
-/// A fixed number of concurrent slots (design review 3.7, N02): the server
-/// used to start a thread for every accepted connection and every
-/// `POST /load` with no bound. [`Slots::try_acquire`] returns a guard
-/// that frees its slot on drop, or `None` when all are taken.
-#[derive(Debug)]
-pub struct Slots {
-    in_use: std::sync::atomic::AtomicUsize,
-    max: usize,
-}
+/// Shared bounded admission gate used for connections and model loads.
+pub type Slots = rusty_sync::Admission;
 
-/// A held [`Slots`] slot, released when dropped.
-#[derive(Debug)]
-pub struct SlotGuard<'a> {
-    slots: &'a Slots,
-}
-
-impl Slots {
-    /// `max` concurrent holders.
-    pub const fn new(max: usize) -> Self {
-        Slots {
-            in_use: std::sync::atomic::AtomicUsize::new(0),
-            max,
-        }
-    }
-
-    /// A slot, or `None` if all `max` are held.
-    pub fn try_acquire(&self) -> Option<SlotGuard<'_>> {
-        use std::sync::atomic::Ordering;
-        // A compare-and-swap loop rather than `fetch_update`, deprecated in
-        // Rust 1.99 for a `try_update` newer than this workspace's MSRV.
-        let mut n = self.in_use.load(Ordering::Acquire);
-        while n < self.max {
-            match self
-                .in_use
-                .compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => return Some(SlotGuard { slots: self }),
-                Err(current) => n = current,
-            }
-        }
-        None
-    }
-}
-
-impl Drop for SlotGuard<'_> {
-    fn drop(&mut self) {
-        self.slots
-            .in_use
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
-}
+/// RAII guard returned by [`Slots::try_acquire`].
+///
+/// Dropping the guard releases its slot back to the admission gate.
+pub type SlotGuard<'a> = rusty_sync::AdmissionPermit<'a>;
 
 #[cfg(test)]
 mod tests {
