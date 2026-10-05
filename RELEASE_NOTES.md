@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_rsi: Codex as the inner model, Claude Code as the outer proposer
-**2026-10-05** · [#PR](https://github.com/Rusty-Mill/rusty_mill/pull/PR) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+**2026-10-05** · [#504](https://github.com/Rusty-Mill/rusty_mill/pull/504) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `CodexModel` (`rsi-runtime::codex_model`), selected with `RSI_INNER_PROVIDER=codex`.
   - It is the inner agent's *model*, not the agent: a0 stays the thing the outer loop improves, and the broker still meters and records every call, so the budget hard stop and trajectory replay hold.

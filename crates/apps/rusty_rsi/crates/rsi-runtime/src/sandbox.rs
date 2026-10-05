@@ -26,7 +26,7 @@ pub const SETUP_FAILED: u8 = 125;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sockets {
     /// Any socket, the internet included. Only the coding-agent CLIs run
-    /// like this: it must reach its model, and its filesystem confinement
+    /// like this: they must reach their models, and their filesystem confinement
     /// keeps private task data out of reach (see [`crate::agent_cli`]).
     Internet,
     /// Anything but internet sockets (solutions).
