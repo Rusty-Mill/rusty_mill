@@ -17,12 +17,12 @@ use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusty_sync::Admission;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::make_backend;
@@ -239,6 +239,10 @@ pub fn serve(
 
     let model_id: Arc<str> = Arc::from(model_label(model_path));
     let max_connections = connection_cap();
+    // The server runs for the process lifetime, so its admission gate can too.
+    // Keeping the permit borrowed from this gate lets the shared primitive stay
+    // allocation-free while preserving the runtime-configured connection cap.
+    let connections: &'static Admission = Box::leak(Box::new(Admission::new(max_connections)));
     let listener = TcpListener::bind((host, port))?;
     eprintln!("rusty_llama: serving '{model_id}' on http://{host}:{port} (backend: {backend})");
 
@@ -252,7 +256,7 @@ pub fn serve(
         };
         // Bounded connections (design review 3.7, N01): each used to get an
         // OS thread with no ceiling.
-        let Some(slot) = ConnectionSlot::acquire(&ACTIVE_CONNECTIONS, max_connections) else {
+        let Some(slot) = connections.try_acquire() else {
             refuse_busy(stream);
             continue;
         };
@@ -267,34 +271,6 @@ pub fn serve(
         });
     }
     Ok(())
-}
-
-/// Connections being served now (design review 3.7, N01).
-static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
-
-/// A held connection slot, released on drop.
-struct ConnectionSlot(&'static AtomicUsize);
-
-impl ConnectionSlot {
-    /// A slot if fewer than `max` are held.
-    fn acquire(active: &'static AtomicUsize, max: usize) -> Option<Self> {
-        // A compare-and-swap loop rather than `fetch_update`, deprecated in
-        // Rust 1.99 for a `try_update` newer than this workspace's MSRV.
-        let mut n = active.load(Ordering::Acquire);
-        while n < max {
-            match active.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => return Some(ConnectionSlot(active)),
-                Err(current) => n = current,
-            }
-        }
-        None
-    }
-}
-
-impl Drop for ConnectionSlot {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 /// Answer an over-cap connection `503` on the accept thread, briefly: a
@@ -1352,11 +1328,11 @@ mod tests {
     /// Design review 3.7 (N01): connections were one thread each with no cap.
     #[test]
     fn connection_slots_admit_at_most_the_cap() {
-        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-        let a = ConnectionSlot::acquire(&ACTIVE, 2).unwrap();
-        let _b = ConnectionSlot::acquire(&ACTIVE, 2).unwrap();
-        assert!(ConnectionSlot::acquire(&ACTIVE, 2).is_none());
+        let active = Admission::new(2);
+        let a = active.try_acquire().unwrap();
+        let _b = active.try_acquire().unwrap();
+        assert!(active.try_acquire().is_none());
         drop(a);
-        assert!(ConnectionSlot::acquire(&ACTIVE, 2).is_some());
+        assert!(active.try_acquire().is_some());
     }
 }
