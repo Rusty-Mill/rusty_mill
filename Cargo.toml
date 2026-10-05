@@ -36,6 +36,7 @@ members = [
     "crates/foundation/rusty_serde/rusty_serde_derive",
     "crates/foundation/rusty_serde/rusty_serde_erased",
     "crates/libs/protocol/rusty_lsp",
+    "crates/libs/protocol/rusty_agui",
     "crates/libs/protocol/rusty_a2a",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
@@ -44,6 +45,7 @@ members = [
     "crates/libs/net/rusty_http",
     "crates/libs/net/rusty_serve",
     "crates/foundation/rusty_json",
+    "crates/foundation/rusty_json_patch",
     "crates/foundation/rusty_json/rusty_json-derive",
     "crates/libs/net/rusty_oauth",
     "crates/libs/homelab/rusty_proxmox",
@@ -418,6 +420,8 @@ rusty-db-mysql = { path = "crates/libs/storage/rusty_db/crates/rusty-db-mysql", 
 rusty_tokio = { path = "crates/libs/async/rusty_tokio" }
 rusty_wire = { path = "crates/foundation/rusty_wire" }
 rusty_json = { path = "crates/foundation/rusty_json" }
+rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
+rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"
 futures-core = "0.3"

@@ -1,0 +1,35 @@
+[package]
+name = "rusty_agui"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["ag-ui", "agent", "sse", "protocol"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[features]
+default = []
+# `serve::AgentHandler`: an AG-UI run endpoint for `rusty_serve`'s blocking
+# server. Off by default so a client-only or framework-agnostic consumer
+# pulls in no HTTP server.
+serve = ["dep:rusty_serve", "dep:rusty_http"]
+
+[dependencies]
+# First-party only (ADR-0002 Tier S). `rusty_json` without its `serde`
+# feature: this crate hand-writes its codec against `Value`.
+# A path dependency, not `workspace = true`: Cargo ignores `default-features
+# = false` on a workspace-inherited dependency whose entry has defaults on.
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+rusty_json_patch = { workspace = true }
+rusty_serve = { workspace = true, optional = true }
+rusty_http = { workspace = true, optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

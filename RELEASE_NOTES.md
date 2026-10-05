@@ -13,6 +13,31 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_agui: follow-ons document
+**2026-10-05** · [#513](https://github.com/Rusty-Mill/rusty_mill/pull/513) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
+
+- **Added (docs only):** [`docs/dev_phases/ADR_0007/FOLLOW-ONS.md`](docs/dev_phases/ADR_0007/FOLLOW-ONS.md) records where `rusty_agui` stands after #512 and plans the two targets set on 2026-10-05: frontend SDKs (React, Angular, Vue, iOS, Android) and an OpenBot-shaped agent platform (sandboxes, CEL gateway with pre-action audit, Slack/Teams/SMS channels, routines). It lists what the workspace already has and at which layer, the gaps, a ten-step build order starting with a Rust AG-UI client and a headless TypeScript core, four departures from the targets as named (one core then bindings; sandboxes on `rusty_rsi`'s executor rather than containers; CEL stays external; channels as adapters), and three open questions.
+
+---
+
+## rusty_agui and rusty_json_patch: a sovereign AG-UI stack
+**2026-10-05** · [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
+
+- **Added:** `rusty_json_patch` (`crates/foundation`): RFC 6901 pointers, RFC 6902 patches with atomic apply and a `diff`, RFC 7386 merge patch, over `rusty_json::Value`; `no_std` + `alloc`; tests are the RFCs' own appendix vectors.
+- **Added:** `rusty_agui` (`crates/libs/protocol`): the AG-UI protocol that CopilotKit's React SDK and OpenBot consume. All 31 event types, `RunAgentInput` and the message model; a hand-written JSON codec (unknown members ignored); SSE encode and incremental decode; a `Verifier` that enforces the ordering rules and expands chunk events as the TypeScript SDK does; a `Reducer` that folds events into messages and state; and, behind the `serve` feature, an `Agent` trait and `AgentHandler` for `rusty_serve` that frames a run, verifies every emitted event, and streams it.
+- **Changed:** `rusty_serve` can stream: `Body::Stream` is written as chunked transfer encoding, one chunk per iterator item, after the handler lock is released. `rusty_tick` and `rusty_fair_play` switch to the new `Response::json` constructor.
+- **Verified:** `cargo test` for `rusty_json_patch` (14, plus the `no_std` build), `rusty_agui --all-features` (24, including an end-to-end run over a socket), `rusty_serve` (7), `rusty_tick` and `rusty_fair_play`; `clippy -D warnings` on all five; `fmt --check`; `check_workspace_layers.py`, `check_workspace_deps.py` and the workspace-map regenerate.
+- Known limitations, by choice (ADR-0007): no adapters yet from `rusty_adk`, `nexus-ai-runtime` or `rusty_key`'s own event types; no AG-UI client; no WebSocket transport; no CORS on the agent endpoint. `diff` is member-wise and index-wise, not an LCS diff.
+
+---
+
+## rusty_rsi: follow-ons document
+**2026-10-05** · [#511](https://github.com/Rusty-Mill/rusty_mill/pull/511) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added (docs only):** [`docs/dev_phases/ADR_0005/FOLLOW-ONS.md`](docs/dev_phases/ADR_0005/FOLLOW-ONS.md) records where `rusty_rsi` stands after #509: the shipped PRs, the WSL2 steps for the first real-agent smoke run, the open follow-on options, the native Windows analysis (AppContainer plus Job Object, a probe first), and the decisions still needed.
+
+---
+
 ## rusty_rsi: ADR-0005 configuration matches the code
 **2026-10-05** · [#509](https://github.com/Rusty-Mill/rusty_mill/pull/509) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

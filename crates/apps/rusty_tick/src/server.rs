@@ -22,9 +22,6 @@ impl Handler for Backend {
                 body: request.body,
             },
         );
-        rusty_serve::Response {
-            status: response.status,
-            body: response.body,
-        }
+        rusty_serve::Response::json(response.status, response.body)
     }
 }
