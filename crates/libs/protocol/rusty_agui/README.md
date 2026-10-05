@@ -78,13 +78,24 @@ socket, a non-SSE response or a stream that ends before `RUN_FINISHED` is
 `Error::Transport`; an agent that breaks the ordering rules is
 `Error::Sequence` on the event that broke them.
 
+## The TypeScript core
+
+[`packages/agui-core`](packages/agui-core/README.md) is this crate's
+headless mirror in TypeScript, with no runtime dependencies: the same
+types, SSE decoder, verifier with chunk expansion and reducer, plus
+`runAgent`/`streamAgent` over `fetch`. Framework bindings (React first)
+sit on it. [`fixtures/`](fixtures/) is shared by both sides: event samples
+round-trip, chunk sequences expand and whole runs reduce identically in
+Rust and TypeScript.
+
 ## Conformance
 
-`conformance/` runs the reference TypeScript client, `@ag-ui/client` (the
-package CopilotKit's React SDK and OpenBot drive agents with), against the
-`echo_agent` example served by `AgentHandler`: a full run reduced by the
-reference client, a frontend tool call with streamed arguments, and an
-agent failure as `RUN_ERROR`. CI runs it whenever this crate changes.
+`conformance/` runs two clients against the `echo_agent` example served
+by `AgentHandler`: the reference `@ag-ui/client` (the package CopilotKit's
+React SDK and OpenBot drive agents with) and this workspace's own
+`@rusty-mill/agui-core`. Each does a full run, a frontend tool call with
+streamed arguments, and an agent failure as `RUN_ERROR`. CI runs it
+whenever this crate changes.
 
 ```sh
 cargo build -p rusty_agui --features serve --example echo_agent

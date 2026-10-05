@@ -689,8 +689,9 @@ jobs:
           name: rusty-tick-e2e-results
           path: crates/apps/rusty_tick/web/test-results
 
-  # rusty_agui conformance: the reference AG-UI TypeScript client
-  # (@ag-ui/client, which CopilotKit's SDK and OpenBot embed) drives the
+  # rusty_agui conformance: the headless TypeScript core (packages/agui-core)
+  # is unit-tested and built, then it and the reference AG-UI client
+  # (@ag-ui/client, which CopilotKit's SDK and OpenBot embed) each drive the
   # `echo_agent` example served by rusty_agui's AgentHandler. Proves the wire
   # format against the client that matters, not only against our own.
   rusty-agui-conformance:
@@ -717,9 +718,21 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: crates/libs/protocol/rusty_agui/conformance/package-lock.json
+          cache-dependency-path: |
+            crates/libs/protocol/rusty_agui/packages/agui-core/package-lock.json
+            crates/libs/protocol/rusty_agui/conformance/package-lock.json
       - run: cargo build -p rusty_agui --features serve --example echo_agent
         working-directory: .
+      # The headless TypeScript core first: its unit tests, then its build,
+      # which the conformance project consumes as a `file:` dependency.
+      - run: npm ci --no-audit --no-fund
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-core
+      - run: npm run typecheck
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-core
+      - run: npm test
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-core
+      - run: npm run build
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-core
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test

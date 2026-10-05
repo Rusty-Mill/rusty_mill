@@ -711,4 +711,26 @@ mod tests {
             Err(Error::Sequence(_))
         ));
     }
+
+    /// Chunk expansion cases shared with the TypeScript core's tests.
+    #[test]
+    fn chunk_fixture_expands_identically() {
+        let cases = rusty_json::Value::parse(include_str!("../fixtures/chunks.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let input: Vec<Event> = case["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| Event::from_value(v).unwrap())
+                .collect();
+            let expected: Vec<Event> = case["expected"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| Event::from_value(v).unwrap())
+                .collect();
+            assert_eq!(run(input).unwrap(), expected, "{name}");
+        }
+    }
 }

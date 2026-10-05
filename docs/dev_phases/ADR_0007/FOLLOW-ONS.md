@@ -4,12 +4,14 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged, and step 1 of the build order below is done: the
-workspace speaks AG-UI on both sides, and the reference TypeScript client
-accepts what the server sends.
+ADR-0007 is merged, and steps 1 and 2 of the build order below are done:
+the workspace speaks AG-UI on both sides, the reference TypeScript client
+accepts what the server sends, and a headless TypeScript core mirrors the
+crate against shared fixtures.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| step 2 (PR pending) | | `@rusty-mill/agui-core`, the headless TypeScript core; shared `fixtures/`; the core run in conformance beside the reference client |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 1 | `rusty_agui`'s `client` feature (`HttpAgent`, blocking, on `rusty_http`); the `echo_agent` example; `conformance/`, where `@ag-ui/client` drives the example in CI |
 | [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) | 2026-10-05 | `rusty_json_patch` (RFC 6901/6902/7386), `rusty_agui` (types, events, codec, SSE, verifier, reducer, `serve` feature with `Agent` and `AgentHandler`), streaming bodies in `rusty_serve` |
 
@@ -49,7 +51,7 @@ targets as named.
 | Gap | Needed by |
 | --- | --- |
 | ~~A Rust AG-UI client~~ Done in step 1, on `rusty_http` directly (see below) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
-| A headless TypeScript core: SSE decoder, verifier, reducer, `runAgent` | Every frontend SDK |
+| ~~A headless TypeScript core~~ Done in step 2 | Every frontend SDK |
 | Framework bindings (hooks, components) | Each SDK |
 | An AG-UI route in the gateway: CEL decision, audit record before and after, forward | The platform |
 | A bot registry (name, endpoint, policy, channel bindings) | The platform |
@@ -66,7 +68,7 @@ Both targets start with the same two pieces, so they come first.
 | Step | What | Size | Needs sign-off |
 | --- | --- | --- | --- |
 | 1 | **Done.** `rusty_agui` client and a conformance test against the reference client (`@ag-ui/client`, the package CopilotKit's React SDK and OpenBot drive agents with) | 1 PR | No |
-| 2 | `agui-core` (TypeScript, headless): decoder, verifier, reducer, `runAgent`; the Rust crate's wire samples as shared fixtures | 1 PR | No |
+| 2 | **Done.** `@rusty-mill/agui-core` (TypeScript, headless): parser, SSE decoder, JSON patch, verifier, reducer, `runAgent`; `fixtures/` shared with the Rust tests | 1 PR | No |
 | 3 | React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function), `useSharedState`; `rusty_tick` as the first consumer | 1–2 PRs | No |
 | 4 | Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1–2 PRs, touches `rusty_agent_gateway` | Yes: new gateway surface |
 | 5 | Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Yes: external service credentials and dependencies |
@@ -116,9 +118,11 @@ before: the hooks are the API, the components are one rendering of it.
 
 ## Open questions
 
-1. Does the TypeScript core live in this workspace (beside the React apps,
-   under a `packages/` directory with its own CI job) or in a separate
-   repository? The React apps' precedent is in-workspace.
+1. ~~Does the TypeScript core live in this workspace or in a separate
+   repository?~~ Answered in step 2: in-workspace, at
+   `crates/libs/protocol/rusty_agui/packages/agui-core`, so the `agui`
+   planner flag covers it and the shared fixtures sit beside the Rust
+   tests. Publishing to a registry is a later decision.
 2. Where does the bot registry persist? `rusty_multimodal_db_engine` is the
    workspace's own store and already backs `rusty_tick` and `remind_me`.
 3. Which agent is the first bot? `rusty_adk`'s weather example is the
