@@ -14,7 +14,7 @@ of the run, and any AG-UI endpoint can be a Slack, Teams or SMS bot.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
-| (this PR) | step 5, SMS | `sms::Twilio`: HMAC-SHA1 webhook signature on `rusty_sha1`, one conversation per pair of numbers, TwiML ack, `Messages.json` reply; the `ack` hook on `Channel` |
+| [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) | step 5, SMS | `sms::Twilio`: HMAC-SHA1 webhook signature on `rusty_sha1`, one conversation per pair of numbers, TwiML ack, `Messages.json` reply; the `ack` hook on `Channel` |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Teams | `teams::Teams` over the Azure Bot Framework (JWT verified with `rusty_oauth`, replies with a client-credentials token); the runner hoisted into `bot::Bot` for both examples |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Slack | `rusty_channel`: the sans-IO `Channel` trait, a `Thread` per conversation, the Slack Events API adapter, and a bot example on `rusty_serve` that runs any AG-UI endpoint |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 4 | `rusty_agent_gateway`'s `agui` route policy (`agentgateway-agui`): CEL rules over the run input, the request and the caller's claims, deny by default; a decision record before the upstream call and an outcome record when the stream ends |
