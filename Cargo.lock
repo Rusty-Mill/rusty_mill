@@ -13861,6 +13861,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_channel"
+version = "0.1.0"
+dependencies = [
+ "rusty_agui",
+ "rusty_http",
+ "rusty_json",
+ "rusty_oauth",
+ "rusty_serve",
+ "rusty_tls",
+ "rusty_uuid",
+]
+
+[[package]]
 name = "rusty_codec"
 version = "0.1.0"
 dependencies = [

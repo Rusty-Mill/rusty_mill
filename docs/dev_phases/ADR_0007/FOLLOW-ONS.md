@@ -4,16 +4,18 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged, and steps 1 to 4 of the build order below are done:
+ADR-0007 is merged, steps 1 to 4 of the build order below are done and
+step 5 has its first channel:
 the workspace speaks AG-UI on both sides, the reference TypeScript client
 accepts what the server sends, a headless TypeScript core mirrors the
 crate against shared fixtures, a React binding sits on the core,
-`rusty_tick` ships an assistant on it, and the gateway can front any
-AG-UI endpoint with a deny-by-default rule set and an audit record either
-side of the run.
+`rusty_tick` ships an assistant on it, the gateway can front any AG-UI
+endpoint with a deny-by-default rule set and an audit record either side
+of the run, and any AG-UI endpoint can be a Slack bot.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Slack | `rusty_channel`: the sans-IO `Channel` trait, a `Thread` per conversation, the Slack Events API adapter, and a bot example on `rusty_serve` that runs any AG-UI endpoint |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 4 | `rusty_agent_gateway`'s `agui` route policy (`agentgateway-agui`): CEL rules over the run input, the request and the caller's claims, deny by default; a decision record before the upstream call and an outcome record when the stream ends |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, second PR | `rusty_tick`'s assistant: a store-free agent at `POST /api/agent`, and the web UI's Assistant panel on the React binding (view as context, `create_task` as a frontend tool) |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, first PR | `@rusty-mill/agui-react`: `AgentProvider`, `useAgent`, `useReadable`, `useAction` (handler, or render-only with `respond` for human in the loop), `useSharedState` |
@@ -77,7 +79,7 @@ Both targets start with the same two pieces, so they come first.
 | 2 | **Done.** `@rusty-mill/agui-core` (TypeScript, headless): parser, SSE decoder, JSON patch, verifier, reducer, `runAgent`; `fixtures/` shared with the Rust tests | 1 PR | No |
 | 3 | **Done.** React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function, `respond` for human in the loop), `useSharedState`; `rusty_tick` as the first consumer | 2 PRs | No |
 | 4 | **Done.** Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1 PR, touches `rusty_agent_gateway` | Given |
-| 5 | Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Yes: external service credentials and dependencies |
+| 5 | **Slack done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given for Slack; Teams and SMS each still need it |
 | 6 | Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
 | 7 | Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Yes: ADR-0005 scoped the executor to `rsi` |
 | 8 | Angular and Vue bindings over `agui-core` | 1 PR each, when a consumer exists | No |
@@ -114,6 +116,24 @@ before: the hooks are the API, the components are one rendering of it.
   to route, and a store can subscribe to that target when one is wanted.
   What the records carry is fixed by what the gateway sees: the run input
   before, the stream's shape after. It does not read the agent's content.
+
+- **Step 5's `Channel` is sans-IO.** `receive` reads a request the
+  runner already accepted and `reply` returns the `POST` to send, so the
+  library has no socket, no clock and no credential of its own, and
+  every Slack rule (signature, skew, retries, bots, thread keys) is
+  tested without a network. The runner is an example, not a crate:
+  there is one channel so far, and a daemon that multiplexes several is
+  step 6's shape (routines) as much as this step's.
+- **Step 5 ignores Slack's retries.** Slack re-sends an event it got no
+  `200` for within three seconds; an agent run can take longer. The
+  runner answers first and runs after, and a delivery marked as a retry
+  is dropped rather than run twice. The cost is that a run lost between
+  the `200` and the reply is lost; a store for threads and in-flight runs
+  (open question 2) is where that gets fixed.
+- **HMAC-SHA256 comes from `rusty_oauth`.** The workspace has it there
+  and nowhere lower; a second copy was not worth avoiding one first-party
+  dependency. Hoisting it (and SHA-256, which `rusty_rsa` carries) into a
+  foundation crate is a `dedupe-loop` candidate, not this step's.
 
 ## Where this departs from the targets as named
 

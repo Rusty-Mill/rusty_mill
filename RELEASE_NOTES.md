@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_channel: chat channels for AG-UI agents, Slack first
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, first channel
+
+- **Added:** `rusty_channel` at `crates/libs/protocol/rusty_channel`. `Channel` is sans-IO: `receive(headers, body, now)` authenticates one inbound request and returns `Challenge`, `Message(Inbound)` or `Ignored(why)`; `reply(to, text)` returns the `Outbound` `POST` (URL, headers, body) the runner sends. `Thread` keeps one conversation: `run(&inbound)` appends the person's message and builds a `RunAgentInput` carrying the whole thread and no tools; `absorb(events)` runs the events through the verifier and reducer and returns a `Reply` with the new assistant text and the error if the run ended in `RUN_ERROR`, a broken stream or an event out of order (the partial text is kept).
+- **Added:** `slack::Slack`, the Events API adapter: `v0=` HMAC-SHA256 over `v0:<timestamp>:<body>` compared in constant time, a five-minute timestamp skew, `url_verification` answered, `app_mention` anywhere and `message` in a direct message accepted, a bot's own messages, subtypes, plain channel messages and Slack's retries ignored. A mention threads under itself so one Slack thread is one AG-UI thread; a direct message is one thread per person. Replies go through `chat.postMessage` with `&`, `<` and `>` escaped.
+- **Added:** `examples/slack_bot.rs` behind the `bot` feature: `rusty_serve` in, `rusty_agui::HttpAgent` to the agent (or to `rusty_agent_gateway`'s `agui` route), `rusty_tls` out to Slack. The request is answered before the run (Slack wants a `200` within three seconds); runs are serialised per process and threads live in memory.
+- **Changed:** `rusty_serve::Request` gains `headers`, every header of the request, and the crate re-exports `HeaderMap`.
+- **Tests:** eleven, no network: thread building and absorbing (text, chunks, errors, a cut stream), an independent HMAC fixture, bad signature, stale clock, missing headers, a tampered body, the challenge, mention and thread keys, the direct-message key and reply body, every ignore case, text cleaning and escaping.
+- **Known limitations:** Slack only; threads are not persisted; one run at a time per process; the bot example is not exercised in CI (it needs Slack credentials). Teams and SMS are the next two PRs of this step.
+
+---
+
 ## rusty_agent_gateway: the `agui` route policy
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 4
 
