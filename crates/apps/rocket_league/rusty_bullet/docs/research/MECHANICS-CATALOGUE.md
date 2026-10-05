@@ -55,7 +55,7 @@ it), `Modelled` (the port has the mechanic), `Needs capture`.
 | Air dribble | Repeated air touches | many small car-ball hits | consecutive touches in air | Needs capture |
 | Double tap | Hit ball off the wall, then again | wall bounce, car-ball | two touches around a wall bounce | Needs capture |
 | Ceiling shot | Drop from ceiling holding the dodge | ceiling contact, flip availability | ceiling plus later flip touch | Needs capture |
-| Flip reset | All four wheels touch the ball in the air, refunding the flip | wheel-ball contact, jump re-arm | four wheel contacts on ball | Needs capture; wheel-ball Modelled (rays), reset not |
+| Flip reset | All four wheels touch the ball in the air, refunding the flip | wheel-ball contact, jump re-arm | four wheel contacts on ball (RocketSim: three) | Needs capture; Modelled as RocketSim does it: wheel rays hit the ball (FR-129) and three or more wheel contacts count as on ground, which refills the second jump (`CarState::HasFlipReset` is airborne, flip available, never jumped) |
 | Pogo | Bounce the car's nose or tail (a corner) off the ground repeatedly to keep height and act on the ball | hard landings, pushback, jump on contact | repeated ground contact plus jump within a few ticks | Needs capture (see residuals in PROJECT-STATUS) |
 | Redirect, bump, demo, 50/50 | Contact play | car-ball, car-car, demolition | contacts, demos | Bumps and demos not modelled |
 | Catch / scoop | Settle a bounce onto the roof; lift the ball with the car's underside | car-ball friction 2.0, contact persistence | slow relative speed, ball z rising on the nose | Needs capture |
