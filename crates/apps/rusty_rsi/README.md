@@ -100,7 +100,7 @@ TASKS=crates/apps/rusty_rsi/crates/rsi-runtime/tasks
 `_API_KEY` (`INNER` for the agent, `OUTER` for the proposer). Running the
 outer loop also needs `git` 2.25 or later.
 
-### Codex as the proposer
+### Codex or Claude Code as the proposer
 
 ```sh
 codex login                                  # once; stored in CODEX_HOME
@@ -114,8 +114,34 @@ harness (no `.git`), may write only that copy, `CODEX_HOME` and a private
 temp dir, may use the network, and cannot reach the tasks or the run
 directory. `RSI_OUTER_CODEX` defaults to `codex` on `PATH`, which must be
 the native binary, not the npm launcher script. Proxy and certificate
-variables (`HTTPS_PROXY`, `SSL_CERT_FILE`, ...) pass through. A real-Codex
-smoke test: `cargo test -p rsi-cli --test codex -- --ignored`.
+variables (`HTTPS_PROXY`, `SSL_CERT_FILE`, ...) pass through.
+
+Claude Code works the same way with its subscription login (no Anthropic
+key), limited to the file tools (no commands):
+
+```sh
+claude                                       # once: /login; stored in CLAUDE_CONFIG_DIR (~/.claude)
+export RSI_OUTER_PROPOSER=claude
+export RSI_OUTER_CLAUDE=/path/to/claude      # the native binary; default `claude` on PATH
+export RSI_OUTER_MODEL=opus                  # optional
+```
+
+### Codex as the inner model
+
+```sh
+export RSI_INNER_PROVIDER=codex              # default: openai (RSI_INNER_MODEL, _BASE_URL)
+export RSI_INNER_CODEX=/path/to/codex        # optional; default `codex` on PATH
+export RSI_INNER_MODEL=gpt-5-codex-mini      # optional
+```
+
+a0 still runs every call through the metered broker; each call is one
+sandboxed `codex exec --json`, charged from its reported token usage (a
+call that reports none is an error). Each call starts a Codex process,
+so runs are slower than with a local endpoint.
+
+Real-agent smoke tests, once logged in:
+`cargo test -p rsi-cli --test agents -- --ignored` (set `RSI_OUTER_CODEX`
+and `RSI_OUTER_CLAUDE`).
 
 ## Test
 

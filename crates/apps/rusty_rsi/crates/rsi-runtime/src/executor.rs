@@ -54,6 +54,14 @@ impl ProcessExecutor {
         }
     }
 
+    /// The same executor, keeping up to `bytes` of each output stream
+    /// instead of [`DEFAULT_CAPTURE_BYTES`].
+    #[must_use]
+    pub fn with_capture_bytes(mut self, bytes: usize) -> Self {
+        self.capture_bytes = bytes;
+        self
+    }
+
     fn status_file(&self) -> Result<PathBuf, RuntimeError> {
         std::fs::create_dir_all(&self.state_dir)
             .map_err(|e| RuntimeError::io("creating the executor state directory", e))?;

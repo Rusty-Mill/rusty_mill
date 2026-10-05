@@ -11,8 +11,9 @@
 //!
 //! Models come from the environment, one set per role: `RSI_INNER_*` for
 //! the agent under test and `RSI_OUTER_*` for the proposer (`_MODEL`,
-//! `_BASE_URL`, `_API_KEY`; or `RSI_OUTER_PROPOSER=codex` for the Codex
-//! CLI; see [`crate::config`]). Nothing secret is accepted as a flag or
+//! `_BASE_URL`, `_API_KEY`), or a coding-agent CLI: `RSI_INNER_PROVIDER=codex`
+//! for the inner model, `RSI_OUTER_PROPOSER=codex` or `claude` for the
+//! proposer (see [`crate::config`]). Nothing secret is accepted as a flag or
 //! written to the run.
 
 use std::ffi::OsString;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rsi_core::{Budget, LineageStore, Margin, ModelId, Seed};
-use rsi_runtime::codex::CodexProposer;
+use rsi_runtime::agent_cli::CliProposer;
 use rsi_runtime::git::Repo;
 use rsi_runtime::grading::{GraderCommand, SYSTEM_READ_ROOTS};
 use rsi_runtime::lineage_store::{Blobs, JsonlLineage};
@@ -31,7 +32,7 @@ use rsi_runtime::proposer::ModelProposer;
 use rsi_runtime::report::{check, replay, summary, RunStatus};
 use rsi_runtime::{ProcessExecutor, ScriptedModel, SolutionRunner, TaskDir, Toolchain};
 
-use crate::config::{model_from_env, outer_from_env, Outer, Role};
+use crate::config::{inner_from_env, outer_from_env, Inner, Outer};
 use crate::flags::Flags;
 
 /// Completion tokens per inner model call.
@@ -90,9 +91,9 @@ impl Setup {
         })
     }
 
-    /// A lab around `model`. No agent may reach the tasks, the repository,
-    /// the executor's state or `extra` (the run directory).
-    fn lab<'a, M>(&'a self, model: &'a M, extra: &[PathBuf]) -> Lab<'a, M> {
+    /// What no sandbox may reach: the tasks, the repository, the
+    /// executor's state and `extra` (the run directory).
+    fn protected(&self, extra: &[PathBuf]) -> Vec<PathBuf> {
         let mut protected: Vec<PathBuf> = self
             .tasks
             .iter()
@@ -100,6 +101,21 @@ impl Setup {
             .chain([self.repo.root().to_path_buf(), self.state.clone()])
             .collect();
         protected.extend_from_slice(extra);
+        protected
+    }
+
+    /// The inner model from the environment (see [`inner_from_env`]).
+    fn inner(&self, extra: &[PathBuf]) -> Result<Inner, String> {
+        inner_from_env(
+            &self.executor,
+            self.work.join("inner-model"),
+            self.protected(extra),
+        )
+    }
+
+    /// A lab around `model`; no agent may reach [`Setup::protected`].
+    fn lab<'a, M>(&'a self, model: &'a M, extra: &[PathBuf]) -> Lab<'a, M> {
+        let protected = self.protected(extra);
         Lab {
             repo: &self.repo,
             tasks: &self.tasks,
@@ -158,7 +174,7 @@ pub fn calibrate_main(args: &[OsString]) -> Result<String, String> {
     )?;
     let out = flags.required_path("--out")?;
     let setup = Setup::new(&flags)?;
-    let model = model_from_env(Role::Inner)?;
+    let model = setup.inner(&[])?;
     let lab = setup.lab(&model, &[]);
     let base = setup
         .repo
@@ -241,7 +257,7 @@ pub fn run_main(args: &[OsString]) -> Result<String, String> {
         .canonicalize()
         .map_err(|e| format!("resolving {}: {e}", run_dir.display()))?;
     let setup = Setup::new(&flags)?;
-    let inner = model_from_env(Role::Inner)?;
+    let inner = setup.inner(std::slice::from_ref(&run_dir))?;
     let outer = outer_from_env(OUTER_TIMEOUT)?;
     let lab = setup.lab(&inner, std::slice::from_ref(&run_dir));
     let config = RunConfig {
@@ -259,11 +275,11 @@ pub fn run_main(args: &[OsString]) -> Result<String, String> {
             let proposer = ModelProposer::new(&model, OUTER_COMPLETION_TOKENS, OUTER_TIMEOUT);
             run(&lab, &proposer, &config, &run_dir)
         }
-        Outer::Codex(codex) => {
-            let proposer = CodexProposer::new(
+        Outer::Cli(cli) => {
+            let proposer = CliProposer::new(
                 &setup.executor,
-                codex,
-                setup.work.join("codex"),
+                cli,
+                setup.work.join("proposer"),
                 lab.protected.clone(),
             )
             .map_err(|e| e.to_string())?;

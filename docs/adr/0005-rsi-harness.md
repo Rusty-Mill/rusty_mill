@@ -108,7 +108,7 @@ inner loop cannot score privately.
 | `PrivateGrader` | `private_score(&TaskId, Option<&Solution>, Seed) -> Result<Score>` (no solution or a failed run scores the task's floor) | `SandboxedGrader`: sandboxed run on private inputs, then an out-of-process `rsi __grade` (see §4). It is never constructed on the inner path. |
 | `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
 | `ChatModel` | `complete(&[Message], max_tokens, timeout) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
-| `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests; `CodexProposer` over `codex exec` in the sandbox (§7, as built). |
+| `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests; `CliProposer` over `codex exec` or Claude Code's `claude -p` in the sandbox (§7, as built). |
 | `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
 | `LineageStore` | `append(&LineageEntry) -> Result<Digest>` (the entry's chain hash), `entries()` (verifies the chain first) | `JsonlLineage`: append-only JSONL plus a content-addressed blob dir (see §6). |
@@ -570,7 +570,8 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
     directory must be a real directory (a symlinked parent is refused,
     and missing ones are created one level at a time), and a planted
     symlink at the leaf is replaced rather than followed. The allowlist decides afterwards.
-- **Codex CLI proposer** (`CodexProposer`, `RSI_OUTER_PROPOSER=codex`).
+- **Codex CLI proposer** (`CliProposer` with `CliAgent::Codex`, `RSI_OUTER_PROPOSER=codex`;
+  `rsi-runtime::agent_cli`).
   It runs `codex exec` under the sandbox helper, in its own profile.
   - **Why our sandbox only.** Codex's Linux sandbox (bubblewrap) cannot
     start inside a Landlock domain ("error building bubblewrap command:
@@ -608,6 +609,34 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
     it cannot write outside, read private data or open devices other
     than `/dev/null` and `/dev/urandom`, while internet sockets work. An
     `#[ignore]`d test runs a real, logged-in Codex.
+- **Claude Code proposer** (`CliAgent::Claude`, `RSI_OUTER_PROPOSER=claude`).
+  The same sandbox, staging copy and mirror as Codex, with
+  `CLAUDE_CONFIG_DIR` as its home. Claude Code needs no bypass flag: it
+  runs `claude -p --restricted` with the file tools only
+  (`Read,Edit,Write,Glob,Grep`, so nothing that runs commands),
+  `--permission-mode acceptEdits`, `--permission-prompts none`, no settings
+  sources, MCP servers, slash commands or session files, and at most 60
+  turns. Its reply is the `result` of the `--output-format json`
+  envelope; an envelope marked `is_error` is an error. It signs in with
+  the Claude subscription login; no Anthropic key passes through `rsi`.
+- **Codex as the inner model** (`CodexModel`, `RSI_INNER_PROVIDER=codex`;
+  `rsi-runtime::codex_model`). a0 stays the agent under improvement and
+  the broker still meters and records every call; only the completion
+  comes from Codex.
+  - **Why not Codex (or Claude Code) as the inner agent.** It would
+    replace a0, leaving the outer loop nothing to improve, and its own
+    agent loop would call its model around the broker, breaking the
+    budget hard stop (invariant 2) and trajectory replay (invariant 4).
+  - **Each call** runs one `codex exec --json` in a fresh, empty staging
+    directory under the proposer's sandbox, with the messages rendered
+    as one prompt under their roles and an instruction to answer with
+    text only. It is killed at the timeout the broker passes.
+  - **Metering.** Tokens come from the `turn.completed` events' `usage`
+    (`input_tokens`, `output_tokens`); a `turn.failed` event or a run
+    with no usage is an error, never an unmetered call. The executor
+    keeps 8 MiB of the event stream for it. Codex has no per-call output
+    cap, so one call may overrun the remaining budget; the meter charges
+    it and the broker refuses the next call.
 - **Replay** (`rsi report --replay`).
   - **Grade replay.** Every stored submission is re-graded through the
     out-of-process grader, and each private score must match bit for bit.
@@ -658,8 +687,11 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
 - Inner model: any OpenAI-compatible `/v1/chat/completions` over plain
   HTTP, via `rusty_http`'s sync transport. The default is Ollama at
   `http://127.0.0.1:11434/v1`. Token usage comes from its `usage` field.
-- Outer model: the same client, or `codex exec` as a subprocess. There
-  is no Anthropic key path.
+- Outer model: the same client, or `codex exec` or Claude Code's
+  `claude -p` as a sandboxed subprocess with its own subscription login.
+  There is no Anthropic key path.
+- Inner model alternative: `codex exec` per call (`CodexModel`), metered
+  from its event stream.
 - `rusty_llama`'s OpenAI-compatible `server` feature can serve as a
   fully in-process, offline inner model later, with zero adapter code.
 - Config: `rsi.toml`, with explicit env overrides (`RSI_*`). Secrets
