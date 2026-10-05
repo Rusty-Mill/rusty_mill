@@ -31,6 +31,7 @@ fn add(store: &Store<'_>, content: &str, entities: &[&str]) -> String {
                     aliases: vec![],
                 })
                 .collect(),
+            ..Default::default()
         },
     )
     .unwrap()
@@ -57,6 +58,7 @@ fn search(
     configure: impl FnOnce(&mut MemorySearchInput),
 ) -> remind_me_core::expansion::MemorySearchResponse {
     let mut input = MemorySearchInput {
+        scope: Default::default(),
         strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
@@ -72,6 +74,8 @@ fn search(
         include_neighbors: false,
         expand_co_retrieval: false,
         bootstrap: false,
+        include_expired: true,
+        min_confidence: 0.0,
     };
     configure(&mut input);
     queries::search_with_expansions(store, &input).unwrap()

@@ -13,7 +13,26 @@
 mod test_env;
 
 pub mod daemon_proxy;
+pub mod references;
 pub mod render;
+
+/// What an MCP client is told about the server on `initialize`: when to
+/// reach for which tool. Kept short; it is paid for in every session.
+const SERVER_INSTRUCTIONS: &str = "Long-term memory for the user. Search (remind_me_search) \
+before answering anything about the user, their projects or past decisions. Call remind_me_add \
+for each durable fact, decision or preference the user states, passing memory_type (a decision \
+needs metadata.rationale) and confidence when known. Call remind_me_auto_capture at the end of \
+any substantive conversation. Close decisions and action items with remind_me_resolve when they \
+are done, abandoned or reverted.";
+
+/// A tool error's text: a rejected input reads as such, anything else is
+/// the store's failure, under `prefix`.
+fn store_error_text(prefix: &str, e: &remind_me_core::db::StoreError) -> String {
+    match e {
+        remind_me_core::db::StoreError::Invalid(why) => format!("Invalid input: {why}"),
+        other => format!("{prefix}: {other}"),
+    }
+}
 
 /// The response format a call asked for, defaulting to **JSON** (#206).
 ///
@@ -113,6 +132,7 @@ fn format_or(args: &serde_json::Value, default: ResponseFormat) -> ResponseForma
     }
 }
 
+use remind_me_core::kinds::StructuredFields;
 use remind_me_core::{
     backup, capture, consolidation::consolidate, contradictions, db::queries, dbs_import, digest,
     entity, export, history, importer, mempalace_import, normalize, recalibrate, saved_searches,
@@ -466,7 +486,8 @@ impl McpServer {
                         "serverInfo": {
                             "name": "rusty_remind_me",
                             "version": "0.1.0"
-                        }
+                        },
+                        "instructions": SERVER_INSTRUCTIONS
                     }
                 }))
             }
@@ -498,7 +519,42 @@ impl McpServer {
                                         "category": { "type": "string", "default": "general" },
                                         "tags": { "type": "array", "items": { "type": "string" } },
                                         "source": { "type": "string", "default": "manual" },
-                                        "sensitive": { "type": "boolean", "default": false, "description": "Mark this memory sensitive: kept out of ordinary search and list results unless include_sensitive is set. A convenience flag, NOT access control — this is a single-user store and anyone with the database reads everything regardless." }
+                                        "sensitive": { "type": "boolean", "default": false, "description": "Mark this memory sensitive: kept out of ordinary search and list results unless include_sensitive is set. A convenience flag, NOT access control — this is a single-user store and anyone with the database reads everything regardless." },
+                                        "extract": { "type": "boolean", "default": true, "description": "Extract references (issues, commits, URLs, paths, handles) and entities from the content. REMIND_ME_EXTRACT=0 disables it globally." },
+                                        "attachments": {
+                                            "type": "array",
+                                            "description": "Files or URLs this memory points at. A path is hashed (sha256) and only the fingerprint, size and mime type are stored, never the bytes.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "path": { "type": "string" },
+                                                    "url": { "type": "string" },
+                                                    "label": { "type": "string" }
+                                                }
+                                            }
+                                        },
+                                        "metadata": { "type": "object", "description": "Free-form JSON stored with the memory; a decision requires a `rationale` string here, an action_item may hold due, owner and status." },
+                                        "subject": { "type": "string", "description": "Subject of a subject-predicate-object fact; a new triple supersedes a live one with the same subject and predicate." },
+                                        "predicate": { "type": "string", "description": "Predicate of the fact triple." },
+                                        "object": { "type": "string", "description": "Object of the fact triple." },
+                                        "entities": {
+                                            "type": "array",
+                                            "description": "Entities this memory mentions, linked into the knowledge graph.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "name": { "type": "string" },
+                                                    "kind": { "type": "string" },
+                                                    "aliases": { "type": "array", "items": { "type": "string" } }
+                                                },
+                                                "required": ["name"]
+                                            }
+                                        },
+                                        "memory_type": { "type": "string", "enum": ["decision", "action_item", "preference", "fact", "reference", "insight", "learning", "blocker", "work_log", "unclassified"], "description": "What kind of memory this is; a decision requires metadata.rationale." },
+                                        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 1, "description": "How far to trust this memory; scales its search ranking." },
+                                        "valid_from": { "type": "string", "description": "RFC 3339 time the memory starts to hold; omit for always." },
+                                        "valid_until": { "type": "string", "description": "RFC 3339 time it stops holding; after it the memory ranks last and is marked expired." },
+                                        "outcome": { "type": "string", "enum": ["done", "abandoned", "reverted", "superseded"], "description": "Only for decision and action_item memories; prefer remind_me_resolve for an existing one." }
                                     },
                                     "required": ["content"]
                                 }
@@ -529,6 +585,10 @@ impl McpServer {
                                             "description": "Memory must have ALL of these tags"
                                         },
                                         "source": { "type": "string" },
+                                        "project": { "type": "string", "description": "Only memories written in this project (case-insensitive)" },
+                                        "branch": { "type": "string", "description": "Only memories written on this git branch" },
+                                        "session_id": { "type": "string", "description": "Only memories written in this client session" },
+                                        "written_by": { "type": "string", "description": "Only memories by this writer: human, hook, model, model:<id> or importer:<name>" },
                                         "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 },
                                         "offset": { "type": "integer", "default": 0, "minimum": 0 },
                                         "include_sensitive": { "type": "boolean", "default": false, "description": "Include memories marked sensitive. Off by default, so sensitive content never surfaces in an ordinary request." }
@@ -548,7 +608,12 @@ impl McpServer {
                                         "tags": { "type": "array", "items": { "type": "string" } },
                                         "metadata": { "type": "object" },
                                         "sensitive": { "type": "boolean", "description": "Set or clear the sensitive flag. Omit to leave it unchanged." },
-                                        "clear_superseded": { "type": "boolean", "default": false, "description": "Clear this memory's superseded_by flag, un-hiding it from search, entity, and subject/predicate lookups. Recovery path for a false-positive contradiction-supersession. Does not affect the memory that did the superseding." }
+                                        "clear_superseded": { "type": "boolean", "default": false, "description": "Clear this memory's superseded_by flag, un-hiding it from search, entity, and subject/predicate lookups. Recovery path for a false-positive contradiction-supersession. Does not affect the memory that did the superseding." },
+                                        "memory_type": { "type": "string", "enum": ["decision", "action_item", "preference", "fact", "reference", "insight", "learning", "blocker", "work_log", "unclassified"], "description": "Reclassify; a decision requires metadata.rationale (in this call or already stored)." },
+                                        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How far to trust this memory; scales its search ranking." },
+                                        "valid_from": { "type": "string", "description": "RFC 3339 time the memory starts to hold." },
+                                        "valid_until": { "type": "string", "description": "RFC 3339 time it stops holding; after it the memory ranks last and is marked expired." },
+                                        "outcome": { "type": "string", "enum": ["done", "abandoned", "reverted", "superseded"], "description": "Only for decision and action_item memories." }
                                     },
                                     "required": ["memory_id"]
                                 }
@@ -574,6 +639,10 @@ impl McpServer {
                                         "query": { "type": "string" },
                                         "limit": { "type": "integer", "default": 20 },
                                         "category": { "type": "string" },
+                                        "project": { "type": "string", "description": "Only memories written in this project (case-insensitive)" },
+                                        "branch": { "type": "string", "description": "Only memories written on this git branch" },
+                                        "session_id": { "type": "string", "description": "Only memories written in this client session" },
+                                        "written_by": { "type": "string", "description": "Only memories by this writer: human, hook, model, model:<id> or importer:<name>" },
                                         "include_dormant": { "type": "boolean", "default": false, "description": "Include memories that have decayed below the vitality floor" },
                                         "min_vitality": { "type": "number", "default": 0, "description": "Only return memories at or above this current vitality" },
                                         "expand_entities": { "type": "boolean", "default": false, "description": "Also surface memories mentioning the same entities" },
@@ -581,6 +650,8 @@ impl McpServer {
                                         "expand_co_retrieval": { "type": "boolean", "default": false, "description": "Also surface memories frequently retrieved alongside these" },
                                         "include_sensitive": { "type": "boolean", "default": false, "description": "Include memories marked sensitive. Off by default, so sensitive content never surfaces in an ordinary request." },
                                         "bootstrap": { "type": "boolean", "default": false, "description": "Prepend the durable persona (L3) as context, whether or not it matches the query. Spends up to a quarter of token_budget; the rest still goes to the ranked results." },
+                                        "include_expired": { "type": "boolean", "default": true, "description": "Include memories whose valid_until has passed. They always rank after in-window ones; set false to drop them." },
+                                        "min_confidence": { "type": "number", "default": 0, "description": "Only return memories at or above this confidence (0 to 1)." },
                                         "strategy": { "type": "string", "enum": ["auto", "balanced", "keyword_favored", "semantic_favored"], "default": "auto", "description": "RRF weight profile. Leave at auto (routes by query shape: quoted phrases, prefix* wildcards and very short queries favour keyword relevance; long or question-shaped queries favour semantic similarity) unless deliberately A/B testing a pinned preset." }
                                     },
                                     "required": ["query"]
@@ -819,7 +890,7 @@ impl McpServer {
                             },
                             {
                                 "name": "remind_me_stale_candidates",
-                                "description": "List memories whose content names a file (inside REMIND_ME_CODE_ROOTS) that has since changed or been deleted. Read-only and never touches the memory it reports: a changed file does not prove the memory wrong, it only means the claim is worth re-checking. Off entirely -- always an empty list -- unless REMIND_ME_CODE_ROOTS is configured.",
+                                "description": "List memories worth re-checking: those whose content names a file (inside REMIND_ME_CODE_ROOTS) that has since changed or been deleted, and those whose valid_until has passed (reason `expired`, shown as expired_at). Read-only and never touches the memory it reports: a changed file does not prove the memory wrong, it only means the claim is worth re-checking. The file check is off -- only expired memories are listed -- unless REMIND_ME_CODE_ROOTS is configured.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -846,6 +917,20 @@ impl McpServer {
                                         "memory_id": { "type": "string" }
                                     },
                                     "required": ["memory_id"]
+                                }
+                            },
+                            references::tool_schema(),
+                            {
+                                "name": "remind_me_session_timeline",
+                                "description": "A client session as an episode. With session_id: the session's start and end, branch and shas, then every memory written under it (captures, facts, the work log) oldest first. Without: the most recent sessions, newest first, each with how many memories it wrote.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "session_id": { "type": "string", "description": "One session to read in full. Omit to list recent sessions." },
+                                        "project": { "type": "string", "description": "When listing, only sessions of this project." },
+                                        "limit": { "type": "integer", "minimum": 1, "default": 10, "description": "When listing, how many sessions." },
+                                        "response_format": { "type": "string", "enum": ["markdown", "json"] }
+                                    }
                                 }
                             },
                             {
@@ -981,7 +1066,7 @@ impl McpServer {
                             },
                             {
                                 "name": "remind_me_contradiction_candidates",
-                                "description": "Surface pairs of memories that might assert incompatible things but were never caught by exact-triple supersession — two pieces of prose that conflict without either carrying a formal subject/predicate/object. Read-only: these are pairs that MIGHT conflict, and most turn out merely topically similar. Read both before acting; fix a real one with remind_me_update, remind_me_delete, or remind_me_add carrying an explicit triple. Paginate by passing the next_after_a/next_after_b from one response as after_a/after_b on the next call, and stop when has_more is false — without a cursor every call returns the same first page, so a large queue has only `limit` reachable rows.",
+                                "description": "Surface pairs of memories that might assert incompatible things but were never caught by exact-triple supersession — two pieces of prose that conflict without either carrying a formal subject/predicate/object. Read-only: these are pairs that MIGHT conflict, and most turn out merely topically similar. Read both before acting; fix a real one with remind_me_update, remind_me_delete, or remind_me_add carrying an explicit triple. When both sides state the same subject and predicate with different objects, recommended_keep names the one to keep (higher confidence, then newer verified_at, then newer updated_at) and it is listed as memory_a. Paginate by passing the next_after_a/next_after_b from one response as after_a/after_b on the next call, and stop when has_more is false — without a cursor every call returns the same first page, so a large queue has only `limit` reachable rows.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -1286,6 +1371,19 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "remind_me_resolve",
+                                "description": "Close a decision or action item as done, abandoned, reverted or superseded. A reverted or abandoned one loses half its weight so it stops outranking what replaced it; the prior state is kept in history.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "memory_id": { "type": "string" },
+                                        "outcome": { "type": "string", "enum": ["done", "abandoned", "reverted", "superseded"] },
+                                        "note": { "type": "string", "description": "Why; stored as metadata.outcome_note." }
+                                    },
+                                    "required": ["memory_id", "outcome"]
+                                }
+                            },
+                            {
                                 "name": "remind_me_stats",
                                 "description": "Get database stats and memory counts.",
                                 "inputSchema": {
@@ -1433,19 +1531,26 @@ impl McpServer {
 
                 let result = match tool_name {
                     "remind_me_add" => {
-                        let input: Result<MemoryAddInput, _> = serde_json::from_value(args);
+                        // The structured fields sit beside the input model, not
+                        // in it, so both read from the same arguments.
+                        let input = serde_json::from_value::<MemoryAddInput>(args.clone())
+                            .and_then(|i| {
+                                serde_json::from_value::<StructuredFields>(args).map(|f| (i, f))
+                            });
                         match input {
-                            Ok(add_input) => match queries::add_memory(&store, add_input) {
-                                Ok(mem) => {
-                                    json!({ "content": [{ "type": "text", "text": match format {
+                            Ok((add_input, fields)) => {
+                                match queries::add_memory_with(&store, add_input, &fields) {
+                                    Ok(mem) => {
+                                        json!({ "content": [{ "type": "text", "text": match format {
     ResponseFormat::Json => serde_json::to_string_pretty(&mem).unwrap(),
     ResponseFormat::Markdown => render::memory_stored(&mem),
 } }] })
+                                    }
+                                    Err(e) => {
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": store_error_text("Database error", &e) }] })
+                                    }
                                 }
-                                Err(e) => {
-                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Database error: {}", e) }] })
-                                }
-                            },
+                            }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid input: {}", e) }] })
                             }
@@ -1462,9 +1567,14 @@ impl McpServer {
                             .or_else(|| args.get("id").and_then(|v| v.as_str()))
                             .unwrap_or("");
                         match queries::get_memory_by_id(&store, id) {
-                            Ok(Some(mem)) => {
-                                json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&mem).unwrap() }] })
-                            }
+                            Ok(Some(mem)) => match references::memory_json(&store, &mem) {
+                                Ok(with_refs) => {
+                                    json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&with_refs).unwrap() }] })
+                                }
+                                Err(e) => {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("Error: {}", e) }] })
+                                }
+                            },
                             Ok(None) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": "Memory not found" }] })
                             }
@@ -1504,10 +1614,13 @@ impl McpServer {
                         }
                     }
                     "remind_me_update" => {
-                        let input: Result<MemoryUpdateInput, _> = serde_json::from_value(args);
+                        let input = serde_json::from_value::<MemoryUpdateInput>(args.clone())
+                            .and_then(|i| {
+                                serde_json::from_value::<StructuredFields>(args).map(|f| (i, f))
+                            });
                         match input {
-                            Ok(update_input) => {
-                                match queries::update_memory(&store, &update_input) {
+                            Ok((update_input, fields)) => {
+                                match queries::update_memory_with(&store, &update_input, &fields) {
                                     Ok(UpdateOutcome::Updated(mem)) => {
                                         json!({ "content": [{ "type": "text", "text": match format {
     ResponseFormat::Json => serde_json::to_string_pretty(&mem).unwrap(),
@@ -1521,7 +1634,7 @@ impl McpServer {
                                         json!({ "isError": true, "content": [{ "type": "text", "text": "Nothing to update — no fields provided" }] })
                                     }
                                     Err(e) => {
-                                        json!({ "isError": true, "content": [{ "type": "text", "text": format!("Update error: {}", e) }] })
+                                        json!({ "isError": true, "content": [{ "type": "text", "text": store_error_text("Update error", &e) }] })
                                     }
                                 }
                             }
@@ -1559,11 +1672,16 @@ impl McpServer {
                                         // away here, so a markdown request got
                                         // a successful JSON response (#224).
                                         let text = match search_input.response_format {
-                                            ResponseFormat::Json => {
-                                                serde_json::to_string_pretty(&res).unwrap()
-                                            }
+                                            ResponseFormat::Json => serde_json::to_string_pretty(
+                                                &references::search_json(&store, &res)
+                                                    .unwrap_or_else(|_| json!(res)),
+                                            )
+                                            .unwrap(),
                                             ResponseFormat::Markdown => {
                                                 render::search_response(&res)
+                                                    + &references::search_markdown_footer(
+                                                        &store, &res,
+                                                    )
                                             }
                                         };
                                         json!({ "content": [{ "type": "text", "text": text }] })
@@ -1922,6 +2040,10 @@ impl McpServer {
                                     || decompose_input.facts.len() > DECOMPOSE_FACTS_MAX
                                 {
                                     json!({ "isError": true, "content": [{ "type": "text", "text": format!("facts must hold {}..={} entries", DECOMPOSE_FACTS_MIN, DECOMPOSE_FACTS_MAX) }] })
+                                } else if let Err(e) =
+                                    remind_me_core::resolve::validate_facts(&decompose_input.facts)
+                                {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": store_error_text("Decompose error", &e) }] })
                                 } else {
                                     match capture::decompose(&store, &decompose_input) {
                                         Ok(Some(result)) => {
@@ -2138,6 +2260,34 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Provenance error: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_references" => match references::run(&store, &args) {
+                        Ok(found) => {
+                            json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&found).unwrap() }] })
+                        }
+                        Err(e) => {
+                            json!({ "isError": true, "content": [{ "type": "text", "text": format!("References error: {}", e) }] })
+                        }
+                    },
+                    "remind_me_session_timeline" => {
+                        let text_arg = |key: &str| args.get(key).and_then(|v| v.as_str());
+                        let limit = args
+                            .get("limit")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(remind_me_core::session_ops::DEFAULT_TIMELINE_LIMIT);
+                        match remind_me_core::session_ops::timeline_text(
+                            &store,
+                            text_arg("session_id"),
+                            text_arg("project"),
+                            limit,
+                            matches!(format, ResponseFormat::Markdown),
+                        ) {
+                            Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Session timeline error: {}", e) }] })
                             }
                         }
                     }
@@ -2793,6 +2943,11 @@ impl McpServer {
                                 let count = rc.classifications.len();
                                 if !(RECLASSIFY_BATCH_MIN..=RECLASSIFY_BATCH_MAX).contains(&count) {
                                     json!({ "isError": true, "content": [{ "type": "text", "text": format!("`classifications` must hold {}..={} items, got {}", RECLASSIFY_BATCH_MIN, RECLASSIFY_BATCH_MAX, count) }] })
+                                } else if let Err(e) = remind_me_core::resolve::validate_reclassify(
+                                    &store,
+                                    &rc.classifications,
+                                ) {
+                                    json!({ "isError": true, "content": [{ "type": "text", "text": store_error_text("Reclassify error", &e) }] })
                                 } else {
                                     match queries::reclassify_memories(&store, &rc) {
                                         Ok(outcome) => {
@@ -3047,6 +3202,27 @@ impl McpServer {
                             }
                             Err(e) => {
                                 json!({ "isError": true, "content": [{ "type": "text", "text": format!("Invalid consolidate input: {}", e) }] })
+                            }
+                        }
+                    }
+                    "remind_me_resolve" => {
+                        let memory_id = args.get("memory_id").and_then(Value::as_str).unwrap_or("");
+                        let outcome = args.get("outcome").and_then(Value::as_str).unwrap_or("");
+                        let note = args.get("note").and_then(Value::as_str);
+                        match remind_me_core::resolve::resolve_memory(
+                            &store, memory_id, outcome, note,
+                        ) {
+                            Ok(Some(mem)) => {
+                                json!({ "content": [{ "type": "text", "text": match format {
+                                    ResponseFormat::Json => serde_json::to_string_pretty(&mem).unwrap(),
+                                    ResponseFormat::Markdown => format!("✓ Memory `{}` resolved as {}.", mem.id, outcome),
+                                } }] })
+                            }
+                            Ok(None) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": format!("Memory `{}` not found", memory_id) }] })
+                            }
+                            Err(e) => {
+                                json!({ "isError": true, "content": [{ "type": "text", "text": store_error_text("Resolve error", &e) }] })
                             }
                         }
                     }
@@ -3390,9 +3566,110 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
 
-        for expected in ["remind_me_list", "remind_me_update", "remind_me_delete"] {
+        for expected in [
+            "remind_me_list",
+            "remind_me_update",
+            "remind_me_delete",
+            "remind_me_session_timeline",
+        ] {
             assert!(names.contains(&expected), "{} not in tools/list", expected);
         }
+    }
+
+    #[test]
+    fn references_tool_is_registered_and_reverse_lookup_works() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+        let req = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" });
+        let resp = server.handle_request(&req.to_string()).unwrap();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"remind_me_references"));
+
+        let added = call(
+            &server,
+            "remind_me_add",
+            json!({ "content": "Shipped o/r#321 in 3ac9f797" }),
+        );
+        let id = serde_json::from_str::<Value>(&text_of(&added)).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let by_value = call(
+            &server,
+            "remind_me_references",
+            json!({ "value": "o/r#321" }),
+        );
+        let found: Value = serde_json::from_str(&text_of(&by_value)).unwrap();
+        assert_eq!(found["count"], 1, "{found}");
+        assert_eq!(found["references"][0]["memory_id"], id.as_str());
+        assert_eq!(found["references"][0]["memory"]["id"], id.as_str());
+
+        let by_memory = call(&server, "remind_me_references", json!({ "memory_id": id }));
+        let found: Value = serde_json::from_str(&text_of(&by_memory)).unwrap();
+        assert_eq!(found["count"], 2, "{found}");
+
+        let none = call(&server, "remind_me_references", json!({}));
+        assert_eq!(none["isError"], true);
+
+        let got = call(&server, "remind_me_get", json!({ "memory_id": id }));
+        let got: Value = serde_json::from_str(&text_of(&got)).unwrap();
+        assert_eq!(got["references"].as_array().unwrap().len(), 2);
+
+        let searched = call(
+            &server,
+            "remind_me_search",
+            json!({ "query": "Shipped", "response_format": "json" }),
+        );
+        let searched: Value = serde_json::from_str(&text_of(&searched)).unwrap();
+        assert_eq!(
+            searched["memories"][0]["memory"]["references"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "{searched}"
+        );
+        let md = call(&server, "remind_me_search", json!({ "query": "Shipped" }));
+        assert!(
+            text_of(&md).contains("refs: commit:3ac9f797, issue:o/r#321"),
+            "{}",
+            text_of(&md)
+        );
+    }
+
+    #[test]
+    fn test_session_timeline_answers_for_an_empty_store_and_an_unknown_session() {
+        let db = Database::open_in_memory().unwrap();
+        let server = McpServer::new(db);
+
+        let listed = call(
+            &server,
+            "remind_me_session_timeline",
+            json!({ "response_format": "markdown" }),
+        );
+        assert!(listed.get("isError").is_none(), "{listed}");
+        assert!(text_of(&listed).contains("No sessions recorded"));
+
+        let as_json = call(
+            &server,
+            "remind_me_session_timeline",
+            json!({ "response_format": "json", "limit": 3 }),
+        );
+        let parsed: Value = serde_json::from_str(&text_of(&as_json)).unwrap();
+        assert_eq!(parsed["count"], 0);
+
+        let unknown = call(
+            &server,
+            "remind_me_session_timeline",
+            json!({ "session_id": "nope" }),
+        );
+        assert!(text_of(&unknown).contains("No session found"));
     }
 
     #[test]
@@ -4999,5 +5276,267 @@ mod handshake_identity {
         assert_eq!(parse(json!({ "clientInfo": { "name": 42 } })), None);
         // A handshake with no params at all must not panic.
         assert_eq!(client_identity(&json!({ "method": "initialize" })), None);
+    }
+}
+
+/// Wave 1A: typed kinds, outcomes and the advertised surface, over JSON-RPC.
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+
+    fn server() -> McpServer {
+        McpServer::new(Database::open_in_memory().unwrap())
+    }
+
+    fn call(server: &McpServer, name: &str, args: Value) -> Value {
+        let req = json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        });
+        server.handle_request(&req.to_string()).unwrap()["result"].clone()
+    }
+
+    fn text(result: &Value) -> String {
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn is_error(result: &Value) -> bool {
+        result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn stored_id(result: &Value) -> String {
+        let memory: Value = serde_json::from_str(&text(result)).unwrap();
+        memory["id"].as_str().unwrap().to_string()
+    }
+
+    fn tool(server: &McpServer, name: &str) -> Value {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+        let listed = server.handle_request(&req.to_string()).unwrap();
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} not in tools/list"))
+            .clone()
+    }
+
+    #[test]
+    fn initialize_carries_short_instructions() {
+        let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        let resp = server().handle_request(&req.to_string()).unwrap();
+        let text = resp["result"]["instructions"].as_str().unwrap();
+        assert!(text.len() < 600, "{} chars", text.len());
+        for tool in [
+            "remind_me_auto_capture",
+            "remind_me_add",
+            "remind_me_search",
+        ] {
+            assert!(text.contains(tool), "instructions should name {tool}");
+        }
+        assert!(text.contains("memory_type") && text.contains("confidence"));
+    }
+
+    #[test]
+    fn add_advertises_every_field_the_input_accepts() {
+        let s = server();
+        let schema = tool(&s, "remind_me_add");
+        let props = schema["inputSchema"]["properties"].as_object().unwrap();
+        for field in [
+            "metadata",
+            "subject",
+            "predicate",
+            "object",
+            "entities",
+            "memory_type",
+            "confidence",
+            "valid_from",
+            "valid_until",
+            "outcome",
+        ] {
+            assert!(props.contains_key(field), "add should advertise {field}");
+        }
+        assert!(props["entities"]["items"]["properties"]["name"].is_object());
+        let update = tool(&s, "remind_me_update");
+        for field in [
+            "memory_type",
+            "confidence",
+            "valid_from",
+            "valid_until",
+            "outcome",
+        ] {
+            assert!(
+                update["inputSchema"]["properties"][field].is_object(),
+                "{field}"
+            );
+        }
+        let search = tool(&s, "remind_me_search");
+        assert_eq!(
+            search["inputSchema"]["properties"]["include_expired"]["default"],
+            true
+        );
+        assert!(search["inputSchema"]["properties"]["min_confidence"].is_object());
+    }
+
+    #[test]
+    fn a_decision_without_a_rationale_is_rejected_with_the_field_named() {
+        let s = server();
+        let bad = call(
+            &s,
+            "remind_me_add",
+            json!({ "content": "use X", "memory_type": "decision" }),
+        );
+        assert!(is_error(&bad));
+        assert!(text(&bad).contains("rationale"), "{}", text(&bad));
+
+        let ok = call(
+            &s,
+            "remind_me_add",
+            json!({ "content": "use X", "memory_type": "decision",
+                    "metadata": { "rationale": "cheaper" }, "confidence": 0.8 }),
+        );
+        assert!(!is_error(&ok), "{}", text(&ok));
+        let stored: Value = serde_json::from_str(&text(&ok)).unwrap();
+        assert_eq!(stored["memory_type"], "decision");
+        assert_eq!(stored["confidence"], 0.8);
+
+        let out_of_range = call(
+            &s,
+            "remind_me_add",
+            json!({ "content": "x", "confidence": 2 }),
+        );
+        assert!(is_error(&out_of_range) && text(&out_of_range).contains("confidence"));
+    }
+
+    #[test]
+    fn update_sets_kind_fields_and_refuses_a_bad_outcome() {
+        let s = server();
+        let id = stored_id(&call(&s, "remind_me_add", json!({ "content": "a note" })));
+        let bad = call(
+            &s,
+            "remind_me_update",
+            json!({ "memory_id": id, "outcome": "done" }),
+        );
+        assert!(is_error(&bad) && text(&bad).contains("outcome"));
+
+        let ok = call(
+            &s,
+            "remind_me_update",
+            json!({ "memory_id": id, "memory_type": "action_item",
+                    "metadata": { "due": "2026-10-05T09:00:00Z" }, "outcome": "done" }),
+        );
+        assert!(!is_error(&ok), "{}", text(&ok));
+    }
+
+    #[test]
+    fn reclassify_and_decompose_refuse_a_malformed_kind() {
+        let s = server();
+        let id = stored_id(&call(&s, "remind_me_add", json!({ "content": "a note" })));
+        let bad = call(
+            &s,
+            "remind_me_reclassify",
+            json!({ "classifications": [{ "memory_id": id, "memory_type": "decision" }] }),
+        );
+        assert!(
+            is_error(&bad) && text(&bad).contains("rationale"),
+            "{}",
+            text(&bad)
+        );
+
+        let cap = call(
+            &s,
+            "remind_me_auto_capture",
+            json!({ "conversation": "u: hi", "summary": "greeting" }),
+        );
+        let capture: Value = serde_json::from_str(&text(&cap)).unwrap();
+        let bad = call(
+            &s,
+            "remind_me_decompose",
+            json!({ "capture_id": capture["capture_id"],
+                    "facts": [{ "content": "use X", "memory_type": "decision" }] }),
+        );
+        assert!(
+            is_error(&bad) && text(&bad).contains("rationale"),
+            "{}",
+            text(&bad)
+        );
+        let good = call(
+            &s,
+            "remind_me_decompose",
+            json!({ "capture_id": capture["capture_id"],
+                    "facts": [{ "content": "use X", "memory_type": "decision",
+                                "metadata": { "rationale": "r" } }] }),
+        );
+        assert!(!is_error(&good), "{}", text(&good));
+    }
+
+    #[test]
+    fn resolve_is_listed_and_demotes_a_reverted_decision() {
+        let s = server();
+        assert!(tool(&s, "remind_me_resolve")["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("outcome")));
+        let id = stored_id(&call(
+            &s,
+            "remind_me_add",
+            json!({ "content": "adopt X", "memory_type": "decision",
+                    "metadata": { "rationale": "r" } }),
+        ));
+        let resolved = call(
+            &s,
+            "remind_me_resolve",
+            json!({ "memory_id": id, "outcome": "reverted", "note": "broke CI" }),
+        );
+        assert!(!is_error(&resolved), "{}", text(&resolved));
+        let m: Value = serde_json::from_str(&text(&resolved)).unwrap();
+        assert_eq!(m["outcome"], "reverted");
+        assert_eq!(m["metadata"]["outcome_note"], "broke CI");
+
+        let missing = call(
+            &s,
+            "remind_me_resolve",
+            json!({ "memory_id": "mem_x", "outcome": "done" }),
+        );
+        assert!(is_error(&missing));
+        let bad = call(
+            &s,
+            "remind_me_resolve",
+            json!({ "memory_id": id, "outcome": "meh" }),
+        );
+        assert!(is_error(&bad) && text(&bad).contains("outcome"));
+    }
+
+    #[test]
+    fn markdown_shows_kind_extras_and_the_expired_mark() {
+        let s = server();
+        call(
+            &s,
+            "remind_me_add",
+            json!({ "content": "quokka policy", "memory_type": "decision",
+                    "metadata": { "rationale": "one store", "alternatives": ["sqlite"] },
+                    "confidence": 0.5, "valid_until": "2020-01-01T00:00:00Z" }),
+        );
+        let found = call(&s, "remind_me_search", json!({ "query": "quokka policy" }));
+        let md = text(&found);
+        assert!(md.contains("**Rationale:** one store"), "{md}");
+        assert!(md.contains("**Alternatives:** sqlite"), "{md}");
+        assert!(
+            md.contains("expired") && md.contains("confidence 0.50"),
+            "{md}"
+        );
+
+        let hidden = call(
+            &s,
+            "remind_me_search",
+            json!({ "query": "quokka policy", "include_expired": false }),
+        );
+        assert!(text(&hidden).contains("No memories"), "{}", text(&hidden));
     }
 }

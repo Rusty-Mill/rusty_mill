@@ -34,6 +34,7 @@ fn add(
                     aliases: vec![],
                 })
                 .collect(),
+            ..Default::default()
         },
     )
     .unwrap()

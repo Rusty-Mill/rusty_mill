@@ -65,8 +65,8 @@ export function subtree(index: CardIndex, id: string): Card[] {
   return out
 }
 
-/** The unowned leaf cards: what is really still undealt. */
-export const undealt = (index: CardIndex, cards: Card[]): Card[] => cards.filter((c) => c.ownerId === null && index.leafIds.has(c.id))
+/** The unowned leaf cards of the family's deck: what is really still undealt. A card set aside is not owed to anyone. */
+export const undealt = (index: CardIndex, cards: Card[]): Card[] => cards.filter((c) => c.inPlay && c.ownerId === null && index.leafIds.has(c.id))
 
 export interface Balance {
   person: Person

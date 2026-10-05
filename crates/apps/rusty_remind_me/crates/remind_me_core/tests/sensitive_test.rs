@@ -28,6 +28,7 @@ fn add(store: &Store<'_>, content: &str, sensitive: bool) -> String {
             object: None,
             entities: vec![],
             sensitive,
+            ..Default::default()
         },
     )
     .unwrap()
@@ -38,6 +39,7 @@ fn search(store: &Store<'_>, query: &str, include_sensitive: bool) -> Vec<String
     queries::search_memories(
         store,
         &MemorySearchInput {
+            scope: Default::default(),
             strategy: Default::default(),
             query: query.to_string(),
             category: None,
@@ -52,6 +54,8 @@ fn search(store: &Store<'_>, query: &str, include_sensitive: bool) -> Vec<String
             include_neighbors: false,
             expand_co_retrieval: false,
             bootstrap: false,
+            include_expired: true,
+            min_confidence: 0.0,
             include_sensitive,
         },
     )
@@ -65,6 +69,7 @@ fn list(store: &Store<'_>, include_sensitive: bool) -> (usize, Vec<String>) {
     let result = queries::list_memories(
         store,
         &MemoryListInput {
+            scope: Default::default(),
             category: None,
             tags: None,
             source: None,

@@ -37,6 +37,8 @@ export interface Card {
   etag: string
   /** Like `etag` but over the card and everything under it; guards `unsplitCard` and `reorderChildren`. */
   treeEtag: string
+  /** In the family's deck. A card set aside has no owner and no children, and is out of the undealt list and the balance. */
+  inPlay: boolean
 }
 
 export interface Baseline {
@@ -82,6 +84,8 @@ export interface CardPatch {
   ownerId?: string | null
   parentCardId?: string | null
   position?: number
+  /** `false` sets the card aside (taking it back from its owner); `true` adds it back. */
+  inPlay?: boolean
 }
 
 export interface NewCard {

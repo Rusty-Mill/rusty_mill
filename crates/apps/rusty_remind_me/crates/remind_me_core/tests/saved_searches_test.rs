@@ -28,6 +28,7 @@ fn add(store: &Store<'_>, content: &str, category: &str, tags: &[&str]) -> Strin
             object: None,
             entities: vec![],
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap()

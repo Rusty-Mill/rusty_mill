@@ -51,7 +51,11 @@ export class MemoryAdapter implements ApiClient {
   private load(): void {
     try {
       const raw = this.storage?.getItem(this.key)
-      if (raw) this.data = JSON.parse(raw) as Data
+      if (raw) {
+        const data = JSON.parse(raw) as Data
+        // Older saves predate deck membership: every card was in the deck.
+        this.data = { ...data, cards: data.cards.map((c) => ({ ...c, inPlay: c.inPlay ?? true })) }
+      }
     } catch {
       /* unreadable: start empty */
     }
@@ -113,7 +117,9 @@ export class MemoryAdapter implements ApiClient {
   private checkParent(card: Stored): void {
     if (!card.parentCardId) return
     if (card.parentCardId === card.id) throw invalid('a card cannot be its own parent')
-    if (!this.data.cards.some((c) => c.id === card.parentCardId)) throw invalid('parent card not found')
+    const parent = this.data.cards.find((c) => c.id === card.parentCardId)
+    if (!parent) throw invalid('parent card not found')
+    if (!parent.inPlay) throw invalid('a card that is set aside cannot have cards under it; add it back to the deck first')
     // Walk up from the parent; reaching the card again would make a cycle.
     const seen = new Set<string>()
     let at: string | null = card.parentCardId
@@ -181,6 +187,7 @@ export class MemoryAdapter implements ApiClient {
           notes: '',
           origin: 'deck',
           baselineId: b.id,
+          inPlay: true,
         })
         result.cards.created++
       }
@@ -233,10 +240,17 @@ export class MemoryAdapter implements ApiClient {
     if (patch.notes !== undefined) next.notes = cleanText(patch.notes)
     if (patch.ownerId !== undefined) {
       this.checkOwner(patch.ownerId)
+      if (patch.ownerId && patch.inPlay === false) throw invalid('a card that is set aside cannot be dealt')
+      if (patch.ownerId && !card.inPlay) throw invalid('a card that is set aside cannot be dealt; add it back to the deck first')
       next.ownerId = patch.ownerId
     }
     if (patch.parentCardId !== undefined) next.parentCardId = patch.parentCardId
     if (patch.position !== undefined) next.position = patch.position
+    if (patch.inPlay === false) {
+      if (this.data.cards.some((c) => c.parentCardId === id)) throw new ConflictError('the card is split; unsplit it before setting it aside')
+      next.ownerId = null // taken back from its owner in the same write
+      next.inPlay = false
+    } else if (patch.inPlay === true) next.inPlay = true
     this.checkParent(next)
     Object.assign(card, next)
     this.save()
@@ -260,6 +274,7 @@ export class MemoryAdapter implements ApiClient {
       notes: cleanText(input.notes ?? ''),
       origin: 'family',
       baselineId: null,
+      inPlay: true,
     }
     if (this.data.cards.some((c) => c.id === card.id)) throw new ConflictError('a card with that id already exists')
     this.checkParent(card)
@@ -271,6 +286,7 @@ export class MemoryAdapter implements ApiClient {
   async split(id: string, input: SplitInput, etag?: string): Promise<SplitResult> {
     const parent = this.stored(id)
     this.check(parent, etag)
+    if (!parent.inPlay) throw invalid('a card that is set aside cannot be split; add it back to the deck first')
     if (input.children.length === 0) throw invalid('a split needs at least one child')
     // Validate everything before writing anything, as the server does.
     const specs: Stored[] = []
@@ -292,6 +308,7 @@ export class MemoryAdapter implements ApiClient {
         notes: cleanText(child.notes ?? ''),
         origin: 'family',
         baselineId: null,
+        inPlay: true,
       })
     }
     if (input.ownerId !== undefined) this.checkOwner(input.ownerId)

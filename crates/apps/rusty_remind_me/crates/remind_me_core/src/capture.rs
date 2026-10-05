@@ -9,12 +9,10 @@ use crate::db::curation::Curation;
 use crate::db::memories::{Memories, NewMemory};
 use crate::db::Result;
 use crate::db::Store;
-use crate::entity::{
-    apply_entity_mentions, maybe_link_entity_relation, supersede_contradicting_facts,
-};
+use crate::entity::{maybe_link_entity_relation, supersede_contradicting_facts};
 use crate::models::{
     AutoCaptureInput, Capture, CaptureResult, DecomposeBatchInput, DecomposeBatchResult,
-    DecomposeInput, DecomposeResult, Memory, UndecomposedCapture, CAPTURE_SOURCE,
+    DecomposeInput, DecomposeResult, Memory, UndecomposedCapture, WriteContext, CAPTURE_SOURCE,
     CAPTURE_TITLE_CHARS, DECOMPOSE_BATCH_MAX, DECOMPOSE_BATCH_MIN, DECOMPOSITION_SOURCE,
     DIALOG_CATEGORY, FACT_CATEGORY, UNCLASSIFIED,
 };
@@ -62,6 +60,29 @@ fn capture_metadata(
     metadata
 }
 
+/// Where and by whom a capture was written, for the callers that know
+/// (the transcript hook); a plain [`auto_capture`] stamps none of it.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureStamp {
+    pub context: WriteContext,
+    /// Overrides the schema default `unknown` when set.
+    pub written_by: Option<String>,
+    /// Overrides the schema default `manual` when set.
+    pub capture_method: Option<String>,
+}
+
+impl CaptureStamp {
+    fn apply(&self, row: &mut NewMemory) {
+        self.context.apply(row);
+        if let Some(by) = &self.written_by {
+            row.written_by.clone_from(by);
+        }
+        if let Some(method) = &self.capture_method {
+            row.capture_method.clone_from(method);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_half(
     store: &Store<'_>,
@@ -72,16 +93,21 @@ fn insert_half(
     metadata: serde_json::Value,
     capture_id: &str,
     now_iso: &str,
+    extract: bool,
+    stamp: &CaptureStamp,
 ) -> Result<()> {
+    let (mut tags, mut metadata) = (tags.to_vec(), metadata);
+    let content = crate::boundary::scrub(content, &mut tags, &mut metadata);
+    let content = content.as_str();
     let now = Utc::now();
     let decay_rate = get_decay_rate(category);
     let base_weight = get_type_prior(category) * get_source_prior(CAPTURE_SOURCE);
     let vitality = calculate_vitality(base_weight, 0, decay_rate, now_iso, now);
 
-    let (node_id, client) = crate::sync::memory_provenance();
-    Memories::new(store).insert(&NewMemory {
+    let provenance = crate::context::default_provenance().auto();
+    let mut row = NewMemory {
         category: category.to_string(),
-        tags: tags.to_vec(),
+        tags,
         source: CAPTURE_SOURCE.to_string(),
         metadata,
         capture_id: Some(capture_id.to_string()),
@@ -89,10 +115,29 @@ fn insert_half(
         vitality,
         base_weight,
         accessed_at: Some(now_iso.to_string()),
-        node_id: Some(node_id),
-        client,
-        ..NewMemory::new(id, content, now_iso)
-    })
+        ..provenance.stamp(NewMemory::new(id, content, now_iso))
+    };
+    // The hook's explicit session/project/branch win over what the
+    // environment supplied.
+    stamp.apply(&mut row);
+    // A session this store has not heard of (written outside the hook)
+    // still appears in `sessions`.
+    let session = WriteContext {
+        project: row.project.clone(),
+        session_id: row.session_id.clone(),
+        git_remote: row.git_remote.clone(),
+        git_branch: row.git_branch.clone(),
+        git_sha: row.git_sha.clone(),
+        cwd: row.cwd.clone(),
+    };
+    crate::episodes::ensure_session(store, &session)?;
+    Memories::new(store).insert(&row)?;
+    // The summary half only: a raw dialog is too long and too noisy for
+    // the rules to mean anything.
+    if extract {
+        crate::boundary::index(store, id, content, &[], true, &[], now_iso)?;
+    }
+    Ok(())
 }
 
 /// Store a conversation as a linked dialog/summary pair.
@@ -110,6 +155,16 @@ fn insert_half(
 /// second pass, because the summary's id does not exist when the dialog is
 /// inserted.
 pub fn auto_capture(store: &Store<'_>, input: &AutoCaptureInput) -> Result<CaptureResult> {
+    auto_capture_stamped(store, input, &CaptureStamp::default())
+}
+
+/// [`auto_capture`] with the provenance columns a hook knows: session,
+/// project, cwd, branch, who wrote it and how.
+pub fn auto_capture_stamped(
+    store: &Store<'_>,
+    input: &AutoCaptureInput,
+    stamp: &CaptureStamp,
+) -> Result<CaptureResult> {
     let now_iso = Utc::now().to_rfc3339();
     let capture_id = format!("cap_{}", uuid::Uuid::new_v4().simple());
     let dialog_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
@@ -141,6 +196,8 @@ pub fn auto_capture(store: &Store<'_>, input: &AutoCaptureInput) -> Result<Captu
         dialog_meta,
         &capture_id,
         &now_iso,
+        false,
+        stamp,
     )?;
     insert_half(
         store,
@@ -151,6 +208,8 @@ pub fn auto_capture(store: &Store<'_>, input: &AutoCaptureInput) -> Result<Captu
         summary_meta,
         &capture_id,
         &now_iso,
+        true,
+        stamp,
     )?;
 
     Ok(CaptureResult {
@@ -271,14 +330,21 @@ pub fn decompose(store: &Store<'_>, input: &DecomposeInput) -> Result<Option<Dec
         let decay_rate = get_decay_rate(memory_type);
         let base_weight = get_type_prior(memory_type);
 
-        let (node_id, client) = crate::sync::memory_provenance();
+        let provenance = crate::context::default_provenance();
 
         // #260: a no-op unless REMIND_ME_CODE_ROOTS is configured. Merged
         // into the metadata object already built for `source_capture_id`
         // rather than a separate write, so one INSERT still carries both.
-        let mut metadata = serde_json::json!({ "source_capture_id": input.capture_id });
+        let mut metadata = fact
+            .metadata
+            .clone()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        metadata["source_capture_id"] = serde_json::json!(input.capture_id);
         let code_refs = crate::code_refs::detect_code_refs(&fact.content);
         crate::code_refs::merge_code_refs(&mut metadata, &code_refs);
+
+        let fact_content = crate::boundary::scrub(&fact.content, &mut merged_tags, &mut metadata);
 
         Memories::new(store).insert(&NewMemory {
             category: FACT_CATEGORY.to_string(),
@@ -294,12 +360,22 @@ pub fn decompose(store: &Store<'_>, input: &DecomposeInput) -> Result<Option<Dec
             subject: fact.subject.clone(),
             predicate: fact.predicate.clone(),
             object: fact.object.clone(),
-            node_id: Some(node_id),
-            client,
-            ..NewMemory::new(fact_id.clone(), fact.content.clone(), &now_iso)
+            ..provenance.stamp(NewMemory::new(
+                fact_id.clone(),
+                fact_content.clone(),
+                &now_iso,
+            ))
         })?;
 
-        entities_linked += apply_entity_mentions(store, &fact_id, &fact.entities)?;
+        entities_linked += crate::boundary::index(
+            store,
+            &fact_id,
+            &fact_content,
+            &fact.entities,
+            true,
+            &[],
+            &now_iso,
+        )?;
         if maybe_link_entity_relation(
             store,
             fact.subject.as_deref(),

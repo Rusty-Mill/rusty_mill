@@ -88,6 +88,7 @@ fn add(store: &Store<'_>, content: &str) {
             object: None,
             entities: Vec::new(),
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -295,6 +296,7 @@ fn a_category_containing_a_single_quote_is_matched_via_bound_parameter() {
             object: None,
             entities: Vec::new(),
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap();

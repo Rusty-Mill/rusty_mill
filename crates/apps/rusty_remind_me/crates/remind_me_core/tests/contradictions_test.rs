@@ -46,6 +46,7 @@ fn add(
                 })
                 .collect(),
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap()

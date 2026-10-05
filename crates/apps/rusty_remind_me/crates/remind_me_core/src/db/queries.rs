@@ -1,8 +1,9 @@
-use super::{Result, Store};
+use super::{Result, Store, StoreError};
 use crate::db::memories::{
     EntityScope, KeywordFilter, ListFilter, Memories, MemoryEdit, NewMemory, PageFilter,
 };
 use crate::expansion::{self, MemorySearchResponse};
+use crate::kinds::StructuredFields;
 use crate::models::{
     AnnotateInput, AnnotateResult, AnnotationApplied, AnnotationError, BulkDeleteResult,
     BulkTagInput, BulkTagResult, ExtractBatchInput, ExtractBatchResult, Memory, MemoryAddInput,
@@ -21,83 +22,20 @@ use crate::vitality::{
     get_type_prior, VITALITY_FLOOR,
 };
 use chrono::Utc;
-use rusqlite::Row;
 
-/// Columns selected wherever a full [`Memory`] is parsed via [`parse_memory_row`].
-///
-/// This list must stay a superset of what [`parse_memory_row`] reads, and the
-/// serialised [`Memory`] must in turn cover every column of `memories` — see
-/// `memory_json_test.rs`, which asserts exactly that against the live schema.
-/// A column added to the schema but not here silently vanished from every
-/// tool response before #198.
-pub const MEMORY_COLUMNS: &str = "id, content, category, tags, source, metadata, created_at, \
-     updated_at, capture_id, subject, predicate, object, superseded_by, decay_rate, vitality, \
-     base_weight, access_count, accessed_at, doc_id, chunk_index, remind_at, sensitive, \
-     memory_type, status, node_id, client, source_capture_id, deleted_at";
-
-/// [`MEMORY_COLUMNS`] with each name qualified by `alias`, for queries that join.
-pub fn prefixed_memory_columns(alias: &str) -> String {
-    MEMORY_COLUMNS
-        .split(',')
-        .map(|c| format!("{}.{}", alias, c.trim()))
-        .collect::<Vec<_>>()
-        .join(", ")
+pub fn add_memory(store: &Store<'_>, input: MemoryAddInput) -> Result<Memory> {
+    add_memory_with(store, input, &StructuredFields::default())
 }
 
-pub fn parse_memory_row(row: &Row) -> rusqlite::Result<Memory> {
-    let tags_json: String = row.get("tags")?;
-    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
-
-    let meta_json: String = row.get("metadata")?;
-    let metadata: serde_json::Value =
-        serde_json::from_str(&meta_json).unwrap_or(serde_json::Value::Null);
-
-    let created_at: String = row.get("created_at")?;
-
-    Ok(Memory {
-        id: row.get("id")?,
-        content: row.get("content")?,
-        category: row.get("category")?,
-        tags,
-        source: row.get("source")?,
-        metadata,
-        created_at: created_at.clone(),
-        updated_at: row.get("updated_at")?,
-        capture_id: row.get("capture_id")?,
-        subject: row.get("subject")?,
-        predicate: row.get("predicate")?,
-        object: row.get("object")?,
-        superseded_by: row.get("superseded_by")?,
-        decay_rate: row.get("decay_rate")?,
-        vitality: row.get("vitality")?,
-        base_weight: row.get("base_weight")?,
-        access_count: row.get("access_count")?,
-        // The column is nullable and a row written by `remind_me` may leave it
-        // unset. Falling back to `created_at` matches the reference, and keeps
-        // `get::<String>` from failing on NULL.
-        accessed_at: row
-            .get::<_, Option<String>>("accessed_at")?
-            .unwrap_or_else(|| created_at.clone()),
-        doc_id: row.get("doc_id")?,
-        chunk_index: row.get("chunk_index")?,
-        remind_at: row.get("remind_at")?,
-        // SQLite has no boolean type and the column is nullable, so this
-        // arrives as 0/1/NULL. Same shape trap as `SyncRecord::sensitive`.
-        sensitive: row.get::<_, Option<i64>>("sensitive")?.unwrap_or(0) != 0,
-        // Read as Option even where the column is NOT NULL: this database is
-        // shared with `remind_me`, and a row written before a column gained
-        // its default arrives as NULL. A non-optional get would fail the whole
-        // read rather than report a missing value.
-        memory_type: row.get("memory_type")?,
-        status: row.get("status")?,
-        node_id: row.get("node_id")?,
-        client: row.get("client")?,
-        source_capture_id: row.get("source_capture_id")?,
-        deleted_at: row.get("deleted_at")?,
-    })
-}
-
-pub fn add_memory(store: &Store<'_>, mut input: MemoryAddInput) -> Result<Memory> {
+/// [`add_memory`] with the structured fields (`memory_type`, `confidence`,
+/// the validity window, `outcome`) a writer may set. Validated first: a
+/// malformed kind is refused with an error naming the field, nothing stored.
+pub fn add_memory_with(
+    store: &Store<'_>,
+    mut input: MemoryAddInput,
+    fields: &StructuredFields,
+) -> Result<Memory> {
+    fields.validate(&input.metadata, None)?;
     let now = Utc::now();
     let now_iso = now.to_rfc3339();
     let id = format!("mem_{}", uuid::Uuid::new_v4().simple());
@@ -106,8 +44,17 @@ pub fn add_memory(store: &Store<'_>, mut input: MemoryAddInput) -> Result<Memory
     let code_refs = crate::code_refs::detect_code_refs(&input.content);
     crate::code_refs::merge_code_refs(&mut input.metadata, &code_refs);
 
-    let decay_rate = get_decay_rate(&input.category);
-    let type_prior = get_type_prior(&input.category);
+    // Write boundary: scrub secrets first (so nothing downstream sees them),
+    // and resolve attachments before the insert so a bad path fails the add.
+    let content = crate::boundary::scrub(&input.content, &mut input.tags, &mut input.metadata);
+    let attachments = crate::attachments::resolve(&input.attachments)?;
+    crate::attachments::merge_metadata(&mut input.metadata, &attachments);
+
+    // A stated kind drives decay and weight; otherwise the category does, as
+    // it always has.
+    let kind = fields.memory_type.as_deref().unwrap_or(&input.category);
+    let decay_rate = get_decay_rate(kind);
+    let type_prior = get_type_prior(kind);
     let source_prior = get_source_prior(&input.source);
     let base_weight = type_prior * source_prior;
     let initial_vitality = calculate_vitality(base_weight, 0, decay_rate, &now_iso, now);
@@ -125,25 +72,47 @@ pub fn add_memory(store: &Store<'_>, mut input: MemoryAddInput) -> Result<Memory
         base_weight,
         accessed_at: Some(now_iso.clone()),
         sensitive: input.sensitive,
-        node_id: Some(crate::sync::configured_node_id()),
-        client: crate::sync::configured_client(),
-        ..NewMemory::new(id.clone(), input.content.clone(), &now_iso)
+        memory_type: fields
+            .memory_type
+            .clone()
+            .unwrap_or_else(|| UNCLASSIFIED.to_string()),
+        confidence: fields
+            .confidence
+            .unwrap_or_else(crate::models::default_confidence),
+        valid_from: fields.valid_from.clone(),
+        valid_until: fields.valid_until.clone(),
+        verified_at: fields.verified_at.clone(),
+        outcome: fields.outcome.clone(),
+        ..crate::context::default_provenance().stamp(NewMemory::new(
+            id.clone(),
+            content.clone(),
+            &now_iso,
+        ))
     })?;
 
     // `MemoryAddInput::entities` was previously parsed and then dropped, so a
     // caller supplying entity mentions got a silent no-op. Same path as
     // `annotate_memories` so both behave identically.
-    crate::entity::apply_entity_mentions(store, &id, &input.entities)?;
+    crate::boundary::index(
+        store,
+        &id,
+        &content,
+        &input.entities,
+        input.extract,
+        &attachments,
+        &now_iso,
+    )?;
 
     // Best-effort: no embedder configured, or one that fails mid-request,
     // leaves this memory keyword-searchable only — never a reason to fail
     // the write that already succeeded. `remind_me_reindex` is the backstop
     // for anything that lands here without an embedder available.
     if let Some(embedder) = crate::embedder::available_embedder() {
-        let _ = crate::vectors::embed_and_store(store, &*embedder, &id, &input.content);
+        let _ = crate::vectors::embed_and_store(store, &*embedder, &id, &content);
     }
 
-    let memory = get_memory_by_id(store, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let memory = get_memory_by_id(store, &id)?.ok_or(StoreError::NotFound)?;
+    crate::episodes::ensure_session_for(store, &memory)?;
 
     // Local mutation, so automation hears about it. A record arriving from a
     // peer goes through `sync::upsert_record` instead, which deliberately
@@ -171,6 +140,7 @@ pub fn list_memories(store: &Store<'_>, input: &MemoryListInput) -> Result<Memor
         category: input.category.clone().filter(|c| !c.is_empty()),
         source: input.source.clone().filter(|s| !s.is_empty()),
         tags: input.tags.clone().unwrap_or_default(),
+        scope: input.scope.clone(),
     };
     let (total, memories) = Memories::new(store).list_page(&filter, limit, input.offset)?;
 
@@ -195,9 +165,26 @@ pub fn list_memories(store: &Store<'_>, input: &MemoryListInput) -> Result<Memor
 /// `vitality`, `base_weight` and `access_count` are left alone too: they encode
 /// accrued retrieval history, and resetting them on an edit would discard it.
 pub fn update_memory(store: &Store<'_>, input: &MemoryUpdateInput) -> Result<UpdateOutcome> {
-    if get_memory_by_id(store, &input.memory_id)?.is_none() {
+    update_memory_with(store, input, &StructuredFields::default())
+}
+
+/// [`update_memory`] with the structured fields a writer may set. Validated
+/// against the metadata the memory will hold after this edit and the kind it
+/// will have, so `outcome` on a `fact`, or a `decision` with no rationale, is
+/// refused before anything is written.
+///
+/// A new `memory_type` also rewrites `decay_rate`, as `reclassify` does:
+/// the type owns the rate.
+pub fn update_memory_with(
+    store: &Store<'_>,
+    input: &MemoryUpdateInput,
+    fields: &StructuredFields,
+) -> Result<UpdateOutcome> {
+    let Some(stored) = get_memory_by_id(store, &input.memory_id)? else {
         return Ok(UpdateOutcome::NotFound);
-    }
+    };
+    let metadata = input.metadata.as_ref().unwrap_or(&stored.metadata);
+    fields.validate(metadata, stored.memory_type.as_deref())?;
 
     // `sensitive` is an `Option<bool>`: `None` leaves the flag alone, so an
     // update that does not mention it cannot silently clear it.
@@ -211,6 +198,13 @@ pub fn update_memory(store: &Store<'_>, input: &MemoryUpdateInput) -> Result<Upd
         metadata: input.metadata.clone(),
         sensitive: input.sensitive,
         clear_superseded: input.clear_superseded,
+        memory_type: fields.memory_type.clone(),
+        decay_rate: fields.memory_type.as_deref().map(get_decay_rate),
+        confidence: fields.confidence,
+        valid_from: fields.valid_from.clone(),
+        valid_until: fields.valid_until.clone(),
+        verified_at: fields.verified_at.clone(),
+        outcome: fields.outcome.clone(),
         ..MemoryEdit::at(Utc::now().to_rfc3339())
     };
     let nothing_to_write = MemoryEdit {
@@ -256,8 +250,7 @@ pub fn update_memory(store: &Store<'_>, input: &MemoryUpdateInput) -> Result<Upd
         }
     }
 
-    let memory =
-        get_memory_by_id(store, &input.memory_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let memory = get_memory_by_id(store, &input.memory_id)?.ok_or(StoreError::NotFound)?;
     crate::events::emit(crate::events::Event::Updated, &memory.id, &memory.category);
 
     Ok(UpdateOutcome::Updated(Box::new(memory)))
@@ -440,9 +433,23 @@ pub fn annotate_memories(store: &Store<'_>, input: &AnnotateInput) -> Result<Ann
             annotation.object.as_deref(),
         )?;
 
+        // Against the triple the memory holds now, which an annotation that
+        // set only some of the three completes. Same rule `decompose` applies.
+        let superseded_ids = match get_memory_by_id(store, &annotation.memory_id)? {
+            Some(m) => crate::entity::supersede_contradicting_facts(
+                store,
+                &m.id,
+                m.subject.as_deref(),
+                m.predicate.as_deref(),
+                m.object.as_deref(),
+            )?,
+            None => Vec::new(),
+        };
+
         results.push(AnnotationApplied {
             memory_id: annotation.memory_id.clone(),
             entities_linked,
+            superseded_ids,
         });
     }
 
@@ -632,6 +639,7 @@ pub fn search_memories_deadlined(
         min_effective_vitality: floor,
         category: input.category.clone(),
         include_sensitive: input.include_sensitive,
+        scope: input.scope.clone(),
     };
 
     // `RrfFusion::Score` mode needs the raw BM25 magnitude alongside each hit.
@@ -692,6 +700,11 @@ pub fn search_memories_deadlined(
             // rank into the output. Done here rather than by threading a
             // parameter through `semantic_search_scored`, which would change an
             // existing public signature.
+            // Same reason for the project/branch/session/writer scope.
+            if !input.scope.is_empty() {
+                memories.retain(|m| input.scope.matches_memory(m));
+                similarity.retain(|id, _| memories.iter().any(|m| &m.id == id));
+            }
             if !input.include_sensitive {
                 let hidden = memories_repo.sensitive_ids()?;
                 memories.retain(|m| !hidden.contains(&m.id));
@@ -717,7 +730,17 @@ pub fn search_memories_deadlined(
     // Query-contextual feedback adjustment (issue #94): nudges `score` by
     // any similarly-worded past feedback before truncating to `limit`, so a
     // memory boosted from just past the cutoff can still make the page.
-    let mut ranked = apply_feedback_adjustment(store, &input.query, ranked)?;
+    let ranked = apply_feedback_adjustment(store, &input.query, ranked)?;
+
+    // Validity and confidence scale the fused score; expired and
+    // low-confidence rows can be dropped on request. Before truncation, so
+    // a demoted row gives its place to one that is in window.
+    let mut ranked = crate::retrieval::apply_validity(
+        ranked,
+        Utc::now(),
+        input.include_expired,
+        input.min_confidence,
+    );
 
     // Optional cross-encoder rerank of the head, before truncation. The pool
     // is deliberately wider than `limit`: rescoring only what was already

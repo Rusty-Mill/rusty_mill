@@ -16,6 +16,7 @@ fn test_database_creation_and_add_memory() {
         predicate: Some("uses".to_string()),
         object: Some("Rusty Mill".to_string()),
         entities: vec![],
+        ..Default::default()
     };
 
     let store = db.store();
@@ -29,6 +30,7 @@ fn test_database_creation_and_add_memory() {
     assert_eq!(fetched.content, mem.content);
 
     let search_input = MemorySearchInput {
+        scope: Default::default(),
         strategy: Default::default(),
         include_sensitive: false,
         query: "FTS5".to_string(),
@@ -44,6 +46,8 @@ fn test_database_creation_and_add_memory() {
         include_neighbors: false,
         expand_co_retrieval: false,
         bootstrap: false,
+        include_expired: true,
+        min_confidence: 0.0,
     };
 
     let search_results = queries::search_memories(&store, &search_input).expect("Search failed");

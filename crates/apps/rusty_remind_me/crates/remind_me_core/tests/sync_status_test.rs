@@ -54,6 +54,7 @@ fn add(store: &Store<'_>, content: &str) {
             object: None,
             entities: vec![],
             sensitive: false,
+            ..Default::default()
         },
     )
     .unwrap();

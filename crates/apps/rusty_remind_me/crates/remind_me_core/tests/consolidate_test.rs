@@ -32,6 +32,7 @@ fn add_with_vector(store: &Store<'_>, content: &str, category: &str, vector: &[f
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
