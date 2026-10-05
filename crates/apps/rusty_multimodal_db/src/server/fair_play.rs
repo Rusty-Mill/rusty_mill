@@ -54,7 +54,7 @@ use super::nullable::NullableField;
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, Predicate, RecordId, RelationCapabilities, RelationDescriptor, ScanValue,
-    TransactionOp, ValueKind,
+    TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
     default_relation_descriptors, predicate_matches, ConnectionStore, InsertOutcome,
@@ -468,6 +468,24 @@ impl ConnectionStore for PersonConnectionStore {
             apply_u32_batch::<_, Person, PlayerField>(inner, updates)
         })
     }
+
+    /// Atomic wire batches are deliberately refused before inspecting or
+    /// applying any operation. This adapter has no rollback facility for
+    /// whole-record writes; non-atomic batches retain pipelined semantics.
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if atomic && !ops.is_empty() {
+            return Err((0, ErrorCode::Unsupported));
+        }
+        let mut results = Vec::with_capacity(ops.len());
+        for op in ops {
+            results.push(self.apply_write_op(op));
+        }
+        Ok(results)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -559,6 +577,7 @@ impl CardConnectionStore {
             | CardError::HasChildren(_)
             | CardError::HoldsCards { .. }
             | CardError::BadOrder(_) => Err(ErrorCode::Malformed),
+            CardError::DuplicateNumber(_) => Ok(Some(InsertOutcome::Duplicate)),
             CardError::NotFound(_)
             | CardError::Replace(ReplaceError::NotFound(_))
             | CardError::Delete(DeleteError::NotFound(_)) => Ok(None),
@@ -802,6 +821,25 @@ impl ConnectionStore for CardConnectionStore {
             })?;
             apply_u32_batch::<_, Card, PositionField>(inner, updates)
         })
+    }
+
+    /// Atomic wire batches are deliberately refused before inspecting or
+    /// applying any operation. The lock-backed domain operations are atomic
+    /// individually, but this adapter does not claim batch rollback or crash
+    /// durability. Non-atomic batches remain pipelined.
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if atomic && !ops.is_empty() {
+            return Err((0, ErrorCode::Unsupported));
+        }
+        let mut results = Vec::with_capacity(ops.len());
+        for op in ops {
+            results.push(self.apply_write_op(op));
+        }
+        Ok(results)
     }
 }
 
