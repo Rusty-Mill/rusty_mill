@@ -253,6 +253,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`agentgateway-core`](crates/apps/rusty_agent_gateway/crates/agentgateway-core) | `crates/apps/rusty_agent_gateway/crates/agentgateway-core` | Route matching and policy evaluation |
 | [`agentgateway-auth`](crates/apps/rusty_agent_gateway/crates/agentgateway-auth) | `crates/apps/rusty_agent_gateway/crates/agentgateway-auth` | JWT authentication policy, over `rusty-mcp`'s JWKS validator |
 | [`agentgateway-a2a`](crates/apps/rusty_agent_gateway/crates/agentgateway-a2a) | `crates/apps/rusty_agent_gateway/crates/agentgateway-a2a` | A2A method gating and agent-card discovery |
+| [`agentgateway-agui`](crates/apps/rusty_agent_gateway/crates/agentgateway-agui) | `crates/apps/rusty_agent_gateway/crates/agentgateway-agui` | AG-UI run gating (CEL, deny by default) and run audit records |
 | [`agentgateway-llm`](crates/apps/rusty_agent_gateway/crates/agentgateway-llm) | `crates/apps/rusty_agent_gateway/crates/agentgateway-llm` | OpenAI-compatible LLM gateway pillar |
 | [`agentgateway-mcp`](crates/apps/rusty_agent_gateway/crates/agentgateway-mcp) | `crates/apps/rusty_agent_gateway/crates/agentgateway-mcp` | MCP federation: several upstream MCP servers behind one endpoint, with guardrails |
 | [`agentgateway-proxy`](crates/apps/rusty_agent_gateway/crates/agentgateway-proxy) | `crates/apps/rusty_agent_gateway/crates/agentgateway-proxy` | HTTP reverse proxying for host backends |

@@ -81,7 +81,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_adk | mcp-tool-server | Serves Rust ADK tools over MCP, so ADK agents in any language can call them | 0 |
 | libs | rusty_adk | rusty-adk | A Rust implementation of the Agent Development Kit (ADK) 2.0 architecture | 3 |
 | libs | rusty_adk | weather-agent | End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop | 0 |
-| libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 1 |
+| libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 2 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 0 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core | 1 |
@@ -181,8 +181,9 @@ Families are the current directories immediately below `crates/`.
 | apps | rush | rush | A small, bash-compatible shell written in Rust | 1 |
 | apps | rusty_agent_gateway | agentgateway | An AI-native gateway for MCP, speaking agentgateway's configuration | 0 |
 | apps | rusty_agent_gateway | agentgateway-a2a | Agent2Agent (A2A) method gating and agent-card discovery for rusty_agent_gateway | 1 |
+| apps | rusty_agent_gateway | agentgateway-agui | AG-UI run gating (CEL, deny by default) and run audit records for rusty_agent_gateway | 1 |
 | apps | rusty_agent_gateway | agentgateway-auth | JWT authentication policy for rusty_agent_gateway | 1 |
-| apps | rusty_agent_gateway | agentgateway-config | Configuration model for rusty_agent_gateway, wire-compatible with agentgateway's local config | 8 |
+| apps | rusty_agent_gateway | agentgateway-config | Configuration model for rusty_agent_gateway, wire-compatible with agentgateway's local config | 9 |
 | apps | rusty_agent_gateway | agentgateway-core | Route matching and policy evaluation for rusty_agent_gateway | 5 |
 | apps | rusty_agent_gateway | agentgateway-llm | OpenAI-compatible LLM gateway for rusty_agent_gateway | 1 |
 | apps | rusty_agent_gateway | agentgateway-mcp | MCP federation for rusty_agent_gateway | 1 |

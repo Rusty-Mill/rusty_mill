@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentgateway_a2a::{A2aGateway, Decision};
+use agentgateway_agui::{AguiGateway, AuditedBody, Decision as AguiDecision, RunRequest, audit};
 use agentgateway_auth::{AuthRejection, Authorization, ExtAuthz, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{
@@ -30,7 +31,7 @@ use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use http::{HeaderMap, Request, StatusCode, header};
+use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -212,14 +213,18 @@ enum BackendState {
     ///
     /// `a2a` is present when the route carries Agent2Agent traffic, which adds
     /// method gating and agent-card discovery in front of the same proxy.
+    /// `agui` is present when it carries AG-UI runs, which adds deny-by-default
+    /// run gating and an audit record either side of the upstream call. The
+    /// config refuses both on one route.
     ///
-    /// Both fields are boxed: an agent card and a weighted endpoint ring make
+    /// The fields are boxed: an agent card and a weighted endpoint ring make
     /// this several times the size of every other variant, and this enum sits
     /// inline in each route's state, so the largest variant is what every
     /// route costs.
     Host {
         proxy: Box<HostProxy>,
         a2a: Option<Box<A2aGateway>>,
+        agui: Option<Box<AguiGateway>>,
     },
     /// An LLM provider behind an OpenAI-compatible API.
     /// An LLM provider behind an OpenAI-compatible API.
@@ -435,9 +440,15 @@ impl Gateway {
                                 None => None,
                             };
 
+                            let agui = match route.policies.agui.as_ref() {
+                                Some(policy) => Some(AguiGateway::new(policy, &at)?),
+                                None => None,
+                            };
+
                             BackendState::Host {
                                 proxy: Box::new(proxy),
                                 a2a: a2a.map(Box::new),
+                                agui: agui.map(Box::new),
                             }
                         }
                     }
@@ -476,6 +487,7 @@ impl Gateway {
                             BackendState::Host {
                                 proxy: Box::new(proxy),
                                 a2a: None,
+                                agui: None,
                             }
                         }
                         count => BackendState::Unsupported(format!(
@@ -733,9 +745,15 @@ impl Gateway {
                     }
                 }
             },
-            BackendState::Host { proxy, a2a } => {
+            BackendState::Host { proxy, a2a, agui } => {
                 let (parts, body) = request.into_parts();
                 let prefix = selection.matched_prefix.as_deref();
+
+                if let Some(agui) = agui {
+                    return self
+                        .dispatch_agui(agui, proxy, selection, peer, scheme, parts, body)
+                        .await;
+                }
 
                 let Some(a2a) = a2a else {
                     let request = Request::from_parts(parts, body);
@@ -812,6 +830,86 @@ impl Gateway {
             BackendState::Ai(backend) => backend.handle(request).await.map(Body::new),
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
+    }
+}
+
+impl Gateway {
+    /// Gate an AG-UI run and forward it with an audit record either side.
+    ///
+    /// The run input is in the body, so a `POST` is read in full (bounded like
+    /// the A2A read) before the rules see it. Anything else on the route is
+    /// proxied untouched. The decision is recorded before the upstream is
+    /// called; the outcome is recorded by the body wrapper once the event
+    /// stream ends, or when the client goes away.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_agui(
+        &self,
+        agui: &AguiGateway,
+        proxy: &HostProxy,
+        selection: &agentgateway_core::Selection<'_>,
+        peer: Option<IpAddr>,
+        scheme: Scheme,
+        parts: http::request::Parts,
+        body: RequestBody,
+    ) -> Response {
+        let prefix = selection.matched_prefix.as_deref();
+        let route = selection.route.name.clone().unwrap_or_default();
+
+        if parts.method != Method::POST {
+            let request = Request::from_parts(parts, body);
+            return proxy
+                .proxy(request, prefix, peer, scheme)
+                .await
+                .map(Body::new);
+        }
+
+        let bytes = match collect_limited(body, agentgateway_llm::MAX_REQUEST_BYTES as usize).await
+        {
+            Ok(bytes) => bytes,
+            Err(()) => {
+                audit::record_decision(&route, None, false, "run input too large");
+                return status(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "the request body is larger than this gateway accepts for an AG-UI run",
+                );
+            }
+        };
+
+        let claims = parts.extensions.get::<TokenClaims>().map(|c| &c.0);
+        let request = RunRequest {
+            method: &parts.method,
+            path: parts.uri.path(),
+            headers: &parts.headers,
+            claims,
+        };
+        let summary = match agui.check(request, &bytes) {
+            AguiDecision::Refused {
+                summary,
+                reason,
+                status: code,
+            } => {
+                audit::record_decision(&route, summary.as_ref(), false, &reason);
+                return status(code, &reason);
+            }
+            AguiDecision::Permitted(summary) => summary,
+            AguiDecision::NotARun => {
+                let request = Request::from_parts(parts, RequestBody::Buffered(bytes));
+                return proxy
+                    .proxy(request, prefix, peer, scheme)
+                    .await
+                    .map(Body::new);
+            }
+        };
+        audit::record_decision(&route, Some(&summary), true, "allowed");
+
+        let request = Request::from_parts(parts, RequestBody::Buffered(bytes));
+        let response = proxy.proxy(request, prefix, peer, scheme).await;
+        let code = response.status().as_u16();
+        response.map(|body| {
+            Body::new(AuditedBody::new(body, move |report| {
+                audit::record_outcome(&route, &summary, code, &report);
+            }))
+        })
     }
 }
 

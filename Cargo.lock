@@ -376,6 +376,7 @@ name = "agentgateway"
 version = "0.1.0"
 dependencies = [
  "agentgateway-a2a",
+ "agentgateway-agui",
  "agentgateway-auth",
  "agentgateway-config",
  "agentgateway-core",
@@ -423,6 +424,23 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "rusty_a2a",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-agui"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "bytes",
+ "cel",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "rusty_agui",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

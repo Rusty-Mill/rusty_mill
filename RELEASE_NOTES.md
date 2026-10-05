@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_agent_gateway: the `agui` route policy
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 4
+
+- **Added:** `agentgateway-agui`, a crate beside `agentgateway-a2a`: `AguiGateway` compiles a route's `agui.rules` (CEL, the same language as `mcpAuthorization.rules`) and judges each run; `AuditedBody` wraps the proxied response and reports once, when the stream ends or the body is dropped; `audit::record_decision` and `audit::record_outcome` write the two records on the `agentgateway::audit` target.
+- **Added:** `policies.agui` in `agentgateway-config` (`rules: [allow|deny|require]`) and its dispatch in the gateway: a `POST` is buffered (bounded like the A2A read), checked, recorded, then forwarded buffered; anything else on the route is proxied as is. Deny by default: no `allow` rule, no runs. Refusals are `403` with the reason; a `POST` that is not a `RunAgentInput` is `400`; `a2a` and `agui` on one route is a config error.
+- **Rule context:** `agui.{threadId,runId,parentRunId,messages,lastUserMessage,tools,forwardedProps}`, `request.{method,path,headers}`, `jwt` (the claims `jwtAuth` verified).
+- **Tests:** seven unit tests in the crate (default refusal, deny and require precedence, the context the rules see, a bad expression at build time, a non-POST and a bad body; the audited body passing bytes through and reporting finished, error, invalid, incomplete and disconnected runs) and five end-to-end tests against a mock agent through a running gateway (nothing reaches the agent on refusal; an allowed run streams through untouched; a GET passes through; the config pair is refused).
+- **Known limitations:** audit records are tracing events, not a store; the gate reads the run input only, not the agent's response, so what the agent *did* is the outcome record's event count and ending, not its content.
+
+---
+
 ## rusty_tick: the assistant, the React binding's first consumer
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, second PR
 

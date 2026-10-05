@@ -219,6 +219,7 @@ members = [
     "crates/apps/rusty_agent_gateway/crates/agentgateway-config",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-auth",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-a2a",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-agui",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-llm",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-mcp",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-proxy",
@@ -703,6 +704,7 @@ agentgateway-config = { path = "crates/apps/rusty_agent_gateway/crates/agentgate
 agentgateway-auth = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-auth", version = "0.1.0" }
 agentgateway-core = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-core", version = "0.1.0" }
 agentgateway-a2a = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-a2a", version = "0.1.0" }
+agentgateway-agui = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-agui", version = "0.1.0" }
 agentgateway-llm = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-llm", version = "0.1.0" }
 agentgateway-mcp = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-mcp", version = "0.1.0" }
 agentgateway-proxy = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }

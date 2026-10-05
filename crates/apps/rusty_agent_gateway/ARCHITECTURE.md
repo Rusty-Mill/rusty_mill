@@ -45,7 +45,7 @@ Recorded in full, with the alternatives, as
 **Crate seams** carry the rest of the structure. `agentgateway-config` owns
 parsing, typing and linting and depends on nothing else; `agentgateway-core` owns
 the primitives several crates share (`Registry`, `Endpoints`, `HostnamePattern`,
-retry, CORS, rewrite); the protocol crates (`-proxy`, `-mcp`, `-llm`, `-a2a`,
+retry, CORS, rewrite); the protocol crates (`-proxy`, `-mcp`, `-llm`, `-a2a`, `-agui`,
 `-tls`, `-auth`) depend on those two and not on each other; `agentgateway` is the
 only crate that knows about all of them, and is where configuration becomes a
 running data plane.
@@ -82,6 +82,7 @@ TCP accept (serve.rs, one task per port)
                              host    → weighted ring, HTTP proxy
                              ai      → provider translation, prompt guards
                              a2a     → agent-to-agent framing
+                             agui    → run gating (deny by default) and audit
                              dynamic → destination from the request itself
 ```
 
