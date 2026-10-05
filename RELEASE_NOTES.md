@@ -86,6 +86,24 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `crates/libs/protocol/rusty_agui/conformance/`, a Node project where `@ag-ui/client` 1.0.2, the reference client CopilotKit's SDK and OpenBot embed, runs the example: a full run the reference client verifies and reduces (state, result, new messages), a frontend tool call with streamed arguments, and an agent failure delivered as `RUN_ERROR`. CI job `rusty_agui conformance (@ag-ui/client)`; planner flag `agui` (path and package).
 - **Verified:** `cargo test -p rusty_agui --all-features` (27, plus the client doc test), `clippy -D warnings` with examples, `fmt --check`, the CI script tests (35), the three conformance tests locally against the built example, workspace map and layer checks.
 - Two departures from the follow-ons document, recorded there: the client is on `rusty_http` directly rather than `rusty_request` (sync, mirroring `serve`; the gateway is async on its own stack), and the smoke test uses the reference `@ag-ui/client` rather than a browser-driven React app, since that client is what the React SDK drives agents with.
+## rusty_baseline: honest measurement status
+**2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
+
+- **Fixed:** The runner prints the full table and exits 1 if any measured stage fails. Unsupported rows, intentionally prebuilt binaries, and unavailable platform RSS counters are not failures. Other products and successful stages remain visible.
+- **Fixed:** Exit-mode warm-ups and timed samples must match an exact expected code. Products default to 0; `@expect-exit=2` records the existing `ts-cli --help` contract, and `@expect-exit=linux:2` records Linux `ts-daemon --help` while leaving other hosts at 0 and preserving the Windows exclusion. A bad sample invalidates that product's runtime measurement; it cannot be hidden by a later successful sample. Idle mode retains its separate requirement to stay alive until intentional teardown.
+- **Fixed:** The manual baseline workflow appends the partial report to the job summary and uploads it even when the measurement step fails, preserving the original failure status.
+- Scope: no product implementation, dependency, support policy, or benchmark workload changed. Non-Linux `ts-daemon` remains a stub; any further host-support policy requires an owner decision.
+
+---
+
+## rusty_tick: Eisenhower matrix view and saved filters
+**2026-10-05** · [#516](https://github.com/Rusty-Mill/rusty_mill/pull/516)
+
+- **Added:** an Eisenhower matrix view mode (`viewMode: "matrix"`) beside list, Kanban and timeline. Important = any priority set; urgent = due by tomorrow or overdue. Dropping a card on a quadrant edits only the axes that differ (priority, due date). Kanban and matrix share one `TaskCard`.
+- **Added:** saved filters: `filter` client documents holding a rule over lists, tags, priorities and due-date buckets (any-of within a field, all fields must match), a sidebar section with add/edit/delete, and a `/f/<id>/tasks` view with the usual grouping, sorting and view modes. The sidebar Filters placeholder is gone.
+- **Changed:** `rusty_tick`'s README describes the web UI and the full route and field set; it had said "no web UI" and "not yet: recurrence, reminders".
+- **Verified:** `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (594) and `npm run build`.
+- Known limitations: a filter that fails to save is reported but not retried (habits are); filters are not cached offline; no Playwright e2e or real-binary integration test covers the new views; a filter cannot match "no tag" or use text or completion-state rules.
 
 ---
 

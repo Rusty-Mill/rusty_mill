@@ -20,6 +20,7 @@ export const routes: RouteObject[] = [
             { path: 'q/:smart/tasks/:taskId?', element: <TasksPage /> },
             { path: 'p/:listId/tasks/:taskId?', element: <TasksPage /> },
             { path: 't/:tag/tasks/:taskId?', element: <TasksPage /> },
+            { path: 'f/:filterId/tasks/:taskId?', element: <TasksPage /> },
             { path: 'q/all/completed/:taskId?', element: <CompletedPage /> },
             { path: 'q/all/trash/:taskId?', element: <TrashPage /> },
             { path: 'q/all/summary', lazy: page(() => import('@/features/summary/SummaryPage'), 'SummaryPage') },

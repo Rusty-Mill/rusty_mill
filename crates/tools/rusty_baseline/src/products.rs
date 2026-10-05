@@ -39,6 +39,36 @@ impl Platform {
     }
 }
 
+/// The exact exit code expected from an `exit` product (zero by default).
+/// A platform-specific override leaves the default on all other hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpectedExit {
+    code: i32,
+    platform: Option<Platform>,
+}
+
+impl ExpectedExit {
+    fn parse(value: &str) -> Result<Self, String> {
+        let (platform, code) = match value.split_once(':') {
+            Some((os, code)) => (Some(Platform::parse(os)?), code),
+            None => (None, value),
+        };
+        let code = code
+            .parse()
+            .map_err(|_| format!("invalid expected exit code `{code}` (expected an i32)"))?;
+        Ok(Self { code, platform })
+    }
+
+    /// The exact code required on `os`, independent of platform eligibility.
+    pub fn code_for_os(&self, os: &str) -> i32 {
+        if self.platform.is_none_or(|platform| platform.name() == os) {
+            self.code
+        } else {
+            0
+        }
+    }
+}
+
 /// One product: a binary target of a workspace package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Product {
@@ -51,16 +81,19 @@ pub struct Product {
     pub platform: Option<Platform>,
     /// The explicitly unsupported OS, or `None` when no OS is excluded.
     pub unsupported: Option<Platform>,
+    pub expected_exit: ExpectedExit,
     /// Environment variables set for the run, from leading `KEY=value`s.
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
 }
 
 /// Parses the product list: one product per line,
-/// `<package>[:<features>] <bin> <exit|idle> [@platform=<os>|@unsupported=<os>] [KEY=value...] [args...]`.
+/// `<package>[:<features>] <bin> <exit|idle> [@platform=<os>|@unsupported=<os>] [@expect-exit=<code>|<os>:<code>] [KEY=value...] [args...]`.
 /// The optional policy declaration accepts `linux`, `windows`, or `macos`
 /// and must immediately follow the mode. `@platform` is an allowlist while
 /// `@unsupported` excludes only the named OS. An omitted declaration is unrestricted.
+/// `@expect-exit` follows that optional policy and applies only to `exit` mode.
+/// It sets an exact exit code, optionally for one OS only; otherwise zero is required.
 /// Leading `KEY=value`s (an uppercase name) set the run's environment, as
 /// in a shell. Blank lines and `#` comments are skipped.
 pub fn parse(text: &str) -> Result<Vec<Product>, String> {
@@ -127,6 +160,27 @@ fn parse_line(line: &str) -> Result<Product, String> {
             "platform policy declaration `{field}` must immediately follow the mode"
         ));
     }
+    let expected_exit = match fields.peek().copied() {
+        Some(field) if field.starts_with("@expect-exit") => {
+            if mode != Mode::Exit {
+                return Err("@expect-exit is only valid in exit mode".to_owned());
+            }
+            let value = field
+                .strip_prefix("@expect-exit=")
+                .ok_or_else(|| format!("malformed expected exit declaration `{field}`"))?;
+            fields.next();
+            ExpectedExit::parse(value)?
+        }
+        _ => ExpectedExit::default(),
+    };
+    if let Some(field) = fields
+        .clone()
+        .find(|field| field.starts_with("@expect-exit"))
+    {
+        return Err(format!(
+            "expected exit declaration `{field}` must follow the mode and optional platform policy, once"
+        ));
+    }
     let mut env = Vec::new();
     while let Some((key, value)) = fields.peek().and_then(|field| env_assignment(field)) {
         env.push((key.to_owned(), value.to_owned()));
@@ -139,6 +193,7 @@ fn parse_line(line: &str) -> Result<Product, String> {
         mode,
         platform,
         unsupported,
+        expected_exit,
         env,
         args: fields.map(str::to_owned).collect(),
     })
@@ -182,6 +237,69 @@ mod tests {
         assert!(products[1].args.is_empty());
         assert_eq!(products[0].platform, None);
         assert_eq!(products[0].unsupported, None);
+    }
+
+    #[test]
+    fn expected_exit_preserves_features_platform_env_and_args() {
+        let product = parse(
+            "p:one,two b exit @unsupported=windows @expect-exit=linux:2 KEY=a=b --help ARG=value",
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(product.features.as_deref(), Some("one,two"));
+        assert!(!product.supports_os("windows"));
+        assert_eq!(product.expected_exit.code_for_os("linux"), 2);
+        assert_eq!(product.expected_exit.code_for_os("macos"), 0);
+        assert_eq!(product.env, [("KEY".into(), "a=b".into())]);
+        assert_eq!(product.args, ["--help", "ARG=value"]);
+        for os in ["linux", "windows", "macos"] {
+            assert_eq!(
+                parse("p b exit").unwrap()[0].expected_exit.code_for_os(os),
+                0
+            );
+            assert_eq!(
+                parse("p b exit @expect-exit=7").unwrap()[0]
+                    .expected_exit
+                    .code_for_os(os),
+                7
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_misplaced_duplicate_and_idle_exit_declarations() {
+        for declaration in [
+            "exit @expect-exit=",
+            "exit @expect-exit=abc",
+            "exit @expect-exit=2147483648",
+            "exit @expect-exit=-2147483649",
+            "exit @expect-exit=linux:",
+            "exit @expect-exit=plan9:2",
+            "exit @expect-exit-2",
+            "exit @expect-exit=2 @expect-exit=0",
+            "exit KEY=x @expect-exit=2",
+            "exit --help @expect-exit=2",
+            "idle @expect-exit=0",
+            "exit @expect-exit=2 @platform=linux",
+        ] {
+            let error = parse(&format!("# header\np b {declaration}")).unwrap_err();
+            assert!(error.starts_with("line 2:"), "{error}");
+        }
+    }
+
+    #[test]
+    fn shipped_tailscale_expectations_match_each_host_without_changing_eligibility() {
+        let products = parse(include_str!("../products.txt")).unwrap();
+        let cli = products.iter().find(|p| p.bin == "ts-cli").unwrap();
+        let daemon = products.iter().find(|p| p.bin == "ts-daemon").unwrap();
+        for os in ["linux", "windows", "macos"] {
+            assert_eq!(cli.expected_exit.code_for_os(os), 2);
+        }
+        assert_eq!(daemon.expected_exit.code_for_os("linux"), 2);
+        assert_eq!(daemon.expected_exit.code_for_os("macos"), 0);
+        assert!(daemon.supports_os("linux"));
+        assert!(daemon.supports_os("macos"));
+        assert!(!daemon.supports_os("windows"));
     }
 
     #[test]

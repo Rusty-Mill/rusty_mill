@@ -72,9 +72,14 @@ describe('tasksForView', () => {
     task({ title: 'in-3-days', listId: 'work', dueMs: day(3), tags: ['x'] }),
     task({ title: 'in-9-days', listId: 'work', dueMs: day(9) }),
   ]
-  const e = { tasks, lists, tags: [], inboxId: INBOX }
+  const filters = [{ id: 'f1', name: 'Work soon', rule: { lists: ['work'], tags: [], priorities: [], dates: ['overdue' as const, 'next7' as const] } }]
+  const e = { tasks, lists, tags: [], inboxId: INBOX, filters }
   const titles = (spec: Parameters<typeof tasksForView>[0], done = false) => ids(tasksForView(spec, e, NOW, done)).sort()
 
+  it('a saved filter: its rule over open, live tasks in lists that are not archived; an unknown filter shows nothing', () => {
+    expect(titles({ kind: 'filter', id: 'f1' })).toEqual(['in-3-days', 'overdue'])
+    expect(titles({ kind: 'filter', id: 'gone' })).toEqual([])
+  })
   it('All: open, live tasks in lists that are not archived', () => {
     expect(titles({ kind: 'all' })).toEqual(['in-3-days', 'in-9-days', 'inbox-open', 'overdue', 'work-open'])
   })

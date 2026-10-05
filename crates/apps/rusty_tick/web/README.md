@@ -27,7 +27,7 @@ sessionStorage unless you tick "remember"). With per-user tokens (`rusty_tick us
   `HttpAdapter` (`/api/v1`). A single contract suite (`contract.ts`) runs against both.
 - `src/store/` — Zustand store: server "base" state plus a persisted queue of pending operations replayed over it.
   Writes are optimistic, retried with backoff when offline, and retried once on `412` (etag).
-- `src/features/` — tasks (list, kanban, detail pane, date popover), lists/tags, search, calendar, focus, habits, summary, settings.
+- `src/features/` — tasks (list, kanban, timeline, Eisenhower matrix, detail pane, date popover), saved filters, lists/tags, search, calendar, focus, habits, summary, settings.
 - `src/components/` — Popover, Menu, Dialog, Confirm, Tooltip, toasts: keyboard-operable and labelled.
 
 | | |

@@ -26,6 +26,23 @@ pub enum Row {
     },
 }
 
+impl Row {
+    /// Whether any measured stage failed. Skips and unavailable RSS counters
+    /// are not failures; neither is an intentionally prebuilt binary.
+    pub fn failed(&self) -> bool {
+        match self {
+            Self::Measured {
+                closure,
+                build,
+                size,
+                run,
+                ..
+            } => closure.is_err() || build.is_err() || size.is_none() || run.is_err(),
+            Self::Unsupported { .. } => false,
+        }
+    }
+}
+
 const HEADER: &str = "| Product | Binary | Deps (workspace + external) | Clean build | Incremental | Startup | Idle RSS | Peak RSS | Notes |\n|---|--:|--:|--:|--:|--:|--:|--:|---|\n";
 
 /// The table, one row per product, in the order given. An exited
@@ -198,6 +215,7 @@ mod tests {
             render_row(&row, None),
             "| `ts-daemon` | 1.0 MiB | 4 + 0 | — | — | — | 2.0 MiB | — |  |"
         );
+        assert!(!row.failed());
     }
 
     #[test]
@@ -211,5 +229,38 @@ mod tests {
             render_row(&row, None),
             "| `fedora` | — | — | — | — | — | — | — | unsupported on windows (allowed: linux); skipped |"
         );
+        assert!(!row.failed());
+    }
+
+    #[test]
+    fn every_failed_stage_counts_even_when_the_run_succeeds() {
+        for stage in ["deps", "build", "size", "run"] {
+            let row = Row::Measured {
+                bin: "fixture".into(),
+                closure: if stage == "deps" {
+                    Err("dependency failure".into())
+                } else {
+                    Ok(Closure {
+                        workspace: 0,
+                        external: 0,
+                    })
+                },
+                build: if stage == "build" {
+                    Err("build failure".into())
+                } else {
+                    Ok(None)
+                },
+                size: (stage != "size").then_some(1),
+                run: if stage == "run" {
+                    Err("runtime failure".into())
+                } else {
+                    Ok(Run::Idle {
+                        idle_rss: None,
+                        peak_rss: None,
+                    })
+                },
+            };
+            assert!(row.failed(), "{stage}");
+        }
     }
 }
