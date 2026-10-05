@@ -69,15 +69,10 @@ env:
   REMIND_ME_PACKAGES: remind_me_core remind_me_mcp remind_me_api rusty-remind-me remind_me_remote remind_me_hub
 
 concurrency:
-  # PR revisions supersede each other, so cancel their obsolete runs. Main
-  # sweeps are different: one may take long enough for another main push to
-  # arrive, and cancelling it loses the coverage we need. GitHub Actions
-  # permits one running and one pending run in a group; an incoming run may
-  # replace pending work, but it does not guarantee ordering, so this must not
-  # be interpreted as proving that the pending run is always the newest SHA.
-  # Manual runs get their own group: a dispatch from another ref must not
-  # replace pending main work.
-  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || 'main' }}
+  # Only revisions of the same PR supersede each other. Every main/manual
+  # run can start planning immediately; main work queues per component/job
+  # below. A later push's diff is not a replacement for an earlier push's.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -125,9 +120,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for workflow in .github/workflows/*.yml; do
-            ./actionlint "$workflow"
-          done
+          python3 .github/scripts/lint_workflows.py --actionlint ./actionlint .github/workflows/*.yml
+          python3 .github/scripts/test_lint_workflows.py --actionlint ./actionlint
 
   dependency-policy:
     # Enforces ADR-0002 (dependency sovereignty policy): a crate that is a
@@ -170,6 +164,7 @@ jobs:
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
       shards: ${{ steps.plan.outputs.shards }}
+      components: ${{ steps.plan.outputs.components }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -282,11 +277,13 @@ jobs:
           else
             echo "Affected crates: $packages"
           fi
+          components="$(python3 .github/scripts/ci_components.py /tmp/metadata.json --packages "$packages")"
           {
             echo "full=false"
             echo "packages=$packages"
             echo "ci_only=false"
             echo "shards=[1]"
+            echo "components=$components"
           } >> "$GITHUB_OUTPUT"
 
       - name: Summary
@@ -309,20 +306,25 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
-    name: clippy (${{ matrix.os }})
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-clippy-${{ matrix.scope.component }}-${{ matrix.os }}
+      queue: max
+      cancel-in-progress: false
+    name: clippy (${{ matrix.scope.component }}, ${{ matrix.os }})
     needs: plan
     if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-build-env
         with:
           components: clippy
-          cache-shared-key: clippy-${{ matrix.os }}
+          cache-shared-key: clippy-${{ matrix.scope.component }}-${{ matrix.os }}
 
       # rusty_stream is built on io_uring, a Linux-only kernel interface --
       # excluded on windows-latest rather than making its internals
@@ -345,7 +347,7 @@ jobs:
         id: scope
         with:
           full: ${{ needs.plan.outputs.full }}
-          packages: ${{ needs.plan.outputs.packages }}
+          packages: ${{ matrix.scope.packages }}
           windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
@@ -354,6 +356,10 @@ jobs:
         run: cargo clippy ${{ steps.scope.outputs.args }} --all-targets --all-features -- -D warnings
 
   ci-smoke:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-ci-smoke-${{ matrix.os }}
+      queue: max
+      cancel-in-progress: false
     # This is deliberately a real Cargo build/test on both supported hosts,
     # but is not a replacement for a full workspace sweep.
     name: CI-only smoke (${{ matrix.os }})
@@ -372,7 +378,11 @@ jobs:
       - run: cargo test --locked -p rusty_baseline
 
   test:
-    name: test (${{ matrix.os }}, shard ${{ matrix.shard }})
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-test-${{ matrix.scope.component }}-${{ matrix.os }}-${{ matrix.shard }}
+      queue: max
+      cancel-in-progress: false
+    name: test (${{ matrix.scope.component }}, ${{ matrix.os }}, shard ${{ matrix.shard }})
     needs: plan
     if: needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''
     strategy:
@@ -380,18 +390,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         shard: ${{ fromJson(needs.plan.outputs.shards) }}
+        scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-build-env
         with:
-          cache-shared-key: test-${{ matrix.os }}
+          cache-shared-key: test-${{ matrix.scope.component }}-${{ matrix.os }}
 
       - uses: ./.github/actions/select-packages
         id: scope
         with:
           full: ${{ needs.plan.outputs.full }}
-          packages: ${{ needs.plan.outputs.packages }}
+          packages: ${{ matrix.scope.packages }}
           windows-exclude: rusty_stream rusty_fedora_agent rusty_multimodal_db
           exclude: ${{ env.REMIND_ME_PACKAGES }}
 
@@ -414,7 +425,7 @@ jobs:
       # when mill-term is actually in scope; every other PR skips this
       # step entirely.
       - name: Build (mill-term's sibling-binary prerequisites)
-        if: steps.scope.outputs.args != '' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'mill-term'))
+        if: steps.scope.outputs.args != '' && (needs.plan.outputs.full == 'true' || contains(matrix.scope.packages, 'mill-term'))
         run: cargo build -p rush -p rusty_git -p rusty_text --all-features
 
       - name: Install cargo-nextest
@@ -490,7 +501,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p test-results
-          cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)' 2>&1 | tee "test-results/nextest-${{ matrix.os }}-shard-${{ matrix.shard }}.log"
+          cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)' 2>&1 | tee "test-results/nextest-${{ matrix.scope.component }}-${{ matrix.os }}-shard-${{ matrix.shard }}.log"
 
       # The configured JUnit report carries each test's timing, retry attempts
       # and failure output; the captured nextest stream is human-readable.
@@ -499,17 +510,17 @@ jobs:
         if: ${{ always() && steps.scope.outputs.args != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-${{ matrix.os }}-shard-${{ matrix.shard }}
+          name: nextest-${{ matrix.scope.component }}-${{ matrix.os }}-shard-${{ matrix.shard }}
           path: |
             target/nextest/default/junit.xml
-            test-results/nextest-${{ matrix.os }}-shard-${{ matrix.shard }}.log
+            test-results/nextest-${{ matrix.scope.component }}-${{ matrix.os }}-shard-${{ matrix.shard }}.log
           if-no-files-found: warn
 
       # Runs once per OS, not once per shard -- it's cheap and not worth
       # partitioning, and nextest's own partitioning above doesn't cover a
       # suite excluded from that run entirely.
       - name: Test rusty_lines' Windows raw-mode suite (cargo test)
-        if: matrix.shard == 1 && runner.os == 'Windows' && (needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_lines'))
+        if: matrix.shard == 1 && runner.os == 'Windows' && (needs.plan.outputs.full == 'true' || contains(matrix.scope.packages, 'rusty_lines'))
         run: cargo test --test windows_raw_mode -p rusty_lines --all-features
 
       # nextest doesn't execute doctests -- run those separately so this
@@ -562,6 +573,10 @@ jobs:
   # scenario in JS and fails if it disagrees with the Rust reference
   # output checked in next to it (see that directory's README).
   data-mesh-monitor:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-data-mesh-monitor
+      queue: max
+      cancel-in-progress: false
     name: data-mesh-monitor (npm build + trace parity)
     needs: plan
     if: needs.plan.outputs.dashboard == 'true'
@@ -586,6 +601,10 @@ jobs:
   # it merges. Its `npm test` is a Playwright end-to-end run that needs a
   # live bridge and browsers; deliberately not run here.
   rusty-term-web:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-term-web
+      queue: max
+      cancel-in-progress: false
     name: rusty_term web (npm build)
     needs: plan
     if: needs.plan.outputs.term_web == 'true'
@@ -607,6 +626,10 @@ jobs:
   # in-memory adapter) and the production build; the Playwright run against
   # the real binary is the rusty-tick-e2e job below.
   rusty-tick-web:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tick-web
+      queue: max
+      cancel-in-progress: false
     name: rusty_tick web (typecheck, test, build)
     needs: plan
     if: needs.plan.outputs.tick == 'true'
@@ -629,6 +652,10 @@ jobs:
   # rusty_tick end to end: Playwright drives the built UI in Chromium against
   # the real rusty_tick binary (single-user and per-user-token servers).
   rusty-tick-e2e:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-tick-e2e
+      queue: max
+      cancel-in-progress: false
     name: rusty_tick e2e (Playwright)
     needs: plan
     if: needs.plan.outputs.tick == 'true'
@@ -664,6 +691,10 @@ jobs:
   # rusty_fair_play's web UI (Vite/React), the Fair Play front end: typecheck, unit tests (jsdom over the
   # in-memory adapter) and the production build. Mirrors rusty-tick-web.
   rusty-fair-play-web:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-fair-play-web
+      queue: max
+      cancel-in-progress: false
     name: rusty_fair_play web (typecheck, test, build)
     needs: plan
     if: needs.plan.outputs.fair_play == 'true'
@@ -686,6 +717,10 @@ jobs:
   # rusty_fair_play end to end: the API contract and the Playwright flows
   # against the real rusty_fair_play binary serving the built UI.
   rusty-fair-play-e2e:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-fair-play-e2e
+      queue: max
+      cancel-in-progress: false
     name: rusty_fair_play e2e (Playwright)
     needs: plan
     if: needs.plan.outputs.fair_play == 'true'
@@ -725,6 +760,10 @@ jobs:
   # Tauri toolchain -- so a dependency bump is proven to compile and
   # bundle before it merges. No test script exists there.
   rusty-key-desktop:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-key-desktop
+      queue: max
+      cancel-in-progress: false
     name: rusty_key desktop (npm build)
     needs: plan
     if: needs.plan.outputs.key_desktop == 'true'
@@ -747,6 +786,10 @@ jobs:
   # cross-compile pre-check so a Linux-only contributor still gets fast
   # feedback on it without waiting on the windows-latest queue.
   win32-cross-compile-check:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-win32-cross-compile-check
+      queue: max
+      cancel-in-progress: false
     name: rusty_win32 cross-compile check (mingw, Linux)
     needs: plan
     if: needs.plan.outputs.win32 == 'true'
@@ -795,6 +838,10 @@ jobs:
   # the Python reference client's offline wire-vector conformance test,
   # and `cargo doc`. The MSRV check is its own job below (other toolchain).
   multimodal-db-feature-sets:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-multimodal-db-feature-sets
+      queue: max
+      cancel-in-progress: false
     name: rusty_multimodal_db feature sets (default, client, server, research)
     needs: plan
     if: needs.plan.outputs.multimodal_db == 'true'
@@ -842,6 +889,10 @@ jobs:
   # `--all-features` pulls DuckDB's amalgamation, so a cold run is long; the
   # cache is keyed on the rustc version, so this job warms its own.
   multimodal-db-msrv:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-multimodal-db-msrv
+      queue: max
+      cancel-in-progress: false
     # The pin lives in the toolchain step below (keep it equal to `rust-version`
     # in the crate's Cargo.toml); the check's name carries no literal so a pin
     # bump does not rename a check a branch protection might require.
@@ -859,6 +910,10 @@ jobs:
         run: cargo check -p rusty_multimodal_db --all-features --all-targets
 
   rusty-config-no-std-check:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-config-no-std-check
+      queue: max
+      cancel-in-progress: false
     name: rusty_config no_std (--no-default-features)
     needs: plan
     if: needs.plan.outputs.rusty_config_no_std == 'true'
@@ -884,6 +939,10 @@ jobs:
   # ---------------------------------------------------------------------------
 
   remind-me:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me
+      queue: max
+      cancel-in-progress: false
     name: rusty_remind_me build / test / clippy (default features)
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
@@ -910,6 +969,10 @@ jobs:
   # and which are clippy-only is deliberate (models that can't be fetched in
   # CI, runner disk) -- see the original workflow's comment before changing it.
   remind-me-features:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-features-${{ matrix.feature }}
+      queue: max
+      cancel-in-progress: false
     name: rusty_remind_me feature ${{ matrix.feature }}
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
@@ -958,6 +1021,10 @@ jobs:
   # ocr/rerank/local-embed share one rten/tokenizers runtime; this is the only
   # leg that exercises them initialising together in one process.
   remind-me-combined-features:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-combined-features
+      queue: max
+      cancel-in-progress: false
     name: rusty_remind_me build / test / clippy (combined features)
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
@@ -981,6 +1048,10 @@ jobs:
         run: cargo clippy --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets -- -D warnings
 
   remind-me-hub:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-hub
+      queue: max
+      cancel-in-progress: false
     name: rusty_remind_me hub (engine + SQLite copy)
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
@@ -1002,6 +1073,10 @@ jobs:
         run: cargo test --locked -p remind_me_hub --no-default-features
 
   remind-me-legacy-import:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-legacy-import
+      queue: max
+      cancel-in-progress: false
     # Postgres is only a legacy recovery source, never a runtime backend.
     name: rusty_remind_me legacy Postgres import
     needs: plan
@@ -1043,6 +1118,10 @@ jobs:
   # remind_me_core's cfg(windows) FFI (sidecar job objects, `\\?\` stripping)
   # compiles on no Linux leg above.
   remind-me-windows:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-remind-me-windows
+      queue: max
+      cancel-in-progress: false
     name: rusty_remind_me build / test / clippy (windows)
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
