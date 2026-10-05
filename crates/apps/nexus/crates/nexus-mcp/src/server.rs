@@ -4186,7 +4186,10 @@ mod tests {
     impl AuditStore for AdapterAuditStore {
         fn append(&self, event_type: &str, plugin_id: Option<&str>, detail: &serde_json::Value) {
             let mut entries = self.0.lock().unwrap();
-            let id = entries.len() as i64 + 1;
+            let id = i64::try_from(entries.len())
+                .expect("fixture audit entry count fits in i64")
+                .checked_add(1)
+                .expect("fixture audit id fits in i64");
             entries.push(AuditEntry {
                 id,
                 ts_ms: 0,
@@ -4274,65 +4277,43 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn adapter_stdio_pages_large_tools_resources_and_prompts() {
-        let audit = Arc::new(AdapterAuditStore::default());
-        nexus_kernel::audit_store::install(audit.clone());
-        let registry = crate::dynamic_tools::global();
-        for i in 0..40 {
-            let name = format!("fixture_dynamic_{i:03}");
-            registry.unregister(&name);
-            registry
-                .register(crate::DynamicTool {
-                    name,
-                    description: "fixture".into(),
-                    input_schema: serde_json::json!({"type": "object"}),
-                    plugin_id: "com.example.fixture".into(),
-                    command: "echo".into(),
-                })
+    async fn assert_adapter_pages(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    ) {
+        let tools = collect_pages(|cursor| async move {
+            let result = client
+                .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
                 .unwrap();
-        }
-
-        let client = connect_stdio(adapter_server()).await;
-        let tools = collect_pages(|cursor| {
-            let client = &client;
-            async move {
-                let result = client
-                    .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                    .await
-                    .unwrap();
-                (result.tools, result.next_cursor)
-            }
+            (result.tools, result.next_cursor)
         })
         .await;
         assert!(tools.len() > 100, "combined static/dynamic tool count");
 
-        let resources = collect_pages(|cursor| {
-            let client = &client;
-            async move {
-                let result = client
-                    .list_resources(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                    .await
-                    .unwrap();
-                (result.resources, result.next_cursor)
-            }
+        let resources = collect_pages(|cursor| async move {
+            let result = client
+                .list_resources(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
+                .unwrap();
+            (result.resources, result.next_cursor)
         })
         .await;
         assert_eq!(resources.len(), 120);
 
-        let prompts = collect_pages(|cursor| {
-            let client = &client;
-            async move {
-                let result = client
-                    .list_prompts(Some(PaginatedRequestParams::default().with_cursor(cursor)))
-                    .await
-                    .unwrap();
-                (result.prompts, result.next_cursor)
-            }
+        let prompts = collect_pages(|cursor| async move {
+            let result = client
+                .list_prompts(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
+                .unwrap();
+            (result.prompts, result.next_cursor)
         })
         .await;
         assert_eq!(prompts.len(), 120);
+    }
 
+    async fn assert_adapter_cursor_validation(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    ) {
         assert!(client
             .list_resources(Some(
                 PaginatedRequestParams::default().with_cursor(Some("malformed".into())),
@@ -4346,7 +4327,12 @@ mod tests {
             ))
             .await
             .is_err());
+    }
 
+    async fn assert_adapter_dynamic_tools_and_audit(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+        audit: &AdapterAuditStore,
+    ) {
         let dynamic = client
             .call_tool(
                 CallToolRequestParams::new("fixture_dynamic_000")
@@ -4356,6 +4342,7 @@ mod tests {
             .unwrap();
         assert!(!dynamic.is_error.unwrap_or(false));
 
+        let registry = crate::dynamic_tools::global();
         registry
             .register(crate::DynamicTool {
                 name: "fixture_internal_gate".into(),
@@ -4377,14 +4364,40 @@ mod tests {
             ))
             .await
             .unwrap();
-        let entries = audit.0.lock().unwrap();
-        assert!(entries
-            .iter()
-            .any(|entry| entry.event_type == "mcp_tool_call"));
-        assert!(entries
-            .iter()
-            .any(|entry| entry.event_type == "mcp_resource_read"));
-        drop(entries);
+        {
+            let entries = audit.0.lock().unwrap();
+            assert!(entries
+                .iter()
+                .any(|entry| entry.event_type == "mcp_tool_call"));
+            assert!(entries
+                .iter()
+                .any(|entry| entry.event_type == "mcp_resource_read"));
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_stdio_pages_large_tools_resources_and_prompts() {
+        let audit = Arc::new(AdapterAuditStore::default());
+        nexus_kernel::audit_store::install(audit.clone());
+        let registry = crate::dynamic_tools::global();
+        for i in 0..40 {
+            let name = format!("fixture_dynamic_{i:03}");
+            registry.unregister(&name);
+            registry
+                .register(crate::DynamicTool {
+                    name,
+                    description: "fixture".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    plugin_id: "com.example.fixture".into(),
+                    command: "echo".into(),
+                })
+                .unwrap();
+        }
+
+        let client = connect_stdio(adapter_server()).await;
+        assert_adapter_pages(&client).await;
+        assert_adapter_cursor_validation(&client).await;
+        assert_adapter_dynamic_tools_and_audit(&client, &audit).await;
 
         for i in 0..40 {
             registry.unregister(&format!("fixture_dynamic_{i:03}"));
