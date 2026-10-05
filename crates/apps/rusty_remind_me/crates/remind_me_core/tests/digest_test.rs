@@ -20,6 +20,7 @@ fn add(store: &Store<'_>, content: &str, sensitive: bool) -> String {
             object: None,
             entities: vec![],
             sensitive,
+            ..Default::default()
         },
     )
     .unwrap()

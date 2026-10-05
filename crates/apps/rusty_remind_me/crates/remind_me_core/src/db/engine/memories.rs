@@ -82,9 +82,49 @@ pub struct MemoryRow {
     pub(crate) client: String,
     pub(crate) source_capture_id: Option<String>,
     pub(crate) deleted_at: Option<String>,
+    // Schema v32. Defaulted when absent, so a journal batch or undo entry
+    // written by a build before v32 still replays; the stored blob is
+    // positional and takes the layout upgrade in [`super::memories_v31`].
+    #[serde(default)]
+    pub(crate) project: Option<String>,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) git_remote: Option<String>,
+    #[serde(default)]
+    pub(crate) git_branch: Option<String>,
+    #[serde(default)]
+    pub(crate) git_sha: Option<String>,
+    #[serde(default)]
+    pub(crate) cwd: Option<String>,
+    #[serde(default)]
+    pub(crate) valid_from: Option<String>,
+    #[serde(default)]
+    pub(crate) valid_until: Option<String>,
+    #[serde(default = "crate::models::default_confidence")]
+    pub(crate) confidence: f64,
+    #[serde(default)]
+    pub(crate) verified_at: Option<String>,
+    #[serde(default)]
+    pub(crate) outcome: Option<String>,
+    #[serde(default = "crate::models::default_written_by")]
+    pub(crate) written_by: String,
+    #[serde(default = "crate::models::default_capture_method")]
+    pub(crate) capture_method: String,
 }
 
 impl MemoryRow {
+    /// Whether this row passes a search or list's project/branch/session/
+    /// writer scope.
+    pub(crate) fn in_scope(&self, scope: &crate::context::ScopeFilter) -> bool {
+        scope.matches(
+            self.project.as_deref(),
+            self.git_branch.as_deref(),
+            self.session_id.as_deref(),
+            &self.written_by,
+        )
+    }
+
     /// `row` as an `INSERT` of it stores it.
     pub(crate) fn from_new(row: &NewMemory) -> Self {
         Self {
@@ -116,6 +156,19 @@ impl MemoryRow {
             client: row.client.clone(),
             source_capture_id: row.source_capture_id.clone(),
             deleted_at: row.deleted_at.clone(),
+            project: row.project.clone(),
+            session_id: row.session_id.clone(),
+            git_remote: row.git_remote.clone(),
+            git_branch: row.git_branch.clone(),
+            git_sha: row.git_sha.clone(),
+            cwd: row.cwd.clone(),
+            valid_from: row.valid_from.clone(),
+            valid_until: row.valid_until.clone(),
+            confidence: row.confidence,
+            verified_at: row.verified_at.clone(),
+            outcome: row.outcome.clone(),
+            written_by: row.written_by.clone(),
+            capture_method: row.capture_method.clone(),
         }
     }
 
@@ -155,16 +208,42 @@ impl MemoryRow {
             client: Some(self.client.clone()),
             source_capture_id: self.source_capture_id.clone(),
             deleted_at: self.deleted_at.clone(),
+            project: self.project.clone(),
+            session_id: self.session_id.clone(),
+            git_remote: self.git_remote.clone(),
+            git_branch: self.git_branch.clone(),
+            git_sha: self.git_sha.clone(),
+            cwd: self.cwd.clone(),
+            valid_from: self.valid_from.clone(),
+            valid_until: self.valid_until.clone(),
+            confidence: self.confidence,
+            verified_at: self.verified_at.clone(),
+            outcome: self.outcome.clone(),
+            written_by: self.written_by.clone(),
+            capture_method: self.capture_method.clone(),
         }
     }
 
     /// The outbox payload `db::derived` builds with `json_object`: the same
-    /// 28 keys, tags and metadata as their JSON text, `sensitive` as 0 or 1.
+    /// 41 keys, tags and metadata as their JSON text, `sensitive` as 0 or 1.
     pub(crate) fn payload(&self) -> Value {
         let mut payload = self.backfill_payload();
         if let Value::Object(fields) = &mut payload {
             fields.insert("remind_at".into(), self.remind_at.clone().into());
             fields.insert("sensitive".into(), i64::from(self.sensitive).into());
+            fields.insert("project".into(), self.project.clone().into());
+            fields.insert("session_id".into(), self.session_id.clone().into());
+            fields.insert("git_remote".into(), self.git_remote.clone().into());
+            fields.insert("git_branch".into(), self.git_branch.clone().into());
+            fields.insert("git_sha".into(), self.git_sha.clone().into());
+            fields.insert("cwd".into(), self.cwd.clone().into());
+            fields.insert("valid_from".into(), self.valid_from.clone().into());
+            fields.insert("valid_until".into(), self.valid_until.clone().into());
+            fields.insert("confidence".into(), self.confidence.into());
+            fields.insert("verified_at".into(), self.verified_at.clone().into());
+            fields.insert("outcome".into(), self.outcome.clone().into());
+            fields.insert("written_by".into(), self.written_by.clone().into());
+            fields.insert("capture_method".into(), self.capture_method.clone().into());
         }
         payload
     }
@@ -277,7 +356,10 @@ impl Record for MemoryRecord {
 }
 
 impl SchemaTag for MemoryRecord {
-    const SCHEMA_TAG: &'static str = "rusty_remind_me::node::MemoryRecord@1";
+    /// `@2` since schema v32: the stored layout is positional, so the
+    /// thirteen columns v32 added changed it. A `@1` table is read with the
+    /// old layout and rewritten at open (`super::memories_v31`).
+    const SCHEMA_TAG: &'static str = "rusty_remind_me::node::MemoryRecord@2";
 }
 
 impl IndexedField<ByDoc> for MemoryRecord {
@@ -618,6 +700,9 @@ pub(crate) fn set_ingest_marker(
         update(tables, id, Origin::Local, |row| {
             let mut metadata: Value = serde_json::from_str(&row.metadata)
                 .map_err(|e| engine_error(format!("memory {:?} metadata: {e}", row.id)))?;
+            // The marker is the webhook's own stamp, so it credits the writer
+            // too: a pushed import is `importer:webhook`, not the connector.
+            row.written_by = "importer:webhook".to_string();
             if let Value::Object(fields) = &mut metadata {
                 fields.insert("ingest".to_string(), Value::String(marker.to_string()));
                 row.metadata = metadata.to_string();
@@ -639,6 +724,8 @@ pub(crate) fn apply_edit(tables: &mut EngineTables, id: &str, edit: &MemoryEdit)
         set(&mut row.content, &edit.content);
         set(&mut row.category, &edit.category);
         set(&mut row.memory_type, &edit.memory_type);
+        set(&mut row.written_by, &edit.written_by);
+        set(&mut row.capture_method, &edit.capture_method);
         if let Some(tags) = &edit.tags {
             row.tags = tags_json(tags);
         }
@@ -649,6 +736,16 @@ pub(crate) fn apply_edit(tables: &mut EngineTables, id: &str, edit: &MemoryEdit)
             (&mut row.subject, &edit.subject),
             (&mut row.predicate, &edit.predicate),
             (&mut row.object, &edit.object),
+            (&mut row.project, &edit.project),
+            (&mut row.session_id, &edit.session_id),
+            (&mut row.git_remote, &edit.git_remote),
+            (&mut row.git_branch, &edit.git_branch),
+            (&mut row.git_sha, &edit.git_sha),
+            (&mut row.cwd, &edit.cwd),
+            (&mut row.valid_from, &edit.valid_from),
+            (&mut row.valid_until, &edit.valid_until),
+            (&mut row.verified_at, &edit.verified_at),
+            (&mut row.outcome, &edit.outcome),
         ] {
             if value.is_some() {
                 field.clone_from(value);
@@ -659,6 +756,9 @@ pub(crate) fn apply_edit(tables: &mut EngineTables, id: &str, edit: &MemoryEdit)
         }
         if let Some(rate) = edit.decay_rate {
             row.decay_rate = rate;
+        }
+        if let Some(confidence) = edit.confidence {
+            row.confidence = confidence;
         }
         if edit.clear_superseded {
             row.superseded_by = None;
@@ -921,6 +1021,46 @@ pub(crate) fn with_code_refs(tables: &EngineTables) -> Result<Vec<(String, Strin
     Ok(found)
 }
 
+/// Live, unsuperseded, non-sensitive memories with a `valid_until`: id,
+/// content and that timestamp. The caller decides which have passed.
+pub(crate) fn with_valid_until(tables: &EngineTables) -> Result<Vec<(String, String, String)>> {
+    let mut found: Vec<(String, String, String)> = rows(core_ref(tables)?)
+        .filter(|row| row.is_live() && !row.sensitive)
+        .filter_map(|row| row.valid_until.map(|until| (row.id, row.content, until)))
+        .collect();
+    found.sort();
+    Ok(found)
+}
+
+/// How memory `id` ties to the capture it came from or the facts decomposed
+/// from it: `(sources, derived)`, each sorted by id. A fact's `sources` are
+/// the not-deleted memories carrying the capture id its `source_capture_id`
+/// names; a capture's `derived` are the not-deleted memories whose
+/// `source_capture_id` is its capture id.
+pub(crate) fn capture_links(tables: &EngineTables, id: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let core = core_ref(tables)?;
+    let Some(row) = row(core, id) else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let ids_where = |keep: &dyn Fn(&MemoryRow) -> bool| {
+        let mut ids: Vec<String> = rows(core)
+            .filter(|r| r.deleted_at.is_none() && r.id != id && keep(r))
+            .map(|r| r.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let sources = match &row.source_capture_id {
+        Some(c) => ids_where(&|r| r.capture_id.as_ref() == Some(c)),
+        None => Vec::new(),
+    };
+    let derived = match &row.capture_id {
+        Some(c) => ids_where(&|r| r.source_capture_id.as_ref() == Some(c)),
+        None => Vec::new(),
+    };
+    Ok((sources, derived))
+}
+
 /// `ids` without repeats, first occurrence first: an `IN (…)` list matches
 /// each row once however often it is named.
 fn distinct(ids: &[String]) -> impl Iterator<Item = &str> {
@@ -973,6 +1113,7 @@ pub(crate) fn list_page(
         .filter(|row| filter.include_sensitive || !row.sensitive)
         .filter(|row| filter.category.as_ref().is_none_or(|c| &row.category == c))
         .filter(|row| filter.source.as_ref().is_none_or(|s| &row.source == s))
+        .filter(|row| row.in_scope(&filter.scope))
         .filter(|row| filter.tags.iter().all(|tag| core.tags.has(tag, &row.id)))
         .collect();
     rows.sort_by(|a, b| (&b.created_at, &b.id).cmp(&(&a.created_at, &a.id)));
@@ -1041,6 +1182,7 @@ pub(crate) fn keyword_hits(
         .into_iter()
         .filter(|(row, _)| filter.include_sensitive || !row.sensitive)
         .filter(|(row, _)| filter.category.as_ref().is_none_or(|c| &row.category == c))
+        .filter(|(row, _)| row.in_scope(&filter.scope))
         .map(|(row, score)| (row.to_memory(), score))
         .filter(|(memory, _)| {
             filter
@@ -1340,6 +1482,8 @@ mod tests {
         let a: Value = serde_json::from_str(&row(core, "a").unwrap().metadata).unwrap();
         assert_eq!(a, serde_json::json!({"k": 1, "ingest": "done"}));
         assert_eq!(row(core, "b").unwrap().metadata, "[1]");
+        // The marker is the webhook's stamp, so it credits the writer too.
+        assert_eq!(row(core, "a").unwrap().written_by, "importer:webhook");
     }
 
     #[test]

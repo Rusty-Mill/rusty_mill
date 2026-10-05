@@ -18,11 +18,11 @@ use rusty_multimodal_db::generic::fair_play::{
     PERSON_FILE,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
-use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
+use rusty_multimodal_db::server::client::{BatchOp, ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::fair_play::{
     CardConnectionStore, CardDefaultConnectionStore, PersonConnectionStore,
 };
-use rusty_multimodal_db::server::protocol::{ErrorCode, ParentLookup, ScanValue};
+use rusty_multimodal_db::server::protocol::{ErrorCode, ParentLookup, ScanValue, WriteResult};
 use rusty_multimodal_db::server::{serve_tables, ConnectionStore, ServeOptions};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
@@ -162,6 +162,196 @@ fn borrowed(fields: &[(String, ScanValue)]) -> Vec<(&str, ScanValue)> {
         .iter()
         .map(|(n, v)| (n.as_str(), v.clone()))
         .collect()
+}
+
+#[test]
+fn malformed_atomic_batches_leave_card_and_person_records_unchanged() {
+    let addr = start_server_at(unique_dir("fair_play_atomic_batches"));
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    let card_id = deck_card_id(1);
+    let card_before = client.get(card_id).unwrap().unwrap();
+    let malformed_card = borrowed(&card_before[..card_before.len() - 1]);
+    let card_ops = [
+        BatchOp::UpdateField {
+            id: card_id,
+            field: "position",
+            value: ScanValue::U32(999),
+        },
+        BatchOp::Replace {
+            id: card_id,
+            fields: &malformed_card,
+        },
+    ];
+    assert!(matches!(
+        client.write_batch(&card_ops, true),
+        Err(ClientError::TransactionFailed {
+            index: 0,
+            code: ErrorCode::Unsupported,
+            ..
+        })
+    ));
+    assert_eq!(client.get(card_id).unwrap().unwrap(), card_before);
+
+    client.use_table("person").unwrap();
+    let person = person_id("Ada");
+    let person_before = client.get(person).unwrap().unwrap();
+    let malformed_person = borrowed(&person_before[..person_before.len() - 1]);
+    let person_ops = [
+        BatchOp::UpdateField {
+            id: person,
+            field: "player",
+            value: ScanValue::U32(999),
+        },
+        BatchOp::Replace {
+            id: person,
+            fields: &malformed_person,
+        },
+    ];
+    assert!(matches!(
+        client.write_batch(&person_ops, true),
+        Err(ClientError::TransactionFailed {
+            index: 0,
+            code: ErrorCode::Unsupported,
+            ..
+        })
+    ));
+    assert_eq!(client.get(person).unwrap().unwrap(), person_before);
+}
+
+#[test]
+fn non_atomic_batches_keep_ordered_results_and_apply_later_valid_updates() {
+    let addr = start_server_at(unique_dir("fair_play_pipelined_batches"));
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let missing = Uuid::from_u128(0xf001);
+
+    let card_id = deck_card_id(1);
+    assert_eq!(
+        client
+            .write_batch(
+                &[
+                    BatchOp::UpdateField {
+                        id: missing,
+                        field: "position",
+                        value: ScanValue::U32(999),
+                    },
+                    BatchOp::UpdateField {
+                        id: card_id,
+                        field: "position",
+                        value: ScanValue::U32(999),
+                    },
+                ],
+                false,
+            )
+            .unwrap(),
+        vec![WriteResult::NotFound, WriteResult::Updated]
+    );
+    assert_eq!(
+        value(&client.get(card_id).unwrap().unwrap(), "position"),
+        &ScanValue::U32(999)
+    );
+
+    client.use_table("person").unwrap();
+    let person = person_id("Ada");
+    assert_eq!(
+        client
+            .write_batch(
+                &[
+                    BatchOp::UpdateField {
+                        id: missing,
+                        field: "player",
+                        value: ScanValue::U32(999),
+                    },
+                    BatchOp::UpdateField {
+                        id: person,
+                        field: "player",
+                        value: ScanValue::U32(999),
+                    },
+                ],
+                false,
+            )
+            .unwrap(),
+        vec![WriteResult::NotFound, WriteResult::Updated]
+    );
+    assert_eq!(
+        value(&client.get(person).unwrap().unwrap(), "player"),
+        &ScanValue::U32(999)
+    );
+}
+
+#[test]
+fn card_insert_enforces_deck_number_uniqueness_under_the_wire_lock() {
+    let addr = start_server_at(unique_dir("fair_play_unique_numbers"));
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let template = client.get(deck_card_id(1)).unwrap().unwrap();
+
+    let duplicate_id = Uuid::from_u128(0xd001);
+    match client.insert(duplicate_id, &borrowed(&template)) {
+        Err(ClientError::Server(ErrorCode::Duplicate, _)) => {}
+        other => panic!("expected Duplicate for an existing deck number, got {other:?}"),
+    }
+    assert!(client.get(duplicate_id).unwrap().is_none());
+
+    let unique = with(&template, "number", ScanValue::U32(98));
+    let unique_id = Uuid::from_u128(0xd002);
+    client.insert(unique_id, &borrowed(&unique)).unwrap();
+    assert_eq!(
+        value(&client.get(unique_id).unwrap().unwrap(), "number"),
+        &ScanValue::U32(98)
+    );
+
+    let family = with(
+        &with(
+            &with(&template, "number", ScanValue::Null),
+            "baseline_id",
+            ScanValue::Null,
+        ),
+        "origin",
+        ScanValue::U32(1),
+    );
+    let family_id = Uuid::from_u128(0xd003);
+    client.insert(family_id, &borrowed(&family)).unwrap();
+    assert_eq!(
+        value(&client.get(family_id).unwrap().unwrap(), "number"),
+        &ScanValue::Null
+    );
+
+    let concurrent = with(&template, "number", ScanValue::U32(99));
+    let attempts: Vec<_> = [Uuid::from_u128(0xd004), Uuid::from_u128(0xd005)]
+        .into_iter()
+        .map(|id| {
+            let fields = concurrent.clone();
+            thread::spawn(move || {
+                let mut client = SchemaDrivenClient::connect(addr).unwrap();
+                (id, client.insert(id, &borrowed(&fields)))
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = attempts.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(_, result)| matches!(result, Ok(())))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(_, result)| matches!(
+                result,
+                Err(ClientError::Server(ErrorCode::Duplicate, _))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(id, _)| client.get(*id).unwrap().is_some())
+            .count(),
+        1
+    );
 }
 
 /// Whichever of the two conventional CPython 3 binary names is on

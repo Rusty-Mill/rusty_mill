@@ -45,6 +45,15 @@ localStorage, nothing sent anywhere.
   "Split…" dialog (child rows with owners, and whom to hand the parent to), a
   confirmed "Unsplit…" (removes the whole subtree, says how many cards) and a
   confirmed "Delete card" (leaves only; disabled with the reason while it has children).
+- **The family's deck.** Families play with the cards they choose. The detail pane
+  has an "In our deck" checkbox (it asks first when the card is dealt, since setting
+  it aside takes it back from its owner), and the board's **Choose cards** mode shows
+  every card as a checkbox tile with "All in" / "All out" per suit. A "Set aside · N"
+  chip shows only the cards left out, to bring them back. The board, the undealt list
+  and the balance count only the cards in play.
+- **Layout.** Every tile is the same size (two lines of name at most). The detail pane
+  folds to a thin rail with its »/« button, remembered across reloads, and opening a
+  card brings it back.
 - `#/players` — people with "holds N cards (M leaves)", inline rename, add (a
   `409` shows as "already exists"), and a confirmed remove, disabled while they hold a card.
 - `#/balance` — per person, all-cards and leaf-only bars with a per-suit row, then
@@ -74,6 +83,7 @@ localStorage, nothing sent anywhere.
 | | |
 |---|---|
 | ![Balance](docs/screenshots/balance.png) | ![Players](docs/screenshots/players.png) |
+| ![Choosing the family deck, detail pane folded](docs/screenshots/choose-deck.png) | |
 
 ## Concurrent edits
 

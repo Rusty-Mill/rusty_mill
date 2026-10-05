@@ -33,6 +33,12 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # No rust-cache: every product's build is meant to be clean.
+      # `inv` links the system D-Bus development library. The baseline builds
+      # every selected product from source, so install it before measuring on
+      # Ubuntu rather than silently excluding that product from Linux data.
+      - name: Install Linux baseline build prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
       - name: Measure
         shell: bash
         # Passed through the environment, not interpolated into the script.

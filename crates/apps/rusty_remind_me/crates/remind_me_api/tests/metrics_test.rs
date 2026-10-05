@@ -219,6 +219,7 @@ fn the_memory_gauge_counts_live_memories_only() {
                         object: None,
                         entities: vec![],
                         sensitive: false,
+                        ..Default::default()
                     },
                 )
                 .unwrap();

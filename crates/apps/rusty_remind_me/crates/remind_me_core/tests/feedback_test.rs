@@ -26,6 +26,7 @@ fn add(store: &Store<'_>) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
@@ -408,6 +409,19 @@ fn result(id: &str, score: f64) -> MemorySearchResult {
             client: None,
             source_capture_id: None,
             deleted_at: None,
+            project: None,
+            session_id: None,
+            git_remote: None,
+            git_branch: None,
+            git_sha: None,
+            cwd: None,
+            valid_from: None,
+            valid_until: None,
+            confidence: 1.0,
+            verified_at: None,
+            outcome: None,
+            written_by: "unknown".to_string(),
+            capture_method: "manual".to_string(),
         },
         score,
         fts_score: Some(score),
@@ -558,6 +572,7 @@ fn apply_feedback_adjustment_ignores_a_dissimilar_past_query_end_to_end() {
 
 fn search_input(query: &str) -> MemorySearchInput {
     MemorySearchInput {
+        scope: Default::default(),
         strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
@@ -573,6 +588,8 @@ fn search_input(query: &str) -> MemorySearchInput {
         include_neighbors: false,
         expand_co_retrieval: false,
         bootstrap: false,
+        include_expired: true,
+        min_confidence: 0.0,
     }
 }
 
@@ -593,6 +610,7 @@ fn search_memories_demotes_a_result_with_similar_unhelpful_feedback() {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()

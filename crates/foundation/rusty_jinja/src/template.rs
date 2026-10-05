@@ -36,6 +36,8 @@ pub enum JinjaError {
     /// A structural error in the tag stream itself (unclosed/mismatched
     /// `if`/`for`, an unrecognized tag keyword, an unterminated `{{`/`{%`).
     Syntax(&'static str),
+    /// Rendering exceeded a configured operation or output limit.
+    Limit(&'static str),
 }
 
 /// What kind of block a recursive [`parse_block`] call is inside — which

@@ -229,5 +229,36 @@ export function runApiContract(label: string, make: () => Promise<ApiClient>): v
       expect(parent.etag).toBe(fresh) // the parent itself did not change
       await api.deleteCard((await api.snapshot()).cards.find((x) => x.name === 'A')!.id, undefined)
     })
+
+    it('lets a family choose its deck: a card set aside has no owner, children or split, and is part of the version', async () => {
+      const { api, ada, cleaning } = await setup()
+      const dishes = (await api.snapshot()).cards.find((x) => x.number === 3)!
+      expect(dishes.inPlay).toBe(true)
+      await api.updateCard(dishes.id, { ownerId: ada.id })
+      const out = await api.updateCard(dishes.id, { inPlay: false })
+      expect(out).toMatchObject({ inPlay: false, ownerId: null }) // taken back from Ada in the same write
+      expect(out.etag).not.toBe(dishes.etag)
+      expect((await api.snapshot()).cards.filter((x) => !x.inPlay).map((x) => x.id)).toEqual([dishes.id])
+      expect((await card(api, dishes.id)).inPlay).toBe(false)
+
+      await expect(api.updateCard(dishes.id, { ownerId: ada.id })).rejects.toBeInstanceOf(InvalidError)
+      await expect(api.updateCard(dishes.id, { inPlay: true, ownerId: ada.id })).rejects.toBeInstanceOf(InvalidError)
+      expect(await card(api, dishes.id)).toMatchObject({ inPlay: false, ownerId: null })
+      await expect(api.split(dishes.id, { children: [{ name: 'x' }] })).rejects.toBeInstanceOf(InvalidError)
+      await expect(api.updateCard(cleaning.id, { parentCardId: dishes.id })).rejects.toBeInstanceOf(InvalidError)
+      await expect(api.createCard({ name: 'Under', suit: 'Home', parentCardId: dishes.id })).rejects.toBeInstanceOf(InvalidError)
+      await expect(api.updateCard(cleaning.id, { ownerId: ada.id, inPlay: false })).rejects.toBeInstanceOf(InvalidError)
+      expect((await card(api, cleaning.id)).inPlay).toBe(true) // the contradictory request changed nothing
+
+      const noted = await api.updateCard(dishes.id, { notes: 'later' }) // editing keeps it set aside
+      expect(noted.inPlay).toBe(false)
+
+      await api.split(cleaning.id, { children: [{ name: 'A' }] })
+      await expect(api.updateCard(cleaning.id, { inPlay: false })).rejects.toBeInstanceOf(ConflictError) // a split card: unsplit first
+
+      const back = await api.updateCard(dishes.id, { inPlay: true })
+      expect(back.inPlay).toBe(true)
+      expect((await api.updateCard(dishes.id, { ownerId: ada.id })).ownerId).toBe(ada.id)
+    })
   })
 }

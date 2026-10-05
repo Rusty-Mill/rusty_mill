@@ -72,6 +72,7 @@ fn add(store: &Store<'_>, content: &str) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
@@ -80,6 +81,7 @@ fn add(store: &Store<'_>, content: &str) -> String {
 
 fn input(query: &str) -> MemorySearchInput {
     MemorySearchInput {
+        scope: Default::default(),
         strategy: Default::default(),
         include_sensitive: false,
         query: query.to_string(),
@@ -95,6 +97,8 @@ fn input(query: &str) -> MemorySearchInput {
         include_neighbors: false,
         expand_co_retrieval: false,
         bootstrap: false,
+        include_expired: true,
+        min_confidence: 0.0,
     }
 }
 

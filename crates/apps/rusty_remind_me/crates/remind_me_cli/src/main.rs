@@ -4,6 +4,7 @@ mod test_env;
 
 mod copy_store;
 mod daemon;
+mod session;
 
 use daemon::Store;
 use remind_me_api::ApiServer;
@@ -14,8 +15,8 @@ use remind_me_core::stats::Stats;
 use remind_me_core::wiki::WikiPage;
 use remind_me_core::wiki_import::WikiImportReport;
 use remind_me_core::{
-    reminders, updater, Database, EntityInput, MemoryAddInput, MemoryListInput, MemorySearchInput,
-    ResponseFormat, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
+    reminders, updater, AttachmentInput, Database, EntityInput, MemoryAddInput, MemoryListInput,
+    MemorySearchInput, ResponseFormat, LIST_LIMIT_MAX, LIST_LIMIT_MIN,
 };
 use remind_me_mcp::McpServer;
 use serde_json::{json, Value};
@@ -312,6 +313,7 @@ fn configure_mcp_clients(parsed: &ConfigureArgs) -> Result<(), Box<dyn std::erro
 struct ListArgs {
     limit: usize,
     category: Option<String>,
+    scope: remind_me_core::context::ScopeFilter,
     as_json: bool,
 }
 
@@ -324,6 +326,7 @@ fn parse_list_args(args: &[String]) -> Result<ListArgs, String> {
         // Matches `list_p.add_argument("--limit", type=int, default=20)`.
         limit: 20,
         category: None,
+        scope: Default::default(),
         as_json: false,
     };
     let mut i = 0;
@@ -359,6 +362,13 @@ fn parse_list_args(args: &[String]) -> Result<ListArgs, String> {
                 }
                 i += 2;
             }
+            flag @ ("--project" | "--branch" | "--session" | "--written-by") => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("Error: {} expects a value.\n{}", flag, LIST_USAGE))?;
+                parsed.scope.set_from_flag(flag, value);
+                i += 2;
+            }
             other => {
                 return Err(format!("Error: unknown flag {:?}.\n{}", other, LIST_USAGE));
             }
@@ -367,11 +377,58 @@ fn parse_list_args(args: &[String]) -> Result<ListArgs, String> {
     Ok(parsed)
 }
 
-const LIST_USAGE: &str = "Usage: rusty-remind-me list [--limit N] [--category CATEGORY] [--json]";
+const LIST_USAGE: &str = "Usage: rusty-remind-me list [--limit N] [--category CATEGORY] [--project P] [--branch B] [--session ID] [--json]";
 
-const ADD_USAGE: &str = "Usage: rusty-remind-me add <content> [--category CATEGORY] [--tags a,b,c]";
+const ADD_USAGE: &str =
+    "Usage: rusty-remind-me add <content> [--category CATEGORY] [--tags a,b,c] [--attach PATH]...";
 
-const SEARCH_USAGE: &str = "Usage: rusty-remind-me search <query> [--limit N] [--json]";
+const RESOLVE_USAGE: &str =
+    "Usage: rusty-remind-me resolve <id> <done|abandoned|reverted|superseded> [--note TEXT]";
+
+/// Parsed form of `rusty-remind-me resolve <id> <outcome> [--note TEXT]`.
+#[derive(Debug, PartialEq, Eq)]
+struct ResolveArgs {
+    memory_id: String,
+    outcome: String,
+    note: Option<String>,
+}
+
+fn parse_resolve_args(args: &[String]) -> Result<ResolveArgs, String> {
+    let mut words: Vec<&String> = Vec::new();
+    let mut note = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--note" {
+            note = Some(flag_value(args, i, "--note", RESOLVE_USAGE)?);
+            i += 2;
+        } else if args[i].starts_with("--") {
+            return Err(format!(
+                "Error: unknown flag {:?}.\n{}",
+                args[i], RESOLVE_USAGE
+            ));
+        } else {
+            words.push(&args[i]);
+            i += 1;
+        }
+    }
+    let [memory_id, outcome] = words[..] else {
+        return Err(RESOLVE_USAGE.to_string());
+    };
+    if !remind_me_core::kinds::OUTCOMES.contains(&outcome.as_str()) {
+        return Err(format!(
+            "Error: outcome must be one of {}.\n{}",
+            remind_me_core::kinds::OUTCOMES.join(", "),
+            RESOLVE_USAGE
+        ));
+    }
+    Ok(ResolveArgs {
+        memory_id: memory_id.clone(),
+        outcome: outcome.clone(),
+        note,
+    })
+}
+
+const SEARCH_USAGE: &str = "Usage: rusty-remind-me search <query> [--limit N] [--project P] [--branch B] [--session ID] [--json]";
 
 /// Parsed form of `rusty-remind-me add <content> [--category C] [--tags a,b]`.
 ///
@@ -385,6 +442,8 @@ struct AddArgs {
     content: String,
     category: String,
     tags: Vec<String>,
+    /// `--attach <path>`, repeatable: files recorded by fingerprint.
+    attach: Vec<String>,
 }
 
 /// Parsed form of `rusty-remind-me search <query> [--limit N] [--json]`.
@@ -392,6 +451,7 @@ struct AddArgs {
 struct SearchArgs {
     query: String,
     limit: usize,
+    scope: remind_me_core::context::ScopeFilter,
     as_json: bool,
 }
 
@@ -477,6 +537,7 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
     // `--tags` defaulting to "" -> [].
     let mut category = "general".to_string();
     let mut tags: Vec<String> = Vec::new();
+    let mut attach: Vec<String> = Vec::new();
 
     let content = collect_positional(args, ADD_USAGE, |flag, args, i| match flag {
         "--category" => {
@@ -489,6 +550,11 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
             *i += 2;
             Ok(true)
         }
+        "--attach" => {
+            attach.push(flag_value(args, *i, flag, ADD_USAGE)?);
+            *i += 2;
+            Ok(true)
+        }
         _ => Ok(false),
     })?;
 
@@ -496,6 +562,7 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
         content,
         category,
         tags,
+        attach,
     })
 }
 
@@ -503,8 +570,14 @@ fn parse_search_args(args: &[String]) -> Result<SearchArgs, String> {
     // `search_p.add_argument("--limit", type=int, default=20)`.
     let mut limit = 20usize;
     let mut as_json = false;
+    let mut scope = remind_me_core::context::ScopeFilter::default();
 
     let query = collect_positional(args, SEARCH_USAGE, |flag, args, i| match flag {
+        "--project" | "--branch" | "--session" | "--written-by" => {
+            scope.set_from_flag(flag, &flag_value(args, *i, flag, SEARCH_USAGE)?);
+            *i += 2;
+            Ok(true)
+        }
         "--json" => {
             as_json = true;
             *i += 1;
@@ -535,6 +608,7 @@ fn parse_search_args(args: &[String]) -> Result<SearchArgs, String> {
     Ok(SearchArgs {
         query,
         limit,
+        scope,
         as_json,
     })
 }
@@ -631,6 +705,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             "daemon" => daemon::command(&args[2..], &db_path)?,
+            // The hook-facing session commands (`session.rs`).
+            "session" | "capture-transcript" | "context" => {
+                session::command(&args[1], &args[2..], &db_path)?
+            }
             "configure" | "setup" => {
                 let configure_args = match parse_configure_args(&args[2..]) {
                     Ok(parsed) => parsed,
@@ -785,6 +863,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // would be silently ignored, so it stays false until the
                     // CLI grows a flag and the call to match.
                     bootstrap: false,
+                    scope: search_args.scope,
+                    include_expired: true,
+                    min_confidence: 0.0,
                 };
                 let response_format = search_input.response_format;
                 let results: Vec<MemorySearchResult> = Store::open(&db_path)?.call(Op::Search {
@@ -810,6 +891,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "add" => {
+                // A person typing `add`, not a model: see `context`'s rule.
+                remind_me_core::context::set_default_writer(remind_me_core::context::Writer::Human);
                 let add_args = match parse_add_args(&args[2..]) {
                     Ok(parsed) => parsed,
                     Err(message) => {
@@ -818,6 +901,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 let add_input = MemoryAddInput {
+                    attachments: add_args
+                        .attach
+                        .into_iter()
+                        .map(|path| AttachmentInput {
+                            path: Some(path),
+                            ..Default::default()
+                        })
+                        .collect(),
                     sensitive: false,
                     content: add_args.content,
                     category: add_args.category,
@@ -828,6 +919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     predicate: None,
                     object: None,
                     entities: vec![],
+                    ..Default::default()
                 };
                 let mem: Memory = Store::open(&db_path)?.call(Op::Add { input: add_input })?;
                 println!("Added memory: {}", mem.id);
@@ -845,6 +937,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let list_input = MemoryListInput {
                     category: list_args.category,
+                    scope: list_args.scope,
                     limit: list_args.limit,
                     response_format: if list_args.as_json {
                         ResponseFormat::Json
@@ -955,12 +1048,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     report.skipped.len()
                 );
             }
+            "resolve" => {
+                let resolve = match parse_resolve_args(&args[2..]) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        eprintln!("{}", message);
+                        std::process::exit(1);
+                    }
+                };
+                let found: Option<Memory> = Store::open(&db_path)?.call(Op::Resolve {
+                    memory_id: resolve.memory_id.clone(),
+                    outcome: resolve.outcome,
+                    note: resolve.note,
+                })?;
+                match found {
+                    Some(mem) => println!("{}", serde_json::to_string_pretty(&mem)?),
+                    None => {
+                        eprintln!("Memory not found: {}", resolve.memory_id);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "stats" => {
                 let stats: Stats = Store::open(&db_path)?.call(Op::Stats)?;
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             }
             cmd => {
-                eprintln!("Unknown subcommand: {}. Available: configure, daemon, api, remote, server, search, add, list, get, entity, wiki-write, wiki-read, wiki-import, stats", cmd);
+                eprintln!("Unknown subcommand: {}. Available: configure, daemon, api, remote, server, search, add, list, get, entity, wiki-write, wiki-read, wiki-import, stats, resolve, session, capture-transcript, context", cmd);
                 std::process::exit(1);
             }
         }
@@ -975,6 +1089,33 @@ mod tests {
 
     fn args(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn resolve_takes_an_id_an_outcome_and_an_optional_note() {
+        let parsed =
+            parse_resolve_args(&args(&["mem_1", "reverted", "--note", "broke CI"])).unwrap();
+        assert_eq!(parsed.memory_id, "mem_1");
+        assert_eq!(parsed.outcome, "reverted");
+        assert_eq!(parsed.note.as_deref(), Some("broke CI"));
+        assert_eq!(
+            parse_resolve_args(&args(&["mem_1", "done"])).unwrap().note,
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_bad_outcome_missing_words_and_unknown_flags() {
+        for bad in [
+            args(&["mem_1", "maybe"]),
+            args(&["mem_1"]),
+            args(&["a", "b", "done"]),
+            args(&["mem_1", "done", "--note"]),
+            args(&["mem_1", "done", "--force"]),
+        ] {
+            let err = parse_resolve_args(&bad).unwrap_err();
+            assert!(err.contains("Usage"), "{bad:?}: {err}");
+        }
     }
 
     #[test]
@@ -1063,6 +1204,15 @@ mod tests {
         // `add_p.add_argument("--category", default="general")`.
         assert_eq!(parsed.category, "general");
         assert!(parsed.tags.is_empty());
+        assert!(parsed.attach.is_empty());
+    }
+
+    #[test]
+    fn add_attach_is_repeatable() {
+        let parsed =
+            parse_add_args(&args(&["note", "--attach", "a.txt", "--attach", "b.pdf"])).unwrap();
+        assert_eq!(parsed.attach, vec!["a.txt", "b.pdf"]);
+        assert!(parse_add_args(&args(&["note", "--attach"])).is_err());
     }
 
     #[test]

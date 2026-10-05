@@ -75,6 +75,7 @@ fn add_with_history(store: &Store<'_>) -> String {
             predicate: Some("plans".into()),
             object: Some("a secret".into()),
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()
