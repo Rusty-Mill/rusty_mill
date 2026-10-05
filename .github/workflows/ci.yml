@@ -165,6 +165,7 @@ jobs:
       tick: ${{ steps.plan.outputs.tick }}
       fair_play: ${{ steps.plan.outputs.fair_play }}
       remind_me: ${{ steps.plan.outputs.remind_me }}
+      remind_me_legacy_import: ${{ steps.plan.outputs.remind_me_legacy_import }}
       win32: ${{ steps.plan.outputs.win32 }}
       multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
       rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
@@ -980,9 +981,31 @@ jobs:
         run: cargo clippy --locked -p remind_me_core --features ann,ocr,rerank,local-embed,pdf --all-targets -- -D warnings
 
   remind-me-hub:
-    name: rusty_remind_me hub (engine + copy tool, with Postgres)
+    name: rusty_remind_me hub (engine + SQLite copy)
     needs: plan
     if: needs.plan.outputs.remind_me == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remind-me-hub
+      - name: cargo clippy -p remind_me_hub --no-default-features
+        run: cargo clippy --locked -p remind_me_hub --no-default-features --all-targets -- -D warnings
+      - name: cargo test -p remind_me_hub --no-default-features
+        run: cargo test --locked -p remind_me_hub --no-default-features
+
+  remind-me-legacy-import:
+    # Postgres is only a legacy recovery source, never a runtime backend.
+    name: rusty_remind_me legacy Postgres import
+    needs: plan
+    if: needs.plan.outputs.remind_me_legacy_import == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
@@ -1007,20 +1030,15 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: remind-me-hub
-      - name: cargo clippy -p remind_me_hub
-        run: cargo clippy --locked -p remind_me_hub --all-targets -- -D warnings
-      - name: cargo clippy -p remind_me_hub --no-default-features
-        run: cargo clippy --locked -p remind_me_hub --no-default-features --all-targets -- -D warnings
-      - name: cargo test -p remind_me_hub (with the Postgres copy tests)
+          shared-key: remind-me-legacy-import
+      - name: Lint the recovery feature and binaries
+        run: cargo clippy --locked -p remind_me_hub --no-default-features --features postgres-import --all-targets -- -D warnings
+      - name: Test legacy Postgres recovery against a disposable server
         env:
           REMIND_ME_HUB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/hubtest
-          # A skipped Postgres test reports as passed; make losing the
-          # service container a hard failure instead.
+          # Refuse a missing service instead of reporting skipped imports as passed.
           REMIND_ME_HUB_REQUIRE_POSTGRES: "1"
-        run: cargo test --locked -p remind_me_hub -- --test-threads=1
-      - name: cargo test -p remind_me_hub --no-default-features
-        run: cargo test --locked -p remind_me_hub --no-default-features
+        run: cargo test --locked -p remind_me_hub --no-default-features --features postgres-import --test hub_postgres_copy_test -- --test-threads=1
 
   # remind_me_core's cfg(windows) FFI (sidecar job objects, `\\?\` stripping)
   # compiles on no Linux leg above.
