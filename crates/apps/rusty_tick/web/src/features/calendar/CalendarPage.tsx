@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import type { Task } from '@/api/types'
 import { calendarPath, type CalendarMode } from '@/app/paths'
@@ -15,6 +15,18 @@ import { MonthView } from './MonthView'
 import { TaskPopover } from './TaskPopover'
 import { TimeGridView } from './TimeGridView'
 import { Toolbar } from './Toolbar'
+import { parseIcs } from '@/lib/ics'
+
+/** A calendar file can hold years of events; each import is capped so it cannot flood the queue. */
+const IMPORT_LIMIT = 500
+
+const readText = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result))
+    r.onerror = () => reject(r.error ?? new Error('unreadable file'))
+    r.readAsText(file)
+  })
 
 type Pop = { kind: 'task'; taskId: string; anchor: HTMLElement } | { kind: 'add'; target: AddTarget; anchor: HTMLElement } | { kind: 'day'; day: number; anchor: HTMLElement }
 
@@ -27,6 +39,7 @@ export function CalendarPage() {
   const now = useNow()
   const tasks = useData((s) => s.tasks)
   const lists = useData((s) => s.lists)
+  const inboxId = useData((s) => s.inboxId)
   const [anchor, setAnchor] = useState(() => Date.now())
   const [showDone, setShowDone] = useState(false)
   const [pop, setPop] = useState<Pop | null>(null)
@@ -54,6 +67,22 @@ export function CalendarPage() {
     addSlot: pop?.kind === 'add' ? pop.target : null,
   }
 
+  const fileRef = useRef<HTMLInputElement>(null)
+  const importFile = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0]
+    e.target.value = '' // so choosing the same file again fires again
+    if (!file) return
+    try {
+      const { tasks: found, skipped, droppedRepeats } = parseIcs(await readText(file))
+      const batch = found.slice(0, IMPORT_LIMIT)
+      for (const t of batch) await actions.createTask({ listId: inboxId, ...t })
+      const notes = [skipped && `${skipped} skipped (cancelled, completed or undated)`, droppedRepeats && `${droppedRepeats} repeating events imported once`, found.length > batch.length && `only the first ${IMPORT_LIMIT} imported`]
+      actions.notify('info', `Imported ${batch.length} from ${file.name} into Inbox${notes.some(Boolean) ? ` (${notes.filter(Boolean).join('; ')})` : ''}`)
+    } catch (err) {
+      actions.notify('error', `Could not import ${file.name}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   const addFromToolbar = (el: HTMLElement): void => {
     // The visible day that is today, else the first day shown.
     const day = range.days.find((d) => diffDays(d, now) === 0) ?? (mode === 'm' ? startOfDay(anchor) : range.start)
@@ -72,7 +101,9 @@ export function CalendarPage() {
         onNext={() => setAnchor(stepAnchor(mode, anchor, 1))}
         onToday={() => setAnchor(Date.now())}
         onAdd={addFromToolbar}
+        onImport={() => fileRef.current?.click()}
       />
+      <input ref={fileRef} type="file" accept=".ics,text/calendar" aria-label="Import calendar file" hidden onChange={(e) => void importFile(e)} />
       {mode === 'm' && <MonthView range={range} anchor={anchor} events={events} ctx={ctx} />}
       {(mode === 'w' || mode === 'd') && <TimeGridView key={mode} range={range} events={events} ctx={ctx} />}
       {mode === 'a' && <AgendaView range={range} events={events} ctx={ctx} listName={listName} />}

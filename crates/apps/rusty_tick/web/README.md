@@ -27,7 +27,7 @@ sessionStorage unless you tick "remember"). With per-user tokens (`rusty_tick us
   `HttpAdapter` (`/api/v1`). A single contract suite (`contract.ts`) runs against both.
 - `src/store/` — Zustand store: server "base" state plus a persisted queue of pending operations replayed over it.
   Writes are optimistic, retried with backoff when offline, and retried once on `412` (etag).
-- `src/features/` — tasks (list, kanban, timeline, Eisenhower matrix, detail pane, date popover), saved filters, lists/tags, search, calendar, focus, habits, summary, settings.
+- `src/features/` — tasks (list, kanban, timeline, Eisenhower matrix, detail pane, date popover), saved filters, lists/tags, search, calendar (with `.ics` import), focus (estimates, interruptions), countdown, habits, summary, settings.
 - `src/components/` — Popover, Menu, Dialog, Confirm, Tooltip, toasts: keyboard-operable and labelled.
 
 | | |
@@ -52,5 +52,7 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
 - Habits: the goal amount counts — each click adds one until the goal is met; a day only keeps a streak and silences its reminder once it is. Changing a habit's goal later re-judges its past days.
+- Calendar import reads a `.ics` file you choose (events and todos become Inbox tasks; repeat rules outside the app's subset import once). Subscribing to a calendar URL is not supported: it needs a server-side fetcher, which the self-hosted server does not have. Re-importing a file adds the tasks again.
+- Pomo estimates are `estimate` docs keyed by task id; one for a task that is purged for good stays until it is cleared from the Pomodoro page's stepper (the Estimates list skips it).
 - Sync is by polling every 30 s and on window focus. A push channel would need a streaming endpoint and a service worker, which the self-hosted server does not have; it is not planned.
 - Compared by eye against screenshots of the real app (not pixel-diffed); differences that remain are listed in the pull requests that closed the gap.

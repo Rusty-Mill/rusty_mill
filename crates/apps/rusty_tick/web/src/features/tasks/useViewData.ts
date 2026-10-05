@@ -27,7 +27,7 @@ export function useViewData(spec: ViewSpec | null): ViewData {
   const listMap = useData((s) => s.lists)
   const tagMap = useData((s) => s.tags)
   const taskMap = useData((s) => s.tasks)
-  const filters = useFilters((s) => s.filters)
+  const filters = useFilters((s) => s.items)
   const stored = useUi((s) => (spec ? s.options[viewKey(spec)] : undefined))
   const view = spec ?? NONE
 
@@ -40,7 +40,7 @@ export function useViewData(spec: ViewSpec | null): ViewData {
     const open = sortTasks(tasksForView(view, entities, now), options.sortBy, options.order)
     const groups = groupTasks(open, options.groupBy, { now, lists, tags })
     if (options.showCompleted) {
-      const done = tasksForView(view, entities, now, true).filter((t) => t.status === 'done').sort((a, b) => (b.completedMs ?? 0) - (a.completedMs ?? 0))
+      const done = tasksForView(view, entities, now, true).filter((t) => t.status !== 'open').sort((a, b) => (b.completedMs ?? 0) - (a.completedMs ?? 0))
       if (done.length) groups.push({ key: 'done', label: 'Completed', tasks: done })
     }
     return { title: viewTitle(view, lists, tags, filters, inboxId), options, tasks: open, groups, lists, tags, now }

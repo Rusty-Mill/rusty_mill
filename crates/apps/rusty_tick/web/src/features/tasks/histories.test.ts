@@ -72,6 +72,10 @@ describe('completedGroups', () => {
     const all = completedGroups(tasks, { range: 'all', listId: null }, NOW, 1)
     expect(all.flatMap((g) => g.tasks)).toHaveLength(3)
   })
+  it("lists won't-do tasks with the completed ones", () => {
+    const all = completedGroups([...tasks, task({ status: 'wontdo', completedMs: day(0) })], { range: 'all', listId: null }, NOW, 1)
+    expect(all.flatMap((g) => g.tasks)).toHaveLength(4)
+  })
   it('filters by date and by list', () => {
     expect(completedGroups(tasks, { range: 'today', listId: null }, NOW, 1).flatMap((g) => g.tasks)).toHaveLength(1)
     expect(completedGroups(tasks, { range: 'all', listId: 'a' }, NOW, 1).flatMap((g) => g.tasks)).toHaveLength(2)

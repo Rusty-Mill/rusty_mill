@@ -8,6 +8,7 @@
  *   #q/all/completed  #q/all/trash  #q/all/summary  #q/all/habit
  *   #c/all/calendar/<m|w|d|a>            calendar
  *   #focus                               Pomodoro
+ *   #countdown                           Countdown
  */
 import type { ViewSpec } from '@/features/tasks/organize'
 
@@ -56,6 +57,7 @@ export const PATHS = {
   trash: '/q/all/trash',
   summary: '/q/all/summary',
   habit: '/q/all/habit',
+  countdown: '/countdown',
   focus: '/focus',
 } as const
 
@@ -68,10 +70,11 @@ export function settingsHref(tab: SettingsTab = 'account'): string {
 }
 
 /** Which rail icon a path belongs to. */
-export type RailSection = 'tasks' | 'calendar' | 'focus' | 'habit'
+export type RailSection = 'tasks' | 'calendar' | 'focus' | 'habit' | 'countdown'
 export function railSection(path: string): RailSection {
   if (path.startsWith('/c/')) return 'calendar'
   if (path.startsWith('/focus')) return 'focus'
   if (path.startsWith(PATHS.habit)) return 'habit'
+  if (path.startsWith(PATHS.countdown)) return 'countdown'
   return 'tasks'
 }

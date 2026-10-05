@@ -16,11 +16,12 @@ interface Props {
   onNext: () => void
   onToday: () => void
   onAdd: (anchor: HTMLElement) => void
+  onImport: () => void
 }
 
 const btn = 'flex h-8 items-center justify-center rounded-row text-base outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary'
 
-export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onNext, onToday, onAdd }: Props) {
+export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onNext, onToday, onAdd, onImport }: Props) {
   const [viewAnchor, setViewAnchor] = useState<HTMLElement | null>(null)
   const [open, setOpen] = useState(false)
   return (
@@ -66,6 +67,7 @@ export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onN
           ...(Object.keys(MODE_LABEL) as CalendarMode[]).map((m) => ({ id: m, label: MODE_LABEL[m], checked: m === mode, onSelect: () => onMode(m) })),
           'separator',
           { id: 'done', label: 'Show completed', checked: showDone, onSelect: () => onShowDone(!showDone) },
+          { id: 'import', label: 'Import calendar (.ics)', onSelect: onImport },
         ]}
       />
     </header>
