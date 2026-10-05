@@ -13868,10 +13868,12 @@ name = "rusty_channel"
 version = "0.1.0"
 dependencies = [
  "rusty_agui",
+ "rusty_base64",
  "rusty_http",
  "rusty_json",
  "rusty_oauth",
  "rusty_serve",
+ "rusty_sha1",
  "rusty_tls",
  "rusty_uuid",
 ]

@@ -2,7 +2,7 @@
 name = "rusty_channel"
 version = "0.1.0"
 edition = "2021"
-description = "Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack as the first adapter"
+description = "Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Rusty-Mill/rusty_mill"
 readme = "README.md"
@@ -17,7 +17,7 @@ layer = "libs"
 default = []
 # `bot`: a runner on `rusty_serve` that runs an AG-UI agent with
 # `rusty_agui`'s client and answers the service over `rusty_tls`; the
-# `slack_bot` and `teams_bot` examples are on it. Off by default: the
+# `slack_bot`, `teams_bot` and `sms_bot` examples are on it. Off by default: the
 # library itself does no I/O.
 bot = ["dep:rusty_serve", "dep:rusty_http", "dep:rusty_tls", "rusty_agui/client"]
 
@@ -29,6 +29,10 @@ rusty_agui = { workspace = true }
 # whose defaults are on.
 rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
 rusty_uuid = { workspace = true }
+# SHA-1 for Twilio's request signature (HMAC-SHA1 is in `sms`), base64
+# for that signature and for basic auth.
+rusty_sha1 = { workspace = true }
+rusty_base64 = { workspace = true }
 # HMAC-SHA256 and a constant-time compare, for Slack's request signature.
 rusty_oauth = { workspace = true }
 rusty_serve = { workspace = true, optional = true }
@@ -41,6 +45,10 @@ required-features = ["bot"]
 
 [[example]]
 name = "teams_bot"
+required-features = ["bot"]
+
+[[example]]
+name = "sms_bot"
 required-features = ["bot"]
 
 [lints.rust]

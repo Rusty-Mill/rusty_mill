@@ -10,12 +10,13 @@
 //! here is tested without a network. `examples/slack_bot.rs` is one such
 //! runner.
 //!
-//! [`slack`] and [`teams`] are the adapters so far; SMS follows the same
-//! shape. With the `bot` feature, [`bot`] is a runner for any of them.
+//! [`slack`], [`teams`] and [`sms`] (Twilio) are the adapters. With the
+//! `bot` feature, [`bot`] is a runner for any of them.
 
 #[cfg(feature = "bot")]
 pub mod bot;
 pub mod slack;
+pub mod sms;
 pub mod teams;
 
 use std::fmt;
@@ -106,6 +107,24 @@ pub struct Outbound {
     pub body: Vec<u8>,
 }
 
+/// What the runner answers a message with, before the agent has run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ack {
+    /// The `Content-Type`.
+    pub content_type: &'static str,
+    /// The body.
+    pub body: &'static [u8],
+}
+
+impl Default for Ack {
+    fn default() -> Self {
+        Ack {
+            content_type: "application/json",
+            body: b"{}",
+        }
+    }
+}
+
 /// Whether the channel can reply right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
@@ -125,6 +144,13 @@ pub trait Channel: Send + Sync {
     /// Authenticate and read one inbound request. `now` is seconds since
     /// the epoch, for replay protection.
     fn receive(&self, headers: &dyn Headers, body: &[u8], now: u64) -> Result<Received, Error>;
+
+    /// What to answer an accepted message with. The reply comes later
+    /// through [`Channel::reply`]; this is what the service wants in the
+    /// meantime (Twilio wants TwiML, the others take anything).
+    fn ack(&self) -> Ack {
+        Ack::default()
+    }
 
     /// What the runner must do before a reply. Static credentials are
     /// always `Ready`.

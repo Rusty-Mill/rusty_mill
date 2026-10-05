@@ -23,6 +23,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_channel: SMS over Twilio
+**2026-10-05** · [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, third channel
+
+- **Added:** `sms::Twilio`. Inbound, `X-Twilio-Signature` is checked in constant time against base64 of HMAC-SHA1 (hand-rolled on `rusty_sha1`, RFC 2202 vectors in the tests) over the webhook's public URL followed by every form field sorted by name; the channel is therefore constructed with the URL Twilio was given, and a webhook moved without telling it is refused rather than trusted. `From` and `To` make the conversation key (SMS has no threads), the trimmed `Body` is the text, and a message without text (media only) is ignored. Outbound, the reply is a `POST` to `Messages.json` with basic auth from the account SID and auth token, cut at Twilio's 1600-character limit with an ellipsis.
+- **Changed:** `Channel` gains a defaulted `ack` hook: what the runner answers an accepted message with before the agent has run. Twilio wants TwiML, so its ack is an empty `<Response/>` as `text/xml`; the others keep the default `{}`. `bot::Bot` sends a non-JSON ack as a one-chunk `rusty_serve` stream, the server's way of carrying a chosen content type.
+- **Added:** the `sms_bot` example on the shared runner.
+- **Tests:** five, no network: the signature against an independently computed value and HMAC-SHA1 against RFC 2202; a signed text accepted, keyed, acknowledged and replied to; a missing header, a wrong signature, a changed body and a moved webhook refused; a media-only message ignored and long replies cut on a character boundary.
+- **Known limitations:** no replay detection (Twilio signs no timestamp; a repeated `MessageSid` is not tracked); inbound media is ignored; no TwiML reply in the webhook response, the agent is too slow for that.
+
+---
+
 ## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
 **2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
 
