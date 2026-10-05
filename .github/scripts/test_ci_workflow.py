@@ -25,6 +25,7 @@ PLANNER = Path(__file__).with_name("ci_plan.py")
 PLAN_KEYS = {
     "full",
     "packages",
+    "ci_only",
     "dashboard",
     "term_web",
     "key_desktop",
@@ -36,7 +37,7 @@ PLAN_KEYS = {
     "rusty_config_no_std",
     "shards",
 }
-SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "shards"}
+SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards"}
 
 
 class CiWorkflowSchedulingTests(unittest.TestCase):
@@ -67,6 +68,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         outputs = self._planner_map("--emit-full")
         self.assertEqual(set(outputs), PLAN_KEYS)
         self.assertEqual(outputs["full"], "true")
+        self.assertEqual(outputs["ci_only"], "false")
         self.assertEqual(outputs["packages"], "")
         self.assertEqual(outputs["shards"], "[1,2,3]")
         self.assertTrue(all(outputs[key] == "true" for key in SPECIALIZED_KEYS))
@@ -87,9 +89,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_global_fallback_entrypoint_covers_lock_and_toolchain_inputs(self) -> None:
         for path in (
-            ".github/workflows/ci.yml",
             "rust-toolchain.toml",
             ".cargo/config.toml",
+            ".config/other-build-policy.toml",
         ):
             with self.subTest(path=path):
                 self.assertEqual(self._planner("--requires-full", input=f"{path}\n").returncode, 0)
@@ -97,6 +99,28 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             self._planner("--requires-full", input="crates/apps/rusty_tick/src/lib.rs\n").returncode,
             1,
         )
+
+    def test_ci_only_entrypoint_uses_smoke_but_mixed_changes_do_not(self) -> None:
+        ci_only = self._planner(
+            "--is-ci-only", input=".github/workflows/ci.yml\n.config/nextest.toml\n"
+        )
+        self.assertEqual(ci_only.returncode, 0)
+        self.assertNotEqual(
+            self._planner(
+                "--is-ci-only",
+                input=".github/workflows/ci.yml\ncrates/apps/rusty_tick/src/lib.rs\n",
+            ).returncode,
+            0,
+        )
+        smoke = self._planner_map("--emit-ci-smoke")
+        self.assertEqual(set(smoke), PLAN_KEYS)
+        self.assertEqual(smoke["ci_only"], "true")
+        self.assertEqual(smoke["full"], "false")
+        self.assertEqual(smoke["packages"], "")
+        self.assertTrue(all(smoke[key] == "false" for key in SPECIALIZED_KEYS))
+        self.assertIn("CI-only smoke (${{ matrix.os }})", self.workflow)
+        self.assertIn('checksums.txt "$base/actionlint_${version}_checksums.txt"', self.workflow)
+        self.assertIn("sha256sum --check --status", self.workflow)
 
     def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
         self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
@@ -237,7 +261,10 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn(target, paths)
 
     def test_global_workflow_change_requires_full_sweep(self) -> None:
-        self.assertTrue(is_workspace_wide_change([".github/workflows/ci.yml"]))
+        self.assertFalse(is_workspace_wide_change([".github/workflows/ci.yml"]))
+        self.assertFalse(is_workspace_wide_change([".config/nextest.toml"]))
+        self.assertTrue(is_workspace_wide_change([".config/other-build-policy.toml"]))
+        self.assertTrue(is_workspace_wide_change(["rust-toolchain.toml"]))
         self.assertFalse(is_workspace_wide_change(["crates/apps/rusty_tick/src/lib.rs"]))
 
     def test_multiple_apps_and_unrelated_app_selection(self) -> None:

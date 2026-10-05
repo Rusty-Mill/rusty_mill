@@ -45,8 +45,20 @@ def full_plan_outputs() -> dict[str, str]:
     return {
         "full": "true",
         "packages": "",
+        "ci_only": "false",
         **{job: "true" for job in SPECIALIZED_JOB_NAMES},
         "shards": "[1,2,3]",
+    }
+
+
+def ci_smoke_plan_outputs() -> dict[str, str]:
+    """Return the complete output set for CI-only smoke validation."""
+    return {
+        "full": "false",
+        "packages": "",
+        "ci_only": "true",
+        **{job: "false" for job in SPECIALIZED_JOB_NAMES},
+        "shards": "[1]",
     }
 
 
@@ -98,11 +110,20 @@ def is_workspace_wide_change(changed_paths: Iterable[str]) -> bool:
         path == "rust-toolchain"
         or path == "rust-toolchain.toml"
         or path.startswith(".cargo/")
-        or path.startswith(".config/")
+        or (path.startswith(".config/") and path != ".config/nextest.toml")
+        for path in changed_paths
+    )
+
+
+def is_ci_only_change(changed_paths: Iterable[str]) -> bool:
+    """Whether every changed file is CI implementation/configuration itself."""
+    paths = tuple(changed_paths)
+    return bool(paths) and all(
+        path == ".config/nextest.toml"
         or path.startswith(".github/workflows/")
         or path.startswith(".github/actions/")
         or path.startswith(".github/scripts/")
-        for path in changed_paths
+        for path in paths
     )
 
 
@@ -144,6 +165,7 @@ def main() -> None:
         help="Space-separated affected workspace package names.",
     )
     parser.add_argument("--emit-full", action="store_true")
+    parser.add_argument("--emit-ci-smoke", action="store_true")
     parser.add_argument("--event")
     parser.add_argument("--pr-base", default="")
     parser.add_argument("--push-before", default="")
@@ -157,9 +179,14 @@ def main() -> None:
         action="store_true",
         help="Exit successfully only if stdin contains a workspace-wide path.",
     )
+    parser.add_argument("--is-ci-only", action="store_true")
     args = parser.parse_args()
     if args.emit_full:
         for key, value in full_plan_outputs().items():
+            print(f"{key}={value}")
+        return
+    if args.emit_ci_smoke:
+        for key, value in ci_smoke_plan_outputs().items():
             print(f"{key}={value}")
         return
     if args.event:
@@ -175,6 +202,8 @@ def main() -> None:
     paths = [line.strip() for line in sys.stdin if line.strip()]
     if args.requires_full:
         raise SystemExit(0 if is_workspace_wide_change(paths) else 1)
+    if args.is_ci_only:
+        raise SystemExit(0 if is_ci_only_change(paths) else 1)
     flags = specialized_job_flags(paths, args.packages.split())
     for job, enabled in flags.items():
         print(f"{job}={'true' if enabled else 'false'}")

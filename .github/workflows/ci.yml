@@ -10,9 +10,10 @@ name: CI
 # touches (plus everything that transitively depends on them) and every
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
-# PRs and main pushes use their event's base-to-head range; CI/config changes,
-# missing history, and manual dispatches still get the full sweep -- those can
-# change how every crate builds or tests. A root Cargo.toml edit
+# PRs and main pushes use their event's base-to-head range. CI-only changes
+# run planner tests, workflow lint, and representative Linux/Windows smoke
+# tests; missing history, manual dispatches, and build-global changes still
+# get the full sweep. A root Cargo.toml edit
 # used to force the same full sweep unconditionally, but the single most
 # common edit to that file is adding a handful of brand-new, independent
 # workspace members with nothing else in the file touched (e.g. #170's
@@ -102,6 +103,27 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
+  workflow-lint:
+    # Runs for every event; it is the primary workflow-specific check for the
+    # CI-only route and remains useful when an application change also edits CI.
+    name: workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v${version}"
+          curl --fail --location --retry 3 --output checksums.txt "$base/actionlint_${version}_checksums.txt"
+          curl --fail --location --retry 3 --output "$archive" "$base/$archive"
+          grep "  $archive$" checksums.txt | sha256sum --check --status
+          tar --extract --gzip --file "$archive"
+      - name: Lint workflows
+        run: ./actionlint .github/workflows/*.yml
+
   dependency-policy:
     # Enforces ADR-0002 (dependency sovereignty policy): a crate that is a
     # workspace member must not also be pinned as a git dependency
@@ -131,6 +153,7 @@ jobs:
     outputs:
       full: ${{ steps.plan.outputs.full }}
       packages: ${{ steps.plan.outputs.packages }}
+      ci_only: ${{ steps.plan.outputs.ci_only }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
@@ -166,6 +189,10 @@ jobs:
             echo "$1 -- running the full workspace sweep."
             python3 .github/scripts/ci_plan.py --emit-full >> "$GITHUB_OUTPUT"
           }
+          emit_ci_smoke() {
+            echo "CI-only change -- running planner, workflow lint, and representative smoke tests. Full workspace coverage is not implied."
+            python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
+          }
           mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
             --event "${{ github.event_name }}" \
             --pr-base "${{ github.event.pull_request.base.sha }}" \
@@ -187,6 +214,11 @@ jobs:
           changed="$(python3 .github/scripts/ci_plan.py --changed-from "$base")"
           echo "Changed files:"
           echo "$changed"
+
+          if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --is-ci-only; then
+            emit_ci_smoke
+            exit 0
+          fi
 
           if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --requires-full; then
             emit_full "Workspace-wide CI/tooling config changed"
@@ -247,6 +279,7 @@ jobs:
           {
             echo "full=false"
             echo "packages=$packages"
+            echo "ci_only=false"
             echo "shards=[1]"
           } >> "$GITHUB_OUTPUT"
 
@@ -255,6 +288,9 @@ jobs:
         run: |
           if [ "${{ steps.plan.outputs.full }}" = "true" ]; then
             echo "### CI scope: full workspace sweep" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.plan.outputs.ci_only }}" = "true" ]; then
+            echo "### CI scope: CI-only smoke validation" >> "$GITHUB_STEP_SUMMARY"
+            echo "Planner tests, workflow lint, and representative Linux/Windows smoke tests ran; this is not full workspace coverage." >> "$GITHUB_STEP_SUMMARY"
           elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
             echo "### CI scope: no workspace crate affected -- build/test/clippy skipped" >> "$GITHUB_STEP_SUMMARY"
           else
@@ -308,6 +344,24 @@ jobs:
       - name: Clippy
         if: steps.scope.outputs.args != ''
         run: cargo clippy ${{ steps.scope.outputs.args }} --all-targets --all-features -- -D warnings
+
+  ci-smoke:
+    # This is deliberately a real Cargo build/test on both supported hosts,
+    # but is not a replacement for a full workspace sweep.
+    name: CI-only smoke (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.ci_only == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-build-env
+        with:
+          cache-shared-key: ci-smoke-${{ matrix.os }}
+      - run: cargo test --locked -p rusty_baseline
 
   test:
     name: test (${{ matrix.os }}, shard ${{ matrix.shard }})
