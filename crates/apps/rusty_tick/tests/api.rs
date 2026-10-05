@@ -249,6 +249,33 @@ fn patch_distinguishes_absent_from_null() {
 }
 
 #[test]
+fn wont_do_is_a_status_of_its_own() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let a = h.task(&list, r#""title":"a""#);
+    h.task(&list, r#""title":"b""#);
+    let path = format!("/api/v1/tasks/{}", a["id"].as_str().unwrap());
+
+    let (_, v) = h.call(Method::Patch, &path, r#"{"status":"wontdo"}"#);
+    assert_eq!(v["status"], "wontdo");
+    assert!(v["completedMs"].is_i64(), "closing stamps completedMs");
+    let (_, closed) = h.call(
+        Method::Get,
+        &format!("/api/v1/lists/{list}/tasks?status=wontdo"),
+        "",
+    );
+    assert_eq!(titles(&closed), ["a"]);
+    let (_, open) = h.call(
+        Method::Get,
+        &format!("/api/v1/lists/{list}/tasks?status=open"),
+        "",
+    );
+    assert_eq!(titles(&open), ["b"]);
+    let (_, v) = h.call(Method::Patch, &path, r#"{"status":"open"}"#);
+    assert!(v["completedMs"].is_null(), "reopening clears it");
+}
+
+#[test]
 fn complete_reopen_and_status_filter() {
     let (_d, mut h) = harness();
     let list = h.list("L");

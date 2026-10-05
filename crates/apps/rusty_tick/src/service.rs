@@ -1104,7 +1104,11 @@ mod tests {
         apply_status(&mut task, Status::WontDo, 7);
         assert_eq!((task.status, task.completed_ms), (Status::WontDo, Some(7)));
         apply_status(&mut task, Status::Done, 9);
-        assert_eq!(task.completed_ms, Some(7), "closed to closed keeps the stamp");
+        assert_eq!(
+            task.completed_ms,
+            Some(7),
+            "closed to closed keeps the stamp"
+        );
         apply_status(&mut task, Status::Open, 10);
         assert_eq!(task.completed_ms, None);
     }
