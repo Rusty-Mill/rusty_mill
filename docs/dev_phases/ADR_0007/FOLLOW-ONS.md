@@ -15,7 +15,7 @@ routine can run one on a schedule.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
-| (this PR) | step 6 | `rusty_routine`: cron `Schedule`, `Routine` (fresh thread per firing, `forwardedProps.routine` for gateway rules, disabled after N consecutive failures), a JSON routines file, a runner on the Rust client |
+| [#524](https://github.com/Rusty-Mill/rusty_mill/pull/524) | step 6 | `rusty_routine`: cron `Schedule`, `Routine` (fresh thread per firing, `forwardedProps.routine` for gateway rules, disabled after N consecutive failures), a JSON routines file, a runner on the Rust client |
 | [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) | step 5, SMS | `sms::Twilio`: HMAC-SHA1 webhook signature on `rusty_sha1`, one conversation per pair of numbers, TwiML ack, `Messages.json` reply; the `ack` hook on `Channel` |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Teams | `teams::Teams` over the Azure Bot Framework (JWT verified with `rusty_oauth`, replies with a client-credentials token); the runner hoisted into `bot::Bot` for both examples |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Slack | `rusty_channel`: the sans-IO `Channel` trait, a `Thread` per conversation, the Slack Events API adapter, and a bot example on `rusty_serve` that runs any AG-UI endpoint |
