@@ -1,54 +1,15 @@
-//! MCP **Host** — client-side integration that lets Nexus consume external
-//! MCP servers.
+//! Protocol-only MCP client for stdio and Streamable HTTP servers.
 //!
-//! # Role split
+//! [`McpServerSpec`] describes the connection and [`McpTransport`] selects
+//! its transport. Host applications own configuration files, policy checks,
+//! connection pooling, and tool dispatch.
 //!
-//! | Side | Module | Purpose |
-//! |------|--------|---------|
-//! | Server | [`crate::server`] | Nexus exposes its own tools (note CRUD, search, graph, RAG, …) to external AI clients (Claude Desktop, Cursor, etc.) |
-//! | **Host / client** | `crate::client` (this module) | Nexus spawns external MCP servers from `mcp.toml` and calls their tools — the same pattern Claude Desktop uses to call `filesystem` / `github` / etc. servers. |
+//! [`McpClient::connect`] resolves authentication and initializes a connection.
+//! [`McpClient::shutdown`] requests a bounded graceful close. Stdio child
+//! cleanup is delegated to rmcp's transport. WebSocket is a reserved schema
+//! value and returns an explicit unsupported-transport error.
 //!
-//! Both halves share the same wire protocol — different roles on it.
-//!
-//! # Microkernel fit
-//!
-//! [`McpClient`] is a plain library type, not a core plugin. Nothing in the
-//! kernel needs to call external MCP servers today (the AI engine already
-//! has its own provider traits), so exposing this as an IPC surface would
-//! add ceremony without customers. If a plugin later needs cross-server
-//! tool dispatch — e.g. routing an AI tool call through a Host-owned
-//! filesystem server — the natural shape is a `com.nexus.mcp.host` core
-//! plugin whose `dispatch` routes to a shared `McpHost` managing a pool of
-//! [`McpClient`] connections. None of this module has to change when that
-//! lands.
-//!
-//! # Transport
-//!
-//! Two transports ship today, dispatched per-entry from `mcp.toml` via the
-//! [`crate::config::McpTransport`] discriminant:
-//!
-//! - **`stdio`** (default) — spawn the configured command, talk MCP over
-//!   the child's stdin/stdout. The dominant transport in the ecosystem
-//!   (Claude Desktop, Cursor, Cline all use it) and the only pre-BL-023
-//!   option.
-//! - **`http`** — connect over the modern MCP "Streamable HTTP" transport
-//!   (POST + SSE under one endpoint, per the 2025-03-26 spec). Backed by
-//!   `rmcp::transport::StreamableHttpClientTransport`. Auth headers and
-//!   custom headers ride on the same `McpServerSpec`.
-//!
-//! WebSocket is reserved in the config schema but not currently
-//! dispatchable — rmcp 2.1 ships only a stub (`src/transport/ws.rs`
-//! comment: "Maybe we don't really need a ws implementation?") because
-//! the MCP working group folded WS into Streamable HTTP. See
-//! [`McpClient::connect`] for the explicit error path.
-//!
-//! # Lifecycle
-//!
-//! [`McpClient::connect`] spawns the configured command, runs the MCP
-//! handshake, and returns a ready client. [`McpClient::shutdown`] issues a
-//! graceful close; dropping without calling `shutdown` still tears the
-//! connection down via the transport's own Drop (the child process is
-//! killed after a 3-second grace window).
+//! Enable the crate's `client` feature to use this module.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -60,12 +21,7 @@ use rmcp::model::{CallToolRequestParams, CallToolResult, Prompt, Resource, Tool}
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-// `from_config` is only present on `StreamableHttpClientTransport<reqwest::Client>`,
-// where `reqwest::Client` is the version rmcp itself depends on (currently
-// 0.13). We must NOT name `reqwest::Client` ourselves here — the workspace
-// pins `reqwest = "0.12"` for the AI provider crates and the two would not
-// be type-compatible. The function call below uses the rmcp re-exported
-// type implicitly through trait inference, dodging the version gap.
+// `from_config` selects rmcp's reqwest-backed HTTP transport.
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::{RoleClient, serve_client};
 use tokio::process::Command;
@@ -220,7 +176,7 @@ impl McpClient {
     /// # Errors
     /// - [`McpClientError::Spawn`] if the executable cannot be started.
     /// - [`McpClientError::Handshake`] if the initialize round-trip fails
-    ///   or exceeds [`CONNECT_TIMEOUT`].
+    ///   or exceeds [`DEFAULT_CONNECT_TIMEOUT`].
     pub async fn connect(name: &str, spec: &McpServerSpec) -> Result<Self, McpClientError> {
         match spec.transport {
             McpTransport::Stdio => Self::connect_stdio(name, spec).await,
@@ -441,7 +397,7 @@ impl McpClient {
 
     /// Gracefully shut down the connection: cancels the service, waits for
     /// the transport to flush and close, and kills the child process if it
-    /// doesn't exit within [`SHUTDOWN_TIMEOUT`].
+    /// doesn't exit within [`DEFAULT_SHUTDOWN_TIMEOUT`].
     ///
     /// # Errors
     /// Returns [`McpClientError::Service`] if the shutdown join failed. The
@@ -533,7 +489,9 @@ mod tests {
             command: "this-binary-definitely-does-not-exist-12345".to_string(),
             ..McpServerSpec::default()
         };
-        let err = McpClient::connect("test", &spec).await.unwrap_err();
+        let err = McpClient::connect("test", &spec)
+            .await
+            .expect_err("invalid connection specification must fail");
         assert!(
             matches!(err, McpClientError::Spawn { .. }),
             "expected Spawn error, got {err:?}"
@@ -596,7 +554,9 @@ mod tests {
             url: Some("wss://example.com/mcp".into()),
             ..McpServerSpec::default()
         };
-        let err = McpClient::connect("legacy", &spec).await.unwrap_err();
+        let err = McpClient::connect("legacy", &spec)
+            .await
+            .expect_err("invalid connection specification must fail");
         match err {
             McpClientError::Unsupported { reason } => {
                 assert!(
@@ -619,7 +579,9 @@ mod tests {
             url: None,
             ..McpServerSpec::default()
         };
-        let err = McpClient::connect("remote", &spec).await.unwrap_err();
+        let err = McpClient::connect("remote", &spec)
+            .await
+            .expect_err("invalid connection specification must fail");
         assert!(
             matches!(err, McpClientError::Config { .. }),
             "expected Config, got {err:?}"
@@ -639,7 +601,9 @@ mod tests {
             headers,
             ..McpServerSpec::default()
         };
-        let err = McpClient::connect("remote", &spec).await.unwrap_err();
+        let err = McpClient::connect("remote", &spec)
+            .await
+            .expect_err("invalid connection specification must fail");
         assert!(
             matches!(err, McpClientError::Config { .. }),
             "expected Config, got {err:?}"
@@ -649,10 +613,15 @@ mod tests {
     #[tokio::test]
     async fn http_transport_delivers_custom_and_bearer_headers_directly() {
         for auth_header in [TEST_BEARER_TOKEN, "bEaReR synthetic-bearer"] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind synthetic server");
+            let url = format!(
+                "http://{}/mcp",
+                listener.local_addr().expect("bound server address")
+            );
             let server = tokio::spawn(async move {
-                let (mut initialize, _) = listener.accept().await.unwrap();
+                let (mut initialize, _) = listener.accept().await.expect("accept client request");
                 let request = read_http_request(&mut initialize).await;
                 assert!(
                     request
@@ -667,9 +636,12 @@ mod tests {
                     "bearer header missing from direct request: {request}"
                 );
                 let id = serde_json::from_str::<serde_json::Value>(
-                    request.split_once("\r\n\r\n").unwrap().1,
+                    request
+                        .split_once("\r\n\r\n")
+                        .expect("HTTP header terminator")
+                        .1,
                 )
-                .unwrap()["id"]
+                .expect("valid initialization JSON")["id"]
                     .clone();
                 let body = serde_json::json!({
                     "jsonrpc": "2.0",
@@ -689,7 +661,7 @@ mod tests {
                 )
                 .await;
 
-                let (mut initialized, _) = listener.accept().await.unwrap();
+                let (mut initialized, _) = listener.accept().await.expect("accept client request");
                 let request = read_http_request(&mut initialized).await;
                 assert!(request.contains("notifications/initialized"));
                 write_http_response(&mut initialized, "202 Accepted", "", "").await;
@@ -709,13 +681,23 @@ mod tests {
     #[tokio::test]
     async fn http_transport_does_not_forward_custom_headers_across_redirects() {
         for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
-            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let redirect = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let target_url = format!("http://{}/capture", target.local_addr().unwrap());
-            let url = format!("http://{}/mcp", redirect.local_addr().unwrap());
+            let target = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind synthetic server");
+            let redirect = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind synthetic server");
+            let target_url = format!(
+                "http://{}/capture",
+                target.local_addr().expect("bound server address")
+            );
+            let url = format!(
+                "http://{}/mcp",
+                redirect.local_addr().expect("bound server address")
+            );
 
             let redirect_server = tokio::spawn(async move {
-                let (mut stream, _) = redirect.accept().await.unwrap();
+                let (mut stream, _) = redirect.accept().await.expect("accept client request");
                 let request = read_http_request(&mut stream).await;
                 assert!(
                     request

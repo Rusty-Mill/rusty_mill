@@ -1,59 +1,19 @@
-//! BL-025 — Authentication for the MCP **Host** client.
+//! Authentication for the protocol-only MCP client.
 //!
-//! `mcp.toml` entries that target a remote transport (`transport = "http"`)
-//! can declare an `[servers.<name>.auth]` table picking one of three
-//! supported flows. Each variant resolves to a single HTTP `Authorization`
-//! header value at connect time; the header is then handed off to rmcp's
-//! [`StreamableHttpClientTransport`] via its `auth_header(...)` config.
+//! [`resolve`] converts [`McpAuth`] into authorization and custom headers.
+//! API keys and bearer tokens support inline values or environment indirection.
+//! OAuth client credentials fetch a token with reqwest 0.13 under
+//! [`DEFAULT_OAUTH_TIMEOUT`]. The resolver does not manage refresh tokens,
+//! interactive authorization, or application credential storage.
 //!
-//! ```toml
-//! # API key (custom header — not necessarily named `Authorization`):
-//! [servers.alpha.auth]
-//! type = "api_key"
-//! header = "X-API-Key"
-//! value = "sk-…"             # or: env = "ALPHA_API_KEY"
-//!
-//! # Static bearer token:
-//! [servers.beta.auth]
-//! type = "bearer"
-//! token = "ey…"              # or: env = "BETA_TOKEN"
-//!
-//! # OAuth 2.0 client_credentials (RFC 6749 §4.4) — token fetched at
-//! # connect time and used as a bearer:
-//! [servers.gamma.auth]
-//! type = "oauth_client_credentials"
-//! token_url = "https://auth.example.com/oauth2/token"
-//! client_id = "nexus"        # or: client_id_env = "GAMMA_CLIENT_ID"
-//! client_secret = "secret"   # or: client_secret_env = "GAMMA_CLIENT_SECRET"
-//! scope = "mcp:tools"        # optional
-//! ```
-//!
-//! # Why a hand-rolled flow rather than `rmcp/auth`?
-//!
-//! rmcp 2.1 ships a full OAuth manager (`rmcp::transport::auth`) that
-//! covers PKCE, refresh tokens, and DCR — but enabling it pulls in
-//! `dep:reqwest` at rmcp's pinned version (0.13.x) plus extra TLS-feature
-//! scaffolding the workspace doesn't otherwise need, and exposes a
-//! `OAuthState`-style stateful surface that's overkill for the
-//! single-shot client-credentials flow PRD-14 §8 calls for. The handful
-//! of lines below is faster to audit and avoids a second `reqwest`
-//! version shipping through the rmcp dep — `auth.rs` uses the
-//! workspace's `reqwest 0.12` which is already in the closure for the
-//! AI provider crates.
-//!
-//! # ADR-0009 (keychain hard-fail) interaction
-//!
-//! Today the resolver supports inline values + env-var indirection.
-//! When ADR-0009 lands a real keyring service, [`McpAuthSecret::Env`]'s
-//! sibling `Keyring { service, account }` variant slots in alongside it
-//! without a wire-format break — every consumer of [`ResolvedAuth`]
-//! sees the same final string regardless of where it came from.
+//! Host applications may deserialize these declarations into their own
+//! configuration format; this module does not load configuration files.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// One of the three auth flows supported per BL-025.
+/// One of the three supported client authentication flows.
 ///
 /// Tagged via serde's `#[serde(tag = "type", rename_all = "snake_case")]`
 /// so a `mcp.toml` entry reads naturally:
@@ -255,7 +215,7 @@ struct TokenResponse {
 ///
 /// Pure for [`McpAuth::ApiKey`] / [`McpAuth::Bearer`] (no I/O). The
 /// OAuth flow makes one HTTP POST to the token endpoint using the
-/// workspace's `reqwest` 0.12 client. A 30-second timeout caps the
+/// crate's `reqwest` 0.13 client. A 30-second timeout caps the
 /// fetch so a hung token endpoint can't stall MCP connect.
 ///
 /// # Errors
@@ -336,10 +296,10 @@ async fn fetch_client_credentials_token(
     // providers only accept that) and put `grant_type` + `scope` in
     // the form body.
     let mut form: Vec<(&str, &str)> = vec![("grant_type", "client_credentials")];
-    if let Some(s) = scope {
-        if !s.is_empty() {
-            form.push(("scope", s));
-        }
+    if let Some(s) = scope
+        && !s.is_empty()
+    {
+        form.push(("scope", s));
     }
     let client = reqwest::Client::builder()
         .timeout(OAUTH_TIMEOUT)
@@ -369,12 +329,12 @@ async fn fetch_client_credentials_token(
     let parsed: TokenResponse = resp.json().await.map_err(|e| AuthError::OauthResponse {
         reason: format!("decode token response: {e}"),
     })?;
-    if let Some(tt) = parsed.token_type.as_deref() {
-        if !tt.eq_ignore_ascii_case("bearer") {
-            return Err(AuthError::OauthResponse {
-                reason: format!("unsupported token_type '{tt}'"),
-            });
-        }
+    if let Some(tt) = parsed.token_type.as_deref()
+        && !tt.eq_ignore_ascii_case("bearer")
+    {
+        return Err(AuthError::OauthResponse {
+            reason: format!("unsupported token_type '{tt}'"),
+        });
     }
     if parsed.access_token.is_empty() {
         return Err(AuthError::OauthResponse {
@@ -396,7 +356,7 @@ mod tests {
                 value: "Bearer xyz".to_string(),
             },
         };
-        let resolved = resolve(&auth).await.unwrap();
+        let resolved = resolve(&auth).await.expect("resolve synthetic credentials");
         assert_eq!(resolved.authorization.as_deref(), Some("Bearer xyz"));
         assert!(resolved.extra_headers.is_empty());
     }
@@ -409,9 +369,15 @@ mod tests {
                 value: "abc".to_string(),
             },
         };
-        let resolved = resolve(&auth).await.unwrap();
+        let resolved = resolve(&auth).await.expect("resolve synthetic credentials");
         assert!(resolved.authorization.is_none());
-        assert_eq!(resolved.extra_headers.get("X-API-Key").unwrap(), "abc");
+        assert_eq!(
+            resolved
+                .extra_headers
+                .get("X-API-Key")
+                .expect("resolved API key header"),
+            "abc"
+        );
     }
 
     #[tokio::test]
@@ -421,7 +387,7 @@ mod tests {
                 value: "xyz".to_string(),
             },
         };
-        let resolved = resolve(&auth).await.unwrap();
+        let resolved = resolve(&auth).await.expect("resolve synthetic credentials");
         assert_eq!(resolved.authorization.as_deref(), Some("Bearer xyz"));
     }
 
@@ -432,7 +398,7 @@ mod tests {
                 value: "Bearer xyz".to_string(),
             },
         };
-        let resolved = resolve(&auth).await.unwrap();
+        let resolved = resolve(&auth).await.expect("resolve synthetic credentials");
         assert_eq!(resolved.authorization.as_deref(), Some("Bearer xyz"));
     }
 
@@ -450,7 +416,7 @@ mod tests {
             header = "X-API-Key"
             env = "MY_KEY"
         "#;
-        let wrap: Wrap = toml::from_str(toml_text).unwrap();
+        let wrap: Wrap = toml::from_str(toml_text).expect("valid auth declaration");
         match wrap.auth {
             McpAuth::ApiKey { header, value } => {
                 assert_eq!(header, "X-API-Key");
@@ -477,7 +443,7 @@ mod tests {
             client_secret_env = "SECRET"
             scope = "mcp:tools"
         "#;
-        let wrap: Wrap = toml::from_str(toml_text).unwrap();
+        let wrap: Wrap = toml::from_str(toml_text).expect("valid auth declaration");
         match wrap.auth {
             McpAuth::OauthClientCredentials {
                 token_url,
