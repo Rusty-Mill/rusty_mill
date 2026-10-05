@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_agui: follow-ons document
+**2026-10-05** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
+
+- **Added (docs only):** [`docs/dev_phases/ADR_0007/FOLLOW-ONS.md`](docs/dev_phases/ADR_0007/FOLLOW-ONS.md) records where `rusty_agui` stands after #512 and plans the two targets set on 2026-10-05: frontend SDKs (React, Angular, Vue, iOS, Android) and an OpenBot-shaped agent platform (sandboxes, CEL gateway with pre-action audit, Slack/Teams/SMS channels, routines). It lists what the workspace already has and at which layer, the gaps, a ten-step build order starting with a Rust AG-UI client and a headless TypeScript core, four departures from the targets as named (one core then bindings; sandboxes on `rusty_rsi`'s executor rather than containers; CEL stays external; channels as adapters), and three open questions.
+
+---
+
 ## rusty_agui and rusty_json_patch: a sovereign AG-UI stack
 **2026-10-05** · [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
 

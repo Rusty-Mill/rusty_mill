@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_agui` follow-ons document** ([`docs/dev_phases/ADR_0007/FOLLOW-ONS.md`](docs/dev_phases/ADR_0007/FOLLOW-ONS.md), docs only): status after #512, the two long-horizon targets (frontend SDKs; an OpenBot-shaped agent platform), what the workspace already has, the gaps, a ten-step build order, departures from the targets, and open questions.
 - **`rusty_agui` and `rusty_json_patch`** ([#512](https://github.com/Rusty-Mill/rusty_mill/pull/512), [ADR-0007](docs/adr/0007-agui-and-json-patch.md)): a sovereign AG-UI (Agent-User Interaction protocol) crate in `crates/libs/protocol` (typed events and run input, JSON and SSE codecs, a verifier with chunk expansion, a messages/state reducer, and a `serve` feature with an `Agent` trait and `AgentHandler` for `rusty_serve`), and a `no_std` JSON Pointer/Patch/Merge Patch crate in `crates/foundation` (RFC 6901/6902/7386, atomic apply, diff). Both depend on first-party crates only.
 ### Changed
 - **`rusty_serve`: streaming bodies** ([#512](https://github.com/Rusty-Mill/rusty_mill/pull/512)). `Response.body` is now `Body::Json(Vec<u8>)` or `Body::Stream { content_type, chunks }` (chunked transfer encoding, pulled after the handler's lock is released); `Response::json` and `Response::stream` construct them. `rusty_tick` and `rusty_fair_play` use `Response::json`; no behaviour change for them.
