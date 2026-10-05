@@ -224,6 +224,17 @@ pub(super) fn tire_grip(slip: f32, handbrake_amount: f32) -> (f32, f32) {
     (lateral, longitudinal)
 }
 
+/// What the pedals ask of the wheels this tick (`RB-PHYSICS-001-FR-134`).
+#[derive(Debug, Clone, Copy)]
+struct DriveForces {
+    /// Engine acceleration (uu/s^2) along each wheel's heading.
+    engine_acceleration: f32,
+    /// Braking deceleration (uu/s^2) against each wheel's rolling speed.
+    brake_deceleration: f32,
+    /// Throttle (or boost) engaged: tires keep full grip on any surface.
+    sticky: bool,
+}
+
 /// Each touching wheel's impulse for one tick, RocketSim's
 /// `btVehicleRL::calcFrictionImpulses`; a wheel with no contact gives none.
 ///
@@ -251,11 +262,14 @@ fn wheel_impulses(
     contacts: &WheelContacts,
     steer: f32,
     handbrake_amount: f32,
-    engine_acceleration: f32,
-    brake_deceleration: f32,
-    sticky: bool,
+    drive: DriveForces,
     dt: f32,
 ) -> Vec<(Vec3, Vec3)> {
+    let DriveForces {
+        engine_acceleration,
+        brake_deceleration,
+        sticky,
+    } = drive;
     let forward = forward_axis(car);
     let right = right_axis(car);
     let up = up_axis(car);
@@ -363,9 +377,11 @@ pub(super) fn apply_ground_control(
         contacts,
         input.steer,
         handbrake_amount,
-        acceleration,
-        deceleration,
-        throttle != 0.0,
+        DriveForces {
+            engine_acceleration: acceleration,
+            brake_deceleration: deceleration,
+            sticky: throttle != 0.0,
+        },
         dt,
     ) {
         car.apply_impulse(impulse, point);
