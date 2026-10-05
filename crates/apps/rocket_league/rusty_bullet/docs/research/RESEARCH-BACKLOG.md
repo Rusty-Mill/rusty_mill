@@ -229,8 +229,10 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   `rb_capture_ingest` format, ADR-0005); terms of use of RLBot with the
   current game build; whether a bot should instead drive `rb_physics_bullet`
   directly for self-consistency tests.
-- **Next**: a spike that runs an RLBot scripted bot through one mechanic
-  from the catalogue and captures it.
+- **Next**: the plan is in [BOT-CAPTURE-PLAN.md](BOT-CAPTURE-PLAN.md):
+  scripted "tape player" bots plus RLBot state-setting, recorded by the
+  existing BakkesMod plugin; first spike a trivial tape on the owner's
+  machine. Finding: Necto/Nexto cannot be told to perform a named mechanic.
 - **Status**: Open. **Owner**: baileyrd.
 
 ### RB-RESEARCH-O006 — Mechanics catalogue to drive the bot and the tests
