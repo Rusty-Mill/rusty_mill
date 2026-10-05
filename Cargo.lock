@@ -8811,6 +8811,7 @@ dependencies = [
  "nexus-plugins",
  "regex-lite",
  "reqwest 0.13.4",
+ "rusty_ip",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -8870,6 +8871,7 @@ dependencies = [
  "r2d2_sqlite",
  "reqwest 0.13.4",
  "rusqlite",
+ "rusty_ip",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -13767,6 +13769,7 @@ dependencies = [
  "prost-types",
  "reqwest 0.13.4",
  "rusty_base64",
+ "rusty_ip",
  "rusty_uuid",
  "serde",
  "serde_json",
@@ -14049,6 +14052,10 @@ dependencies = [
  "rusty_tokio",
  "tokio",
 ]
+
+[[package]]
+name = "rusty_ip"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_jinja"

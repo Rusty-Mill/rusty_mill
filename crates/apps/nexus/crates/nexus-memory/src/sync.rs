@@ -106,38 +106,29 @@ fn parse_config(args: &Value) -> Result<HubConfig, String> {
 /// (`255.255.255.255`), IPv6 ULA (`fc00::/7`), unspecified (`0.0.0.0`,
 /// `::`), multicast, or IPv4-mapped IPv6 of any of the above.
 ///
-/// Mirrors `nexus-linkpreview::is_blocked_address` (issue #78) — duplicated
-/// here rather than extracted into a shared crate since the two callers use
-/// different reqwest clients (blocking vs. async) and pulling out a shared
-/// crate would widen this fix beyond `nexus-memory`.
+/// Uses shared address facts but retains this caller's explicit policy.
+/// The private-hub override and async transport remain in the caller below.
 fn is_blocked_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            if v4.is_loopback() || v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast() {
-                return true;
-            }
-            let octs = v4.octets();
-            v4.is_private()
-                || v4.is_link_local()
-                || (octs[0] == 100 && (64..128).contains(&octs[1]))
-                || octs[0] == 0
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
-                return true;
-            }
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_blocked_address(IpAddr::V4(mapped));
-            }
-            let segs = v6.segments();
-            if (segs[0] & 0xfe00) == 0xfc00 {
-                return true;
-            }
-            if (segs[0] & 0xffc0) == 0xfe80 {
-                return true;
-            }
-            false
-        }
+    use rusty_ip::{classify, AddressClass as Class};
+
+    // Preserve Nexus's policy: mapped IPv4 is interpreted, NAT64 is not.
+    match classify(ip) {
+        Class::Ipv4Mapped(v4) => is_blocked_address(IpAddr::V4(v4)),
+        Class::Unspecified
+        | Class::Loopback
+        | Class::Private
+        | Class::LinkLocal
+        | Class::Shared
+        | Class::Broadcast
+        | Class::Multicast
+        | Class::ThisNetwork
+        | Class::UniqueLocal => true,
+        Class::ProtocolAssignment
+        | Class::Benchmarking
+        | Class::Reserved
+        | Class::SiteLocal
+        | Class::Nat64(_)
+        | Class::Other => false,
     }
 }
 
@@ -595,6 +586,18 @@ fn de(e: crate::db::MemoryDbError) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod address_conformance {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../foundation/rusty_ip/tests/ssrf_conformance/policy.rs"
+        ));
+    }
+
+    #[test]
+    fn ssrf_address_conformance() {
+        address_conformance::assert_policy("memory", super::is_blocked_address);
+    }
+
     use std::sync::Arc;
 
     use nexus_memory_hub::{AppState, HubStore};

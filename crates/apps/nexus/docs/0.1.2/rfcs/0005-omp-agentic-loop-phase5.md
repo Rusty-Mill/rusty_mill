@@ -148,8 +148,9 @@ changes, no ADR tension.
 - New backend capability ⇒ new IPC handler in the owning service crate, reachable
   from CLI/TUI/MCP/shell uniformly — never a frontend-direct call or a bespoke
   `#[tauri::command]`.
-- Run `gitnexus_impact` before editing any existing symbol (e.g. `read_file`,
-  the tool registry seed) and `gitnexus_detect_changes` before each commit, per
+- Assess callers, dependencies, and execution flows before editing any existing
+  symbol (e.g. `read_file`, the tool registry seed), then review the diff and run
+  focused regression tests before each commit. GitNexus is optional assistance, per
   `CLAUDE.md`. Report HIGH/CRITICAL blast radius before proceeding.
 - Verify scoped to touched crates: `cargo test -p <crate>` + the pedantic clippy
   line from the handoff; shell `typecheck|lint|test` if the shell is touched.
