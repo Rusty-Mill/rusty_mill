@@ -86,7 +86,8 @@ export function CalendarPage() {
   const addFromToolbar = (el: HTMLElement): void => {
     // The visible day that is today, else the first day shown.
     const day = range.days.find((d) => diffDays(d, now) === 0) ?? (mode === 'm' ? startOfDay(anchor) : range.start)
-    setPop({ kind: 'add', target: { ms: mode === 'd' || mode === 'w' ? atTime(day, 9) : day, allDay: mode !== 'd' && mode !== 'w' }, anchor: el })
+    const timed = mode !== 'm' && mode !== 'a'
+    setPop({ kind: 'add', target: { ms: timed ? atTime(day, 9) : day, allDay: !timed }, anchor: el })
   }
 
   return (
@@ -105,7 +106,7 @@ export function CalendarPage() {
       />
       <input ref={fileRef} type="file" accept=".ics,text/calendar" aria-label="Import calendar file" hidden onChange={(e) => void importFile(e)} />
       {mode === 'm' && <MonthView range={range} anchor={anchor} events={events} ctx={ctx} />}
-      {(mode === 'w' || mode === 'd') && <TimeGridView key={mode} range={range} events={events} ctx={ctx} />}
+      {mode !== 'm' && mode !== 'a' && <TimeGridView key={mode} range={range} events={events} ctx={ctx} />}
       {mode === 'a' && <AgendaView range={range} events={events} ctx={ctx} listName={listName} />}
 
       {pop?.kind === 'task' && tasks[pop.taskId] && <TaskPopover taskId={pop.taskId} anchor={pop.anchor} color={colorOf(tasks[pop.taskId]!)} hour12={hour12} onClose={closePop} />}

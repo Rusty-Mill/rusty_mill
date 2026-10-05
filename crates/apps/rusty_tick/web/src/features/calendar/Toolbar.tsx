@@ -3,8 +3,8 @@ import { useState } from 'react'
 import type { CalendarMode } from '@/app/paths'
 import { Menu } from '@/components/Menu'
 
-export const MODE_LABEL: Record<CalendarMode, string> = { m: 'Month', w: 'Week', d: 'Day', a: 'Agenda' }
-const NAV = { m: 'month', w: 'week', d: 'day', a: 'page' } as const
+export const MODE_LABEL: Record<CalendarMode, string> = { m: 'Month', w: 'Week', d: 'Day', '3': '3 Days', t: '10 Days', a: 'Agenda' }
+const NAV = { m: 'month', w: 'week', d: 'day', '3': 'days', t: 'days', a: 'page' } as const
 
 interface Props {
   title: string
