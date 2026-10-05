@@ -4,11 +4,13 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged in one PR. The workspace now speaks AG-UI on the
-server side; nothing consumes it yet.
+ADR-0007 is merged, and step 1 of the build order below is done: the
+workspace speaks AG-UI on both sides, and the reference TypeScript client
+accepts what the server sends.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| step 1 (PR pending) | | `rusty_agui`'s `client` feature (`HttpAgent`, blocking, on `rusty_http`); the `echo_agent` example; `conformance/`, where `@ag-ui/client` drives the example in CI |
 | [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) | 2026-10-05 | `rusty_json_patch` (RFC 6901/6902/7386), `rusty_agui` (types, events, codec, SSE, verifier, reducer, `serve` feature with `Agent` and `AgentHandler`), streaming bodies in `rusty_serve` |
 
 ## The goal this document plans for
@@ -46,7 +48,7 @@ targets as named.
 
 | Gap | Needed by |
 | --- | --- |
-| A Rust AG-UI client (`HttpAgent` over `rusty_request`) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
+| ~~A Rust AG-UI client~~ Done in step 1, on `rusty_http` directly (see below) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
 | A headless TypeScript core: SSE decoder, verifier, reducer, `runAgent` | Every frontend SDK |
 | Framework bindings (hooks, components) | Each SDK |
 | An AG-UI route in the gateway: CEL decision, audit record before and after, forward | The platform |
@@ -63,7 +65,7 @@ Both targets start with the same two pieces, so they come first.
 
 | Step | What | Size | Needs sign-off |
 | --- | --- | --- | --- |
-| 1 | `rusty_agui` client over `rusty_request`, and a smoke test of CopilotKit's React SDK against `AgentHandler` (proves the wire format against the reference client) | 1 PR | No |
+| 1 | **Done.** `rusty_agui` client and a conformance test against the reference client (`@ag-ui/client`, the package CopilotKit's React SDK and OpenBot drive agents with) | 1 PR | No |
 | 2 | `agui-core` (TypeScript, headless): decoder, verifier, reducer, `runAgent`; the Rust crate's wire samples as shared fixtures | 1 PR | No |
 | 3 | React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function), `useSharedState`; `rusty_tick` as the first consumer | 1–2 PRs | No |
 | 4 | Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1–2 PRs, touches `rusty_agent_gateway` | Yes: new gateway surface |
@@ -76,6 +78,20 @@ Both targets start with the same two pieces, so they come first.
 
 Chat components come after step 3 as a thin layer over the hooks, not
 before: the hooks are the API, the components are one rendering of it.
+
+## Departures made while building
+
+- **Step 1's client is on `rusty_http`, not `rusty_request`.** `rusty_request`
+  is async on `rusty_tokio` with `rusty_tls`. The server side is blocking
+  on `rusty_serve`, and the one consumer that will be async (the gateway)
+  runs on tokio and axum with its own HTTP stack. A blocking client over
+  `std::net` mirrors `serve`, keeps the crate's manifest first-party only,
+  and is what a routine or a channel adapter on the same host needs. An
+  async adapter can be added behind a feature when a consumer appears.
+- **Step 1's smoke test is `@ag-ui/client`, not a browser-driven React
+  app.** That package is the client CopilotKit's React SDK and OpenBot
+  embed, so a run it verifies and reduces is a run those products accept,
+  and it runs in Node in CI without a browser.
 
 ## Where this departs from the targets as named
 

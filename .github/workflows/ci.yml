@@ -158,6 +158,7 @@ jobs:
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
       tick: ${{ steps.plan.outputs.tick }}
       fair_play: ${{ steps.plan.outputs.fair_play }}
+      agui: ${{ steps.plan.outputs.agui }}
       remind_me: ${{ steps.plan.outputs.remind_me }}
       remind_me_legacy_import: ${{ steps.plan.outputs.remind_me_legacy_import }}
       win32: ${{ steps.plan.outputs.win32 }}
@@ -687,6 +688,43 @@ jobs:
         with:
           name: rusty-tick-e2e-results
           path: crates/apps/rusty_tick/web/test-results
+
+  # rusty_agui conformance: the reference AG-UI TypeScript client
+  # (@ag-ui/client, which CopilotKit's SDK and OpenBot embed) drives the
+  # `echo_agent` example served by rusty_agui's AgentHandler. Proves the wire
+  # format against the client that matters, not only against our own.
+  rusty-agui-conformance:
+    concurrency:
+      group: ci-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('run-{0}', github.run_id) }}-rusty-agui-conformance
+      queue: max
+      cancel-in-progress: false
+    name: rusty_agui conformance (@ag-ui/client)
+    needs: plan
+    if: needs.plan.outputs.agui == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/libs/protocol/rusty_agui/conformance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusty-agui-conformance
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/libs/protocol/rusty_agui/conformance/package-lock.json
+      - run: cargo build -p rusty_agui --features serve --example echo_agent
+        working-directory: .
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          AGUI_ECHO_BIN: ${{ github.workspace }}/target/debug/examples/echo_agent
 
   # rusty_fair_play's web UI (Vite/React), the Fair Play front end: typecheck, unit tests (jsdom over the
   # in-memory adapter) and the production build. Mirrors rusty-tick-web.

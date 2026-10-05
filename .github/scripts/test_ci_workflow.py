@@ -26,6 +26,7 @@ PLAN_KEYS = {
     "key_desktop",
     "tick",
     "fair_play",
+    "agui",
     "remind_me",
     "remind_me_legacy_import",
     "win32",
@@ -197,7 +198,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_fair_play_reverse_dependencies_select_its_specialized_jobs(self) -> None:
@@ -275,11 +276,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "remind_me": False, "remind_me_legacy_import": False},
         )
 
     def test_shared_and_specialized_package_rules(self) -> None:

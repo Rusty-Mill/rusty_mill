@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_agui: a client, and conformance against the reference TypeScript client
+**2026-10-05** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 1
+
+- **Added:** `rusty_agui`'s `client` feature: `HttpAgent::new(url).run(&input)` posts a `RunAgentInput` and returns a `RunStream`, an iterator of verified events (through the same `Verifier` the server uses). Blocking, on `rusty_http`'s sync transport over `std::net`, plain `http://`; `Error::Status` for a refused run, `Error::Transport` for a closed socket, a non-SSE response or a stream that ends early.
+- **Added:** the `echo_agent` example (`--features serve`): state snapshot and delta, a step, a tool call when the client offers a tool, an echoed assistant message; `fail` ends the run with `RUN_ERROR`.
+- **Added:** `crates/libs/protocol/rusty_agui/conformance/`, a Node project where `@ag-ui/client` 1.0.2, the reference client CopilotKit's SDK and OpenBot embed, runs the example: a full run the reference client verifies and reduces (state, result, new messages), a frontend tool call with streamed arguments, and an agent failure delivered as `RUN_ERROR`. CI job `rusty_agui conformance (@ag-ui/client)`; planner flag `agui` (path and package).
+- **Verified:** `cargo test -p rusty_agui --all-features` (27, plus the client doc test), `clippy -D warnings` with examples, `fmt --check`, the CI script tests (35), the three conformance tests locally against the built example, workspace map and layer checks.
+- Two departures from the follow-ons document, recorded there: the client is on `rusty_http` directly rather than `rusty_request` (sync, mirroring `serve`; the gateway is async on its own stack), and the smoke test uses the reference `@ag-ui/client` rather than a browser-driven React app, since that client is what the React SDK drives agents with.
+
+---
+
 ## rusty_agui: follow-ons document
 **2026-10-05** · [#513](https://github.com/Rusty-Mill/rusty_mill/pull/513) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
 
