@@ -13,6 +13,8 @@ pub type Server = rusty_serve::Server<Backend>;
 /// The assistant's route: a streamed AG-UI run, so it bypasses the
 /// buffered [`api::Response`] path.
 const AGENT_PATH: &str = "/api/agent";
+/// Fetching a calendar feed for the client: network, not the user's data.
+const FETCH_ICS_PATH: &str = "/api/v1/fetch-ics";
 
 impl Handler for Backend {
     fn handle(&mut self, request: &rusty_serve::Request<'_>) -> rusty_serve::Response {
@@ -29,6 +31,13 @@ impl Handler for Backend {
                 Ok(_) => self.assistant.handle_run(request.body),
                 Err(denied) => rusty_serve::Response::json(denied.status, denied.body),
             };
+        }
+        if path == FETCH_ICS_PATH && request.method == &rusty_http::Method::Post {
+            let response = match self.authorize(&api_request) {
+                Ok(_) => api::Api::fetch_ics(request.body),
+                Err(denied) => denied,
+            };
+            return rusty_serve::Response::json(response.status, response.body);
         }
         let response = Backend::handle(self, &api_request);
         rusty_serve::Response::json(response.status, response.body)
@@ -84,6 +93,66 @@ mod tests {
             EventKind::ToolCallStart { tool_call_name, .. } if tool_call_name == "create_task"
         )));
         assert!(matches!(events.last(), Some(EventKind::RunFinished { .. })));
+        stop.shutdown();
+    }
+
+    /// One request over a fresh connection; the status and body of the reply.
+    fn post(
+        addr: std::net::SocketAddr,
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+    ) -> (u16, String) {
+        use std::io::{Read, Write};
+        let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut sock = std::net::TcpStream::connect(addr).unwrap();
+        sock.write_all(request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        sock.read_to_string(&mut reply).unwrap();
+        let status = reply.split(' ').nth(1).unwrap().parse().unwrap();
+        (
+            status,
+            reply.split("\r\n\r\n").nth(1).unwrap_or("").to_string(),
+        )
+    }
+
+    #[test]
+    fn fetch_ics_needs_a_token_and_refuses_unsafe_targets_without_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "a-token-long-enough-to-pass";
+        let backend = Backend::single(dir.path(), token.into(), clock()).unwrap();
+        let server = rusty_serve::Server::bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
+        let addr = server.local_addr().unwrap();
+        let stop = server.shutdown_handle().unwrap();
+        std::thread::spawn(move || server.run().unwrap());
+        let path = FETCH_ICS_PATH;
+
+        assert_eq!(
+            post(addr, path, None, r#"{"url":"https://example.com/a.ics"}"#).0,
+            401
+        );
+        assert_eq!(
+            post(addr, path, Some("wrong-token-wrong-token"), "{}").0,
+            401
+        );
+        assert_eq!(post(addr, path, Some(token), "not json").0, 400);
+        assert_eq!(
+            post(addr, path, Some(token), r#"{"url":"https://x","extra":1}"#).0,
+            400
+        );
+        for url in [
+            "http://example.com/a.ics",
+            "https://example.com:8443/a.ics",
+            "https://localhost/a.ics",
+        ] {
+            let (status, body) = post(addr, path, Some(token), &format!(r#"{{"url":"{url}"}}"#));
+            assert_eq!(status, 422, "{url}: {body}");
+            assert!(body.contains(r#""code":"invalid""#), "{body}");
+        }
         stop.shutdown();
     }
 }

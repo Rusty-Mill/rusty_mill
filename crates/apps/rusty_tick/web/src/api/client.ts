@@ -46,4 +46,7 @@ export interface ApiClient {
   listDocs<T = unknown>(kind: DocKind): Promise<Doc<T>[]>
   putDoc<T = unknown>(kind: DocKind, id: string, body: T): Promise<Doc<T>>
   deleteDoc(kind: DocKind, id: string): Promise<void>
+
+  /** The text of the calendar feed at `url`, fetched by the server (browsers cannot read most feeds). */
+  fetchIcs(url: string): Promise<string>
 }

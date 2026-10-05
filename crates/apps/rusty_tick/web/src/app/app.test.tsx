@@ -763,4 +763,48 @@ describe("won't do, countdowns and calendar import", () => {
     expect(within(tasksList()).getByText('review draft')).toBeInTheDocument()
     expect(within(tasksList()).queryByText('water plants')).toBeNull()
   })
+  it('subscribes to a calendar feed, refreshes it in place, and unsubscribes', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    const feed = (...events: string[]) => ['BEGIN:VCALENDAR', ...events.flatMap((e) => ['BEGIN:VEVENT', ...e.split('|'), 'END:VEVENT']), 'END:VCALENDAR'].join('\r\n')
+    let text = feed('UID:a|SUMMARY:Planning|DTSTART;VALUE=DATE:20261010', 'UID:b|SUMMARY:Retro|DTSTART;VALUE=DATE:20261011')
+    api.fetchIcs = async () => text
+
+    await user.click(await screen.findByRole('button', { name: 'View: Month' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Calendar subscriptions…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Calendar subscriptions' })
+    await user.type(within(dialog).getByPlaceholderText('Team calendar'), 'Team')
+    await user.type(within(dialog).getByPlaceholderText('https://example.com/calendar.ics'), 'https://example.com/team.ics')
+    await user.click(within(dialog).getByRole('button', { name: 'Subscribe' }))
+    await within(dialog).findByRole('button', { name: 'Refresh Team' })
+
+    const snap = async () => await api.snapshot()
+    const list = (await snap()).lists.find((l) => l.name === 'Team')!
+    expect((await snap()).tasks.filter((t) => t.listId === list.id).map((t) => t.title).sort()).toEqual(['Planning', 'Retro'])
+
+    text = feed('UID:a|SUMMARY:Planning v2|DTSTART;VALUE=DATE:20261012')
+    await user.click(within(dialog).getByRole('button', { name: 'Refresh Team' }))
+    await waitFor(async () => {
+      const tasks = (await snap()).tasks.filter((t) => t.listId === list.id)
+      expect(tasks.find((t) => t.title === 'Planning v2')?.deletedMs).toBeNull()
+      expect(tasks.find((t) => t.title === 'Retro')?.deletedMs).not.toBeNull()
+      expect(tasks).toHaveLength(2) // updated in place, not duplicated
+    })
+
+    await user.click(within(dialog).getByRole('button', { name: 'Unsubscribe from Team' }))
+    await waitFor(async () => expect((await snap()).lists.some((l) => l.name === 'Team')).toBe(false))
+  })
+
+  it('reports a feed that cannot be fetched and leaves nothing behind', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    await user.click(await screen.findByRole('button', { name: 'View: Month' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Calendar subscriptions…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Calendar subscriptions' })
+    await user.type(within(dialog).getByPlaceholderText('Team calendar'), 'Broken')
+    await user.type(within(dialog).getByPlaceholderText('https://example.com/calendar.ics'), 'https://example.com/x.ics')
+    await user.click(within(dialog).getByRole('button', { name: 'Subscribe' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/need the server/)
+    await waitFor(async () => expect((await api.snapshot()).lists.some((l) => l.name === 'Broken')).toBe(false))
+  })
 })
