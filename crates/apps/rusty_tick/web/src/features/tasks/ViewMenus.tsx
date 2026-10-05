@@ -1,4 +1,4 @@
-import { ArrowUpDown, Columns3, GanttChart, List as ListIcon, Printer, SlidersHorizontal, Eye, EyeOff, MoreHorizontal } from 'lucide-react'
+import { ArrowUpDown, Columns3, GanttChart, LayoutGrid, List as ListIcon, Printer, SlidersHorizontal, Eye, EyeOff, MoreHorizontal } from 'lucide-react'
 import { useRef, useState } from 'react'
 import type { ViewMode } from '@/api/types'
 import { Menu, type MenuEntry } from '@/components/Menu'
@@ -38,6 +38,7 @@ const MODES: { mode: ViewMode; label: string; icon: React.ReactNode }[] = [
   { mode: 'list', label: 'List', icon: <ListIcon size={18} /> },
   { mode: 'kanban', label: 'Kanban', icon: <Columns3 size={18} /> },
   { mode: 'timeline', label: 'Timeline', icon: <GanttChart size={18} /> },
+  { mode: 'matrix', label: 'Eisenhower Matrix', icon: <LayoutGrid size={18} /> },
 ]
 
 /** The "..." popover: view switcher, Hide/Show Completed, Show Details, View Options, Print. */

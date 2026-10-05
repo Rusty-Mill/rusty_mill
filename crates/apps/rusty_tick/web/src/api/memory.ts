@@ -167,7 +167,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.color !== undefined) list.color = cleanColor(patch.color)
     if (patch.archived !== undefined) list.archived = patch.archived
     if (patch.viewMode !== undefined) {
-      if (!['list', 'kanban', 'timeline'].includes(patch.viewMode)) throw new InvalidError(400, 'unknown viewMode')
+      if (!['list', 'kanban', 'timeline', 'matrix'].includes(patch.viewMode)) throw new InvalidError(400, 'unknown viewMode')
       list.viewMode = patch.viewMode
     }
     if (patch.sortType !== undefined) list.sortType = patch.sortType

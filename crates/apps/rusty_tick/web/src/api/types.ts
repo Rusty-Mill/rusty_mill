@@ -10,7 +10,7 @@
 export type Status = 'open' | 'done'
 export type Priority = 0 | 1 | 3 | 5
 export type TaskKind = 'text' | 'checklist' | 'note'
-export type ViewMode = 'list' | 'kanban' | 'timeline'
+export type ViewMode = 'list' | 'kanban' | 'timeline' | 'matrix'
 
 export interface ChecklistItem {
   id: string

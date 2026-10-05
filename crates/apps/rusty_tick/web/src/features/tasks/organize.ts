@@ -138,7 +138,7 @@ const DATE_GROUPS = [
   ['nodate', 'No Date'],
 ] as const
 
-function dateBucket(t: Task, now: number): (typeof DATE_GROUPS)[number][0] {
+export function dateBucket(t: Task, now: number): (typeof DATE_GROUPS)[number][0] {
   if (t.dueMs === null) return 'nodate'
   const days = diffDays(now, t.dueMs)
   const overdue = t.isAllDay ? days < 0 : t.dueMs < now && days <= 0

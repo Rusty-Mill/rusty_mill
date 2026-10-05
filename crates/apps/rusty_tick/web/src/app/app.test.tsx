@@ -653,6 +653,21 @@ describe('large lists', () => {
     await user.click(within(timeline).getByRole('button', { name: 'spans, bar' }))
     expect(router.state.location.pathname).toMatch(/^\/p\/inbox\/tasks\/[0-9a-f-]{36}$/)
   })
+  it('sorts tasks into Eisenhower quadrants by priority and due date', async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'fire', priority: 5, dueMs: startOfDay(Date.now()), isAllDay: true })
+      await a.createTask({ listId: INBOX_ID, title: 'goal', priority: 5 })
+      await a.createTask({ listId: INBOX_ID, title: 'noise' })
+    })
+    await user.click(screen.getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('radio', { name: 'Eisenhower Matrix' }))
+    const quadrant = (name: string) => within(screen.getByRole('listitem', { name }))
+    expect(quadrant('Do First').getByText('fire')).toBeInTheDocument()
+    expect(quadrant('Schedule').getByText('goal')).toBeInTheDocument()
+    expect(quadrant('Eliminate').getByText('noise')).toBeInTheDocument()
+    expect(quadrant('Delegate').queryByRole('button')).toBeNull()
+  })
   it('keeps comments on a task: add one, reopen the task, delete it', async () => {
     const user = userEvent.setup()
     const { api } = await renderApp('/p/inbox/tasks', async (a) => {
