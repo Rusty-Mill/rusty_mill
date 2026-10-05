@@ -99,7 +99,7 @@ split parent and its children would otherwise count the same work
 twice. CPE text is not copied from parent to child on a split.
 
 **Validated writes.** `insert_card`/`replace_card` check the invariant
-above, that the card is not its own parent, that the parent exists,
+above, that a deck number is unique on insert, that the card is not its own parent, that the parent exists,
 that the new parent chain does not reach the card (no cycles), and on
 replace that `number`/`origin`/`baseline_id` are unchanged. Every
 domain operation — `reassign_card`, `split_card`, `create_custom_card`,
@@ -228,7 +228,9 @@ relation is the tree (`parent`/`children`); `owner_id` and
 
 - **The stack cannot enforce** uniqueness of `number`, acyclicity of
   the parent chain, or the origin/number/baseline invariant; the domain
-  functions do, the raw traits do not. Tested in both directions.
+  functions do, the raw traits do not. The validated server insert holds
+  its exclusive lock across the number check and insertion. Tested in both
+  directions.
 - **An orphan after a raw delete** (`ADR-0051`: records do not cascade):
   the children keep their `parent_card_id`, `Parent` names an id with
   no record, `chain_to_root` stops at the cold trail, and the children

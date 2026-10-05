@@ -10,9 +10,10 @@ name: CI
 # touches (plus everything that transitively depends on them) and every
 # other job scopes its cargo invocation to just that set via `-p`, instead
 # of always running `--workspace` across ~70 largely-unrelated crates.
-# Pushes to main, and PRs that touch this CI config itself or workspace-wide
-# tooling config under .config/ (e.g. nextest's), still get the full sweep --
-# those can change how every crate builds or tests. A root Cargo.toml edit
+# PRs and main pushes use their event's base-to-head range. CI-only changes
+# run planner tests, workflow lint, and representative Linux/Windows smoke
+# tests; missing history, manual dispatches, and build-global changes still
+# get the full sweep. A root Cargo.toml edit
 # used to force the same full sweep unconditionally, but the single most
 # common edit to that file is adding a handful of brand-new, independent
 # workspace members with nothing else in the file touched (e.g. #170's
@@ -21,14 +22,17 @@ name: CI
 # cargo_toml_diff.py` classifies the change first and only forces the full
 # sweep when it's more than a pure `[workspace.members]` addition (a
 # dependency version bump, a removed/renamed member, a `[profile]` edit,
-# ...). A Cargo.lock-only change (no Cargo.toml edit -- a plain `cargo
-# update`) is narrower still: only the workspace crates whose dependency
-# graph actually includes whatever package moved, per `.github/scripts/
-# lockfile_diff.py`.
+# ...). Toolchain inputs are global. Cargo.lock changes are selected using the
+# full Cargo resolve graph below, with a conservative full fallback whenever
+# the old/new lockfile impact cannot be established reliably.
 on:
   push:
     branches: [main]
   pull_request:
+  # A manual run deliberately uses the same full-sweep plan as a main push.
+  # It is useful for re-running the whole workspace after runner or cache
+  # incidents without creating a no-op commit.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -65,8 +69,16 @@ env:
   REMIND_ME_PACKAGES: remind_me_core remind_me_mcp remind_me_api rusty-remind-me remind_me_remote remind_me_hub
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PR revisions supersede each other, so cancel their obsolete runs. Main
+  # sweeps are different: one may take long enough for another main push to
+  # arrive, and cancelling it loses the coverage we need. GitHub Actions
+  # permits one running and one pending run in a group; an incoming run may
+  # replace pending work, but it does not guarantee ordering, so this must not
+  # be interpreted as proving that the pending run is always the newest SHA.
+  # Manual runs get their own group: a dispatch from another ref must not
+  # replace pending main work.
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fmt:
@@ -90,6 +102,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
+  workflow-lint:
+    # Runs for every event; it is the primary workflow-specific check for the
+    # CI-only route and remains useful when an application change also edits CI.
+    name: workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          archive="actionlint_${version}_linux_amd64.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v${version}"
+          curl --fail --location --retry 3 --output checksums.txt "$base/actionlint_${version}_checksums.txt"
+          curl --fail --location --retry 3 --output "$archive" "$base/$archive"
+          grep "  $archive$" checksums.txt | sha256sum --check --status
+          tar --extract --gzip --file "$archive"
+      - name: Lint workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          for workflow in .github/workflows/*.yml; do
+            ./actionlint "$workflow"
+          done
 
   dependency-policy:
     # Enforces ADR-0002 (dependency sovereignty policy): a crate that is a
@@ -120,13 +158,24 @@ jobs:
     outputs:
       full: ${{ steps.plan.outputs.full }}
       packages: ${{ steps.plan.outputs.packages }}
+      ci_only: ${{ steps.plan.outputs.ci_only }}
       dashboard: ${{ steps.plan.outputs.dashboard }}
       term_web: ${{ steps.plan.outputs.term_web }}
       key_desktop: ${{ steps.plan.outputs.key_desktop }}
+      tick: ${{ steps.plan.outputs.tick }}
+      fair_play: ${{ steps.plan.outputs.fair_play }}
       remind_me: ${{ steps.plan.outputs.remind_me }}
+      win32: ${{ steps.plan.outputs.win32 }}
+      multimodal_db: ${{ steps.plan.outputs.multimodal_db }}
+      rusty_config_no_std: ${{ steps.plan.outputs.rusty_config_no_std }}
       shards: ${{ steps.plan.outputs.shards }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The planner verifies the event base is an ancestor before it
+          # selects a narrow range. A shallow checkout cannot prove that for
+          # a multi-commit push, so fetch complete history here.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -141,33 +190,43 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Event is ${{ github.event_name }}, not pull_request -- running the full workspace sweep."
-            echo "full=true" >> "$GITHUB_OUTPUT"
-            echo "packages=" >> "$GITHUB_OUTPUT"
-            echo "dashboard=true" >> "$GITHUB_OUTPUT"
-            echo "term_web=true" >> "$GITHUB_OUTPUT"
-            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-            echo "remind_me=true" >> "$GITHUB_OUTPUT"
-            echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+          emit_full() {
+            echo "$1 -- running the full workspace sweep."
+            python3 .github/scripts/ci_plan.py --emit-full >> "$GITHUB_OUTPUT"
+          }
+          emit_ci_smoke() {
+            echo "CI-only change -- running planner, workflow lint, and representative smoke tests. Full workspace coverage is not implied."
+            python3 .github/scripts/ci_plan.py --emit-ci-smoke >> "$GITHUB_OUTPUT"
+          }
+          mapfile -t event_plan < <(python3 .github/scripts/ci_plan.py \
+            --event "${{ github.event_name }}" \
+            --pr-base "${{ github.event.pull_request.base.sha }}" \
+            --push-before "${{ github.event.before }}")
+          mode="${event_plan[0]#mode=}"
+          base="${event_plan[1]#base=}"
+          if [ "$mode" = "full" ]; then
+            emit_full "Event has no usable scoped base"
             exit 0
           fi
-
-          base="${{ github.event.pull_request.base.sha }}"
-          git fetch --no-tags --depth=1 origin "$base"
-          changed="$(git diff --name-only "$base" HEAD)"
+          if ! git fetch --no-tags --depth=1 origin "$base" || ! git cat-file -e "$base^{commit}"; then
+            emit_full "Unable to obtain event base $base"
+            exit 0
+          fi
+          if ! python3 .github/scripts/ci_plan.py --verify-base "$base"; then
+            emit_full "Event base is not an ancestor of this checkout"
+            exit 0
+          fi
+          changed="$(python3 .github/scripts/ci_plan.py --changed-from "$base")"
           echo "Changed files:"
           echo "$changed"
 
-          if echo "$changed" | grep -Eq '^(\.config/|\.github/(workflows|actions|scripts)/)'; then
-            echo "Workspace-wide CI/tooling config changed -- running the full workspace sweep."
-            echo "full=true" >> "$GITHUB_OUTPUT"
-            echo "packages=" >> "$GITHUB_OUTPUT"
-            echo "dashboard=true" >> "$GITHUB_OUTPUT"
-            echo "term_web=true" >> "$GITHUB_OUTPUT"
-            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-            echo "remind_me=true" >> "$GITHUB_OUTPUT"
-            echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+          if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --is-ci-only; then
+            emit_ci_smoke
+            exit 0
+          fi
+
+          if printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --requires-full; then
+            emit_full "Workspace-wide CI/tooling config changed"
             exit 0
           fi
 
@@ -175,80 +234,47 @@ jobs:
             git show "$base:Cargo.toml" > /tmp/old-Cargo.toml
             classification="$(python3 .github/scripts/cargo_toml_diff.py /tmp/old-Cargo.toml Cargo.toml)"
             if [ "$classification" != "safe" ]; then
-              echo "Root Cargo.toml changed beyond a pure [workspace.members] addition -- running the full workspace sweep."
-              echo "full=true" >> "$GITHUB_OUTPUT"
-              echo "packages=" >> "$GITHUB_OUTPUT"
-              echo "dashboard=true" >> "$GITHUB_OUTPUT"
-              echo "term_web=true" >> "$GITHUB_OUTPUT"
-              echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-              echo "remind_me=true" >> "$GITHUB_OUTPUT"
-              echo "shards=[1,2,3]" >> "$GITHUB_OUTPUT"
+              emit_full "Root Cargo.toml changed beyond a pure [workspace.members] addition"
               exit 0
             fi
             echo "Root Cargo.toml changed, but only added new [workspace.members] entries -- narrowing normally instead of a full sweep."
           fi
 
-          # rusty_meshed's vendored data-mesh-monitor (Vite/React) isn't a
-          # Cargo crate, so affected_crates.py can't see it -- gate its own
-          # job on a plain path match instead.
-          if echo "$changed" | grep -q '^crates/apps/rusty_meshed/data-mesh-monitor/'; then
-            echo "dashboard=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "dashboard=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # Same for rusty_term's vendored web front end (Vite/React): not
-          # a Cargo crate, so gate its build job on its own path too.
-          if echo "$changed" | grep -q '^crates/libs/ui/rusty_term/web/'; then
-            echo "term_web=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "term_web=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # And rusty_key's Tauri front end (Vite/Solid), the third
-          # vendored npm app -- same gate, same reason.
-          if echo "$changed" | grep -q '^crates/apps/rusty_key/desktop/'; then
-            echo "key_desktop=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "key_desktop=false" >> "$GITHUB_OUTPUT"
-          fi
-
           cargo metadata --format-version=1 --all-features > /tmp/metadata.json
           packages="$(echo "$changed" | python3 .github/scripts/affected_crates.py /tmp/metadata.json)"
 
-          # Cargo.lock isn't owned by any single crate, so affected_crates.py
-          # can't attribute it -- but unlike Cargo.toml/CI-config changes
-          # above, a lockfile-only change (a plain `cargo update` bumping one
-          # transitive dependency, no Cargo.toml edit at all) has a real,
-          # narrower blast radius: exactly the workspace crates whose
-          # dependency graph actually includes the package(s) that moved.
-          # lockfile_diff.py computes that from the full resolve graph
-          # (including external packages, which affected_crates.py's own
-          # graph deliberately excludes) and falls back to every workspace
-          # crate itself if a changed lockfile entry can't be placed in the
-          # current metadata snapshot -- this step never forces `full=true`
-          # past that, it just folds the (possibly full) result into
-          # `packages`.
+          # Cargo.lock has no owning crate. For a lock-only update, select
+          # every workspace consumer of an added, removed, version-changed,
+          # source-changed, or checksum-changed resolved package through the
+          # full Cargo graph (including external nodes), then fold those
+          # consumers and their workspace reverse dependencies into scope.
+          # A simultaneous manifest edit or any unreadable/unknown lock
+          # entry is ambiguous, so deliberately retain the full sweep.
           if echo "$changed" | grep -Eq '^Cargo\.lock$'; then
-            echo "Cargo.lock changed -- narrowing to crates whose dependency graph actually moved."
-            git show "$base:Cargo.lock" > /tmp/old-Cargo.lock
-            lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock)"
-            echo "Lockfile-narrowed crates: ${lockfile_packages:-<none>}"
-            packages="$(printf '%s\n' $packages $lockfile_packages | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+            if echo "$changed" | grep -Eq '(^|/)Cargo\.toml$'; then
+              emit_full "Cargo.lock changed with a manifest"
+              exit 0
+            fi
+            if ! git show "$base:Cargo.lock" > /tmp/old-Cargo.lock; then
+              emit_full "Event base has no readable Cargo.lock"
+              exit 0
+            fi
+            if ! lockfile_packages="$(python3 .github/scripts/lockfile_diff.py /tmp/metadata.json /tmp/old-Cargo.lock Cargo.lock)"; then
+              emit_full "Unable to establish Cargo.lock impact"
+              exit 0
+            fi
+            if [ -z "$lockfile_packages" ]; then
+              emit_full "Cargo.lock changed with no resolvable package impact"
+              exit 0
+            fi
+            echo "Cargo.lock-affected crates: $lockfile_packages"
+            packages="$(printf '%s\n' "$packages" "$lockfile_packages" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
           fi
 
-          # rusty_remind_me's crates are excluded from the generic clippy/test
-          # jobs and run by the remind-me-* jobs below instead. Those run when
-          # one of its crates is affected (including via a lockfile move) or
-          # anything under its directory changed -- scripts/, .claude-plugin/
-          # and hooks/ belong to no crate, so the affected-crates filter alone
-          # would miss them.
-          if echo "$changed" | grep -q '^crates/apps/rusty_remind_me/' \
-            || printf ' %s ' "$packages" | grep -Eq ' (rusty-remind-me|remind_me_[a-z]+) '; then
-            echo "remind_me=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "remind_me=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Centralize all non-generic job gates here. Path-only front ends
+          # are selected directly; Rust jobs use the affected crate plus its
+          # reverse dependents.
+          printf '%s\n' "$changed" | python3 .github/scripts/ci_plan.py --packages "$packages" >> "$GITHUB_OUTPUT"
 
           if [ -z "$packages" ]; then
             echo "No workspace crate touched by this PR -- build/test/clippy will be skipped."
@@ -258,22 +284,28 @@ jobs:
           {
             echo "full=false"
             echo "packages=$packages"
+            echo "ci_only=false"
             echo "shards=[1]"
           } >> "$GITHUB_OUTPUT"
 
       - name: Summary
         shell: bash
         run: |
-          if [ "${{ steps.plan.outputs.full }}" = "true" ]; then
-            echo "### CI scope: full workspace sweep" >> "$GITHUB_STEP_SUMMARY"
-          elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
-            echo "### CI scope: no workspace crate affected -- build/test/clippy skipped" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### CI scope: affected crates" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "${{ steps.plan.outputs.packages }}" | tr ' ' '\n' >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            if [ "${{ steps.plan.outputs.full }}" = "true" ]; then
+              echo "### CI scope: full workspace sweep"
+            elif [ "${{ steps.plan.outputs.ci_only }}" = "true" ]; then
+              echo "### CI scope: CI-only smoke validation"
+              echo "Planner tests, workflow lint, and representative Linux/Windows smoke tests ran; this is not full workspace coverage."
+            elif [ -z "${{ steps.plan.outputs.packages }}" ]; then
+              echo "### CI scope: no workspace crate affected -- build/test/clippy skipped"
+            else
+              echo "### CI scope: affected crates"
+              echo '```'
+              echo "${{ steps.plan.outputs.packages }}" | tr ' ' '\n'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   clippy:
     name: clippy (${{ matrix.os }})
@@ -319,6 +351,24 @@ jobs:
       - name: Clippy
         if: steps.scope.outputs.args != ''
         run: cargo clippy ${{ steps.scope.outputs.args }} --all-targets --all-features -- -D warnings
+
+  ci-smoke:
+    # This is deliberately a real Cargo build/test on both supported hosts,
+    # but is not a replacement for a full workspace sweep.
+    name: CI-only smoke (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.ci_only == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-build-env
+        with:
+          cache-shared-key: ci-smoke-${{ matrix.os }}
+      - run: cargo test --locked -p rusty_baseline
 
   test:
     name: test (${{ matrix.os }}, shard ${{ matrix.shard }})
@@ -435,7 +485,24 @@ jobs:
       # on Windows must do the same.
       - name: Test (nextest)
         if: steps.scope.outputs.args != ''
-        run: cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)'
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          cargo nextest run ${{ steps.scope.outputs.args }} --all-features --no-fail-fast --no-tests=warn ${{ runner.os == 'Windows' && '--test-threads 2' || '' }} ${{ needs.plan.outputs.full == 'true' && format('--partition count:{0}/3', matrix.shard) || '' }} -E 'not binary_id(rusty_lines::windows_raw_mode)' 2>&1 | tee "test-results/nextest-${{ matrix.os }}-shard-${{ matrix.shard }}.log"
+
+      # The configured JUnit report carries each test's timing, retry attempts
+      # and failure output; the captured nextest stream is human-readable.
+      # Keep both even when the test step fails for later diagnosis.
+      - name: Upload nextest timing and retry reports
+        if: ${{ always() && steps.scope.outputs.args != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-${{ matrix.os }}-shard-${{ matrix.shard }}
+          path: |
+            target/nextest/default/junit.xml
+            test-results/nextest-${{ matrix.os }}-shard-${{ matrix.shard }}.log
+          if-no-files-found: warn
 
       # Runs once per OS, not once per shard -- it's cheap and not worth
       # partitioning, and nextest's own partitioning above doesn't cover a
@@ -474,14 +541,15 @@ jobs:
             cargo test --doc ${{ steps.scope.outputs.args }} --all-features
           else
             lib_pkgs="$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.targets[]?.kind[]? == "lib") | .name')"
-            args=""
-            for p in ${{ steps.scope.outputs.packages }}; do
+            read -r -a args <<< "${{ steps.scope.outputs.packages }}"
+            doc_args=()
+            for p in "${args[@]}"; do
               if echo "$lib_pkgs" | grep -qx "$p"; then
-                args="$args -p $p"
+                doc_args+=(-p "$p")
               fi
             done
-            if [ -n "$args" ]; then
-              cargo test --doc $args --all-features
+            if [ "${#doc_args[@]}" -gt 0 ]; then
+              cargo test --doc "${doc_args[@]}" --all-features
             else
               echo "No affected package declares a library target -- nothing to doc-test."
             fi
@@ -539,6 +607,8 @@ jobs:
   # the real binary is the rusty-tick-e2e job below.
   rusty-tick-web:
     name: rusty_tick web (typecheck, test, build)
+    needs: plan
+    if: needs.plan.outputs.tick == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -559,6 +629,8 @@ jobs:
   # the real rusty_tick binary (single-user and per-user-token servers).
   rusty-tick-e2e:
     name: rusty_tick e2e (Playwright)
+    needs: plan
+    if: needs.plan.outputs.tick == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -592,6 +664,8 @@ jobs:
   # in-memory adapter) and the production build. Mirrors rusty-tick-web.
   rusty-fair-play-web:
     name: rusty_fair_play web (typecheck, test, build)
+    needs: plan
+    if: needs.plan.outputs.fair_play == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -612,6 +686,8 @@ jobs:
   # against the real rusty_fair_play binary serving the built UI.
   rusty-fair-play-e2e:
     name: rusty_fair_play e2e (Playwright)
+    needs: plan
+    if: needs.plan.outputs.fair_play == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -672,7 +748,7 @@ jobs:
   win32-cross-compile-check:
     name: rusty_win32 cross-compile check (mingw, Linux)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_win32')
+    if: needs.plan.outputs.win32 == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -720,7 +796,7 @@ jobs:
   multimodal-db-feature-sets:
     name: rusty_multimodal_db feature sets (default, client, server, research)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -770,7 +846,7 @@ jobs:
     # bump does not rename a check a branch protection might require.
     name: rusty_multimodal_db msrv (rust-version)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_multimodal_db')
+    if: needs.plan.outputs.multimodal_db == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -784,7 +860,7 @@ jobs:
   rusty-config-no-std-check:
     name: rusty_config no_std (--no-default-features)
     needs: plan
-    if: needs.plan.outputs.full == 'true' || contains(needs.plan.outputs.packages, 'rusty_config')
+    if: needs.plan.outputs.rusty_config_no_std == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -859,10 +935,6 @@ jobs:
           # rstack-self links libunwind's ptrace API; liblzma-dev is required
           # too (remind_me_core's build.rs asks for -llzma -- its docs/adr/0014).
           - { feature: stack-dumps, test: true, clippy: true, apt: libunwind-dev liblzma-dev }
-          # ADR-0023: the engine is the default store (phase 5.4b), so every
-          # other leg runs on it. This one keeps the SQLite store covered:
-          # `store: sqlite` runs the whole suite with REMIND_ME_STORE=sqlite.
-          - { feature: engine-store, test: true, clippy: true, store: sqlite }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -877,8 +949,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
       - name: cargo test --features ${{ matrix.feature }}
         if: matrix.test
-        env:
-          REMIND_ME_STORE: ${{ matrix.store }}
         run: cargo test --locked -p remind_me_core --features ${{ matrix.feature }}
       - name: cargo clippy --features ${{ matrix.feature }}
         if: matrix.clippy

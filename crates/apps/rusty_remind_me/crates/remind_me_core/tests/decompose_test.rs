@@ -37,6 +37,7 @@ fn fact(content: &str) -> AtomicFact {
         predicate: None,
         object: None,
         entities: vec![],
+        metadata: None,
     }
 }
 
@@ -310,6 +311,7 @@ fn a_superseded_fact_drops_out_of_search() {
     let found: Vec<String> = queries::search_memories(
         &store,
         &remind_me_core::MemorySearchInput {
+            scope: Default::default(),
             strategy: Default::default(),
             include_sensitive: false,
             query: "quokka".into(),
@@ -325,6 +327,8 @@ fn a_superseded_fact_drops_out_of_search() {
             include_neighbors: false,
             expand_co_retrieval: false,
             bootstrap: false,
+            include_expired: true,
+            min_confidence: 0.0,
         },
     )
     .unwrap()
@@ -496,6 +500,7 @@ fn ordinary_memories_never_enter_the_batch() {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap();

@@ -2,8 +2,28 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { renderApp, seedFamily } from '@/test/renderApp'
+import { STALE_MESSAGE } from '@/store/data'
 
 describe('the board', () => {
+  it('does not rebase a confirmed suit selection after a background refresh', async () => {
+    const user = userEvent.setup()
+    const { api, services } = await renderApp('/deck', async (api) => {
+      const { ada } = await seedFamily(api)
+      const first = (await api.snapshot()).cards.find((c) => c.suit === 'Home')!
+      await api.updateCard(first.id, { ownerId: ada })
+    })
+    const selected = (await api.snapshot()).cards.find((c) => c.suit === 'Home')!
+    await user.click(screen.getByRole('button', { name: 'Choose cards' }))
+    await user.click(screen.getByRole('button', { name: 'Set aside every Home card' }))
+    const bob = (await api.snapshot()).people.find((p) => p.name === 'Bob')!
+    await api.updateCard(selected.id, { ownerId: bob.id }, selected.etag)
+    await services.store.getState().refresh()
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Set aside' }))
+    await waitFor(() => expect(services.store.getState().toasts.at(-1)?.message).toBe(STALE_MESSAGE))
+    expect(await api.getCard(selected.id)).toMatchObject({ inPlay: true, ownerId: bob.id })
+    expect((await api.snapshot()).cards.every((c) => c.inPlay)).toBe(true)
+  })
+
   it('shows six shelves with counts and a tile per card', async () => {
     await renderApp('/deck', async (api) => void (await seedFamily(api)))
     expect(screen.getByRole('heading', { name: /Home · 22/ })).toBeInTheDocument()
@@ -95,5 +115,63 @@ describe('the board', () => {
     expect(tile).toHaveTextContent('Ada')
     // The pane re-mounts when the route and the store settle, so re-query it on every poll rather than holding one node.
     await waitFor(() => expect(within(screen.getByRole('complementary', { name: 'Card details' })).getByLabelText('Name')).toHaveValue('Dog walking'))
+  })
+
+  it('chooses the family deck: set cards aside one by one or by suit, ask before taking a dealt card, and bring them back', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => {
+      const { ada } = await seedFamily(api)
+      await api.updateCard((await api.snapshot()).cards.find((c) => c.number === 3)!.id, { ownerId: ada }) // Dishes, Home
+    })
+    await user.click(screen.getByRole('button', { name: 'Choose cards' }))
+    expect(screen.getByText(/Pick the cards your family plays with/)).toBeInTheDocument()
+    const unicorn = within(screen.getByRole('list', { name: 'Unicorn Space cards' }))
+    await user.click(unicorn.getAllByRole('checkbox')[0]!)
+    await waitFor(() => expect(unicorn.getAllByRole('checkbox', { checked: false })).toHaveLength(1))
+
+    // A suit at once; Home has a dealt card, so it asks first.
+    await user.click(screen.getByRole('button', { name: 'Set aside every Home card' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Set aside 22 cards?' })
+    expect(dialog).toHaveTextContent('1 of them are dealt')
+    await user.click(within(dialog).getByRole('button', { name: 'Set aside' }))
+    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Home cards' })).getAllByRole('checkbox', { checked: false })).toHaveLength(22))
+    expect((await api.snapshot()).cards.filter((c) => !c.inPlay)).toHaveLength(23)
+    expect((await api.snapshot()).cards.find((c) => c.number === 3)).toMatchObject({ ownerId: null, inPlay: false })
+
+    await user.click(screen.getByRole('button', { name: 'Done choosing' }))
+    expect(screen.getAllByTestId('card-tile')).toHaveLength(77) // the deck is what is in play
+    expect(screen.getByText('77 cards')).toBeInTheDocument()
+    expect(screen.getByText('· 23 set aside')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /^Home/ })).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Set aside · 23' }))
+    expect(screen.getAllByTestId('card-tile')).toHaveLength(23)
+    await user.click(screen.getByRole('button', { name: 'Choose cards' }))
+    await user.click(screen.getByRole('button', { name: 'Put every Home card in the deck' }))
+    await waitFor(async () => expect((await api.snapshot()).cards.filter((c) => !c.inPlay)).toHaveLength(1))
+
+    // Putting the last one back leaves the "set aside" view instead of stranding the user on an empty board.
+    await user.click(screen.getByRole('button', { name: 'Done choosing' }))
+    await user.click(screen.getByRole('button', { name: 'Set aside · 1' }))
+    await user.click(screen.getByRole('button', { name: 'Choose cards' }))
+    await user.click(screen.getByRole('button', { name: 'Put every Unicorn Space card in the deck' }))
+    await user.click(screen.getByRole('button', { name: 'Done choosing' }))
+    await waitFor(() => expect(screen.getAllByTestId('card-tile')).toHaveLength(100))
+    expect(screen.queryByRole('button', { name: /^Set aside/ })).toBeNull()
+  })
+
+  it('keeps every tile the same size and folds the detail pane to a rail and back', async () => {
+    const user = userEvent.setup()
+    await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    for (const tile of screen.getAllByTestId('card-tile')) expect(tile.className).toContain('h-full w-full') // sized by the grid cell, not by the content
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const pane = () => screen.getByRole('complementary', { name: 'Card details' })
+    await user.click(within(pane()).getByRole('button', { name: 'Hide details' }))
+    expect(within(pane()).queryByLabelText('Execution')).toBeNull()
+    await user.click(within(pane()).getByRole('button', { name: 'Show details' }))
+    expect(within(pane()).getByLabelText('Execution')).toBeInTheDocument()
+    await user.click(within(pane()).getByRole('button', { name: 'Hide details' }))
+    await user.click(screen.getByRole('link', { name: /^Garbage/ })) // opening a card brings it back
+    expect(within(pane()).getByLabelText('Name')).toHaveValue('Garbage')
   })
 })

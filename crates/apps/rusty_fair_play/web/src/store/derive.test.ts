@@ -40,7 +40,7 @@ describe('derived views', () => {
   })
 
   it('stops on a cycle instead of looping', () => {
-    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: null, conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const, etag: '0', treeEtag: '0' }
+    const base = { number: null, suit: 'Home' as const, position: 0, ownerId: null, conception: '', planning: '', execution: '', minimumStandardOfCare: [], notes: '', origin: 'family' as const, baselineId: null, state: 'custom' as const, etag: '0', treeEtag: '0', inPlay: true }
     const index = indexCards([
       { ...base, id: 'a', name: 'A', parentCardId: 'b' },
       { ...base, id: 'b', name: 'B', parentCardId: 'a' },
@@ -74,5 +74,15 @@ describe('derived views', () => {
   it('counts states', async () => {
     const { snap } = await fixture()
     expect(stateCounts(snap.cards)).toEqual({ original: 99, edited: 1, custom: 3 })
+  })
+
+  it('leaves a card set aside out of the undealt list', async () => {
+    const { snap, index } = await fixture()
+    const away = snap.cards.find((c) => c.number === 5)!
+    const before = undealt(index, snap.cards)
+    expect(before.some((c) => c.id === away.id)).toBe(true)
+    const out = { ...away, inPlay: false }
+    const now = snap.cards.map((c) => (c.id === away.id ? out : c))
+    expect(undealt(indexCards(now), now)).toHaveLength(before.length - 1)
   })
 })

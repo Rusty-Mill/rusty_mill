@@ -23,6 +23,7 @@ fn add(store: &Store<'_>, content: &str, category: &str) -> String {
             predicate: None,
             object: None,
             entities: vec![],
+            ..Default::default()
         },
     )
     .unwrap()

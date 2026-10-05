@@ -51,7 +51,7 @@ when a descendant is edited, added or reordered. A mismatch is 412
 | POST | `/api/v1/seed` | (re)load the embedded deck: inserts any missing deck card, never touches an existing one (so it also restores a deleted deck card); `{"cardDefaults":{created,existing},"cards":{…}}` |
 | GET, POST | `/api/v1/people` | POST `{"name"}` → 201 Person; 409 if the name exists |
 | GET, PATCH, DELETE | `/api/v1/people/{id}` | PATCH `{"name"}`; DELETE → 204, 409 while the person holds a card |
-| GET, PATCH, DELETE | `/api/v1/cards/{id}` | DELETE → 204, 409 while the card has children; PATCH any of `name`, `suit`, `conception`, `planning`, `execution`, `minimumStandardOfCare`, `notes`, `ownerId`, `parentCardId`, `position`; absent = keep, `null` clears `ownerId`/`parentCardId` |
+| GET, PATCH, DELETE | `/api/v1/cards/{id}` | DELETE → 204, 409 while the card has children; PATCH any of `name`, `suit`, `conception`, `planning`, `execution`, `minimumStandardOfCare`, `notes`, `ownerId`, `parentCardId`, `position`, `inPlay`; absent = keep, `null` clears `ownerId`/`parentCardId`; `inPlay: false` sets the card aside, `true` adds it back |
 | POST | `/api/v1/cards` | `{"id"?,"name","suit","parentCardId"?,"ownerId"?,"conception"?,"planning"?,"execution"?,"minimumStandardOfCare"?,"notes"?}` → 201 Card |
 | POST | `/api/v1/cards/{id}/split` | `{"children":[{"id"?,"name","ownerId"?,…}],"ownerId"?,"notes"?}` → 201 `{"parent":Card,"children":[Card]}` |
 | POST | `/api/v1/cards/{id}/reset` | the six text fields back to the baseline; owner, parent, position and notes kept |
@@ -78,6 +78,7 @@ interface Card {
   state: 'original' | 'edited' | 'custom'   // derived against the baseline, never stored
   etag: string                     // send back as If-Match
   treeEtag: string                 // the same over the card and its whole subtree
+  inPlay: boolean                  // in the family's deck; false = set aside
 }
 interface Baseline { id; number; name; suit; conception; planning; execution; minimumStandardOfCare }
 ```
@@ -90,6 +91,25 @@ of the six text fields makes a deck card `edited`, while owner, parent,
 position and notes never do. Deletes keep the tree and the ownership
 well-formed: a leaf card and a person holding nothing can go; a parent
 goes through `unsplit`; a holder's cards are reassigned first.
+
+A family plays with the cards it chooses. `PATCH {"inPlay": false}` sets a card
+aside: it is taken back from its owner in the same write, and from then on it
+cannot be dealt, split or made a parent (422); a card that is split cannot be set
+aside (409, unsplit it first). `{"inPlay": true}` adds it back. The set is the
+small file `set-aside.json` beside the stores, written by rename, not a field on
+the stored card, so no existing data directory needs migrating. It is part of
+the card's `etag`, a deleted card drops out of it, and a damaged file refuses to
+open rather than reading as "nothing set aside". The undealt list and the balance
+count only the cards in play.
+
+Adding a set-aside card back and assigning an owner in the same request is
+refused (422). First persist `{"inPlay": true}`, then assign the owner with
+the returned etag. Failed sidecar saves leave membership unchanged in memory;
+retry after fixing the I/O error. Deletion/unsplit clean membership before
+removing cards, leaving them available if cleanup fails. These multi-store
+operations are not atomic: interruption can leave an unowned card in play.
+The UI preserves selection-time versions through confirmations and bulk writes,
+and folding the detail pane preserves unsaved edits and pending saves.
 
 The deck loads on first start and is recorded by a `deck.loaded` marker written
 after the load finishes, not by looking for card 1: a deleted deck card stays

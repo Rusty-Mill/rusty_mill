@@ -41,6 +41,7 @@ fn add(store: &Store<'_>, content: &str, sensitive: bool) -> String {
             object: None,
             entities: vec![],
             sensitive,
+            ..Default::default()
         },
     )
     .unwrap()
@@ -51,6 +52,7 @@ fn search_ids(store: &Store<'_>, query: &str, include_sensitive: bool) -> Vec<St
     queries::search_memories(
         store,
         &MemorySearchInput {
+            scope: Default::default(),
             strategy: Default::default(),
             query: query.to_string(),
             category: None,
@@ -65,6 +67,8 @@ fn search_ids(store: &Store<'_>, query: &str, include_sensitive: bool) -> Vec<St
             include_neighbors: false,
             expand_co_retrieval: false,
             bootstrap: false,
+            include_expired: true,
+            min_confidence: 0.0,
             include_sensitive,
         },
     )
@@ -133,6 +137,19 @@ fn an_incoming_sensitive_record_stays_hidden_on_this_node() {
         deleted_at: None,
         sensitive: true,
         remind_at: None,
+        project: None,
+        session_id: None,
+        git_remote: None,
+        git_branch: None,
+        git_sha: None,
+        cwd: None,
+        valid_from: None,
+        valid_until: None,
+        confidence: 1.0,
+        verified_at: None,
+        outcome: None,
+        written_by: "unknown".into(),
+        capture_method: "manual".into(),
     };
 
     upsert_record(&store, &record).unwrap();
