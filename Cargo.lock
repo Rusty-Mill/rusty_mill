@@ -13765,6 +13765,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_agui"
+version = "0.1.0"
+dependencies = [
+ "rusty_http",
+ "rusty_json",
+ "rusty_json_patch",
+ "rusty_serve",
+]
+
+[[package]]
 name = "rusty_ansder"
 version = "0.1.0"
 dependencies = [
@@ -14030,6 +14040,13 @@ dependencies = [
 [[package]]
 name = "rusty_json-derive"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_json_patch"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+]
 
 [[package]]
 name = "rusty_kafka"

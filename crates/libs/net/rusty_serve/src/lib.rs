@@ -46,23 +46,62 @@ pub struct Request<'a> {
     pub body: &'a [u8],
 }
 
-/// What a [`Handler`] answers: a status and a JSON document (empty for
-/// 204).
+/// What a [`Handler`] answers: a status and a body.
 pub struct Response {
     pub status: StatusCode,
-    pub body: Vec<u8>,
+    pub body: Body,
+}
+
+/// A response body: a JSON document written whole, or a stream of chunks
+/// written as they are produced.
+pub enum Body {
+    /// A JSON document, empty for 204. Sent with `Content-Length`.
+    Json(Vec<u8>),
+    /// Chunks pulled from the iterator after the handler has returned and
+    /// its lock is released, each written to the socket as one
+    /// `Transfer-Encoding: chunked` chunk, until the iterator ends. For
+    /// `text/event-stream` and other long-lived responses.
+    Stream {
+        /// The `Content-Type` to send.
+        content_type: &'static str,
+        /// The chunks. Blocking in `next` is fine: the connection thread
+        /// is the only one waiting.
+        chunks: Box<dyn Iterator<Item = Vec<u8>> + Send>,
+    },
 }
 
 impl Response {
+    /// A JSON response (an empty body for 204).
+    pub fn json(status: StatusCode, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body: Body::Json(body),
+        }
+    }
+
+    /// A streamed response; see [`Body::Stream`].
+    pub fn stream(
+        content_type: &'static str,
+        chunks: impl Iterator<Item = Vec<u8>> + Send + 'static,
+    ) -> Self {
+        Self {
+            status: StatusCode::OK,
+            body: Body::Stream {
+                content_type,
+                chunks: Box::new(chunks),
+            },
+        }
+    }
+
     /// A generic 500 in the error shape every handler here uses,
     /// `{"error":{"code":"internal","message":"internal error"}}` — what
     /// the transport answers when the handler is unusable (its lock is
     /// poisoned, so a handler panicked mid-write).
     pub fn internal_error() -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            body: br#"{"error":{"code":"internal","message":"internal error"}}"#.to_vec(),
-        }
+        Self::json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error":{"code":"internal","message":"internal error"}}"#.to_vec(),
+        )
     }
 }
 
@@ -216,11 +255,54 @@ fn serve_connection<H: Handler>(stream: TcpStream, app: &App<H>) -> TransportRes
             // rather than serve state that may be inconsistent.
             Err(_) => Response::internal_error(),
         };
-        write_response(&mut transport, response.status, &response.body, keep_alive)?;
+        match response.body {
+            Body::Json(body) => write_response(&mut transport, response.status, &body, keep_alive)?,
+            Body::Stream {
+                content_type,
+                chunks,
+            } => write_stream(
+                &mut transport,
+                response.status,
+                content_type,
+                chunks,
+                keep_alive,
+            )?,
+        }
         if !keep_alive {
             return Ok(());
         }
     }
+}
+
+/// Send a streamed body as chunked transfer encoding, one chunk per
+/// iterator item, ending the body when the iterator does. Nothing is
+/// buffered: each chunk reaches the socket before the next is pulled, so
+/// a client sees events as the handler's producer emits them.
+fn write_stream(
+    transport: &mut SyncTransport<TcpStream>,
+    status: StatusCode,
+    content_type: &'static str,
+    chunks: Box<dyn Iterator<Item = Vec<u8>> + Send>,
+    keep_alive: bool,
+) -> TransportResult<()> {
+    let mut headers = HeaderMap::new();
+    let _ = headers.insert("Content-Type", content_type);
+    let _ = headers.insert("Transfer-Encoding", "chunked");
+    let _ = headers.insert("Cache-Control", "no-store");
+    let _ = headers.insert("X-Content-Type-Options", "nosniff");
+    if !keep_alive {
+        let _ = headers.insert("Connection", "close");
+    }
+    transport.write_response_head(&ResponseHead {
+        status,
+        reason: status.canonical_reason().unwrap_or("").to_string(),
+        version: Version::Http11,
+        headers,
+    })?;
+    for chunk in chunks {
+        transport.write_chunk(&chunk)?;
+    }
+    transport.write_chunked_end()
 }
 
 /// The web UI file for a `GET` outside the API, when a UI directory is set.
@@ -324,9 +406,16 @@ mod tests {
     impl Handler for Echo {
         fn handle(&mut self, request: &Request<'_>) -> Response {
             assert!(request.target != "/api/boom", "poison the lock");
-            Response {
-                status: StatusCode::OK,
-                body: format!(
+            if request.target == "/api/stream" {
+                // Three chunks, the second produced after the first was sent.
+                return Response::stream(
+                    "text/event-stream",
+                    (1..=3).map(|n| format!("data: {n}\n\n").into_bytes()),
+                );
+            }
+            Response::json(
+                StatusCode::OK,
+                format!(
                     r#"{{"method":"{:?}","target":"{}","ifMatch":{}}}"#,
                     request.method,
                     request.target,
@@ -335,7 +424,7 @@ mod tests {
                         .map_or("null".to_string(), |v| format!("\"{v}\""))
                 )
                 .into_bytes(),
-            }
+            )
         }
     }
 
@@ -434,6 +523,40 @@ mod tests {
         );
         assert_eq!(status(&after), 500);
         assert!(after.contains(r#""code":"internal""#));
+        stop.shutdown();
+    }
+
+    #[test]
+    fn a_streamed_body_is_chunked_and_keeps_the_connection_usable() {
+        let (addr, stop) = start(None);
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .write_all(b"GET /api/stream HTTP/1.1\r\nHost: t\r\n\r\n")
+            .unwrap();
+        stream
+            .write_all(b"GET /api/after HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut out = String::new();
+        let _ = stream.read_to_string(&mut out);
+        let (first, second) = out.split_once("HTTP/1.1 200 OK\r\nContent-Length").unwrap();
+        assert!(
+            first.contains("Content-Type: text/event-stream\r\n"),
+            "{first}"
+        );
+        assert!(first.contains("Transfer-Encoding: chunked\r\n"), "{first}");
+        assert!(!first.contains("Content-Length"), "{first}");
+        assert!(
+            first
+                .ends_with("9\r\ndata: 1\n\n\r\n9\r\ndata: 2\n\n\r\n9\r\ndata: 3\n\n\r\n0\r\n\r\n"),
+            "{first:?}"
+        );
+        assert!(
+            second.contains("/api/after"),
+            "keep-alive survives a stream"
+        );
         stop.shutdown();
     }
 
