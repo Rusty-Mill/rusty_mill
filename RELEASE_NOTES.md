@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty-mcp: public cache-hint helper; nexus-mcp sheds a private API and two dependencies
+**2026-10-05** · (link once pushed) · [#479](https://github.com/Rusty-Mill/rusty_mill/issues/479)
+
+- **Added:** `rusty_mcp::apply_cache_hints`, documented public API with a doc example. It sets `ttlMs` and `cacheScope` on a list result only for peers that negotiated spec 2026-07-28.
+- **Changed:** `nexus-mcp`'s `list_tools`, `list_prompts` and `list_resources` call it instead of `rusty_mcp::__private::apply_cache_hints`, a `#[doc(hidden)]` module documented as not stable. `__private::apply_cache_hints` stays as a re-export, so `rusty-mcp`'s own macros are untouched.
+- **Changed:** `nexus-mcp` drops its direct `http` and `reqwest` dependencies, which had no remaining uses after the Host client moved into `rusty-mcp` (#498), and trims its own `rmcp` features to `server` and `macros`. The client and Streamable HTTP client features move to `[dev-dependencies]` for the in-process adapter tests. Production builds still get them through `rusty-mcp`'s `client` feature, which already enables `client-side-sse` through the Streamable HTTP client feature. `Cargo.lock` loses the two edges.
+- **Verified on the pinned 1.98.1 toolchain:** `clippy -D warnings` and `fmt --check` clean for `rusty-mcp`, `nexus-mcp` and `nexus-cli`; `rusty-mcp` 201 tests with the `client` feature and its doc tests with default features; `nexus-mcp` 108 tests; `nexus-bootstrap`'s `dep_invariants` 3 passed; `cargo check --all-targets` for every workspace crate that depends on `rusty-mcp`; `check_workspace_deps.py`, `check_workspace_layers.py` and the workspace-map verify. Not run locally: the full workspace sweep, because `libdbus-sys` needs headers this container lacks. CI on the PR is the authority for that.
+- Out of scope, by choice: the Streamable HTTP option on `nexus mcp serve` (it is loopback-only with no auth and no Origin allow-list, and is awaiting an owner decision), and the proposal to let plugins publish their own tools through the dynamic registry.
+
+---
+
 ## rusty_rsi: Codex CLI as the outer proposer
 **2026-10-04** · [#485](https://github.com/Rusty-Mill/rusty_mill/pull/485) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

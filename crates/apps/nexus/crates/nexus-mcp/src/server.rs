@@ -3892,11 +3892,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
         std::future::ready(page.map(|(tools, next_cursor)| {
             let mut result = ListToolsResult::with_all_items(tools);
             result.next_cursor = next_cursor;
-            rusty_mcp::__private::apply_cache_hints(
-                &context,
-                &mut result.ttl_ms,
-                &mut result.cache_scope,
-            );
+            rusty_mcp::apply_cache_hints(&context, &mut result.ttl_ms, &mut result.cache_scope);
             result
         }))
     }
@@ -3970,11 +3966,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
         )?;
         let mut result = ListPromptsResult::with_all_items(prompts);
         result.next_cursor = next_cursor;
-        rusty_mcp::__private::apply_cache_hints(
-            &context,
-            &mut result.ttl_ms,
-            &mut result.cache_scope,
-        );
+        rusty_mcp::apply_cache_hints(&context, &mut result.ttl_ms, &mut result.cache_scope);
         Ok(result)
     }
 
@@ -4052,11 +4044,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
         )?;
         let mut result = ListResourcesResult::with_all_items(resources);
         result.next_cursor = next_cursor;
-        rusty_mcp::__private::apply_cache_hints(
-            &context,
-            &mut result.ttl_ms,
-            &mut result.cache_scope,
-        );
+        rusty_mcp::apply_cache_hints(&context, &mut result.ttl_ms, &mut result.cache_scope);
         Ok(result)
     }
 
