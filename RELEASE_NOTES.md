@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_rsi: record the outer agent's cost
-**2026-10-05** · PR pending · [ADR-0005](docs/adr/0005-rsi-harness.md)
+**2026-10-05** · [#507](https://github.com/Rusty-Mill/rusty_mill/pull/507) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 
 - **Added:** `outer_cost` on each proposal's lineage entry: the proposer's prompt and completion tokens, and the wall time the outer loop measured around the proposal. `rsi report` adds an **Outer cost** line beside the inner cost.
   - **Codex** proposals now run with `--json`; tokens are summed from the `turn.completed` events, as for `CodexModel`.

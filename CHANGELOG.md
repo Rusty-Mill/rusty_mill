@@ -9,7 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
-- **`rusty_rsi`: the outer agent's cost is recorded** (`crates/apps/rusty_rsi`, ADR-0005): each proposal's lineage entry gains `outer_cost` (tokens from Codex's `--json` events or Claude Code's envelope, wall time measured by the loop), and `rsi report` totals it. Older lineages still verify and decode.
+- **`rusty_rsi`: the outer agent's cost is recorded** ([#507](https://github.com/Rusty-Mill/rusty_mill/pull/507), `crates/apps/rusty_rsi`, ADR-0005): each proposal's lineage entry gains `outer_cost` (tokens from Codex's `--json` events or Claude Code's envelope, wall time measured by the loop), and `rsi report` totals it. Older lineages still verify and decode.
 - **`rusty_rsi`: Codex as the inner model and Claude Code as the outer proposer** (`crates/apps/rusty_rsi`, ADR-0005): `RSI_INNER_PROVIDER=codex` serves the inner agent's completions from sandboxed `codex exec --json`, metered from its token usage; `RSI_OUTER_PROVIDER=claude` runs `claude -p --restricted` with file tools only in the same sandbox. `rsi-runtime::codex` becomes `agent_cli`.
 - **`rusty_rsi` Codex proposer** (`crates/apps/rusty_rsi`, ADR-0005): `RSI_OUTER_PROPOSER=codex` runs `codex exec` inside `rsi`'s Landlock sandbox on a `.git`-free staging copy, with a new `Sockets::Internet` rule; rustils 0.27.2 lets Landlock roots be single files.
 - **`rusty_fair_play`: the family's deck.** `PATCH inPlay` sets a card aside or adds it back (a `set-aside.json` beside the stores, no stored-format change); a set-aside card has no owner and is out of the undealt list and the balance. The web board gets equal-size tiles, a collapsible detail pane, a Choose cards mode and a set-aside view.
