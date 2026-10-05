@@ -13728,6 +13728,7 @@ dependencies = [
  "rusty_http",
  "rusty_simd",
  "rusty_std",
+ "rusty_sync",
  "rusty_wire",
 ]
 
@@ -14068,6 +14069,7 @@ dependencies = [
  "rusty_http",
  "rusty_simd",
  "rusty_std",
+ "rusty_sync",
  "serde",
  "serde_json",
  "wgpu 29.0.4",
