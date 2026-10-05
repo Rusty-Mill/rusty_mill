@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_agui: the headless TypeScript core
-**2026-10-05** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 2
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 2
 
 - **Added:** `@rusty-mill/agui-core` at `crates/libs/protocol/rusty_agui/packages/agui-core`, the headless TypeScript mirror of the crate with no runtime dependencies. Wire types and a validating `parseEvent` (unknown members kept, as the Rust codec ignores them); RFC 6901/6902/7386 pointers, atomic patch and merge patch; SSE `encode` and an incremental `Decoder`; a `Verifier` with the same ordering rules and chunk expansion as the Rust one; a `Reducer`; `streamAgent` (an async iterable of verified events) and `runAgent` (events, messages, state, result, outcome or error) over `fetch`. ESM, built with `tsc`.
 - **Added:** `crates/libs/protocol/rusty_agui/fixtures/`: `events.json` (one sample per event type), `chunks.json` (chunk sequences and their canonical expansion) and `runs.json` (a whole run with its expected messages and state). The Rust codec, verifier and reducer tests and the TypeScript tests both read them, so the two implementations cannot drift apart without a test saying so.

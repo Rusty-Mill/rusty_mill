@@ -11,7 +11,7 @@ crate against shared fixtures.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
-| step 2 (PR pending) | | `@rusty-mill/agui-core`, the headless TypeScript core; shared `fixtures/`; the core run in conformance beside the reference client |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 2 | `@rusty-mill/agui-core`, the headless TypeScript core; shared `fixtures/`; the core run in conformance beside the reference client |
 | [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 1 | `rusty_agui`'s `client` feature (`HttpAgent`, blocking, on `rusty_http`); the `echo_agent` example; `conformance/`, where `@ag-ui/client` drives the example in CI |
 | [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) | 2026-10-05 | `rusty_json_patch` (RFC 6901/6902/7386), `rusty_agui` (types, events, codec, SSE, verifier, reducer, `serve` feature with `Agent` and `AgentHandler`), streaming bodies in `rusty_serve` |
 
