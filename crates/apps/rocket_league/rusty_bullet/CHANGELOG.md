@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0055 (`RB-PHYSICS-001-FR-136`): `jump::JumpClock`; the second jump
+  or dodge expires 1.25 s after the first jump's hold ends.
 - ADR-0054 (`RB-PHYSICS-001-FR-135`): a body's static-contact lever arm
   runs to `Contact::point_on_a`, shifting the friction rows' lever.
 - ADR-0053 (`RB-PHYSICS-001-FR-134`): `ground::NON_STICKY_FRICTION_CURVE`;

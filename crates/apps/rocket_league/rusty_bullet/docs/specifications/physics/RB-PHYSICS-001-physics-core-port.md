@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.138.0
+- Version: 0.139.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6525,6 +6525,22 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       the principle is Bullet's and the capture with wall impacts gains
       most); `side` unchanged; 9.125 s unmoved.
 
+- `RB-PHYSICS-001-FR-136` (second-jump window; implemented, no capture
+  exercises it, ADR-0055): `jump::JumpClock` is `Car::_UpdateJump`'s and
+  `_UpdateDoubleJumpOrFlip`'s timers. The second jump or dodge expires
+  `DOUBLE_JUMP_MAX_DELAY` (1.25 s) after the first jump's hold ends. A car
+  that never jumped (drove off an edge) has no expiry, as RocketSim; a wall
+  contact refills the window with the second jump; a landing forgets the
+  jump after `JUMP_MIN_TIME + JUMP_RESET_TIME_PAD`.
+  - Why: found reading the glossaries and `Car.cpp` for the mechanics
+    catalogue; the port never expired the second jump.
+  - **Verification**:
+    - `drive` test `the_second_jump_expires_after_the_double_jump_window`
+      (dodge at 1.0 s works, at 1.6 s does nothing, never-jumped at 3 s
+      works; fails without the gate).
+    - All four captures unchanged to the printed precision (no recorded
+      second jump comes later than the window).
+
 
 ## Architecture and interfaces
 
@@ -8015,6 +8031,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.139.0 (2026-10-05): `RB-PHYSICS-001-FR-136` — the second jump expires
+  1.25 s after the first jump's hold ends (ADR-0055). 452 tests in
+  `rb_physics_bullet`.
 - 0.138.0 (2026-10-04): `RB-PHYSICS-001-FR-135` — a body's static-contact
   lever arm runs to its own surface point (ADR-0054). 451 tests in
   `rb_physics_bullet`.

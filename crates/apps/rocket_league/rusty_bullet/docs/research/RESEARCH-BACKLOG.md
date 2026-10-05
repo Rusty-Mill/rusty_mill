@@ -165,8 +165,87 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   implemented. No re-capturing workflow exists yet to justify more.
 - **Owner**: baileyrd.
 
+### RB-RESEARCH-O004 — Larger replay corpus: where to get replay files
+
+- **Why**: the owner's own captures and 40 real matches are the only
+  ground truth; more `.replay` files widen coverage (hard landings, wall
+  and corner impacts, pogos) and feed any bot-training or detector work.
+- **Sources found (2026-10-05, from web search and the ballchasing API
+  docs; none downloaded yet)**:
+  - ballchasing.com API (needs an API token, never committed; set in the
+    environment). Replay list filters: `title`, `player-name`, `player-id`,
+    `playlist`, `season`, `match-result`, `min-rank`, `max-rank`, `pro`,
+    `uploader`, `group`, `map`, `created-before/after`,
+    `replay-date-before/after`, `count`, `sort-by`, `sort-dir`. Raw file:
+    `GET /replays/{id}/file`. Detail stats include `flip_resets` (counted by
+    the game, unverified by ballchasing), `aerial_hits`, `epic_saves`,
+    `clears`, `centers`, `first_touches`, `crossbar_hits`, `bicycle_hits`,
+    `juggle_hits`. No mechanic filter on the list endpoint and no pogo stat.
+    Download limits: free 1/s and 200/h; patron tiers 2/s and up to 2000/h.
+    Group download: free about 333 3v3 games, 1000 per group for the top
+    tier. [API](https://ballchasing.com/doc/api),
+    [FAQ](https://ballchasing.com/doc/faq).
+  - Kaggle: [High-Level Rocket League Replay Dataset](https://www.kaggle.com/datasets/rolvarild/high-level-rocket-league-replay-dataset)
+    (about 120k GC+ replays: 41k 1v1, 42k 2v2, 36k 3v3, from ballchasing;
+    pipeline at [Rolv-Arild/rl-high-level-dataset](https://github.com/Rolv-Arild/rl-high-level-dataset)),
+    and per-season SSL sets such as
+    [Season 15](https://www.kaggle.com/datasets/rolvarild/rocket-league-ranked-replays-season-15-ssl)
+    (seasons 10-15 listed). Size and licence not checked.
+  - Scraper projects showing how to pull replays:
+    [RLBot-Dataset](https://github.com/jeromepl/RLBot-Dataset),
+    [rlcs_data](https://github.com/Dyl-M/rlcs_data),
+    [rocket-league-replays](https://github.com/rocket-league-replays/rocket-league-replays).
+  - Local replay folder in-game: `Documents\My Games\Rocket League\TAGame\Demos`.
+- **Caveats**: replay frames are sampled at a lower rate than BakkesMod
+  captures and carry no raw inputs, so replays check trajectories, not
+  one-step physics. Downloaded files go in the gitignored `/replays/`;
+  respect each source's terms; check licences before any redistribution.
+- **Next**: owner creates a ballchasing token; write a small fetch script
+  (outside the workspace crates, or a new adapter) that lists with the
+  filters above, keeps `flip_resets > 0`, `aerial_hits`, `juggle_hits`
+  candidates, and writes into `/replays/`; run `corpus_check` over them.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O005 — A high-level bot to perform the mechanics
+
+- **Why**: the owner cannot execute some mechanics (pogo, flip reset,
+  ceiling shot, speed flip) as accurately as a strong bot; a bot driving
+  the game offline while BakkesMod records would give clean, repeatable
+  captures for each mechanic, with exact inputs.
+- **Candidates found (2026-10-05, web search; not evaluated)**:
+  - [RLBot](https://rlbot.org/faq/): framework giving bots game state and
+    carrying back button presses for offline modes; Python and .NET.
+    [v5 download](https://rlbot.org/v5/).
+  - [Necto](https://github.com/Rolv-Arild/Necto) / Nexto: community
+    reinforcement-learning bots trained with RLGym; Nexto reported about
+    Grand Champion 1 in 1v1/2v2/3v3.
+  - RLGym: Gym-style Python API and BakkesMod plugin for training.
+  - Not from the search, to verify: RocketSim is the simulator RLGym-sim
+    variants train against, which is also this project's reference engine.
+- **Open questions**: do existing bots perform the specific mechanics on
+  demand (pogo, flip reset) or only as part of play; scripted sequences
+  (RLBot) versus a trained policy; how to record BakkesMod captures during
+  a bot-driven offline session (the existing capture script and
+  `rb_capture_ingest` format, ADR-0005); terms of use of RLBot with the
+  current game build; whether a bot should instead drive `rb_physics_bullet`
+  directly for self-consistency tests.
+- **Next**: a spike that runs an RLBot scripted bot through one mechanic
+  from the catalogue and captures it.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O006 — Mechanics catalogue to drive the bot and the tests
+
+- **Why**: a bot (O005) and a replay detector (O004) both need a shared,
+  named list of mechanics with how each is detected and which physics it
+  stresses.
+- **Status**: Started: [MECHANICS-CATALOGUE.md](MECHANICS-CATALOGUE.md)
+  holds the first list. **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-05: Added RB-RESEARCH-O004 (replay corpus sources),
+  O005 (high-level bot) and O006 (mechanics catalogue) from the owner's
+  notes; nothing downloaded or built yet.
 - 2026-08-28: RB-RESEARCH-O003 resolved (ADR-0005: JSON-Lines capture
   format, one-off script not a harness), decided while implementing
   `rb_capture_ingest`. RB-RESEARCH-S004 updated: replay-recovered input is

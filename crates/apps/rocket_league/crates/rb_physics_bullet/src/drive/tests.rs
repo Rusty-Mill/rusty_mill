@@ -153,6 +153,7 @@ fn step_with_input_and_dodge_flip(
         jump_held: *jump_held,
         double_jump_available: *double_jump_available,
         jump_hold_time_remaining: *jump_hold_time_remaining,
+        jump_clock: super::JumpClock::default(),
         flip: *flip,
         handbrake_amount: 0.0,
         sticky_surface_up: None,
@@ -2426,6 +2427,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
+            jump_clock: super::JumpClock::default(),
             flip: None,
             handbrake_amount: 0.0,
             sticky_surface_up: None,
@@ -3577,4 +3579,51 @@ fn coasting_on_a_steep_surface_grips_less_than_driving() {
         "coasting {coasting} against driving {driving}"
     );
     assert!((slide(1.0, 0.0) - slide(1.0, 1.0)).abs() < 1e-3);
+}
+
+/// RB-PHYSICS-001-FR-136: the second jump or dodge expires 1.25 s after the
+/// first jump's hold ends; a car that never jumped keeps it (RocketSim's
+/// `airTimeSinceJump` only runs after a jump).
+#[test]
+fn the_second_jump_expires_after_the_double_jump_window() {
+    let dt = 1.0 / 120.0;
+    let dodge_after = |jumped: bool, wait: f32| -> f32 {
+        let mut car = car();
+        let mut state = DriveState::new();
+        let mut step = |car: &mut RigidBody, input: &ControllerInput, on_ground: bool| {
+            car.clear_forces();
+            apply_driven_forces(
+                car,
+                input,
+                &wheels_for(car, on_ground),
+                None,
+                &mut state,
+                dt,
+            );
+            integrate::integrate_velocities(car, dt);
+        };
+        if jumped {
+            let press = ControllerInput {
+                jump: true,
+                ..Default::default()
+            };
+            step(&mut car, &press, true);
+        }
+        let idle = ControllerInput::default();
+        for _ in 0..(wait / dt) as usize {
+            step(&mut car, &idle, false);
+        }
+        car.linear_velocity = Vec3::ZERO;
+        let dodge = ControllerInput {
+            jump: true,
+            pitch: Some(-1.0),
+            ..Default::default()
+        };
+        step(&mut car, &dodge, false);
+        car.linear_velocity.x
+    };
+    // The hold ends 0.2 s after the press, so the window runs to about 1.45 s.
+    assert!(dodge_after(true, 1.0) > 100.0, "inside the window");
+    assert!(dodge_after(true, 1.6).abs() < 1.0, "past the window");
+    assert!(dodge_after(false, 3.0) > 100.0, "never jumped: no expiry");
 }
