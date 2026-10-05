@@ -22,7 +22,7 @@ use rusty_multimodal_db::server::client::{BatchOp, ClientError, SchemaDrivenClie
 use rusty_multimodal_db::server::fair_play::{
     CardConnectionStore, CardDefaultConnectionStore, PersonConnectionStore,
 };
-use rusty_multimodal_db::server::protocol::{ErrorCode, ParentLookup, ScanValue};
+use rusty_multimodal_db::server::protocol::{ErrorCode, ParentLookup, ScanValue, WriteResult};
 use rusty_multimodal_db::server::{serve_tables, ConnectionStore, ServeOptions};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
@@ -217,6 +217,66 @@ fn malformed_atomic_batches_leave_card_and_person_records_unchanged() {
         })
     ));
     assert_eq!(client.get(person).unwrap().unwrap(), person_before);
+}
+
+#[test]
+fn non_atomic_batches_keep_ordered_results_and_apply_later_valid_updates() {
+    let addr = start_server_at(unique_dir("fair_play_pipelined_batches"));
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let missing = Uuid::from_u128(0xf001);
+
+    let card_id = deck_card_id(1);
+    assert_eq!(
+        client
+            .write_batch(
+                &[
+                    BatchOp::UpdateField {
+                        id: missing,
+                        field: "position",
+                        value: ScanValue::U32(999),
+                    },
+                    BatchOp::UpdateField {
+                        id: card_id,
+                        field: "position",
+                        value: ScanValue::U32(999),
+                    },
+                ],
+                false,
+            )
+            .unwrap(),
+        vec![WriteResult::NotFound, WriteResult::Updated]
+    );
+    assert_eq!(
+        value(&client.get(card_id).unwrap().unwrap(), "position"),
+        &ScanValue::U32(999)
+    );
+
+    client.use_table("person").unwrap();
+    let person = person_id("Ada");
+    assert_eq!(
+        client
+            .write_batch(
+                &[
+                    BatchOp::UpdateField {
+                        id: missing,
+                        field: "player",
+                        value: ScanValue::U32(999),
+                    },
+                    BatchOp::UpdateField {
+                        id: person,
+                        field: "player",
+                        value: ScanValue::U32(999),
+                    },
+                ],
+                false,
+            )
+            .unwrap(),
+        vec![WriteResult::NotFound, WriteResult::Updated]
+    );
+    assert_eq!(
+        value(&client.get(person).unwrap().unwrap(), "player"),
+        &ScanValue::U32(999)
+    );
 }
 
 #[test]
