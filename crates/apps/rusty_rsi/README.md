@@ -104,7 +104,7 @@ outer loop also needs `git` 2.25 or later.
 
 ```sh
 codex login                                  # once; stored in CODEX_HOME
-export RSI_OUTER_PROPOSER=codex
+export RSI_OUTER_PROVIDER=codex
 export RSI_OUTER_CODEX=/path/to/vendor/x86_64-unknown-linux-musl/bin/codex  # the native binary
 export RSI_OUTER_MODEL=gpt-5-codex           # optional: Codex's default otherwise
 ```
@@ -121,7 +121,7 @@ key), limited to the file tools (no commands):
 
 ```sh
 claude                                       # once: /login; stored in CLAUDE_CONFIG_DIR (~/.claude)
-export RSI_OUTER_PROPOSER=claude
+export RSI_OUTER_PROVIDER=claude
 export RSI_OUTER_CLAUDE=/path/to/claude      # the native binary; default `claude` on PATH
 export RSI_OUTER_MODEL=opus                  # optional
 ```

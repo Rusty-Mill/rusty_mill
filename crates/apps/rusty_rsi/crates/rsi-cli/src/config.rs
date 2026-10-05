@@ -14,7 +14,7 @@
 //!
 //! | Variable | Meaning |
 //! |---|---|
-//! | `RSI_OUTER_PROPOSER` | `model` (default), `codex` or `claude` |
+//! | `RSI_OUTER_PROVIDER` | `model` (default), `codex` or `claude` |
 //! | `RSI_INNER_PROVIDER` | `openai` (default) or `codex` |
 //! | `RSI_<ROLE>_CODEX`, `RSI_OUTER_CLAUDE` | the native binary; default `codex` / `claude` on `PATH` |
 //! | `RSI_<ROLE>_MODEL` | the agent's model; its default if unset |
@@ -78,24 +78,32 @@ pub enum Outer {
     Cli(CliConfig),
 }
 
-/// The proposer from `RSI_OUTER_PROPOSER` (`model`, the default, `codex`
+/// The proposer from `RSI_OUTER_PROVIDER` (`model`, the default, `codex`
 /// or `claude`) and its variables.
 ///
 /// # Errors
-/// An unknown proposer, or a missing or invalid setting for the chosen one.
+/// The retired `RSI_OUTER_PROPOSER`, an unknown proposer, or a missing or
+/// invalid setting for the chosen one.
 pub fn outer_from_env(wall: Duration) -> Result<Outer, String> {
-    let var = |name: &str| std::env::var(name).ok();
-    let agent = match var("RSI_OUTER_PROPOSER").as_deref() {
+    outer_from(&|name: &str| std::env::var(name).ok(), wall)
+}
+
+/// [`outer_from_env`], reading variables through `var`.
+fn outer_from(var: &dyn Fn(&str) -> Option<String>, wall: Duration) -> Result<Outer, String> {
+    if var("RSI_OUTER_PROPOSER").is_some() {
+        return Err("RSI_OUTER_PROPOSER is now RSI_OUTER_PROVIDER; rename it".into());
+    }
+    let agent = match var("RSI_OUTER_PROVIDER").as_deref() {
         None | Some("model") => return model_from_env(Role::Outer).map(Outer::Model),
         Some("codex") => CliAgent::Codex,
         Some("claude") => CliAgent::Claude,
         Some(other) => {
             return Err(format!(
-                "RSI_OUTER_PROPOSER={other}: expected `model`, `codex` or `claude`"
+                "RSI_OUTER_PROVIDER={other}: expected `model`, `codex` or `claude`"
             ))
         }
     };
-    cli_config(&var, agent, Role::Outer, wall).map(Outer::Cli)
+    cli_config(var, agent, Role::Outer, wall).map(Outer::Cli)
 }
 
 /// The inner agent's model: an OpenAI-compatible endpoint or Codex.
@@ -368,6 +376,30 @@ mod tests {
         )
         .expect_err("no binary");
         assert!(e.contains("RSI_OUTER_CLAUDE"), "{e}");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_outer_provider_is_chosen_by_name_and_the_old_name_is_refused() {
+        let dir = scratch("outer");
+        std::fs::write(dir.join("bin/claude"), b"\x7fELF").expect("claude");
+        let wall = Duration::from_secs(1);
+        let vars = [
+            ("RSI_OUTER_PROVIDER", "claude".to_owned()),
+            (
+                "RSI_OUTER_CLAUDE",
+                dir.join("bin/claude").display().to_string(),
+            ),
+            ("HOME", dir.join("home").display().to_string()),
+            ("RSI_OUTER_PROPOSER", "claude".to_owned()),
+        ];
+        let outer = outer_from(&lookup(&vars[..3]), wall).expect("claude");
+        assert!(matches!(outer, Outer::Cli(c) if c.agent == CliAgent::Claude));
+        let e = outer_from(&lookup(&vars), wall).expect_err("old name");
+        assert!(e.contains("RSI_OUTER_PROVIDER"), "{e}");
+        let bad = [("RSI_OUTER_PROVIDER", "gemini".to_owned())];
+        let e = outer_from(&lookup(&bad), wall).expect_err("unknown");
+        assert!(e.contains("expected `model`"), "{e}");
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

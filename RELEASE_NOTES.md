@@ -19,10 +19,11 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `CodexModel` (`rsi-runtime::codex_model`), selected with `RSI_INNER_PROVIDER=codex`.
   - It is the inner agent's *model*, not the agent: a0 stays the thing the outer loop improves, and the broker still meters and records every call, so the budget hard stop and trajectory replay hold.
   - Each call runs one sandboxed `codex exec --json` in an empty directory and is charged from the `turn.completed` token usage. A call that reports no usage, or a failed turn, is an error.
-- **Added:** Claude Code as the outer proposer, `RSI_OUTER_PROPOSER=claude` (binary from `RSI_OUTER_CLAUDE`, login in `CLAUDE_CONFIG_DIR`, model from `RSI_OUTER_MODEL`).
+- **Added:** Claude Code as the outer proposer, `RSI_OUTER_PROVIDER=claude` (binary from `RSI_OUTER_CLAUDE`, login in `CLAUDE_CONFIG_DIR`, model from `RSI_OUTER_MODEL`).
   - It runs `claude -p --restricted` with the file tools only (`Read,Edit,Write,Glob,Grep`), edits accepted and every other prompt denied, in the same sandbox and `.git`-free copy as Codex. No bypass flag is needed.
   - It uses the Claude subscription login; no Anthropic key passes through `rsi`.
 - **Changed:** `rsi-runtime::codex` is now `rsi-runtime::agent_cli`: `CliProposer` and `CliConfig` (with a `CliAgent` of `Codex` or `Claude`) replace `CodexProposer` and `CodexConfig`. `ProcessExecutor::with_capture_bytes` sets how much output a run keeps.
+- **Changed (breaking):** `RSI_OUTER_PROPOSER` is renamed `RSI_OUTER_PROVIDER`, matching `RSI_INNER_PROVIDER`. A leftover `RSI_OUTER_PROPOSER` is an error naming the new variable, never silently ignored.
 - **Tests:**
   - **Fake agents.** Fake `claude` and `codex` scripts run through the real sandbox. Claude's edits come back, `.git` is untouched, and it cannot write outside or read private data; an `is_error` envelope and a login failure are errors. A Codex completion is charged exactly its reported tokens, and an unmetered or timed-out call is an error.
   - **Mutation checks.** Each check catches its mutation: an unmetered call charged as zero, and an ignored `is_error`.

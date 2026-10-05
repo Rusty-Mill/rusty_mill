@@ -12,7 +12,7 @@
 //! Models come from the environment, one set per role: `RSI_INNER_*` for
 //! the agent under test and `RSI_OUTER_*` for the proposer (`_MODEL`,
 //! `_BASE_URL`, `_API_KEY`), or a coding-agent CLI: `RSI_INNER_PROVIDER=codex`
-//! for the inner model, `RSI_OUTER_PROPOSER=codex` or `claude` for the
+//! for the inner model, `RSI_OUTER_PROVIDER=codex` or `claude` for the
 //! proposer (see [`crate::config`]). Nothing secret is accepted as a flag or
 //! written to the run.
 

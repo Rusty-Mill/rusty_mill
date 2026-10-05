@@ -570,7 +570,7 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
     directory must be a real directory (a symlinked parent is refused,
     and missing ones are created one level at a time), and a planted
     symlink at the leaf is replaced rather than followed. The allowlist decides afterwards.
-- **Codex CLI proposer** (`CliProposer` with `CliAgent::Codex`, `RSI_OUTER_PROPOSER=codex`;
+- **Codex CLI proposer** (`CliProposer` with `CliAgent::Codex`, `RSI_OUTER_PROVIDER=codex`;
   `rsi-runtime::agent_cli`).
   It runs `codex exec` under the sandbox helper, in its own profile.
   - **Why our sandbox only.** Codex's Linux sandbox (bubblewrap) cannot
@@ -609,7 +609,7 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
     it cannot write outside, read private data or open devices other
     than `/dev/null` and `/dev/urandom`, while internet sockets work. An
     `#[ignore]`d test runs a real, logged-in Codex.
-- **Claude Code proposer** (`CliAgent::Claude`, `RSI_OUTER_PROPOSER=claude`).
+- **Claude Code proposer** (`CliAgent::Claude`, `RSI_OUTER_PROVIDER=claude`).
   The same sandbox, staging copy and mirror as Codex, with
   `CLAUDE_CONFIG_DIR` as its home. Claude Code needs no bypass flag: it
   runs `claude -p --restricted` with the file tools only

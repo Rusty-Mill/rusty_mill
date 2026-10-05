@@ -9,7 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
-- **`rusty_rsi`: Codex as the inner model and Claude Code as the outer proposer** (`crates/apps/rusty_rsi`, ADR-0005): `RSI_INNER_PROVIDER=codex` serves the inner agent's completions from sandboxed `codex exec --json`, metered from its token usage; `RSI_OUTER_PROPOSER=claude` runs `claude -p --restricted` with file tools only in the same sandbox. `rsi-runtime::codex` becomes `agent_cli`.
+- **`rusty_rsi`: Codex as the inner model and Claude Code as the outer proposer** (`crates/apps/rusty_rsi`, ADR-0005): `RSI_INNER_PROVIDER=codex` serves the inner agent's completions from sandboxed `codex exec --json`, metered from its token usage; `RSI_OUTER_PROVIDER=claude` runs `claude -p --restricted` with file tools only in the same sandbox. `rsi-runtime::codex` becomes `agent_cli`.
 - **`rusty_rsi` Codex proposer** (`crates/apps/rusty_rsi`, ADR-0005): `RSI_OUTER_PROPOSER=codex` runs `codex exec` inside `rsi`'s Landlock sandbox on a `.git`-free staging copy, with a new `Sockets::Internet` rule; rustils 0.27.2 lets Landlock roots be single files.
 - **`rusty_fair_play`: the family's deck.** `PATCH inPlay` sets a card aside or adds it back (a `set-aside.json` beside the stores, no stored-format change); a set-aside card has no owner and is out of the undealt list and the balance. The web board gets equal-size tiles, a collapsible detail pane, a Choose cards mode and a set-aside view.
 - **The `rusty_rsi` outer loop** (`crates/apps/rusty_rsi`, ADR-0005 P4): `rsi run` (sparse git worktrees, a path allowlist, fresh-seed accept gate, hash-chained JSONL lineage with content-addressed blobs), `rsi calibrate` (noise band and margin), `rsi report --replay` (bit-for-bit grade replay and trajectory replay); `rsi-core` gains the `Proposer` and `LineageStore` ports.
@@ -42,6 +42,7 @@ Removed / Fixed / Security, newest first.
   - `rusty_remind_me`'s hub applies each push through it.
 
 ### Changed
+- **`rusty_rsi`: `RSI_OUTER_PROPOSER` is now `RSI_OUTER_PROVIDER`** (`crates/apps/rusty_rsi`), matching `RSI_INNER_PROVIDER`; the old name is refused with a pointer to the new one.
 - **One synchronous spinlock authority:** `rusty_std::sync::Mutex` now owns the
   atomic acquisition and release mechanism used by `rusty_sync::SpinLock`.
   `SpinLock` and `SpinLockGuard` remain distinct compatibility types, preserving
