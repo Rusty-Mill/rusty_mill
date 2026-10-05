@@ -25,7 +25,7 @@ it), `Modelled` (the port has the mechanic), `Needs capture`.
 |---|---|---|---|---|
 | Jump (held for height) | 0.2 s hold accel | jump hold, impulse | jump input timing | Captured, Modelled |
 | Double jump | Second jump, no direction | double-jump impulse | two jump presses, no flip torque | Modelled |
-| Double-jump / dodge window | The second jump must come within 1.25 s of the first jump finishing (`DOUBLEJUMP_MAX_DELAY`); one dodge or double jump per airtime | jump timer | second jump timing | **Not modelled** (found 2026-10-05, see below) |
+| Double-jump / dodge window | The second jump must come within 1.25 s of the first jump finishing (`DOUBLEJUMP_MAX_DELAY`); one dodge or double jump per airtime | jump timer | second jump timing | Modelled (FR-136, ADR-0055; no capture exercises it) |
 | Flip / dodge (front, back, side, diagonal) | Second jump with direction | flip impulse, flip torque, damping | pitch/yaw/roll inputs at second jump | Captured, Modelled |
 | Flip cancel | Cancel the flip rotation | flip torque timing | opposite pitch input after flip | Needs capture |
 | Stall | Tilt car to cancel a flip mid-air | flip torque, air control | roll plus pitch at second jump | Needs capture |

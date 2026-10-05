@@ -268,7 +268,7 @@ Not modelled, with no capture to check against: car-car bumps and demolitions, s
 
 - `cargo fmt --all -- --check`: pass
 - `cargo clippy --workspace --all-targets -- -D warnings`: pass
-- `cargo test --workspace`: pass (522 tests: 27 `rb_domain`, 451
+- `cargo test --workspace`: pass (523 tests: 27 `rb_domain`, 452
   `rb_physics_bullet`, 14 `rb_replay_ingest` (incl. real-fixture
   integration test), 10 `rb_capture_ingest`, 20 `rb_verify_cli`)
 - `cargo run -p rb_replay_ingest --bin corpus_check` (local only, not CI):

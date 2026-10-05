@@ -8,6 +8,14 @@ in git history, and each requirement's spec section holds its detail.
 
 ---
 
+## The second jump times out
+**2026-10-05** · `RB-PHYSICS-001-FR-136` · ADR-0055
+
+- In the game, the second jump or dodge must come within 1.25 s of the
+  first jump ending. We never expired it. Found while building the
+  mechanics list. None of the recordings has a dodge that late, so their
+  scores are unchanged; a late-dodge test covers it. 523 tests.
+
 ## Wall-hit friction uses the car's own contact point
 **2026-10-04** · `RB-PHYSICS-001-FR-135` · ADR-0054
 

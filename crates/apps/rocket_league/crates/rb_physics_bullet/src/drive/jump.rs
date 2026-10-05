@@ -646,6 +646,64 @@ fn apply_dodge(
     });
 }
 
+/// `DOUBLEJUMP_MAX_DELAY` (`RLConst.h`, `RB-PHYSICS-001-FR-136`): the second
+/// jump or dodge must come within this many seconds of the first jump's hold
+/// ending.
+pub(super) const DOUBLE_JUMP_MAX_DELAY: f32 = 1.25;
+
+/// `JUMP_MIN_TIME + JUMP_RESET_TIME_PAD` (0.025 + 1/40 s): a grounded car
+/// keeps its jump record this long, so a minimum-length jump that has not
+/// yet left the ground is not forgotten.
+const JUMP_RESET_WINDOW: f32 = 0.025 + 1.0 / 40.0;
+
+/// `Car::_UpdateJump`'s and `_UpdateDoubleJumpOrFlip`'s timers:
+/// whether this airtime began with a jump, how long since the jump press,
+/// and how long since its hold ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct JumpClock {
+    has_jumped: bool,
+    jump_time: f32,
+    air_time_since_jump: f32,
+}
+
+impl JumpClock {
+    /// One tick: `jumping` while the jump hold runs. Landing forgets the
+    /// jump (after the reset window); airborne after a finished jump the
+    /// since-jump timer runs, otherwise it stays zero, as RocketSim's.
+    pub(super) fn update(&mut self, jumping: bool, on_ground: bool, dt: f32) {
+        if on_ground && !jumping {
+            if !(self.has_jumped && self.jump_time < JUMP_RESET_WINDOW) {
+                self.has_jumped = false;
+                self.jump_time = 0.0;
+            }
+            self.air_time_since_jump = 0.0;
+        }
+        if jumping {
+            self.has_jumped = true;
+        }
+        if self.has_jumped {
+            self.jump_time += dt;
+        }
+        if !on_ground {
+            self.air_time_since_jump = if self.has_jumped && !jumping {
+                self.air_time_since_jump + dt
+            } else {
+                0.0
+            };
+        }
+    }
+
+    /// Whether the second jump or dodge is still inside its window.
+    pub(super) fn window_open(&self) -> bool {
+        self.air_time_since_jump < DOUBLE_JUMP_MAX_DELAY
+    }
+
+    /// Touching a wall refills the window with the second jump.
+    pub(super) fn refill(&mut self) {
+        self.air_time_since_jump = 0.0;
+    }
+}
+
 /// A fresh jump press while airborne. Priority: wall jump (plain, or a
 /// wall-jump dodge) if touching a wall, else a double jump (plain, or a
 /// dodge) if one is still available. See `super::apply_driven_forces` for

@@ -299,7 +299,8 @@ pub(crate) fn bicycle_yaw_rate_for_tests(
     forward_speed * ground::steer_angle(forward_speed, steer, handbrake_amount).tan() / wheelbase
 }
 pub use jump::{
-    AutoFlip, FlipState, AUTO_FLIP_SPEED, DODGE_SPEED, JUMP_SPEED, WALL_JUMP_HORIZONTAL_SPEED,
+    AutoFlip, FlipState, JumpClock, AUTO_FLIP_SPEED, DODGE_SPEED, JUMP_SPEED,
+    WALL_JUMP_HORIZONTAL_SPEED,
 };
 
 use crate::body::RigidBody;
@@ -417,6 +418,8 @@ pub struct DriveState {
     /// mandatory window keeps applying the full acceleration.
     /// Untouched by the double jump, a dodge, or the wall jump.
     pub jump_hold_time_remaining: f32,
+    /// Timers for the second jump's 1.25 s window (`RB-PHYSICS-001-FR-136`).
+    pub jump_clock: jump::JumpClock,
     /// The dodge flip since the last dodge press, until landing
     /// (`RB-PHYSICS-001-FR-083`): drives the flip torque, vertical damping,
     /// and air-control lock. `None` on the ground and before any dodge.
@@ -453,6 +456,7 @@ impl DriveState {
             jump_held: false,
             double_jump_available: true,
             jump_hold_time_remaining: 0.0,
+            jump_clock: jump::JumpClock::default(),
             flip: None,
             handbrake_amount: 0.0,
             sticky_surface_up: None,
@@ -529,6 +533,9 @@ pub fn apply_driven_forces(
         &mut state.auto_flip,
         dt,
     );
+    state
+        .jump_clock
+        .update(state.jump_hold_time_remaining > 0.0, on_ground, dt);
     state.handbrake_amount = ground::ramp_handbrake(state.handbrake_amount, input.handbrake, dt);
 
     let throttle = effective_throttle(input, state);
@@ -575,6 +582,12 @@ pub fn apply_driven_forces(
             // the same "any surface contact refills your second jump"
             // rule landing uses — regardless of whether jump is pressed.
             state.double_jump_available = true;
+            state.jump_clock.refill();
+        }
+        // RB-PHYSICS-001-FR-136: the second jump expires 1.25 s after the
+        // first jump's hold ends.
+        if !state.jump_clock.window_open() {
+            state.double_jump_available = false;
         }
         // The jump press first, so a dodge's flip torque acts on the press
         // tick itself: the owner's capture shows the real game's spin jump
