@@ -11,6 +11,8 @@
 //! which is deleted once measured, so peak disk use is one product's build.
 //! `--prebuilt` skips the builds and runs binaries from an existing target
 //! directory instead. Naming `BIN`s measures only those products.
+//! The complete table is printed even when a measured stage fails; the process
+//! then exits unsuccessfully. Unsupported products are skipped, not failures.
 
 mod cargo;
 mod measure;
@@ -34,11 +36,24 @@ struct Options {
     only: Vec<String>,
 }
 
+struct Baseline {
+    table: String,
+    failures: usize,
+}
+
 fn main() -> ExitCode {
     match options(std::env::args().skip(1)).and_then(|options| baseline(&options)) {
-        Ok(table) => {
-            print!("{table}");
-            ExitCode::SUCCESS
+        Ok(result) => {
+            print!("{}", result.table);
+            if result.failures == 0 {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!(
+                    "rusty_baseline: {} product(s) failed; see table",
+                    result.failures
+                );
+                ExitCode::FAILURE
+            }
         }
         Err(error) => {
             eprintln!("rusty_baseline: {error}");
@@ -76,7 +91,7 @@ fn number(text: &str) -> Result<usize, String> {
         .map_err(|_| format!("`{text}` is not a whole number"))
 }
 
-fn baseline(options: &Options) -> Result<String, String> {
+fn baseline(options: &Options) -> Result<Baseline, String> {
     let text = std::fs::read_to_string(&options.products)
         .map_err(|error| format!("reading {}: {error}", options.products.display()))?;
     let products: Vec<Product> = products::parse(&text)?
@@ -130,11 +145,10 @@ fn baseline(options: &Options) -> Result<String, String> {
         });
     }
     let floor = sys::floor();
-    Ok(format!(
-        "{}\n{}",
-        environment(floor),
-        report::render(&rows, floor)
-    ))
+    Ok(Baseline {
+        table: format!("{}\n{}", environment(floor), report::render(&rows, floor)),
+        failures: rows.iter().filter(|row| row.failed()).count(),
+    })
 }
 
 fn measure_one(options: &Options, product: &Product, entry_point: &Path, home: &Path) -> Row {

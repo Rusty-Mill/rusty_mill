@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_baseline: honest measurement status
+**2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
+
+- **Fixed:** The runner prints the full table and exits 1 if any measured stage fails. Unsupported rows, intentionally prebuilt binaries, and unavailable platform RSS counters are not failures. Other products and successful stages remain visible.
+- **Fixed:** Exit-mode warm-ups and timed samples must match an exact expected code. Products default to 0; `@expect-exit=2` records the existing `ts-cli --help` contract, and `@expect-exit=linux:2` records Linux `ts-daemon --help` while leaving other hosts at 0 and preserving the Windows exclusion. A bad sample invalidates that product's runtime measurement; it cannot be hidden by a later successful sample. Idle mode retains its separate requirement to stay alive until intentional teardown.
+- **Fixed:** The manual baseline workflow appends the partial report to the job summary and uploads it even when the measurement step fails, preserving the original failure status.
+- Scope: no product implementation, dependency, support policy, or benchmark workload changed. Non-Linux `ts-daemon` remains a stub; any further host-support policy requires an owner decision.
+
+---
+
 ## rusty_tick: Eisenhower matrix view and saved filters
 **2026-10-05** · [#516](https://github.com/Rusty-Mill/rusty_mill/pull/516)
 
