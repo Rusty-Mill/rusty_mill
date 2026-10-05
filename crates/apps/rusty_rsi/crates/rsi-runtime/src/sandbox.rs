@@ -25,9 +25,9 @@ pub const SETUP_FAILED: u8 = 125;
 /// Which sockets a sandboxed process may create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sockets {
-    /// Any socket, the internet included. Only the Codex proposer runs
-    /// like this: it must reach its model, and its filesystem confinement
-    /// keeps private task data out of reach (see [`crate::codex`]).
+    /// Any socket, the internet included. Only the coding-agent CLIs run
+    /// like this: they must reach their models, and their filesystem confinement
+    /// keeps private task data out of reach (see [`crate::agent_cli`]).
     Internet,
     /// Anything but internet sockets (solutions).
     NoInternet,

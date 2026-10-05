@@ -14,13 +14,35 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty-mcp: public cache-hint helper; nexus-mcp sheds a private API and two dependencies
-**2026-10-05** · (link once pushed) · [#479](https://github.com/Rusty-Mill/rusty_mill/issues/479)
+**2026-10-05** · [#505](https://github.com/Rusty-Mill/rusty_mill/pull/505) · [#479](https://github.com/Rusty-Mill/rusty_mill/issues/479)
 
 - **Added:** `rusty_mcp::apply_cache_hints`, documented public API with a doc example. It sets `ttlMs` and `cacheScope` on a list result only for peers that negotiated spec 2026-07-28.
 - **Changed:** `nexus-mcp`'s `list_tools`, `list_prompts` and `list_resources` call it instead of `rusty_mcp::__private::apply_cache_hints`, a `#[doc(hidden)]` module documented as not stable. `__private::apply_cache_hints` stays as a re-export, so `rusty-mcp`'s own macros are untouched.
 - **Changed:** `nexus-mcp` drops its direct `http` and `reqwest` dependencies, which had no remaining uses after the Host client moved into `rusty-mcp` (#498), and trims its own `rmcp` features to `server` and `macros`. The client and Streamable HTTP client features move to `[dev-dependencies]` for the in-process adapter tests. Production builds still get them through `rusty-mcp`'s `client` feature, which already enables `client-side-sse` through the Streamable HTTP client feature. `Cargo.lock` loses the two edges.
 - **Verified on the pinned 1.98.1 toolchain:** `clippy -D warnings` and `fmt --check` clean for `rusty-mcp`, `nexus-mcp` and `nexus-cli`; `rusty-mcp` 201 tests with the `client` feature and its doc tests with default features; `nexus-mcp` 108 tests; `nexus-bootstrap`'s `dep_invariants` 3 passed; `cargo check --all-targets` for every workspace crate that depends on `rusty-mcp`; `check_workspace_deps.py`, `check_workspace_layers.py` and the workspace-map verify. Not run locally: the full workspace sweep, because `libdbus-sys` needs headers this container lacks. CI on the PR is the authority for that.
 - Out of scope, by choice: the Streamable HTTP option on `nexus mcp serve` (it is loopback-only with no auth and no Origin allow-list, and is awaiting an owner decision), and the proposal to let plugins publish their own tools through the dynamic registry.
+
+---
+
+## rusty_rsi: Codex as the inner model, Claude Code as the outer proposer
+**2026-10-05** · [#504](https://github.com/Rusty-Mill/rusty_mill/pull/504) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Added:** `CodexModel` (`rsi-runtime::codex_model`), selected with `RSI_INNER_PROVIDER=codex`.
+  - It is the inner agent's *model*, not the agent: a0 stays the thing the outer loop improves, and the broker still meters and records every call, so the budget hard stop and trajectory replay hold.
+  - Each call runs one sandboxed `codex exec --json` in an empty directory and is charged from the `turn.completed` token usage. A call that reports no usage, or a failed turn, is an error.
+- **Added:** Claude Code as the outer proposer, `RSI_OUTER_PROVIDER=claude` (binary from `RSI_OUTER_CLAUDE`, login in `CLAUDE_CONFIG_DIR`, model from `RSI_OUTER_MODEL`).
+  - It runs `claude -p --restricted` with the file tools only (`Read,Edit,Write,Glob,Grep`), edits accepted and every other prompt denied, in the same sandbox and `.git`-free copy as Codex. No bypass flag is needed.
+  - It uses the Claude subscription login; no Anthropic key passes through `rsi`.
+- **Changed:** `rsi-runtime::codex` is now `rsi-runtime::agent_cli`: `CliProposer` and `CliConfig` (with a `CliAgent` of `Codex` or `Claude`) replace `CodexProposer` and `CodexConfig`. `ProcessExecutor::with_capture_bytes` sets how much output a run keeps.
+- **Changed (breaking):** `RSI_OUTER_PROPOSER` is renamed `RSI_OUTER_PROVIDER`, matching `RSI_INNER_PROVIDER`. A leftover `RSI_OUTER_PROPOSER` is an error naming the new variable, never silently ignored.
+- **Tests:**
+  - **Fake agents.** Fake `claude` and `codex` scripts run through the real sandbox. Claude's edits come back, `.git` is untouched, and it cannot write outside or read private data; an `is_error` envelope and a login failure are errors. A Codex completion is charged exactly its reported tokens, and an unmetered or timed-out call is an error.
+  - **Mutation checks.** Each check catches its mutation: an unmetered call charged as zero, and an ignored `is_error`.
+  - **Real agents.** `#[ignore]`d tests run a real Claude Code proposal and a real Codex completion.
+- Known limitations:
+  - Codex has no per-call output cap, so one inner call may overrun the remaining token budget; the next call is refused.
+  - Each inner call starts a Codex process.
+  - The proposers' own token use is still not recorded.
 
 ---
 
