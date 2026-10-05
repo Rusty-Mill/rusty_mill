@@ -10,8 +10,11 @@ one copy.
 
 - `Handler`: `fn handle(&mut self, &Request) -> Response`. A `Request` is
   the method, the origin-form target, the `Authorization` and `If-Match`
-  header values and the body; a `Response` is a status and a JSON body
-  (empty for 204). The handler never sees the transport, so every route
+  header values and the body; a `Response` is a status and a `Body`:
+  `Body::Json` (a document, empty for 204, built with `Response::json`)
+  or `Body::Stream` (chunks from an iterator, built with
+  `Response::stream`, sent as chunked transfer encoding after the
+  handler's lock is released, for `text/event-stream` and the like). The handler never sees the transport, so every route
   is testable without a socket, and it runs under one lock, so it may
   hold `&mut` state.
 - `Server::bind(addr, handler)`, `.with_web_dir(dir)`, `.run()`,
@@ -36,7 +39,8 @@ server.run()?;
 
 Deliberately not async: a personal server has a handful of connections
 and one store behind one lock, so there is no I/O concurrency for a
-runtime to exploit. Users: `rusty_tick`, `rusty_fair_play`.
+runtime to exploit. Users: `rusty_tick`, `rusty_fair_play`, `rusty_agui`
+(its `serve` feature streams AG-UI runs through `Body::Stream`).
 
 ```
 cargo test -p rusty_serve

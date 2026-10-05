@@ -1,0 +1,32 @@
+[package]
+name = "rusty_json_patch"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["json", "json-patch", "rfc6902", "no_std"]
+categories = ["encoding", "no-std"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[features]
+default = ["std"]
+# `std::error::Error` for `Error`. Off, the crate is `no_std` + `alloc`.
+std = ["rusty_json/std"]
+
+[dependencies]
+# The only dependency, and a first-party one: this crate is the patch
+# layer over rusty_json's `Value`. `default-features = false` so this
+# manifest never asks for rusty_json's `serde` feature -- ADR-0002 Tier S.
+# A path dependency, not `workspace = true`: the workspace entry carries
+# rusty_json's default features, and Cargo ignores `default-features =
+# false` on a workspace-inherited dependency (rsi-runtime does the same).
+rusty_json = { path = "../rusty_json", version = "0.1.0", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
