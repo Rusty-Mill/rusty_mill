@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_routine: routines for AG-UI agents
+**2026-10-05** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 6
+
+- **Added:** `rusty_routine` at `crates/libs/protocol/rusty_routine`. `Schedule` is five-field cron in UTC with `*`, numbers, ranges, lists and steps; `0` and `7` are Sunday; when both day fields are restricted either matches, as in cron; `next_after(t)` finds the first scheduled minute strictly after `t` by Hinnant's civil-date arithmetic and gives up after five years for a date that never comes. `Routine::fire(now)` returns the run (a fresh thread per firing, the prompt as the person's message, `forwardedProps.routine` and `scheduledAt` for gateway rules) and advances the schedule past `now`, so a firing the runner slept through is skipped rather than made up. `Routine::record` counts consecutive failures and disables the routine at its budget; a success resets it. `load` reads a JSON array of `{"name", "cron", "prompt", "maxFailures"?}` and refuses duplicate names.
+- **Added:** behind the `run` feature, `run::tick` fires every due routine against one `HttpAgent`, reads the reply back through `rusty_channel::Thread`, and reports one line per run; `run::run` sleeps until the earliest next firing and stops once every routine is disabled. The `routines` example reads `ROUTINES`, `AGENT_URL` and an optional `AGENT_TOKEN`, the bearer token that makes the routine the gateway's requester.
+- **Tests:** seven unit tests with fixed times (civil-date round trips against known dates; every-minute, hourly and daily schedules; weekdays, month ends, a leap day, both day fields, an impossible date; nine bad expressions; firing, skipping, disabling and resetting; loading and five bad documents) and two runner tests against a scripted agent served in-process on `rusty_serve` (a reply reported, a failing agent counted down to disabled).
+- **Known limitations:** UTC only; no seconds, names, `L`, `W` or `#`; state is in memory; the reply is printed, not delivered to a channel (a routine that posts to Slack is the two crates composed, a later step).
+
+---
+
 ## rusty_channel: SMS over Twilio
 **2026-10-05** · [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, third channel
 

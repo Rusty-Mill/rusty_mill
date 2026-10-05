@@ -14284,6 +14284,16 @@ name = "rusty_retry"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_routine"
+version = "0.1.0"
+dependencies = [
+ "rusty_agui",
+ "rusty_channel",
+ "rusty_json",
+ "rusty_serve",
+]
+
+[[package]]
 name = "rusty_rsa"
 version = "0.1.0"
 
