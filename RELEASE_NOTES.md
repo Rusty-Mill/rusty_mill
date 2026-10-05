@@ -13,7 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
-## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
+## rusty_tick: calendar subscriptions, assignees, ambient sound, 3- and 10-day views
+**2026-10-05** · [#525](https://github.com/Rusty-Mill/rusty_mill/pull/525)
+
+- **Added:** `POST /api/v1/fetch-ics {"url"}` (`crates/apps/rusty_tick/src/fetch.rs`) and a Calendar subscriptions dialog: each feed (`https://` or `webcal://`) gets its own list, refreshes in place by the feed's UID, and refreshes on opening the calendar when older than six hours. The fetcher is HTTPS on port 443 only, refuses any non-public resolved address (checked before connecting, redirects re-checked, at most 3), 6 s per step, 4 MiB, body must be an iCalendar. `rusty_tick` now depends on `rusty_tls` (already in the workspace); `docs/WORKSPACE-MAP.md` regenerated.
+- **Added:** `assignee` and `subscription` doc kinds; task assignees (free-text, a field, a row chip, an Assignee group in saved filters); 3-day and ten-day calendar views; ambient focus sound (white noise, rain, waves, synthesised with Web Audio).
+- **Verified:** `cargo fmt --check`, `clippy -D warnings`, `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (640), `npm run build`; workspace layer, dependency and map checks.
+- Known limitations: the server serves one request at a time, so a slow feed holds up other requests (6 s per step at most); a refresh overwrites the feed-owned fields of a task; no feeds with credentials; at most 500 events per feed; assignees are names, not accounts; not run against a live feed or in a browser.
+
+---
+
+# rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
 **2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
 
 - **Added:** `Status::WontDo` (`status: "wontdo"`, `?status=wontdo`), appended last so stored tasks still decode. Closing stamps `completedMs` and keeps the first stamp; the task menu has Won't Do and Mark as open; closed tasks list under Completed.
