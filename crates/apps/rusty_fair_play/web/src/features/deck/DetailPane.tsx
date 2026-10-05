@@ -20,29 +20,28 @@ const shell = 'relative flex w-[460px] shrink-0 flex-col border-l border-line bg
 export function DetailPane({ cardId }: { cardId: string | null }) {
   const card = useData((s) => (cardId ? s.index.byId.get(cardId) : undefined))
   const collapsed = useUi((s) => s.paneCollapsed)
-  // Folded away: a thin rail with one button, so the board gets the room. (On narrow screens the pane is a drawer with its own close button.)
-  if (collapsed) {
-    return (
-      <aside aria-label="Card details" className="flex w-11 shrink-0 flex-col items-center border-l border-line bg-surface pt-3 max-[999px]:hidden">
-        <button type="button" aria-label="Show details" title="Show details" onClick={() => useUi.getState().setPaneCollapsed(false)} className="rounded-row p-1.5 text-grey hover:bg-hover">
-          <ChevronsLeft size={18} />
-        </button>
-      </aside>
-    )
-  }
-  if (!cardId) return <aside aria-label="Card details" className={`${shell} items-center justify-center text-grey max-[999px]:hidden`}><CollapseButton className="absolute right-2 top-3" />Pick a card</aside>
-  if (!card) {
-    return (
-      <aside aria-label="Card details" className={`${shell} items-center justify-center gap-2 text-grey`}>
-        <p>This card does not exist.</p>
-        <Link to={PATHS.deck} className="text-primary underline">
-          Back to the deck
-        </Link>
-      </aside>
-    )
-  }
-  // Keyed by id so every draft starts from the card being opened.
-  return <CardDetail key={card.id} card={card} />
+  // Keep the keyed editor mounted while folded, including drafts and in-flight saves.
+  return (
+    <>
+      {collapsed && (
+        <aside aria-label="Card details" className="flex w-11 shrink-0 flex-col items-center border-l border-line bg-surface pt-3 max-[999px]:hidden">
+          <button type="button" aria-label="Show details" title="Show details" onClick={() => useUi.getState().setPaneCollapsed(false)} className="rounded-row p-1.5 text-grey hover:bg-hover">
+            <ChevronsLeft size={18} />
+          </button>
+        </aside>
+      )}
+      <div style={{ display: collapsed ? 'none' : 'contents' }}>
+        {!cardId ? <aside aria-label="Card details" className={`${shell} items-center justify-center text-grey max-[999px]:hidden`}><CollapseButton className="absolute right-2 top-3" />Pick a card</aside> : !card ? (
+          <aside aria-label="Card details" className={`${shell} items-center justify-center gap-2 text-grey`}>
+            <p>This card does not exist.</p>
+            <Link to={PATHS.deck} className="text-primary underline">
+              Back to the deck
+            </Link>
+          </aside>
+        ) : <CardDetail key={card.id} card={card} />}
+      </div>
+    </>
+  )
 }
 
 /** Folds the pane away to its rail; hidden on narrow screens, where the pane is a drawer closed with ✕. */
@@ -99,6 +98,7 @@ function CardDetail({ card }: { card: Card }) {
   const [saving, setSaving] = useState(false)
   const [splitOpen, setSplitOpen] = useState(false)
   const [confirm, setConfirm] = useState<'delete' | 'unsplit' | 'aside' | null>(null)
+  const [asideSelection, setAsideSelection] = useState<Card | null>(null)
 
   const chain = useMemo(() => chainToRoot(index, card.id), [index, card.id])
   const children = childrenOf(index, card.id)
@@ -167,8 +167,11 @@ function CardDetail({ card }: { card: Card }) {
   }
 
   const toggleDeck = (): void => {
-    if (card.inPlay && card.ownerId) return setConfirm('aside')
-    void setInPlay([card.id], !card.inPlay).catch(() => undefined)
+    if (card.inPlay && card.ownerId) {
+      setAsideSelection(card)
+      return setConfirm('aside')
+    }
+    void setInPlay([card], !card.inPlay).catch(() => undefined)
   }
 
   const deal = (value: string): void => {
@@ -373,7 +376,7 @@ function CardDetail({ card }: { card: Card }) {
         danger
         onConfirm={() => {
           setConfirm(null)
-          void setInPlay([card.id], false).catch(() => undefined)
+          if (asideSelection) void setInPlay([asideSelection], false).catch(() => undefined)
         }}
         onCancel={() => setConfirm(null)}
       />

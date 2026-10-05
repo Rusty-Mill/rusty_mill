@@ -242,6 +242,8 @@ export function runApiContract(label: string, make: () => Promise<ApiClient>): v
       expect((await card(api, dishes.id)).inPlay).toBe(false)
 
       await expect(api.updateCard(dishes.id, { ownerId: ada.id })).rejects.toBeInstanceOf(InvalidError)
+      await expect(api.updateCard(dishes.id, { inPlay: true, ownerId: ada.id })).rejects.toBeInstanceOf(InvalidError)
+      expect(await card(api, dishes.id)).toMatchObject({ inPlay: false, ownerId: null })
       await expect(api.split(dishes.id, { children: [{ name: 'x' }] })).rejects.toBeInstanceOf(InvalidError)
       await expect(api.updateCard(cleaning.id, { parentCardId: dishes.id })).rejects.toBeInstanceOf(InvalidError)
       await expect(api.createCard({ name: 'Under', suit: 'Home', parentCardId: dishes.id })).rejects.toBeInstanceOf(InvalidError)

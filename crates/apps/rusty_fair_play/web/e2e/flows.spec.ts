@@ -242,9 +242,14 @@ test('tiles are one size, the detail pane folds away, and the family chooses its
   // The pane folds to a rail and the board takes the room; opening a card brings it back.
   const board = page.getByRole('main', { name: 'Deck' })
   const before = (await board.boundingBox())!.width
+  await pane(page).getByLabel('Notes').fill('Keep this unsaved draft while folded')
   await pane(page).getByRole('button', { name: 'Hide details' }).click()
   await expect(pane(page).getByLabel('Name')).toBeHidden()
   expect((await board.boundingBox())!.width).toBeGreaterThan(before + 300)
+  await pane(page).getByRole('button', { name: 'Show details' }).click()
+  await expect(pane(page).getByLabel('Notes')).toHaveValue('Keep this unsaved draft while folded')
+  await pane(page).getByRole('button', { name: 'Cancel' }).click()
+  await pane(page).getByRole('button', { name: 'Hide details' }).click()
   await page.reload() // remembered
   await expect(pane(page).getByRole('button', { name: 'Show details' })).toBeVisible()
   await tile(page, /^Mail/).click()

@@ -18,6 +18,30 @@ async function seeded() {
 }
 
 describe('data store', () => {
+  it('keeps the later selection tag when an earlier bulk request is delayed', async () => {
+    const { store, api, ada } = await seeded()
+    const [a, b, c] = store.getState().cards as [Card, Card, Card]
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const update = vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      await gate
+      return real(id, patch, etag)
+    })
+    const batch = store.getState().setInPlay([a, b, c], false)
+    const rejected = expect(batch).rejects.toBeInstanceOf(StaleError)
+    const changed = await real(b.id, { ownerId: ada.id }, b.etag)
+    // A concurrent acknowledged write updates the live store while the batch waits.
+    await store.getState().updateCard(b.id, { notes: 'new version' }, changed.etag)
+    release()
+    await rejected
+    expect(update.mock.calls.at(-1)).toEqual([b.id, { inPlay: false }, b.etag])
+    expect(await api.getCard(a.id)).toMatchObject({ inPlay: false })
+    expect(await api.getCard(b.id)).toMatchObject({ inPlay: true, ownerId: ada.id })
+    expect(await api.getCard(c.id)).toMatchObject({ inPlay: true })
+    expect(store.getState().toasts.at(-1)?.message).toBe(STALE_MESSAGE)
+  })
+
   it('boots from the snapshot and indexes it', async () => {
     const { store } = await seeded()
     const s = store.getState()
@@ -174,14 +198,14 @@ describe('data store', () => {
     const [a, b, c] = store.getState().cards as [Card, Card, Card]
     await store.getState().updateCard(a.id, { ownerId: ada.id }, a.etag)
     const update = vi.spyOn(api, 'updateCard')
-    await store.getState().setInPlay([a.id, b.id], false)
+    await store.getState().setInPlay([store.getState().index.byId.get(a.id)!, b], false)
     expect(update).toHaveBeenCalledTimes(2)
     expect(store.getState().index.byId.get(a.id)).toMatchObject({ inPlay: false, ownerId: null })
     expect(store.getState().index.byId.get(b.id)?.inPlay).toBe(false)
     expect(store.getState().index.byId.get(c.id)?.inPlay).toBe(true)
-    await store.getState().setInPlay([a.id, b.id], false) // already out: nothing to write
+    await store.getState().setInPlay([store.getState().index.byId.get(a.id)!, store.getState().index.byId.get(b.id)!], false) // already out: nothing to write
     expect(update).toHaveBeenCalledTimes(2)
-    await store.getState().setInPlay([a.id], true)
+    await store.getState().setInPlay([store.getState().index.byId.get(a.id)!], true)
     expect(store.getState().index.byId.get(a.id)?.inPlay).toBe(true)
   })
 

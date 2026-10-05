@@ -241,7 +241,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.ownerId !== undefined) {
       this.checkOwner(patch.ownerId)
       if (patch.ownerId && patch.inPlay === false) throw invalid('a card that is set aside cannot be dealt')
-      if (patch.ownerId && patch.inPlay !== true && !card.inPlay) throw invalid('a card that is set aside cannot be dealt; add it back to the deck first')
+      if (patch.ownerId && !card.inPlay) throw invalid('a card that is set aside cannot be dealt; add it back to the deck first')
       next.ownerId = patch.ownerId
     }
     if (patch.parentCardId !== undefined) next.parentCardId = patch.parentCardId

@@ -102,6 +102,15 @@ the card's `etag`, a deleted card drops out of it, and a damaged file refuses to
 open rather than reading as "nothing set aside". The undealt list and the balance
 count only the cards in play.
 
+Adding a set-aside card back and assigning an owner in the same request is
+refused (422). First persist `{"inPlay": true}`, then assign the owner with
+the returned etag. Failed sidecar saves leave membership unchanged in memory;
+retry after fixing the I/O error. Deletion/unsplit clean membership before
+removing cards, leaving them available if cleanup fails. These multi-store
+operations are not atomic: interruption can leave an unowned card in play.
+The UI preserves selection-time versions through confirmations and bulk writes,
+and folding the detail pane preserves unsaved edits and pending saves.
+
 The deck loads on first start and is recorded by a `deck.loaded` marker written
 after the load finishes, not by looking for card 1: a deleted deck card stays
 deleted across restarts, and a first load killed part way is finished on the next

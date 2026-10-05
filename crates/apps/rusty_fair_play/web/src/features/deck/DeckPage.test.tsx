@@ -2,8 +2,28 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { renderApp, seedFamily } from '@/test/renderApp'
+import { STALE_MESSAGE } from '@/store/data'
 
 describe('the board', () => {
+  it('does not rebase a confirmed suit selection after a background refresh', async () => {
+    const user = userEvent.setup()
+    const { api, services } = await renderApp('/deck', async (api) => {
+      const { ada } = await seedFamily(api)
+      const first = (await api.snapshot()).cards.find((c) => c.suit === 'Home')!
+      await api.updateCard(first.id, { ownerId: ada })
+    })
+    const selected = (await api.snapshot()).cards.find((c) => c.suit === 'Home')!
+    await user.click(screen.getByRole('button', { name: 'Choose cards' }))
+    await user.click(screen.getByRole('button', { name: 'Set aside every Home card' }))
+    const bob = (await api.snapshot()).people.find((p) => p.name === 'Bob')!
+    await api.updateCard(selected.id, { ownerId: bob.id }, selected.etag)
+    await services.store.getState().refresh()
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Set aside' }))
+    await waitFor(() => expect(services.store.getState().toasts.at(-1)?.message).toBe(STALE_MESSAGE))
+    expect(await api.getCard(selected.id)).toMatchObject({ inPlay: true, ownerId: bob.id })
+    expect((await api.snapshot()).cards.every((c) => c.inPlay)).toBe(true)
+  })
+
   it('shows six shelves with counts and a tile per card', async () => {
     await renderApp('/deck', async (api) => void (await seedFamily(api)))
     expect(screen.getByRole('heading', { name: /Home · 22/ })).toBeInTheDocument()

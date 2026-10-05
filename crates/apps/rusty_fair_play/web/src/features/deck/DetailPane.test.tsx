@@ -9,6 +9,70 @@ const cleaningOf = async (api: MemoryAdapter) => (await api.snapshot()).cards.fi
 const pane = () => screen.getByRole('complementary', { name: 'Card details' })
 
 describe('the detail pane', () => {
+  it('preserves unsaved execution and notes through folding', async () => {
+    const user = userEvent.setup()
+    await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const execution = within(pane()).getByLabelText('Execution')
+    await user.clear(execution)
+    await user.type(execution, 'unsaved execution')
+    await user.type(within(pane()).getByLabelText('Notes'), 'unsaved notes')
+    await user.click(within(pane()).getByRole('button', { name: 'Hide details' }))
+    expect(execution).not.toBeVisible()
+    await user.click(within(pane()).getByRole('button', { name: 'Show details' }))
+    expect(within(pane()).getByLabelText('Execution')).toBe(execution)
+    expect(execution).toHaveValue('unsaved execution')
+    expect(within(pane()).getByLabelText('Notes')).toHaveValue('unsaved notes')
+  })
+
+  it('preserves newer edits when a pending save completes while folded', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/deck', async (api) => void (await seedFamily(api)))
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    const dishes = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    const real = api.updateCard.bind(api)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(api, 'updateCard').mockImplementationOnce(async (id, patch, etag) => {
+      const saved = await real(id, patch, etag)
+      await gate
+      return saved
+    })
+    await user.type(within(pane()).getByLabelText('Execution'), ' saved')
+    await user.click(within(pane()).getByRole('button', { name: 'Save' }))
+    await user.type(within(pane()).getByLabelText('Notes'), 'typed during save')
+    const execution = within(pane()).getByLabelText('Execution')
+    await user.click(within(pane()).getByRole('button', { name: 'Hide details' }))
+    release()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save', hidden: true })).toBeEnabled())
+    await user.click(within(pane()).getByRole('button', { name: 'Show details' }))
+    expect(within(pane()).getByLabelText('Execution')).toBe(execution)
+    expect(within(pane()).getByLabelText('Notes')).toHaveValue('typed during save')
+    expect(await api.getCard(dishes.id)).toMatchObject({ notes: '' })
+    await user.click(within(pane()).getByRole('button', { name: 'Save' }))
+    await waitFor(async () => expect(await api.getCard(dishes.id)).toMatchObject({ notes: 'typed during save' }))
+  })
+
+  it('retains the selected version while set-aside confirmation is open', async () => {
+    const user = userEvent.setup()
+    const { api, services } = await renderApp('/deck', async (api) => {
+      const { ada } = await seedFamily(api)
+      const card = (await api.snapshot()).cards.find((c) => c.number === 3)!
+      await api.updateCard(card.id, { ownerId: ada })
+    })
+    const selected = (await api.snapshot()).cards.find((c) => c.number === 3)!
+    await user.click(screen.getByRole('link', { name: /^Dishes/ }))
+    await user.click(within(pane()).getByRole('checkbox', { name: 'In our deck' }))
+    const bob = (await api.snapshot()).people.find((p) => p.name === 'Bob')!
+    await api.updateCard(selected.id, { ownerId: bob.id }, selected.etag)
+    await services.store.getState().refresh()
+    const update = vi.spyOn(api, 'updateCard')
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Set aside' }))
+    await waitFor(() => expect(services.store.getState().toasts.at(-1)?.message).toBe(STALE_MESSAGE))
+    expect(update).toHaveBeenCalledWith(selected.id, { inPlay: false }, selected.etag)
+    expect(await api.getCard(selected.id)).toMatchObject({ inPlay: true, ownerId: bob.id })
+  })
+
   it('deals a card with the owner select', async () => {
     const user = userEvent.setup()
     let id = ''

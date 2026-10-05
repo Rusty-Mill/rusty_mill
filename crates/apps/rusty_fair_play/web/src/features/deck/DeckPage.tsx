@@ -53,7 +53,7 @@ export function DeckPage() {
     if (split.length > 0) notify('info', `${split.length} split ${split.length === 1 ? 'card was' : 'cards were'} left in the deck: unsplit ${split.length === 1 ? 'it' : 'them'} first.`)
     if (ok.length === 0) return
     if (!inPlay && ok.some((c) => c.ownerId)) return setAsking(ok)
-    void setInPlay(ok.map((c) => c.id), inPlay).catch(() => undefined)
+    void setInPlay(ok, inPlay).catch(() => undefined)
   }
 
   // Escape closes the pane (dialogs stop the event before it gets here).
@@ -135,9 +135,9 @@ export function DeckPage() {
         confirmLabel="Set aside"
         danger
         onConfirm={() => {
-          const ids = (asking ?? []).map((c) => c.id)
+          const selected = asking ?? []
           setAsking(null)
-          void setInPlay(ids, false).catch(() => undefined)
+          void setInPlay(selected, false).catch(() => undefined)
         }}
         onCancel={() => setAsking(null)}
       />
