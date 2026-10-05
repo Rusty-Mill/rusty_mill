@@ -27,7 +27,20 @@
       "superseded_by": null,
       "deleted_at": "2026-09-24T10:31:00+00:00",
       "sensitive": true,
-      "remind_at": "2026-09-25T09:00:00+00:00"
+      "remind_at": "2026-09-25T09:00:00+00:00",
+      "project": "synthetic-project",
+      "session_id": "synthetic-session",
+      "git_remote": "https://example.invalid/synthetic/project",
+      "git_branch": "synthetic-branch",
+      "git_sha": "0000000000000000000000000000000000000445",
+      "cwd": "/synthetic/project",
+      "valid_from": "2026-09-24T10:30:00+00:00",
+      "valid_until": null,
+      "confidence": 0.75,
+      "verified_at": "2026-09-24T10:31:00+00:00",
+      "outcome": "done",
+      "written_by": "human",
+      "capture_method": "manual"
     }
   ]
 }
