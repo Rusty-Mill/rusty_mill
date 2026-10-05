@@ -31,11 +31,28 @@ first active packet the bot sets the state; the tape starts on the next one,
 after `settle_ticks` neutral packets. Rotation is radians in RLBot's
 convention (yaw 0 faces +x). Pitch -1 is nose down (a forward dodge).
 
-Shipped:
+Shipped scenarios. "Port predicts" is what `rb_physics_bullet` does with the
+same start and tape (a scratch simulation, not committed); the capture is
+the test of that prediction.
 
-- `prompt_dodge.json`: jump, wait 0.5 s, dodge. A dodge must fire (control).
-- `late_dodge.json`: jump, wait 1.6 s, dodge. Past the 1.25 s window the
-  port expects no dodge (`RB-PHYSICS-001-FR-136`); the capture settles it.
+| File | What it does | Port predicts | Targets |
+|---|---|---|---|
+| `prompt_dodge` | full-height jump, forward dodge 0.5 s after the press | the dodge fires (about 500 uu/s forward) | control for the next row |
+| `late_dodge` | full-height jump, dodge 1.6 s after the press (1.4 s after the hold ends) | no dodge (1.25 s window, FR-136) | second-jump window |
+| `wavedash_early` / `_mid` / `_late` | nose-up car falling at 900 uu/s forward, forward flip 15, 19 or 23 ticks in | early: hops back up; mid and late: land and keep about 1350 uu/s | landing with a flip, tire grip, wheel pushback |
+| `speed_flip` | kickoff: boost, jump, nose up, diagonal flip, cancel pitch, air roll | flips to about 1100 uu/s forward-side, 70 uu up | flip torque, cancel, boost together |
+| `half_flip` | car facing -y moving +y, jump, back flip, cancel, air roll | keeps spinning (pitch spin about -5 rad/s) for the flip window | flip cancel rule, air roll |
+| `pogo` | drop nose-first from 260 uu, jump on contact, rotate nose down | the contact jump pushes the car along its own up axis (about +270 uu/s forward) and it lands again | hard nose landings, jump on contact |
+| `hard_landing_nose_first` | the `test2.jsonl` 18.308 s state, no input | the recorded landing (rebounds, then rests) | the 18.35 s residual, with exact inputs |
+| `corner_slide` | the `test2.jsonl` 8.95 s state and inputs | hits the corner and slides | the 8.958 s and 9.125 s residuals |
+| `car_over_ball` | the `hitjump.jsonl` 77.642 s state, ball resting | wheels over the ball | the 77.667 s ball residual |
+
+The last three start from states read out of the owner's captures, so the new
+capture can be compared directly with the old one. Rotations were converted
+from the capture's quaternions to RLBot's pitch/yaw/roll and checked by
+converting back (the 18.308 s quaternion round-trips to four decimals); the
+roll sign is the convention most likely to be wrong in the game, so check the
+first captured frame's rotation against the scenario's.
 
 ## Running (on the machine with the game)
 

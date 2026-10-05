@@ -1,12 +1,44 @@
 {
-  "name": "prompt dodge control: jump, wait 0.5 s, dodge forward (a dodge must fire)",
+  "name": "prompt dodge control: full-height jump, dodge 0.5 s after the press; a dodge must fire",
   "settle_ticks": 240,
-  "car": { "location": [0, -2000, 17], "rotation": [0, 1.5708, 0], "velocity": [0, 0, 0], "angular_velocity": [0, 0, 0], "boost": 0 },
+  "car": {
+    "location": [
+      0,
+      -2000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
   "steps": [
-    { "ticks": 12, "jump": true },
-    { "ticks": 12 },
-    { "ticks": 36 },
-    { "ticks": 1, "jump": true, "pitch": -1 },
-    { "ticks": 240 }
+    {
+      "ticks": 24,
+      "jump": true
+    },
+    {
+      "ticks": 36
+    },
+    {
+      "ticks": 1,
+      "jump": true,
+      "pitch": -1
+    },
+    {
+      "ticks": 240
+    }
   ]
 }

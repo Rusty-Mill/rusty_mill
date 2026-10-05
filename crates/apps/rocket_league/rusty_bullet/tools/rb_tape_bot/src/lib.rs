@@ -182,13 +182,19 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_scenarios_parse() {
-        for text in [
-            include_str!("../scenarios/late_dodge.json"),
-            include_str!("../scenarios/prompt_dodge.json"),
-        ] {
-            let scenario = Scenario::from_json(text).expect("shipped scenario");
-            assert!(scenario.total_ticks() > 0);
+    fn every_shipped_scenario_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).expect("scenarios dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let text = std::fs::read_to_string(&path).expect("read scenario");
+                let scenario = Scenario::from_json(&text)
+                    .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+                assert!(scenario.total_ticks() > 0, "{}", path.display());
+                count += 1;
+            }
         }
+        assert!(count >= 10, "only {count} scenarios found");
     }
 }

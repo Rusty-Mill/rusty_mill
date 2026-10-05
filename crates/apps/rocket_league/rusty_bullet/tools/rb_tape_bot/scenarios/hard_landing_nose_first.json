@@ -1,0 +1,44 @@
+{
+  "name": "reproduces test2.jsonl 18.308 s: a nose-first landing at 1600 uu/s down, no input (the 18.35 s residual)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -2141.5,
+      -431.33,
+      49.48
+    ],
+    "rotation": [
+      -0.4315,
+      -1.0776,
+      0.4492
+    ],
+    "velocity": [
+      639.97,
+      -1517.59,
+      -1605.41
+    ],
+    "angular_velocity": [
+      0.99,
+      -0.22,
+      1.44
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      2000,
+      2000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 240
+    }
+  ]
+}

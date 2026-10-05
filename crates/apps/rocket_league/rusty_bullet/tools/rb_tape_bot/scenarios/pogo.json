@@ -1,0 +1,58 @@
+{
+  "name": "pogo: drop nose-first from 260 uu and jump on contact, then rotate nose-down again; checks hard nose landings, jump on contact and re-arm",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      0,
+      -2000,
+      260
+    ],
+    "rotation": [
+      -1.2,
+      1.5708,
+      0.0
+    ],
+    "velocity": [
+      0,
+      150,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      3000,
+      3000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 91
+    },
+    {
+      "ticks": 4,
+      "jump": true
+    },
+    {
+      "ticks": 20
+    },
+    {
+      "ticks": 24,
+      "pitch": -1
+    },
+    {
+      "ticks": 181
+    }
+  ]
+}
