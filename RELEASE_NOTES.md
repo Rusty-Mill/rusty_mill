@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_agui and rusty_json_patch: a sovereign AG-UI stack
-**2026-10-05** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
+**2026-10-05** · [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
 
 - **Added:** `rusty_json_patch` (`crates/foundation`): RFC 6901 pointers, RFC 6902 patches with atomic apply and a `diff`, RFC 7386 merge patch, over `rusty_json::Value`; `no_std` + `alloc`; tests are the RFCs' own appendix vectors.
 - **Added:** `rusty_agui` (`crates/libs/protocol`): the AG-UI protocol that CopilotKit's React SDK and OpenBot consume. All 31 event types, `RunAgentInput` and the message model; a hand-written JSON codec (unknown members ignored); SSE encode and incremental decode; a `Verifier` that enforces the ordering rules and expands chunk events as the TypeScript SDK does; a `Reducer` that folds events into messages and state; and, behind the `serve` feature, an `Agent` trait and `AgentHandler` for `rusty_serve` that frames a run, verifies every emitted event, and streams it.
