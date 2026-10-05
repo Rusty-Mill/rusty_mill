@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Gemini adapter dropped
+**2026-10-05** · (link once pushed)
+
+- **Changed:** docs only. The Gemini CLI is discontinued, so the planned Gemini adapter is dropped, not deferred (README, ARCHITECTURE, AGENTS.md, ADR-0001 update, ADR-0012). `Agent::Gemini` stays a routing label so persisted records remain readable; no code change.
+- Known limitation: a goal that routes to `gemini` still parses and fails at run time with "no adapter".
+
+---
+
 ## Claude joins the board: `orch-claude`
 **2026-10-04** · (link once pushed) · [ADR-0012](docs/adr/0012-claude-adapter.md)
 
@@ -11,7 +19,7 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 - **Added:** `rusty_orch run --repo <dir>` (env `ORCH_REPO`) names the repository Codex and Claude read; `--codex-repo` and `ORCH_CODEX_REPO` remain as aliases. `--claude-model <name>` pins a model. Goal files reach Claude by naming `claude` in `routing`; default routing is unchanged.
 - **Changed:** `orch_cli::CommandRunner` gains the required `run_in(cwd, …)`, with `run_scrubbed` and `run` provided over it, so an adapter can give its CLI the repository as working directory instead of inheriting the orchestrator's. `orch_cli::output_schema(stop)` is the schema's home; `orch_codex::output_schema` re-exports it, so no caller changes. In-family source changes: every `CommandRunner` implementation (all in this family) implements `run_in`; `AgentsConfig.codex_repo`/`Args.codex_repo` become `repo` and both gain `claude_model`.
 - **Tests:** orch-claude contract (argv pinned including the schema text and the absence of every write, shell, or bypass flag; constants; footer) and adapter over a scripted two-process fake (probe then run in the repo with the scrub list on both; logged-out probe is unavailable and skips the run; probe spawn failure is transient; login text inside the envelope is unavailable; four rate-limit wordings named; other envelope errors keep status and subtype; non-envelope exit reports stderr; prose, missing `structured_output`, and off-protocol objects are transient; timeout; best effort withdraws `question` from prompt, schema, and parser); orch-cli `run_in` sets the working directory and `None` inherits it, and the moved schema agrees with the parser under both rules; rusty_orch composite runner serves Codex, Claude, and Local and fails Gemini permanently; args cover `--repo`, the alias, and env precedence. Verified locally on rustc 1.97; CI pins 1.98.1. One live `claude -p` run with the pinned argv against this repository returned a schema-valid `structured_output` in three turns with no permission denials; the ignored real-binary nonce test is the standing check. The logged-out envelope text was not observed (the development container is always logged in); the probe's exit code is the load-bearing signal.
-- Out of scope, by choice: the Gemini adapter (next, once its binary can be verified), the Implement role, write access, an OS sandbox for Claude, `--add-dir`.
+- Out of scope, by choice: the Gemini adapter (later dropped: the Gemini CLI is discontinued), the Implement role, write access, an OS sandbox for Claude, `--add-dir`.
 
 ---
 

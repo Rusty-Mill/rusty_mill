@@ -21,6 +21,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_orch: drop the planned Gemini adapter
+**2026-10-05** · [#508](https://github.com/Rusty-Mill/rusty_mill/pull/508) · [ADR-0001](crates/apps/rusty_orch/docs/adr/0001-shared-substrate-over-agent-messaging.md)
+
+- **Changed:** docs only. The Gemini CLI is discontinued, so the Gemini adapter is dropped, not deferred. `Agent::Gemini` stays a routing label so persisted records remain readable; no code change.
+- Known limitation: a goal that routes to `gemini` still parses and fails at run time with "no adapter".
+
+---
+
 ## rusty_rsi: record the outer agent's cost
 **2026-10-05** · [#507](https://github.com/Rusty-Mill/rusty_mill/pull/507) · [ADR-0005](docs/adr/0005-rsi-harness.md)
 

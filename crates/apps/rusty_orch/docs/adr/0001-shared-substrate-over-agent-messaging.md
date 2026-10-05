@@ -17,3 +17,5 @@ Multiple models (Claude, Codex, Gemini, local Ollama/Hermes) should collaborate 
 - Invariants (no self-review, no dangling refs, acyclic plans) live in a pure core and are unit-tested.
 - Subscription rate limits, especially Claude's, become the main throughput constraint; heavy work routes to Codex and local models.
 - Dependence on CLI headless behavior: each adapter must be verified per vendor before use.
+
+**Update (2026-10):** the Gemini CLI is discontinued, so no Gemini adapter will be built. `Agent::Gemini` remains a routing label in `orch-core` and in persisted records; nothing serves it.
