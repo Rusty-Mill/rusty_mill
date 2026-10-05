@@ -1,0 +1,48 @@
+[package]
+name = "rusty_channel"
+version = "0.1.0"
+edition = "2021"
+description = "Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack as the first adapter"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["ag-ui", "agent", "slack", "chat", "bot"]
+categories = ["network-programming"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[features]
+default = []
+# `bot`: a runner on `rusty_serve` that runs an AG-UI agent with
+# `rusty_agui`'s client and answers the service over `rusty_tls`; the
+# `slack_bot` and `teams_bot` examples are on it. Off by default: the
+# library itself does no I/O.
+bot = ["dep:rusty_serve", "dep:rusty_http", "dep:rusty_tls", "rusty_agui/client"]
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_agui = { workspace = true }
+# `rusty_json` without `serde`, as `rusty_agui` takes it: a path dependency
+# because Cargo ignores `default-features = false` on a workspace entry
+# whose defaults are on.
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+rusty_uuid = { workspace = true }
+# HMAC-SHA256 and a constant-time compare, for Slack's request signature.
+rusty_oauth = { workspace = true }
+rusty_serve = { workspace = true, optional = true }
+rusty_http = { workspace = true, optional = true }
+rusty_tls = { workspace = true, optional = true }
+
+[[example]]
+name = "slack_bot"
+required-features = ["bot"]
+
+[[example]]
+name = "teams_bot"
+required-features = ["bot"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

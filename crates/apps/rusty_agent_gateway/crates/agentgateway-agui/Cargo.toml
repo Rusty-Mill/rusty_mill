@@ -1,0 +1,46 @@
+[package]
+name = "agentgateway-agui"
+version = "0.1.0"
+description = "AG-UI run gating (CEL, deny by default) and run audit records for rusty_agent_gateway"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+authors = ["rusty_agent_gateway contributors"]
+publish = false
+
+# De-inherited from rusty_agent_gateway's own former `[workspace.lints]`:
+# this workspace root's `[workspace.lints]` is rustils' (a weaker
+# `unsafe_code = "warn"`, and none of the rest), so these are written
+# literally rather than silently downgraded.
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "warn"
+unwrap_used = "warn"
+
+[dependencies]
+agentgateway-config = { workspace = true }
+# The protocol types, codec, SSE decoder and verifier: what a run looks like
+# on the wire, so the gate reads the run input and the audit reads the
+# event stream. Default features only (no `serve`, no `client`): the gateway
+# proxies runs, it neither hosts nor calls agents.
+rusty_agui = { workspace = true }
+# The same expression language as `mcpAuthorization.rules`, so one rule
+# syntax covers tools and runs.
+cel = { workspace = true }
+serde_json = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+bytes = { workspace = true }
+thiserror = "2"
+tracing = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

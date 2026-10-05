@@ -64,6 +64,7 @@ tool's own name.
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
 | `agentgateway-a2a` | A2A method gating and agent-card discovery, over [`rusty_a2a`][rusty_a2a]. |
+| `agentgateway-agui` | AG-UI run gating (CEL, deny by default) and run audit records, over [`rusty_agui`][rusty_agui]. |
 | `agentgateway` | The binary: data plane assembly, sockets, graceful shutdown. |
 
 Three decisions are worth knowing up front, because they shape everything else.
@@ -154,6 +155,9 @@ Implemented and tested:
   [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
+- `agui` policies: deny-by-default CEL gating of AG-UI runs with an audit
+  record either side of the upstream call — see
+  [Agent-user interaction](#agent-user-interaction)
 - TLS termination with ALPN (`h2` and `http/1.1`), one certificate per
   hostname, and `protocol: TLS` passthrough that forwards connections without
   decrypting them — see [TLS](#tls)
@@ -1241,6 +1245,68 @@ that agent's with its URL corrected.
 
 [Agent2Agent]: https://a2a-protocol.org
 
+## Agent-user interaction
+
+```yaml
+policies:
+  jwtAuth: { ... }
+  agui:
+    rules:
+      - allow: 'jwt.sub != "" && agui.tools.size() <= 8'
+      - deny: '"delete_account" in agui.tools'
+      - require: 'agui.forwardedProps.tenant == jwt.tenant'
+backends:
+  - host: "assistant:9000"
+```
+
+An `agui` policy marks a route as carrying [AG-UI] runs: a frontend posting a
+`RunAgentInput` and reading back an event stream. The gateway fronts the
+agent rather than becoming one, so it takes only [`rusty_agui`][rusty_agui]'s
+protocol types, codec and verifier. Every `POST` on the route is read as a run
+and judged by `rules` before the agent sees it; any other request is proxied
+untouched. A `POST` that is not a `RunAgentInput` is a `400`.
+
+### Deny by default
+
+This gate is the one place in the gateway that **fails closed**. The MCP tool
+gate and the A2A method gate permit whatever is not denied, which is right
+for a protocol where the operator enumerates a closed set of operations. A
+run carries the person's words, the tools the frontend offers and whatever
+the frontend forwards, so there is no closed set to enumerate, and a route
+with no `allow` rule refuses every run. A `deny` that holds refuses; a
+`require` that fails refuses; otherwise some `allow` must hold. Refusals are
+`403` with the reason as the body (the rule that matched, or "no allow rule
+on this route").
+
+Rules are CEL, the same language as `mcpAuthorization.rules`, over three
+bindings:
+
+| Binding | What it holds |
+| --- | --- |
+| `agui` | `threadId`, `runId`, `parentRunId`, `messages` (the count), `lastUserMessage`, `tools` (names), `forwardedProps` |
+| `request` | `method`, `path`, `headers` |
+| `jwt` | the verified token's claims, when the route has `jwtAuth` |
+
+### Audit
+
+Two records per run, as structured `tracing` events on the
+`agentgateway::audit` target so a log pipeline can route them apart from
+the rest. The first is written **before** the upstream is called and
+carries the decision: route, thread, run, subject (`jwt.sub`), tool names,
+message count, permit or refuse and why. A run that never completes still
+has its decision on record. The second is written when the event stream
+ends, or when the client goes away first, with what the gateway saw of the
+run: the upstream status, how many canonical events, how it ended
+(`finished`, `error`, `incomplete`, `disconnected`, `transport` or
+`invalid` when the agent broke the protocol's ordering rules) and the
+elapsed time. The stream itself passes through unchanged: the gateway
+records, it does not re-encode.
+
+A route carries either `a2a` or `agui`, not both; the config refuses the
+pair.
+
+[AG-UI]: https://docs.ag-ui.com
+
 ## The LLM gateway
 
 ```yaml
@@ -2300,3 +2366,4 @@ test binaries cannot collide however their process ids fall.
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp
 [rusty_tls]: https://github.com/baileyrd/rusty_tls
 [rusty_a2a]: https://github.com/baileyrd/rusty_a2a
+[rusty_agui]: ../../libs/protocol/rusty_agui

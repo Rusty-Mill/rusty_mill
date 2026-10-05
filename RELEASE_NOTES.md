@@ -25,6 +25,81 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_channel: Microsoft Teams
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, second channel
+
+- **Added:** `teams::Teams`, the Azure Bot Framework adapter. Inbound, the framework's bearer JWT is verified with `rusty_oauth`: `RS256` against the key the token's `kid` names in the framework's JWK Set, issuer `https://api.botframework.com`, audience equal to the app id, `exp` and `nbf` with five minutes of leeway, and a `serviceurl` claim that must match the activity's `serviceUrl`, so a forged activity pointing replies at another host is refused before its body is read. Only `message` activities become runs; `<at>` mentions are stripped; the Teams conversation id (which carries `;messageid=` for a channel thread) is the thread key. Outbound, a reply activity is posted to `{serviceUrl}v3/conversations/{id}/activities/{activityId}` with a token from the client-credentials grant.
+- **Changed:** `Channel` gains two defaulted hooks. `credential(now)` returns `Ready` or `Fetch(Outbound)`, and `accept_credential(body, now)` takes the response: Teams' token is short-lived, so the runner fetches one before a reply and a minute before it expires. `reply_accepted(status, body)` lets a service that reports failure in a `200` body (Slack's `"ok": false`) say so. `Channel` is now `Send + Sync`.
+- **Changed:** the runner moves from the Slack example into `bot::Bot` behind the `bot` feature, with `bot::get` and `bot::post` over `rusty_tls`; `slack_bot` and `teams_bot` are thin examples over it sharing an `examples/common` module. The Teams example fetches the framework's signing keys once at start.
+- **Tests:** five for Teams, no network, against an RSA key and tokens produced with `openssl` outside the crate: a signed message accepted and keyed; no token, an altered payload, a wrong audience, an expired token, a not-yet-valid token, a token without `serviceurl`, an activity naming a foreign service, and an unknown key all refused; other activity types and bot messages ignored; the token fetch, its acceptance and expiry, and the reply URL, headers and body.
+- **Known limitations:** keys are fetched once per process; a Bot Framework retry is not deduplicated (unlike Slack's, it carries no marker); outbound proactive messages are not supported, only replies.
+
+---
+
+## rusty_channel: chat channels for AG-UI agents, Slack first
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, first channel
+
+- **Added:** `rusty_channel` at `crates/libs/protocol/rusty_channel`. `Channel` is sans-IO: `receive(headers, body, now)` authenticates one inbound request and returns `Challenge`, `Message(Inbound)` or `Ignored(why)`; `reply(to, text)` returns the `Outbound` `POST` (URL, headers, body) the runner sends. `Thread` keeps one conversation: `run(&inbound)` appends the person's message and builds a `RunAgentInput` carrying the whole thread and no tools; `absorb(events)` runs the events through the verifier and reducer and returns a `Reply` with the new assistant text and the error if the run ended in `RUN_ERROR`, a broken stream or an event out of order (the partial text is kept).
+- **Added:** `slack::Slack`, the Events API adapter: `v0=` HMAC-SHA256 over `v0:<timestamp>:<body>` compared in constant time, a five-minute timestamp skew, `url_verification` answered, `app_mention` anywhere and `message` in a direct message accepted, a bot's own messages, subtypes, plain channel messages and Slack's retries ignored. A mention threads under itself so one Slack thread is one AG-UI thread; a direct message is one thread per person. Replies go through `chat.postMessage` with `&`, `<` and `>` escaped.
+- **Added:** `examples/slack_bot.rs` behind the `bot` feature: `rusty_serve` in, `rusty_agui::HttpAgent` to the agent (or to `rusty_agent_gateway`'s `agui` route), `rusty_tls` out to Slack. The request is answered before the run (Slack wants a `200` within three seconds); runs are serialised per process and threads live in memory.
+- **Changed:** `rusty_serve::Request` gains `headers`, every header of the request, and the crate re-exports `HeaderMap`.
+- **Tests:** eleven, no network: thread building and absorbing (text, chunks, errors, a cut stream), an independent HMAC fixture, bad signature, stale clock, missing headers, a tampered body, the challenge, mention and thread keys, the direct-message key and reply body, every ignore case, text cleaning and escaping.
+- **Known limitations:** Slack only; threads are not persisted; one run at a time per process; the bot example is not exercised in CI (it needs Slack credentials). Teams and SMS are the next two PRs of this step.
+
+---
+
+## rusty_agent_gateway: the `agui` route policy
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 4
+
+- **Added:** `agentgateway-agui`, a crate beside `agentgateway-a2a`: `AguiGateway` compiles a route's `agui.rules` (CEL, the same language as `mcpAuthorization.rules`) and judges each run; `AuditedBody` wraps the proxied response and reports once, when the stream ends or the body is dropped; `audit::record_decision` and `audit::record_outcome` write the two records on the `agentgateway::audit` target.
+- **Added:** `policies.agui` in `agentgateway-config` (`rules: [allow|deny|require]`) and its dispatch in the gateway: a `POST` is buffered (bounded like the A2A read), checked, recorded, then forwarded buffered; anything else on the route is proxied as is. Deny by default: no `allow` rule, no runs. Refusals are `403` with the reason; a `POST` that is not a `RunAgentInput` is `400`; `a2a` and `agui` on one route is a config error.
+- **Rule context:** `agui.{threadId,runId,parentRunId,messages,lastUserMessage,tools,forwardedProps}`, `request.{method,path,headers}`, `jwt` (the claims `jwtAuth` verified).
+- **Tests:** seven unit tests in the crate (default refusal, deny and require precedence, the context the rules see, a bad expression at build time, a non-POST and a bad body; the audited body passing bytes through and reporting finished, error, invalid, incomplete and disconnected runs) and five end-to-end tests against a mock agent through a running gateway (nothing reaches the agent on refusal; an allowed run streams through untouched; a GET passes through; the config pair is refused).
+- **Known limitations:** audit records are tracing events, not a store; the gate reads the run input only, not the agent's response, so what the agent *did* is the outcome record's event count and ending, not its content.
+
+---
+
+## rusty_tick: the assistant, the React binding's first consumer
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, second PR
+
+- **Added:** `rusty_tick::assistant`, an AG-UI agent served at `POST /api/agent` through `rusty_agui::AgentHandler`, behind the same bearer token as every other route (`Backend::authorize`; the streaming route lives in `server.rs` because it cannot return the buffered API response). It is deterministic and holds no store: it reads the thread, the context the UI exposes and the tools the UI offers, and answers as a pure function (`decide`). "add buy milk" becomes a `create_task` tool call the browser runs; a tool message answering it becomes "Added “buy milk”."; "what's due?" reads the open view; anything else gets help. An LLM-backed agent can replace it behind the same trait.
+- **Added:** the web UI's Assistant panel (`src/features/assistant`, a rail button, `assistantOpen` in the UI store), on `@rusty-mill/agui-react`: `useReadable` for the open view and its tasks, `useAction` for `create_task` against the app's own store, `useAgent` for the thread. The agui packages are linked as `file:` dependencies; Vite dedupes React and inlines them in tests.
+- **Tests:** three Rust tests on `decide` and one over a socket (a bad token gets 401, a good one streams a run with the tool call); two web tests through the real panel, store and hooks over a scripted agent (the task lands in the store and the confirmation shows; a 404 is shown and the panel stays usable).
+- **CI:** the `rusty_tick web` and `rusty_tick e2e` jobs build the agui packages first; a change under `packages/` also selects the tick jobs.
+
+---
+
+## rusty_agui: the React binding
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, first PR
+
+- **Added:** `@rusty-mill/agui-react` at `crates/libs/protocol/rusty_agui/packages/agui-react`, headless hooks over the core. `AgentProvider` holds one thread with one agent in a `useSyncExternalStore` store. `useAgent` gives messages, state, running and error plus `send`, `run`, `stop`, the thread's tool calls and `renderToolCall`. `useReadable` exposes application context for as long as the component lives. `useAction` registers a frontend tool: with a `handler` the agent's call is answered and a follow-up run starts; with only a `render` the call stays pending until the rendered UI calls `respond`, the human-in-the-loop pattern; `render` is the generative UI, given the parsed arguments, the call's status and its result. `useSharedState` sets state the next run sends and receives the agent's snapshots and deltas.
+- **Tests:** four hook tests under jsdom against a scripted fake agent: a streamed reply and a `RUN_ERROR`; context and state sent and state received; a handled tool call answered and followed up with the tool message in the next run's thread; a render-only call that waits for the person and then continues.
+- **Changed:** the `rusty_agui conformance` CI job typechecks, tests and builds the binding after the core.
+- Not in this PR, by choice: the first consumer. Wiring an agent and a chat panel into `rusty_tick` is step 3's second PR, so it can be reviewed as an app change.
+
+---
+
+## rusty_agui: the headless TypeScript core
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 2
+
+- **Added:** `@rusty-mill/agui-core` at `crates/libs/protocol/rusty_agui/packages/agui-core`, the headless TypeScript mirror of the crate with no runtime dependencies. Wire types and a validating `parseEvent` (unknown members kept, as the Rust codec ignores them); RFC 6901/6902/7386 pointers, atomic patch and merge patch; SSE `encode` and an incremental `Decoder`; a `Verifier` with the same ordering rules and chunk expansion as the Rust one; a `Reducer`; `streamAgent` (an async iterable of verified events) and `runAgent` (events, messages, state, result, outcome or error) over `fetch`. ESM, built with `tsc`.
+- **Added:** `crates/libs/protocol/rusty_agui/fixtures/`: `events.json` (one sample per event type), `chunks.json` (chunk sequences and their canonical expansion) and `runs.json` (a whole run with its expected messages and state). The Rust codec, verifier and reducer tests and the TypeScript tests both read them, so the two implementations cannot drift apart without a test saying so.
+- **Changed:** the conformance project also runs `@rusty-mill/agui-core` against the echo agent, beside `@ag-ui/client`; the `rusty_agui conformance` CI job runs the package's typecheck, tests and build first and consumes it as a `file:` dependency.
+- **Verified:** `cargo test -p rusty_agui --all-features` (29, three of them the shared fixtures), `clippy -D warnings`, `fmt --check`; package `typecheck`, 16 unit tests and `build`; conformance 5 tests against the built example; workflow lint with pinned actionlint.
+- Answers open question 1 of the follow-ons: the TypeScript core lives in-workspace under the crate, as the React apps do, so the `agui` planner flag covers it and the fixtures stay beside the Rust tests.
+
+---
+
+## rusty_agui: a client, and conformance against the reference TypeScript client
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 1
+
+- **Added:** `rusty_agui`'s `client` feature: `HttpAgent::new(url).run(&input)` posts a `RunAgentInput` and returns a `RunStream`, an iterator of verified events (through the same `Verifier` the server uses). Blocking, on `rusty_http`'s sync transport over `std::net`, plain `http://`; `Error::Status` for a refused run, `Error::Transport` for a closed socket, a non-SSE response or a stream that ends early.
+- **Added:** the `echo_agent` example (`--features serve`): state snapshot and delta, a step, a tool call when the client offers a tool, an echoed assistant message; `fail` ends the run with `RUN_ERROR`.
+- **Added:** `crates/libs/protocol/rusty_agui/conformance/`, a Node project where `@ag-ui/client` 1.0.2, the reference client CopilotKit's SDK and OpenBot embed, runs the example: a full run the reference client verifies and reduces (state, result, new messages), a frontend tool call with streamed arguments, and an agent failure delivered as `RUN_ERROR`. CI job `rusty_agui conformance (@ag-ui/client)`; planner flag `agui` (path and package).
+- **Verified:** `cargo test -p rusty_agui --all-features` (27, plus the client doc test), `clippy -D warnings` with examples, `fmt --check`, the CI script tests (35), the three conformance tests locally against the built example, workspace map and layer checks.
+- Two departures from the follow-ons document, recorded there: the client is on `rusty_http` directly rather than `rusty_request` (sync, mirroring `serve`; the gateway is async on its own stack), and the smoke test uses the reference `@ag-ui/client` rather than a browser-driven React app, since that client is what the React SDK drives agents with.
+---
+
 ## rusty_baseline: honest measurement status
 **2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
 
