@@ -369,6 +369,9 @@ pub struct EntryFields {
     pub inner_model: ModelId,
     /// The outer agent's model; `None` for the baseline.
     pub outer_model: Option<ModelId>,
+    /// What the outer agent consumed proposing this candidate; `None` for
+    /// the baseline, and for entries written before it was recorded.
+    pub outer_cost: Option<CostUsage>,
     /// The per-task budget every inner run was held to.
     pub budget: Budget,
     /// Grading rounds in order; empty when the candidate never built.
@@ -395,6 +398,7 @@ impl LineageEntry {
     /// - [`Rejection::Buggy`] and [`Rejection::PathViolation`] need no
     ///   evaluations (and must have none), plus a reason or at least one path.
     /// - Evaluation rounds must be numbered `0, 1, …` in order.
+    /// - A baseline has no outer cost: nothing proposed it.
     ///
     /// # Errors
     /// [`CoreError::InconsistentEvidence`] when the evaluations have the
@@ -402,6 +406,11 @@ impl LineageEntry {
     /// replayed decision differs, and any error from recomputing a grade
     /// ([`EvaluationRecord::evaluation`]) or from [`confirm`].
     pub fn new(fields: EntryFields) -> Result<Self, CoreError> {
+        if matches!(fields.decision, Decision::Baseline) && fields.outer_cost.is_some() {
+            return Err(CoreError::InconsistentEvidence(
+                "a baseline has no proposal, so no outer cost",
+            ));
+        }
         verify_decision(&fields.decision, &fields.evaluations)?;
         Ok(Self(fields))
     }
@@ -715,6 +724,11 @@ mod tests {
             diff: Some(BlobId::of(b"diff")),
             inner_model: ModelId::parse("llama3.1").expect("valid model"),
             outer_model: Some(ModelId::parse("gpt-5-codex").expect("valid model")),
+            outer_cost: Some(CostUsage {
+                prompt_tokens: 900,
+                completion_tokens: 80,
+                ..CostUsage::default()
+            }),
             budget: Budget::new(1_000, Duration::from_secs(60), None).expect("valid budget"),
             evaluations,
             decision,
@@ -902,18 +916,28 @@ mod tests {
     }
 
     #[test]
-    fn baseline_needs_exactly_one_valid_evaluation() {
+    fn baseline_needs_exactly_one_valid_evaluation_and_no_outer_cost() {
+        let baseline = |evaluations| EntryFields {
+            outer_cost: None,
+            ..fields(evaluations, Decision::Baseline)
+        };
         let one = winning_rounds()[..1].to_vec();
-        assert!(LineageEntry::new(fields(one, Decision::Baseline)).is_ok());
+        assert!(LineageEntry::new(baseline(one.clone())).is_ok());
         for evaluations in [Vec::new(), winning_rounds()] {
             assert!(matches!(
-                LineageEntry::new(fields(evaluations, Decision::Baseline)),
+                LineageEntry::new(baseline(evaluations)),
                 Err(CoreError::InconsistentEvidence(_))
             ));
         }
+        assert!(matches!(
+            LineageEntry::new(fields(one, Decision::Baseline)),
+            Err(CoreError::InconsistentEvidence(
+                "a baseline has no proposal, so no outer cost"
+            ))
+        ));
         let duplicated = vec![round(0, &[("ml", 1, 0.5), ("ml", 1, 0.5)])];
         assert!(matches!(
-            LineageEntry::new(fields(duplicated, Decision::Baseline)),
+            LineageEntry::new(baseline(duplicated)),
             Err(CoreError::DuplicateResult { .. })
         ));
     }

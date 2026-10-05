@@ -439,8 +439,9 @@ solutions, full broker transcripts. Every entry records the following:
 
 - harness commit SHA, parent SHA, diff blob
 - seeds per task
-- inner and outer model ids plus endpoint kinds
+- inner and outer model ids
 - `Budget` and `CostUsage` (tokens, wall, gpu)
+- the outer agent's `CostUsage` for the proposal (`outer_cost`)
 - per-task public score of `x̂_t`, private score, and grade
 - the accept decision with the margin used
 - a host fingerprint (wall-clock budgets depend on the machine)
@@ -536,6 +537,12 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
   - **Recorded per task:** the submission's public score, its private
     score (the floor if there was no submission), the submission and
     transcript blobs, and the inner cost.
+- **Outer cost.** Each proposal's entry records `outer_cost`: the
+  proposer's prompt and completion tokens, and the wall time the loop
+  measured around `propose`. The baseline has none (`LineageEntry::new`
+  refuses one). Entries written before it existed decode with none, and
+  `rsi report` totals it with those proposals counted apart. It is
+  recorded, not budgeted: the budget bounds each inner run (invariant 2).
 - **Lineage file.** Each line is
   `{"hash":"<64 hex>","prev":"<64 hex>","entry":<entry>}`.
   - **Exact bytes.** The fixed-width prefix lets a reader recover the
@@ -601,9 +608,9 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
     no-follow, no-`.git` rules above, so a symlink Codex makes is
     recreated for the allowlist to reject, never followed.
   - **Login and cost.** Codex signs in with its own login under
-    `CODEX_HOME`; no key passes through `rsi`. Its token use is not
-    reported back, so the proposal's usage is zero (the outer cost was
-    already unrecorded).
+    `CODEX_HOME`; no key passes through `rsi`. It runs with `--json`, and
+    the proposal's tokens are summed from the `turn.completed` events, as
+    for `CodexModel`; a run that reports none is an error.
   - **Tests.** A fake `codex` script runs through the real helper and
     checks the edits that come back, that `.git` is untouched, and that
     it cannot write outside, read private data or open devices other
@@ -617,7 +624,10 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
   `--permission-mode acceptEdits`, `--permission-prompts none`, no settings
   sources, MCP servers, slash commands or session files, and at most 60
   turns. Its reply is the `result` of the `--output-format json`
-  envelope; an envelope marked `is_error` is an error. It signs in with
+  envelope; an envelope marked `is_error` is an error. Its tokens come
+  from the envelope's `usage`: prompt tokens are `input_tokens` plus the
+  cache writes and reads, which Claude Code counts apart; an envelope
+  without usage is an error. It signs in with
   the Claude subscription login; no Anthropic key passes through `rsi`.
 - **Codex as the inner model** (`CodexModel`, `RSI_INNER_PROVIDER=codex`;
   `rsi-runtime::codex_model`). a0 stays the agent under improvement and
@@ -675,12 +685,12 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
 - **Mutation check.** Each of these, removed alone, fails the run test:
   - the allowlist;
   - fresh seeds for the re-evaluation;
-  - passing the full history to the proposer.
+  - passing the full history to the proposer;
+  - recording each proposal's outer cost.
 - **Known limits.**
   - `run.json` keeps the run seed. Calibrating and running with the same
     `--seed` makes calibration's round 0 and the baseline share seeds,
     which is harmless: neither is a gate decision.
-  - Cost of the outer model is not yet recorded in lineage.
 
 ### 8. Models and configuration
 
@@ -694,9 +704,11 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
   from its event stream.
 - `rusty_llama`'s OpenAI-compatible `server` feature can serve as a
   fully in-process, offline inner model later, with zero adapter code.
-- Config: `rsi.toml`, with explicit env overrides (`RSI_*`). Secrets
-  come only from env (e.g. `RSI_OUTER_API_KEY`) and are never written to
-  lineage or logs; lineage records the endpoint kind and model id only.
+- Config: command-line flags and `RSI_*` environment variables only;
+  there is no `rsi.toml` (see §7, Configuration). Secrets come only from
+  env (e.g. `RSI_OUTER_API_KEY`) and are never written to lineage or
+  logs; lineage records model ids only (a CLI agent's id names it, e.g.
+  `codex:<model>`).
 - CI has no model. Tests use a scripted model behind the same broker,
   and scripted proposers.
 

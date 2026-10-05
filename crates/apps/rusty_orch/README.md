@@ -1,6 +1,6 @@
 # rusty_orch
 
-A small orchestrator that lets Claude, ChatGPT (Codex), Gemini, and local models (Ollama/Hermes) collaborate on development research and tasks without a human relaying context between them. Agents never message each other: they read and write a shared, append-only blackboard and a git repo, and a deterministic dispatcher hands each one a task card.
+A small orchestrator that lets Claude, ChatGPT (Codex), and local models (Ollama/Hermes) collaborate on development research and tasks without a human relaying context between them. Agents never message each other: they read and write a shared, append-only blackboard and a git repo, and a deterministic dispatcher hands each one a task card.
 
 ## Status
 Experimental. Domain core (`orch-core`), an in-memory dispatcher (`orch-dispatch`), a shared CLI-adapter core (`orch-cli`), three real adapters (`orch-ollama` for `Agent::Local`, `orch-codex` for `Agent::Codex`, `orch-claude` for `Agent::Claude`, both read-only), a snapshot store (`orch-store`) over the embedded `rusty_multimodal_db` engine, and the `rusty_orch` command that runs a JSON goal file through them and resumes a blocked run from `--state <dir>`. Owner: @baileyrd.

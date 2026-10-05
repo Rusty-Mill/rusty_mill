@@ -39,4 +39,4 @@ Claude Code reports a missing login inside the result envelope, with `is_error: 
 - `rusty_orch::agents::AgentsConfig` renames `codex_repo` to `repo` and gains `claude_model`; `rusty_orch::args::Args` likewise. Source changes for external struct literals, stated in the release notes.
 - The read-only promise rests on the CLI's own flags, which a future Claude Code release could rename or weaken; the contract test pins the argv and the ignored real-binary test exercises it. An OS-level sandbox for Claude would be its own decision.
 - The live auth-failure text was not observed during development (the development container is always logged in); the probe's exit code is the load-bearing signal and the text match is a second line. If Claude Code changes its wording, the error degrades to a generic transient message, never a wrong classification.
-- Out of scope, by choice: the Implement role, write access, MCP access to the board, `--add-dir`, the Gemini adapter.
+- Out of scope, by choice: the Implement role, write access, MCP access to the board, `--add-dir`. A Gemini adapter is dropped, not deferred: the Gemini CLI is discontinued.
