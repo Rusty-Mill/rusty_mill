@@ -100,6 +100,23 @@ TASKS=crates/apps/rusty_rsi/crates/rsi-runtime/tasks
 `_API_KEY` (`INNER` for the agent, `OUTER` for the proposer). Running the
 outer loop also needs `git` 2.25 or later.
 
+### Codex as the proposer
+
+```sh
+codex login                                  # once; stored in CODEX_HOME
+export RSI_OUTER_PROPOSER=codex
+export RSI_OUTER_CODEX=/path/to/vendor/x86_64-unknown-linux-musl/bin/codex  # the native binary
+export RSI_OUTER_MODEL=gpt-5-codex           # optional: Codex's default otherwise
+```
+
+Codex runs inside `rsi`'s sandbox, not its own: it edits a copy of the
+harness (no `.git`), may write only that copy, `CODEX_HOME` and a private
+temp dir, may use the network, and cannot reach the tasks or the run
+directory. `RSI_OUTER_CODEX` defaults to `codex` on `PATH`, which must be
+the native binary, not the npm launcher script. Proxy and certificate
+variables (`HTTPS_PROXY`, `SSL_CERT_FILE`, ...) pass through. A real-Codex
+smoke test: `cargo test -p rsi-cli --test codex -- --ignored`.
+
 ## Test
 
 ```sh

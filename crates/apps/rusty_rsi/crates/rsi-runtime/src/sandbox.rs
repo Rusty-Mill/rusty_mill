@@ -25,6 +25,10 @@ pub const SETUP_FAILED: u8 = 125;
 /// Which sockets a sandboxed process may create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sockets {
+    /// Any socket, the internet included. Only the Codex proposer runs
+    /// like this: it must reach its model, and its filesystem confinement
+    /// keeps private task data out of reach (see [`crate::codex`]).
+    Internet,
     /// Anything but internet sockets (solutions).
     NoInternet,
     /// Nothing that can reach an endpoint: `socket(2)` is refused, so no
@@ -42,6 +46,7 @@ impl Sockets {
     const fn flag(self) -> Option<&'static str> {
         match self {
             Self::NoInternet => None,
+            Self::Internet => Some("internet"),
             Self::NoEndpoints => Some("no-endpoints"),
             Self::None => Some("none"),
         }
@@ -156,7 +161,7 @@ impl HelperRequest {
                 Some("--read") => read.push(PathBuf::from(value)),
                 Some("--write") => write.push(PathBuf::from(value)),
                 Some("--sockets") => {
-                    sockets = [Sockets::NoEndpoints, Sockets::None]
+                    sockets = [Sockets::Internet, Sockets::NoEndpoints, Sockets::None]
                         .into_iter()
                         .find(|rule| rule.flag().is_some_and(|f| value == f))
                         .ok_or_else(|| {
@@ -325,10 +330,12 @@ fn confine(request: &HelperRequest) -> Result<(), RuntimeError> {
         .confine_filesystem(&read, &write)
         .map_err(|error| RuntimeError::Sandbox(format!("Landlock: {error}")))?;
     require_enforced("Landlock filesystem confinement", fs)?;
-    let net = sandbox
-        .block_inet_sockets()
-        .map_err(|error| RuntimeError::Sandbox(format!("seccomp: {error}")))?;
-    require_enforced("seccomp socket blocking", net)?;
+    if request.sockets != Sockets::Internet {
+        let net = sandbox
+            .block_inet_sockets()
+            .map_err(|error| RuntimeError::Sandbox(format!("seccomp: {error}")))?;
+        require_enforced("seccomp socket blocking", net)?;
+    }
     group_lock::install(request.sockets)
 }
 
@@ -425,7 +432,7 @@ mod group_lock {
             IO_URING_REGISTER,
         ];
         match sockets {
-            Sockets::NoInternet => {}
+            Sockets::Internet | Sockets::NoInternet => {}
             Sockets::NoEndpoints => denied.push(nr::SOCKET as u32),
             Sockets::None => denied.extend([nr::SOCKET as u32, SOCKETPAIR]),
         }
@@ -547,6 +554,23 @@ mod tests {
     }
 
     #[test]
+    fn every_socket_rule_round_trips() {
+        for sockets in [
+            Sockets::Internet,
+            Sockets::NoInternet,
+            Sockets::NoEndpoints,
+            Sockets::None,
+        ] {
+            let original = HelperRequest {
+                sockets,
+                ..request()
+            };
+            let decoded = HelperRequest::decode(&original.encode()).expect("valid");
+            assert_eq!(decoded.sockets, sockets);
+        }
+    }
+
+    #[test]
     fn program_arguments_that_look_like_flags_are_kept() {
         let decoded = HelperRequest::decode(&request().encode()).expect("valid");
         assert_eq!(
@@ -586,7 +610,12 @@ mod tests {
     fn the_seccomp_program_denies_exactly_what_it_lists() {
         use rusty_libc::arch::nr;
         let (arch, allow, eperm, kill) = group_lock::VERDICTS;
-        for sockets in [Sockets::NoInternet, Sockets::NoEndpoints, Sockets::None] {
+        for sockets in [
+            Sockets::Internet,
+            Sockets::NoInternet,
+            Sockets::NoEndpoints,
+            Sockets::None,
+        ] {
             let denied = group_lock::denied(sockets);
             let program = group_lock::program(&denied);
             for &syscall in &denied {
@@ -595,7 +624,7 @@ mod tests {
             let socket = group_lock::verdict(&program, arch, nr::SOCKET as u32);
             let pair = group_lock::verdict(&program, arch, group_lock::SOCKETPAIR);
             let expected = match sockets {
-                Sockets::NoInternet => (allow, allow),
+                Sockets::Internet | Sockets::NoInternet => (allow, allow),
                 Sockets::NoEndpoints => (eperm, allow),
                 Sockets::None => (eperm, eperm),
             };

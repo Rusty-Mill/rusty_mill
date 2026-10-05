@@ -9,6 +9,7 @@ Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- **`rusty_rsi` Codex proposer** (`crates/apps/rusty_rsi`, ADR-0005): `RSI_OUTER_PROPOSER=codex` runs `codex exec` inside `rsi`'s Landlock sandbox on a `.git`-free staging copy, with a new `Sockets::Internet` rule; rustils 0.27.2 lets Landlock roots be single files.
 - **`rusty_fair_play`: the family's deck.** `PATCH inPlay` sets a card aside or adds it back (a `set-aside.json` beside the stores, no stored-format change); a set-aside card has no owner and is out of the undealt list and the balance. The web board gets equal-size tiles, a collapsible detail pane, a Choose cards mode and a set-aside view.
 - **The `rusty_rsi` outer loop** (`crates/apps/rusty_rsi`, ADR-0005 P4): `rsi run` (sparse git worktrees, a path allowlist, fresh-seed accept gate, hash-chained JSONL lineage with content-addressed blobs), `rsi calibrate` (noise band and margin), `rsi report --replay` (bit-for-bit grade replay and trajectory replay); `rsi-core` gains the `Proposer` and `LineageStore` ports.
 - **`rusty_serve`** (`crates/libs/net/rusty_serve`): the blocking `rusty_http` server plus static file loader extracted from `rusty_tick`, now shared with `rusty_fair_play` through a sans-IO `Handler`.
