@@ -19,14 +19,14 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, GetPromptRequestParams,
     GetPromptResponse, GetPromptResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
     PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams,
-    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents,
-    ResourceUpdatedNotificationParam, Role, ServerCapabilities, ServerInfo,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::schemars;
-use rmcp::service::{Peer, RequestContext};
+use rmcp::service::RequestContext;
 use rmcp::RoleServer;
-use rmcp::ServiceExt as _;
 use rmcp::{tool, tool_router};
+use rusty_mcp::subscriptions::ChangeBroadcaster;
 use serde::{Deserialize, Serialize};
 
 use nexus_types::constants::{IPC_TIMEOUT_EXTENDED, IPC_TIMEOUT_LONG, IPC_TIMEOUT_SHORT};
@@ -205,7 +205,7 @@ fn recv_error_is_terminal(err: &nexus_kernel::RecvError) -> bool {
 /// push per session per `OUTPUT_DEBOUNCE`. Best-effort: a no-op when no tokio
 /// runtime is in scope (e.g. a sync test harness), and it exits quietly when the
 /// bus or the client peer closes.
-fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<RoleServer>) {
+fn spawn_terminal_resource_notifier(context: &KernelPluginContext, changes: ChangeBroadcaster) {
     /// Debounce window for screen pushes driven by the output byte stream.
     const OUTPUT_DEBOUNCE: Duration = Duration::from_millis(750);
 
@@ -246,7 +246,7 @@ fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<Ro
                 // A command finished: screen, exit, and command resources changed.
                 NotifyAction::PushResources(kinds) => {
                     for k in kinds {
-                        notify_terminal_resource(&peer, id, k).await;
+                        notify_terminal_resource(&changes, id, k);
                     }
                     last_screen_push.insert(id.to_string(), Instant::now());
                 }
@@ -257,7 +257,7 @@ fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<Ro
                         .get(id)
                         .is_none_or(|t| now.duration_since(*t) >= OUTPUT_DEBOUNCE);
                     if due {
-                        notify_terminal_resource(&peer, id, "screen").await;
+                        notify_terminal_resource(&changes, id, "screen");
                         last_screen_push.insert(id.to_string(), now);
                     }
                 }
@@ -275,11 +275,9 @@ fn spawn_terminal_resource_notifier(context: &KernelPluginContext, peer: Peer<Ro
 }
 
 /// Push one `notifications/resources/updated` for a terminal VT-grid resource.
-async fn notify_terminal_resource(peer: &Peer<RoleServer>, id: &str, kind: &str) {
+fn notify_terminal_resource(changes: &ChangeBroadcaster, id: &str, kind: &str) {
     let uri = format!("{TERMINAL_URI_PREFIX}{id}/{kind}");
-    let _ = peer
-        .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri))
-        .await;
+    changes.resource_updated(uri);
 }
 
 // ── Input types ──────────────────────────────────────────────────────────────
@@ -1151,9 +1149,11 @@ fn dynamic_tool_to_rmcp(t: &crate::dynamic_tools::DynamicTool) -> rmcp::model::T
 ///
 /// Holds an [`Arc<KernelPluginContext>`] and dispatches every tool call
 /// through `context.ipc_call("com.nexus.storage", …)`.
+#[derive(Clone)]
 pub struct NexusMcpServer {
     context: Arc<KernelPluginContext>,
     tool_router: ToolRouter<Self>,
+    changes: ChangeBroadcaster,
 }
 
 impl NexusMcpServer {
@@ -1163,6 +1163,7 @@ impl NexusMcpServer {
         Self {
             context,
             tool_router: Self::tool_router(),
+            changes: ChangeBroadcaster::new(),
         }
     }
 
@@ -1170,15 +1171,21 @@ impl NexusMcpServer {
     ///
     /// # Errors
     /// Returns an error if the transport or server fails to start.
-    pub async fn serve_stdio(self) -> Result<(), Box<dyn std::error::Error>> {
-        let transport = rmcp::transport::io::stdio();
-        // Clone the context before `serve` consumes `self`, so the terminal
-        // resource-change notifier can subscribe to the kernel bus.
+    pub async fn serve(self, config: rusty_mcp::ServerConfig) -> Result<(), rusty_mcp::ServeError> {
         let context = Arc::clone(&self.context);
-        let server: rmcp::service::RunningService<RoleServer, Self> = self.serve(transport).await?;
-        spawn_terminal_resource_notifier(&context, server.peer().clone());
-        server.waiting().await?;
-        Ok(())
+        let changes = self.changes.clone();
+        spawn_terminal_resource_notifier(&context, changes);
+        rusty_mcp::serve(move || Ok(self.clone()), config).await
+    }
+
+    /// Start the server on stdio transport and block until disconnected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stdio transport cannot start or terminates with
+    /// a protocol I/O failure.
+    pub async fn serve_stdio(self) -> Result<(), rusty_mcp::ServeError> {
+        self.serve(rusty_mcp::ServerConfig::stdio()).await
     }
 
     async fn storage_call<T: serde::de::DeserializeOwned>(
@@ -3736,21 +3743,24 @@ impl NexusMcpServer {
 
 impl rmcp::ServerHandler for NexusMcpServer {
     fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
-        info.capabilities = ServerCapabilities::builder()
-            .enable_tools()
-            .enable_resources()
-            // RFC 0003 — clients may subscribe to terminal resources and receive
-            // notifications/resources/updated as the VT grid changes.
-            .enable_resources_subscribe()
-            // C32 (#385) — forge skills are also exposed as MCP prompts
-            // (see `list_prompts`/`get_prompt` below) so native prompt
-            // pickers (Claude Desktop, Cursor) surface them directly
-            // instead of requiring the nexus_list_skills /
-            // nexus_render_skill tool workaround.
-            .enable_prompts()
-            .build();
-        info.with_instructions(
+        rusty_mcp::server_info(
+            "nexus-mcp",
+            env!("CARGO_PKG_VERSION"),
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                // RFC 0003 — clients may subscribe to terminal resources and receive
+                // notifications/resources/updated as the VT grid changes.
+                .enable_resources_subscribe()
+                // C32 (#385) — forge skills are also exposed as MCP prompts
+                // (see `list_prompts`/`get_prompt` below) so native prompt
+                // pickers (Claude Desktop, Cursor) surface them directly
+                // instead of requiring the nexus_list_skills /
+                // nexus_render_skill tool workaround.
+                .enable_prompts()
+                .build(),
+        )
+        .with_instructions(
             "Nexus MCP server: manage a personal knowledge base of markdown notes. \
              Use nexus_* tools to create, read, update, delete, search, and query notes; \
              list and render authored skill templates from .forge/skills via \
@@ -3858,8 +3868,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
 
     fn list_tools(
         &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<rmcp::model::PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         // DG-39 / PRD-14 §10 — surface dynamic tools alongside the
@@ -3871,9 +3881,23 @@ impl rmcp::ServerHandler for NexusMcpServer {
         for t in crate::dynamic_tools::global().list() {
             items.push(dynamic_tool_to_rmcp(&t));
         }
-        std::future::ready(Ok(ListToolsResult {
-            tools: items,
-            ..Default::default()
+        let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+        let page = rusty_mcp::pagination::page_owned(
+            &items,
+            |tool| tool.name.as_ref(),
+            rusty_mcp::pagination::CursorKind::Tool,
+            cursor,
+            rusty_mcp::pagination::DEFAULT_PAGE_SIZE,
+        );
+        std::future::ready(page.map(|(tools, next_cursor)| {
+            let mut result = ListToolsResult::with_all_items(tools);
+            result.next_cursor = next_cursor;
+            rusty_mcp::__private::apply_cache_hints(
+                &context,
+                &mut result.ttl_ms,
+                &mut result.cache_scope,
+            );
+            result
         }))
     }
 
@@ -3889,8 +3913,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
 
     async fn list_prompts(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, rmcp::ErrorData> {
         // Mirrors `SkillParameter` (nexus-skills/src/lib.rs) — only the
         // fields that map onto `PromptArgument` are captured.
@@ -3913,7 +3937,7 @@ impl rmcp::ServerHandler for NexusMcpServer {
             .skills_call("list", serde_json::json!({}))
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(format!("list_prompts: {e}"), None))?;
-        let prompts = records
+        let prompts: Vec<Prompt> = records
             .into_iter()
             .map(|r| {
                 let arguments = (!r.parameters.is_empty()).then(|| {
@@ -3936,10 +3960,22 @@ impl rmcp::ServerHandler for NexusMcpServer {
                 Prompt::new(r.id, Some(r.description), arguments).with_title(r.name)
             })
             .collect();
-        Ok(ListPromptsResult {
-            prompts,
-            ..Default::default()
-        })
+        let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+        let (prompts, next_cursor) = rusty_mcp::pagination::page_owned(
+            &prompts,
+            |prompt| prompt.name.as_ref(),
+            rusty_mcp::pagination::CursorKind::Prompt,
+            cursor,
+            rusty_mcp::pagination::DEFAULT_PAGE_SIZE,
+        )?;
+        let mut result = ListPromptsResult::with_all_items(prompts);
+        result.next_cursor = next_cursor;
+        rusty_mcp::__private::apply_cache_hints(
+            &context,
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
     }
 
     async fn get_prompt(
@@ -3970,8 +4006,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, rmcp::ErrorData> {
         // Same `query_files` shape as nexus_list_notes (server.rs ~390): the
         // storage handler returns Vec<{ path, size_bytes, modified_at }>.
@@ -4006,10 +4042,22 @@ impl rmcp::ServerHandler for NexusMcpServer {
             }
         }
 
-        Ok(ListResourcesResult {
-            resources,
-            ..Default::default()
-        })
+        let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+        let (resources, next_cursor) = rusty_mcp::pagination::page_owned(
+            &resources,
+            |resource| resource.uri.as_str(),
+            rusty_mcp::pagination::CursorKind::Resource,
+            cursor,
+            rusty_mcp::pagination::DEFAULT_PAGE_SIZE,
+        )?;
+        let mut result = ListResourcesResult::with_all_items(resources);
+        result.next_cursor = next_cursor;
+        rusty_mcp::__private::apply_cache_hints(
+            &context,
+            &mut result.ttl_ms,
+            &mut result.cache_scope,
+        );
+        Ok(result)
     }
 
     async fn read_resource(
@@ -4069,6 +4117,8 @@ impl rmcp::ServerHandler for NexusMcpServer {
         }
         outcome.map(ReadResourceResponse::from)
     }
+
+    rusty_mcp::forward_subscription_methods!(changes);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -4076,6 +4126,347 @@ impl rmcp::ServerHandler for NexusMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use nexus_kernel::{
+        audit_store::{AuditEntry, AuditQuery, AuditStore},
+        Capability, CapabilitySet, EventBus, InMemoryKvStore, IpcDispatcher, IpcError, KvStore,
+    };
+    use rmcp::model::{ClientInfo, ProtocolVersion, SubscriptionFilter};
+    use rmcp::{ClientLifecycleMode, ClientServiceExt, ServiceExt};
+
+    struct AdapterDispatcher;
+
+    impl IpcDispatcher for AdapterDispatcher {
+        fn dispatch(
+            &self,
+            _caller: &str,
+            target: &str,
+            command: &str,
+            args: &serde_json::Value,
+        ) -> Result<serde_json::Value, IpcError> {
+            match (target, command) {
+                (STORAGE_PLUGIN, "query_files") => Ok(serde_json::Value::Array(
+                    (0..120)
+                        .map(|i| {
+                            serde_json::json!({
+                                "path": format!("notes/{i:03}.md"), "size_bytes": i + 1
+                            })
+                        })
+                        .collect(),
+                )),
+                (STORAGE_PLUGIN, "read_file") => Ok(serde_json::json!({
+                    "bytes": format!("fixture:{}", args["path"].as_str().unwrap_or_default())
+                        .into_bytes()
+                })),
+                (SKILLS_PLUGIN, "list") => Ok(serde_json::Value::Array(
+                    (0..120)
+                        .map(|i| {
+                            serde_json::json!({
+                                "id": format!("skill-{i:03}"),
+                                "name": format!("Skill {i:03}"),
+                                "description": "fixture", "parameters": []
+                            })
+                        })
+                        .collect(),
+                )),
+                ("com.example.fixture", "echo") => Ok(args.clone()),
+                (TERMINAL_PLUGIN, "list_sessions") => Ok(serde_json::json!([])),
+                _ => Err(IpcError::CommandNotFound {
+                    plugin_id: target.to_string(),
+                    command: command.to_string(),
+                }),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct AdapterAuditStore(Mutex<Vec<AuditEntry>>);
+
+    impl AuditStore for AdapterAuditStore {
+        fn append(&self, event_type: &str, plugin_id: Option<&str>, detail: &serde_json::Value) {
+            let mut entries = self.0.lock().unwrap();
+            let id = i64::try_from(entries.len())
+                .expect("fixture audit entry count fits in i64")
+                .checked_add(1)
+                .expect("fixture audit id fits in i64");
+            entries.push(AuditEntry {
+                id,
+                ts_ms: 0,
+                event_type: event_type.to_string(),
+                plugin_id: plugin_id.map(str::to_string),
+                detail_json: detail.to_string(),
+            });
+        }
+
+        fn query(&self, query: &AuditQuery) -> Vec<AuditEntry> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| {
+                    query
+                        .event_type
+                        .as_ref()
+                        .is_none_or(|kind| &entry.event_type == kind)
+                })
+                .cloned()
+                .collect()
+        }
+
+        fn clear(&self, _before_ts: i64) -> u64 {
+            let mut entries = self.0.lock().unwrap();
+            let count = entries.len() as u64;
+            entries.clear();
+            count
+        }
+    }
+
+    fn adapter_server() -> NexusMcpServer {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let capabilities: CapabilitySet = Capability::ALL.iter().copied().collect();
+        let kv: Arc<dyn KvStore> = Arc::new(InMemoryKvStore::new());
+        let context = KernelPluginContext::new(
+            "com.nexus.mcp",
+            "0.0.1",
+            capabilities,
+            kv,
+            Arc::new(EventBus::new(32)),
+            &dir,
+            Some(Arc::new(AdapterDispatcher)),
+        )
+        .unwrap();
+        NexusMcpServer::new(Arc::new(context))
+    }
+
+    async fn connect_stdio(
+        server: NexusMcpServer,
+    ) -> rmcp::service::RunningService<rmcp::RoleClient, ClientInfo> {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let running = ServiceExt::serve(server, server_transport)
+                .await
+                .expect("server starts");
+            let _ = running.waiting().await;
+        });
+        ClientInfo::default()
+            .serve_with_lifecycle(
+                client_transport,
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+            )
+            .await
+            .expect("client connects")
+    }
+
+    async fn collect_pages<T, F, Fut>(mut next: F) -> Vec<T>
+    where
+        F: FnMut(Option<String>) -> Fut,
+        Fut: std::future::Future<Output = (Vec<T>, Option<String>)>,
+    {
+        let mut all = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (items, following) = next(cursor).await;
+            all.extend(items);
+            cursor = following;
+            if cursor.is_none() {
+                return all;
+            }
+        }
+    }
+
+    async fn assert_adapter_pages(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    ) {
+        let tools = collect_pages(|cursor| async move {
+            let result = client
+                .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
+                .unwrap();
+            (result.tools, result.next_cursor)
+        })
+        .await;
+        assert!(tools.len() > 100, "combined static/dynamic tool count");
+
+        let resources = collect_pages(|cursor| async move {
+            let result = client
+                .list_resources(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
+                .unwrap();
+            (result.resources, result.next_cursor)
+        })
+        .await;
+        assert_eq!(resources.len(), 120);
+
+        let prompts = collect_pages(|cursor| async move {
+            let result = client
+                .list_prompts(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
+                .unwrap();
+            (result.prompts, result.next_cursor)
+        })
+        .await;
+        assert_eq!(prompts.len(), 120);
+    }
+
+    async fn assert_adapter_cursor_validation(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+    ) {
+        assert!(client
+            .list_resources(Some(
+                PaginatedRequestParams::default().with_cursor(Some("malformed".into())),
+            ))
+            .await
+            .is_err());
+        let tool_cursor = client.list_tools(None).await.unwrap().next_cursor.unwrap();
+        assert!(client
+            .list_prompts(Some(
+                PaginatedRequestParams::default().with_cursor(Some(tool_cursor)),
+            ))
+            .await
+            .is_err());
+    }
+
+    async fn assert_adapter_dynamic_tools_and_audit(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>,
+        audit: &AdapterAuditStore,
+    ) {
+        let dynamic = client
+            .call_tool(
+                CallToolRequestParams::new("fixture_dynamic_000")
+                    .with_arguments(serde_json::json!({"value": 7}).as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert!(!dynamic.is_error.unwrap_or(false));
+
+        let registry = crate::dynamic_tools::global();
+        registry
+            .register(crate::DynamicTool {
+                name: "fixture_internal_gate".into(),
+                description: "must remain unreachable".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                plugin_id: "com.nexus.ai".into(),
+                command: "resolve_credentials".into(),
+            })
+            .unwrap();
+        assert!(client
+            .call_tool(CallToolRequestParams::new("fixture_internal_gate"))
+            .await
+            .is_err());
+        registry.unregister("fixture_internal_gate");
+
+        client
+            .read_resource(ReadResourceRequestParams::new(
+                "mcp://nexus/notes/notes/000.md",
+            ))
+            .await
+            .unwrap();
+        {
+            let entries = audit.0.lock().unwrap();
+            assert!(entries
+                .iter()
+                .any(|entry| entry.event_type == "mcp_tool_call"));
+            assert!(entries
+                .iter()
+                .any(|entry| entry.event_type == "mcp_resource_read"));
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_stdio_pages_large_tools_resources_and_prompts() {
+        let audit = Arc::new(AdapterAuditStore::default());
+        nexus_kernel::audit_store::install(audit.clone());
+        let registry = crate::dynamic_tools::global();
+        for i in 0..40 {
+            let name = format!("fixture_dynamic_{i:03}");
+            registry.unregister(&name);
+            registry
+                .register(crate::DynamicTool {
+                    name,
+                    description: "fixture".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    plugin_id: "com.example.fixture".into(),
+                    command: "echo".into(),
+                })
+                .unwrap();
+        }
+
+        let client = connect_stdio(adapter_server()).await;
+        assert_adapter_pages(&client).await;
+        assert_adapter_cursor_validation(&client).await;
+        assert_adapter_dynamic_tools_and_audit(&client, &audit).await;
+
+        for i in 0..40 {
+            registry.unregister(&format!("fixture_dynamic_{i:03}"));
+        }
+        client.cancel().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adapter_http_serves_requests_and_can_be_shut_down() {
+        use rmcp::transport::{
+            streamable_http_client::StreamableHttpClientTransportConfig,
+            StreamableHttpClientTransport,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let task = tokio::spawn(adapter_server().serve(rusty_mcp::ServerConfig::http(addr)));
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+        );
+        let client = ClientInfo::default()
+            .serve_with_lifecycle(
+                transport,
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+            )
+            .await
+            .unwrap();
+        let result = client.list_resources(None).await.unwrap();
+        assert!(!result.resources.is_empty());
+        client.cancel().await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn adapter_delivers_terminal_events_and_disconnects_cleanly() {
+        let server = adapter_server();
+        let changes = server.changes.clone();
+        let client = connect_stdio(server).await;
+        let mut subscription = client
+            .listen(
+                SubscriptionFilter::builder()
+                    .resource_subscription("mcp://nexus/terminal/session-1/screen")
+                    .build(),
+            )
+            .await
+            .unwrap();
+        changes.resource_updated("mcp://nexus/terminal/session-1/screen");
+        let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+            .await
+            .expect("terminal event delivered")
+            .expect("subscription remains connected")
+            .expect("notification succeeds");
+        assert!(matches!(
+            event,
+            rmcp::model::ServerNotification::ResourceUpdatedNotification(_)
+        ));
+        drop(subscription);
+        client.cancel().await.unwrap();
+    }
 
     #[test]
     fn classify_terminal_event_routes_each_kind() {
