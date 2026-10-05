@@ -9,6 +9,9 @@ Per-PR detail lives in [RELEASE_NOTES.md](./RELEASE_NOTES.md); this file summari
 by category for a reader who wants the shape of a release rather than its history.
 
 ### Added
+- The `agui` route policy (`agentgateway-agui`): AG-UI runs gated by CEL
+  rules, deny by default, with a decision record before the upstream call
+  and an outcome record when the stream ends
 - `service` and `dynamic` backends — a written-down service inventory, and a
   forward-proxy mode that takes its upstream from the request
 - SNI-based certificate selection: one certificate per listener hostname on a port

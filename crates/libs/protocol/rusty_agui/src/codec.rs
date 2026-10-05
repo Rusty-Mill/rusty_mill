@@ -811,67 +811,17 @@ mod tests {
     }
 
     /// One wire sample per event type, as the TypeScript SDK emits them.
+    /// The fixture is shared with the TypeScript core's tests.
     #[test]
     fn every_event_type_round_trips() {
-        let samples = [
-            json!({"type": "RUN_STARTED", "threadId": "t", "runId": "r", "timestamp": 1700000000000u64}),
-            json!({"type": "RUN_STARTED", "threadId": "t", "runId": "r", "parentRunId": "p",
-                   "input": {"threadId": "t", "runId": "r", "state": {"n": 1},
-                             "messages": [{"id": "m", "role": "user", "content": "hi"}],
-                             "tools": [{"name": "f", "description": "d", "parameters": {"type": "object"}}],
-                             "context": [{"description": "page", "value": "home"}],
-                             "forwardedProps": null}}),
-            json!({"type": "RUN_FINISHED", "threadId": "t", "runId": "r", "result": {"ok": true},
-                   "outcome": {"type": "success"}}),
-            json!({"type": "RUN_FINISHED", "threadId": "t", "runId": "r",
-                   "outcome": {"type": "interrupt", "interrupts": [{"id": "i"}]}}),
-            json!({"type": "RUN_ERROR", "message": "boom", "code": "E"}),
-            json!({"type": "STEP_STARTED", "stepName": "plan"}),
-            json!({"type": "STEP_FINISHED", "stepName": "plan"}),
-            json!({"type": "TEXT_MESSAGE_START", "messageId": "m", "role": "assistant"}),
-            json!({"type": "TEXT_MESSAGE_CONTENT", "messageId": "m", "delta": "Hi"}),
-            json!({"type": "TEXT_MESSAGE_END", "messageId": "m"}),
-            json!({"type": "TEXT_MESSAGE_CHUNK", "messageId": "m", "role": "assistant", "delta": "Hi"}),
-            json!({"type": "TEXT_MESSAGE_CHUNK", "delta": "more"}),
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c", "toolCallName": "f", "parentMessageId": "m"}),
-            json!({"type": "TOOL_CALL_ARGS", "toolCallId": "c", "delta": "{\"a\":"}),
-            json!({"type": "TOOL_CALL_END", "toolCallId": "c"}),
-            json!({"type": "TOOL_CALL_RESULT", "messageId": "tm", "toolCallId": "c", "content": "42", "role": "tool"}),
-            json!({"type": "TOOL_CALL_CHUNK", "toolCallId": "c", "toolCallName": "f", "delta": "{}"}),
-            json!({"type": "STATE_SNAPSHOT", "snapshot": {"count": 1}}),
-            json!({"type": "STATE_DELTA", "delta": [{"op": "replace", "path": "/count", "value": 2}]}),
-            json!({"type": "MESSAGES_SNAPSHOT", "messages": [
-                {"id": "1", "role": "developer", "content": "be brief"},
-                {"id": "2", "role": "system", "content": "sys", "name": "n"},
-                {"id": "3", "role": "user", "content": [{"type": "text", "text": "look"},
-                    {"type": "binary", "mimeType": "image/png", "url": "https://x/y.png"}]},
-                {"id": "4", "role": "assistant", "toolCalls": [{"id": "c", "type": "function",
-                    "function": {"name": "f", "arguments": "{}"}}]},
-                {"id": "5", "role": "tool", "content": "ok", "toolCallId": "c"},
-                {"id": "6", "role": "tool", "content": "", "toolCallId": "c", "error": "denied"},
-                {"id": "7", "role": "activity", "activityType": "PLAN", "content": {"steps": []}},
-                {"id": "8", "role": "reasoning", "content": "hmm", "encryptedValue": "x"}
-            ]}),
-            json!({"type": "ACTIVITY_SNAPSHOT", "messageId": "a", "activityType": "PLAN", "content": {"s": 1}, "replace": false}),
-            json!({"type": "ACTIVITY_DELTA", "messageId": "a", "activityType": "PLAN", "patch": [{"op": "add", "path": "/t", "value": 1}]}),
-            json!({"type": "REASONING_START", "messageId": "r"}),
-            json!({"type": "REASONING_MESSAGE_START", "messageId": "r", "role": "reasoning"}),
-            json!({"type": "REASONING_MESSAGE_CONTENT", "messageId": "r", "delta": "think"}),
-            json!({"type": "REASONING_MESSAGE_END", "messageId": "r"}),
-            json!({"type": "REASONING_MESSAGE_CHUNK", "messageId": "r", "delta": ""}),
-            json!({"type": "REASONING_END", "messageId": "r"}),
-            json!({"type": "REASONING_ENCRYPTED_VALUE", "subtype": "message", "entityId": "r", "encryptedValue": "blob"}),
-            json!({"type": "SUBAGENT_STARTED", "subagentRunId": "s", "name": "researcher", "description": "d",
-                   "parentSubagentRunId": "p", "parentToolCallId": "c", "parentMessageId": "m"}),
-            json!({"type": "SUBAGENT_FINISHED", "subagentRunId": "s", "result": 1, "outcome": {"type": "success"}}),
-            json!({"type": "SUBAGENT_ERROR", "subagentRunId": "s", "message": "oops"}),
-            json!({"type": "TEXT_MESSAGE_CONTENT", "messageId": "m", "delta": "x", "subagentRunId": "s",
-                   "metadata": {"usage": 3}, "rawEvent": {"k": "v"}}),
-            json!({"type": "RAW", "event": {"k": "v"}, "source": "langgraph"}),
-            json!({"type": "CUSTOM", "name": "ping", "value": {"n": 1}}),
-        ];
+        let samples = Value::parse(include_str!("../fixtures/events.json")).unwrap();
+        let samples = samples.as_array().unwrap();
+        assert!(
+            samples.len() >= 35,
+            "one sample per event type, plus variants"
+        );
         for sample in samples {
-            round_trip(sample);
+            round_trip(sample.clone());
         }
     }
 

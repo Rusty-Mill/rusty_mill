@@ -19,12 +19,16 @@
 //! - [`serve`] (feature `serve`): an [`Agent`] trait and a `rusty_serve`
 //!   handler that frames a run, verifies what the agent emits, and
 //!   streams it.
+//! - [`client`] (feature `client`): [`HttpAgent`], a blocking client that
+//!   posts a run and yields verified events.
 //!
 //! Wire names follow the TypeScript SDK (`RUN_STARTED`, `messageId`).
 //! Unknown JSON members are ignored on decode so newer peers still parse.
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod codec;
 pub mod event;
 pub mod reduce;
@@ -36,6 +40,8 @@ pub mod verify;
 
 mod error;
 
+#[cfg(feature = "client")]
+pub use client::{HttpAgent, RunStream};
 pub use error::Error;
 pub use event::{Event, EventKind, EventMeta, RunOutcome};
 pub use reduce::Reducer;

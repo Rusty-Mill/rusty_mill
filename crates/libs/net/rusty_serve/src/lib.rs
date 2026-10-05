@@ -22,7 +22,11 @@ pub mod static_files;
 use rusty_http::body::{request_framing, Framing};
 use rusty_http::head::ResponseHead;
 use rusty_http::sync::SyncTransport;
-use rusty_http::{HeaderMap, Method, StatusCode, TransportError, TransportResult, Version};
+use rusty_http::{Method, StatusCode, TransportError, TransportResult, Version};
+
+/// Re-exported so a handler can name the header type without depending on
+/// `rusty_http` itself.
+pub use rusty_http::HeaderMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -43,6 +47,9 @@ pub struct Request<'a> {
     pub target: &'a str,
     pub authorization: Option<&'a str>,
     pub if_match: Option<&'a str>,
+    /// Every header, for a handler that needs more than the two above (a
+    /// webhook's signature, say).
+    pub headers: &'a HeaderMap,
     pub body: &'a [u8],
 }
 
@@ -247,6 +254,7 @@ fn serve_connection<H: Handler>(stream: TcpStream, app: &App<H>) -> TransportRes
             target: &head.target,
             authorization: head.headers.get("authorization"),
             if_match: head.headers.get("if-match"),
+            headers: &head.headers,
             body: &body,
         };
         let response = match app.handler.lock() {

@@ -48,6 +48,7 @@ members = [
     "crates/foundation/rusty_json_patch",
     "crates/foundation/rusty_json/rusty_json-derive",
     "crates/libs/net/rusty_oauth",
+    "crates/libs/protocol/rusty_channel",
     "crates/libs/homelab/rusty_proxmox",
     "crates/libs/homelab/rusty_opnsense",
     "crates/libs/homelab/rusty_fedora",
@@ -220,6 +221,7 @@ members = [
     "crates/apps/rusty_agent_gateway/crates/agentgateway-config",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-auth",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-a2a",
+    "crates/apps/rusty_agent_gateway/crates/agentgateway-agui",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-llm",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-mcp",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-proxy",
@@ -422,6 +424,8 @@ rusty_wire = { path = "crates/foundation/rusty_wire" }
 rusty_json = { path = "crates/foundation/rusty_json" }
 rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
+rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
+rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
 rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"
 futures-core = "0.3"
@@ -705,6 +709,7 @@ agentgateway-config = { path = "crates/apps/rusty_agent_gateway/crates/agentgate
 agentgateway-auth = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-auth", version = "0.1.0" }
 agentgateway-core = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-core", version = "0.1.0" }
 agentgateway-a2a = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-a2a", version = "0.1.0" }
+agentgateway-agui = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-agui", version = "0.1.0" }
 agentgateway-llm = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-llm", version = "0.1.0" }
 agentgateway-mcp = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-mcp", version = "0.1.0" }
 agentgateway-proxy = { path = "crates/apps/rusty_agent_gateway/crates/agentgateway-proxy", version = "0.1.0" }

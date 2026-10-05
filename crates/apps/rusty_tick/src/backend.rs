@@ -14,6 +14,7 @@
 //! cannot serve one store.
 
 use crate::api::{Api, Request, Response};
+use crate::assistant::Assistant;
 use crate::pool::{ClockFactory, PoolError, ServicePool};
 use crate::service::{Clock, Service, ServiceError};
 use crate::users::{RegistryFile, UsersError, DEFAULT_RELOAD_INTERVAL};
@@ -54,6 +55,8 @@ enum Data {
 pub struct Backend {
     api: Api,
     data: Data,
+    /// The AG-UI agent behind `POST /api/agent`; see [`crate::assistant`].
+    pub assistant: rusty_agui::AgentHandler<Assistant>,
 }
 
 impl Backend {
@@ -79,6 +82,7 @@ impl Backend {
                 service: Box::new(service),
                 _lock: lock,
             },
+            assistant: rusty_agui::AgentHandler::new(Assistant),
         })
     }
 
@@ -97,6 +101,22 @@ impl Backend {
         Ok(Self {
             api: Api::multi_user(users),
             data: Data::Multi(ServicePool::new(&data_dir.join(USERS_DIR), capacity, clock)),
+            assistant: rusty_agui::AgentHandler::new(Assistant),
+        })
+    }
+
+    /// The user behind the request's token, or the bare 401 that answers
+    /// a bad one. Routes that bypass [`Backend::handle`] (the streaming
+    /// `/api/agent`) call this first.
+    pub fn authorize(&mut self, request: &Request<'_>) -> Result<crate::users::UserKey, Response> {
+        self.api.authenticate(request).map_err(|denied| {
+            if let Some(claimed) = denied.claimed {
+                eprintln!(
+                    "rusty_tick: refused a token for user {:?}",
+                    claimed.as_str()
+                );
+            }
+            Response::unauthorized()
         })
     }
 
@@ -115,17 +135,9 @@ impl Backend {
         if let Some(response) = Api::public(request) {
             return response;
         }
-        let user = match self.api.authenticate(request) {
+        let user = match self.authorize(request) {
             Ok(user) => user,
-            Err(denied) => {
-                if let Some(claimed) = denied.claimed {
-                    eprintln!(
-                        "rusty_tick: refused a token for user {:?}",
-                        claimed.as_str()
-                    );
-                }
-                return Response::unauthorized();
-            }
+            Err(response) => return response,
         };
         match &mut self.data {
             Data::Single { service, .. } => Api::serve(service, request),

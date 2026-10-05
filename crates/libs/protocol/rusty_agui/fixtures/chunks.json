@@ -1,0 +1,44 @@
+[
+  {
+    "name": "text chunks open, continue by implicit id, close on id switch and at run end",
+    "input": [
+      {"type": "RUN_STARTED", "threadId": "t", "runId": "r"},
+      {"type": "TEXT_MESSAGE_CHUNK", "messageId": "a", "delta": "he"},
+      {"type": "TEXT_MESSAGE_CHUNK", "delta": "llo"},
+      {"type": "TEXT_MESSAGE_CHUNK", "messageId": "b", "role": "user"},
+      {"type": "RUN_FINISHED", "threadId": "t", "runId": "r"}
+    ],
+    "expected": [
+      {"type": "RUN_STARTED", "threadId": "t", "runId": "r"},
+      {"type": "TEXT_MESSAGE_START", "messageId": "a", "role": "assistant"},
+      {"type": "TEXT_MESSAGE_CONTENT", "messageId": "a", "delta": "he"},
+      {"type": "TEXT_MESSAGE_CONTENT", "messageId": "a", "delta": "llo"},
+      {"type": "TEXT_MESSAGE_END", "messageId": "a"},
+      {"type": "TEXT_MESSAGE_START", "messageId": "b", "role": "user"},
+      {"type": "TEXT_MESSAGE_END", "messageId": "b"},
+      {"type": "RUN_FINISHED", "threadId": "t", "runId": "r"}
+    ]
+  },
+  {
+    "name": "tool call chunks and reasoning chunks expand; an empty reasoning delta closes",
+    "input": [
+      {"type": "RUN_STARTED", "threadId": "t", "runId": "r"},
+      {"type": "TOOL_CALL_CHUNK", "toolCallId": "c", "toolCallName": "f", "delta": "{\"a\""},
+      {"type": "TOOL_CALL_CHUNK", "delta": ":1}"},
+      {"type": "REASONING_MESSAGE_CHUNK", "messageId": "r", "delta": "think"},
+      {"type": "REASONING_MESSAGE_CHUNK", "delta": ""},
+      {"type": "RUN_FINISHED", "threadId": "t", "runId": "r"}
+    ],
+    "expected": [
+      {"type": "RUN_STARTED", "threadId": "t", "runId": "r"},
+      {"type": "TOOL_CALL_START", "toolCallId": "c", "toolCallName": "f"},
+      {"type": "TOOL_CALL_ARGS", "toolCallId": "c", "delta": "{\"a\""},
+      {"type": "TOOL_CALL_ARGS", "toolCallId": "c", "delta": ":1}"},
+      {"type": "TOOL_CALL_END", "toolCallId": "c"},
+      {"type": "REASONING_MESSAGE_START", "messageId": "r", "role": "reasoning"},
+      {"type": "REASONING_MESSAGE_CONTENT", "messageId": "r", "delta": "think"},
+      {"type": "REASONING_MESSAGE_END", "messageId": "r"},
+      {"type": "RUN_FINISHED", "threadId": "t", "runId": "r"}
+    ]
+  }
+]

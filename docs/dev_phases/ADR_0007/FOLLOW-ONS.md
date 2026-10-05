@@ -4,11 +4,24 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged in one PR. The workspace now speaks AG-UI on the
-server side; nothing consumes it yet.
+ADR-0007 is merged, steps 1 to 4 of the build order below are done and
+step 5 has its first two channels:
+the workspace speaks AG-UI on both sides, the reference TypeScript client
+accepts what the server sends, a headless TypeScript core mirrors the
+crate against shared fixtures, a React binding sits on the core,
+`rusty_tick` ships an assistant on it, the gateway can front any AG-UI
+endpoint with a deny-by-default rule set and an audit record either side
+of the run, and any AG-UI endpoint can be a Slack or Teams bot.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Teams | `teams::Teams` over the Azure Bot Framework (JWT verified with `rusty_oauth`, replies with a client-credentials token); the runner hoisted into `bot::Bot` for both examples |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Slack | `rusty_channel`: the sans-IO `Channel` trait, a `Thread` per conversation, the Slack Events API adapter, and a bot example on `rusty_serve` that runs any AG-UI endpoint |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 4 | `rusty_agent_gateway`'s `agui` route policy (`agentgateway-agui`): CEL rules over the run input, the request and the caller's claims, deny by default; a decision record before the upstream call and an outcome record when the stream ends |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, second PR | `rusty_tick`'s assistant: a store-free agent at `POST /api/agent`, and the web UI's Assistant panel on the React binding (view as context, `create_task` as a frontend tool) |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, first PR | `@rusty-mill/agui-react`: `AgentProvider`, `useAgent`, `useReadable`, `useAction` (handler, or render-only with `respond` for human in the loop), `useSharedState` |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 2 | `@rusty-mill/agui-core`, the headless TypeScript core; shared `fixtures/`; the core run in conformance beside the reference client |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 1 | `rusty_agui`'s `client` feature (`HttpAgent`, blocking, on `rusty_http`); the `echo_agent` example; `conformance/`, where `@ag-ui/client` drives the example in CI |
 | [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) | 2026-10-05 | `rusty_json_patch` (RFC 6901/6902/7386), `rusty_agui` (types, events, codec, SSE, verifier, reducer, `serve` feature with `Agent` and `AgentHandler`), streaming bodies in `rusty_serve` |
 
 ## The goal this document plans for
@@ -46,9 +59,9 @@ targets as named.
 
 | Gap | Needed by |
 | --- | --- |
-| A Rust AG-UI client (`HttpAgent` over `rusty_request`) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
-| A headless TypeScript core: SSE decoder, verifier, reducer, `runAgent` | Every frontend SDK |
-| Framework bindings (hooks, components) | Each SDK |
+| ~~A Rust AG-UI client~~ Done in step 1, on `rusty_http` directly (see below) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
+| ~~A headless TypeScript core~~ Done in step 2 | Every frontend SDK |
+| Framework bindings (hooks, components) | Each SDK. React: done in step 3; Angular and Vue: steps 8 |
 | An AG-UI route in the gateway: CEL decision, audit record before and after, forward | The platform |
 | A bot registry (name, endpoint, policy, channel bindings) | The platform |
 | Inbound channel adapters: Slack Events API, Teams Bot Framework, Twilio SMS | Channels |
@@ -63,11 +76,11 @@ Both targets start with the same two pieces, so they come first.
 
 | Step | What | Size | Needs sign-off |
 | --- | --- | --- | --- |
-| 1 | `rusty_agui` client over `rusty_request`, and a smoke test of CopilotKit's React SDK against `AgentHandler` (proves the wire format against the reference client) | 1 PR | No |
-| 2 | `agui-core` (TypeScript, headless): decoder, verifier, reducer, `runAgent`; the Rust crate's wire samples as shared fixtures | 1 PR | No |
-| 3 | React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function), `useSharedState`; `rusty_tick` as the first consumer | 1–2 PRs | No |
-| 4 | Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1–2 PRs, touches `rusty_agent_gateway` | Yes: new gateway surface |
-| 5 | Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Yes: external service credentials and dependencies |
+| 1 | **Done.** `rusty_agui` client and a conformance test against the reference client (`@ag-ui/client`, the package CopilotKit's React SDK and OpenBot drive agents with) | 1 PR | No |
+| 2 | **Done.** `@rusty-mill/agui-core` (TypeScript, headless): parser, SSE decoder, JSON patch, verifier, reducer, `runAgent`; `fixtures/` shared with the Rust tests | 1 PR | No |
+| 3 | **Done.** React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function, `respond` for human in the loop), `useSharedState`; `rusty_tick` as the first consumer | 2 PRs | No |
+| 4 | **Done.** Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1 PR, touches `rusty_agent_gateway` | Given |
+| 5 | **Slack and Teams done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given for Slack and Teams; SMS still needs it |
 | 6 | Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
 | 7 | Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Yes: ADR-0005 scoped the executor to `rsi` |
 | 8 | Angular and Vue bindings over `agui-core` | 1 PR each, when a consumer exists | No |
@@ -76,6 +89,57 @@ Both targets start with the same two pieces, so they come first.
 
 Chat components come after step 3 as a thin layer over the hooks, not
 before: the hooks are the API, the components are one rendering of it.
+
+## Departures made while building
+
+- **Step 1's client is on `rusty_http`, not `rusty_request`.** `rusty_request`
+  is async on `rusty_tokio` with `rusty_tls`. The server side is blocking
+  on `rusty_serve`, and the one consumer that will be async (the gateway)
+  runs on tokio and axum with its own HTTP stack. A blocking client over
+  `std::net` mirrors `serve`, keeps the crate's manifest first-party only,
+  and is what a routine or a channel adapter on the same host needs. An
+  async adapter can be added behind a feature when a consumer appears.
+- **Step 1's smoke test is `@ag-ui/client`, not a browser-driven React
+  app.** That package is the client CopilotKit's React SDK and OpenBot
+  embed, so a run it verifies and reduces is a run those products accept,
+  and it runs in Node in CI without a browser.
+
+- **Step 4 is a route policy, not a backend kind.** `agui` sits beside
+  `a2a` in `policies` and gates a `host` backend, so it composes with
+  `jwtAuth`, `extAuthz`, rate limits, rewrites and retries the way every
+  other policy does, and the gateway gains no new `BackendState` variant.
+  An AG-UI endpoint is an HTTP endpoint; the gateway proxies it and judges
+  what passes.
+- **Step 4's audit is a pair of structured `tracing` records, not a
+  store.** The gateway has no audit module and no persistence of its own;
+  every decision it makes today is a tracing event. Two records on a
+  dedicated target (`agentgateway::audit`) give a log pipeline something
+  to route, and a store can subscribe to that target when one is wanted.
+  What the records carry is fixed by what the gateway sees: the run input
+  before, the stream's shape after. It does not read the agent's content.
+
+- **Step 5's `Channel` is sans-IO.** `receive` reads a request the
+  runner already accepted and `reply` returns the `POST` to send, so the
+  library has no socket, no clock and no credential of its own, and
+  every Slack rule (signature, skew, retries, bots, thread keys) is
+  tested without a network. The runner is an example, not a crate:
+  there is one channel so far, and a daemon that multiplexes several is
+  step 6's shape (routines) as much as this step's.
+- **Step 5's runner became a module at the second channel.** `bot::Bot`
+  was the Slack example's body until Teams needed the same loop plus a
+  credential fetch before each reply. That fetch is a `Channel` hook with
+  a default (`credential` returns `Ready`), so Slack did not change; the
+  trait grew by what the second service needed and nothing more.
+- **Step 5 ignores Slack's retries.** Slack re-sends an event it got no
+  `200` for within three seconds; an agent run can take longer. The
+  runner answers first and runs after, and a delivery marked as a retry
+  is dropped rather than run twice. The cost is that a run lost between
+  the `200` and the reply is lost; a store for threads and in-flight runs
+  (open question 2) is where that gets fixed.
+- **HMAC-SHA256 comes from `rusty_oauth`.** The workspace has it there
+  and nowhere lower; a second copy was not worth avoiding one first-party
+  dependency. Hoisting it (and SHA-256, which `rusty_rsa` carries) into a
+  foundation crate is a `dedupe-loop` candidate, not this step's.
 
 ## Where this departs from the targets as named
 
@@ -100,11 +164,14 @@ before: the hooks are the API, the components are one rendering of it.
 
 ## Open questions
 
-1. Does the TypeScript core live in this workspace (beside the React apps,
-   under a `packages/` directory with its own CI job) or in a separate
-   repository? The React apps' precedent is in-workspace.
+1. ~~Does the TypeScript core live in this workspace or in a separate
+   repository?~~ Answered in step 2: in-workspace, at
+   `crates/libs/protocol/rusty_agui/packages/agui-core`, so the `agui`
+   planner flag covers it and the shared fixtures sit beside the Rust
+   tests. Publishing to a registry is a later decision.
 2. Where does the bot registry persist? `rusty_multimodal_db_engine` is the
    workspace's own store and already backs `rusty_tick` and `remind_me`.
-3. Which agent is the first bot? `rusty_adk`'s weather example is the
-   smallest with human-in-the-loop; `rusty_key` has the richest existing
-   contract.
+3. Which agent is the first bot? `rusty_tick`'s assistant now exists and
+   is the simplest candidate (store-free, deterministic); `rusty_adk`'s
+   weather example is the smallest with human-in-the-loop; `rusty_key`
+   has the richest existing contract.

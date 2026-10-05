@@ -8,7 +8,9 @@ one copy.
 
 ## Shape
 
-- `Handler`: `fn handle(&mut self, &Request) -> Response`. A `Request` is
+- `Handler`: `fn handle(&mut self, &Request) -> Response`. A `Request` carries
+  the method, target, body, the `Authorization` and `If-Match` values, and
+  every header (`headers`, for a webhook's signature, say). A `Request` is
   the method, the origin-form target, the `Authorization` and `If-Match`
   header values and the body; a `Response` is a status and a `Body`:
   `Body::Json` (a document, empty for 204, built with `Response::json`)

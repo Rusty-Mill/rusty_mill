@@ -4,6 +4,7 @@
 
 pub mod admin;
 pub mod api;
+pub mod assistant;
 pub mod auth;
 pub mod backend;
 pub mod docs;
