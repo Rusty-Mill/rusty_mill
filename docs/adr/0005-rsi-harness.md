@@ -439,7 +439,7 @@ solutions, full broker transcripts. Every entry records the following:
 
 - harness commit SHA, parent SHA, diff blob
 - seeds per task
-- inner and outer model ids plus endpoint kinds
+- inner and outer model ids
 - `Budget` and `CostUsage` (tokens, wall, gpu)
 - the outer agent's `CostUsage` for the proposal (`outer_cost`)
 - per-task public score of `x̂_t`, private score, and grade
@@ -704,9 +704,11 @@ is the outer model's endpoint. (As built, the HTTP proposer runs in the
   from its event stream.
 - `rusty_llama`'s OpenAI-compatible `server` feature can serve as a
   fully in-process, offline inner model later, with zero adapter code.
-- Config: `rsi.toml`, with explicit env overrides (`RSI_*`). Secrets
-  come only from env (e.g. `RSI_OUTER_API_KEY`) and are never written to
-  lineage or logs; lineage records the endpoint kind and model id only.
+- Config: command-line flags and `RSI_*` environment variables only;
+  there is no `rsi.toml` (see §7, Configuration). Secrets come only from
+  env (e.g. `RSI_OUTER_API_KEY`) and are never written to lineage or
+  logs; lineage records model ids only (a CLI agent's id names it, e.g.
+  `codex:<model>`).
 - CI has no model. Tests use a scripted model behind the same broker,
   and scripted proposers.
 

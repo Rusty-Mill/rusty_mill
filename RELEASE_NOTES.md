@@ -13,6 +13,14 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_rsi: ADR-0005 configuration matches the code
+**2026-10-05** · [#509](https://github.com/Rusty-Mill/rusty_mill/pull/509) · [ADR-0005](docs/adr/0005-rsi-harness.md)
+
+- **Fixed (docs only):** §8 said configuration came from `rsi.toml` with `RSI_*` overrides. There is no `rsi.toml`: `rsi` reads command-line flags and `RSI_*` environment variables, as §7 and the code already said (the workspace has no first-party TOML parser).
+- **Fixed (docs only):** §6 and §8 said lineage records endpoint kinds. It records model ids only; a coding-agent CLI's id names the agent (`codex:<model>`, `claude:<model>`).
+
+---
+
 ## rusty_orch: drop the planned Gemini adapter
 **2026-10-05** · [#508](https://github.com/Rusty-Mill/rusty_mill/pull/508) · [ADR-0001](crates/apps/rusty_orch/docs/adr/0001-shared-substrate-over-agent-messaging.md)
 
