@@ -10,9 +10,13 @@
 //! here is tested without a network. `examples/slack_bot.rs` is one such
 //! runner.
 //!
-//! [`slack`] is the first adapter. Teams and SMS follow the same shape.
+//! [`slack`] and [`teams`] are the adapters so far; SMS follows the same
+//! shape. With the `bot` feature, [`bot`] is a runner for any of them.
 
+#[cfg(feature = "bot")]
+pub mod bot;
 pub mod slack;
+pub mod teams;
 
 use std::fmt;
 
@@ -102,9 +106,19 @@ pub struct Outbound {
     pub body: Vec<u8>,
 }
 
+/// Whether the channel can reply right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// Reply away.
+    Ready,
+    /// Send this first and hand the response body to
+    /// [`Channel::accept_credential`]; a short-lived outbound token.
+    Fetch(Outbound),
+}
+
 /// A chat service, as the runner sees it. Sans-IO: `receive` reads a
 /// request the runner accepted and `reply` describes one the runner sends.
-pub trait Channel {
+pub trait Channel: Send + Sync {
     /// A short name, used as the thread id prefix and in logs.
     fn name(&self) -> &'static str;
 
@@ -112,8 +126,30 @@ pub trait Channel {
     /// the epoch, for replay protection.
     fn receive(&self, headers: &dyn Headers, body: &[u8], now: u64) -> Result<Received, Error>;
 
+    /// What the runner must do before a reply. Static credentials are
+    /// always `Ready`.
+    fn credential(&self, now: u64) -> Credential {
+        let _ = now;
+        Credential::Ready
+    }
+
+    /// The response to a [`Credential::Fetch`].
+    fn accept_credential(&self, body: &[u8], now: u64) -> Result<(), Error> {
+        let _ = (body, now);
+        Ok(())
+    }
+
     /// The request that sends `text` back where `to` came from.
     fn reply(&self, to: &Inbound, text: &str) -> Outbound;
+
+    /// Whether the service accepted a reply, from its status and body. A
+    /// 2xx is enough unless the service says otherwise in the body.
+    fn reply_accepted(&self, status: u16, body: &[u8]) -> Result<(), String> {
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        Err(format!("{status} {}", String::from_utf8_lossy(body).trim()))
+    }
 }
 
 /// What a run said back, in the channel's terms.

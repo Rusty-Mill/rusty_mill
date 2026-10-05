@@ -177,6 +177,15 @@ impl Channel for Slack {
             body: body.to_json_string().into_bytes(),
         }
     }
+
+    /// `chat.postMessage` answers `200` with `"ok": false` on failure.
+    fn reply_accepted(&self, status: u16, body: &[u8]) -> Result<(), String> {
+        let text = String::from_utf8_lossy(body);
+        if status == 200 && text.contains(r#""ok":true"#) {
+            return Ok(());
+        }
+        Err(format!("{status} {}", text.trim()))
+    }
 }
 
 fn str_of<'a>(value: &'a Value, key: &str) -> Result<&'a str, Error> {

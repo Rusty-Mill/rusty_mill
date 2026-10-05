@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_channel: Microsoft Teams
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, second channel
+
+- **Added:** `teams::Teams`, the Azure Bot Framework adapter. Inbound, the framework's bearer JWT is verified with `rusty_oauth`: `RS256` against the key the token's `kid` names in the framework's JWK Set, issuer `https://api.botframework.com`, audience equal to the app id, `exp` and `nbf` with five minutes of leeway, and a `serviceurl` claim that must match the activity's `serviceUrl`, so a forged activity pointing replies at another host is refused before its body is read. Only `message` activities become runs; `<at>` mentions are stripped; the Teams conversation id (which carries `;messageid=` for a channel thread) is the thread key. Outbound, a reply activity is posted to `{serviceUrl}v3/conversations/{id}/activities/{activityId}` with a token from the client-credentials grant.
+- **Changed:** `Channel` gains two defaulted hooks. `credential(now)` returns `Ready` or `Fetch(Outbound)`, and `accept_credential(body, now)` takes the response: Teams' token is short-lived, so the runner fetches one before a reply and a minute before it expires. `reply_accepted(status, body)` lets a service that reports failure in a `200` body (Slack's `"ok": false`) say so. `Channel` is now `Send + Sync`.
+- **Changed:** the runner moves from the Slack example into `bot::Bot` behind the `bot` feature, with `bot::get` and `bot::post` over `rusty_tls`; `slack_bot` and `teams_bot` are thin examples over it sharing an `examples/common` module. The Teams example fetches the framework's signing keys once at start.
+- **Tests:** five for Teams, no network, against an RSA key and tokens produced with `openssl` outside the crate: a signed message accepted and keyed; no token, an altered payload, a wrong audience, an expired token, a not-yet-valid token, a token without `serviceurl`, an activity naming a foreign service, and an unknown key all refused; other activity types and bot messages ignored; the token fetch, its acceptance and expiry, and the reply URL, headers and body.
+- **Known limitations:** keys are fetched once per process; a Bot Framework retry is not deduplicated (unlike Slack's, it carries no marker); outbound proactive messages are not supported, only replies.
+
+---
+
 ## rusty_channel: chat channels for AG-UI agents, Slack first
 **2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, first channel
 

@@ -15,9 +15,10 @@ layer = "libs"
 
 [features]
 default = []
-# `examples/slack_bot`: a bot on `rusty_serve` that runs an AG-UI agent
-# with `rusty_agui`'s client and answers Slack over `rusty_tls`. Off by
-# default: the library itself does no I/O.
+# `bot`: a runner on `rusty_serve` that runs an AG-UI agent with
+# `rusty_agui`'s client and answers the service over `rusty_tls`; the
+# `slack_bot` and `teams_bot` examples are on it. Off by default: the
+# library itself does no I/O.
 bot = ["dep:rusty_serve", "dep:rusty_http", "dep:rusty_tls", "rusty_agui/client"]
 
 [dependencies]
@@ -36,6 +37,10 @@ rusty_tls = { workspace = true, optional = true }
 
 [[example]]
 name = "slack_bot"
+required-features = ["bot"]
+
+[[example]]
+name = "teams_bot"
 required-features = ["bot"]
 
 [lints.rust]
