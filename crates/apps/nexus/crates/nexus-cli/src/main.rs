@@ -248,10 +248,24 @@ fn main() {
         2 => tracing::Level::DEBUG,
         _ => tracing::Level::TRACE,
     };
-    tracing_subscriber::fmt()
+    let mcp_server = matches!(
+        &cli.command,
+        Commands::Mcp(McpArgs {
+            command: McpCommand::Serve { .. },
+        })
+    );
+    let subscriber = tracing_subscriber::fmt()
         .with_max_level(level)
-        .with_ansi(output::use_color(cli.no_color))
-        .init();
+        .with_ansi(output::use_color(cli.no_color));
+    if mcp_server {
+        // MCP stdio owns stdout. Configure the process-wide subscriber before
+        // bootstrap emits anything; rusty_mcp::telemetry::init cannot replace
+        // a subscriber once one has already been installed.
+        subscriber.with_writer(std::io::stderr).init();
+    } else {
+        // Preserve the historical CLI destination for all non-server commands.
+        subscriber.with_writer(std::io::stdout).init();
+    }
 
     // BL-140 Phase 2b — detect ssh:// forge URIs (via --forge-path or
     // NEXUS_FORGE_PATH) and route through App::new_remote. Anything
@@ -790,7 +804,7 @@ fn main() {
             }
         },
         Commands::Mcp(args) => match args.command {
-            McpCommand::Serve => commands::mcp::serve(&app),
+            McpCommand::Serve { transport, bind } => commands::mcp::serve(&app, transport, bind),
             McpCommand::Servers => commands::mcp::host_servers(&mut app),
             McpCommand::Tools { server } => commands::mcp::host_tools(&mut app, &server),
             McpCommand::Call {

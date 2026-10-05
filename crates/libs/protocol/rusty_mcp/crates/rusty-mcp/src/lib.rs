@@ -61,6 +61,10 @@
 
 pub mod auth;
 pub mod cli;
+#[cfg(feature = "client")]
+pub mod client;
+#[cfg(feature = "client")]
+pub mod client_auth;
 pub mod completion;
 pub mod config;
 pub mod error;
