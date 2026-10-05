@@ -122,7 +122,12 @@ jobs:
           grep "  $archive$" checksums.txt | sha256sum --check --status
           tar --extract --gzip --file "$archive"
       - name: Lint workflows
-        run: ./actionlint .github/workflows/*.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          for workflow in .github/workflows/*.yml; do
+            ./actionlint "$workflow"
+          done
 
   dependency-policy:
     # Enforces ADR-0002 (dependency sovereignty policy): a crate that is a
