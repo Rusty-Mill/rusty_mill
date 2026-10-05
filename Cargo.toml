@@ -85,6 +85,7 @@ members = [
     "crates/foundation/rusty_rand",
     "crates/foundation/rusty_atomic_file",
     "crates/foundation/rusty_confined_fs",
+    "crates/foundation/rusty_ip",
     "crates/foundation/rusty_retry",
     "crates/foundation/rusty_rsa",
     "crates/libs/storage/rusty_sqlite",
@@ -350,6 +351,7 @@ rusty_regx = { path = "crates/foundation/rusty_regx", version = "0.5.0" }
 rusty_request = { path = "crates/libs/net/rusty_request" }
 rusty_atomic_file = { path = "crates/foundation/rusty_atomic_file" }
 rusty_confined_fs = { path = "crates/foundation/rusty_confined_fs" }
+rusty_ip = { path = "crates/foundation/rusty_ip" }
 rusty_retry = { path = "crates/foundation/rusty_retry" }
 rusty_rsa = { path = "crates/foundation/rusty_rsa" }
 rusty_sha1 = { path = "crates/foundation/rusty_sha1", version = "0.1.0" }
