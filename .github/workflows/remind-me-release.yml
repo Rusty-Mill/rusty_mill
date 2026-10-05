@@ -160,7 +160,7 @@ jobs:
       # remind-me-checks.yml should already have blocked a drifted PR, but a
       # release must never ship a plugin archive claiming the wrong version.
       - name: Verify plugin.json version matches this release
-        run: "$PRODUCT_DIR/scripts/check_plugin_version.sh"
+        run: '"$PRODUCT_DIR/scripts/check_plugin_version.sh"'
 
       - name: Build the plugin archive
         run: |
