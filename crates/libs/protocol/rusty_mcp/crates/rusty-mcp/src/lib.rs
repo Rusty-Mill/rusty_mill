@@ -141,6 +141,44 @@ where
     serve(factory, config).await
 }
 
+/// Set the 2026-07-28 cache hints on a list result, but only for peers that
+/// negotiated that revision.
+///
+/// `rmcp`'s generated list methods gate `ttlMs` and `cacheScope` on the
+/// negotiated protocol version, and a hand-written list method must behave
+/// identically: an older peer handed `ttlMs` would be receiving a field its
+/// revision does not define. The paginating macros in [`routers`] call this
+/// for you. Call it directly from a `list_tools`, `list_prompts` or
+/// `list_resources` that cannot use them, for example because it merges
+/// static and dynamic entries before paging with [`pagination::page_owned`].
+///
+/// `ttl_ms` and `cache_scope` are the fields of the list result being
+/// returned; both are overwritten, to `Some(0)` and `Some(Public)` for a peer
+/// on 2026-07-28 or later and to `None` otherwise.
+///
+/// ```
+/// use rmcp::model::{CacheScope, ListToolsResult};
+///
+/// fn hint(context: &rmcp::service::RequestContext<rmcp::RoleServer>) -> ListToolsResult {
+///     let mut result = ListToolsResult::default();
+///     rusty_mcp::apply_cache_hints(context, &mut result.ttl_ms, &mut result.cache_scope);
+///     result
+/// }
+/// # let _ = hint;
+/// ```
+pub fn apply_cache_hints(
+    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+    ttl_ms: &mut Option<u64>,
+    cache_scope: &mut Option<rmcp::model::CacheScope>,
+) {
+    let supported = context
+        .protocol_version()
+        .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+
+    *ttl_ms = supported.then_some(0);
+    *cache_scope = supported.then_some(rmcp::model::CacheScope::Public);
+}
+
 /// Type re-exports for macros in this crate. Not a stable API.
 #[doc(hidden)]
 pub mod __private {
@@ -158,22 +196,5 @@ pub mod __private {
         service::{RequestContext, RoleServer, SubscriptionContext},
     };
 
-    /// Set the 2026-07-28 cache hints, but only for peers that negotiated it.
-    ///
-    /// `rmcp`'s generated list methods gate these on the protocol version, and
-    /// the paginating replacements in [`crate::routers`] must behave
-    /// identically — an older peer handed `ttlMs` would be receiving a field
-    /// its revision does not define.
-    pub fn apply_cache_hints(
-        context: &RequestContext<RoleServer>,
-        ttl_ms: &mut Option<u64>,
-        cache_scope: &mut Option<CacheScope>,
-    ) {
-        let supported = context
-            .protocol_version()
-            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
-
-        *ttl_ms = supported.then_some(0);
-        *cache_scope = supported.then_some(CacheScope::Public);
-    }
+    pub use crate::apply_cache_hints;
 }

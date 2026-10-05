@@ -8823,11 +8823,9 @@ dependencies = [
 name = "nexus-mcp"
 version = "0.1.0"
 dependencies = [
- "http 1.5.0",
  "nexus-kernel",
  "nexus-plugins",
  "nexus-types",
- "reqwest 0.13.4",
  "rmcp",
  "rusty-mcp",
  "schemars 1.2.2",
