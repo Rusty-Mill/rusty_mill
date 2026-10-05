@@ -26,6 +26,10 @@ these.
     Bullet's rigid-body/contact pipeline plus Rocket League car mechanics
     and arena geometry, see ADR-0004). Pure computation, depends only on
     `rb_domain`; `rb-verify` scores it against recorded ground truth.
+  - `crates/rb_scenario` — scenario files (initial state plus input tape)
+    for scripted mechanic captures; read by `rb-verify --scenario` and by
+    `tools/rb_tape_bot` (a standalone RLBot bot outside the workspace). Depends
+    only on `rb_domain`.
   - `crates/rb_verify_cli` — composition root binary (`rb-verify`); wires
     adapters to domain logic, no domain logic of its own.
 - Architectural boundaries: domain crates never depend on adapter crates;

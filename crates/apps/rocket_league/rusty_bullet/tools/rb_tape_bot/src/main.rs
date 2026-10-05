@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use rb_tape_bot::{BallStart, CarStart, Input, Scenario};
+use rb_scenario::{BallStart, CarStart, Input, Scenario};
 use rlbot::{
     agents::{run_bot_agents, BotAgent},
     flat::{

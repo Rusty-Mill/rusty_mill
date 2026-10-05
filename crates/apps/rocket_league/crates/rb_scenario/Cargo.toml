@@ -1,0 +1,19 @@
+[package]
+name = "rb_scenario"
+description = "Scenario files for scripted mechanic captures: an initial game state plus a run-length input tape (docs/research/BOT-CAPTURE-PLAN.md). Read by rb-verify and by tools/rb_tape_bot."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rb_domain = { path = "../rb_domain" }
+# The scenario format is JSON, same as the capture format (ADR-0005):
+# serde/serde_json rather than a hand-rolled parser; both are already in
+# the workspace via rb_capture_ingest.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

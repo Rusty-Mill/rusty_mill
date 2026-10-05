@@ -1,8 +1,11 @@
-//! Scenario files for the tape-player bot: an initial game state plus a
-//! run-length input timeline, replayed one input per game packet.
+//! Scenario files for scripted mechanic captures: an initial game state plus
+//! a run-length input timeline, replayed one input per game packet by
+//! `tools/rb_tape_bot` and simulated by `rb-verify --scenario`
+//! (`docs/research/BOT-CAPTURE-PLAN.md`).
 //!
 //! Pure data and lookup, no RLBot types, so it is testable without the game.
 
+use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
 use serde::Deserialize;
 
 /// One tick of controller input, the same fields as the capture format's
@@ -118,7 +121,119 @@ impl Scenario {
     }
 }
 
+impl Input {
+    /// The domain's controller input for this tick.
+    pub fn to_controller_input(self) -> ControllerInput {
+        ControllerInput {
+            throttle: self.throttle,
+            steer: self.steer,
+            pitch: Some(self.pitch),
+            yaw: Some(self.yaw),
+            roll: Some(self.roll),
+            jump: self.jump,
+            boost: self.boost,
+            handbrake: self.handbrake,
+        }
+    }
+}
+
+/// Where a scenario puts a car that gives no location, and a ball that is
+/// absent: the car on the floor at the origin, the ball far away and still.
+const DEFAULT_CAR_LOCATION: [f32; 3] = [0.0, 0.0, 17.0];
+const DEFAULT_BALL_LOCATION: [f32; 3] = [3000.0, 3000.0, 93.15];
+
+fn vec3(v: [f32; 3]) -> Vec3 {
+    Vec3::new(v[0], v[1], v[2])
+}
+
+/// A rotation from RLBot's `[pitch, yaw, roll]` (radians) as a quaternion.
+///
+/// Pitch is nose up, yaw 0 faces +x, and the car's local +y axis is the
+/// "left" of RLUtilities' Euler convention. Checked by round trip against a
+/// recorded quaternion (`test2.jsonl` 18.308 s, see the tests).
+pub fn rotator_to_quat(rotation: [f32; 3]) -> Quat {
+    let (sp, cp) = rotation[0].sin_cos();
+    let (sy, cy) = rotation[1].sin_cos();
+    let (sr, cr) = rotation[2].sin_cos();
+    // Matrix columns: forward, local y, up.
+    let forward = [cp * cy, cp * sy, sp];
+    let side = [cy * sp * sr - cr * sy, sy * sp * sr + cr * cy, -cp * sr];
+    let up = [-cr * cy * sp - sr * sy, -cr * sy * sp + sr * cy, cp * cr];
+    let m = [
+        [forward[0], side[0], up[0]],
+        [forward[1], side[1], up[1]],
+        [forward[2], side[2], up[2]],
+    ];
+    let trace = m[0][0] + m[1][1] + m[2][2];
+    if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        Quat {
+            w: 0.25 * s,
+            x: (m[2][1] - m[1][2]) / s,
+            y: (m[0][2] - m[2][0]) / s,
+            z: (m[1][0] - m[0][1]) / s,
+        }
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
+        Quat {
+            w: (m[2][1] - m[1][2]) / s,
+            x: 0.25 * s,
+            y: (m[0][1] + m[1][0]) / s,
+            z: (m[0][2] + m[2][0]) / s,
+        }
+    } else if m[1][1] > m[2][2] {
+        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
+        Quat {
+            w: (m[0][2] - m[2][0]) / s,
+            x: (m[0][1] + m[1][0]) / s,
+            y: 0.25 * s,
+            z: (m[1][2] + m[2][1]) / s,
+        }
+    } else {
+        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
+        Quat {
+            w: (m[1][0] - m[0][1]) / s,
+            x: (m[0][2] + m[2][0]) / s,
+            y: (m[1][2] + m[2][1]) / s,
+            z: 0.25 * s,
+        }
+    }
+}
+
+impl Scenario {
+    /// The scenario's start as a physics frame (one car, player 0, and the
+    /// ball), with the car's input unset.
+    pub fn initial_frame(&self) -> PhysicsFrame {
+        let car = CarState {
+            player_id: 0,
+            position: vec3(self.car.location.unwrap_or(DEFAULT_CAR_LOCATION)),
+            rotation: rotator_to_quat(self.car.rotation.unwrap_or([0.0; 3])),
+            velocity: vec3(self.car.velocity.unwrap_or([0.0; 3])),
+            angular_velocity: vec3(self.car.angular_velocity.unwrap_or([0.0; 3])),
+            boost_amount: self.car.boost.unwrap_or(100.0),
+            input: None,
+        };
+        let ball = self.ball.unwrap_or_default();
+        PhysicsFrame {
+            timestamp_secs: 0.0,
+            ball: BallState {
+                position: vec3(ball.location.unwrap_or(DEFAULT_BALL_LOCATION)),
+                rotation: Quat {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 1.0,
+                },
+                velocity: vec3(ball.velocity.unwrap_or([0.0; 3])),
+                angular_velocity: vec3(ball.angular_velocity.unwrap_or([0.0; 3])),
+            },
+            cars: vec![car],
+        }
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -183,7 +298,8 @@ mod tests {
 
     #[test]
     fn every_shipped_scenario_parses() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rb_tape_bot/scenarios");
         let mut count = 0;
         for entry in std::fs::read_dir(dir).expect("scenarios dir") {
             let path = entry.expect("dir entry").path();
@@ -196,5 +312,41 @@ mod tests {
             }
         }
         assert!(count >= 10, "only {count} scenarios found");
+    }
+
+    #[test]
+    fn a_rotator_round_trips_a_recorded_quaternion() {
+        // test2.jsonl 18.308 s: rotator [-0.4315, -1.0776, 0.4492] against
+        // the recorded quaternion (-0.0796464, 0.290751, -0.447697, 0.841836).
+        let q = rotator_to_quat([-0.4315, -1.0776, 0.4492]);
+        for (got, want) in [
+            (q.x, -0.0796464),
+            (q.y, 0.290751),
+            (q.z, -0.447697),
+            (q.w, 0.841836),
+        ] {
+            assert!((got - want).abs() < 1e-3, "{q:?}");
+        }
+    }
+
+    #[test]
+    fn a_level_rotator_yawed_a_quarter_turn_faces_plus_y() {
+        let q = rotator_to_quat([0.0, std::f32::consts::FRAC_PI_2, 0.0]);
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(q.x.abs() < 1e-5 && q.y.abs() < 1e-5);
+        assert!((q.z - half).abs() < 1e-5 && (q.w - half).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_initial_frame_uses_the_scenario_state_and_defaults() {
+        let scenario = Scenario::from_json(JUMP_THEN_DODGE).expect("valid");
+        let frame = scenario.initial_frame();
+        assert_eq!(frame.cars.len(), 1);
+        assert_eq!(frame.cars[0].position, Vec3::new(0.0, 0.0, 17.0));
+        assert_eq!(frame.cars[0].boost_amount, 0.0);
+        assert_eq!(frame.ball.position, Vec3::new(3000.0, 3000.0, 93.15));
+        let jump = scenario.input_at(2).to_controller_input();
+        assert!(jump.jump);
+        assert_eq!(jump.pitch, Some(0.0));
     }
 }

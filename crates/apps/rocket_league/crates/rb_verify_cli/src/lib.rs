@@ -13,6 +13,7 @@ use rb_physics_bullet::world::{
 };
 use rb_physics_bullet::PhysicsWorld;
 use rb_replay_ingest::ReplayFileSource;
+use rb_scenario::Scenario;
 use std::path::Path;
 
 /// Default timestamp tolerance (seconds) `rb-verify` uses when the caller
@@ -407,6 +408,32 @@ pub fn boost_is_unlimited(frames: &[PhysicsFrame]) -> bool {
     held >= UNLIMITED_BOOST_MIN_HELD_FRAMES && !drained
 }
 
+/// Seconds per tick of a scenario run: the game's 120 Hz.
+pub const SCENARIO_TICK_SECS: f32 = 1.0 / 120.0;
+
+/// What the port does with a scenario (`docs/research/BOT-CAPTURE-PLAN.md`):
+/// the start state, then one frame after each tick of the scenario's input
+/// tape (settling and a final neutral tick included). The first frame is the
+/// start state and carries no input; later frames carry the input that
+/// produced them.
+pub fn simulate_scenario(scenario: &Scenario) -> Vec<PhysicsFrame> {
+    let start = scenario.initial_frame();
+    let mut world = PhysicsWorld::from_frame(&start);
+    let mut frames = vec![start];
+    for tick in 0..=scenario.total_ticks() {
+        let input = scenario.input_at(tick).to_controller_input();
+        world.set_car_input(0, input);
+        world.step(SCENARIO_TICK_SECS);
+        let mut frame = world.frame();
+        frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
+        if let Some(car) = frame.cars.first_mut() {
+            car.input = Some(input);
+        }
+        frames.push(frame);
+    }
+    frames
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -668,5 +695,47 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         assert!(matches!(result, Err(IngestError::Malformed(_))));
+    }
+
+    fn scenario(name: &str) -> Scenario {
+        let path = format!(
+            "{}/../../tools/rb_tape_bot/scenarios/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        Scenario::from_json(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_scenario_run_has_one_frame_per_tick_and_the_start_state_first() {
+        let sc = scenario("prompt_dodge");
+        let frames = simulate_scenario(&sc);
+        assert_eq!(frames.len() as u64, sc.total_ticks() + 2);
+        assert_eq!(frames[0].cars[0].input, None);
+        assert!(frames[1].cars[0].input.is_some());
+        assert!(frames[1].timestamp_secs > 0.0);
+    }
+
+    #[test]
+    fn the_prompt_dodge_fires_and_the_late_dodge_does_not() {
+        // The scenarios face +y, so a forward dodge adds speed along +y.
+        let fastest_y = |name: &str| {
+            simulate_scenario(&scenario(name))
+                .iter()
+                .map(|f| f.cars[0].velocity.y)
+                .fold(0.0_f32, f32::max)
+        };
+        assert!(fastest_y("prompt_dodge") > 400.0, "dodge must fire");
+        assert!(fastest_y("late_dodge") < 50.0, "past the 1.25 s window");
+    }
+
+    #[test]
+    fn a_late_enough_wavedash_keeps_its_speed_and_an_early_one_hops() {
+        let mid = simulate_scenario(&scenario("wavedash_mid"));
+        // Down to the floor and moving about 1300 uu/s along +y (from 900).
+        let landed = &mid[60];
+        assert!(landed.cars[0].position.z < 20.0, "{:?}", landed.cars[0]);
+        assert!(landed.cars[0].velocity.y > 1100.0, "{:?}", landed.cars[0]);
+        let early = simulate_scenario(&scenario("wavedash_early"));
+        assert!(early[60].cars[0].position.z > 40.0, "the early flip hops");
     }
 }

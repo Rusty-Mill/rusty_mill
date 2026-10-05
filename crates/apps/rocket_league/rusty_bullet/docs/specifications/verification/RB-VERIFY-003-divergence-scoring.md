@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.19.0
+- Version: 0.20.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -225,6 +225,22 @@ them.
     not modelled.
   - **Verification**: `rb_physics_bullet` test
     `snapping_to_a_frame_takes_its_boost_fuel`.
+- `RB-VERIFY-003-FR-010` (implemented): scenario runs.
+  `rb-verify --scenario <scenario.json> [every]` (`simulate_scenario`)
+  runs a scripted scenario through `rb_physics_bullet` and prints the car's
+  position, velocity and spin every `every` ticks (default 12) and on every
+  jump press. A scenario (`rb_scenario::Scenario`) is an initial state and a
+  run-length input tape, the same file `tools/rb_tape_bot` replays in the
+  real game (`docs/research/BOT-CAPTURE-PLAN.md`), so a scenario's predicted
+  trajectory can be compared with its capture. The start frame carries no
+  input; later frames carry the input that produced them; the tick is
+  `SCENARIO_TICK_SECS` (1/120 s).
+  - **Verification**: `rb_verify_cli` tests
+    `a_scenario_run_has_one_frame_per_tick_and_the_start_state_first`,
+    `the_prompt_dodge_fires_and_the_late_dodge_does_not` and
+    `a_late_enough_wavedash_keeps_its_speed_and_an_early_one_hops`;
+    `rb_scenario` tests for the reader, defaults, every shipped scenario
+    parsing, and the rotator round trip against a recorded quaternion.
 
 
 ## Architecture and interfaces
@@ -444,6 +460,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.20.0 (2026-10-05): `RB-VERIFY-003-FR-010` implemented — `rb-verify
+  --scenario` runs a scripted scenario through the port; new workspace
+  crate `rb_scenario` (ADR-0056).
 - 0.19.0 (2026-10-02): `RB-VERIFY-003-FR-009` implemented — snapping
   takes the recorded boost fuel; `--self-kstep` lists its worst frames.
 - 0.18.0 (2026-10-02): `RB-VERIFY-003-FR-008` implemented — k-step

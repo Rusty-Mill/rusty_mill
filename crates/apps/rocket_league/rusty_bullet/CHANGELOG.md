@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0056 (`RB-VERIFY-003-FR-010`): `rb_scenario` crate and
+  `rb-verify --scenario`, which runs a scripted scenario through the port.
 - ADR-0055 (`RB-PHYSICS-001-FR-136`): `jump::JumpClock`; the second jump
   or dodge expires 1.25 s after the first jump's hold ends.
 - ADR-0054 (`RB-PHYSICS-001-FR-135`): a body's static-contact lever arm

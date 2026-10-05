@@ -126,12 +126,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb_domain"
+version = "0.1.0"
+
+[[package]]
+name = "rb_scenario"
+version = "0.1.0"
+dependencies = [
+ "rb_domain",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rb_tape_bot"
 version = "0.1.0"
 dependencies = [
+ "rb_scenario",
  "rlbot",
- "serde",
- "serde_json",
 ]
 
 [[package]]
