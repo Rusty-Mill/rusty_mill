@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.20.0
+- Version: 0.21.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -241,6 +241,31 @@ them.
     `a_late_enough_wavedash_keeps_its_speed_and_an_early_one_hops`;
     `rb_scenario` tests for the reader, defaults, every shipped scenario
     parsing, and the rotator round trip against a recorded quaternion.
+- `RB-VERIFY-003-FR-011` (implemented): a scenario against its recording.
+  `rb-verify --scenario <scenario.json> --against <capture> [every]`
+  (`compare_scenario`) lines the capture up with the port's free-run
+  prediction of the scenario and prints per-tick position, velocity and
+  spin error, the mean and maximum position error, the first tick the
+  position error passes 10 and 100 uu, and how many recorded inputs differ
+  from the tape.
+  - Alignment: the start is the first recorded frame with the car within
+    5 uu of the scenario's start location; the lag (0 to 3 ticks, the
+    recording's delay in showing the set state) is the one that best matches
+    the first 60 ticks. A scenario with no car location, or a capture that
+    never has the car there, is an error.
+  - The capture's input may belong to a tick or the one before it; either
+    counts as playing the tape.
+  - Free run, not one-step: error grows with chaos, so read the tick of
+    first divergence, not the end.
+  - **Verification**: `rb_verify_cli` tests
+    `a_recording_equal_to_the_prediction_has_no_error`,
+    `a_recording_that_lags_the_start_by_a_tick_is_aligned`,
+    `a_wrong_velocity_shows_up_as_error_and_a_wrong_input_as_a_mismatch`,
+    `a_recording_without_the_start_or_a_scenario_without_a_location_is_an_error`.
+    Run on real data: the `corner_slide` scenario against `test2.jsonl`
+    (its own source) stays within 10 uu for 56 ticks (0.47 s); the
+    `hard_landing_nose_first` scenario within 5 uu for 24 ticks, after which
+    the recording's own steering, which the tape lacks, takes over.
 
 
 ## Architecture and interfaces
@@ -460,6 +485,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.21.0 (2026-10-05): `RB-VERIFY-003-FR-011` implemented — `rb-verify
+  --scenario ... --against <capture>` scores a scenario against its
+  recording (ADR-0057).
 - 0.20.0 (2026-10-05): `RB-VERIFY-003-FR-010` implemented — `rb-verify
   --scenario` runs a scripted scenario through the port; new workspace
   crate `rb_scenario` (ADR-0056).

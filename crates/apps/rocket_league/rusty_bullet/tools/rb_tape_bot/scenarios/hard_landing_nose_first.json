@@ -1,5 +1,5 @@
 {
-  "name": "reproduces test2.jsonl 18.308 s: a nose-first landing at 1600 uu/s down, no input (the 18.35 s residual)",
+  "name": "reproduces test2.jsonl 18.308 s: a nose-first landing at 1600 uu/s down, neutral until the recording's throttle at 18.367 s (the 18.35 s residual)",
   "settle_ticks": 0,
   "car": {
     "location": [
@@ -38,7 +38,11 @@
   },
   "steps": [
     {
-      "ticks": 240
+      "ticks": 7
+    },
+    {
+      "ticks": 233,
+      "throttle": 1
     }
   ]
 }

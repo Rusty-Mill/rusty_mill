@@ -33,20 +33,27 @@
 //!   a scripted scenario (`simulate_scenario`, `docs/research/BOT-CAPTURE-PLAN.md`):
 //!   the car's position, velocity and spin every `every` ticks (default 12)
 //!   and on every tick a jump is pressed.
+//! - `rb-verify --scenario <scenario.json> --against <capture> [every]`:
+//!   the same scenario's recording lined up with that prediction
+//!   (`compare_scenario`): per-tick position, velocity and spin error, when
+//!   the error first passes 10 and 100 uu, and whether the recorded inputs
+//!   played the tape.
 //! - `rb-verify --self-kstep <capture-file> [k] [count]`: every frame
 //!   predicted `k` ticks ahead (default 30) from the recorded frame `k`
 //!   before it, scored like `--self` (`k_step_score`,
 //!   `RB-VERIFY-003-FR-008`), then the `count` (default 0) frames with the
 //!   largest car velocity error (`k_step_capture`).
 
+use rb_capture_ingest::CaptureFileSource;
 use rb_domain::divergence::DivergenceScore;
+use rb_domain::PhysicsStateSource;
 use rb_domain::{ControllerInput, Vec3};
 use rb_scenario::Scenario;
 use rb_verify_cli::{
-    car_frame_spin, k_step_capture, k_step_score, one_step_capture, rotation_rate,
-    score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
-    simulate_scenario, trace_capture, TraceRow, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP,
-    DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    car_frame_spin, compare_scenario, k_step_capture, k_step_score, one_step_capture,
+    rotation_rate, score_capture_against_candidate, score_capture_growth,
+    score_replay_against_capture, simulate_scenario, trace_capture, TraceRow,
+    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::process::ExitCode;
@@ -211,6 +218,55 @@ fn run_scenario(path: &str, every: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Prints a scenario's recording against the port's prediction.
+fn run_scenario_against(path: &str, capture: &str, every: usize) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let scenario = Scenario::from_json(&text).map_err(|e| format!("{path}: {e}"))?;
+    let frames = CaptureFileSource::new(capture)
+        .frames()
+        .map_err(|e| format!("{capture}: {e}"))?;
+    let comparison = compare_scenario(&scenario, &frames).map_err(|e| format!("{capture}: {e}"))?;
+    println!("{}", scenario.name);
+    println!(
+        "recording starts at capture frame {} (lag {} ticks); {} ticks compared",
+        comparison.start_index,
+        comparison.lag_ticks,
+        comparison.rows.len()
+    );
+    println!("tick  pos err  vel err  spin err   recorded position (x, y, z)    predicted position (x, y, z)");
+    for row in &comparison.rows {
+        if row.tick % every.max(1) != 0 {
+            continue;
+        }
+        println!(
+            "{tick:>4}  {pe:>7.1}  {ve:>7.1}  {se:>8.2}   {rp}  {pp}",
+            tick = row.tick,
+            pe = row.position_error(),
+            ve = row.velocity_error(),
+            se = row.spin_error(),
+            rp = fmt_vec(&row.recorded.position),
+            pp = fmt_vec(&row.predicted.position),
+        );
+    }
+    let first = |threshold: f32| {
+        comparison
+            .first_position_error_over(threshold)
+            .map_or_else(|| "never".to_string(), |tick| format!("tick {tick}"))
+    };
+    println!(
+        "position error: mean {:.1} uu, max {:.1} uu; first over 10 uu: {}; first over 100 uu: {}",
+        comparison.mean_position_error(),
+        comparison.max_position_error(),
+        first(10.0),
+        first(100.0),
+    );
+    println!(
+        "recorded inputs that differ from the tape: {}",
+        comparison.input_mismatches
+    );
+    Ok(())
+}
+
 fn parse_secs(name: &str, raw: Option<String>) -> Result<f32, String> {
     let raw = raw.ok_or_else(|| format!("missing {name}"))?;
     raw.parse::<f32>()
@@ -236,7 +292,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]"
+    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]"
 }
 
 fn main() -> ExitCode {
@@ -251,7 +307,17 @@ fn main() -> ExitCode {
             eprintln!("{}", usage());
             return ExitCode::FAILURE;
         };
-        let every = match args.next().map(|raw| raw.parse::<usize>()) {
+        let mut capture = None;
+        let mut next = args.next();
+        if next.as_deref() == Some("--against") {
+            let Some(capture_path) = args.next() else {
+                eprintln!("{}", usage());
+                return ExitCode::FAILURE;
+            };
+            capture = Some(capture_path);
+            next = args.next();
+        }
+        let every = match next.map(|raw| raw.parse::<usize>()) {
             None => 12,
             Some(Ok(every)) => every,
             Some(Err(_)) => {
@@ -259,7 +325,11 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match run_scenario(&path, every) {
+        let result = match capture {
+            None => run_scenario(&path, every),
+            Some(capture) => run_scenario_against(&path, &capture, every),
+        };
+        return match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
