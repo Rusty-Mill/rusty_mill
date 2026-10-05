@@ -5,6 +5,7 @@
   --grey: 140 140 140; /* #8c8c8c */
   --line: 232 233 235; /* #e8e9eb */
   --surface: 255 255 255;
+  --paper: 240 227 219; /* #f0e3db: the blush cream of a Fair Play card */
   --rail: 250 250 250; /* #fafafa */
   --side: 247 247 247; /* #f7f7f7 */
   --hover: 245 245 245;
@@ -30,6 +31,7 @@
   --grey: 150 150 150;
   --line: 52 52 56;
   --surface: 26 26 28;
+  --paper: 47 41 37; /* #2f2925 */
   --rail: 32 32 34;
   --side: 30 30 32;
   --hover: 40 40 43;
