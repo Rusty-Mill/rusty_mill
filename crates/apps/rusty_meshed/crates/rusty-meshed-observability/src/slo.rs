@@ -255,7 +255,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
         partition: i32,
         threshold_seconds: i64,
     ) -> SLOResult {
-        let age = self.latest_age(topic, partition, &SystemClock).await;
+        self.check_completeness_with(topic, partition, threshold_seconds, &SystemClock)
+            .await
+    }
+
+    async fn check_completeness_with(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        threshold_seconds: i64,
+        clock: &impl WallClock,
+    ) -> SLOResult {
+        let age = self.latest_age(topic, partition, clock).await;
         let (passed, age_seconds, message) = match age {
             Age::Known(age) if age <= threshold_seconds as f64 => (
                 true,
@@ -917,7 +928,7 @@ mod tests {
     }
 
     #[rusty_tokio::test]
-    async fn an_unreadable_clock_is_age_unavailable_for_freshness_and_completeness() {
+    async fn an_unreadable_clock_is_age_unavailable_for_freshness() {
         let (client_io, mut peer) = duplex(4096);
         let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
         let server = rusty_tokio::spawn(async move {
@@ -930,6 +941,25 @@ mod tests {
         assert_eq!(
             result.message,
             "Freshness age unavailable: system clock unavailable"
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn an_unreadable_clock_is_age_unavailable_for_completeness() {
+        let (client_io, mut peer) = duplex(4096);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let server = rusty_tokio::spawn(async move {
+            respond_with_offset(&mut peer, 1_700_000_000_000, 0).await;
+        });
+        let result = monitor
+            .check_completeness_with("t", 0, 60, &BrokenClock)
+            .await;
+        server.await.unwrap();
+        assert!(!result.passed);
+        assert!(result.actual_value.is_infinite());
+        assert_eq!(
+            result.message,
+            "Completeness age unavailable: system clock unavailable"
         );
     }
 
