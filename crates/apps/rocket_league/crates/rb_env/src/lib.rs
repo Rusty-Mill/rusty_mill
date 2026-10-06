@@ -207,6 +207,33 @@ mod tests {
         assert_eq!(seen.cars[0].boost_amount, 40.0);
     }
 
+    /// A characterisation, not a verification: no recording has a ball on a
+    /// car's wheels (`RB-PHYSICS-001-FR-138`), so this only pins that an
+    /// inverted car's wheels stop a fast ball without letting it through.
+    #[test]
+    fn a_fast_ball_hits_an_inverted_cars_wheels_and_bounces_off() {
+        let mut frame = start();
+        frame.cars[0].position = Vec3::new(0.0, 0.0, 800.0);
+        frame.cars[0].velocity = Vec3::new(0.0, 0.0, 0.0);
+        frame.cars[0].rotation = Quat::new(1.0, 0.0, 0.0, 0.0);
+        frame.ball.position = Vec3::new(0.0, 0.0, 1000.0);
+        frame.ball.velocity = Vec3::new(0.0, 0.0, -1500.0);
+        let mut env = Env::new();
+        env.reset(&frame);
+        let mut nearest = f32::MAX;
+        let mut last = env.peek(&[]);
+        for _ in 0..30 {
+            last = env.step(&[ControllerInput::default()]);
+            nearest = nearest.min((last.ball.position - last.cars[0].position).length());
+        }
+        assert!(nearest > 80.0, "the ball got within {nearest} of the car");
+        assert!(last.ball.velocity.z > 0.0, "and left upward");
+        assert!(
+            last.ball.position.z > last.cars[0].position.z,
+            "still above it"
+        );
+    }
+
     #[test]
     fn reset_observes_the_start_and_keeps_its_clock() {
         let mut frame = start();

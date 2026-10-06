@@ -444,6 +444,15 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   One event cannot separate a floor-row difference from a car-ball friction
   or restitution one; wait for more recorded hits (the tape-bot
   `car_over_ball` capture, other bot hits) before changing the solver.
+- **Dribble and flip-reset sanity (2026-10-06, FR-138's unverified case)**:
+  with no recording of a wheel on the ball, an `Env` run drops a ball onto an
+  inverted car's wheels at 600, 1500 and 100 uu/s relative: no tunnelling
+  (nearest centre distance 87.6 uu at 1500 uu/s), finite throughout, and a
+  fast ball bounces off upward (+603 uu/s, car -280). Pinned as test
+  `a_fast_ball_hits_an_inverted_cars_wheels_and_bounces_off`. Whether the
+  game gives a wheel the same grip on the ball (a flip reset needs three
+  wheels) is untested; a capture of a flip reset or dribble is the missing
+  data.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball
