@@ -276,7 +276,6 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`nexus-plugins`](crates/apps/nexus/crates/nexus-plugins) | `crates/apps/nexus/crates/nexus-plugins` | Nexus: community plugin lifecycle — WASM (wasmtime) and JS-sandboxed plugin hosting |
 | [`nexus-ai`](crates/apps/nexus/crates/nexus-ai) | `crates/apps/nexus/crates/nexus-ai` | Nexus: AI provider integration — chat, embeddings, RAG |
 | [`nexus-ai-runtime`](crates/apps/nexus/crates/nexus-ai-runtime) | `crates/apps/nexus/crates/nexus-ai-runtime` | Nexus: local model runtime plumbing for `nexus-ai` |
-| [`nexus-agui`](crates/apps/nexus/crates/nexus-agui) | `crates/apps/nexus/crates/nexus-agui` | Nexus: an agent session served over AG-UI, the ai-runtime's typed event stream behind `rusty_agui`'s `Agent` trait, round approval as a frontend tool call (ADR-0007 follow-ons step 10) |
 | [`nexus-mcp`](crates/apps/nexus/crates/nexus-mcp) | `crates/apps/nexus/crates/nexus-mcp` | Nexus: Host-side MCP client/server integration |
 | [`nexus-lsp`](crates/apps/nexus/crates/nexus-lsp) | `crates/apps/nexus/crates/nexus-lsp` | Nexus: Language Server Protocol integration |
 | [`nexus-dap`](crates/apps/nexus/crates/nexus-dap) | `crates/apps/nexus/crates/nexus-dap` | Nexus: Debug Adapter Protocol integration |
