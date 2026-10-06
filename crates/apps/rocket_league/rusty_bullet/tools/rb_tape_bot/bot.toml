@@ -13,8 +13,9 @@ hivemind = false
 # bot's process after inheriting its own environment, so a value here wins
 # over one set in the shell that started the GUI. Edit the path per run;
 # relative paths resolve from root_dir, which defaults to this file's folder.
+# Use forward slashes: a backslash in a TOML basic string is an escape.
 [settings.environment]
-RB_TAPE = "scenarios\prompt_dodge.json"
+RB_TAPE = "scenarios/prompt_dodge.json"
 
 [details]
 description = "Replays a scripted input tape from a known start state, for repeatable mechanic captures."
