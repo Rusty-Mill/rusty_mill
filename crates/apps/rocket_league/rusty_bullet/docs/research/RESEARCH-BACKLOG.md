@@ -280,6 +280,16 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   framing only); (3) a minimal server that runs one car and the ball, so a
   `rlbot` crate bot drives `rb_physics_bullet`; (4) boost pads and match
   rules; (5) compare bot runs on the game and on the port.
+- **Shared bot surface (added 2026-10-06)**: reading B and the stepping
+  environment of ADR-0059 are the same idea at two heights. Order them so
+  nothing is built twice: `Env` (reset/step/observe over `PhysicsWorld`,
+  ADR-0059) first; then a protocol adapter that turns `Env` observations
+  into v5 `GamePacket`s and `ControllerState`s back into `ControllerInput`s.
+  For bot code that should run on both targets, the seam is the packet and
+  controller types, not a Rust trait of our own: a bot written against the
+  `rlbot` crate runs on the game via RLBot core and on the port via the
+  adapter, and the tape bot is the first such bot. No new bot trait until a
+  second in-process caller needs one.
 - **Status**: Open, long term, not scheduled. Needs an ADR before work
   (new adapter crate, new dependencies, public protocol surface).
   **Owner**: baileyrd.

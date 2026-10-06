@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0059 (proposed): the physics port as a stepping environment for bots
+  (`rb_env` sketch), plus a "port as the bot's second target" section in
+  `BOT-CAPTURE-PLAN.md` and a shared-bot-surface note on `RB-RESEARCH-O007`.
+  Docs only; no code.
 - ADR-0058 (`RB-VERIFY-003-FR-012`, `FR-013`): `rb-verify --scenario-from
   <capture> <from> <to> [name]` cuts a scenario from a window of a capture
   (`scenario_from_capture`, `rb_scenario::quat_to_rotator`,
