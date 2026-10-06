@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## Consolidation review batch 2: whisper log sink, nexus env UTF-8, Provider FIFO, search Value bridge, rusty_time from_unix_secs
-**2026-10-06** · PR pending (branch `claude/new-session-cihrd9`) · consolidation review B4, B5, B6, B7, B8 part 1
+**2026-10-06** · [#527](https://github.com/Rusty-Mill/rusty_mill/pull/527) · consolidation review B4, B5, B6, B7, B8 part 1
 
 - **Fixed:** `rusty_whisper::log` runs the installed sink with no lock held and drops a replaced sink after the lock is released; poisoned locks are recovered. A reentrant sink, a sink whose captured values log on drop, and a panicking sink are covered by child-process tests.
 - **Fixed:** `nexus-terminal::interpolate_env` decodes whole UTF-8 scalars instead of pushing bytes as Latin-1 chars; `café ${X}` interpolates to `café ok`. Malformed references and cycles behave as before, now pinned.
