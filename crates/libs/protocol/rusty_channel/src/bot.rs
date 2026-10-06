@@ -21,7 +21,7 @@ use rusty_http::{HeaderMap, Method, StatusCode, Url, Version};
 use rusty_serve::{Handler, Request, Response, Server};
 use rusty_tls::{TlsConnector, TrustPolicy};
 
-use crate::{Channel, Credential, Error, Headers, Outbound, Received, Reply, Thread};
+use crate::{Ack, Channel, Credential, Error, Headers, Outbound, Received, Reply, Thread};
 
 /// A bot: one channel in front of one agent.
 pub struct Bot<C> {
@@ -110,7 +110,7 @@ impl<C: Channel + 'static> Handler for Bot<C> {
             }
             Ok(Received::Message(inbound)) => {
                 self.answer(inbound);
-                Response::json(StatusCode::OK, b"{}".to_vec())
+                ack(self.channel.ack())
             }
             Ok(Received::Ignored(why)) => {
                 eprintln!("ignored: {why}");
@@ -126,6 +126,16 @@ impl<C: Channel + 'static> Handler for Bot<C> {
             }
         }
     }
+}
+
+/// The acknowledgement as a response. JSON goes out buffered; anything
+/// else as a one-chunk stream, which is how `rusty_serve` carries a
+/// content type of the handler's choosing.
+fn ack(ack: Ack) -> Response {
+    if ack.content_type == "application/json" {
+        return Response::json(StatusCode::OK, ack.body.to_vec());
+    }
+    Response::stream(ack.content_type, std::iter::once(ack.body.to_vec()))
 }
 
 /// Fetch the channel's credential if it needs one, then post the reply.

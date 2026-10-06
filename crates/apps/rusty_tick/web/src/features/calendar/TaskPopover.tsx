@@ -28,7 +28,7 @@ export function TaskPopover({ taskId, anchor, color, hour12, onClose }: Props) {
       <div className="flex items-start gap-2.5">
         <span className="mt-[3px]">
           <TaskCheck
-            checked={task.status === 'done'}
+            checked={task.status !== 'open'}
             priority={task.priority}
             label={`Complete ${task.title}`}
             onChange={() => {
@@ -37,7 +37,7 @@ export function TaskPopover({ taskId, anchor, color, hour12, onClose }: Props) {
             }}
           />
         </span>
-        <h2 className={`min-w-0 flex-1 break-words font-semibold ${task.status === 'done' ? 'text-grey line-through' : ''}`}>{task.title}</h2>
+        <h2 className={`min-w-0 flex-1 break-words font-semibold ${task.status !== 'open' ? 'text-grey line-through' : ''}`}>{task.title}</h2>
       </div>
       <dl className="mt-2 space-y-1 pl-[26px] text-s text-grey">
         {event && (

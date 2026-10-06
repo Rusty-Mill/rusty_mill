@@ -25,7 +25,7 @@ export function TaskCard({ task, group, spec, now, selected }: { task: Task; gro
       className={`cursor-grab rounded-row border border-line bg-surface p-2.5 ${selected ? 'ring-2 ring-primary/40' : ''}`}
     >
       <div className="flex items-start gap-2">
-        <TaskCheck checked={task.status === 'done'} priority={task.priority} label={task.title} onChange={() => taskActions.toggle(task.id)} />
+        <TaskCheck checked={task.status !== 'open'} priority={task.priority} label={task.title} onChange={() => taskActions.toggle(task.id)} />
         <button type="button" onClick={() => navigate(taskPath(spec, task.id))} className="min-w-0 flex-1 text-left text-base">
           <span className="line-clamp-2">{task.title}</span>
         </button>

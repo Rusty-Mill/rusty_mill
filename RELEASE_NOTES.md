@@ -21,7 +21,30 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Fixed:** `rusty_request` no longer replays a failed pooled-connection attempt on a fresh connection. That replay ignored method, retry policy and how far the request had got, so a `POST` the server accepted and then dropped could be submitted twice. The configured `RetryPolicy` is now the only replay authority; `send_streaming` keeps ignoring retry policy; a `Body::Stream` factory is opened zero times on a head-write failure and once otherwise.
 - **Changed:** a `rusty_request` request with no retry policy that lands on a pooled connection the server has since closed returns `Error::Io` where it used to succeed on a second connection. Set `pool_idle_timeout` below the server's keep-alive timeout or configure a `RetryPolicy`.
 - **Tests:** cap−1/cap/cap+1 for complete and fragmented heads with trailing body and upgrade bytes; chunked boundaries across chunk and read splits, extensions, trailers, empty body, premature EOF, and the unbounded primitive pinned; scripted-transport tests for head-write, partial head-write and post-body failures counting body-factory opens; loopback tests for a stale pooled connection without and with a policy, for streaming, and for a `POST` the peer accepts then drops reaching the server exactly once.
-- **Known limitations:** no per-client body limit in `rusty_request` (a 1 MiB chunked response is now an error); no idle-connection liveness probe, which is a separate improvement.
+- **Known limitations:** no per-client body limit in `rusty_request` (a chunked response over 1 MiB is now an error); no idle-connection liveness probe, which is a separate improvement.
+
+---
+
+## rusty_channel: SMS over Twilio
+**2026-10-05** · [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, third channel
+
+- **Added:** `sms::Twilio`. Inbound, `X-Twilio-Signature` is checked in constant time against base64 of HMAC-SHA1 (hand-rolled on `rusty_sha1`, RFC 2202 vectors in the tests) over the webhook's public URL followed by every form field sorted by name; the channel is therefore constructed with the URL Twilio was given, and a webhook moved without telling it is refused rather than trusted. `From` and `To` make the conversation key (SMS has no threads), the trimmed `Body` is the text, and a message without text (media only) is ignored. Outbound, the reply is a `POST` to `Messages.json` with basic auth from the account SID and auth token, cut at Twilio's 1600-character limit with an ellipsis.
+- **Changed:** `Channel` gains a defaulted `ack` hook: what the runner answers an accepted message with before the agent has run. Twilio wants TwiML, so its ack is an empty `<Response/>` as `text/xml`; the others keep the default `{}`. `bot::Bot` sends a non-JSON ack as a one-chunk `rusty_serve` stream, the server's way of carrying a chosen content type.
+- **Added:** the `sms_bot` example on the shared runner.
+- **Tests:** five, no network: the signature against an independently computed value and HMAC-SHA1 against RFC 2202; a signed text accepted, keyed, acknowledged and replied to; a missing header, a wrong signature, a changed body and a moved webhook refused; a media-only message ignored and long replies cut on a character boundary.
+- **Known limitations:** no replay detection (Twilio signs no timestamp; a repeated `MessageSid` is not tracked); inbound media is ignored; no TwiML reply in the webhook response, the agent is too slow for that.
+
+---
+
+## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
+**2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
+
+- **Added:** `Status::WontDo` (`status: "wontdo"`, `?status=wontdo`), appended last so stored tasks still decode. Closing stamps `completedMs` and keeps the first stamp; the task menu has Won't Do and Mark as open; closed tasks list under Completed.
+- **Added:** a Countdown page over a `countdown` doc kind; pomo estimates over an `estimate` doc kind (a stepper on the Pomodoro page and an estimated-against-actual list); an Interrupted button whose count is stored on the focus record.
+- **Added:** `.ics` import from the Calendar view menu: events and todos become Inbox tasks (all-day end dates exclusive, `TZID` converted, cancelled/completed skipped, unsupported repeat rules imported once), capped at 500 per file.
+- **Changed:** a shared `createDocStore` backs filters, countdowns and estimates.
+- **Verified:** `cargo fmt --check`, `clippy -D warnings`, `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (616), `npm run build`.
+- Known limitations: no calendar subscription by URL (needs a server-side fetcher); re-importing a file duplicates its tasks; an estimate for a purged task stays stored; a new web UI needs a new server (an old one rejects `wontdo` and the new doc kinds); doc saves are reported but not retried.
 
 ---
 
@@ -98,6 +121,8 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** `crates/libs/protocol/rusty_agui/conformance/`, a Node project where `@ag-ui/client` 1.0.2, the reference client CopilotKit's SDK and OpenBot embed, runs the example: a full run the reference client verifies and reduces (state, result, new messages), a frontend tool call with streamed arguments, and an agent failure delivered as `RUN_ERROR`. CI job `rusty_agui conformance (@ag-ui/client)`; planner flag `agui` (path and package).
 - **Verified:** `cargo test -p rusty_agui --all-features` (27, plus the client doc test), `clippy -D warnings` with examples, `fmt --check`, the CI script tests (35), the three conformance tests locally against the built example, workspace map and layer checks.
 - Two departures from the follow-ons document, recorded there: the client is on `rusty_http` directly rather than `rusty_request` (sync, mirroring `serve`; the gateway is async on its own stack), and the smoke test uses the reference `@ag-ui/client` rather than a browser-driven React app, since that client is what the React SDK drives agents with.
+---
+
 ## rusty_baseline: honest measurement status
 **2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
 

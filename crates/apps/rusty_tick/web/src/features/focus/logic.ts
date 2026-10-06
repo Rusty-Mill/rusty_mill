@@ -10,6 +10,8 @@ export interface FocusRecordBody {
   kind: FocusMode
   taskId: string | null
   taskTitle: string | null
+  /** Times the user logged being pulled away during the session. */
+  interruptions: number
 }
 
 export interface FocusRecord extends FocusRecordBody {
@@ -52,6 +54,7 @@ export function asRecordBody(body: unknown): FocusRecordBody | null {
     kind: o.kind,
     taskId: typeof o.taskId === 'string' ? o.taskId : null,
     taskTitle: typeof o.taskTitle === 'string' ? o.taskTitle : null,
+    interruptions: typeof o.interruptions === 'number' && o.interruptions > 0 ? Math.floor(o.interruptions) : 0,
   }
 }
 
@@ -147,6 +150,8 @@ export interface Session {
   pausedTotalMs: number
   taskId: string | null
   taskTitle: string | null
+  /** Interruptions logged so far; they go onto the record. */
+  interruptions: number
 }
 
 /** Milliseconds actually spent running: timestamps, not ticks, so a throttled tab stays right. */

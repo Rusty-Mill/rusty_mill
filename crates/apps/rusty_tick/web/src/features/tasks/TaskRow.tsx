@@ -39,7 +39,7 @@ export const TaskRow = memo(function TaskRow({ task, selected, now, hour12, show
   const [at, setAt] = useState<{ x: number; y: number } | null>(null)
   const moreRef = useRef<HTMLButtonElement>(null)
   const pointRef = useRef<HTMLSpanElement>(null)
-  const done = task.status === 'done'
+  const done = task.status !== 'open'
   const due = formatDue(task, now, hour12)
   const progress = checklistProgress(task)
 

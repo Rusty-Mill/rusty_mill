@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { Priority, Task } from '@/api/types'
+import type { Priority, Status, Task } from '@/api/types'
 import { useActions } from '@/app/services'
 import { newId } from '@/lib/id'
 import { ORDER_STEP } from './organize'
@@ -11,6 +11,7 @@ export function useTaskActions() {
     const fail = (e: unknown): void => actions.notify('error', e instanceof Error ? e.message : String(e))
     return {
       toggle: (id: string): void => void actions.toggleDone(id).catch(fail),
+      setStatus: (id: string, status: Status): void => void actions.updateTask(id, { status }).catch(fail),
       setPriority: (id: string, priority: Priority): void => void actions.updateTask(id, { priority }).catch(fail),
       moveTo: (id: string, listId: string): void => void actions.moveTask(id, listId).catch(fail),
       /** Move to the Trash. */

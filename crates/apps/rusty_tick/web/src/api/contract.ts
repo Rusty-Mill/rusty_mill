@@ -110,6 +110,16 @@ export function runApiContract(label: string, make: () => Promise<ApiClient>): v
       expect((await api.updateTask(t.id, { status: 'open' })).completedMs).toBeNull()
     })
 
+    it("closes a task as won't do, keeping the first completion stamp, and reopens it", async () => {
+      const { api, list } = await setup()
+      const t = await api.createTask({ listId: list.id, title: 't' })
+      const closed = await api.updateTask(t.id, { status: 'wontdo' })
+      expect(closed.status).toBe('wontdo')
+      expect(closed.completedMs).toEqual(expect.any(Number))
+      expect((await api.updateTask(t.id, { status: 'done' })).completedMs).toBe(closed.completedMs)
+      expect((await api.updateTask(t.id, { status: 'open' })).completedMs).toBeNull()
+    })
+
     it('refuses stale writes with the current record, and accepts fresh ones', async () => {
       const { api, list } = await setup()
       const t = await api.createTask({ listId: list.id, title: 'v1' })

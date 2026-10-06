@@ -107,7 +107,7 @@ function useViewContext(): void {
   const lists = useData((s) => s.lists)
   const tags = useData((s) => s.tags)
   const inboxId = useData((s) => s.inboxId)
-  const filters = useFilters((s) => s.filters)
+  const filters = useFilters((s) => s.items)
   const visible = useMemo(() => {
     if (!spec) return []
     return tasksForView(spec, { tasks: Object.values(tasks), lists: Object.values(lists), tags: Object.values(tags), inboxId, filters }, Date.now())
