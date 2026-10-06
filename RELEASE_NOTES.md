@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Consolidation review batch 3: nexus vector integrity
+**2026-10-06** · PR pending · consolidation review B9, B9b, B9c
+
+- **Fixed:** `nexus-storage` vector search. A dimension-mismatched row scored 1.0 against a 3-d query; NaN scores could panic the sort; unreadable rows were dropped silently; truncated blobs decoded as shorter vectors. Similarity is now f64, checked, and undefined pairs are excluded (also from note near-duplicate detection at threshold 0.0); damaged embeddings and mixed-dimension files are `CorruptFile` errors naming the file; ties break by path, block id, row id.
+- **Fixed:** `upsert` is validated before anything is replaced (wrong-file chunk, empty or non-finite or oversized embedding, mixed dimensions or hashes); `stored_signature` inspects every row so ordinary indexing re-embeds a damaged file; `index_file` rejects a short, long or malformed provider reply instead of truncating.
+- **Added:** `StorageError::InvalidInput`; `index_file` `force` (optional boolean, malformed values rejected); `rag::index_file_with` and `IndexMode`.
+- **Behaviour change:** a database that already holds a mixed-dimension or damaged file now fails `search`, hybrid search and averaging until that file is re-indexed (`vector_delete_by_file` then `index_file`, or `index_file` with `force`). Hybrid search also fails on an invalid query vector.
+- **Known limitations:** a non-finite float inside a correctly sized blob is invisible to `stored_signature` (new writes cannot create one; `force` repairs old ones). `rp-core::RateLimiter` FIFO, the embedder-availability race, the `rusty_err` source chain and the rusty_meshed clock migration are not part of this batch. Not run here: the Windows matrix and the full workspace check.
+
+---
+
 ## Consolidation review batch 2: whisper log sink, nexus env UTF-8, Provider FIFO, search Value bridge, rusty_time from_unix_secs
 **2026-10-06** · [#527](https://github.com/Rusty-Mill/rusty_mill/pull/527) · consolidation review B4, B5, B6, B7, B8 part 1
 
