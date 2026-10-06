@@ -17,6 +17,7 @@ use rusty_http::{HeaderMap, Method, Url, Version};
 use rusty_tls::{TlsConnector, TrustPolicy};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -39,7 +40,38 @@ pub enum FetchError {
     /// The remote end failed or sent something that is not a calendar.
     #[error("{0}")]
     Upstream(String),
+    /// Too many fetches are already running; try again shortly.
+    #[error("too many calendar fetches are running; try again shortly")]
+    Busy,
 }
+
+/// Fetches allowed in flight at once. Each holds a connection thread for up
+/// to its timeouts, so this keeps a burst of them from using up the
+/// server's connections.
+pub const MAX_IN_FLIGHT: usize = 4;
+
+/// A place among the running fetches, given back on drop.
+struct Slot<'a>(&'a AtomicUsize);
+
+impl<'a> Slot<'a> {
+    /// A slot, unless `max` are already taken.
+    fn take(counter: &'a AtomicUsize, max: usize) -> Option<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(counter))
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether the server may connect to `ip`: only globally routable unicast
 /// addresses. Loopback, private, link-local, shared (CGNAT), unspecified,
@@ -247,9 +279,11 @@ fn public_address(url: &Url) -> Result<SocketAddr, FetchError> {
 /// [`FetchError::Invalid`] for a URL this server will not use,
 /// [`FetchError::Refused`] for one that resolves to a non-public address, and
 /// [`FetchError::Upstream`] for a failure on the way or a response that is
-/// not a calendar.
+/// not a calendar, and [`FetchError::Busy`] when [`MAX_IN_FLIGHT`] fetches
+/// are already running.
 pub fn fetch_text(raw: &str) -> Result<String, FetchError> {
     let mut url = check_url(raw)?;
+    let _slot = Slot::take(&IN_FLIGHT, MAX_IN_FLIGHT).ok_or(FetchError::Busy)?;
     for _ in 0..=MAX_REDIRECTS {
         let addr = public_address(&url)?;
         let sock = TcpStream::connect_timeout(&addr, STEP_TIMEOUT)
@@ -339,6 +373,19 @@ mod tests {
         ] {
             assert!(!is_public(bad.parse().unwrap()), "{bad}");
         }
+    }
+
+    #[test]
+    fn only_so_many_fetches_run_at_once_and_a_slot_is_given_back() {
+        let counter = AtomicUsize::new(0);
+        let a = Slot::take(&counter, 2).unwrap();
+        let _b = Slot::take(&counter, 2).unwrap();
+        assert!(Slot::take(&counter, 2).is_none(), "a third is refused");
+        drop(a);
+        assert!(
+            Slot::take(&counter, 2).is_some(),
+            "a freed slot can be taken again"
+        );
     }
 
     #[test]

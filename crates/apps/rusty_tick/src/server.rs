@@ -33,11 +33,18 @@ impl Handler for Backend {
             };
         }
         if path == FETCH_ICS_PATH && request.method == &rusty_http::Method::Post {
-            let response = match self.authorize(&api_request) {
-                Ok(_) => api::Api::fetch_ics(request.body),
-                Err(denied) => denied,
+            // Authenticated here, under the lock; the fetch itself runs after the
+            // lock is released, so a slow feed holds up no other request.
+            return match self.authorize(&api_request) {
+                Ok(_) => {
+                    let body = request.body.to_vec();
+                    rusty_serve::Response::deferred(move || {
+                        let response = api::Api::fetch_ics(&body);
+                        (response.status, response.body)
+                    })
+                }
+                Err(denied) => rusty_serve::Response::json(denied.status, denied.body),
             };
-            return rusty_serve::Response::json(response.status, response.body);
         }
         let response = Backend::handle(self, &api_request);
         rusty_serve::Response::json(response.status, response.body)

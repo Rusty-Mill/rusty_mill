@@ -255,6 +255,7 @@ impl Api {
                         ApiError::Invalid(m)
                     }
                     crate::fetch::FetchError::Upstream(m) => ApiError::Upstream(m),
+                    crate::fetch::FetchError::Busy => ApiError::Unavailable,
                 })
             });
         match result {

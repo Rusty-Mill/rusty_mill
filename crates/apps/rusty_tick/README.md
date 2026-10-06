@@ -72,7 +72,7 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`) |
 | GET, POST | `/api/v1/tags` | PATCH `/tags/{name}`, POST `/tags/{name}/rename` |
 | GET | `/api/v1/tags/{tag}/tasks` | |
-| POST | `/api/v1/fetch-ics` | `{"url"}` → `{"text"}`: the server fetches a calendar feed for the web UI (browsers cannot read most). `https://` or `webcal://`, port 443, public addresses only (checked before connecting, redirects re-checked), 4 MiB, 6 s per step; 422 for a URL it refuses, 502 for a feed that fails. It holds the server's request lock while it waits, so other requests queue behind it |
+| POST | `/api/v1/fetch-ics` | `{"url"}` → `{"text"}`: the server fetches a calendar feed for the web UI (browsers cannot read most). `https://` or `webcal://`, port 443, public addresses only (checked before connecting, redirects re-checked), 4 MiB, 6 s per step; 422 for a URL it refuses, 502 for a feed that fails, 503 when 4 fetches are already running. It runs after the server's request lock is released, so a slow feed holds up no other request |
 | GET | `/api/v1/docs/{kind}` | client documents: `PUT`/`DELETE /docs/{kind}/{id}`; kinds `habit`, `habit_checkin`, `focus`, `prefs`, `summary_template`, `comment`, `filter`, `countdown`, `estimate`, `assignee`, `subscription` |
 | GET | `/api/v1/smart/today`, `/next7`, `/overdue` | `?utcOffsetMin=` (default 0); open tasks in non-archived lists |
 
