@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## nexus-agui: a Nexus agent session over AG-UI
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `nexus-ai-runtime`
+
+- **Added:** `nexus-agui` at `crates/apps/nexus/crates/nexus-agui`: `NexusAgent::new(runtime, handle)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves a Nexus agent session to everything that speaks AG-UI. `Runtime` is the port (`subscribe` to the typed `AiEvent` stream, `submit` a session, `decide` a round); `KernelRuntime` implements it over a `KernelPluginContext` with `com.nexus.ai.runtime::submit`, a `CustomPrefix` subscription on `com.nexus.ai.runtime.`, and `com.nexus.agent::round_decide`.
+- **Added:** the mapping. The last user message is the goal of one `Session` task (`forwardedProps.archetype` picks the archetype); `TokenChunk` streams as deltas of one message; `ToolCalled` is `TOOL_CALL_START`/`ARGS`/`END` with the runtime's arguments preview (quoted when it is not JSON) and `ToolResult` is `TOOL_CALL_RESULT` (an error as `{"error": …}`); `Finished` ends the run with `{sessionId, outcome, tokensUsed}` and, when nothing streamed, the last round's text as the answer; `Failed`, `Cancelled`, a refused `submit`, a closed stream, an empty or missing user message and a tool message answering no proposed round are `RUN_ERROR`.
+- **Added:** human in the loop, opt-in through `with_approval(timeout_secs)`: rounds are gated, a `RoundProposed` sends its narration as text and ends the run with a call to the frontend tool `round_decide` (id `<session>:<round>`, arguments `round` and `narration`); the tool message that answers it on the next run of the thread is delivered as the decision (`approve`/`yes`/`ok` approve all; a JSON object passes through, so a `partial` decision works; other text aborts with that reason) and the same session is relayed until it finishes or proposes again. By default rounds are auto-approved and a run is one request.
+- **Tests:** five end-to-end tests with `rusty_agui`'s client over a socket against a scripted runtime (a streamed run with a tool call, result and final result; the last round's text when nothing streamed; a proposed round answered with approval, a stray answer on another thread refused, a second answer refused; an abort with its reason; failures, cancellation, a refused submit, no or blank user message) and three unit tests (decision parsing, the arguments preview, the last round's text).
+- **Known limitations:** one run is one session (the runtime's `submit` cannot continue a session; a resumed Nexus session is a fork), so a thread's earlier turns are not replayed; no artifacts; blocking over a tokio handle; not registered in `nexus-bootstrap`, a host mounts it with the invoker context; the `rusty_key` adapter is still to come.
+
+---
+
 ## adk-agui: a Rust ADK agent over AG-UI
 **2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `rusty_adk`
 

@@ -16,6 +16,7 @@ sandbox of its own.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 10, `nexus-ai-runtime` | `nexus-agui`: a Nexus agent session behind `rusty_agui`'s `Agent` trait over a `Runtime` port (submit, the typed `AiEvent` stream, `round_decide`) with a kernel adapter; token chunks, tool calls and results, the finished session as the result; a `RoundProposed` as a call to the frontend tool `round_decide`, answered on the next run |
 | (this PR) | step 10, `rusty_adk` | `adk-agui`: an ADK `Runner` behind `rusty_agui`'s `Agent` trait (thread = session, the last user message is the turn, text streamed as deltas, the agent's tool calls and results reported, the session state as a snapshot, a graph suspension as a call to the frontend tool `request_input` that the answering tool message resumes); feature `agui` on the facade; the `agui-agent-server` example |
 | (this PR) | step 8 | `@rusty-mill/agui-vue` (`provideAgent`, `useAgent`, `useReadable`, `useAction`, `useSharedState` as composables and refs) and `@rusty-mill/agui-angular` (`provideAgent`, `injectAgent`, `injectReadable`, `injectAction`, `injectSharedState` as signals); the `AgentStore` hoisted from the React binding into `agui-core`, where all three bindings share it |
 | (this PR) | step 7, second PR | `rusty_bot`: `BotSpec` confined by `rusty_sandbox` (own workspace, read roots, limits, process group, network open), `Fleet`, the `rusty-bot` runner-and-helper binary; `ProcessExecutor::start` for long-lived jobs |
@@ -75,7 +76,7 @@ targets as named.
 | A routines crate (cron schedule, run as requester, disable after N failures) | Routines |
 | Per-bot isolation | Sandboxes |
 | CORS and authentication on the agent endpoint | Any cross-origin or multi-user deployment |
-| Adapters from ~~`rusty_adk`~~ (step 10, `adk-agui`), `nexus-ai-runtime` and `rusty_key` event types to AG-UI | Putting existing agents behind the SDKs |
+| Adapters from ~~`rusty_adk`~~ (step 10, `adk-agui`), ~~`nexus-ai-runtime`~~ (step 10, `nexus-agui`) and `rusty_key` event types to AG-UI | Putting existing agents behind the SDKs |
 
 ## Build order
 
@@ -92,7 +93,7 @@ Both targets start with the same two pieces, so they come first.
 | 7 | **Done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
 | 8 | **Done.** Angular and Vue bindings over `agui-core` | 1 PR (see below) | No |
 | 9 | iOS (Swift) and Android (Kotlin) ports of the core | Large, when a consumer exists | Yes: new languages in the workspace |
-| 10 | Adapters from `rusty_adk` (**done**), `nexus-ai-runtime`, `rusty_key` | 1 PR each, in each family | No |
+| 10 | Adapters from `rusty_adk` (**done**), `nexus-ai-runtime` (**done**), `rusty_key` | 1 PR each, in each family | No |
 
 Chat components come after step 3 as a thin layer over the hooks, not
 before: the hooks are the API, the components are one rendering of it.
@@ -173,6 +174,29 @@ before: the hooks are the API, the components are one rendering of it.
   handler owns the framing and the frontend bindings already have the
   tool-call path, so the suspension rides the mechanism every binding
   implements instead of a second one.
+- **Step 10's Nexus adapter is over a port, not the kernel.** The
+  ai-runtime is reached through IPC and the bus, and a kernel with the
+  agent plugin and a model provider is too much to stand up in a test.
+  `nexus-agui` names the three things it needs (`Runtime::subscribe`,
+  `submit`, `decide`) and the kernel adapter is thirty lines; the tests
+  drive the mapping end to end against a scripted runtime through the
+  real handler, client and socket, the way the ADK adapter's tests drive
+  a real runner.
+- **Step 10's Nexus runs are one session each.** `submit` starts a
+  session and cannot continue one, and a resumed Nexus session is a fork
+  with a new id. So a user turn is a new session whose goal is that
+  message, and the thread's earlier turns are not replayed; Nexus's own
+  session memory carries context between sessions. Threading one Nexus
+  session across AG-UI runs waits on the runtime's own continuation
+  story (ADR 0028's later phases).
+- **Step 10's Nexus approval is answered on the next run.** A gated
+  round blocks the session in the worker until `round_decide`. An AG-UI
+  run is one request, and the bindings' store sends nothing while a run
+  is open, so the proposal ends the run as a frontend tool call (the ADK
+  shape) and the answer arrives as the next run, which delivers the
+  decision and relays the same session on. The session waits meanwhile,
+  bounded by its approval timeout. Auto-approval is the default; the
+  gate is opt-in for a UI that will answer it.
 - **Step 8 is one PR, before a consumer.** The plan said one PR per
   binding, when a consumer exists. The owner called for both at once,
   and each binding is under a hundred lines because the store they wrap

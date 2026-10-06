@@ -8452,6 +8452,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-agui"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "nexus-ai-runtime",
+ "nexus-kernel",
+ "rusty_agui",
+ "rusty_json",
+ "rusty_serve",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "nexus-ai"
 version = "0.1.0"
 dependencies = [

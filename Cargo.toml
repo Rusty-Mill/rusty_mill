@@ -243,6 +243,7 @@ members = [
     "crates/apps/nexus/crates/nexus-plugins",
     "crates/apps/nexus/crates/nexus-ai",
     "crates/apps/nexus/crates/nexus-ai-runtime",
+    "crates/apps/nexus/crates/nexus-agui",
     "crates/apps/nexus/crates/nexus-mcp",
     "crates/apps/nexus/crates/nexus-lsp",
     "crates/apps/nexus/crates/nexus-dap",
