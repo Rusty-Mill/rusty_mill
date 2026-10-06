@@ -5,7 +5,7 @@
 
 use rusty_json::json;
 use rusty_meshed_core::avro::{decode_string, encode_string};
-use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent};
+use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent, Timestamp};
 
 /// Event emitted when a position's authorization status is modified
 /// (DOM-006). `authorization_status` carries values such as
@@ -28,7 +28,8 @@ impl PositionAuthorizationChanged {
     pub const NAMESPACE: &'static str = "meshed.domains.position";
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         position_id: impl Into<String>,
         unit_uic: impl Into<String>,
@@ -39,7 +40,7 @@ impl PositionAuthorizationChanged {
         transaction_date: impl Into<String>,
     ) -> Self {
         PositionAuthorizationChanged {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             position_id: position_id.into(),
             unit_uic: unit_uic.into(),
             authorized_grade: authorized_grade.into(),
@@ -118,7 +119,8 @@ pub struct PositionFilled {
 impl PositionFilled {
     pub const NAMESPACE: &'static str = "meshed.domains.position";
 
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         position_id: impl Into<String>,
         person_id: impl Into<String>,
@@ -127,7 +129,7 @@ impl PositionFilled {
         transaction_date: impl Into<String>,
     ) -> Self {
         PositionFilled {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             position_id: position_id.into(),
             person_id: person_id.into(),
             unit_uic: unit_uic.into(),
@@ -198,7 +200,8 @@ impl PositionVacated {
     pub const NAMESPACE: &'static str = "meshed.domains.position";
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         position_id: impl Into<String>,
         person_id: impl Into<String>,
@@ -208,7 +211,7 @@ impl PositionVacated {
         transaction_date: impl Into<String>,
     ) -> Self {
         PositionVacated {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             position_id: position_id.into(),
             person_id: person_id.into(),
             unit_uic: unit_uic.into(),
@@ -287,7 +290,8 @@ impl PositionModified {
     pub const NAMESPACE: &'static str = "meshed.domains.position";
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         position_id: impl Into<String>,
         unit_uic: impl Into<String>,
@@ -298,7 +302,7 @@ impl PositionModified {
         transaction_date: impl Into<String>,
     ) -> Self {
         PositionModified {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             position_id: position_id.into(),
             unit_uic: unit_uic.into(),
             field_changed: field_changed.into(),
@@ -565,9 +569,14 @@ impl DomainEvent for PositionModified {
 mod tests {
     use super::*;
 
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+
     #[test]
     fn position_authorization_changed_serialize_then_deserialize_round_trips() {
-        let event = PositionAuthorizationChanged::new(
+        let event = PositionAuthorizationChanged::new_at(
+            &at(),
             "req-1",
             "pos-1",
             "UIC-1",
@@ -590,15 +599,23 @@ mod tests {
 
     #[test]
     fn position_filled_serialize_then_deserialize_round_trips() {
-        let event =
-            PositionFilled::new("req-1", "pos-1", "p-1", "UIC-1", "2026-01-01", "2026-01-02");
+        let event = PositionFilled::new_at(
+            &at(),
+            "req-1",
+            "pos-1",
+            "p-1",
+            "UIC-1",
+            "2026-01-01",
+            "2026-01-02",
+        );
         let bytes = event.serialize();
         assert_eq!(PositionFilled::deserialize(&bytes).unwrap(), event);
     }
 
     #[test]
     fn position_vacated_serialize_then_deserialize_round_trips() {
-        let event = PositionVacated::new(
+        let event = PositionVacated::new_at(
+            &at(),
             "req-1",
             "pos-1",
             "p-1",
@@ -613,7 +630,8 @@ mod tests {
 
     #[test]
     fn position_modified_serialize_then_deserialize_round_trips() {
-        let event = PositionModified::new(
+        let event = PositionModified::new_at(
+            &at(),
             "req-1",
             "pos-1",
             "UIC-1",

@@ -19,6 +19,7 @@ rusty_json = { workspace = true }
 rusty_request = { workspace = true }
 rusty_tokio = { workspace = true }
 rusty_uuid = { workspace = true }
+rusty-meshed-core = { path = "../rusty-meshed-core" }
 rusty-meshed-schema-registry = { path = "../rusty-meshed-schema-registry" }
 
 [dev-dependencies]

@@ -14,6 +14,7 @@
 //! forever if the operator queues `MigrateTrack` once and moves on.
 
 use super::enums::{CapabilityDimension, DecisionType, SystemStatus};
+use rusty_meshed_core::Timestamp;
 use rusty_sqlite::rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
@@ -26,43 +27,6 @@ const SCORE_MAX: f64 = 5.0;
 
 fn clamp(value: f64) -> f64 {
     value.clamp(SCORE_MIN, SCORE_MAX)
-}
-
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    // A minimal RFC 3339 UTC formatter -- this crate needs "now, as an
-    // ISO-8601 string" only for a `created_at`/`timestamp` audit trail
-    // no test asserts the exact value of, so a hand-rolled civil-date
-    // conversion (no leap-second table, no calendar library) is
-    // sufficient; `rusty_time::DateTime` has no `now()`/`from_timestamp`
-    // constructor to build on today (it's a pure calendar/formatting
-    // type, not a clock).
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    // Civil-from-days (Howard Hinnant's algorithm), proleptic Gregorian,
-    // days since 1970-01-01.
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// A legacy system being strangled and replaced by a mesh data product
@@ -179,8 +143,9 @@ pub fn get_or_create_clock(conn: &Connection) -> rusty_sqlite::rusqlite::Result<
 /// Queues a decision for the upcoming quarter (current quarter + 1).
 /// `target` is a track slug for `MigrateTrack`/`SunsetLegacy`, or
 /// `"platform"`/`"product_teams"` for the two investment decisions.
-pub fn queue_decision(
+pub fn queue_decision_at(
     conn: &Connection,
+    at: &Timestamp,
     decision_type: DecisionType,
     target: &str,
 ) -> rusty_sqlite::rusqlite::Result<DecisionRef> {
@@ -189,7 +154,7 @@ pub fn queue_decision(
     conn.execute(
         "INSERT INTO transformation_decisions (quarter, decision_type, target, applied, created_at)
          VALUES (?1, ?2, ?3, 0, ?4)",
-        params![quarter, decision_type.as_str(), target, now_iso()],
+        params![quarter, decision_type.as_str(), target, at.as_str()],
     )?;
     let id = conn.last_insert_rowid();
     Ok(DecisionRef {
@@ -248,6 +213,7 @@ fn latest_scores(
 
 fn emit(
     conn: &Connection,
+    at: &Timestamp,
     quarter: i64,
     event_type: &str,
     message: &str,
@@ -256,7 +222,7 @@ fn emit(
     conn.execute(
         "INSERT INTO transformation_events (quarter, event_type, track, message, timestamp)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![quarter, event_type, track, message, now_iso()],
+        params![quarter, event_type, track, message, at.as_str()],
     )?;
     Ok(())
 }
@@ -284,8 +250,9 @@ struct PendingDecision {
 /// legacy-system status, recomputes capability scores, emits narrative
 /// events, and advances the clock -- one atomic transaction. Returns
 /// the resulting snapshot, same shape as [`get_state`].
-pub fn advance_quarter(
+pub fn advance_quarter_at(
     conn: &mut Connection,
+    at: &Timestamp,
 ) -> rusty_sqlite::rusqlite::Result<TransformationState> {
     let tx = conn.transaction()?;
     let current_quarter = get_or_create_clock(&tx)?;
@@ -336,6 +303,7 @@ pub fn advance_quarter(
                     );
                     emit(
                         &tx,
+                        at,
                         next_q,
                         "wave_started",
                         &format!(
@@ -347,6 +315,7 @@ pub fn advance_quarter(
                 } else {
                     emit(
                         &tx,
+                        at,
                         next_q,
                         "decision_rejected",
                         &format!("Migrate {target}: already past LEGACY status, decision skipped"),
@@ -373,6 +342,7 @@ pub fn advance_quarter(
                     );
                     emit(
                         &tx,
+                        at,
                         next_q,
                         "system_decommissioned",
                         &format!(
@@ -400,6 +370,7 @@ pub fn advance_quarter(
                     );
                     emit(
                         &tx,
+                        at,
                         next_q,
                         "maturity_regression",
                         &format!(
@@ -412,6 +383,7 @@ pub fn advance_quarter(
                 _ => {
                     emit(
                         &tx,
+                        at,
                         next_q,
                         "decision_rejected",
                         &format!("Sunset {target}: no eligible legacy system in LEGACY or DUAL_WRITE status"),
@@ -430,6 +402,7 @@ pub fn advance_quarter(
                 }
                 emit(
                     &tx,
+                    at,
                     next_q,
                     "decision_applied",
                     "Platform investment lifts self-serve capability mesh-wide",
@@ -453,6 +426,7 @@ pub fn advance_quarter(
                 }
                 emit(
                     &tx,
+                    at,
                     next_q,
                     "decision_applied",
                     "Product team investment lifts domain ownership mesh-wide",
@@ -492,6 +466,7 @@ pub fn advance_quarter(
             ls.status_since_quarter = next_q;
             emit(
                 &tx,
+                at,
                 next_q,
                 "system_decommissioned",
                 &format!("{name} dual-write period complete — {target_data_product} cut over automatically"),
@@ -621,6 +596,10 @@ pub fn get_state(conn: &Connection) -> rusty_sqlite::rusqlite::Result<Transforma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
     use crate::transformation::seed::seed_transformation_state;
 
     fn seeded_connection() -> Connection {
@@ -651,9 +630,14 @@ mod tests {
     #[test]
     fn queue_decision_targets_current_quarter_plus_one() {
         let mut conn = seeded_connection();
-        advance_quarter(&mut conn).unwrap(); // quarter -> 1
-        let decision =
-            queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap(); // quarter -> 1
+        let decision = queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
         assert_eq!(decision.quarter, 2);
         assert_eq!(decision.target, "personnel-lifecycle");
     }
@@ -661,8 +645,14 @@ mod tests {
     #[test]
     fn migrate_track_on_legacy_system_transitions_to_dual_write() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
-        let state = advance_quarter(&mut conn).unwrap();
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
 
         let ls = status_of(&state, "personnel-lifecycle");
         assert_eq!(ls.status, SystemStatus::DualWrite);
@@ -678,11 +668,23 @@ mod tests {
     #[test]
     fn migrate_track_on_non_legacy_system_is_rejected() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
-        advance_quarter(&mut conn).unwrap(); // now DUAL_WRITE
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap(); // now DUAL_WRITE
 
-        queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
-        let state = advance_quarter(&mut conn).unwrap(); // quarter 2, decision rejected
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap(); // quarter 2, decision rejected
 
         let ls = status_of(&state, "personnel-lifecycle");
         assert_eq!(ls.status, SystemStatus::DualWrite);
@@ -692,20 +694,32 @@ mod tests {
     #[test]
     fn migrate_track_on_unknown_track_is_rejected_without_error() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::MigrateTrack, "no-such-track").unwrap();
+        queue_decision_at(&conn, &at(), DecisionType::MigrateTrack, "no-such-track").unwrap();
         // Must not panic/error even though the target doesn't exist.
-        let state = advance_quarter(&mut conn).unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
         assert_eq!(state.quarter, 1);
     }
 
     #[test]
     fn sunset_legacy_on_dual_write_is_a_clean_cutover() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
-        advance_quarter(&mut conn).unwrap(); // quarter 1: DUAL_WRITE
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap(); // quarter 1: DUAL_WRITE
 
-        queue_decision(&conn, DecisionType::SunsetLegacy, "personnel-lifecycle").unwrap();
-        let state = advance_quarter(&mut conn).unwrap(); // quarter 2: MIGRATED
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::SunsetLegacy,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap(); // quarter 2: MIGRATED
 
         let ls = status_of(&state, "personnel-lifecycle");
         assert_eq!(ls.status, SystemStatus::Migrated);
@@ -720,8 +734,14 @@ mod tests {
     #[test]
     fn sunset_legacy_on_legacy_is_a_risky_sunset() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::SunsetLegacy, "personnel-lifecycle").unwrap();
-        let state = advance_quarter(&mut conn).unwrap();
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::SunsetLegacy,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
 
         let ls = status_of(&state, "personnel-lifecycle");
         assert_eq!(ls.status, SystemStatus::Decommissioned);
@@ -735,11 +755,23 @@ mod tests {
     #[test]
     fn sunset_legacy_on_already_migrated_or_decommissioned_is_rejected() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::SunsetLegacy, "personnel-lifecycle").unwrap();
-        advance_quarter(&mut conn).unwrap(); // now DECOMMISSIONED
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::SunsetLegacy,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap(); // now DECOMMISSIONED
 
-        queue_decision(&conn, DecisionType::SunsetLegacy, "personnel-lifecycle").unwrap();
-        let state = advance_quarter(&mut conn).unwrap(); // rejected, no further change
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::SunsetLegacy,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap(); // rejected, no further change
 
         let ls = status_of(&state, "personnel-lifecycle");
         assert_eq!(ls.status, SystemStatus::Decommissioned);
@@ -754,8 +786,8 @@ mod tests {
         // platform investment instead: +0.3 per quarter, from a 1.0
         // baseline, needs many quarters to hit 5.0 -- push well past it.
         for _ in 0..20 {
-            queue_decision(&conn, DecisionType::InvestPlatform, "platform").unwrap();
-            advance_quarter(&mut conn).unwrap();
+            queue_decision_at(&conn, &at(), DecisionType::InvestPlatform, "platform").unwrap();
+            advance_quarter_at(&mut conn, &at()).unwrap();
         }
         let state = get_state(&conn).unwrap();
         for scores in state.capability.values() {
@@ -766,8 +798,8 @@ mod tests {
     #[test]
     fn invest_platform_lifts_self_serve_platform_mesh_wide() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::InvestPlatform, "platform").unwrap();
-        let state = advance_quarter(&mut conn).unwrap();
+        queue_decision_at(&conn, &at(), DecisionType::InvestPlatform, "platform").unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
 
         for track in [
             "personnel-lifecycle",
@@ -782,8 +814,14 @@ mod tests {
     #[test]
     fn invest_product_teams_lifts_domain_ownership_and_data_as_a_product_mesh_wide() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::InvestProductTeams, "product_teams").unwrap();
-        let state = advance_quarter(&mut conn).unwrap();
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::InvestProductTeams,
+            "product_teams",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
 
         for track in [
             "personnel-lifecycle",
@@ -799,16 +837,22 @@ mod tests {
     #[test]
     fn dual_write_auto_completes_after_minimum_quarters_with_no_sunset_decision() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
-        advance_quarter(&mut conn).unwrap(); // q1: DUAL_WRITE, since=1
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap(); // q1: DUAL_WRITE, since=1
 
-        let state = advance_quarter(&mut conn).unwrap(); // q2: 2 - 1 = 1 < 2, not yet
+        let state = advance_quarter_at(&mut conn, &at()).unwrap(); // q2: 2 - 1 = 1 < 2, not yet
         assert_eq!(
             status_of(&state, "personnel-lifecycle").status,
             SystemStatus::DualWrite
         );
 
-        let state = advance_quarter(&mut conn).unwrap(); // q3: 3 - 1 = 2 >= 2, auto-completes
+        let state = advance_quarter_at(&mut conn, &at()).unwrap(); // q3: 3 - 1 = 2 >= 2, auto-completes
         let ls = status_of(&state, "personnel-lifecycle");
         assert_eq!(ls.status, SystemStatus::Migrated);
         assert_eq!(ls.status_since_quarter, 3);
@@ -817,15 +861,21 @@ mod tests {
     #[test]
     fn advance_quarter_increments_clock_even_with_no_pending_decisions() {
         let mut conn = seeded_connection();
-        let state = advance_quarter(&mut conn).unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
         assert_eq!(state.quarter, 1);
     }
 
     #[test]
     fn advance_quarter_marks_processed_decisions_applied() {
         let mut conn = seeded_connection();
-        queue_decision(&conn, DecisionType::MigrateTrack, "personnel-lifecycle").unwrap();
-        let state = advance_quarter(&mut conn).unwrap();
+        queue_decision_at(
+            &conn,
+            &at(),
+            DecisionType::MigrateTrack,
+            "personnel-lifecycle",
+        )
+        .unwrap();
+        let state = advance_quarter_at(&mut conn, &at()).unwrap();
         assert!(state.pending_decisions.is_empty());
         assert_eq!(state.decision_history.len(), 1);
         assert_eq!(
@@ -838,8 +888,8 @@ mod tests {
     fn decision_history_is_capped_at_twenty_most_recent() {
         let mut conn = seeded_connection();
         for _ in 0..25 {
-            queue_decision(&conn, DecisionType::InvestPlatform, "platform").unwrap();
-            advance_quarter(&mut conn).unwrap();
+            queue_decision_at(&conn, &at(), DecisionType::InvestPlatform, "platform").unwrap();
+            advance_quarter_at(&mut conn, &at()).unwrap();
         }
         let state = get_state(&conn).unwrap();
         assert_eq!(state.decision_history.len(), 20);
@@ -850,8 +900,8 @@ mod tests {
     #[test]
     fn maturity_trend_has_one_point_per_quarter_from_zero() {
         let mut conn = seeded_connection();
-        advance_quarter(&mut conn).unwrap();
-        advance_quarter(&mut conn).unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap();
+        advance_quarter_at(&mut conn, &at()).unwrap();
         let state = get_state(&conn).unwrap();
         assert_eq!(state.maturity_trend.len(), 3); // quarters 0, 1, 2
         assert_eq!(state.maturity_trend[0].quarter, 0);

@@ -13,6 +13,7 @@ mod error;
 pub mod outbox;
 mod producer;
 pub mod registry_client;
+mod relay_log;
 mod topic_config;
 mod topic_manager;
 mod types;
@@ -30,8 +31,8 @@ pub use consumer::{
 };
 pub use error::{ContractVersionMismatch, RegistryError};
 pub use outbox::{
-    ensure_schema as ensure_outbox_schema, relay_pending, write_outbox_entry, OutboxEntry,
-    OutboxRelay, RelayError,
+    ensure_schema as ensure_outbox_schema, relay_pending, relay_pending_with,
+    write_outbox_entry_at, OutboxEntry, OutboxRelay, RelayError,
 };
 pub use producer::{DataProductProducerBase, ProducerError, PublishError};
 pub use topic_config::{TopicSpec, TopicType};

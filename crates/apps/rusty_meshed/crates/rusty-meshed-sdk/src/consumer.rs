@@ -123,7 +123,7 @@ use rusty_kafka::protocol::offset_fetch::{
 };
 use rusty_kafka::protocol::sync_group::{SyncGroupAssignment, SyncGroupRequest};
 use rusty_kafka::{ClientError, CodecError, KafkaClient};
-use rusty_meshed_core::{AvroDecodeError, DomainEvent, PlatformConfig};
+use rusty_meshed_core::{AvroDecodeError, DomainEvent, PlatformConfig, SystemClock, WallClock};
 use rusty_meshed_observability::LineageTracker;
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -432,11 +432,21 @@ impl<E: DomainEvent, S: AsyncRead + AsyncWrite + Unpin + Send> DataProductConsum
     /// [`EARLIEST_TIMESTAMP`] when nothing has been committed yet
     /// (`auto.offset.reset = "earliest"` parity, SDK-034).
     pub async fn startup(&mut self) -> Result<(), ConsumerStartupError> {
+        self.startup_with(&SystemClock).await
+    }
+
+    /// [`startup`](Self::startup) reading the lineage time from `clock`.
+    /// The clock is read before any registry or Kafka call.
+    async fn startup_with(&mut self, clock: &impl WallClock) -> Result<(), ConsumerStartupError> {
+        let at = clock
+            .read()
+            .map_err(|err| ConsumerStartupError::Lineage(err.to_string()))?;
         let topic = self.resolve_output_port().await?;
         self.join_and_subscribe(&topic).await?;
 
         self.lineage_tracker
-            .record_job_run(
+            .record_job_run_at(
+                at.timestamp(),
                 &self.consumer_type_name(),
                 "meshed",
                 &[("kafka".to_string(), topic.clone())],
@@ -1211,6 +1221,36 @@ mod tests {
         assert_eq!(consumer.subscribed_topic.as_deref(), Some(topic));
     }
 
+    /// A clock that cannot be read.
+    struct BrokenClock;
+
+    impl WallClock for BrokenClock {
+        fn read(&self) -> Result<rusty_meshed_core::ClockReading, rusty_meshed_core::ClockError> {
+            Err(rusty_meshed_core::ClockError::BeforeEpoch)
+        }
+    }
+
+    #[rusty_tokio::test]
+    async fn startup_with_an_unreadable_clock_makes_no_kafka_or_registry_call() {
+        use rusty_tokio::io::AsyncReadExt;
+        // An unroutable registry would turn any registry call into a different error.
+        let (client_io, mut peer) = duplex(8192);
+        let client = KafkaClient::new(client_io, None);
+        let mut consumer = consumer_with(RegistryClient::new("http://unused.invalid"), client);
+
+        let err = consumer.startup_with(&BrokenClock).await.unwrap_err();
+
+        assert!(
+            matches!(&err, ConsumerStartupError::Lineage(msg) if msg.contains("before the Unix epoch")),
+            "{err:?}"
+        );
+        assert!(consumer.subscribed_topic.is_none());
+        drop(consumer);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        assert!(received.is_empty());
+    }
+
     #[rusty_tokio::test]
     async fn run_processes_a_fetched_record_then_commits_and_stops() {
         let (client_io, mut peer) = duplex(8192);
@@ -1225,7 +1265,7 @@ mod tests {
         let stop_handle = consumer.stop_handle();
 
         let event = TestEvent {
-            base: BaseEvent::new("req-1"),
+            base: BaseEvent::try_new("req-1").unwrap(),
         };
         let event_id = event.base.event_id.clone();
         let value = event.serialize();
@@ -1340,7 +1380,7 @@ mod tests {
         consumer.next_fetch_offsets.insert(0, 0);
 
         let event = TestEvent {
-            base: BaseEvent::new("req-1"),
+            base: BaseEvent::try_new("req-1").unwrap(),
         };
         let event_id = event.base.event_id.clone();
         consumer.seen_event_ids.insert(event_id.clone()); // seed as already seen
@@ -1440,7 +1480,7 @@ mod tests {
         let stop_handle = consumer.stop_handle();
 
         let event = TestEvent {
-            base: BaseEvent::new("req-1"),
+            base: BaseEvent::try_new("req-1").unwrap(),
         };
         let event_id = event.base.event_id.clone();
 

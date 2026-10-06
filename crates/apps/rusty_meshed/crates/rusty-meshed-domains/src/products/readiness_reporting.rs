@@ -7,7 +7,7 @@
 //! never freshly generated -- both consumers' [`process`] set it
 //! explicitly after construction (`UnitReadinessAssessed::new`, like
 //! every domain event's constructor, only ever generates a *fresh*
-//! `correlation_id` via `BaseEvent::new`, matching source parity for
+//! `correlation_id` via `BaseEvent::new_at`, matching source parity for
 //! every other caller of that constructor -- DOM-023/024's propagation
 //! is a property of these two `process()` methods, not of the event
 //! type itself).
@@ -35,6 +35,7 @@
 
 use crate::events::{PersonnelAssigned, PositionFilled, UnitReadinessAssessed};
 use rusty_err::Error;
+use rusty_meshed_core::ClockReading;
 use rusty_meshed_core::EventType;
 use rusty_meshed_core::PlatformConfig;
 use rusty_meshed_sdk::{
@@ -129,16 +130,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
     /// project out of `self`) -- a genuine borrow conflict, not just an
     /// ergonomics choice.
     pub async fn process(&self, event: &PersonnelAssigned) -> Result<(), PublishError> {
+        let reading = ClockReading::now()?;
         let assessment = derive_assessment(
             &event.base.correlation_id,
             &event.base.event_id,
             &event.unit_uic,
             &event.effective_date,
             &event.transaction_date,
+            &reading,
         );
         let mut producer = self.producer.lock().await;
         producer
-            .publish("manpower.readiness-reporting.assessments", &assessment)
+            .publish_at(
+                "manpower.readiness-reporting.assessments",
+                &assessment,
+                &reading,
+            )
             .await?;
         producer.flush(10.0);
         Ok(())
@@ -162,16 +169,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelAssignmentConsumer<S> {
             .run(move |event: PersonnelAssigned| {
                 let producer = producer.clone();
                 async move {
+                    let reading = ClockReading::now().map_err(|err| err.to_string())?;
                     let assessment = derive_assessment(
                         &event.base.correlation_id,
                         &event.base.event_id,
                         &event.unit_uic,
                         &event.effective_date,
                         &event.transaction_date,
+                        &reading,
                     );
                     let mut producer = producer.lock().await;
                     producer
-                        .publish("manpower.readiness-reporting.assessments", &assessment)
+                        .publish_at(
+                            "manpower.readiness-reporting.assessments",
+                            &assessment,
+                            &reading,
+                        )
                         .await
                         .map_err(|err| err.to_string())?;
                     producer.flush(10.0);
@@ -221,16 +234,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PositionFillConsumer<S> {
     /// [`run`](Self::run) duplicates this logic rather than calling
     /// this method directly.
     pub async fn process(&self, event: &PositionFilled) -> Result<(), PublishError> {
+        let reading = ClockReading::now()?;
         let assessment = derive_assessment(
             &event.base.correlation_id,
             &event.base.event_id,
             &event.unit_uic,
             &event.effective_date,
             &event.transaction_date,
+            &reading,
         );
         let mut producer = self.producer.lock().await;
         producer
-            .publish("manpower.readiness-reporting.assessments", &assessment)
+            .publish_at(
+                "manpower.readiness-reporting.assessments",
+                &assessment,
+                &reading,
+            )
             .await?;
         producer.flush(10.0);
         Ok(())
@@ -254,16 +273,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PositionFillConsumer<S> {
             .run(move |event: PositionFilled| {
                 let producer = producer.clone();
                 async move {
+                    let reading = ClockReading::now().map_err(|err| err.to_string())?;
                     let assessment = derive_assessment(
                         &event.base.correlation_id,
                         &event.base.event_id,
                         &event.unit_uic,
                         &event.effective_date,
                         &event.transaction_date,
+                        &reading,
                     );
                     let mut producer = producer.lock().await;
                     producer
-                        .publish("manpower.readiness-reporting.assessments", &assessment)
+                        .publish_at(
+                            "manpower.readiness-reporting.assessments",
+                            &assessment,
+                            &reading,
+                        )
                         .await
                         .map_err(|err| err.to_string())?;
                     producer.flush(10.0);
@@ -285,54 +310,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PositionFillConsumer<S> {
 /// Shared derivation logic for both consumers' `process()`: same
 /// `correlation_id` as the triggering event (never a fresh one),
 /// `source_event_ids = [event.event_id]`, a hardcoded
-/// [`DERIVED_READINESS_PCT`], `assessed_at` set to now.
+/// [`DERIVED_READINESS_PCT`], `assessed_at` and the event timestamp both
+/// taken from the caller's one `reading`.
 fn derive_assessment(
     correlation_id: &str,
     source_event_id: &str,
     unit_uic: &str,
     effective_date: &str,
     transaction_date: &str,
+    reading: &ClockReading,
 ) -> UnitReadinessAssessed {
-    let mut assessment = UnitReadinessAssessed::new(
+    let mut assessment = UnitReadinessAssessed::new_at(
+        reading.timestamp(),
         correlation_id.to_string(),
         unit_uic.to_string(),
         DERIVED_READINESS_PCT,
-        now_iso(),
+        reading.timestamp().as_str(),
         effective_date.to_string(),
         transaction_date.to_string(),
     );
     assessment.base.source_event_ids = vec![source_event_id.to_string()];
     assessment
-}
-
-/// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
-/// civil-from-days algorithm duplicated elsewhere in this crate family.
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Composition wrapper combining two consumers and one producer for
@@ -455,6 +453,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ReadinessReportingProduct<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at() -> rusty_meshed_core::Timestamp {
+        rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+
+    fn reading() -> ClockReading {
+        ClockReading::from_duration(std::time::Duration::from_secs(1_700_000_000)).unwrap()
+    }
     use rusty_http::async_tokio::AsyncTransport;
     use rusty_http::head::ResponseHead;
     use rusty_http::{HeaderMap, StatusCode, Version};
@@ -651,8 +657,11 @@ mod tests {
             "UIC-1",
             "2026-01-01",
             "2026-01-02",
+            &reading(),
         );
         assert_eq!(assessment.base.correlation_id, "req-1");
+        assert_eq!(assessment.assessed_at, "2023-11-14T22:13:20Z");
+        assert_eq!(assessment.base.timestamp, "2023-11-14T22:13:20Z");
         assert_eq!(assessment.base.source_event_ids, vec!["evt-personnel-1"]);
         assert_eq!(assessment.readiness_pct, DERIVED_READINESS_PCT);
         assert_eq!(assessment.unit_uic, "UIC-1");
@@ -662,8 +671,22 @@ mod tests {
 
     #[test]
     fn two_derivations_never_share_a_fresh_event_id() {
-        let a = derive_assessment("req-1", "evt-1", "UIC-1", "2026-01-01", "2026-01-02");
-        let b = derive_assessment("req-1", "evt-1", "UIC-1", "2026-01-01", "2026-01-02");
+        let a = derive_assessment(
+            "req-1",
+            "evt-1",
+            "UIC-1",
+            "2026-01-01",
+            "2026-01-02",
+            &reading(),
+        );
+        let b = derive_assessment(
+            "req-1",
+            "evt-1",
+            "UIC-1",
+            "2026-01-01",
+            "2026-01-02",
+            &reading(),
+        );
         assert_ne!(a.base.event_id, b.base.event_id);
     }
 
@@ -684,7 +707,8 @@ mod tests {
         );
         let consumer = PersonnelAssignmentConsumer::new(consumer_base, producer);
 
-        let event = PersonnelAssigned::new(
+        let event = PersonnelAssigned::new_at(
+            &at(),
             "req-1",
             "p-1",
             "pos-1",
@@ -718,8 +742,15 @@ mod tests {
         );
         let consumer = PositionFillConsumer::new(consumer_base, producer);
 
-        let event =
-            PositionFilled::new("req-2", "pos-1", "p-1", "UIC-1", "2026-01-01", "2026-01-02");
+        let event = PositionFilled::new_at(
+            &at(),
+            "req-2",
+            "pos-1",
+            "p-1",
+            "UIC-1",
+            "2026-01-01",
+            "2026-01-02",
+        );
 
         let server = rusty_tokio::spawn(async move {
             respond_to_produce(&mut peer, 0).await;
@@ -954,7 +985,8 @@ mod tests {
         let mut consumer_peer = startup_server.await.unwrap();
 
         let stop_handle = consumer.stop_handle();
-        let event = PersonnelAssigned::new(
+        let event = PersonnelAssigned::new_at(
+            &at(),
             "req-1",
             "p-1",
             "pos-1",

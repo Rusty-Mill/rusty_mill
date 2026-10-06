@@ -98,7 +98,8 @@ mod tests {
         let path = temp_db_path();
         let tracker = LineageTracker::new(path.0.to_str().unwrap()).unwrap();
         tracker
-            .record_job_run(
+            .record_job_run_at(
+                &rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
                 "orders",
                 "meshed",
                 &[("kafka".to_string(), "commerce.orders".to_string())],
@@ -106,7 +107,8 @@ mod tests {
             )
             .unwrap();
         tracker
-            .record_job_run(
+            .record_job_run_at(
+                &rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
                 "other-product",
                 "meshed",
                 &[("kafka".to_string(), "commerce.unrelated".to_string())],
@@ -125,7 +127,8 @@ mod tests {
         let path = temp_db_path();
         let tracker = LineageTracker::new(path.0.to_str().unwrap()).unwrap();
         tracker
-            .record_job_run(
+            .record_job_run_at(
+                &rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
                 "orders",
                 "meshed",
                 &[("kafka".to_string(), "commerce.orders".to_string())],

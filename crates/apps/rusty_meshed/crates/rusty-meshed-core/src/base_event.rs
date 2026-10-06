@@ -35,6 +35,7 @@
 use crate::avro::{
     decode_string, decode_string_array, encode_string, encode_string_array, AvroDecodeError,
 };
+use crate::clock::{ClockError, ClockReading, Timestamp};
 use rusty_json::json;
 
 /// The lineage contract every meshed platform event carries (SDK-001,
@@ -45,7 +46,7 @@ pub struct BaseEvent {
     /// UUID v4 per instance (SDK-002).
     pub event_id: String,
     /// Caller-supplied ID linking causally related events. Required --
-    /// unlike the other three fields, [`BaseEvent::new`] takes it as a
+    /// unlike the other three fields, [`BaseEvent::try_new`] takes it as a
     /// parameter rather than defaulting it (SDK-003); there is
     /// deliberately no `Default` impl for `BaseEvent`, for the same
     /// reason.
@@ -63,16 +64,22 @@ impl BaseEvent {
     /// unless a subclass's own `Meta` overrides it (SDK-006).
     pub const NAMESPACE: &'static str = "meshed.base";
 
-    /// Builds a new event with `correlation_id` supplied by the
-    /// caller and the other three lineage fields auto-populated:
-    /// `event_id` a fresh UUID v4, `source_event_ids` empty,
-    /// `timestamp` the current UTC instant.
-    pub fn new(correlation_id: impl Into<String>) -> Self {
+    /// Builds a new event stamped with the current UTC second: `event_id`
+    /// a fresh UUID v4, `source_event_ids` empty, `correlation_id`
+    /// caller-supplied. Fails only if the system clock cannot be read.
+    pub fn try_new(correlation_id: impl Into<String>) -> Result<Self, ClockError> {
+        let reading = ClockReading::now()?;
+        Ok(Self::new_at(correlation_id, reading.timestamp()))
+    }
+
+    /// Like [`try_new`](Self::try_new) with an explicit `timestamp`, so a
+    /// caller that already holds a reading (or a test) needs no clock.
+    pub fn new_at(correlation_id: impl Into<String>, timestamp: &Timestamp) -> Self {
         BaseEvent {
             event_id: rusty_uuid::Uuid::new_v4().to_string(),
             correlation_id: correlation_id.into(),
             source_event_ids: Vec::new(),
-            timestamp: now_iso(),
+            timestamp: timestamp.as_str().to_string(),
         }
     }
 
@@ -203,56 +210,34 @@ impl BaseEvent {
     }
 }
 
-/// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
-/// civil-from-days algorithm duplicated elsewhere in this crate family
-/// (see `rusty-meshed-observability::metrics::now_iso`'s doc for why
-/// there's no shared clock type to build on instead).
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn ts() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+
     #[test]
     fn new_requires_only_correlation_id_and_auto_populates_the_rest() {
-        let event = BaseEvent::new("req-abc-123");
+        let event = BaseEvent::try_new("req-abc-123").unwrap();
         assert_eq!(event.correlation_id, "req-abc-123");
         assert!(!event.event_id.is_empty());
         assert_eq!(event.event_id.len(), 36, "UUID v4 string form");
         assert!(event.source_event_ids.is_empty());
-        assert!(!event.timestamp.is_empty());
+        assert!(Timestamp::parse(&event.timestamp).is_ok());
+    }
+
+    #[test]
+    fn new_at_stamps_the_given_timestamp() {
+        let event = BaseEvent::new_at("req-1", &ts());
+        assert_eq!(event.timestamp, "2023-11-14T22:13:20Z");
     }
 
     #[test]
     fn each_instance_gets_an_independent_event_id_and_source_event_ids() {
-        let a = BaseEvent::new("req-1");
-        let mut b = BaseEvent::new("req-1");
+        let a = BaseEvent::new_at("req-1", &ts());
+        let mut b = BaseEvent::new_at("req-1", &ts());
         assert_ne!(a.event_id, b.event_id);
 
         b.source_event_ids.push("upstream-1".to_string());
@@ -285,7 +270,7 @@ mod tests {
 
     #[test]
     fn serialize_then_deserialize_round_trips_all_fields() {
-        let mut event = BaseEvent::new("req-abc-123");
+        let mut event = BaseEvent::new_at("req-abc-123", &ts());
         event.source_event_ids = vec!["e-1".to_string(), "e-2".to_string()];
 
         let bytes = event.serialize();
@@ -295,7 +280,7 @@ mod tests {
 
     #[test]
     fn serialize_then_deserialize_round_trips_empty_source_event_ids() {
-        let event = BaseEvent::new("req-abc-123");
+        let event = BaseEvent::new_at("req-abc-123", &ts());
         let bytes = event.serialize();
         let decoded = BaseEvent::deserialize(&bytes).unwrap();
         assert_eq!(decoded, event);
@@ -304,7 +289,7 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_truncated_input() {
-        let event = BaseEvent::new("req-abc-123");
+        let event = BaseEvent::new_at("req-abc-123", &ts());
         let bytes = event.serialize();
         let truncated = &bytes[..bytes.len() - 1];
         assert!(BaseEvent::deserialize(truncated).is_err());

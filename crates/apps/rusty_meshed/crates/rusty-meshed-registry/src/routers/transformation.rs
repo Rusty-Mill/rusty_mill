@@ -17,10 +17,11 @@ use crate::http::request::Request;
 use crate::http::response::Response;
 use crate::http::router::Router;
 use crate::transformation::{
-    advance_quarter, get_state, queue_decision, seed_transformation_state, DecisionRef,
+    advance_quarter_at, get_state, queue_decision_at, seed_transformation_state, DecisionRef,
     DecisionType, LegacySystem, MaturityPoint, TransformationState,
 };
 use rusty_http::StatusCode;
+use rusty_meshed_core::ClockReading;
 use rusty_request::Json;
 use rusty_sqlite::rusqlite::{params, Connection};
 use std::collections::VecDeque;
@@ -169,7 +170,10 @@ async fn create_decision(app_state: Arc<AppState>, req: Request) -> Response {
         );
     }
 
-    match queue_decision(&conn, decision_type, target) {
+    let Ok(reading) = ClockReading::now() else {
+        return internal_error();
+    };
+    match queue_decision_at(&conn, reading.timestamp(), decision_type, target) {
         Ok(decision) => Response::json(StatusCode::CREATED, &decision_ref_json(&decision)),
         Err(_) => internal_error(),
     }
@@ -182,7 +186,10 @@ async fn advance(app_state: Arc<AppState>, _req: Request) -> Response {
     if seed_transformation_state(&conn).is_err() {
         return internal_error();
     }
-    match advance_quarter(&mut conn) {
+    let Ok(reading) = ClockReading::now() else {
+        return internal_error();
+    };
+    match advance_quarter_at(&mut conn, reading.timestamp()) {
         Ok(snapshot) => Response::json(StatusCode::OK, &state_json(&snapshot)),
         Err(_) => internal_error(),
     }

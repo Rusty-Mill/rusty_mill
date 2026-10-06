@@ -121,6 +121,11 @@ impl ClockReading {
         })
     }
 
+    /// Whole seconds since the Unix epoch.
+    pub fn unix_secs(&self) -> i64 {
+        self.unix_millis.div_euclid(1000)
+    }
+
     /// Milliseconds since the Unix epoch (Kafka record time).
     pub fn unix_millis(&self) -> i64 {
         self.unix_millis
@@ -252,6 +257,7 @@ mod tests {
         let r = reading(1_700_000_000, 999_999_999).unwrap();
         assert_eq!(r.timestamp().as_str(), "2023-11-14T22:13:20Z");
         assert_eq!(r.unix_millis(), 1_700_000_000_999);
+        assert_eq!(r.unix_secs(), 1_700_000_000);
     }
 
     #[test]

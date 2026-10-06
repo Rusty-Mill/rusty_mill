@@ -5,7 +5,7 @@
 
 use rusty_json::json;
 use rusty_meshed_core::avro::{decode_double, decode_string, encode_double, encode_string};
-use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent};
+use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent, Timestamp};
 
 /// Event emitted when a unit's readiness is formally assessed
 /// (DOM-010). This is a measurement event -- it records a point-in-time
@@ -36,7 +36,8 @@ impl UnitReadinessAssessed {
     pub const NAMESPACE: &'static str = "meshed.domains.readiness";
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         unit_uic: impl Into<String>,
         readiness_pct: f64,
@@ -45,7 +46,7 @@ impl UnitReadinessAssessed {
         transaction_date: impl Into<String>,
     ) -> Self {
         UnitReadinessAssessed {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             unit_uic: unit_uic.into(),
             readiness_pct,
             assessed_at: assessed_at.into(),
@@ -147,9 +148,14 @@ impl DomainEvent for UnitReadinessAssessed {
 mod tests {
     use super::*;
 
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+
     #[test]
     fn serialize_then_deserialize_round_trips_including_the_float_field() {
-        let event = UnitReadinessAssessed::new(
+        let event = UnitReadinessAssessed::new_at(
+            &at(),
             "req-1",
             "UIC-1",
             75.5,
@@ -163,7 +169,8 @@ mod tests {
 
     #[test]
     fn to_json_includes_lineage_and_own_fields_with_readiness_pct_as_a_number() {
-        let event = UnitReadinessAssessed::new(
+        let event = UnitReadinessAssessed::new_at(
+            &at(),
             "req-1",
             "UIC-1",
             75.5,

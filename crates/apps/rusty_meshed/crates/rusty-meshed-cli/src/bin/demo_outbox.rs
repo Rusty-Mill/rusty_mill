@@ -21,6 +21,7 @@
 //! it yet.
 
 use rusty_json::json;
+use rusty_meshed_core::ClockReading;
 use rusty_meshed_sdk::outbox;
 use rusty_meshed_sdk::OutboxRelay;
 use rusty_sqlite::rusqlite::Connection;
@@ -75,12 +76,14 @@ fn main() {
     });
     let headers = json!({"source": "demo_outbox", "version": "1"});
 
+    let reading = ClockReading::now().expect("failed to read the system clock");
     let entry_id = {
         let tx = conn.transaction().expect("failed to start transaction");
         // In a real application you would also write your business
         // entity here, in this same transaction.
-        let entry = outbox::write_outbox_entry(
+        let entry = outbox::write_outbox_entry_at(
             &tx,
+            reading.timestamp(),
             "PersonnelAssigned",
             DEMO_TOPIC,
             &payload,

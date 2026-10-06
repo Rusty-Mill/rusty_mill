@@ -44,6 +44,7 @@
 use crate::command_output::CommandOutput;
 use crate::format::{dim, green, red, yellow, OutputFormat, Table};
 use rusty_json::json;
+use rusty_meshed_core::ClockReading;
 use rusty_meshed_observability::{
     get_violation_count, SLOMonitor, SLOResult, SLOViolationPayload, SLOViolationPublisher,
 };
@@ -265,8 +266,13 @@ pub async fn run(
 
         let violation_count = get_violation_count(conn, &port.schema_subject).unwrap_or(0);
         let passed = violation_count == 0;
-        if !passed {
-            let payload = SLOViolationPayload::new(
+        // Violation publishing is best effort here, as for the Kafka-backed
+        // checks: a clock that cannot be read skips the publish, like a
+        // failed send.
+        let reading = ClockReading::now().ok();
+        if let (false, Some(reading)) = (passed, &reading) {
+            let payload = SLOViolationPayload::new_at(
+                reading.timestamp(),
                 product,
                 port.topic_name.clone(),
                 "schema_conformance",
@@ -278,7 +284,7 @@ pub async fn run(
                 ),
             );
             if let Some(publisher) = &mut publisher {
-                let _ = publisher.publish(&payload).await;
+                let _ = publisher.publish_at(&payload, reading).await;
             }
         }
         rows.push(SloRow::schema_conformance(
@@ -337,7 +343,11 @@ async fn publish_violation(
     let Some(publisher) = publisher else {
         return;
     };
-    let payload = SLOViolationPayload::new(
+    let Ok(reading) = ClockReading::now() else {
+        return;
+    };
+    let payload = SLOViolationPayload::new_at(
+        reading.timestamp(),
         product,
         topic,
         result.slo_type.clone(),
@@ -345,7 +355,7 @@ async fn publish_violation(
         result.actual_value,
         result.message.clone(),
     );
-    let _ = publisher.publish(&payload).await;
+    let _ = publisher.publish_at(&payload, &reading).await;
 }
 
 #[cfg(test)]
@@ -498,13 +508,19 @@ mod tests {
 
     #[rusty_tokio::test]
     async fn schema_conformance_fails_with_recorded_violations() {
-        use rusty_meshed_observability::record_violation;
+        use rusty_meshed_observability::record_violation_at;
 
         let conn = seeded_connection();
         let id = insert_product(&conn, "orders");
         let port_id = insert_output_port(&conn, id, "commerce.orders");
         insert_contract(&conn, port_id, 60);
-        record_violation(&conn, "commerce.orders-value", "bad field").unwrap();
+        record_violation_at(
+            &conn,
+            &rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            "commerce.orders-value",
+            "bad field",
+        )
+        .unwrap();
 
         let output = run(&conn, UNREACHABLE_KAFKA, "orders", OutputFormat::Json).await;
         let json = rusty_json::from_str::<rusty_json::Value>(output.text.trim()).unwrap();

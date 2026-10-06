@@ -29,7 +29,7 @@
 //! next line. Rust can't support both idioms with one signature: a
 //! `&mut self -> &mut Self` method chains fluently only within a
 //! single statement (the receiver's temporary doesn't outlive it), so
-//! `let builder = ScenarioBuilder::new().add_x(...);` -- binding the
+//! `let builder = ScenarioBuilder::new()?.add_x(...);` -- binding the
 //! *builder itself*, not a call *within* one statement -- won't
 //! compile. This port picks `mut self -> Self` (or, for the two
 //! fallible methods, `Result<Self, ScenarioError>`): a plain owned
@@ -52,9 +52,8 @@ use crate::events::{
     PositionFilled, StatusChanged,
 };
 use rusty_err::Error;
-use rusty_meshed_core::BaseEvent;
+use rusty_meshed_core::{BaseEvent, ClockError, ClockReading, Timestamp};
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// One event a [`ScenarioBuilder`] can append -- see the module doc for
 /// why this exists instead of the source's `list[BaseEvent]`.
@@ -147,6 +146,8 @@ pub struct ScenarioBuilder {
     /// since the epoch (the source's `datetime.replace(microsecond=0)`
     /// truncation).
     base_time_epoch_secs: i64,
+    /// Stamped on every event's lineage `timestamp`.
+    created_at: Timestamp,
     events: Vec<ScenarioEvent>,
     time_offset_days: i64,
     active_persons: HashSet<String>,
@@ -157,28 +158,37 @@ pub struct ScenarioBuilder {
     assigned_persons: HashMap<String, String>,
 }
 
-impl Default for ScenarioBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ScenarioBuilder {
     /// A builder with a fresh, random `correlation_id` (UUID v4) and
-    /// `base_time` set to now.
-    pub fn new() -> Self {
+    /// `base_time` set to now; fails only if the clock cannot be read.
+    pub fn new() -> Result<Self, ClockError> {
         Self::with_correlation_id(rusty_uuid::Uuid::new_v4().to_string())
     }
 
+    /// [`new`](Self::new) anchored at an explicit clock `reading`.
+    pub fn new_at(reading: &ClockReading) -> Self {
+        Self::with_correlation_id_at(rusty_uuid::Uuid::new_v4().to_string(), reading)
+    }
+
     /// A builder with a caller-supplied `correlation_id`.
-    pub fn with_correlation_id(correlation_id: impl Into<String>) -> Self {
-        let base_time_epoch_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+    pub fn with_correlation_id(correlation_id: impl Into<String>) -> Result<Self, ClockError> {
+        Ok(Self::with_correlation_id_at(
+            correlation_id,
+            &ClockReading::now()?,
+        ))
+    }
+
+    /// [`with_correlation_id`](Self::with_correlation_id) anchored at an
+    /// explicit clock `reading`: its second is `base_time` and its
+    /// timestamp stamps every event the builder creates.
+    pub fn with_correlation_id_at(
+        correlation_id: impl Into<String>,
+        reading: &ClockReading,
+    ) -> Self {
         ScenarioBuilder {
             correlation_id: correlation_id.into(),
-            base_time_epoch_secs,
+            base_time_epoch_secs: reading.unix_secs(),
+            created_at: reading.timestamp().clone(),
             events: Vec::new(),
             time_offset_days: 0,
             active_persons: HashSet::new(),
@@ -210,7 +220,8 @@ impl ScenarioBuilder {
         let person_id = person_id.into();
         let new_status = new_status.into();
         let ts = self.next_timestamp(days_forward);
-        let event = StatusChanged::new(
+        let event = StatusChanged::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             person_id.clone(),
             previous_status,
@@ -239,7 +250,8 @@ impl ScenarioBuilder {
     ) -> Self {
         let position_id = position_id.into();
         let ts = self.next_timestamp(days_forward);
-        let event = PositionAuthorizationChanged::new(
+        let event = PositionAuthorizationChanged::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             position_id.clone(),
             unit_uic,
@@ -276,7 +288,8 @@ impl ScenarioBuilder {
             return Err(ScenarioError::PersonNotActive(person_id));
         }
         let ts = self.next_timestamp(days_forward);
-        let event = PersonnelAssigned::new(
+        let event = PersonnelAssigned::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             person_id.clone(),
             position_id,
@@ -313,7 +326,8 @@ impl ScenarioBuilder {
         }
         let person_id = person_id.into();
         let ts = self.next_timestamp(days_forward);
-        let mut event = PositionFilled::new(
+        let mut event = PositionFilled::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             position_id,
             person_id.clone(),
@@ -338,7 +352,8 @@ impl ScenarioBuilder {
         days_forward: i64,
     ) -> Self {
         let ts = self.next_timestamp(days_forward);
-        let event = PersonnelPromoted::new(
+        let event = PersonnelPromoted::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             person_id,
             from_grade,
@@ -359,7 +374,8 @@ impl ScenarioBuilder {
         days_forward: i64,
     ) -> Self {
         let ts = self.next_timestamp(days_forward);
-        let event = PersonnelSeparated::new(
+        let event = PersonnelSeparated::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             person_id,
             separation_reason,
@@ -393,7 +409,8 @@ impl ScenarioBuilder {
         let effective_ts =
             format_iso_from_epoch_secs(self.base_time_epoch_secs - effective_days_ago * 86_400);
 
-        let mut event = PersonnelAssigned::new(
+        let mut event = PersonnelAssigned::new_at(
+            &self.created_at,
             self.correlation_id.clone(),
             person_id.clone(),
             position_id,
@@ -433,9 +450,9 @@ impl ScenarioBuilder {
 
 /// Formats a Unix epoch-seconds instant as an ISO-8601 UTC string
 /// (`YYYY-MM-DDTHH:MM:SSZ`) -- the same hand-rolled civil-from-days
-/// algorithm `rusty_meshed_core::BaseEvent`'s own `now_iso()` uses
-/// (duplicated here since that one is private and only ever formats
-/// "now"), extended to accept an arbitrary instant via
+/// algorithm the former `BaseEvent` `now_iso()` used
+/// (kept here because [`Timestamp::from_unix_secs`] is fallible and this
+/// builder's day offsets are not range-checked), extended to accept an arbitrary instant via
 /// [`i64::div_euclid`]/[`i64::rem_euclid`] rather than an
 /// always-non-negative `u64`, since [`ScenarioBuilder::add_retroactive_correction`]
 /// needs a *past* instant, not just "now".
@@ -467,10 +484,14 @@ fn format_iso_from_epoch_secs(total_secs: i64) -> String {
 mod tests {
     use super::*;
 
+    fn reading() -> ClockReading {
+        ClockReading::from_duration(std::time::Duration::from_secs(1_700_000_000)).unwrap()
+    }
+
     /// The simplest complete scenario: status_change -> authorize ->
     /// assign -> fill.
     fn build_minimal() -> (ScenarioBuilder, Vec<ScenarioEvent>) {
-        let builder = ScenarioBuilder::new()
+        let builder = ScenarioBuilder::new_at(&reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_position_authorization("POS1", "UNIT-A", "E5", "Rifleman", 1)
             .add_assignment("P1", "POS1", "UNIT-A", "Rifleman", "E5", 1)
@@ -549,7 +570,7 @@ mod tests {
     #[test]
     fn custom_correlation_id_propagated() {
         let custom_id = "test-correlation-id-12345";
-        let builder = ScenarioBuilder::with_correlation_id(custom_id)
+        let builder = ScenarioBuilder::with_correlation_id_at(custom_id, &reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1);
         for event in builder.build() {
             assert_eq!(event.base().correlation_id, custom_id);
@@ -558,8 +579,8 @@ mod tests {
 
     #[test]
     fn different_scenarios_different_correlation_ids() {
-        let b1 = ScenarioBuilder::new();
-        let b2 = ScenarioBuilder::new();
+        let b1 = ScenarioBuilder::new_at(&reading());
+        let b2 = ScenarioBuilder::new_at(&reading());
         assert_ne!(b1.correlation_id(), b2.correlation_id());
     }
 
@@ -631,7 +652,7 @@ mod tests {
         // wall-clock timestamps, but the property being verified is
         // `_next_timestamp`'s own monotonic advance, not wall-clock
         // construction order.
-        let builder = ScenarioBuilder::new()
+        let builder = ScenarioBuilder::new_at(&reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_status_change("P1", "TDY", "ACTIVE", 5);
         let events = builder.build();
@@ -646,7 +667,7 @@ mod tests {
 
     #[test]
     fn retroactive_correction_effective_before_transaction() {
-        let builder = ScenarioBuilder::new()
+        let builder = ScenarioBuilder::new_at(&reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_position_authorization("POS1", "UNIT-A", "E5", "Rifleman", 1)
             .add_assignment("P1", "POS1", "UNIT-A", "Rifleman", "E5", 1)
@@ -664,7 +685,7 @@ mod tests {
 
     #[test]
     fn retroactive_effective_date_is_in_the_past() {
-        let mut builder = ScenarioBuilder::new();
+        let mut builder = ScenarioBuilder::new_at(&reading());
         builder = builder.add_status_change("P1", "ACTIVE", "NONE", 1);
         builder = builder.add_position_authorization("POS1", "UNIT-A", "E5", "Rifleman", 1);
         builder = builder
@@ -685,7 +706,7 @@ mod tests {
 
     #[test]
     fn assignment_without_prior_status_change_raises() {
-        let builder = ScenarioBuilder::new();
+        let builder = ScenarioBuilder::new_at(&reading());
         let err = builder
             .add_assignment("P1", "POS1", "UNIT-A", "Rifleman", "E5", 1)
             .unwrap_err();
@@ -694,7 +715,7 @@ mod tests {
 
     #[test]
     fn position_fill_without_prior_authorization_raises() {
-        let builder = ScenarioBuilder::new()
+        let builder = ScenarioBuilder::new_at(&reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_position_authorization("POS1", "UNIT-A", "E5", "Rifleman", 1)
             .add_assignment("P1", "POS1", "UNIT-A", "Rifleman", "E5", 1)
@@ -712,7 +733,7 @@ mod tests {
     fn assignment_requires_active_status_specifically() {
         // A StatusChanged to a non-ACTIVE new_status must not unlock
         // assignment.
-        let builder = ScenarioBuilder::new().add_status_change("P1", "TDY", "NONE", 1);
+        let builder = ScenarioBuilder::new_at(&reading()).add_status_change("P1", "TDY", "NONE", 1);
         let err = builder
             .add_assignment("P1", "POS1", "UNIT-A", "Rifleman", "E5", 1)
             .unwrap_err();
@@ -723,7 +744,7 @@ mod tests {
 
     #[test]
     fn multi_person_scenario() {
-        let mut builder = ScenarioBuilder::new();
+        let mut builder = ScenarioBuilder::new_at(&reading());
         for i in 1..=3 {
             let person = format!("P{i}");
             let position = format!("POS{i}");
@@ -747,7 +768,7 @@ mod tests {
 
     #[test]
     fn promotion_event_included() {
-        let builder = ScenarioBuilder::new()
+        let builder = ScenarioBuilder::new_at(&reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_promotion("P1", "E4", "E5", 1);
         let events = builder.build();
@@ -758,7 +779,7 @@ mod tests {
 
     #[test]
     fn separation_event_included() {
-        let builder = ScenarioBuilder::new()
+        let builder = ScenarioBuilder::new_at(&reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_separation("P1", "ETS", 1);
         let events = builder.build();
@@ -769,7 +790,8 @@ mod tests {
 
     #[test]
     fn build_returns_a_fresh_copy_each_call() {
-        let builder = ScenarioBuilder::new().add_status_change("P1", "ACTIVE", "NONE", 1);
+        let builder =
+            ScenarioBuilder::new_at(&reading()).add_status_change("P1", "ACTIVE", "NONE", 1);
         let events1 = builder.build();
         let events2 = builder.build();
         assert_eq!(events1.len(), events2.len());
@@ -779,7 +801,7 @@ mod tests {
     #[test]
     fn promotion_shares_correlation_id() {
         let cid = "fixed-corr-id";
-        let builder = ScenarioBuilder::with_correlation_id(cid)
+        let builder = ScenarioBuilder::with_correlation_id_at(cid, &reading())
             .add_status_change("P1", "ACTIVE", "NONE", 1)
             .add_promotion("P1", "E4", "E5", 1);
         for event in builder.build() {
