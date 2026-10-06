@@ -90,8 +90,9 @@ type). `PhysicsWorld::from_frame_in` clones a prebuilt arena. Measured:
 arena build 29 ms once, `reset` 0.25 ms (about 115 times cheaper).
 `simulate_scenario` now runs on `Env` (its first caller); the shipped
 scenario output is byte-identical (checked on `speed_flip`) and all 35
-`rb_verify_cli` tests pass. The second caller the ADR asked for (a sweep or
-policy) is **not** written yet, so the "fold back" trigger below is live.
+`rb_verify_cli` tests pass. The second caller the ADR asked for arrived the same day:
+the car-ball hit sweep (ADR-0061), which also added `Env::snap` and
+`Env::peek`.
 
 ## Validation and revisit triggers
 

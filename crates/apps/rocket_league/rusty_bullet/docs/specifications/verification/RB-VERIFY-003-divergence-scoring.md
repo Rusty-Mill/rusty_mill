@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.23.0
+- Version: 0.24.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -335,6 +335,32 @@ them.
     default errors, the flag scores all 12 frames),
     `seed_first_frame_starts_every_self_mode_at_the_first_frame` and
     `seed_first_frame_still_refuses_a_capture_whose_first_frame_has_no_car`.
+- `RB-VERIFY-003-FR-014` (implemented): car-ball hit sweeps, the second
+  caller of `rb_env::Env` (ADR-0060, ADR-0061). `rb-verify --sweep-hit <k>
+  <capture> <from> <to> [<capture> <from> <to>]...` scores a grid of
+  `CarBallTuning`s (car-ball restitution and friction, the extra ball-hit
+  velocity's scale, z factor and forward factor; RocketSim's values are the
+  default and the first row) over short windows of recordings: each scored
+  frame is predicted `k` ticks ahead from the recorded frame `k` before it,
+  stepping the recorded inputs, and the mean car velocity (uu/s) and ball
+  position (uu) errors are summed. The first window is the target, the
+  rest guards. The environment is tracked along the recording with
+  `Env::snap` (60 ticks of pre-roll), because a cold `Env::reset` from one
+  recorded frame costs 290 uu/s of car velocity error on `hitjump` and
+  drowns the effect. 405 tunings over three windows take about 20 s.
+  - **Not a decision**: the output is candidates. A window objective once
+    found a car-ball setting (extra impulse x0.7, z 0.5) that cut a hit's
+    car velocity error 51 -> 8 uu/s and doubled `test2`'s k = 30 ball
+    distance (`RB-RESEARCH-O010`); any winner must pass the full-capture
+    `--self-kstep 30` table (`test2`, `hitjump`, `front`, `side`) first.
+  - **Verification**: `rb_verify_cli` sweep tests (a recording made under a
+    tuning scores near zero under it and worse under another, the sweep
+    ranks the generating tuning first, an empty window scores no frames, a
+    capture hole skips the frames it spans, the grid starts with the
+    default and has no repeats), `rb_env` tests `peek_*` and `snap_*`,
+    `rb_physics_bullet` tests for `CarBallTuning`. On real data the default
+    row reproduces the earlier scratch sweep (`hitjump` 51.5 uu/s against
+    51.0, same best tuning).
 
 
 ## Architecture and interfaces
@@ -554,6 +580,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.24.0 (2026-10-06): `RB-VERIFY-003-FR-014` implemented: `rb-verify
+  --sweep-hit`, car-ball hit sweeps over `Env` (ADR-0061).
 - 0.23.0 (2026-10-06): `RB-VERIFY-003-FR-011` aligns recorded frames by
   timestamp, so a capture hole skips ticks instead of shifting the rest.
   First real tape-bot captures (eleven scenarios, `BOT-RUN-SHEET.md`

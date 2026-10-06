@@ -122,4 +122,4 @@ pub use body::{
 pub use collision::Contact;
 pub use mat3::Mat3;
 pub use net::NetMesh;
-pub use world::{simulate, PhysicsWorld};
+pub use world::{simulate, CarBallTuning, PhysicsWorld};
