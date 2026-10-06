@@ -321,6 +321,10 @@ mod tests {
                     .insert("Content-Length", &response_body.len().to_string())
                     .unwrap();
                 headers.insert("Content-Type", "application/json").unwrap();
+                // This fake serves one request per connection and then drops it,
+                // so it must say so: a keep-alive client would otherwise reuse the
+                // closed connection and fail (correctly) with a broken pipe.
+                headers.insert("Connection", "close").unwrap();
                 let response_head = ResponseHead {
                     status: StatusCode::from_u16(status),
                     reason: String::new(),

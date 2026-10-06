@@ -1411,6 +1411,9 @@ Removed / Fixed / Security, newest first.
   longer describes it as a seed and points at `docs/atlas/` for the
   crosswalk. `docs/atlas/`: the `rusty_tokio` dependent count corrected to
   the `cargo metadata` figure
+### Fixed
+- **`rusty_http`: head and chunked-body limits** ([#526](https://github.com/Rusty-Mill/rusty_mill/pull/526), consolidation review B1/B2). `parse_request_head`/`parse_response_head` reject a terminated head larger than `max_head_len` (previously only an unterminated one was bounded); `read_body` bounds a chunked body's decoded total by `DEFAULT_MAX_BODY_LEN` on the sync, `rusty_tokio` and tokio adapters alike, with checked arithmetic before each extend. `read_chunked_body` remains aggregate-unbounded by contract. Every `read_body` consumer (`rusty_request`, `rusty_tailscale`, `rusty_meshed`) now refuses a chunked response over 1 MiB with `BodyTooLarge`.
+- **`rusty_request`: no hidden replay on a stale pooled connection** ([#526](https://github.com/Rusty-Mill/rusty_mill/pull/526), consolidation review B3). A failed attempt on a pooled connection was repeated on a fresh connection regardless of method, retry policy or how far the request had got, so a `POST` the server accepted and then dropped could be submitted twice, even under `no_retry`. The pooled attempt now fails like any other and only the configured `RetryPolicy` (idempotent methods by default) decides on a retry; `send_streaming` keeps ignoring retry policy and so surfaces a stale connection directly. A `Body::Stream` factory is opened zero times when the head write fails and once otherwise. Behaviour change: a request with no retry policy that lands on a connection the server has since closed now returns `Error::Io` instead of silently succeeding on a second connection; set `pool_idle_timeout` below the server's keep-alive timeout or configure a `RetryPolicy`.
 
 ## [workspace] - 2026-09-01
 ### Fixed
