@@ -1,6 +1,6 @@
 # ADR-0059: The physics port as a stepping environment for bots
 
-- Status: Proposed
+- Status: Accepted (option 2 built 2026-10-06)
 - Date: 2026-10-06
 - Deciders: baileyrd
 - Related: RB-RESEARCH-O005, RB-RESEARCH-O007, ADR-0056, ADR-0057,
@@ -82,8 +82,21 @@ frame.
   works there may fail in the game, so game captures remain the check.
 - Missing rules (pads, goals, kickoff) bound which tasks can be trained.
 
+## Outcome (2026-10-06)
+
+Built as `crates/rb_env` (`Env::new`, `reset(&PhysicsFrame)`,
+`step(&[ControllerInput])`; the observation is a `PhysicsFrame`, no new state
+type). `PhysicsWorld::from_frame_in` clones a prebuilt arena. Measured:
+arena build 29 ms once, `reset` 0.25 ms (about 115 times cheaper).
+`simulate_scenario` now runs on `Env` (its first caller); the shipped
+scenario output is byte-identical (checked on `speed_flip`) and all 35
+`rb_verify_cli` tests pass. The second caller the ADR asked for (a sweep or
+policy) is **not** written yet, so the "fold back" trigger below is live.
+
 ## Validation and revisit triggers
 
+- Done: `Env` reproduces `simulate_scenario` exactly; determinism and
+  reset-reuse tests in `rb_env`.
 - Throughput target: keep the steady-state 36,000 steps/s per core, and
   make `reset` far cheaper than the 28 ms world build (reuse the arena).
 - `Env` reproduces every shipped scenario exactly versus

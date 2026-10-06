@@ -3,7 +3,7 @@
 //! and a scenario cut from a window of a recording.
 
 use rb_domain::{CarState, IngestError, PhysicsFrame, Vec3};
-use rb_physics_bullet::PhysicsWorld;
+use rb_env::Env;
 use rb_scenario::{quat_to_rotator, BallStart, CarStart, Input, Scenario, Step};
 
 /// Seconds per tick of a scenario run: the game's 120 Hz.
@@ -15,18 +15,14 @@ pub const SCENARIO_TICK_SECS: f32 = 1.0 / 120.0;
 /// start state and carries no input; later frames carry the input that
 /// produced them.
 pub fn simulate_scenario(scenario: &Scenario) -> Vec<PhysicsFrame> {
+    let mut env = Env::new();
     let start = scenario.initial_frame();
-    let mut world = PhysicsWorld::from_frame(&start);
-    let mut frames = vec![start];
+    let mut frames = vec![start.clone()];
+    env.reset(&start);
     for tick in 0..=scenario.total_ticks() {
         let input = scenario.input_at(tick).to_controller_input();
-        world.set_car_input(0, input);
-        world.step(SCENARIO_TICK_SECS);
-        let mut frame = world.frame();
+        let mut frame = env.step(&[input]);
         frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
-        if let Some(car) = frame.cars.first_mut() {
-            car.input = Some(input);
-        }
         frames.push(frame);
     }
     frames
