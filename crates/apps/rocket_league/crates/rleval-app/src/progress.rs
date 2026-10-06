@@ -1,7 +1,8 @@
 //! Progress across play sessions, and a short training plan (pure, no I/O).
 //!
-//! Matches are grouped into **play sessions**: by the name the uploader gave, else by
-//! time (a gap over [`SESSION_GAP_S`] starts a new one). For one player,
+//! Matches are ordered by when they were played (the replay's own date) and grouped into
+//! **play sessions**: by the name the uploader gave, else by time — either way a gap over
+//! [`SESSION_GAP_S`] starts a new one, so a bulk upload under one name still splits by day. For one player,
 //! [`progress`] rolls each session up and ranks the scoring metrics where they sit
 //! lowest in their rank bracket into a plan of [`PLAN_LEN`] targets — each with the
 //! next bracket's median to aim for and, once there is more than one session, whether
@@ -12,7 +13,7 @@ use serde::Serialize;
 
 use crate::history::{MetricSnapshot, PlayerSnapshot, SessionRecord};
 
-/// Matches more than this far apart (s) belong to different unnamed play sessions.
+/// Matches more than this far apart (s) belong to different play sessions.
 pub const SESSION_GAP_S: u64 = 2 * 60 * 60;
 /// Matches a metric needs before it is planned or its trend claimed.
 pub const MIN_MATCHES: usize = 3;
@@ -75,7 +76,7 @@ fn mean(xs: impl Iterator<Item = f32>) -> Option<f32> {
     (n > 0).then(|| sum / n as f32)
 }
 
-/// Group `matches` (oldest first) into play sessions: same name, or unnamed and close in time.
+/// Group `matches` (oldest first) into play sessions: same name (or both unnamed) and close in time.
 fn group<'a>(
     matches: &[(&'a SessionRecord, &'a PlayerSnapshot)],
 ) -> Vec<Vec<(&'a SessionRecord, &'a PlayerSnapshot)>> {
@@ -83,8 +84,10 @@ fn group<'a>(
     for &(r, p) in matches {
         let joins = out.last().and_then(|g| g.last()).is_some_and(|(prev, _)| {
             match (&prev.session, &r.session) {
-                (Some(a), Some(b)) => a == b,
-                (None, None) => r.saved_at.saturating_sub(prev.saved_at) <= SESSION_GAP_S,
+                (Some(a), Some(b)) => {
+                    a == b && r.when().saturating_sub(prev.when()) <= SESSION_GAP_S
+                }
+                (None, None) => r.when().saturating_sub(prev.when()) <= SESSION_GAP_S,
                 _ => false,
             }
         });
@@ -117,7 +120,7 @@ fn stamp(t: u64) -> String {
 }
 
 fn roll_up(g: &[(&SessionRecord, &PlayerSnapshot)]) -> PlaySession {
-    let start = g[0].0.saved_at;
+    let start = g[0].0.when();
     PlaySession {
         name: g[0].0.session.clone().unwrap_or_else(|| stamp(start)),
         start,
@@ -162,12 +165,13 @@ fn trend(
     }
 }
 
-/// A player's play sessions and plan from `records` (oldest first); `None` if they are in none.
+/// A player's play sessions and plan from `records`; `None` if they are in none.
 pub fn progress(query: &str, records: &[SessionRecord]) -> Option<ProgressReport> {
-    let mine: Vec<(&SessionRecord, &PlayerSnapshot)> = records
+    let mut mine: Vec<(&SessionRecord, &PlayerSnapshot)> = records
         .iter()
         .filter_map(|r| r.players.iter().find(|p| p.matches(query)).map(|p| (r, p)))
         .collect();
+    mine.sort_by_key(|(r, _)| r.when());
     let player = mine.last()?.1.player.clone();
     let groups = group(&mine);
 
@@ -239,6 +243,7 @@ mod tests {
             label: format!("m{i}"),
             saved_at,
             session: session.map(String::from),
+            played_at: None,
             players: vec![PlayerSnapshot {
                 player: "me".into(),
                 won: Some(won),
@@ -268,6 +273,29 @@ mod tests {
         assert_eq!(shape, [(2, 1, 1), (1, 1, 0), (2, 2, 0)]);
         assert_eq!(p.sessions[2].name, "scrims");
         assert_eq!(p.sessions[0].name, "2023-11-14 22:13");
+    }
+
+    #[test]
+    fn a_bulk_upload_under_one_name_splits_by_when_the_matches_were_played() {
+        let (saved, day) = (1_800_000_000, 24 * 3600);
+        // Saved seconds apart, played on different days, and uploaded out of order.
+        let recs: Vec<_> = [(0, 2 * day), (1, 0), (2, 600), (3, day)]
+            .into_iter()
+            .map(|(i, played)| {
+                let mut r = rec(i, saved + i, Some("my-games"), true, vec![]);
+                r.played_at = Some(1_700_000_000 + played);
+                r
+            })
+            .collect();
+        let p = progress("me", &recs).unwrap();
+        let shape: Vec<_> = p.sessions.iter().map(|s| s.matches).collect();
+        assert_eq!(
+            shape,
+            [2, 1, 1],
+            "oldest day first, named sessions still split on gaps"
+        );
+        assert!(p.sessions.iter().all(|s| s.name == "my-games"));
+        assert_eq!(p.sessions[0].start, 1_700_000_000);
     }
 
     #[test]

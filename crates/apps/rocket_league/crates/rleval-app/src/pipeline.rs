@@ -26,7 +26,8 @@ use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
 use replay_scoring::{
-    attach_relative, chains, extract_with, score_all, Episode, RankNorms, Report, ScoreConfig, XgModel,
+    attach_relative, chains, extract_with, score_all, Episode, RankNorms, Report, ScoreConfig,
+    XgModel,
 };
 
 use replay_skills::profile::{profiles, PlayerSkillProfile};
@@ -50,6 +51,8 @@ pub struct Analysis {
     pub duration_s: f32,
     /// Seconds of play (no post-goal celebration/replay); the denominator of per-minute rates.
     pub live_time_s: f32,
+    /// When the match was played (replay header date, unix seconds), if the header has one.
+    pub played_at: Option<u64>,
     pub team_scores: Vec<(i32, i32)>,
     /// `false` for Hoops/Dropshot/etc. — the UI surfaces a low-confidence banner.
     pub standard_map: bool,
@@ -202,7 +205,10 @@ pub fn load_xg(corpus_dir: &Path) -> XgModel {
         return XgModel::default();
     };
     serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-        eprintln!("warning: {} is not a valid xG model ({e}); using the prior", path.display());
+        eprintln!(
+            "warning: {} is not a valid xG model ({e}); using the prior",
+            path.display()
+        );
         XgModel::default()
     })
 }
@@ -390,6 +396,7 @@ pub fn analyze(
         team_size: canonical.team_size,
         duration_s: canonical.duration_s,
         live_time_s: canonical.live_time_s(),
+        played_at: decoded.meta.played_at,
         team_scores: canonical
             .team_scores
             .iter()

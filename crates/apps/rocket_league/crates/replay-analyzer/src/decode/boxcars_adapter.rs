@@ -148,6 +148,29 @@ fn prop_str(replay: &Replay, key: &str) -> Option<String> {
     }
 }
 
+/// `YYYY-MM-DD HH-MM-SS` (the header `Date` format) as unix seconds, reading it as UTC.
+fn parse_header_date(s: &str) -> Option<u64> {
+    let n: Vec<i64> = s
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().ok())
+        .collect::<Option<_>>()?;
+    let [y, m, d, hh, mm, ss] = n[..] else {
+        return None;
+    };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    // Days from civil (Howard Hinnant).
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hh * 3_600 + mm * 60 + ss).ok()
+}
+
 /// Extract header-sourced metadata (map, team sizes, scores, player stats).
 fn extract_meta(replay: &Replay) -> ReplayMeta {
     let mut team_scores = BTreeMap::new();
@@ -163,6 +186,9 @@ fn extract_meta(replay: &Replay) -> ReplayMeta {
         map: prop_str(replay, "MapName"),
         team_size: prop_i32(replay, "TeamSize"),
         record_fps: prop_f32(replay, "RecordFPS"),
+        played_at: prop_str(replay, "Date")
+            .as_deref()
+            .and_then(parse_header_date),
         team_scores,
         players: extract_players(replay),
         goals: extract_goals(replay),
@@ -617,5 +643,36 @@ mod tests {
             platform_id(&row(Some("OnlinePlatform_Steam"), None, false)),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::parse_header_date;
+
+    #[test]
+    fn header_date_is_unix_seconds() {
+        assert_eq!(parse_header_date("1970-01-01 00-00-00"), Some(0));
+        assert_eq!(
+            parse_header_date("2019-10-14 22-23-14"),
+            Some(1_571_091_794)
+        );
+        assert_eq!(
+            parse_header_date("2024-02-29 12-00-00"),
+            Some(1_709_208_000)
+        );
+    }
+
+    #[test]
+    fn malformed_dates_are_none() {
+        for bad in [
+            "",
+            "2019-10-14",
+            "2019-13-01 00-00-00",
+            "2019-10-14 25-00-00",
+            "x",
+        ] {
+            assert_eq!(parse_header_date(bad), None, "{bad}");
+        }
     }
 }

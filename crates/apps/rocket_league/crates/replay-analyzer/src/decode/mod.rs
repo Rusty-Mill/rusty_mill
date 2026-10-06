@@ -29,6 +29,8 @@ pub struct ReplayMeta {
     pub map: Option<String>,
     pub team_size: Option<i32>,
     pub record_fps: Option<f32>,
+    /// When the match was played: the header `Date` (the recorder's clock, read as UTC), unix seconds.
+    pub played_at: Option<u64>,
     /// Team id -> final score.
     pub team_scores: BTreeMap<i32, i32>,
     /// Per-player summary stats from the header `PlayerStats` array.

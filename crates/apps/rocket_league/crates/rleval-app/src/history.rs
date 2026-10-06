@@ -84,6 +84,9 @@ pub struct SessionRecord {
     /// The play session the uploader named; unnamed matches are grouped by time (see `progress`).
     #[serde(default)]
     pub session: Option<String>,
+    /// When the match was played (replay header date, unix seconds); `saved_at` for records without one.
+    #[serde(default)]
+    pub played_at: Option<u64>,
     pub players: Vec<PlayerSnapshot>,
 }
 
@@ -100,6 +103,11 @@ impl PlayerSnapshot {
 }
 
 impl SessionRecord {
+    /// When the match was played, falling back to when it was saved.
+    pub fn when(&self) -> u64 {
+        self.played_at.unwrap_or(self.saved_at)
+    }
+
     /// Project the parts of `analysis` that history needs.
     pub fn from_analysis(key: String, saved_at: u64, analysis: &Analysis) -> Self {
         let winner = winning_team(&analysis.team_scores);
@@ -137,6 +145,7 @@ impl SessionRecord {
             label: analysis.replay_id.clone(),
             saved_at,
             session: None,
+            played_at: analysis.played_at,
             players,
         }
     }

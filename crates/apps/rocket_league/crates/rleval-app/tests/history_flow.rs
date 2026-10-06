@@ -105,6 +105,7 @@ fn a_plan_is_built_from_real_snapshots_across_two_sessions() {
         .map(|(i, dt)| SessionRecord {
             key: format!("{i:024x}"),
             saved_at: t0 + dt,
+            played_at: None, // order by save time, as a replay with no header date would
             ..base.clone()
         })
         .collect();

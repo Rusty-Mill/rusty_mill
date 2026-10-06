@@ -133,6 +133,7 @@ fn fixture() -> DecodedReplay {
             map: Some("TestArena".into()),
             team_size: Some(1),
             record_fps: Some(30.0),
+            played_at: None,
             team_scores: BTreeMap::from([(0, 0)]),
             players: vec![PlayerMeta {
                 platform_id: None,
