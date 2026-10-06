@@ -56,55 +56,70 @@ For each run: the capture in `replays/` (gitignored), the
 wrong (dropped inputs, a reset, a wrong spawn). Then the loop is: largest
 error, diagnose, fix, record in the spec, as usual.
 
-## Session 1 (2026-10-06): stopped before Stage 0, RLBot not installed
+## Session 1 (2026-10-06): Stages 0 to 2 done, all eleven scenarios captured
 
-Preflight on the Windows machine (Epic Rocket League at
-`C:\Program Files\Epic Gamesocketleague`; BakkesMod injector version 32,
-API 95, `rusty_bullet_capture.dll` 1.2 of 2026-10-03 already in the plugins
-folder and not in `plugins.cfg`; rustc 1.98.1, VS 2022 Build Tools, CMake
-4.4.3; `replays\` absent, so no earlier captures on this box):
+Machine: Epic Rocket League (`C:\Program Files\Epic Games\rocketleague`),
+BakkesMod injector 32 / API 95 with `rusty_bullet_capture.dll` 1.2 already
+in the plugins folder, rustc 1.98.1, VS 2022 Build Tools, CMake 4.4.3;
+`replays\` did not exist before this session. Setup details and the
+verified run sequence are in `tools/rb_tape_bot/README.md`; decisions in
+ADR-0059.
 
-| Step | Result |
+Timeline of what failed and was fixed on the way (each one cost a run):
+
+1. Installing RLBot was first refused by the Claude Code permission
+   classifier; a local allow rule for `msiexec` was added and the official
+   launcher MSI installed per-user.
+2. `bot.toml` was unparseable (a backslash in a TOML basic string is an
+   escape), so the GUI showed a nameless bot and core rejected it:
+   `cars[0].agent_id is empty`. Forward slashes in `RB_TAPE`.
+3. The car never moved: core reports `MatchPhase::Paused` throughout
+   freeplay while physics runs, so the bot's `== Active` gate never
+   opened. Found with the new `rb_probe` (120 packets and 120 frames per
+   second, phase Paused). The bot now gates on the frame counter.
+4. Rocket League pauses freeplay when its window loses focus, and Escape
+   froze it for minutes; the game window must stay focused for the tape.
+5. The per-scenario `bots/*.bot.toml` first used a forward-slash
+   `run_command`, which `cmd.exe` rejects (`'target' is not recognized`);
+   now a TOML literal string with backslashes.
+
+Stage 0 and 1 (prompt_dodge, two runs):
+
+| Risk | Result |
 |---|---|
-| `cargo build --release -p rb_verify_cli`, `rb-verify --self` | builds, prints usage |
-| `cargo build --release` in `tools/rb_tape_bot` | builds (`rlbot` 0.6.0) |
-| `rb-verify --scenario tools/rb_tape_bot/scenarios/prompt_dodge.json` | runs; the port dodges to about 440 uu/s forward at tick 480 |
-| Install RLBot v5 | **blocked**: the session's tool permissions refused `msiexec /i rlbot-v5-installer.msi /qn` as an unauthorized persistent install; not retried another way |
+| BakkesMod records while RLBot runs | pass, 1707 and 3980 frames |
+| State setting from a bot works | pass, first frame (0, -2000, 17) exactly, rotation (0, 1.571, 0), velocity 0 |
+| 120 packets/s | pass, lag 0 (run 1) and 1 (run 2), no drift; probe: 119.9 packets and frames per second |
+| Roll sign | pass, checked on corner_slide/pogo/car_over_ball (`--scenario-from` of the set frame reproduces the scenario rotation to 3 decimals) |
+| Run-to-run noise | 2.8 uu mean, 13.8 uu max between the two runs, a one-tick offset of the jump |
 
-Stage 0 to 3: not run. No capture exists, so the results table below is
-empty by construction; the columns are the ones to fill.
+Stage 2 results (`rb-verify --scenario ... --against`, port against game):
 
-| Scenario | Lag | Position error mean / max (uu) | First over 10 / 100 uu | Input mismatches | Port prediction held? |
-|---|---|---|---|---|---|
-| prompt_dodge (run 1) | | | | | |
-| prompt_dodge (run 2, noise floor) | | | | | |
-| late_dodge | | | | | |
-| wavedash_early / mid / late | | | | | |
-| speed_flip, half_flip | | | | | |
-| pogo, hard_landing_nose_first | | | | | |
-| corner_slide, car_over_ball | | | | | |
+| Scenario | Lag | Position error mean / max (uu) | First over 10 / 100 uu | Port prediction held? |
+|---|---|---|---|---|
+| prompt_dodge run 1 | 0 | 8.5 / 27.5 | 308 / never | yes, dodge at 502 uu/s |
+| prompt_dodge run 2 | 1 | 10.1 / 27.5 | 239 / never | yes |
+| late_dodge | 1 | 4.2 / 20.7 | 241 / never | yes, no dodge (FR-136 window) |
+| wavedash_early | 0 | 36.3 / 66.2 | 98 / never | roughly |
+| wavedash_mid | 0 | 22.6 / 45.0 | 73 / never | peak speed yes |
+| wavedash_late | 0 | 15.3 / 33.6 | 84 / never | peak speed yes |
+| speed_flip | 0 | 81.5 / 255.0 | 193 / 241 | no |
+| half_flip | 0 | 6.8 / 14.5 | 186 / never | yes |
+| pogo | 0 | 7.6 / 21.1 | 32 / never | yes |
+| hard_landing_nose_first | 0 | 64.1 / 97.4 | 78 / never | no |
+| corner_slide | 0 | 86.7 / 177.6 | 41 / 126 | no |
+| car_over_ball | 0 | 119.9 / 216.6 | 1 / 76 | no |
 
-What the session did settle, from the RLBot v5 docs and source rather than
-from a run (details and citations in `tools/rb_tape_bot/README.md`,
-decision in ADR-0059):
+Input mismatches are not reported: the plugin records all-zero inputs for
+an RLBot-driven car (RB-RESEARCH-O008), so that column only counts the
+tape's own non-neutral ticks. Every capture has one 5-tick hole in the
+first two seconds (RB-RESEARCH-O009).
 
-- The install path moved: rlbot.org/v5 links an MSI from `RLBot/launcher`
-  that installs a self-updating launcher into `%LOCALAPPDATA%\RLBot5`; the
-  launcher downloads `rlbotgui.exe` and `RLBotServer.exe`. The earlier
-  "install the GUI" step in the README was out of date.
-- `rlbot` 0.6.0 is the newest crate and its FlatBuffers schema is
-  wire-identical to core rc17's; no crate bump.
-- Core gates `DesiredGameState` only on the match's `enable_state_setting`
-  (default on), with no bot/script distinction.
-- `RB_TAPE` goes in `bot.toml`'s `[settings.environment]` table, which core
-  applies to the bot process; done, set to `prompt_dodge`.
-- Launch order: BakkesMod running first, then start the match from the
-  RLBot GUI with **Freeplay** ticked; core relaunches the game with
-  `-rlbot`. The wiki documents this order for BakkesMod plugins.
-- A remaining doubt for Stage 1: core launches the game with
-  `RLBot_PacketSendRate=240` while the wiki caps a bot's tick rate at 120.
-  If the capture shows the tape playing at double speed, key the tape on
-  `match_info.frame_num`.
+Largest errors, for the next loop (largest error, diagnose, fix, record):
+car_over_ball (contact differs from the first tick), corner_slide (the
+slide), speed_flip (flip direction and height, see FR-094), hard landing
+(after touchdown). The 1.25 s second-jump window and the roll convention
+held, so nothing in the code was refuted by this session.
 
-Next session: run the `msiexec` line in the README by hand, open the
-launcher once, then start at Stage 0.
+Stage 3 not run. Next session: a second run of each Stage 2 scenario for
+its own noise floor, then the car_over_ball contact.

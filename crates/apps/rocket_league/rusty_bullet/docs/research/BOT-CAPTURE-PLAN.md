@@ -72,35 +72,31 @@ mechanic.
 
 ## Risks to settle first (one spike each)
 
-- Does BakkesMod load and record when the game is started by RLBot (its
-  `-rlbot` flag disables online play)? People combine them, but I have not
-  confirmed it for this plugin. 2026-10-06: still not observed, but the
-  v5 match option `freeplay` is documented as allowing "Bakkesmod plugins"
-  and the wiki's LAN guide runs BakkesMod first, then launches the game
-  through RLBot; core kills and relaunches the game itself, so BakkesMod
-  must be running before the match starts (ADR-0059).
-- Does RLBot v5 run on the owner's current game build and launcher (Epic or
-  Steam)? RLBot says PC only, Epic and Steam. 2026-10-06: core has an
-  Epic launch path (`Epic.Windows.cs`) and the owner's install is Epic;
-  not yet run, because installing RLBot was refused by the session's tool
-  permissions (see `BOT-RUN-SHEET.md`, session 1).
-- Does core accept state setting from a bot rather than a script?
-  2026-10-06: settled from core's source, no bot/script distinction, only
-  the match's `enable_state_setting` (default on).
-- Does the `rlbot` crate speak core's protocol? 2026-10-06: settled,
-  0.6.0 is the newest release and its schema is wire-identical to rc17's.
-- Do packets arrive at 120 per second? Core starts the game with
-  `RLBot_PacketSendRate=240`; the wiki caps the bot tick rate at 120.
-  Measure on the first capture (lag and drift).
-- Does state setting land on the tick we expect, and does the first
-  captured frame equal the set state? Needed because `rb-verify` seeds its
-  simulation from the capture's first grounded, neutral frame
-  (`seed()` in `crates/rb_verify_cli/src/lib.rs`); an airborne start has
-  none. Built: `rb-verify --seed-first-frame <mode> ...` (FR-013,
-  ADR-0058) seeds from the first frame instead.
-- Determinism: run each scenario twice and diff; the difference is the
-  noise floor for every later score.
-- Terms: RLBot may be used offline only; no online play, no ranked.
+All settled on 2026-10-06, first real session (`BOT-RUN-SHEET.md` session
+1, `tools/rb_tape_bot/README.md`, ADR-0059):
+
+- BakkesMod loads and records when core starts the game with `-rlbot`:
+  yes. BakkesMod runs first, core relaunches the game, the injector
+  attaches, `plugin load rusty_bullet_capture` works. Eleven captures.
+- RLBot v5 runs on the owner's Epic install: yes (core rc17, launcher
+  Epic).
+- State setting lands on the expected tick and the first captured frame
+  equals the set state: yes, to the decimal, including rotation (roll
+  sign right), velocity, angular velocity, boost and the ball. The
+  capture misses 2 to 7 ticks at the set frame itself.
+- Core accepts state setting from a bot: yes (gated only by the match's
+  `enable_state_setting`).
+- The `rlbot` crate speaks core's protocol: yes, 0.6.0 against rc17.
+- Packets at 120 per second: yes, 120 packets and 120 physics frames per
+  second measured; 240 identical packets per second only while paused.
+- Determinism: two `prompt_dodge` runs differ by 2.8 uu mean, 13.8 uu max,
+  a one-tick offset of the jump; that is the noise floor.
+- Terms: offline only, freeplay via RLBot's own `freeplay` match option.
+
+Surprises: core reports `MatchPhase::Paused` for all of freeplay (the bot
+now gates on the frame counter); the game pauses when unfocused; the
+plugin records all-zero inputs for an RLBot-driven car
+(RB-RESEARCH-O008); one 5-tick hole per capture (RB-RESEARCH-O009).
 
 ## Mechanics, in order
 
@@ -164,8 +160,9 @@ score a recording that starts airborne.
 
 ## Next
 
-Run risk spikes 1 and 2 on the owner's machine with a trivial tape (jump
-once), capture it, and run `rb-verify` on the result. The first attempt
-(2026-10-06, `BOT-RUN-SHEET.md` session 1) stopped at installing RLBot;
-the verified install and run sequence is in `tools/rb_tape_bot/README.md`
-and the owner installs with one `msiexec` line, then starts at Stage 0.
+Done 2026-10-06: all eleven scenarios captured and scored (results in
+`BOT-RUN-SHEET.md` and the tape-bot README). Predictions held for the
+dodges, half flip and pogo; speed flip, the hard landing, the corner slide
+and the car over the ball diverge by 100 to 250 uu and are the next
+targets. Then a second run per scenario for its noise floor, and Stage 3
+(human windows via `--scenario-from`).

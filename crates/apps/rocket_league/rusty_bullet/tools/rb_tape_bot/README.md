@@ -10,12 +10,10 @@ Standalone package, not in the root workspace (its own `[workspace]`), so the
 lives in the workspace crate `crates/rb_scenario`, which this package and
 `rb-verify --scenario` share.
 
-Status: builds (`rlbot` 0.6.0, the newest published version, wire-compatible
-with RLBot core v5.0.0-rc17, see below); **never run against the game**. The
-first run session (2026-10-06, `docs/research/BOT-RUN-SHEET.md`) stopped at
-installing RLBot: the session's tool permissions refused to run the
-installer, so Stage 0 onwards still waits for the owner to install it by
-hand (one command, below).
+Status: **run against the game on 2026-10-06** (RLBot core v5.0.0-rc17,
+Epic Rocket League, BakkesMod injector 32): all eleven scenarios captured
+and scored, results below and in `docs/research/BOT-RUN-SHEET.md`
+(session 1). Setup decisions: ADR-0059.
 
 ## Scenario files (`scenarios/*.json`)
 
@@ -64,106 +62,149 @@ first captured frame's rotation against the scenario's.
 
 ## Running (on the machine with the game)
 
-Checked against the RLBot v5 docs and source on 2026-10-06 (`RLBot/core`
-master = v5.0.0-rc17 of 2026-08-15, `RLBot/gui` beta23, `RLBot/launcher`,
-`RLBot/wiki` `docs/v5`); where they disagreed with the earlier text of this
-file, the docs won and the difference is noted.
+What worked on 2026-10-06 (`RLBot/core` v5.0.0-rc17, `RLBot/gui` beta23,
+`RLBot/launcher`, Epic game, BakkesMod injector 32). Where the RLBot docs
+disagreed with the earlier text of this file, the docs won and the
+difference is noted.
 
 ### Install (once)
 
-1. The official download is no longer "the GUI": rlbot.org/v5 now links an
-   MSI, <https://github.com/RLBot/launcher/releases/download/installer/rlbot-v5-installer.msi>
+1. rlbot.org/v5 links an MSI, not "the GUI":
+   <https://github.com/RLBot/launcher/releases/download/installer/rlbot-v5-installer.msi>
    (1.7 MB, SHA-256
    `549af50bdaf76a251375e6a6543c5013d1e8fcceca648d2cbc4800ecd553dc5c`
-   on 2026-10-06). It is a per-user WiX install with no elevation: it
-   puts `launcher.exe` in `%LOCALAPPDATA%\RLBot5\bin`, plus a Start-menu
-   and desktop shortcut. Silent form:
-   ```
-   msiexec /i rlbot-v5-installer.msi /qn /norestart
-   ```
-2. Run `launcher.exe` once (the shortcut "RLBot v5"). It downloads the
-   latest GitHub releases of `rlbotgui.exe` (`RLBot/gui`) and
-   `RLBotServer.exe` (`RLBot/core`) into `%LOCALAPPDATA%\RLBot5`, keeps
-   them updated, and starts the GUI.
-3. `cargo build --release` in this directory. `RLBotServer.exe --version`
-   prints core's version; compare it with the compatibility note below if
-   anything fails to connect.
+   on 2026-10-06). Per-user WiX install, no elevation; it puts
+   `launcher.exe` in `%LOCALAPPDATA%\RLBot5\bin`. Silent form:
+   `msiexec /i rlbot-v5-installer.msi /qn /norestart`.
+2. Run `launcher.exe` once. It downloads the latest GitHub releases of
+   `rlbotgui.exe` (`RLBot/gui`) and `RLBotServer.exe` (`RLBot/core`) into
+   the same folder plus the botpack, keeps them updated, and starts core
+   and the GUI. `RLBotServer.exe --version` prints core's version.
+3. `cargo build --release` in this directory (builds `rb_tape_bot.exe`
+   and the `rb_probe.exe` diagnostic).
 
 ### Run one scenario
 
 1. Start **BakkesMod first** and leave it waiting. Core kills any running
-   Rocket League and relaunches the game itself with
+   Rocket League and relaunches it itself with
    `-rlbot RLBot_ControllerURL=127.0.0.1:<port> RLBot_PacketSendRate=240 -nomovie`
-   (for Epic it first starts the game through
-   `com.epicgames.launcher://` to read the login arguments from
-   `Launch.log`, then restarts it directly), so BakkesMod must already be
-   running to inject into the process core creates. This is the order the
-   RLBot wiki itself documents for BakkesMod plugins ("Make sure that
-   BakkesMod is running. Start Rocket League with RLBotGUI",
-   `docs/v5/miscellaneous/lan-setup.md`).
-2. Set the tape: edit `RB_TAPE` in `bot.toml`'s `[settings.environment]`
-   table (for example `scenarios\late_dodge.json`). Core sets every key of
-   that table on the bot process after inheriting its own environment
-   (`ConfigParser.GetEnvironment`, `LaunchManager.ApplyEnvironment`), so a
-   value in `bot.toml` beats a variable exported in the shell that
-   started the GUI. The bot process runs from `root_dir`, which defaults
-   to this folder, so relative paths work.
-3. In the GUI: add this folder as a bot folder (it scans for `bot.toml`
-   and `*.bot.toml`), put "RB Tape Bot" on one team, no opponents. In the
-   match settings' extra options tick **Enable State Setting** (default
-   on; match field `enable_state_setting`) and **Freeplay** (field
-   `freeplay`; the wiki: "allows the players to use training keybinds,
-   Bakkesmod plugins, and other features that are only allowed in free
-   play"). Launcher: Epic on the owner's machine (the game is
-   `C:\Program Files\Epic Games\rocketleague`). No mutators.
-4. Start the match. The bot prints `tape bot: '<name>' (<n> ticks)` in
-   its console window; a missing `RB_TAPE` panics with "set RB_TAPE to
-   the scenario JSON path".
-5. In BakkesMod (F6): `plugin load rusty_bullet_capture` (once per game
-   start; the plugin is not in `plugins.cfg`), `rb_capture_start
-   <absolute path>\<scenario>.jsonl`, then `rb_capture_stop` after the
-   tape length has elapsed (n ticks at 120 per second). A relative path
-   is written under the game's working directory.
-6. Copy the capture to `replays\<scenario>.jsonl` (gitignored) and score
-   it, see below.
+   (for Epic it first starts the game through `com.epicgames.launcher://`
+   to read the login arguments from `Launch.log`, then restarts it
+   directly). BakkesMod injected into that process and the plugin loaded
+   normally; this is the order the RLBot wiki documents for BakkesMod
+   plugins (`docs/v5/miscellaneous/lan-setup.md`).
+2. In the GUI add this folder as a bot folder. It scans recursively for
+   `bot.toml` and `*.bot.toml`, so it lists "RB Tape Bot" (`bot.toml`,
+   plays `prompt_dodge`) and one **"RB Tape: <scenario>"** entry per file
+   in `bots/`, each with its own `RB_TAPE` in `[settings.environment]`.
+   Core sets that table on the bot process after inheriting its own
+   environment (`ConfigParser.GetEnvironment`,
+   `LaunchManager.ApplyEnvironment`); the GUI parses the files when it
+   scans, so refresh the folder after editing one. Put the scenario's
+   entry on Blue, nobody else.
+3. Match settings: launcher **Epic** (or Steam), Soccar, any map, default
+   mutators; extra options **Enable State Setting** (default on) and
+   **Freeplay** ticked. Keep "auto start agents" and "wait for agents".
+4. In the game, F6: `plugin load rusty_bullet_capture` (once per game
+   start), then `rb_capture_start <absolute path>\<scenario>.jsonl`
+   (a relative path lands in the game's working directory).
+5. Press **Start Match**, then **click into the game window and keep it
+   focused** for the tape's length plus a few seconds. Rocket League
+   pauses freeplay whenever its window loses focus, and Escape opens a
+   pause menu that froze the game for us; while paused core repeats one
+   packet 240 times a second with the same frame number, and the bot
+   waits. Core's log (and the bot's stdout, which core forwards) shows
+   `Spawning RB Tape: <scenario>`, the bot's tape line, and `tape bot:
+   physics ticking at frame N (phase Paused), setting the start state`.
+6. F6, `rb_capture_stop`. Score the file, see below. The GUI leaves you
+   in spectator view because the match has no human; the plugin records
+   every car regardless.
 
-Scripted alternative to the GUI clicks: core only needs a match
-configuration over its socket (`RLBotServer.exe [sockets-port]
-[game-port]`, default 23234), as the crate's `start_match` example does
-with `MatchConfiguration { enable_state_setting: true, .. }`. Not built
-here; the GUI path is enough for one session.
+Tape lengths (settle plus steps, at 120 Hz): prompt_dodge 4.5 s,
+late_dodge 5.6 s, half_flip 3.1 s, speed_flip 3.1 s, pogo 2.7 s, the
+rest 2.0 s.
 
-### Compatibility (checked 2026-10-06)
+If the bot does nothing: run `target\release\rb_probe.exe [seconds]`
+while the match is up. It connects to core as a passive client and prints,
+once a second, the match phase, frame number, packets per second and car
+0's position, rotation, air state and boost. A frozen frame number means
+the game is paused (focus or Escape); 120 packets and 120 frames per
+second with the phase `Paused` is normal freeplay.
 
-- `rlbot` 0.6.0 (crates.io, 2026-09-21) is the newest release, pinned to
-  `flatbuffers-schema` `c38374e`. Core rc17 pins `f90c844` ("Move
-  ConsoleCommand to end of union", 2026-08-08). `git diff c38374e f90c844
-  -- '*.fbs'` is two comment lines and the `deprecated` attribute on
-  `DesiredGameState.console_commands`: the wire format is identical, so
-  no crate bump is needed.
-- Core accepts `DesiredGameState` from any connected agent when the match
-  has `enable_state_setting` (`FlatBuffersSession.cs`); bots and scripts
-  are not distinguished. So "does core accept state setting from a bot"
-  is answered by the source: yes, if the match setting is on.
-- Core's `RLBOT_SERVER_PORT` and `RLBOT_AGENT_ID` are what
-  `AgentEnvironment::from_env` reads; `agent_id` in `bot.toml` must match
-  the bot's (`rusty_bullet/tape_bot`, it does).
-- Packet rate: core launches the game with `RLBot_PacketSendRate=240`,
-  and the wiki says a bot's tick rate is `min(game FPS, 120)`. The tape
-  assumes one packet per 120 Hz tick; check the first capture's lag and
-  drift (Stage 1) before trusting it, and if packets repeat, key the tape
-  on `match_info.frame_num` instead of counting packets.
+Core's own log is lost when the launcher starts it (no console). To keep
+it, stop `RLBotServer.exe` and start it yourself with stdout redirected to
+a file; the GUI reconnects on the next Start Match.
+
+### Facts settled against the running game (2026-10-06)
+
+- **Match phase.** Core reports `MatchPhase::Paused` for the whole
+  freeplay session while physics runs at 120 Hz (core rc17 marks a
+  freshly loaded map Paused and the bridge never changes it in freeplay).
+  The bot therefore gates on the physics frame counter advancing, not on
+  `Active`, and indexes the tape by frame.
+- **Packet rate.** 120 game packets and 120 physics frames per second
+  (7192 packets, 7196 frames in 60 s) despite `RLBot_PacketSendRate=240`.
+  While paused, 240 identical packets per second.
+- **State setting from a bot.** Works: the first captured frame of every
+  run is the scenario's location to the decimal, with the scenario's
+  velocity, angular velocity and boost; the ball is placed too. Core gates
+  `DesiredGameState` only on the match's `enable_state_setting`
+  (`FlatBuffersSession.cs`), no bot/script distinction.
+- **Rotation convention.** `corner_slide` start (pitch, yaw, roll) =
+  (0.4624, -0.2194, 1.2204) in the scenario was recorded as (0.4621,
+  -0.2194, 1.2203) by `rb-verify --scenario-from` on the set frame; `pogo`
+  pitch -1.2 and `car_over_ball` yaw -2.2569 likewise. Roll sign is right.
+- **Alignment.** `rb-verify --scenario ... --against` found the start in
+  every capture with lag 0 or 1.
+- **Protocol.** `rlbot` 0.6.0 (newest crate, schema `c38374e`) against
+  core rc17 (schema `f90c844`): the `.fbs` diff is comments and one
+  `deprecated` attribute; no crate bump needed.
+- **Recorded inputs are all zero for the bot's car.** The plugin reads
+  `CarWrapper::GetInput()`, which stays neutral when RLBot drives the car,
+  so the "recorded inputs that differ from the tape" count only reflects
+  the tape's own non-neutral ticks. Backlog item RB-RESEARCH-O008. The
+  tape is the input ground truth for these captures.
+- **Dropped ticks.** Every capture has one hole of 5 ticks (0.0417 s)
+  somewhere in the first two seconds of the tape, and 2 to 7 missing
+  ticks at the state-set frame itself. Backlog item RB-RESEARCH-O009.
+- **Noise floor.** Two `prompt_dodge` runs: after aligning on the set
+  frame, position differs by 2.8 uu mean and 13.8 uu max, almost all of
+  it a one-tick offset of the jump (lag 0 vs lag 1).
+
+### Results (2026-10-06, port vs game)
+
+`rb-verify --scenario scenarios/<name>.json --against replays/<name>.jsonl`.
+"Held" is the scenario table's port prediction against what the game did.
+
+| Scenario | Lag | Pos. error mean / max (uu) | First over 10 / 100 uu | What the game did | Port prediction held? |
+|---|---|---|---|---|---|
+| prompt_dodge (two runs) | 0, 1 | 8.5 / 27.5 and 10.1 / 27.5 | tick 308 / never | dodge fires, 502 uu/s forward | yes |
+| late_dodge | 1 | 4.2 / 20.7 | 241 / never | no dodge on the 1.6 s press; car lands | yes (1.25 s window, FR-136) |
+| wavedash_early | 0 | 36.3 / 66.2 | 98 / never | flips in the air to 1466 uu/s, rises to 152 uu, lands at tick 209 | roughly (hop up), 66 uu off |
+| wavedash_mid | 0 | 22.6 / 45.0 | 73 / never | lands tick 28, 1466 uu/s peak, coasts to 436 | peak yes, 45 uu off |
+| wavedash_late | 0 | 15.3 / 33.6 | 84 / never | lands tick 30, 1454 uu/s peak, coasts to 441 | peak yes, 34 uu off |
+| speed_flip | 0 | 81.5 / 255.0 | 193 / 241 | flip from tick 216; 1913 uu/s at the end, but 550 uu/s velocity error during the flip | no: flip direction and height differ |
+| half_flip | 0 | 6.8 / 14.5 | 186 / never | flips, lands at tick 370 | yes |
+| pogo | 0 | 7.6 / 21.1 | 32 / never | contact jump to 520 uu/s, lands tick 141 | yes |
+| hard_landing_nose_first | 0 | 64.1 / 97.4 | 78 / never | nose landing at 2300 uu/s, settles to 1514 | no: diverges after the landing |
+| corner_slide | 0 | 86.7 / 177.6 | 41 / 126 | corner slide, stops | no: diverges in the slide |
+| car_over_ball | 0 | 119.9 / 216.6 | 1 / 76 | ball struck immediately (ball to 1870 uu/s) | no: contact differs from tick 1 |
+
+The input-mismatch column of `rb-verify` is omitted: inputs are not
+recorded for a bot car (above). Captures live in `replays/` (gitignored).
 
 ### Open risks
 
 | Risk | Status (2026-10-06) |
 |---|---|
-| BakkesMod records while RLBot runs the game | not yet observed; supported by the wiki's own `freeplay` option text and LAN guide (BakkesMod first, then launch through RLBot) |
-| State setting from a bot is accepted by core | refuted as a risk by core's source: no bot/script distinction, only `enable_state_setting` |
-| Packets arrive at 120 per second | not yet observed; see the packet-rate note above |
+| BakkesMod records while RLBot runs the game | confirmed: eleven captures |
+| State setting from a bot is accepted by core | confirmed |
+| Packets arrive at 120 per second | confirmed (120 packets, 120 frames per second) |
 | Protocol mismatch between crate and core | refuted: schemas wire-identical |
-| Roll sign of the start rotation | not yet observed |
-| Run-to-run noise | not yet measured; run each scenario twice and diff |
+| Roll sign of the start rotation | confirmed correct |
+| Run-to-run noise | 2.8 uu mean, 13.8 uu max, dominated by a one-tick jump offset |
+| New: inputs not recorded for the bot car | open, RB-RESEARCH-O008 |
+| New: one 5-tick hole per capture | open, RB-RESEARCH-O009 |
 
 ## Scoring
 

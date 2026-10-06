@@ -284,6 +284,49 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (new adapter crate, new dependencies, public protocol surface).
   **Owner**: baileyrd.
 
+### RB-RESEARCH-O008 — Capture plugin records no inputs for an RLBot-driven car
+
+- **Evidence (2026-10-06)**: in all eleven tape-bot captures
+  (`replays/<scenario>.jsonl`, gitignored) every car `input` field is
+  zero on every frame, although the car jumps, dodges and boosts as the
+  tape says and `rb-verify --scenario ... --against` lines the motion up
+  with lag 0 or 1. `RustyBulletCapturePlugin.cpp` reads
+  `CarWrapper::GetInput()` after `TAGame.Car_TA.SetVehicleInput`; RLBot's
+  input path evidently does not update it. Human captures (`test2.jsonl`)
+  do carry inputs.
+- **Effect**: `rb-verify`'s "recorded inputs that differ from the tape"
+  is meaningless for bot captures (it counts the tape's own non-neutral
+  ticks), and `--scenario-from` cannot cut a bot capture into a scenario
+  with inputs. The tape is the input ground truth for these runs.
+- **Reproduce**: `rb-verify --scenario tools/rb_tape_bot/scenarios/prompt_dodge.json --against replays/prompt_dodge.jsonl`
+  reports 23 mismatches; the capture's `input.jump` is never true.
+- **Next**: read the input from the vehicle-input event's argument or
+  from the PRI/controller rather than `GetInput()`, or record RLBot's
+  `last_input` on the bot side; check with a human-driven and a
+  bot-driven car in one capture.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O009 — One 5-tick hole per tape-bot capture
+
+- **Evidence (2026-10-06)**: every one of the eleven captures has exactly
+  one gap of 0.0417 s (5 missing physics ticks) within the first two
+  seconds of the tape (prompt_dodge at tick 52, late_dodge 241,
+  wavedash_early 100, wavedash_mid 72, wavedash_late 83, speed_flip 140,
+  half_flip 85, pogo 23, hard landing 77, corner_slide 86, car_over_ball
+  85), plus 2 to 7 missing ticks at the state-set frame. RLBot core
+  itself delivered 120 packets and 120 frames per second without a gap
+  over 60 s (`rb_probe`), so the hole is in the plugin's path (the
+  per-tick hook or the `GetPhysicsFrame` dedupe) or a game hitch.
+- **Effect**: `rb-verify` aligns by timestamp, so the comparison skips
+  the hole, but a 5-tick hole during a dodge hides the ticks of most
+  interest.
+- **Reproduce**: any `replays/<scenario>.jsonl`; list consecutive
+  `timestamp_secs` deltas above 0.0125.
+- **Next**: log the physics frame number per line and compare with the
+  frame RLBot reports; check whether the hole coincides with the
+  plugin's first write after `rb_capture_start` or with a fixed interval.
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
 
 - 2026-10-05: Added RB-RESEARCH-O007 (long term, RLBot in Rust over this

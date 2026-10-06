@@ -1,7 +1,6 @@
 # ADR-0059: RLBot v5 and BakkesMod setup for tape-bot captures
 
-- Status: Proposed (run sequence verified against docs and source, not yet
-  against the game)
+- Status: Accepted (validated against the game on 2026-10-06, see below)
 - Date: 2026-10-06
 - Deciders: baileyrd
 - Related: RB-RESEARCH-O005, ADR-0056, ADR-0057, ADR-0058,
@@ -18,9 +17,10 @@ speaks the installed core's protocol. The README's run steps were written
 before anything was installed; the first run session (2026-10-06) checked
 them against the current RLBot docs and source (`RLBot/core` master =
 v5.0.0-rc17, `RLBot/gui` beta23, `RLBot/launcher`, `RLBot/wiki`
-`docs/v5`, `RLBot/rust-interface` 0.6.0). Installing RLBot in that session
-was refused by the tool permission policy, so the choices below are made
-from documentation and source, and the run itself is still owed.
+`docs/v5`, `RLBot/rust-interface` 0.6.0). Installing RLBot was first refused by
+the tool permission policy; after a local allow rule for `msiexec` the
+session installed it and ran all eleven scenarios, which changed two of
+the choices below (the bot's gate and how a scenario is selected).
 
 ## Decision drivers
 
@@ -57,11 +57,18 @@ from documentation and source, and the run itself is still owed.
 - Launch order (b): BakkesMod running first, then start the match from the
   RLBot GUI with **Freeplay** and **Enable State Setting** ticked, Epic as
   the launcher; core relaunches the game and BakkesMod injects into it.
-- Scenario path (b): `RB_TAPE` lives in `bot.toml`'s
-  `[settings.environment]`, set to `scenarios\prompt_dodge.json`, edited
-  per run. It is the mechanism core documents, needs no bot code change,
-  and is explicit in the repository. (c) is the fallback if editing per
-  run proves annoying; (d) is not needed.
+- Scenario path (b) and (c) together: `RB_TAPE` lives in the
+  `[settings.environment]` table, the mechanism core documents, and there
+  is one `bots/<scenario>.bot.toml` per scenario (same binary and agent
+  id) so the operator picks the tape by name in the GUI. Editing a single
+  `bot.toml` between runs (plain (b)) was dropped because the GUI parses
+  bot files when it scans the folder, not at match start. Paths are
+  forward slashes in basic strings or TOML literal strings: a backslash
+  in a basic string is an escape (`\r`, `\p`), which broke the first run.
+- Bot gate: the bot acts when the physics frame counter advances, not
+  when `MatchPhase == Active`, because core reports `Paused` for all of
+  freeplay while physics runs (and repeats one packet 240 times a second
+  while the game is really paused). The tape is indexed by frame.
 - Keep `rlbot` 0.6.0.
 - Match start through the GUI for now; the scripted start is noted in the
   README and built only if a second session wants it.
@@ -82,19 +89,20 @@ from documentation and source, and the run itself is still owed.
 
 ### Negative / tradeoffs
 
-- The decisive risk (BakkesMod recording while core owns the game) is
-  still only supported by documentation, not observed.
-- `bot.toml` is edited per scenario, which dirties the working tree
-  during a session; acceptable for a tool, and a per-scenario
-  `*.bot.toml` set is the easy fix.
-- Core's `RLBot_PacketSendRate=240` against the wiki's 120 Hz cap leaves
-  the tape's one-packet-per-tick assumption to be measured in Stage 1.
+- The operator must keep the game window focused for each tape: Rocket
+  League pauses freeplay on focus loss, so a run cannot be driven
+  entirely from a terminal without window automation.
+- Core's log is lost when the launcher starts it; keeping it means
+  starting `RLBotServer.exe` by hand with redirected output.
+- Eleven generated bot files to keep in step with `scenarios/`.
+- The plugin records no inputs for an RLBot-driven car, so the tape is
+  the only input record (RB-RESEARCH-O008).
 
 ## Validation and revisit triggers
 
-- Validate: Stage 1 of `BOT-RUN-SHEET.md` (prompt_dodge captured, first
-  frame within 5 uu of the set location, lag 0 or 1, no drift). Record the
-  numbers in the run sheet and change this ADR's status to Accepted.
+- Validated 2026-10-06: prompt_dodge captured twice, first frame equal
+  to the set state, lag 0 and 1, no drift, 120 packets and frames per
+  second; all eleven scenarios scored (`BOT-RUN-SHEET.md` session 1).
 - Revisit if BakkesMod does not inject into the core-launched process
   (then try injecting after the match starts, or `launcher = NoLaunch`
   with the game already running under BakkesMod), if packets arrive at
