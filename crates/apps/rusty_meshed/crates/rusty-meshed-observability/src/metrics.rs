@@ -7,7 +7,7 @@
 //! specifically to unblock this module -- see those protocol modules'
 //! own docs for the wire-level detail, including `OffsetFetch`'s
 //! coordinator-routing caveat, which applies here unchanged).
-//! `record_violation`/`get_violation_count` are plain SQLite functions
+//! `record_violation_at`/`get_violation_count` are plain SQLite functions
 //! (the source's `@staticmethod`s -- no `MetricsCollector` state
 //! needed for either), following this crate family's per-call-
 //! connection convention.
@@ -18,6 +18,7 @@ use rusty_kafka::protocol::list_offsets::{
 };
 use rusty_kafka::protocol::offset_fetch::{OffsetFetchRequest, OffsetFetchTopicRequest};
 use rusty_kafka::{ClientError, KafkaClient};
+use rusty_meshed_core::Timestamp;
 use rusty_sqlite::rusqlite::{params, Connection, Result as SqlResult};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_tokio::time::timeout;
@@ -96,11 +97,15 @@ pub fn ensure_schema(conn: &Connection) -> SqlResult<()> {
 /// Persists a schema violation record (GOV-037). A plain function, not
 /// a `MetricsCollector` method -- the source's `record_violation` is a
 /// `@staticmethod` needing no Kafka state either.
-pub fn record_violation(conn: &Connection, subject: &str, error_message: &str) -> SqlResult<()> {
-    let timestamp = now_iso();
+pub fn record_violation_at(
+    conn: &Connection,
+    at: &Timestamp,
+    subject: &str,
+    error_message: &str,
+) -> SqlResult<()> {
     conn.execute(
         "INSERT INTO schema_violations (subject, timestamp, error_message) VALUES (?1, ?2, ?3)",
-        params![subject, timestamp, error_message],
+        params![subject, at.as_str(), error_message],
     )?;
     Ok(())
 }
@@ -250,42 +255,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> MetricsCollector<S> {
     }
 }
 
-/// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
-/// civil-from-days algorithm used elsewhere in this crate family for a
-/// `timestamp` field no test asserts the exact value of; see
-/// `rusty-meshed-registry::transformation::engine::now_iso`'s doc for
-/// why there's no shared clock type to build on instead.
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
     use rusty_kafka::protocol::header::RequestHeader;
     use rusty_kafka::protocol::list_offsets::{
         ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
@@ -306,9 +282,9 @@ mod tests {
     #[test]
     fn record_violation_and_get_violation_count_round_trip() {
         let conn = seeded_connection();
-        record_violation(&conn, "orders-value", "field removed").unwrap();
-        record_violation(&conn, "orders-value", "type changed").unwrap();
-        record_violation(&conn, "other-value", "unrelated").unwrap();
+        record_violation_at(&conn, &at(), "orders-value", "field removed").unwrap();
+        record_violation_at(&conn, &at(), "orders-value", "type changed").unwrap();
+        record_violation_at(&conn, &at(), "other-value", "unrelated").unwrap();
 
         assert_eq!(get_violation_count(&conn, "orders-value").unwrap(), 2);
         assert_eq!(get_violation_count(&conn, "other-value").unwrap(), 1);
@@ -522,7 +498,7 @@ mod tests {
     #[rusty_tokio::test]
     async fn get_product_metrics_combines_lag_throughput_and_violation_count() {
         let conn = seeded_connection();
-        record_violation(&conn, "manpower.assessments-value", "bad field").unwrap();
+        record_violation_at(&conn, &at(), "manpower.assessments-value", "bad field").unwrap();
 
         let (client_io, mut peer) = duplex(4096);
         let client = KafkaClient::new(client_io, None);

@@ -43,7 +43,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_simd | rusty_simd | A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library for LLM and Whisper inference | 5 |
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 15 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 3 |
-| foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 7 |
+| foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 8 |
 | foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 5 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 14 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 11 |
@@ -221,7 +221,7 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_key | rk-mcp |  | 1 |
 | apps | rusty_key | rk-observe |  | 7 |
 | apps | rusty_meshed | rusty-meshed-cli | The meshed operator CLI (health/lineage/metrics/slo commands), ported from meshed.cli. | 0 |
-| apps | rusty_meshed | rusty-meshed-core | Shared platform config for rusty_meshed: env-prefixed settings loaded once, injected into every other rusty_meshed crate. | 4 |
+| apps | rusty_meshed | rusty-meshed-core | Shared platform config for rusty_meshed: env-prefixed settings loaded once, injected into every other rusty_meshed crate. | 5 |
 | apps | rusty_meshed | rusty-meshed-domains | The manpower domain: event schemas, domain data products (personnel lifecycle, position management, readiness reporting), scenario builder, and demo generators, ported from meshed.domains. | 0 |
 | apps | rusty_meshed | rusty-meshed-governance | Policy-as-code governance engine and built-in policies, ported from meshed.governance. | 1 |
 | apps | rusty_meshed | rusty-meshed-observability | Lineage tracking, metrics collection, SLO monitoring, and the CI contract gate, ported from meshed.observability. | 4 |

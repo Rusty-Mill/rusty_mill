@@ -17,10 +17,11 @@ use crate::http::request::Request;
 use crate::http::response::Response;
 use crate::http::router::Router;
 use crate::transformation::{
-    advance_quarter, get_state, queue_decision, seed_transformation_state, DecisionRef,
+    advance_quarter_at, get_state, queue_decision_at, seed_transformation_state, DecisionRef,
     DecisionType, LegacySystem, MaturityPoint, TransformationState,
 };
 use rusty_http::StatusCode;
+use rusty_meshed_core::{SystemClock, WallClock};
 use rusty_request::Json;
 use rusty_sqlite::rusqlite::{params, Connection};
 use std::collections::VecDeque;
@@ -123,6 +124,20 @@ async fn state(app_state: Arc<AppState>, _req: Request) -> Response {
 }
 
 async fn create_decision(app_state: Arc<AppState>, req: Request) -> Response {
+    create_decision_with(app_state, req, &SystemClock).await
+}
+
+/// [`create_decision`] reading the time from `clock`. The clock is read
+/// first, before the database is opened or seeded, so an unreadable
+/// clock leaves the database untouched.
+async fn create_decision_with(
+    app_state: Arc<AppState>,
+    req: Request,
+    clock: &impl WallClock,
+) -> Response {
+    let Ok(reading) = clock.read() else {
+        return internal_error();
+    };
     let Ok(conn) = app_state.get_session() else {
         return session_error();
     };
@@ -169,20 +184,29 @@ async fn create_decision(app_state: Arc<AppState>, req: Request) -> Response {
         );
     }
 
-    match queue_decision(&conn, decision_type, target) {
+    match queue_decision_at(&conn, reading.timestamp(), decision_type, target) {
         Ok(decision) => Response::json(StatusCode::CREATED, &decision_ref_json(&decision)),
         Err(_) => internal_error(),
     }
 }
 
 async fn advance(app_state: Arc<AppState>, _req: Request) -> Response {
+    advance_with(app_state, &SystemClock).await
+}
+
+/// [`advance`] reading the time from `clock`, before the database is
+/// opened or seeded (see [`create_decision_with`]).
+async fn advance_with(app_state: Arc<AppState>, clock: &impl WallClock) -> Response {
+    let Ok(reading) = clock.read() else {
+        return internal_error();
+    };
     let Ok(mut conn) = app_state.get_session() else {
         return session_error();
     };
     if seed_transformation_state(&conn).is_err() {
         return internal_error();
     }
-    match advance_quarter(&mut conn) {
+    match advance_quarter_at(&mut conn, reading.timestamp()) {
         Ok(snapshot) => Response::json(StatusCode::OK, &state_json(&snapshot)),
         Err(_) => internal_error(),
     }
@@ -399,6 +423,60 @@ mod tests {
             headers: HeaderMap::new(),
             body: body.to_json_string().into_bytes(),
         }
+    }
+
+    /// A clock that cannot be read.
+    struct BrokenClock;
+
+    impl WallClock for BrokenClock {
+        fn read(&self) -> Result<rusty_meshed_core::ClockReading, rusty_meshed_core::ClockError> {
+            Err(rusty_meshed_core::ClockError::BeforeEpoch)
+        }
+    }
+
+    /// Row counts of every table the seed or a decision would write.
+    fn rows_written(state: &AppState) -> i64 {
+        let conn = state.get_session().unwrap();
+        [
+            "transformation_clock",
+            "legacy_systems",
+            "capability_scores",
+            "transformation_decisions",
+            "transformation_events",
+        ]
+        .iter()
+        .map(|table| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        })
+        .sum()
+    }
+
+    #[rusty_tokio::test]
+    async fn advance_with_an_unreadable_clock_returns_500_and_writes_nothing() {
+        let state = temp_state();
+        assert_eq!(rows_written(&state), 0, "fresh database");
+
+        let response = advance_with((*state).clone(), &BrokenClock).await;
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(rows_written(&state), 0, "the seed must not have committed");
+    }
+
+    #[rusty_tokio::test]
+    async fn create_decision_with_an_unreadable_clock_returns_500_and_writes_nothing() {
+        let state = temp_state();
+        let mut body = Json::object();
+        body.insert("decision_type", "migrate_track");
+        body.insert("target", "personnel-lifecycle");
+        let request = req(Method::Post, "/transformation/decisions".to_string(), body);
+
+        let response = create_decision_with((*state).clone(), request, &BrokenClock).await;
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(rows_written(&state), 0, "the seed must not have committed");
     }
 
     #[rusty_tokio::test]

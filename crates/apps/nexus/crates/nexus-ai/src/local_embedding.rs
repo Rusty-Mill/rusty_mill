@@ -168,6 +168,12 @@ impl EmbeddingProvider for LocalEmbedding {
     fn dimension(&self) -> usize {
         self.dim
     }
+
+    /// Verified: `dim` comes from the loaded model's own table
+    /// (`model_dimension`), not from a configured constant.
+    fn expected_dimension(&self) -> Option<usize> {
+        Some(self.dim)
+    }
 }
 
 /// Compute embeddings for `texts`, consulting `cache` first and only
@@ -420,6 +426,7 @@ mod tests {
     fn local_embedding_round_trip() {
         let backend = LocalEmbedding::new("bge-small-en-v1.5-int8").unwrap();
         assert_eq!(backend.dimension(), 384);
+        assert_eq!(backend.expected_dimension(), Some(384));
 
         let texts = vec!["hello world".to_string(), "foo bar baz".to_string()];
         let v1 = backend.embed_batch(&texts).unwrap();

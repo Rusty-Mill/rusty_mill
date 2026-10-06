@@ -26,6 +26,7 @@ use rusty_kafka::protocol::produce::{
 };
 use rusty_kafka::record_batch::Record;
 use rusty_kafka::{ClientError, KafkaClient};
+use rusty_meshed_core::{ClockError, ClockReading, SystemClock, Timestamp, WallClock};
 use rusty_sqlite::rusqlite::{Connection, Result as SqlResult};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use rusty_tokio::time::timeout;
@@ -66,10 +67,12 @@ pub struct SLOViolationPayload {
 
 impl SLOViolationPayload {
     /// Builds a payload for `slo_result`'s violation, auto-generating
-    /// `event_id`/`timestamp`/`correlation_id` the same way the
-    /// source's dataclass field factories do.
+    /// `event_id`/`correlation_id` the same way the source's dataclass
+    /// field factories do; `timestamp` is the caller's, so the payload
+    /// needs no clock of its own.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_at(
+        timestamp: &Timestamp,
         product_name: impl Into<String>,
         port_name: impl Into<String>,
         slo_type: impl Into<String>,
@@ -85,7 +88,7 @@ impl SLOViolationPayload {
             actual_value,
             violation_message: violation_message.into(),
             event_id: rusty_uuid::Uuid::new_v4().to_string(),
-            timestamp: now_iso(),
+            timestamp: timestamp.as_str().to_string(),
             correlation_id: rusty_uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -127,6 +130,16 @@ impl SLOMonitor<TcpStream> {
     }
 }
 
+/// What is known about the age of a partition's latest message.
+enum Age {
+    /// Seconds since the latest message, fractional milliseconds kept.
+    Known(f64),
+    /// A successful lookup found an empty partition.
+    NeverPublished,
+    /// The age could not be determined; carries why.
+    Unavailable(String),
+}
+
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
     /// Wraps an already-connected [`rusty_kafka::KafkaClient`] -- the
     /// seam this crate's own tests use (an in-memory
@@ -136,22 +149,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
         SLOMonitor { client }
     }
 
-    /// The age, in seconds, of `topic`/`partition`'s latest message
-    /// (GOV-043). `f64::INFINITY` if the partition is empty
-    /// (`timestamp < 0`) or the lookup failed for any reason --
-    /// connection failure, protocol error, or a non-zero Kafka error
-    /// code.
+    /// The age of `topic`/`partition`'s latest message (GOV-043), or why
+    /// it is not known. [`Age::NeverPublished`] only for a successful
+    /// lookup of an empty partition (`timestamp < 0`); a connection
+    /// failure, protocol error, non-zero Kafka error code or unreadable
+    /// clock is [`Age::Unavailable`] -- never reported as "never
+    /// published".
     ///
     /// The source's `admin.list_offsets(...)` result can come back as
     /// either `ListOffsetsResultInfo` directly or wrapped in a
     /// `concurrent.futures.Future`, depending on `confluent-kafka`
-    /// version -- only the `Future`-wrapped case's exception is caught
-    /// (falling back to `float('inf')`); `rusty_kafka::KafkaClient` has
-    /// no such duality (`list_offsets` always awaits one request and
-    /// returns one `Result` directly), so there's only one failure path
-    /// to handle here, not two -- it collapses to the same `inf`
-    /// outcome either way.
-    async fn latest_timestamp_seconds_ago(&mut self, topic: &str, partition: i32) -> f64 {
+    /// version; `rusty_kafka::KafkaClient` has no such duality, so there
+    /// is one failure path to handle here, not two.
+    async fn latest_age(&mut self, topic: &str, partition: i32, clock: &impl WallClock) -> Age {
         let request = ListOffsetsRequest {
             replica_id: -1,
             topics: vec![ListOffsetsTopicRequest {
@@ -163,15 +173,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
             }],
         };
         let Ok(response) = bounded(self.client.list_offsets(&request)).await else {
-            return f64::INFINITY;
+            return Age::Unavailable("Kafka request failed".to_string());
         };
         let Some(result) = response.topics.first().and_then(|t| t.partitions.first()) else {
-            return f64::INFINITY;
+            return Age::Unavailable("no partition result in the broker's response".to_string());
         };
-        if result.error_code != 0 || result.timestamp < 0 {
-            return f64::INFINITY;
+        if result.error_code != 0 {
+            return Age::Unavailable(format!("broker returned error code {}", result.error_code));
         }
-        (now_millis() - result.timestamp as f64) / 1000.0
+        if result.timestamp < 0 {
+            return Age::NeverPublished;
+        }
+        let Ok(now) = clock.read() else {
+            return Age::Unavailable("system clock unavailable".to_string());
+        };
+        Age::Known((now.unix_millis_f64() - result.timestamp as f64) / 1000.0)
     }
 
     /// Freshness SLO: passes iff the latest message on `topic`/`partition`
@@ -182,21 +198,42 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
         partition: i32,
         threshold_seconds: i64,
     ) -> SLOResult {
-        let age_seconds = self.latest_timestamp_seconds_ago(topic, partition).await;
-        let passed = age_seconds <= threshold_seconds as f64;
+        self.check_freshness_with(topic, partition, threshold_seconds, &SystemClock)
+            .await
+    }
 
-        let message = if age_seconds.is_infinite() {
-            "No messages exist in partition — data product has never published".to_string()
-        } else if passed {
-            format!(
-                "Freshness OK: last message {age_seconds:.1}s ago (threshold={threshold_seconds}s)"
-            )
-        } else {
-            format!(
-                "Freshness violated: last message {age_seconds:.1}s ago (threshold={threshold_seconds}s)"
-            )
+    async fn check_freshness_with(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        threshold_seconds: i64,
+        clock: &impl WallClock,
+    ) -> SLOResult {
+        let age = self.latest_age(topic, partition, clock).await;
+        let (passed, age_seconds, message) = match age {
+            Age::Known(age) if age <= threshold_seconds as f64 => (
+                true,
+                age,
+                format!("Freshness OK: last message {age:.1}s ago (threshold={threshold_seconds}s)"),
+            ),
+            Age::Known(age) => (
+                false,
+                age,
+                format!(
+                    "Freshness violated: last message {age:.1}s ago (threshold={threshold_seconds}s)"
+                ),
+            ),
+            Age::NeverPublished => (
+                false,
+                f64::INFINITY,
+                "No messages exist in partition — data product has never published".to_string(),
+            ),
+            Age::Unavailable(reason) => (
+                false,
+                f64::INFINITY,
+                format!("Freshness age unavailable: {reason}"),
+            ),
         };
-
         SLOResult {
             slo_type: "freshness".to_string(),
             passed,
@@ -218,21 +255,44 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOMonitor<S> {
         partition: i32,
         threshold_seconds: i64,
     ) -> SLOResult {
-        let age_seconds = self.latest_timestamp_seconds_ago(topic, partition).await;
-        let passed = age_seconds <= threshold_seconds as f64;
+        self.check_completeness_with(topic, partition, threshold_seconds, &SystemClock)
+            .await
+    }
 
-        let message = if age_seconds.is_infinite() {
-            "No messages exist — completeness check failed (empty partition)".to_string()
-        } else if passed {
-            format!(
-                "Completeness OK (liveness): last message {age_seconds:.1}s ago (threshold={threshold_seconds}s)"
-            )
-        } else {
-            format!(
-                "Completeness violated (liveness): partition stalled for {age_seconds:.1}s (threshold={threshold_seconds}s)"
-            )
+    async fn check_completeness_with(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        threshold_seconds: i64,
+        clock: &impl WallClock,
+    ) -> SLOResult {
+        let age = self.latest_age(topic, partition, clock).await;
+        let (passed, age_seconds, message) = match age {
+            Age::Known(age) if age <= threshold_seconds as f64 => (
+                true,
+                age,
+                format!(
+                    "Completeness OK (liveness): last message {age:.1}s ago (threshold={threshold_seconds}s)"
+                ),
+            ),
+            Age::Known(age) => (
+                false,
+                age,
+                format!(
+                    "Completeness violated (liveness): partition stalled for {age:.1}s (threshold={threshold_seconds}s)"
+                ),
+            ),
+            Age::NeverPublished => (
+                false,
+                f64::INFINITY,
+                "No messages exist — completeness check failed (empty partition)".to_string(),
+            ),
+            Age::Unavailable(reason) => (
+                false,
+                f64::INFINITY,
+                format!("Completeness age unavailable: {reason}"),
+            ),
         };
-
         SLOResult {
             slo_type: "completeness".to_string(),
             passed,
@@ -291,6 +351,9 @@ pub enum PublishError {
     /// (e.g. `UNKNOWN_TOPIC_OR_PARTITION`).
     #[error("broker returned Kafka error code {0}")]
     KafkaErrorCode(i16),
+    /// The system clock could not be read, so nothing was sent.
+    #[error("clock unavailable: {0}")]
+    Clock(#[from] ClockError),
 }
 
 /// Publishes [`SLOViolationPayload`]s to `mesh.governance.slo-violations`,
@@ -337,12 +400,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SLOViolationPublisher<S> {
     /// (unlike `librdkafka`'s default one the source relies on), so
     /// this deliberately assumes a single-partition topic, matching the
     /// platform's own local-dev deployment.
+    ///
+    /// Reads the clock once, before any I/O; a clock failure sends
+    /// nothing. See [`publish_at`](Self::publish_at) to supply the reading.
     pub async fn publish(&mut self, violation: &SLOViolationPayload) -> Result<(), PublishError> {
+        self.publish_with(violation, &SystemClock).await
+    }
+
+    async fn publish_with(
+        &mut self,
+        violation: &SLOViolationPayload,
+        clock: &impl WallClock,
+    ) -> Result<(), PublishError> {
+        let reading = clock.read()?;
+        self.publish_at(violation, &reading).await
+    }
+
+    /// [`publish`](Self::publish) with an explicit clock `reading` for the
+    /// Kafka record time.
+    pub async fn publish_at(
+        &mut self,
+        violation: &SLOViolationPayload,
+        reading: &ClockReading,
+    ) -> Result<(), PublishError> {
         let value = rusty_json::to_string(&violation_json(violation)).unwrap_or_default();
         let request = ProduceRequest {
             acks: -1,
             timeout_ms: 5000,
-            base_timestamp_ms: now_millis() as i64,
+            base_timestamp_ms: reading.unix_millis(),
             topics: vec![ProduceTopicRequest {
                 name: Self::TOPIC.to_string(),
                 partitions: vec![ProducePartitionRequest {
@@ -404,56 +489,33 @@ fn violation_json(violation: &SLOViolationPayload) -> rusty_json::Value {
     })
 }
 
-fn now_millis() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-        * 1000.0
-}
-
-/// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
-/// civil-from-days algorithm duplicated elsewhere in this crate family
-/// (see `metrics::now_iso`'s doc for why there's no shared clock type
-/// to build on instead).
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{ensure_schema, record_violation};
+    use crate::metrics::{ensure_schema, record_violation_at};
     use rusty_kafka::protocol::list_offsets::{
         ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
     };
     use rusty_kafka::testing::{recv_request, send_response};
     use rusty_tokio::io::duplex;
     use rusty_wire::Writer;
+
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+
+    fn now_ms() -> i64 {
+        ClockReading::now().unwrap().unix_millis()
+    }
+
+    /// A clock that cannot be read.
+    struct BrokenClock;
+
+    impl WallClock for BrokenClock {
+        fn read(&self) -> Result<ClockReading, ClockError> {
+            Err(ClockError::BeforeEpoch)
+        }
+    }
 
     fn seeded_connection() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -492,7 +554,7 @@ mod tests {
         let client = KafkaClient::new(client_io, None);
         let mut monitor = SLOMonitor::with_client(client);
 
-        let now_ms = now_millis() as i64;
+        let now_ms = now_ms();
         let server = rusty_tokio::spawn(async move {
             respond_with_offset(&mut peer, now_ms - 5_000, 0).await;
         });
@@ -513,7 +575,7 @@ mod tests {
         let client = KafkaClient::new(client_io, None);
         let mut monitor = SLOMonitor::with_client(client);
 
-        let now_ms = now_millis() as i64;
+        let now_ms = now_ms();
         let server = rusty_tokio::spawn(async move {
             respond_with_offset(&mut peer, now_ms - 120_000, 0).await;
         });
@@ -585,7 +647,7 @@ mod tests {
         let client = KafkaClient::new(client_io, None);
         let mut monitor = SLOMonitor::with_client(client);
 
-        let now_ms = now_millis() as i64;
+        let now_ms = now_ms();
         let server = rusty_tokio::spawn(async move {
             respond_with_offset(&mut peer, now_ms - 120_000, 0).await;
         });
@@ -625,8 +687,8 @@ mod tests {
     #[test]
     fn check_schema_conformance_fails_with_recorded_violations() {
         let conn = seeded_connection();
-        record_violation(&conn, "orders-value", "field removed").unwrap();
-        record_violation(&conn, "orders-value", "type changed").unwrap();
+        record_violation_at(&conn, &at(), "orders-value", "field removed").unwrap();
+        record_violation_at(&conn, &at(), "orders-value", "type changed").unwrap();
         let monitor = monitor_with_no_kafka_traffic();
         let result = monitor
             .check_schema_conformance(&conn, "orders-value")
@@ -638,7 +700,8 @@ mod tests {
 
     #[test]
     fn slo_violation_payload_auto_generates_distinct_ids_and_a_timestamp() {
-        let payload = SLOViolationPayload::new(
+        let payload = SLOViolationPayload::new_at(
+            &at(),
             "orders",
             "commerce.orders",
             "freshness",
@@ -650,14 +713,22 @@ mod tests {
         assert!(!payload.event_id.is_empty());
         assert!(!payload.timestamp.is_empty());
 
-        let second =
-            SLOViolationPayload::new("orders", "commerce.orders", "freshness", 60.0, 125.4, "x");
+        let second = SLOViolationPayload::new_at(
+            &at(),
+            "orders",
+            "commerce.orders",
+            "freshness",
+            60.0,
+            125.4,
+            "x",
+        );
         assert_ne!(payload.event_id, second.event_id);
         assert_ne!(payload.correlation_id, second.correlation_id);
     }
 
     fn sample_violation() -> SLOViolationPayload {
-        SLOViolationPayload::new(
+        SLOViolationPayload::new_at(
+            &at(),
             "orders",
             "commerce.orders",
             "freshness",
@@ -670,7 +741,7 @@ mod tests {
     async fn respond_to_produce(
         peer: &mut (impl rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin + Send),
         error_code: i16,
-    ) -> rusty_kafka::protocol::produce::ProduceRequest {
+    ) -> (rusty_kafka::protocol::produce::ProduceRequest, Vec<u8>) {
         use rusty_kafka::protocol::produce::{
             ProducePartitionResponse, ProduceRequest, ProduceResponse, ProduceTopicResponse,
         };
@@ -697,7 +768,7 @@ mod tests {
         send_response(peer, header.correlation_id, &writer.into_vec())
             .await
             .unwrap();
-        request
+        (request, body)
     }
 
     #[rusty_tokio::test]
@@ -713,7 +784,7 @@ mod tests {
         let server = rusty_tokio::spawn(async move { respond_to_produce(&mut peer, 0).await });
 
         publisher.publish(&violation).await.unwrap();
-        let sent = server.await.unwrap();
+        let (sent, _body) = server.await.unwrap();
 
         assert_eq!(sent.topics.len(), 1);
         assert_eq!(
@@ -805,7 +876,8 @@ mod tests {
     async fn publish_to_a_silent_broker_times_out_instead_of_hanging() {
         let (client_io, _peer) = duplex(4096);
         let mut publisher = SLOViolationPublisher::with_client(KafkaClient::new(client_io, None));
-        let violation = SLOViolationPayload::new(
+        let violation = SLOViolationPayload::new_at(
+            &at(),
             "orders",
             "commerce.orders",
             "freshness",
@@ -824,5 +896,129 @@ mod tests {
             "returned too early: {:?}",
             started.elapsed()
         );
+    }
+
+    #[rusty_tokio::test]
+    async fn a_kafka_error_code_is_age_unavailable_not_never_published() {
+        let (client_io, mut peer) = duplex(4096);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let server = rusty_tokio::spawn(async move {
+            respond_with_offset(&mut peer, 0, 3).await;
+        });
+        let result = monitor.check_freshness("t", 0, 60).await;
+        server.await.unwrap();
+        assert!(!result.passed);
+        assert!(result.actual_value.is_infinite());
+        assert_eq!(
+            result.message,
+            "Freshness age unavailable: broker returned error code 3"
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn a_connection_failure_is_age_unavailable_not_never_published() {
+        let (client_io, peer) = duplex(4096);
+        drop(peer);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let result = monitor.check_freshness("t", 0, 60).await;
+        assert_eq!(
+            result.message,
+            "Freshness age unavailable: Kafka request failed"
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn an_unreadable_clock_is_age_unavailable_for_freshness() {
+        let (client_io, mut peer) = duplex(4096);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let server = rusty_tokio::spawn(async move {
+            respond_with_offset(&mut peer, 1_700_000_000_000, 0).await;
+        });
+        let result = monitor.check_freshness_with("t", 0, 60, &BrokenClock).await;
+        server.await.unwrap();
+        assert!(!result.passed);
+        assert!(result.actual_value.is_infinite());
+        assert_eq!(
+            result.message,
+            "Freshness age unavailable: system clock unavailable"
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn an_unreadable_clock_is_age_unavailable_for_completeness() {
+        let (client_io, mut peer) = duplex(4096);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let server = rusty_tokio::spawn(async move {
+            respond_with_offset(&mut peer, 1_700_000_000_000, 0).await;
+        });
+        let result = monitor
+            .check_completeness_with("t", 0, 60, &BrokenClock)
+            .await;
+        server.await.unwrap();
+        assert!(!result.passed);
+        assert!(result.actual_value.is_infinite());
+        assert_eq!(
+            result.message,
+            "Completeness age unavailable: system clock unavailable"
+        );
+    }
+
+    #[rusty_tokio::test]
+    async fn completeness_distinguishes_unavailable_from_empty() {
+        let (client_io, mut peer) = duplex(4096);
+        let mut monitor = SLOMonitor::with_client(KafkaClient::new(client_io, None));
+        let server = rusty_tokio::spawn(async move {
+            respond_with_offset(&mut peer, 0, 3).await;
+        });
+        let result = monitor.check_completeness("t", 0, 60).await;
+        server.await.unwrap();
+        assert_eq!(
+            result.message,
+            "Completeness age unavailable: broker returned error code 3"
+        );
+    }
+
+    #[test]
+    fn payload_carries_the_given_timestamp() {
+        let p = sample_violation();
+        assert_eq!(p.timestamp, "2023-11-14T22:13:20Z");
+    }
+
+    /// A clock failure must send nothing: the peer sees zero bytes.
+    #[rusty_tokio::test]
+    async fn publish_with_an_unreadable_clock_sends_nothing() {
+        use rusty_tokio::io::AsyncReadExt;
+        let (client_io, mut peer) = duplex(4096);
+        let mut publisher = SLOViolationPublisher::with_client(KafkaClient::new(client_io, None));
+        let err = publisher
+            .publish_with(&sample_violation(), &BrokenClock)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PublishError::Clock(ClockError::BeforeEpoch)),
+            "{err:?}"
+        );
+        drop(publisher);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        assert!(received.is_empty(), "{} bytes were sent", received.len());
+    }
+
+    #[rusty_tokio::test]
+    async fn publish_at_uses_the_readings_millis_for_the_record_time() {
+        let (client_io, mut peer) = duplex(4096);
+        let mut publisher = SLOViolationPublisher::with_client(KafkaClient::new(client_io, None));
+        let reading =
+            ClockReading::from_duration(std::time::Duration::new(1_700_000_000, 123_456_789))
+                .unwrap();
+        let server = rusty_tokio::spawn(async move { respond_to_produce(&mut peer, 0).await });
+        publisher
+            .publish_at(&sample_violation(), &reading)
+            .await
+            .unwrap();
+        let (_request, body) = server.await.unwrap();
+        // the decoded request drops the record time, so look for its bytes in the batch
+        let millis = 1_700_000_000_123_i64.to_be_bytes();
+        assert!(body.windows(8).any(|w| w == millis));
     }
 }

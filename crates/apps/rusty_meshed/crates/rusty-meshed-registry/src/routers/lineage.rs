@@ -150,7 +150,8 @@ mod tests {
         let db_path = path.0.to_str().unwrap();
         let tracker = LineageTracker::new(db_path).unwrap();
         tracker
-            .record_job_run(
+            .record_job_run_at(
+                &rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
                 "readiness-reporting",
                 "meshed",
                 &[(

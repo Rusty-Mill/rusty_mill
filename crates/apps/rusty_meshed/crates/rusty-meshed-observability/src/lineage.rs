@@ -15,7 +15,7 @@
 //! This port has no generic OpenLineage client to sit behind (there's
 //! no Rust equivalent in this workspace, and this module is the only
 //! thing in the source repo that ever constructs a `RunEvent`) --
-//! [`LineageTracker::record_job_run`] writes the one event shape the
+//! [`LineageTracker::record_job_run_at`] writes the one event shape the
 //! source ever actually produces (a `COMPLETE` run event) directly,
 //! folding in `SQLiteLineageTransport.emit()`'s filtering/shaping logic
 //! rather than modeling a separate transport layer that has nothing
@@ -31,6 +31,7 @@
 //!   preserve: no code path in the source ever reads it back.
 
 use rusty_json::json;
+use rusty_meshed_core::Timestamp;
 use rusty_sqlite::rusqlite::{params, Connection};
 
 /// One record-level lineage entry, as returned by
@@ -80,14 +81,15 @@ impl LineageTracker {
     /// becomes one dataset reference in the stored JSON arrays.
     /// `job_namespace` is accepted for interface parity but not
     /// persisted -- see the module doc.
-    pub fn record_job_run(
+    pub fn record_job_run_at(
         &self,
+        at: &Timestamp,
         job_name: &str,
         _job_namespace: &str,
         inputs: &[(String, String)],
         outputs: &[(String, String)],
     ) -> rusty_sqlite::rusqlite::Result<()> {
-        let event_time = now_iso();
+        let event_time = at.as_str();
         let inputs_json = rusty_json::to_string(&datasets_json(inputs))
             .expect("serializing a datasets array never fails");
         let outputs_json = rusty_json::to_string(&datasets_json(outputs))
@@ -234,38 +236,13 @@ fn datasets_json(pairs: &[(String, String)]) -> rusty_json::Value {
     )
 }
 
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    // Civil-from-days (Howard Hinnant's algorithm), proleptic Gregorian.
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
 
     /// `LineageTracker` opens a fresh connection per call (matching the
     /// Python source's per-call `sqlite3.connect()`) -- `:memory:` gives
@@ -307,7 +284,8 @@ mod tests {
     fn record_job_run_and_get_topology_dependencies_round_trip() {
         let tracker = tracker();
         tracker
-            .record_job_run(
+            .record_job_run_at(
+                &at(),
                 "readiness-reporting",
                 "meshed",
                 &[(
@@ -333,7 +311,8 @@ mod tests {
         let tracker = tracker();
         for _ in 0..3 {
             tracker
-                .record_job_run(
+                .record_job_run_at(
+                    &at(),
                     "readiness-reporting",
                     "meshed",
                     &[(

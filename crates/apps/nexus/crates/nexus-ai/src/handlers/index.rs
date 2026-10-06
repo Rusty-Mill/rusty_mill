@@ -72,6 +72,19 @@ pub(crate) async fn handle_index_trigger(
     Ok(serde_json::json!({ "queued": queued }))
 }
 
+/// The `force` argument of `index_file`: omitted means `false`; present, it
+/// must be a JSON boolean (`null`, strings and numbers are rejected rather
+/// than guessed at).
+fn parse_index_mode(args: &serde_json::Value) -> Result<rag::IndexMode, PluginError> {
+    match args.get("force") {
+        None | Some(serde_json::Value::Bool(false)) => Ok(rag::IndexMode::IfChanged),
+        Some(serde_json::Value::Bool(true)) => Ok(rag::IndexMode::Force),
+        Some(other) => Err(exec_err(format!(
+            "index_file: 'force' must be a boolean, got {other}"
+        ))),
+    }
+}
+
 pub(crate) async fn handle_index_file(
     ctx: &KernelPluginContext,
     embed_cfg: Option<AiConfig>,
@@ -89,11 +102,13 @@ pub(crate) async fn handle_index_file(
                 .map_err(|e| exec_err(format!("index_file: blocks decode: {e}")))
         })?;
 
+    let mode = parse_index_mode(args)?;
+
     let embed_cfg = embed_cfg
         .ok_or_else(|| exec_err("index_file: no AI embedding provider configured".to_string()))?;
     let embedder = build_embedding_provider(&embed_cfg).map_err(exec_err)?;
 
-    let outcome = rag::index_file(ctx, embedder.as_ref(), file_path, &blocks)
+    let outcome = rag::index_file_with(ctx, embedder.as_ref(), file_path, &blocks, mode)
         .await
         .map_err(|e| exec_err(format!("index_file: {e}")))?;
     Ok(serde_json::json!({
@@ -133,4 +148,49 @@ pub(crate) async fn handle_status(
         "tls_pinned": tls_pinned,
         "local_embeddings_supported": local_embeddings_supported,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn omitted_force_means_false() {
+        assert_eq!(
+            parse_index_mode(&json!({ "file_path": "a.md" })).unwrap(),
+            rag::IndexMode::IfChanged
+        );
+    }
+
+    #[test]
+    fn boolean_force_is_honoured() {
+        assert_eq!(
+            parse_index_mode(&json!({ "force": true })).unwrap(),
+            rag::IndexMode::Force
+        );
+        assert_eq!(
+            parse_index_mode(&json!({ "force": false })).unwrap(),
+            rag::IndexMode::IfChanged
+        );
+    }
+
+    #[test]
+    fn malformed_force_is_rejected_not_guessed() {
+        for bad in [
+            json!(null),
+            json!("true"),
+            json!("false"),
+            json!(1),
+            json!(0),
+            json!([]),
+            json!({}),
+        ] {
+            let err = parse_index_mode(&json!({ "force": bad })).unwrap_err();
+            assert!(
+                err.to_string().contains("'force' must be a boolean"),
+                "{bad}: {err}"
+            );
+        }
+    }
 }

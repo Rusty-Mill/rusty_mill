@@ -16,7 +16,7 @@
 
 use rusty_json::json;
 use rusty_meshed_core::avro::{decode_string, encode_string};
-use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent};
+use rusty_meshed_core::{AvroDecodeError, BaseEvent, DomainEvent, Timestamp};
 
 /// Event emitted when a person is assigned to a position within a
 /// unit (DOM-002). A delta event capturing the assignment action:
@@ -39,7 +39,8 @@ impl PersonnelAssigned {
     pub const NAMESPACE: &'static str = "meshed.domains.personnel";
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         person_id: impl Into<String>,
         position_id: impl Into<String>,
@@ -50,7 +51,7 @@ impl PersonnelAssigned {
         transaction_date: impl Into<String>,
     ) -> Self {
         PersonnelAssigned {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             person_id: person_id.into(),
             position_id: position_id.into(),
             unit_uic: unit_uic.into(),
@@ -129,7 +130,8 @@ pub struct PersonnelPromoted {
 impl PersonnelPromoted {
     pub const NAMESPACE: &'static str = "meshed.domains.personnel";
 
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         person_id: impl Into<String>,
         from_grade: impl Into<String>,
@@ -138,7 +140,7 @@ impl PersonnelPromoted {
         transaction_date: impl Into<String>,
     ) -> Self {
         PersonnelPromoted {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             person_id: person_id.into(),
             from_grade: from_grade.into(),
             to_grade: to_grade.into(),
@@ -208,7 +210,8 @@ pub struct PersonnelSeparated {
 impl PersonnelSeparated {
     pub const NAMESPACE: &'static str = "meshed.domains.personnel";
 
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         person_id: impl Into<String>,
         separation_reason: impl Into<String>,
@@ -216,7 +219,7 @@ impl PersonnelSeparated {
         transaction_date: impl Into<String>,
     ) -> Self {
         PersonnelSeparated {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             person_id: person_id.into(),
             separation_reason: separation_reason.into(),
             effective_date: effective_date.into(),
@@ -280,7 +283,8 @@ pub struct StatusChanged {
 impl StatusChanged {
     pub const NAMESPACE: &'static str = "meshed.domains.personnel";
 
-    pub fn new(
+    pub fn new_at(
+        at: &Timestamp,
         correlation_id: impl Into<String>,
         person_id: impl Into<String>,
         previous_status: impl Into<String>,
@@ -289,7 +293,7 @@ impl StatusChanged {
         transaction_date: impl Into<String>,
     ) -> Self {
         StatusChanged {
-            base: BaseEvent::new(correlation_id),
+            base: BaseEvent::new_at(correlation_id, at),
             person_id: person_id.into(),
             previous_status: previous_status.into(),
             new_status: new_status.into(),
@@ -530,6 +534,10 @@ impl DomainEvent for StatusChanged {
 mod tests {
     use super::*;
 
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
+
     #[test]
     fn personnel_assigned_avro_schema_includes_lineage_and_own_fields() {
         let schema = PersonnelAssigned::avro_schema();
@@ -566,7 +574,8 @@ mod tests {
 
     #[test]
     fn personnel_assigned_to_json_includes_lineage_and_own_fields() {
-        let mut event = PersonnelAssigned::new(
+        let mut event = PersonnelAssigned::new_at(
+            &at(),
             "req-1",
             "p-1",
             "pos-1",
@@ -606,7 +615,8 @@ mod tests {
 
     #[test]
     fn personnel_assigned_serialize_then_deserialize_round_trips() {
-        let event = PersonnelAssigned::new(
+        let event = PersonnelAssigned::new_at(
+            &at(),
             "req-1",
             "p-1",
             "pos-1",
@@ -622,7 +632,15 @@ mod tests {
 
     #[test]
     fn personnel_promoted_serialize_then_deserialize_round_trips() {
-        let event = PersonnelPromoted::new("req-1", "p-1", "E4", "E5", "2026-01-01", "2026-01-02");
+        let event = PersonnelPromoted::new_at(
+            &at(),
+            "req-1",
+            "p-1",
+            "E4",
+            "E5",
+            "2026-01-01",
+            "2026-01-02",
+        );
         let bytes = event.serialize();
         assert_eq!(PersonnelPromoted::deserialize(&bytes).unwrap(), event);
         assert_eq!(PersonnelPromoted::NAMESPACE, "meshed.domains.personnel");
@@ -630,14 +648,16 @@ mod tests {
 
     #[test]
     fn personnel_separated_serialize_then_deserialize_round_trips() {
-        let event = PersonnelSeparated::new("req-1", "p-1", "ETS", "2026-01-01", "2026-01-02");
+        let event =
+            PersonnelSeparated::new_at(&at(), "req-1", "p-1", "ETS", "2026-01-01", "2026-01-02");
         let bytes = event.serialize();
         assert_eq!(PersonnelSeparated::deserialize(&bytes).unwrap(), event);
     }
 
     #[test]
     fn status_changed_serialize_then_deserialize_round_trips() {
-        let event = StatusChanged::new(
+        let event = StatusChanged::new_at(
+            &at(),
             "req-1",
             "p-1",
             "PRESENT_FOR_DUTY",
@@ -651,7 +671,8 @@ mod tests {
 
     #[test]
     fn correlation_id_and_source_event_ids_flow_through_the_embedded_base_event() {
-        let mut event = PersonnelSeparated::new("req-1", "p-1", "ETS", "2026-01-01", "2026-01-02");
+        let mut event =
+            PersonnelSeparated::new_at(&at(), "req-1", "p-1", "ETS", "2026-01-01", "2026-01-02");
         event.base.source_event_ids = vec!["e-0".to_string()];
         let bytes = event.serialize();
         let decoded = PersonnelSeparated::deserialize(&bytes).unwrap();

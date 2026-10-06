@@ -47,7 +47,7 @@
 //! called, matching the source, since [`DataProductProducerBase::flush`]
 //! is a real (if documented no-op) method there.
 
-use rusty_meshed_core::PlatformConfig;
+use rusty_meshed_core::{ClockReading, PlatformConfig};
 use rusty_meshed_domains::generators::topics::{create_phase4_topics, event_topic, PHASE4_TOPICS};
 use rusty_meshed_domains::generators::{ScenarioBuilder, ScenarioEvent};
 use rusty_meshed_domains::products::{PersonnelLifecycleProducer, PositionManagementProducer};
@@ -120,8 +120,8 @@ impl Rng {
 /// person (random grade E4-E7, random duty), assigns and fills every
 /// pair, then a 60% chance of one promotion and a 30% chance of one
 /// separation.
-fn build_random_scenario(rng: &mut Rng) -> (String, Vec<ScenarioEvent>) {
-    let mut builder = ScenarioBuilder::new();
+fn build_random_scenario(rng: &mut Rng, reading: &ClockReading) -> (String, Vec<ScenarioEvent>) {
+    let mut builder = ScenarioBuilder::new_at(reading);
     let num_people = rng.gen_range(2, 6) as usize;
     let unit = *rng.choice(&UNITS);
 
@@ -329,7 +329,11 @@ async fn main() {
         // on) *outside* the macro.
         let interrupted = rusty_tokio::select! {
             (correlation_id, events) = async {
-                let (correlation_id, events) = build_random_scenario(&mut rng);
+                let reading = ClockReading::now().unwrap_or_else(|err| {
+                    eprintln!("Cannot read the system clock: {err}");
+                    std::process::exit(1);
+                });
+                let (correlation_id, events) = build_random_scenario(&mut rng, &reading);
                 let published = publish_scenario(&events, &mut personnel_producer, &mut position_producer, &mut rng).await;
                 (correlation_id, published)
             } => {
@@ -363,10 +367,14 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn reading() -> ClockReading {
+        ClockReading::from_duration(std::time::Duration::from_secs(1_700_000_000)).unwrap()
+    }
+
     #[test]
     fn build_random_scenario_produces_2_to_5_people_worth_of_events() {
         let mut rng = Rng::new();
-        let (_correlation_id, events) = build_random_scenario(&mut rng);
+        let (_correlation_id, events) = build_random_scenario(&mut rng, &reading());
         // Every person contributes exactly 4 events (status change,
         // authorization, assignment, fill); num_people is 2..=5, so
         // the baseline is 8..=20, plus 0-2 optional promotion/separation.
@@ -376,7 +384,7 @@ mod tests {
     #[test]
     fn build_random_scenario_events_all_share_one_correlation_id() {
         let mut rng = Rng::new();
-        let (correlation_id, events) = build_random_scenario(&mut rng);
+        let (correlation_id, events) = build_random_scenario(&mut rng, &reading());
         for event in &events {
             assert_eq!(event.base().correlation_id, correlation_id);
         }

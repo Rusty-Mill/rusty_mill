@@ -29,10 +29,12 @@
 
 use crate::events::{PersonnelAssigned, PersonnelPromoted, PersonnelSeparated, StatusChanged};
 use rusty_err::Error;
-use rusty_meshed_core::{DomainEvent, EventType, PlatformConfig};
+use rusty_meshed_core::{
+    ClockError, ClockReading, DomainEvent, EventType, PlatformConfig, SystemClock, WallClock,
+};
 use rusty_meshed_sdk::{
-    ensure_outbox_schema, write_outbox_entry, DataProductProducerBase, OutboxRelay, OutputPortSpec,
-    PortDescriptor, ProducerError,
+    ensure_outbox_schema, write_outbox_entry_at, DataProductProducerBase, OutboxRelay,
+    OutputPortSpec, PortDescriptor, ProducerError,
 };
 use rusty_sqlite::rusqlite::Connection;
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
@@ -63,6 +65,9 @@ pub enum PersonnelLifecyclePublishError {
     /// Recording record-level lineage after the outbox write failed.
     #[error("lineage recording failed: {0}")]
     Lineage(String),
+    /// The system clock could not be read, so nothing was written.
+    #[error("clock unavailable: {0}")]
+    Clock(#[from] ClockError),
 }
 
 /// Data product producer for manpower personnel lifecycle events
@@ -206,10 +211,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelLifecycleProducer<S> {
     /// (its own lineage call happens right after the outbox commit,
     /// not after a confirmed Kafka delivery -- there is none to wait
     /// for on this path).
+    ///
+    /// Reads the clock once, before any database access, for the outbox
+    /// `created_at`; a clock failure writes nothing. See
+    /// [`publish_at`](Self::publish_at) to supply the reading.
     pub fn publish<E: DomainEvent>(
         &mut self,
         topic: &str,
         event: &E,
+    ) -> Result<(), PersonnelLifecyclePublishError> {
+        self.publish_with(topic, event, &SystemClock)
+    }
+
+    fn publish_with<E: DomainEvent>(
+        &mut self,
+        topic: &str,
+        event: &E,
+        clock: &impl WallClock,
+    ) -> Result<(), PersonnelLifecyclePublishError> {
+        let reading = clock.read()?;
+        self.publish_at(topic, event, &reading)
+    }
+
+    /// [`publish`](Self::publish) with an explicit clock `reading`.
+    pub fn publish_at<E: DomainEvent>(
+        &mut self,
+        topic: &str,
+        event: &E,
+        reading: &ClockReading,
     ) -> Result<(), PersonnelLifecyclePublishError> {
         if !self.base.is_declared_topic(topic) {
             return Err(PersonnelLifecyclePublishError::UndeclaredTopic(
@@ -241,8 +270,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelLifecycleProducer<S> {
 
         let conn = Connection::open(&self.outbox_db_path)
             .map_err(|err| PersonnelLifecyclePublishError::Outbox(err.to_string()))?;
-        write_outbox_entry(&conn, E::EVENT_NAME, topic, &payload, Some(&headers))
-            .map_err(|err| PersonnelLifecyclePublishError::Outbox(err.to_string()))?;
+        write_outbox_entry_at(
+            &conn,
+            reading.timestamp(),
+            E::EVENT_NAME,
+            topic,
+            &payload,
+            Some(&headers),
+        )
+        .map_err(|err| PersonnelLifecyclePublishError::Outbox(err.to_string()))?;
 
         self.base
             .lineage_tracker()
@@ -263,6 +299,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> PersonnelLifecycleProducer<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at() -> rusty_meshed_core::Timestamp {
+        rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
     use rusty_http::async_tokio::AsyncTransport;
     use rusty_http::head::ResponseHead;
     use rusty_http::{HeaderMap, StatusCode, Version};
@@ -384,11 +424,56 @@ mod tests {
         );
     }
 
+    /// A clock that cannot be read.
+    struct BrokenClock;
+
+    impl WallClock for BrokenClock {
+        fn read(&self) -> Result<ClockReading, ClockError> {
+            Err(ClockError::BeforeEpoch)
+        }
+    }
+
+    #[test]
+    fn publish_with_an_unreadable_clock_touches_no_database() {
+        let db_path = temp_db_path("no_clock");
+        let mut producer = unstarted_producer(&db_path);
+        let event = PersonnelAssigned::new_at(
+            &at(),
+            "req-1",
+            "p-1",
+            "pos-1",
+            "UIC-1",
+            "Rifleman",
+            "E4",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        let err = producer
+            .publish_with(
+                "manpower.personnel-lifecycle.assignments",
+                &event,
+                &BrokenClock,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PersonnelLifecyclePublishError::Clock(ClockError::BeforeEpoch)
+            ),
+            "{err:?}"
+        );
+        assert!(
+            !std::path::Path::new(&db_path).exists(),
+            "the outbox database must not even be opened"
+        );
+    }
+
     #[test]
     fn publish_rejects_an_undeclared_topic() {
         let db_path = temp_db_path("undeclared");
         let mut producer = unstarted_producer(&db_path);
-        let event = PersonnelAssigned::new(
+        let event = PersonnelAssigned::new_at(
+            &at(),
             "req-1",
             "p-1",
             "pos-1",
@@ -480,7 +565,8 @@ mod tests {
         reg_server.await.unwrap();
         producer.shutdown();
 
-        let event = PersonnelAssigned::new(
+        let event = PersonnelAssigned::new_at(
+            &at(),
             "req-1",
             "p-1",
             "pos-1",
