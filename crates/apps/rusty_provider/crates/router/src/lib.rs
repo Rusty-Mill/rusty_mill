@@ -3,6 +3,7 @@ mod cache;
 mod client_budget;
 mod config;
 mod error;
+mod fifo;
 mod free_tiers;
 mod guardrails;
 mod metrics;
@@ -132,28 +133,28 @@ pub struct GenerationRecord {
 /// `GenerationRecord`s, keyed by request id. Not a general-purpose LRU --
 /// only insertion order is tracked, so a lookup doesn't refresh an
 /// entry's position; that's the right tradeoff for "how long ago was this
-/// requested," which is monotonic with insertion order anyway.
-#[derive(Debug, Default)]
+/// requested," which is monotonic with insertion order anyway. The
+/// eviction policy itself is [`fifo::FifoMap`]'s.
+#[derive(Debug)]
 struct GenerationCache {
-    order: std::collections::VecDeque<String>,
-    by_id: HashMap<String, GenerationRecord>,
+    by_id: fifo::FifoMap<String, GenerationRecord>,
+}
+
+impl Default for GenerationCache {
+    fn default() -> Self {
+        Self {
+            by_id: fifo::FifoMap::with_capacity(GENERATION_CACHE_CAPACITY),
+        }
+    }
 }
 
 impl GenerationCache {
     fn insert(&mut self, record: GenerationRecord) {
-        if !self.by_id.contains_key(&record.id) {
-            self.order.push_back(record.id.clone());
-            if self.order.len() > GENERATION_CACHE_CAPACITY {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.by_id.remove(&oldest);
-                }
-            }
-        }
         self.by_id.insert(record.id.clone(), record);
     }
 
     fn get(&self, id: &str) -> Option<GenerationRecord> {
-        self.by_id.get(id).cloned()
+        self.by_id.get(&id.to_string()).cloned()
     }
 }
 
@@ -177,27 +178,26 @@ const REASONING_REPLAY_CACHE_CAPACITY: usize = 1000;
 /// disproportionate to this cache's job; replay itself (the read side)
 /// still applies to a streaming request if an earlier non-streaming turn
 /// already populated an entry.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ReasoningReplayCache {
-    order: std::collections::VecDeque<String>,
-    by_tool_call_id: HashMap<String, String>,
+    by_tool_call_id: fifo::FifoMap<String, String>,
+}
+
+impl Default for ReasoningReplayCache {
+    fn default() -> Self {
+        Self {
+            by_tool_call_id: fifo::FifoMap::with_capacity(REASONING_REPLAY_CACHE_CAPACITY),
+        }
+    }
 }
 
 impl ReasoningReplayCache {
     fn insert(&mut self, tool_call_id: String, reasoning: String) {
-        if !self.by_tool_call_id.contains_key(&tool_call_id) {
-            self.order.push_back(tool_call_id.clone());
-            if self.order.len() > REASONING_REPLAY_CACHE_CAPACITY {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.by_tool_call_id.remove(&oldest);
-                }
-            }
-        }
         self.by_tool_call_id.insert(tool_call_id, reasoning);
     }
 
     fn get(&self, tool_call_id: &str) -> Option<String> {
-        self.by_tool_call_id.get(tool_call_id).cloned()
+        self.by_tool_call_id.get(&tool_call_id.to_string()).cloned()
     }
 }
 
@@ -4715,6 +4715,23 @@ mod tests {
         cache.insert(generation_record("id-a"));
         assert!(cache.get("id-a").is_some());
         assert!(cache.get("id-b").is_some());
+    }
+
+    #[test]
+    fn reasoning_replay_cache_evicts_the_oldest_entry_once_over_capacity() {
+        let mut cache = ReasoningReplayCache::default();
+        for i in 0..REASONING_REPLAY_CACHE_CAPACITY {
+            cache.insert(format!("call-{i}"), format!("because {i}"));
+        }
+        assert_eq!(cache.get("call-0").as_deref(), Some("because 0"));
+        cache.insert("call-overflow".to_string(), "newest".to_string());
+        assert!(cache.get("call-0").is_none());
+        assert!(cache.get("call-1").is_some());
+        assert_eq!(cache.get("call-overflow").as_deref(), Some("newest"));
+        // Re-inserting a present id overwrites in place without evicting.
+        cache.insert("call-1".to_string(), "revised".to_string());
+        assert_eq!(cache.get("call-1").as_deref(), Some("revised"));
+        assert!(cache.get("call-2").is_some());
     }
 
     // --- apply_moderation ------------------------------------------------------

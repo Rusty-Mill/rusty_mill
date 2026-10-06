@@ -4,6 +4,15 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `rp-router`: one crate-private `fifo::FifoMap` now supplies the
+  insertion-order eviction behind `GenerationCache`, `ReasoningReplayCache`
+  and `cache::ResponseCache`, which each carried the same `VecDeque` +
+  `HashMap` block. Capacities, the capacity floor of one, re-insert
+  overwriting in place, the response cache's TTL refresh on insert and
+  removal on expiry are unchanged; `ReasoningReplayCache` gains the
+  eviction test it lacked. `rp-core`'s `RateLimiter` keeps its own copy
+  for now: sharing it would need a public API across the crate boundary.
 ### Security
 - Startup fails closed on unresolved credentials (design review 3.1). A
   configured `server.api_key_env`, `[[clients]].api_key_env` or `[jwt]`
