@@ -195,7 +195,9 @@ pub fn compare_scenario(
         // The capture's input may belong to this tick or the previous one;
         // either counts as playing the tape.
         let next = predicted.get(tick + 1).and_then(|f| f.cars.first());
-        if tick > 1 && !inputs_match(r, p) && !next.is_some_and(|n| inputs_match(r, n)) {
+        // The last frame is one past the tape, so it holds no input to play.
+        let on_tape = (tick as u64) <= scenario.total_ticks();
+        if on_tape && tick > 1 && !inputs_match(r, p) && !next.is_some_and(|n| inputs_match(r, n)) {
             input_mismatches += 1;
         }
         rows.push(ScenarioRow {
@@ -403,6 +405,19 @@ mod tests {
         assert_eq!(comparison.input_mismatches, 0);
         assert_eq!(comparison.first_position_error_over(1.0), None);
         assert_eq!(comparison.rows.len() as u64, sc.total_ticks() + 2);
+    }
+
+    #[test]
+    fn the_frame_past_the_tape_is_not_an_input_mismatch() {
+        let sc = scenario("prompt_dodge");
+        let mut capture = fake_capture(&sc, 10, 0);
+        // A held steer on the last frame, where the tape has run out.
+        if let Some(car) = capture.last_mut().and_then(|f| f.cars.first_mut()) {
+            if let Some(input) = car.input.as_mut() {
+                input.steer = -1.0;
+            }
+        }
+        assert_eq!(compare_scenario(&sc, &capture).unwrap().input_mismatches, 0);
     }
 
     #[test]
