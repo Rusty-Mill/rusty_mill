@@ -75,7 +75,8 @@ pub struct ScenarioComparison {
     pub start_index: usize,
     /// Ticks the recording lagged the predicted start (0 to `MAX_LAG_TICKS`).
     pub lag_ticks: usize,
-    /// One row per tick both sides have.
+    /// One row per tick both sides have; ticks missing from the capture
+    /// (holes) have no row.
     pub rows: Vec<ScenarioRow>,
     /// Ticks where the recorded car's input differs from the tape's, past
     /// the first (state-setting) tick: nonzero means the bot did not play
@@ -113,6 +114,16 @@ impl ScenarioComparison {
     }
 }
 
+/// Whole 120 Hz ticks from the start frame's timestamp to `secs`.
+fn tick_after(start_secs: f32, secs: f32) -> usize {
+    let ticks = ((secs - start_secs) / SCENARIO_TICK_SECS).round();
+    if ticks.is_sign_negative() {
+        0
+    } else {
+        ticks as usize
+    }
+}
+
 fn near(a: &Vec3, b: &Vec3, radius: f32) -> bool {
     a.distance(b) <= radius
 }
@@ -138,9 +149,12 @@ fn inputs_match(recorded: &CarState, predicted: &CarState) -> bool {
 /// Lines a scenario's recording (`recorded`, the whole capture) up with the
 /// port's free-run prediction of it. The start is the first recorded frame
 /// whose car is within `START_MATCH_RADIUS` of the scenario's start
-/// location; the lag (0 to `MAX_LAG_TICKS`) is the one that best matches the
-/// first `LAG_WINDOW_TICKS` ticks. A scenario with no start location cannot
-/// be aligned.
+/// location. Every later recorded frame is placed by its timestamp, in
+/// 120 Hz ticks after that frame, so a hole in the capture (the plugin
+/// drops a few ticks per run, `RB-RESEARCH-O009`) skips those ticks instead
+/// of shifting the rest of the comparison; the lag (0 to `MAX_LAG_TICKS`) is
+/// the one that best matches the first `LAG_WINDOW_TICKS` ticks. A scenario
+/// with no start location cannot be aligned.
 pub fn compare_scenario(
     scenario: &Scenario,
     recorded: &[PhysicsFrame],
@@ -166,13 +180,30 @@ pub fn compare_scenario(
             ))
         })?;
 
+    // Each recorded frame after the start, with its tick count since the
+    // start frame read from its timestamp (not its row number: captures
+    // have holes).
+    let start_secs = recorded[start_index].timestamp_secs;
+    let recorded_ticks: Vec<(usize, &PhysicsFrame)> = recorded[start_index..]
+        .iter()
+        .map(|frame| (tick_after(start_secs, frame.timestamp_secs), frame))
+        .take_while(|(tick, _)| *tick < predicted.len() + MAX_LAG_TICKS)
+        .collect();
+
+    // Mean, not sum: a hole in the window must not favour a lag.
     let error_at_lag = |lag: usize| -> f32 {
-        predicted
+        let errors: Vec<f32> = recorded_ticks
             .iter()
-            .zip(recorded.iter().skip(start_index + lag))
-            .take(LAG_WINDOW_TICKS)
-            .filter_map(|(p, r)| Some(p.cars.first()?.position.distance(&r.cars.first()?.position)))
-            .sum()
+            .filter(|(tick, _)| *tick >= lag && *tick - lag < LAG_WINDOW_TICKS)
+            .filter_map(|(tick, r)| {
+                let p = predicted.get(*tick - lag)?.cars.first()?;
+                Some(p.position.distance(&r.cars.first()?.position))
+            })
+            .collect();
+        if errors.is_empty() {
+            return f32::INFINITY;
+        }
+        errors.iter().sum::<f32>() / errors.len() as f32
     };
     let lag_ticks = (0..=MAX_LAG_TICKS)
         .min_by(|a, b| error_at_lag(*a).total_cmp(&error_at_lag(*b)))
@@ -180,11 +211,13 @@ pub fn compare_scenario(
 
     let mut rows = Vec::new();
     let mut input_mismatches = 0;
-    for (tick, (p, r)) in predicted
-        .iter()
-        .zip(recorded.iter().skip(start_index + lag_ticks))
-        .enumerate()
-    {
+    for (recorded_tick, r) in recorded_ticks {
+        let Some(tick) = recorded_tick.checked_sub(lag_ticks) else {
+            continue;
+        };
+        let Some(p) = predicted.get(tick) else {
+            continue;
+        };
         let (Some(p), Some(r)) = (p.cars.first(), r.cars.first()) else {
             continue;
         };
@@ -387,7 +420,26 @@ mod tests {
             frames.push(predicted[0].clone());
         }
         frames.extend(predicted);
+        // A capture's rows are 1/120 s apart whatever they show.
+        for (i, frame) in frames.iter_mut().enumerate() {
+            frame.timestamp_secs = i as f32 * SCENARIO_TICK_SECS;
+        }
         frames
+    }
+
+    #[test]
+    fn a_hole_in_the_recording_skips_those_ticks_instead_of_shifting_the_rest() {
+        let sc = scenario("prompt_dodge");
+        let mut capture = fake_capture(&sc, 4, 0);
+        // The plugin dropped ticks 2, 3 and 4 after the start frame.
+        capture.drain(6..9);
+        let comparison = compare_scenario(&sc, &capture).unwrap();
+        assert_eq!(comparison.start_index, 4);
+        assert_eq!(comparison.lag_ticks, 0);
+        assert_eq!(comparison.max_position_error(), 0.0);
+        assert_eq!(comparison.rows.len() as u64, sc.total_ticks() + 2 - 3);
+        let ticks: Vec<usize> = comparison.rows.iter().map(|r| r.tick).take(4).collect();
+        assert_eq!(ticks, vec![0, 1, 5, 6]);
     }
 
     #[test]

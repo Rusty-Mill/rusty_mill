@@ -4,7 +4,7 @@ One session on the machine with the game, RLBot v5 and BakkesMod. Setup and
 risks: `tools/rb_tape_bot/README.md`. Plan: `BOT-CAPTURE-PLAN.md`. Nothing
 here has run against the game yet; each stage below settles one open risk
 before the next depends on it. Stop at the first failure and bring back the
-output.
+output. Results of each session are at the end of this file.
 
 ## Stage 0: build and load (10 min)
 
@@ -55,3 +55,92 @@ For each run: the capture in `replays/` (gitignored), the
 `--scenario ... --against` output, and anything the game did that looked
 wrong (dropped inputs, a reset, a wrong spawn). Then the loop is: largest
 error, diagnose, fix, record in the spec, as usual.
+
+## Session 1 (2026-10-06): Stages 0 to 2 done, all eleven scenarios captured
+
+Machine: Epic Rocket League (`C:\Program Files\Epic Games\rocketleague`),
+BakkesMod injector 32 / API 95 with `rusty_bullet_capture.dll` 1.2 already
+in the plugins folder, rustc 1.98.1, VS 2022 Build Tools, CMake 4.4.3;
+`replays\` did not exist before this session. Setup details and the
+verified run sequence are in `tools/rb_tape_bot/README.md`; decisions in
+ADR-0059.
+
+Timeline of what failed and was fixed on the way (each one cost a run):
+
+1. Installing RLBot was first refused by the Claude Code permission
+   classifier; a local allow rule for `msiexec` was added and the official
+   launcher MSI installed per-user.
+2. `bot.toml` was unparseable (a backslash in a TOML basic string is an
+   escape), so the GUI showed a nameless bot and core rejected it:
+   `cars[0].agent_id is empty`. Forward slashes in `RB_TAPE`.
+3. The car never moved: core reports `MatchPhase::Paused` throughout
+   freeplay while physics runs, so the bot's `== Active` gate never
+   opened. Found with the new `rb_probe` (120 packets and 120 frames per
+   second, phase Paused). The bot now gates on the frame counter.
+4. Rocket League pauses freeplay when its window loses focus, and Escape
+   froze it for minutes; the game window must stay focused for the tape.
+5. The per-scenario `bots/*.bot.toml` first used a forward-slash
+   `run_command`, which `cmd.exe` rejects (`'target' is not recognized`);
+   now a TOML literal string with backslashes.
+
+Stage 0 and 1 (prompt_dodge, two runs):
+
+| Risk | Result |
+|---|---|
+| BakkesMod records while RLBot runs | pass, 1707 and 3980 frames |
+| State setting from a bot works | pass, first frame (0, -2000, 17) exactly, rotation (0, 1.571, 0), velocity 0 |
+| 120 packets/s | pass, lag 0 (run 1) and 1 (run 2), no drift; probe: 119.9 packets and frames per second |
+| Roll sign | pass, checked on corner_slide/pogo/car_over_ball (`--scenario-from` of the set frame reproduces the scenario rotation to 3 decimals) |
+| Run-to-run noise | 2.8 uu mean, 13.8 uu max between the two runs, a one-tick offset of the jump |
+
+Stage 2 results (`rb-verify --scenario ... --against`, port against game,
+re-scored after RB-VERIFY-003 0.23.0 aligned recorded frames by timestamp;
+the first scoring aligned by row and every capture hole became a permanent
+offset, which made prompt_dodge read 8.5 uu mean and car_over_ball look
+wrong from tick 1):
+
+| Scenario | Lag | Position error mean / max (uu) | First over 10 / 100 uu | Port prediction held? |
+|---|---|---|---|---|
+| prompt_dodge run 1 | 1 | 1.2 / 3.6 | never / never | yes, dodge at 502 uu/s |
+| prompt_dodge run 2 | 1 | 1.2 / 3.6 | never / never | yes |
+| late_dodge | 2 | 1.8 / 4.7 | never / never | yes, no dodge (FR-136 window) |
+| wavedash_early | 0 | 14.2 / 25.3 | 98 / never | roughly |
+| wavedash_mid | 0 | 4.1 / 5.1 | never / never | yes |
+| wavedash_late | 0 | 4.1 / 5.1 | never / never | yes |
+| speed_flip | 0 | 94.4 / 289.3 | 218 / 237 | no |
+| half_flip | 0 | 4.3 / 13.9 | 320 / never | yes |
+| pogo | 0 | 2.4 / 4.3 | never / never | yes |
+| hard_landing_nose_first | 0 | 10.0 / 22.0 | 125 / never | yes, within 22 uu |
+| corner_slide | 0 | 100.3 / 177.6 | 41 / 95 | no |
+| car_over_ball | 1 | 156.2 / 290.5 | 2 / 71 | no |
+
+Input mismatches are not reported: the plugin records all-zero inputs for
+an RLBot-driven car (RB-RESEARCH-O008), so that column only counts the
+tape's own non-neutral ticks. Every capture has one 5-tick hole in the
+first two seconds and 2 to 7 missing ticks at the set frame
+(RB-RESEARCH-O009); `rb-verify` now skips them.
+
+The three that diverge, with the evidence for the next loop:
+
+- **car_over_ball** (RB-RESEARCH-O010): the port's first contact tick is
+  right (port tick 3 at (43.9, 112.0, 163.1), velocity (-1211, -1447,
+  400); game (43.9, 112.1, 163.2), (-1210, -1443, 405)), but the game's
+  car keeps gaining upward speed for four more ticks (405, 444, 475, 498
+  uu/s) and loses more horizontal speed (to -1138, -1311) while the
+  port's contact is over in one tick (400, 392, 387; -1214, -1452). The
+  game's hit carries about 1.6 times the port's impulse, spread over
+  about four ticks.
+- **corner_slide**: agrees to 5 uu for 36 ticks, then the game's car
+  climbs the corner higher (z 326 uu at tick 84 against the port's 263)
+  and stays up longer; 100 uu by tick 96. The 9.125 s residual of
+  `test2.jsonl`, now with exact inputs.
+- **speed_flip**: agrees to 10 uu until the flip at tick 216, then 550
+  uu/s of velocity error through the flip and 289 uu by the end of it;
+  the diagonal dodge with pitch cancel and air roll goes a different way
+  (see RB-PHYSICS-001-FR-094, the dodge-direction miss).
+
+Nothing in the code was refuted by this session: the 1.25 s second-jump
+window and the roll convention held, and the nose landing is within 22 uu.
+
+Stage 3 not run. Next session: a second run of each Stage 2 scenario for
+its own noise floor, then the car_over_ball contact.
