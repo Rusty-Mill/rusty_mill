@@ -521,13 +521,23 @@ impl PhysicsWorld {
     /// exactly this order (see `RB-VERIFY-002-FR-001`'s plugin), so this
     /// isn't a coincidence to maintain, just a fact to preserve.
     pub fn from_frame(frame: &PhysicsFrame) -> PhysicsWorld {
+        let arena = PhysicsWorld::standard_arena(RigidBody::standard_ball(frame.ball.position));
+        PhysicsWorld::from_frame_in(&arena, frame)
+    }
+
+    /// `from_frame` over an arena the caller already built (a
+    /// `standard_arena` with no cars), cloned instead of rebuilt: the
+    /// arena's collision meshes cost far more to build than to copy, which
+    /// matters to a caller that resets many times (`rb_env`, ADR-0060).
+    /// The arena's own ball is replaced by the frame's.
+    pub fn from_frame_in(arena: &PhysicsWorld, frame: &PhysicsFrame) -> PhysicsWorld {
+        let mut world = arena.clone();
         let mut ball = RigidBody::standard_ball(frame.ball.position);
         ball.orientation = frame.ball.rotation;
         ball.linear_velocity = frame.ball.velocity;
         ball.angular_velocity = frame.ball.angular_velocity;
         ball.update_inertia_tensor();
-
-        let mut world = PhysicsWorld::standard_arena(ball);
+        world.ball = ball;
         world.elapsed_secs = frame.timestamp_secs;
 
         for car_state in &frame.cars {

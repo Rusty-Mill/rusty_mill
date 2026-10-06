@@ -114,6 +114,33 @@ plugin records all-zero inputs for an RLBot-driven car
 Rows 1 to 3 and 6 target open questions already recorded in
 `docs/PROJECT-STATUS.md`.
 
+## The port as the bot's second target
+
+(Added 2026-10-06.) The same tape runs against two backends: the real game
+(`rb_tape_bot` plus the capture plugin) and `rb_physics_bullet`
+(`simulate_scenario`). The score is the gap between them, which is what
+`rb-verify --scenario <file> --against <capture>` already prints. So the port
+is already an environment for scripted bots, with three properties worth
+stating:
+
+- **Deterministic.** Three runs of `speed_flip` print identical output, and
+  the physics crate iterates no `HashMap` (the mesh grid only looks cells up).
+- **Fast enough to sweep.** About 36,000 steps/s per core in steady state
+  (one car and the ball, release build, measured 2026-10-06), so a 400-tick
+  scenario is about 11 ms of simulation. Today each `simulate_scenario` call
+  also rebuilds the arena mesh (about 28 ms), which dominates short runs
+  (6,000 to 10,000 steps/s end to end); a sweep should build the arena once
+  (ADR-0060).
+- **Honest only as far as the last score.** Port predictions are trustworthy
+  to the recorded fidelity (car velocity 1.99 uu/s over 30 ticks on
+  `test2`), and the first game captures will say which scenarios exceed it.
+
+Uses, in order of value: sweep a mechanic's timing in the port to choose
+which tapes are worth a game run; run the same tape on both and keep the
+diff as a regression gauge; use a game capture to extend the recorded corpus
+where the port disagrees. A stepping API for policies is a separate step:
+`ADR-0060` (proposed). A bot-protocol server is `RB-RESEARCH-O007`.
+
 ## Not doing
 
 - ML policies for any of the above; revisit only for mechanics that need

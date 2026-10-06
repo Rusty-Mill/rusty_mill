@@ -20,3 +20,4 @@ rb_replay_ingest = { path = "../rb_replay_ingest" }
 rb_capture_ingest = { path = "../rb_capture_ingest" }
 rb_physics_bullet = { path = "../rb_physics_bullet" }
 rb_scenario = { path = "../rb_scenario" }
+rb_env = { path = "../rb_env" }
