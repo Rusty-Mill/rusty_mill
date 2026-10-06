@@ -12,10 +12,12 @@ use rusty_err::Error;
 
 pub mod avro;
 mod base_event;
+mod clock;
 mod domain_event;
 mod event_type;
 pub use avro::AvroDecodeError;
 pub use base_event::BaseEvent;
+pub use clock::{ClockError, ClockReading, SystemClock, Timestamp, WallClock};
 pub use domain_event::DomainEvent;
 pub use event_type::EventType;
 
