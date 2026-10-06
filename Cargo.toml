@@ -50,6 +50,7 @@ members = [
     "crates/libs/net/rusty_oauth",
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
+    "crates/libs/rusty_sandbox",
     "crates/libs/homelab/rusty_proxmox",
     "crates/libs/homelab/rusty_opnsense",
     "crates/libs/homelab/rusty_fedora",
@@ -427,6 +428,7 @@ rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
 rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
+rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
 rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"

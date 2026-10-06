@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_sandbox: the sandboxed executor, hoisted from rusty_rsi
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 7, first PR · amends [ADR-0005](docs/adr/0005-rsi-harness.md) §4
+
+- **Added:** `rusty_sandbox` at `crates/libs/rusty_sandbox`: the sandboxed-execution port (`SandboxSpec`, `Limits`, `Executor`, `ExecOutcome`, `Termination`) and its Linux adapter (`ProcessExecutor`, the helper's `run_helper`, `HelperRequest`, `Sockets`, `SETUP_FAILED`, `require_enforced`), moved from `rsi-core` and `rsi-runtime` with their fifteen tests. The code is unchanged but for its error type: `rusty_sandbox::Error` has `Io`, `Sandbox` and `Invalid` (a rejected limit or path), where the port used `CoreError::InvalidParameter`/`InvalidId` and the adapter `RuntimeError`.
+- **Changed:** `rsi-core::exec` re-exports the port; `rsi_runtime::executor` and `rsi_runtime::sandbox` re-export the adapter, so `rsi __sandbox`, the harness, the graders, the coding-agent runner and every test keep their paths. `CoreError` and `RuntimeError` gain `From<rusty_sandbox::Error>` (a rejected spec is an `InvalidId`; I/O and setup failures keep their runtime variants), and `rsi-runtime`'s grading impls take any `Executor` whose error converts rather than one whose error *is* `RuntimeError`. `rsi-runtime` keeps `rusty_libc` for its own file flags; `platform` and `platform-linux` moved with the helper.
+- **Why now:** step 7's second PR gives each bot a sandbox of its own; that needs the executor in `libs`, where an app family other than `rsi` can depend on it (ADR-0003 forbids `apps → apps`). ADR-0005 scoped the executor to `rsi`; this amends it with the user's sign-off.
+- **Known limitations:** unchanged from `rsi`: Linux only, and the helper must be a single-threaded binary; the next PR adds one for bots.
+
+---
+
 ## rusty_routine: routines for AG-UI agents
 **2026-10-05** · [#524](https://github.com/Rusty-Mill/rusty_mill/pull/524) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 6
 

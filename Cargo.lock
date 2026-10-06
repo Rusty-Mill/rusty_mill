@@ -12740,6 +12740,7 @@ dependencies = [
  "rsi-core",
  "rsi-harness",
  "rsi-runtime",
+ "rusty_sandbox",
 ]
 
 [[package]]
@@ -12748,6 +12749,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_err",
  "rusty_rsa",
+ "rusty_sandbox",
 ]
 
 [[package]]
@@ -12758,13 +12760,12 @@ version = "0.1.0"
 name = "rsi-runtime"
 version = "0.1.0"
 dependencies = [
- "platform",
- "platform-linux",
  "rsi-core",
  "rusty_err",
  "rusty_http",
  "rusty_json",
  "rusty_libc",
+ "rusty_sandbox",
 ]
 
 [[package]]
@@ -14296,6 +14297,16 @@ dependencies = [
 [[package]]
 name = "rusty_rsa"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_sandbox"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "rusty_err",
+ "rusty_libc",
+]
 
 [[package]]
 name = "rusty_serde"

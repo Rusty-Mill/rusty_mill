@@ -1,6 +1,8 @@
 # ADR-0005: `rusty_rsi`, an AIDE²-style recursive self-improvement harness
 
-Status: Accepted
+Status: Accepted; amended 2026-10-06 (the sandboxed executor moved to
+`crates/libs/rusty_sandbox`, ADR-0007 follow-ons step 7, with the owner's
+sign-off; `rsi` re-exports it at the old paths and nothing else changed)
 Date: 2026-09-30 (proposed) / 2026-10-04 (accepted)
 
 Accepted by the owner on 2026-10-04 with all four open questions resolved
@@ -109,7 +111,7 @@ inner loop cannot score privately.
 | `Harness` | `Harness<T: PublicTask>::run(&T, &Budget, Seed) -> Result<InnerOutcome>` (last valid submission, `CostUsage`, encoded transcript, agent log) | `SandboxedHarness`: runs the built agent in the sandbox and serves it over the broker socket (§3). |
 | `ChatModel` | `complete(&[Message], max_tokens, timeout) -> Result<Completion>` (text plus prompt and completion tokens) | `OpenAiModel` (plain-HTTP OpenAI-compatible); `ScriptedModel` in tests. |
 | `Proposer` | `propose(&[Precedent], &Path) -> Result<Proposal>`: edits the worktree at the path; sees only `Precedent`s (verdicts, grades, public scores), never a per-task private score | `ModelProposer` over any `ChatModel` (so the OpenAI-compatible client); `ScriptedProposer` in tests; `CliProposer` over `codex exec` or Claude Code's `claude -p` in the sandbox (§7, as built). |
-| `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. |
+| `Executor` | `exec(&SandboxSpec, program, args) -> Result<ExecOutcome>` | `ProcessExecutor`, on Linux: rlimits → Landlock → seccomp → exec, via the `rsi __sandbox` helper. Fails closed where these are unsupported. Since the 2026-10-06 amendment both live in `rusty_sandbox` (libs) and are re-exported here. |
 | `CostMeter` | `admit() -> Result<(), BudgetExhausted>`, then `record_tokens` / `observe_wall` | A concrete struct in core, not a trait: there is one implementation, and the broker is its only caller. |
 | `LineageStore` | `append(&LineageEntry) -> Result<Digest>` (the entry's chain hash), `entries()` (verifies the chain first) | `JsonlLineage`: append-only JSONL plus a content-addressed blob dir (see §6). |
 
