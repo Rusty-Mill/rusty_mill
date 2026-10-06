@@ -1,7 +1,9 @@
-// A scripted AG-UI agent behind a fake fetch: each run answers from a
-// script that sees the RunAgentInput it was sent.
+// A scripted AG-UI agent behind a fake fetch, for the bindings' tests:
+// each run answers from a script that sees the RunAgentInput it was sent.
+// Exported as `@rusty-mill/agui-core/testing`; not part of the API.
 
-import { encode, type Event, type RunAgentInput } from "@rusty-mill/agui-core";
+import { encode } from "./sse.js";
+import type { Event, RunAgentInput } from "./types.js";
 
 export type Script = (input: RunAgentInput, runIndex: number) => Event[];
 

@@ -12,4 +12,6 @@ layer = "apps"
 
 [dependencies]
 rusty_err = { workspace = true }
+# The sandboxed-execution port and its spec, re-exported from `exec`.
+rusty_sandbox = { workspace = true }
 rusty_rsa = { workspace = true }

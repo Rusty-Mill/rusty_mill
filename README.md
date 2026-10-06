@@ -103,6 +103,9 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rusty_serde_erased`](crates/foundation/rusty_serde/rusty_serde_erased) | `crates/foundation/rusty_serde/rusty_serde_erased` | Minimal unsafe primitive erasing a serializer/deserializer's associated `Ok` type across an object-safe boundary — internal to `rusty_serde` |
 | [`rusty_lsp`](crates/libs/protocol/rusty_lsp) | `crates/libs/protocol/rusty_lsp` | Small, reusable async Language Server Protocol framework: own the protocol plumbing, implement one trait for your language |
 | [`rusty_agui`](crates/libs/protocol/rusty_agui) | `crates/libs/protocol/rusty_agui` | Sovereign AG-UI (Agent-User Interaction) protocol: typed events and run input, JSON/SSE codecs, verifier with chunk expansion, reducer, and an optional `rusty_serve` agent endpoint (ADR-0007) |
+| [`rusty_bot`](crates/libs/rusty_bot) | `crates/libs/rusty_bot` | Per-bot sandboxes for AG-UI agents: a `BotSpec` confined by `rusty_sandbox` (its own workspace, read roots, limits, a process group), a `Fleet` that starts and stops bots, and the `rusty-bot` binary that is both runner and sandbox helper (ADR-0007 follow-ons step 7) |
+| [`rusty_sandbox`](crates/libs/rusty_sandbox) | `crates/libs/rusty_sandbox` | Fail-closed sandboxed execution: a validated `SandboxSpec` and `Limits`, the `Executor` port, and the Linux `ProcessExecutor` and helper (Landlock, seccomp, rlimits, a process-group job), hoisted from `rusty_rsi` (ADR-0007 follow-ons step 7) |
+| [`rusty_routine`](crates/libs/protocol/rusty_routine) | `crates/libs/protocol/rusty_routine` | Routines for AG-UI agents: five-field cron in UTC, a `Routine` that builds each firing's `RunAgentInput` and is disabled after too many consecutive failures, a JSON routines file, and a runner on `rusty_agui`'s client (ADR-0007 follow-ons step 6) |
 | [`rusty_channel`](crates/libs/protocol/rusty_channel) | `crates/libs/protocol/rusty_channel` | Chat channels for AG-UI agents: a sans-IO `Channel` trait (inbound message to `RunAgentInput`, reply events back), a `Thread` per conversation, Slack, Microsoft Teams and SMS (Twilio) adapters, and a bot runner on `rusty_serve` (ADR-0007 follow-ons step 5) |
 | [`rusty_a2a`](crates/libs/protocol/rusty_a2a) | `crates/libs/protocol/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
 | [`rusty-mcp`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
@@ -204,6 +207,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rk-mcp`](crates/apps/rusty_key/crates/mcp) | `crates/apps/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
 | [`rk-compose`](crates/apps/rusty_key/crates/compose) | `crates/apps/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
 | [`rk-app`](crates/apps/rusty_key/crates/app) | `crates/apps/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
+| [`rk-agui`](crates/apps/rusty_key/crates/agui) | `crates/apps/rusty_key/crates/agui` | Rusty Keys over AG-UI: a `Session` per thread behind `rusty_agui`'s `Agent` trait, the approval gate and plan exits as frontend tool calls (ADR-0007 follow-ons step 10) |
 | [`rusty_llama`](crates/libs/ai/rusty_llama) | `crates/libs/ai/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
 | [`ts-types`](crates/apps/rusty_tailscale/crates/ts-types) | `crates/apps/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
 | [`ts-key`](crates/apps/rusty_tailscale/crates/ts-key) | `crates/apps/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |
@@ -231,10 +235,12 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`adk-runner`](crates/libs/rusty_adk/crates/adk-runner) | `crates/libs/rusty_adk/crates/adk-runner` | The runner: drives an agent over a session and streams its events |
 | [`adk-mcp`](crates/libs/rusty_adk/crates/adk-mcp) | `crates/libs/rusty_adk/crates/adk-mcp` | MCP bridge: consume MCP servers as ADK tools, and serve ADK tools over MCP |
 | [`adk-a2a`](crates/libs/rusty_adk/crates/adk-a2a) | `crates/libs/rusty_adk/crates/adk-a2a` | A2A bridge: serve a Rust ADK agent over the Agent2Agent protocol |
+| [`adk-agui`](crates/libs/rusty_adk/crates/adk-agui) | `crates/libs/rusty_adk/crates/adk-agui` | AG-UI bridge: serve a Rust ADK agent to `rusty_agui`'s bindings, channels, routines and gateway; a graph suspension is a frontend tool call (ADR-0007 follow-ons step 10) |
 | [`rusty-adk`](crates/libs/rusty_adk/crates/rusty-adk) | `crates/libs/rusty_adk/crates/rusty-adk` | The `rusty-adk` facade crate re-exporting the ADK stack |
 | [`weather-agent`](crates/libs/rusty_adk/examples/weather-agent) | `crates/libs/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
 | [`mcp-tool-server`](crates/libs/rusty_adk/examples/mcp-tool-server) | `crates/libs/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
 | [`a2a-agent-server`](crates/libs/rusty_adk/examples/a2a-agent-server) | `crates/libs/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
+| [`agui-agent-server`](crates/libs/rusty_adk/examples/agui-agent-server) | `crates/libs/rusty_adk/examples/agui-agent-server` | `rusty-adk` example: serving an ADK agent over AG-UI on `rusty_serve`, with a human-in-the-loop graph |
 | [`rp-core`](crates/apps/rusty_provider/crates/core) | `crates/apps/rusty_provider/crates/core` | Unified OpenAI-shaped request/response types and the provider trait |
 | [`rp-providers`](crates/apps/rusty_provider/crates/providers) | `crates/apps/rusty_provider/crates/providers` | Provider adapters: OpenAI, Anthropic, Gemini, Groq, Together AI, Fireworks |
 | [`rp-router`](crates/apps/rusty_provider/crates/router) | `crates/apps/rusty_provider/crates/router` | Config-driven routing: fallback chains, budgets, metrics, and usage persistence |
@@ -270,6 +276,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`nexus-plugins`](crates/apps/nexus/crates/nexus-plugins) | `crates/apps/nexus/crates/nexus-plugins` | Nexus: community plugin lifecycle — WASM (wasmtime) and JS-sandboxed plugin hosting |
 | [`nexus-ai`](crates/apps/nexus/crates/nexus-ai) | `crates/apps/nexus/crates/nexus-ai` | Nexus: AI provider integration — chat, embeddings, RAG |
 | [`nexus-ai-runtime`](crates/apps/nexus/crates/nexus-ai-runtime) | `crates/apps/nexus/crates/nexus-ai-runtime` | Nexus: local model runtime plumbing for `nexus-ai` |
+| [`nexus-agui`](crates/apps/nexus/crates/nexus-agui) | `crates/apps/nexus/crates/nexus-agui` | Nexus: an agent session served over AG-UI, the ai-runtime's typed event stream behind `rusty_agui`'s `Agent` trait, round approval as a frontend tool call (ADR-0007 follow-ons step 10) |
 | [`nexus-mcp`](crates/apps/nexus/crates/nexus-mcp) | `crates/apps/nexus/crates/nexus-mcp` | Nexus: Host-side MCP client/server integration |
 | [`nexus-lsp`](crates/apps/nexus/crates/nexus-lsp) | `crates/apps/nexus/crates/nexus-lsp` | Nexus: Language Server Protocol integration |
 | [`nexus-dap`](crates/apps/nexus/crates/nexus-dap) | `crates/apps/nexus/crates/nexus-dap` | Nexus: Debug Adapter Protocol integration |

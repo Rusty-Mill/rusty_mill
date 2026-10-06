@@ -22,7 +22,7 @@ Design, reuse decisions and scope: [ADR-0005](../../../docs/adr/0005-rsi-harness
 | Crate | Purpose | ADR-0002 tier |
 |---|---|---|
 | [`rsi-core`](crates/rsi-core) | Pure domain and ports: no I/O, no async, no clock | S (workspace foundation crates only) |
-| [`rsi-runtime`](crates/rsi-runtime) | Adapters: sandboxed executor, task directories, metrics, graders, the broker and agent runner, model clients, the outer loop, lineage store, git worktrees, proposers and reports; the [toy task suite](crates/rsi-runtime/tasks) | S (workspace crates only) |
+| [`rsi-runtime`](crates/rsi-runtime) | Adapters: the sandboxed executor (re-exported from [`rusty_sandbox`](../../libs/rusty_sandbox) since ADR-0007 step 7), task directories, metrics, graders, the broker and agent runner, model clients, the outer loop, lineage store, git worktrees, proposers and reports; the [toy task suite](crates/rsi-runtime/tasks) | S (workspace crates only) |
 | [`rsi-cli`](crates/rsi-cli) | The `rsi` binary: `rsi calibrate`, `rsi run`, `rsi report` and `rsi inner`, plus the internal `__sandbox` and `__grade` entry points | S (workspace crates only) |
 | [`rsi-harness`](harness) | a0, the inner agent; std-only, compiled by the runtime with plain `rustc`. The only code the outer loop may rewrite | S (no dependencies) |
 
