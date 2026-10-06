@@ -319,14 +319,21 @@ pub fn executor(helper: &Path, state_dir: &Path) -> ProcessExecutor {
 mod tests {
     use super::*;
 
+    /// An absolute path on this platform: `/`-rooted on Unix, `C:\`-rooted
+    /// on Windows, where a bare `/srv/...` is not absolute.
+    fn abs(rel: &str) -> PathBuf {
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        PathBuf::from(root).join(rel)
+    }
+
     fn spec() -> BotSpec {
         BotSpec {
             name: "echo".into(),
-            program: "/opt/bots/echo/agent".into(),
+            program: abs("opt/bots/echo/agent"),
             args: vec!["--port".into(), "4000".into()],
             env: vec![("PATH".into(), "/usr/bin".into())],
-            workspace: "/srv/bots/echo".into(),
-            read_roots: vec!["/usr".into(), "/lib".into()],
+            workspace: abs("srv/bots/echo"),
+            read_roots: vec![abs("usr"), abs("lib")],
             limits: default_limits(),
         }
     }
@@ -334,16 +341,14 @@ mod tests {
     #[test]
     fn the_sandbox_writes_only_to_the_workspace_and_reads_the_program() {
         let sandbox = spec().sandbox().expect("valid");
-        assert_eq!(sandbox.write_roots(), [PathBuf::from("/srv/bots/echo")]);
-        assert_eq!(sandbox.cwd(), &PathBuf::from("/srv/bots/echo"));
-        assert!(sandbox
-            .read_roots()
-            .contains(&PathBuf::from("/opt/bots/echo")));
-        assert!(sandbox.can_reach(Path::new("/usr/bin/python3")));
-        assert!(!sandbox.can_reach(Path::new("/srv/bots/other")));
+        assert_eq!(sandbox.write_roots(), [abs("srv/bots/echo")]);
+        assert_eq!(sandbox.cwd(), &abs("srv/bots/echo"));
+        assert!(sandbox.read_roots().contains(&abs("opt/bots/echo")));
+        assert!(sandbox.can_reach(&abs("usr/bin/python3")));
+        assert!(!sandbox.can_reach(&abs("srv/bots/other")));
 
         let mut inside = spec();
-        inside.program = "/usr/bin/python3".into();
+        inside.program = abs("usr/bin/python3");
         let sandbox = inside.sandbox().expect("valid");
         assert_eq!(
             sandbox.read_roots().len(),
