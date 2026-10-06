@@ -16,6 +16,7 @@ sandbox of its own.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 10, `rusty_adk` | `adk-agui`: an ADK `Runner` behind `rusty_agui`'s `Agent` trait (thread = session, the last user message is the turn, text streamed as deltas, the agent's tool calls and results reported, the session state as a snapshot, a graph suspension as a call to the frontend tool `request_input` that the answering tool message resumes); feature `agui` on the facade; the `agui-agent-server` example |
 | (this PR) | step 8 | `@rusty-mill/agui-vue` (`provideAgent`, `useAgent`, `useReadable`, `useAction`, `useSharedState` as composables and refs) and `@rusty-mill/agui-angular` (`provideAgent`, `injectAgent`, `injectReadable`, `injectAction`, `injectSharedState` as signals); the `AgentStore` hoisted from the React binding into `agui-core`, where all three bindings share it |
 | (this PR) | step 7, second PR | `rusty_bot`: `BotSpec` confined by `rusty_sandbox` (own workspace, read roots, limits, process group, network open), `Fleet`, the `rusty-bot` runner-and-helper binary; `ProcessExecutor::start` for long-lived jobs |
 | (this PR) | step 7, first PR | `rusty_sandbox`: the executor port and Linux adapter hoisted from `rusty_rsi` unchanged, re-exported there so nothing in `rsi` moves |
@@ -74,7 +75,7 @@ targets as named.
 | A routines crate (cron schedule, run as requester, disable after N failures) | Routines |
 | Per-bot isolation | Sandboxes |
 | CORS and authentication on the agent endpoint | Any cross-origin or multi-user deployment |
-| Adapters from `rusty_adk`, `nexus-ai-runtime` and `rusty_key` event types to AG-UI | Putting existing agents behind the SDKs |
+| Adapters from ~~`rusty_adk`~~ (step 10, `adk-agui`), `nexus-ai-runtime` and `rusty_key` event types to AG-UI | Putting existing agents behind the SDKs |
 
 ## Build order
 
@@ -91,7 +92,7 @@ Both targets start with the same two pieces, so they come first.
 | 7 | **Done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
 | 8 | **Done.** Angular and Vue bindings over `agui-core` | 1 PR (see below) | No |
 | 9 | iOS (Swift) and Android (Kotlin) ports of the core | Large, when a consumer exists | Yes: new languages in the workspace |
-| 10 | Adapters from `rusty_adk`, `nexus-ai-runtime`, `rusty_key` | 1 PR each, in each family | No |
+| 10 | Adapters from `rusty_adk` (**done**), `nexus-ai-runtime`, `rusty_key` | 1 PR each, in each family | No |
 
 Chat components come after step 3 as a thin layer over the hooks, not
 before: the hooks are the API, the components are one rendering of it.
@@ -152,6 +153,26 @@ before: the hooks are the API, the components are one rendering of it.
   converts the error, so the harness, graders and `rsi __sandbox` did
   not change. The one visible difference is the bound on `rsi-runtime`'s
   grading impls, which now take any executor whose error converts.
+- **Step 10's ADK adapter lives in `rusty_adk`, beside `adk-a2a`.**
+  The follow-ons said "in each family", and the A2A bridge set the
+  pattern: a small crate in the family that implements the protocol's
+  server-side trait over the family's runner, with the protocol crate as
+  a dependency and nothing of the family leaking into `rusty_agui`. The
+  one asymmetry is the runtime: ADK is async on tokio and `rusty_agui`'s
+  `Agent` is blocking, so `AdkAgent` takes a runtime handle and drives
+  each run with `block_on` from the handler's thread. A blocking server
+  in front of an async runner is the arrangement step 1 chose for the
+  whole Rust side; an async handler is a later addition behind a feature
+  when a consumer needs it.
+- **Step 10 answers human-in-the-loop with a frontend tool.** ADK's graph
+  suspension (`resume_or_request_input`) becomes a `TOOL_CALL_*` for a
+  tool named `request_input` whose id is the interrupt id; the client
+  renders it through `useAction`'s `render` and answers through
+  `respond`, and the tool message that comes back resumes the graph.
+  AG-UI's `RUN_FINISHED` has an `Interrupt` outcome too, but the
+  handler owns the framing and the frontend bindings already have the
+  tool-call path, so the suspension rides the mechanism every binding
+  implements instead of a second one.
 - **Step 8 is one PR, before a consumer.** The plan said one PR per
   binding, when a consumer exists. The owner called for both at once,
   and each binding is under a hundred lines because the store they wrap

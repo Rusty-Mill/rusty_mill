@@ -202,10 +202,12 @@ members = [
     "crates/libs/rusty_adk/crates/adk-runner",
     "crates/libs/rusty_adk/crates/adk-mcp",
     "crates/libs/rusty_adk/crates/adk-a2a",
+    "crates/libs/rusty_adk/crates/adk-agui",
     "crates/libs/rusty_adk/crates/rusty-adk",
     "crates/libs/rusty_adk/examples/weather-agent",
     "crates/libs/rusty_adk/examples/mcp-tool-server",
     "crates/libs/rusty_adk/examples/a2a-agent-server",
+    "crates/libs/rusty_adk/examples/agui-agent-server",
     "crates/apps/rusty_provider/crates/core",
     "crates/apps/rusty_provider/crates/providers",
     "crates/apps/rusty_provider/crates/router",
@@ -645,6 +647,7 @@ adk-agents = { path = "crates/libs/rusty_adk/crates/adk-agents", version = "0.1.
 adk-runner = { path = "crates/libs/rusty_adk/crates/adk-runner", version = "0.1.0" }
 adk-mcp = { path = "crates/libs/rusty_adk/crates/adk-mcp", version = "0.1.0" }
 adk-a2a = { path = "crates/libs/rusty_adk/crates/adk-a2a", version = "0.1.0" }
+adk-agui = { path = "crates/libs/rusty_adk/crates/adk-agui", version = "0.1.0" }
 futures = "0.3"
 tokio-test = "0.4"
 # rusty_a2a is a merged sibling -- retiring adk-a2a's and

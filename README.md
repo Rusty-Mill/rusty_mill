@@ -234,10 +234,12 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`adk-runner`](crates/libs/rusty_adk/crates/adk-runner) | `crates/libs/rusty_adk/crates/adk-runner` | The runner: drives an agent over a session and streams its events |
 | [`adk-mcp`](crates/libs/rusty_adk/crates/adk-mcp) | `crates/libs/rusty_adk/crates/adk-mcp` | MCP bridge: consume MCP servers as ADK tools, and serve ADK tools over MCP |
 | [`adk-a2a`](crates/libs/rusty_adk/crates/adk-a2a) | `crates/libs/rusty_adk/crates/adk-a2a` | A2A bridge: serve a Rust ADK agent over the Agent2Agent protocol |
+| [`adk-agui`](crates/libs/rusty_adk/crates/adk-agui) | `crates/libs/rusty_adk/crates/adk-agui` | AG-UI bridge: serve a Rust ADK agent to `rusty_agui`'s bindings, channels, routines and gateway; a graph suspension is a frontend tool call (ADR-0007 follow-ons step 10) |
 | [`rusty-adk`](crates/libs/rusty_adk/crates/rusty-adk) | `crates/libs/rusty_adk/crates/rusty-adk` | The `rusty-adk` facade crate re-exporting the ADK stack |
 | [`weather-agent`](crates/libs/rusty_adk/examples/weather-agent) | `crates/libs/rusty_adk/examples/weather-agent` | `rusty-adk` example: a tool-using LLM agent |
 | [`mcp-tool-server`](crates/libs/rusty_adk/examples/mcp-tool-server) | `crates/libs/rusty_adk/examples/mcp-tool-server` | `rusty-adk` example: serving ADK tools over MCP |
 | [`a2a-agent-server`](crates/libs/rusty_adk/examples/a2a-agent-server) | `crates/libs/rusty_adk/examples/a2a-agent-server` | `rusty-adk` example: serving an ADK agent over A2A |
+| [`agui-agent-server`](crates/libs/rusty_adk/examples/agui-agent-server) | `crates/libs/rusty_adk/examples/agui-agent-server` | `rusty-adk` example: serving an ADK agent over AG-UI on `rusty_serve`, with a human-in-the-loop graph |
 | [`rp-core`](crates/apps/rusty_provider/crates/core) | `crates/apps/rusty_provider/crates/core` | Unified OpenAI-shaped request/response types and the provider trait |
 | [`rp-providers`](crates/apps/rusty_provider/crates/providers) | `crates/apps/rusty_provider/crates/providers` | Provider adapters: OpenAI, Anthropic, Gemini, Groq, Together AI, Fireworks |
 | [`rp-router`](crates/apps/rusty_provider/crates/router) | `crates/apps/rusty_provider/crates/router` | Config-driven routing: fallback chains, budgets, metrics, and usage persistence |

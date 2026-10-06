@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## adk-agui: a Rust ADK agent over AG-UI
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `rusty_adk`
+
+- **Added:** `adk-agui` at `crates/libs/rusty_adk/crates/adk-agui`, the AG-UI counterpart to `adk-a2a`: `AdkAgent::new(runner, handle)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves any ADK agent or graph to everything in the workspace that speaks AG-UI. `with_user_resolver` maps a run to an ADK user (default: `forwardedProps.userId`, else the thread id); `with_run_config` applies one `RunConfig` to every run, streaming included.
+- **Added:** the mapping. Thread = session, created on first contact; the last user message is the new turn and the client's history is not replayed (ADK keeps its own); a model text part is a text message, streamed as deltas under one message when the run config streams and the aggregated event closes it without repeating the text; `FunctionCall` and `FunctionResponse` parts are `TOOL_CALL_START`/`ARGS`/`END` and `TOOL_CALL_RESULT`; a run that changed non-`temp:` state ends with a `STATE_SNAPSHOT` of the session; an event with an error, a failed stream, a run without a user message or a tool message answering no pending interrupt is `RUN_ERROR`. Artifacts and thoughts are not forwarded.
+- **Added:** human in the loop. A graph node's `resume_or_request_input` ends the run with a call to the frontend tool `request_input` (id = the interrupt id, arguments = the node's `hint` and `payload`); the tool message that answers it, on the next run of the thread, resumes the graph at that node with the answer (JSON when it parses, text otherwise) as the payload. A React, Vue or Angular client registers an action named `request_input` with a `render` and the person answers through `respond`.
+- **Added:** feature `agui` on `rusty-adk` (`rusty_adk::agui`), and the `agui-agent-server` example: the same approval graph as `a2a-agent-server`, served at `http://127.0.0.1:8080/api/agent`, with the two `curl` calls that suspend and resume it.
+- **Tests:** five end-to-end tests with `rusty_agui`'s blocking client against the handler over a socket (a tool-calling agent with its text, calls, result and state; two turns on one thread landing in one session; a streamed run whose deltas arrive once; a suspension answered and resumed, and a stray answer refused; a run with no user message), plus two unit tests for the value bridge.
+- **Known limitations:** blocking only (`Handle::block_on` from the handler's thread; a current-thread runtime that something else blocks would deadlock); no artifacts; one agent serves one run at a time, as `AgentHandler` does; the `nexus-ai-runtime` and `rusty_key` adapters are still to come.
+
+---
+
 ## @rusty-mill/agui-vue and @rusty-mill/agui-angular: the Vue and Angular bindings
 **2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 8
 
