@@ -13706,6 +13706,7 @@ dependencies = [
  "async-trait",
  "rusty_err",
  "rusty_serde",
+ "serde_json",
  "tokio",
 ]
 

@@ -1,57 +1,18 @@
 use rusty_search_core::Document;
 use serde_json::Value as JsonValue;
 
+// The `rusty_serde::Value` <-> `serde_json::Value` conversion itself is
+// shared with every other serde_json-speaking backend; see
+// `rusty_search_core::serde_json_bridge` for its (documented) lossy points.
+pub(crate) use rusty_search_core::serde_json_bridge::{
+    json_to_value as json_value_to_rusty, value_to_json as rusty_value_to_json,
+};
+
 // The official `meilisearch-sdk` crate's document methods take/return real
 // `serde_json::Value`, so `serde_json::Value` stays this crate's wire type
 // throughout `lib.rs`/`query_map.rs`. `rusty_serde::Value` is only
 // `Document::fields`'s type; these two functions convert at exactly that
 // boundary.
-
-pub(crate) fn rusty_value_to_json(value: rusty_serde::Value) -> JsonValue {
-    use rusty_serde::Value as RustyValue;
-    match value {
-        RustyValue::Null => JsonValue::Null,
-        RustyValue::Bool(b) => JsonValue::Bool(b),
-        RustyValue::Int(v) => JsonValue::Number(v.into()),
-        RustyValue::UInt(v) => JsonValue::Number(v.into()),
-        RustyValue::Float(v) => serde_json::Number::from_f64(v)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        RustyValue::String(s) => JsonValue::String(s),
-        RustyValue::Seq(items) => {
-            JsonValue::Array(items.into_iter().map(rusty_value_to_json).collect())
-        }
-        RustyValue::Map(entries) => JsonValue::Object(
-            entries
-                .into_iter()
-                .map(|(k, v)| (k, rusty_value_to_json(v)))
-                .collect(),
-        ),
-    }
-}
-
-fn json_value_to_rusty(value: JsonValue) -> rusty_serde::Value {
-    use rusty_serde::Value as RustyValue;
-    match value {
-        JsonValue::Null => RustyValue::Null,
-        JsonValue::Bool(b) => RustyValue::Bool(b),
-        JsonValue::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
-            (Some(v), _, _) => RustyValue::Int(v),
-            (None, Some(v), _) => RustyValue::UInt(v),
-            (None, None, Some(v)) => RustyValue::Float(v),
-            (None, None, None) => RustyValue::Null,
-        },
-        JsonValue::String(s) => RustyValue::String(s),
-        JsonValue::Array(items) => {
-            RustyValue::Seq(items.into_iter().map(json_value_to_rusty).collect())
-        }
-        JsonValue::Object(map) => RustyValue::Map(
-            map.into_iter()
-                .map(|(k, v)| (k, json_value_to_rusty(v)))
-                .collect(),
-        ),
-    }
-}
 
 /// Meilisearch stores a document's primary key *inside* the document body
 /// (unlike Elasticsearch's separate `_id`/`_source`, or Tantivy's reserved
