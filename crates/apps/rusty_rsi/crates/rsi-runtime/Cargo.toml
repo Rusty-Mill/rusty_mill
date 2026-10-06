@@ -13,6 +13,8 @@ layer = "apps"
 
 [dependencies]
 rsi-core = { path = "../rsi-core" }
+# The sandboxed executor and helper, hoisted from here (ADR-0007 step 7).
+rusty_sandbox = { workspace = true }
 rusty_err = { workspace = true }
 # The inner model client (ADR-0005 §8): rusty_http's sans-IO HTTP/1.1 core
 # with its sync adapter. No default features, so no async runtime.
@@ -23,6 +25,5 @@ rusty_http = { workspace = true }
 rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform = { workspace = true }
-platform-linux = { workspace = true }
+# `output.rs` opens files with `O_NOFOLLOW | O_NONBLOCK`.
 rusty_libc = { workspace = true, features = ["std"] }

@@ -11,32 +11,31 @@
 //! and out of scope for this first version.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use rp_core::{ChatRequest, ChatResponse};
 
 use crate::config::CacheConfig;
+use crate::fifo::FifoMap;
 
 /// Fixed-capacity, insertion-order-evicting, TTL-bounded cache of
 /// `ChatResponse`s keyed by request hash. Not a general-purpose LRU --
-/// same "insertion order only, no read-refresh" tradeoff `GenerationCache`
-/// already makes, plus a TTL check on read.
+/// the same insertion-order policy as `GenerationCache`, supplied by
+/// [`FifoMap`], plus a TTL check on read. An insert of a present key
+/// overwrites its `(inserted_at, response)` pair, which is how an entry's
+/// TTL is refreshed.
 pub(crate) struct ResponseCache {
     ttl: Duration,
-    max_entries: usize,
-    order: VecDeque<u64>,
-    entries: HashMap<u64, (Instant, ChatResponse)>,
+    entries: FifoMap<u64, (Instant, ChatResponse)>,
 }
 
 impl ResponseCache {
     pub(crate) fn new(config: &CacheConfig) -> Self {
         Self {
             ttl: Duration::from_secs(config.ttl_secs),
-            max_entries: config.max_entries.max(1),
-            order: VecDeque::new(),
-            entries: HashMap::new(),
+            entries: FifoMap::with_capacity(config.max_entries),
         }
     }
 
@@ -63,28 +62,17 @@ impl ResponseCache {
     pub(crate) fn get(&mut self, key: u64) -> Option<ChatResponse> {
         let (inserted_at, resp) = self.entries.get(&key)?;
         if inserted_at.elapsed() > self.ttl {
+            // `FifoMap::remove` drops the key from the eviction queue as
+            // well as the map, so a later re-insert of the same key cannot
+            // leave a stale queue reference that would make the next
+            // eviction pop the wrong key.
             self.entries.remove(&key);
-            // Keep `order` in sync with `entries` on expiry -- otherwise
-            // a stale queue reference for `key` survives, and a later
-            // `insert` of the same key pushes a *second* `order` entry.
-            // The next eviction then pops the stale duplicate instead of
-            // the true oldest key, corrupting bookkeeping and evicting a
-            // live, freshly-reinserted entry instead.
-            self.order.retain(|&k| k != key);
             return None;
         }
         Some(resp.clone())
     }
 
     pub(crate) fn insert(&mut self, key: u64, resp: ChatResponse) {
-        if !self.entries.contains_key(&key) {
-            self.order.push_back(key);
-            if self.order.len() > self.max_entries {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.entries.remove(&oldest);
-                }
-            }
-        }
         self.entries.insert(key, (Instant::now(), resp));
     }
 }
@@ -371,11 +359,19 @@ mod tests {
             2,
             "capacity 2 should be fully utilized"
         );
-        assert_eq!(
-            cache.order.len(),
-            2,
-            "order queue should stay in sync with entries, no stale duplicates"
+        // The eviction queue must be in step with the entries, with no
+        // stale duplicate for B: the next insert over capacity evicts the
+        // true oldest live entry, which is the reinserted B (older than C),
+        // and leaves C and the newcomer.
+        let key_d = ResponseCache::key_for(&request("a/m1", "d"));
+        cache.insert(key_d, response("resp-d"));
+        assert!(
+            !cache.entries.contains_key(&key_b),
+            "B is the oldest and goes"
         );
+        assert!(cache.entries.contains_key(&key_c), "C survives");
+        assert!(cache.entries.contains_key(&key_d), "D was just inserted");
+        assert_eq!(cache.entries.len(), 2);
     }
 
     // --- SemanticCache -------------------------------------------------------------

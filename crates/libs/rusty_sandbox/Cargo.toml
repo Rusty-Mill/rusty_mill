@@ -1,0 +1,26 @@
+[package]
+name = "rusty_sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["sandbox", "landlock", "seccomp", "rlimit", "agent"]
+categories = ["os::linux-apis"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_err = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform = { workspace = true }
+platform-linux = { workspace = true }
+rusty_libc = { workspace = true, features = ["std"] }
+
+[lints.rust]
+missing_docs = "warn"

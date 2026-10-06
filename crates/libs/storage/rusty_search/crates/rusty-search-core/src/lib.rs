@@ -14,6 +14,8 @@ mod error;
 mod query;
 mod result;
 mod schema;
+#[cfg(feature = "serde-json")]
+pub mod serde_json_bridge;
 
 pub use backend::SearchBackend;
 pub use document::{Document, DocumentId};

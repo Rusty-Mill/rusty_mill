@@ -8,6 +8,13 @@ use tantivy::Term;
 
 use crate::schema_map::{FieldMeta, ID_FIELD_NAME};
 
+// The `rusty_serde::Value` <-> `serde_json::Value` conversion itself is
+// shared with every other serde_json-speaking backend; see
+// `rusty_search_core::serde_json_bridge` for its (documented) lossy points.
+use rusty_search_core::serde_json_bridge::{
+    json_to_value as json_value_to_rusty, value_to_json as rusty_value_to_json,
+};
+
 // `tantivy::schema::document::TantivyDocument::from_json_object` is
 // `tantivy`'s own API, hard-requiring literal `serde_json::Map`/`Value`
 // since `tantivy` itself depends on real `serde_json` - neither
@@ -16,50 +23,6 @@ use crate::schema_map::{FieldMeta, ID_FIELD_NAME};
 // between `rusty_serde::Value` (what `Document::fields` is) and
 // `serde_json::Value` (what `tantivy` needs) right at that boundary,
 // rather than anywhere else in this crate.
-
-fn rusty_value_to_json(value: RustyValue) -> serde_json::Value {
-    match value {
-        RustyValue::Null => serde_json::Value::Null,
-        RustyValue::Bool(b) => serde_json::Value::Bool(b),
-        RustyValue::Int(v) => serde_json::Value::Number(v.into()),
-        RustyValue::UInt(v) => serde_json::Value::Number(v.into()),
-        RustyValue::Float(v) => serde_json::Number::from_f64(v)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        RustyValue::String(s) => serde_json::Value::String(s),
-        RustyValue::Seq(items) => {
-            serde_json::Value::Array(items.into_iter().map(rusty_value_to_json).collect())
-        }
-        RustyValue::Map(entries) => serde_json::Value::Object(
-            entries
-                .into_iter()
-                .map(|(k, v)| (k, rusty_value_to_json(v)))
-                .collect(),
-        ),
-    }
-}
-
-fn json_value_to_rusty(value: serde_json::Value) -> RustyValue {
-    match value {
-        serde_json::Value::Null => RustyValue::Null,
-        serde_json::Value::Bool(b) => RustyValue::Bool(b),
-        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
-            (Some(v), _, _) => RustyValue::Int(v),
-            (None, Some(v), _) => RustyValue::UInt(v),
-            (None, None, Some(v)) => RustyValue::Float(v),
-            (None, None, None) => RustyValue::Null,
-        },
-        serde_json::Value::String(s) => RustyValue::String(s),
-        serde_json::Value::Array(items) => {
-            RustyValue::Seq(items.into_iter().map(json_value_to_rusty).collect())
-        }
-        serde_json::Value::Object(map) => RustyValue::Map(
-            map.into_iter()
-                .map(|(k, v)| (k, json_value_to_rusty(v)))
-                .collect(),
-        ),
-    }
-}
 
 /// Parses an RFC 3339 timestamp string into a Tantivy `DateTime`.
 pub fn parse_date(value: &str) -> Result<tantivy::DateTime, SearchError> {

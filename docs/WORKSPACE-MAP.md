@@ -24,14 +24,14 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. | 2 |
 | foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) | 1 |
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
-| foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 16 |
+| foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 17 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 3 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 27 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 32 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
-| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 11 |
+| foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. | 5 |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies | 6 |
 | foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. | 4 |
@@ -70,22 +70,25 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_acp | rusty-acp | Agent Communication Protocol (ACP) v0.2.0 for Rust: protocol types, an HTTP client, and a server framework for hosting agents. | 0 |
 | libs | rusty_adk | a2a-agent-server | Serves a Rust ADK agent over A2A, so agents in any language can talk to it | 0 |
 | libs | rusty_adk | adk-a2a | Serve a Rust ADK agent over the Agent2Agent (A2A) protocol | 2 |
-| libs | rusty_adk | adk-agents | Agents for the Rust ADK: LlmAgent, workflow agents, callbacks, and graph integration | 3 |
-| libs | rusty_adk | adk-core | Core ADK 2.0 data model: Content, Event, EventActions, State, Session, InvocationContext | 10 |
-| libs | rusty_adk | adk-graph | The ADK 2.0 workflow graph engine: nodes, edges, routes, joins, and interrupts | 4 |
+| libs | rusty_adk | adk-agents | Agents for the Rust ADK: LlmAgent, workflow agents, callbacks, and graph integration | 4 |
+| libs | rusty_adk | adk-agui | Serve a Rust ADK agent over AG-UI (the Agent-User Interaction protocol) | 1 |
+| libs | rusty_adk | adk-core | Core ADK 2.0 data model: Content, Event, EventActions, State, Session, InvocationContext | 11 |
+| libs | rusty_adk | adk-graph | The ADK 2.0 workflow graph engine: nodes, edges, routes, joins, and interrupts | 5 |
 | libs | rusty_adk | adk-macros | Procedural macros for the Rust ADK: #[adk_tool] | 1 |
 | libs | rusty_adk | adk-mcp | Model Context Protocol transports for the Rust ADK: serve ADK tools, or consume an MCP server's | 1 |
-| libs | rusty_adk | adk-models | Model abstraction and provider connectors for the Rust ADK | 4 |
-| libs | rusty_adk | adk-runner | The ADK runtime event loop: orchestrates agents, commits state, and streams events | 2 |
-| libs | rusty_adk | adk-sessions | Session, artifact, and memory service implementations for the Rust ADK | 8 |
-| libs | rusty_adk | adk-tools | Tool abstraction for the Rust ADK: Tool trait, FunctionTool, ToolContext, toolsets | 6 |
+| libs | rusty_adk | adk-models | Model abstraction and provider connectors for the Rust ADK | 5 |
+| libs | rusty_adk | adk-runner | The ADK runtime event loop: orchestrates agents, commits state, and streams events | 3 |
+| libs | rusty_adk | adk-sessions | Session, artifact, and memory service implementations for the Rust ADK | 9 |
+| libs | rusty_adk | adk-tools | Tool abstraction for the Rust ADK: Tool trait, FunctionTool, ToolContext, toolsets | 7 |
+| libs | rusty_adk | agui-agent-server | Serves a Rust ADK agent over AG-UI, so the workspace's frontend bindings, channels, routines and gateway can drive it | 0 |
 | libs | rusty_adk | mcp-tool-server | Serves Rust ADK tools over MCP, so ADK agents in any language can call them | 0 |
-| libs | rusty_adk | rusty-adk | A Rust implementation of the Agent Development Kit (ADK) 2.0 architecture | 3 |
+| libs | rusty_adk | rusty-adk | A Rust implementation of the Agent Development Kit (ADK) 2.0 architecture | 4 |
 | libs | rusty_adk | weather-agent | End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop | 0 |
-| libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 3 |
+| libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 8 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 0 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
-| libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 0 |
+| libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
+| libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core | 1 |
 | libs | rusty_db | rusty-db-core | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db) | 4 |
 | libs | rusty_db | rusty-db-derive | #[derive(Mapped)] macro for rusty_db: maps a struct to a table | 1 |
@@ -113,6 +116,8 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_rag | rusty_rag | Sovereign AI Retrieval-Augmented Generation (RAG) &amp; Question Answering Engine for Rusty Mill | 0 |
 | libs | rusty_rdp | rusty_rdp | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format in Rust. | 0 |
 | libs | rusty_request | rusty_request | An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http. | 14 |
+| libs | rusty_routine | rusty_routine | Routines for AG-UI agents: a cron schedule that posts a RunAgentInput on time, disabled after too many consecutive failures | 0 |
+| libs | rusty_sandbox | rusty_sandbox | Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec | 4 |
 | libs | rusty_search | rusty-search | Async, pluggable search interface for Rust: swap search engines without changing application code | 0 |
 | libs | rusty_search | rusty-search-algolia | Algolia-backed SearchBackend implementation for rusty_search: a hosted search SaaS | 1 |
 | libs | rusty_search | rusty-search-azure-search | Azure AI Search-backed SearchBackend implementation for rusty_search: a hosted search-as-a-service on Azure | 1 |
@@ -125,7 +130,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_search | rusty-search-solr | Apache Solr-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
 | libs | rusty_search | rusty-search-sqlite-fts5 | SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables | 1 |
 | libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 1 |
-| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 4 |
+| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 9 |
 | libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
 | libs | rusty_stream | rusty_stream | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
@@ -141,8 +146,9 @@ Families are the current directories immediately below `crates/`.
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
 | apps | nexus | nexus-acp | Nexus ACP host + server — outbound Agent Communication Protocol host for external agent processes (BL-144) and inbound JSON-RPC surface exposing Nexus's agent IPC to Hermes-compatible clients (BL-145) | 2 |
 | apps | nexus | nexus-agent | Nexus agent system: Agent trait, Plan/Step types, and PlanExecutor driving tool calls through kernel IPC (PRD-15 scaffold) | 1 |
+| apps | nexus | nexus-agui | Serve a Nexus agent session over AG-UI: the ai-runtime's typed AiEvent stream behind rusty_agui's Agent trait, with round approval as a frontend tool call (ADR-0007 follow-ons step 10) | 0 |
 | apps | nexus | nexus-ai | Nexus AI engine: provider traits, embeddings, RAG pipeline | 1 |
-| apps | nexus | nexus-ai-runtime | Nexus unified AI/agent event loop (BL-134, ADR 0028): task scheduler, typed AiEvent channel, dedicated worker pool. | 2 |
+| apps | nexus | nexus-ai-runtime | Nexus unified AI/agent event loop (BL-134, ADR 0028): task scheduler, typed AiEvent channel, dedicated worker pool. | 3 |
 | apps | nexus | nexus-audio | Nexus audio subsystem: STT + TTS provider traits with local / provider-routed / platform backends (BL-117) | 1 |
 | apps | nexus | nexus-bootstrap | Nexus runtime bootstrap: assembles kernel, plugin loader, and core plugins for CLI/TUI invokers | 3 |
 | apps | nexus | nexus-cli | Nexus IDE — headless CLI | 0 |
@@ -157,7 +163,7 @@ Families are the current directories immediately below `crates/`.
 | apps | nexus | nexus-fuzz | Nexus security fuzz targets (BL-103). Stable-Rust smoke runner; libFuzzer/cargo-fuzz integration is operator-side. | 0 |
 | apps | nexus | nexus-git | Nexus git integration: read-only status, diff, blame, log via libgit2 | 3 |
 | apps | nexus | nexus-hashline | Hashline patch format for Nexus: content-hash-anchored edits with TAG hashing, an applier, and 3-way merge recovery (RFC 0005 Phase 5.1) | 1 |
-| apps | nexus | nexus-kernel | Nexus kernel: event bus, plugin lifecycle, capability system | 28 |
+| apps | nexus | nexus-kernel | Nexus kernel: event bus, plugin lifecycle, capability system | 29 |
 | apps | nexus | nexus-kv | Nexus KV store backends (SQLite on disk, in-memory for tests) implementing nexus-kernel::KvStore | 1 |
 | apps | nexus | nexus-linkpreview | Nexus link-preview subsystem: best-effort OG/Twitter-card metadata fetch for canvas link nodes | 1 |
 | apps | nexus | nexus-lsp | Nexus LSP host — spawns external Language Server Protocol servers and bridges JSON-RPC to the kernel IPC bus | 1 |
@@ -206,14 +212,15 @@ Families are the current directories immediately below `crates/`.
 | apps | rusty_inventory | inventory-cli | Search every AI agent and IDE conversation on your machine, from the terminal | 0 |
 | apps | rusty_inventory | inventory-core | Local-first index over the conversation history AI coding tools write to disk | 2 |
 | apps | rusty_inventory | inventory-tauri | Menu bar app: one keystroke to every AI conversation on your machine | 0 |
-| apps | rusty_key | rk-app |  | 0 |
+| apps | rusty_key | rk-agui | Serve a Rusty Keys session over AG-UI: a Session per thread behind rusty_agui's Agent trait, with the approval gate and plan exits as frontend tool calls (ADR-0007 follow-ons step 10) | 0 |
+| apps | rusty_key | rk-app |  | 1 |
 | apps | rusty_key | rk-compose |  | 1 |
-| apps | rusty_key | rk-config |  | 7 |
-| apps | rusty_key | rk-constrain |  | 4 |
+| apps | rusty_key | rk-config |  | 8 |
+| apps | rusty_key | rk-constrain |  | 5 |
 | apps | rusty_key | rk-feed |  | 2 |
-| apps | rusty_key | rk-kernel |  | 1 |
+| apps | rusty_key | rk-kernel |  | 2 |
 | apps | rusty_key | rk-mcp |  | 1 |
-| apps | rusty_key | rk-observe |  | 6 |
+| apps | rusty_key | rk-observe |  | 7 |
 | apps | rusty_meshed | rusty-meshed-cli | The meshed operator CLI (health/lineage/metrics/slo commands), ported from meshed.cli. | 0 |
 | apps | rusty_meshed | rusty-meshed-core | Shared platform config for rusty_meshed: env-prefixed settings loaded once, injected into every other rusty_meshed crate. | 4 |
 | apps | rusty_meshed | rusty-meshed-domains | The manpower domain: event schemas, domain data products (personnel lifecycle, position management, readiness reporting), scenario builder, and demo generators, ported from meshed.domains. | 0 |
