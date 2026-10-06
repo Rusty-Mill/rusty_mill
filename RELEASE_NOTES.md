@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_http and rusty_request: head cap, chunked body bound, no hidden pool replay
-**2026-10-05** · PR pending (branch `claude/new-session-cihrd9`) · consolidation review first batch B1, B2(a), B3
+**2026-10-06** · [#526](https://github.com/Rusty-Mill/rusty_mill/pull/526) · consolidation review first batch B1, B2(a), B3
 
 - **Fixed:** `rusty_http::head::parse_request_head`/`parse_response_head` enforce `max_head_len` on a head that completes, not only on one that has not; a terminated head over the cap is `HeadTooLarge`. Only the head's own bytes count, so body or upgrade bytes buffered after the blank line never trip it. All three transport adapters inherit the fix.
 - **Fixed:** `read_body` on the `sync`, `async_tokio` and `tokio_native` adapters bounds a chunked body's decoded total by `DEFAULT_MAX_BODY_LEN` (1 MiB), as it already did for `Content-Length` and close-delimited framing, with a checked addition before each extend. `read_chunked_body` stays a line-bounded primitive with no aggregate cap and is documented as such.
