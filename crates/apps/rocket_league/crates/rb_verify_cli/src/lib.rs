@@ -13,8 +13,12 @@ use rb_physics_bullet::world::{
 };
 use rb_physics_bullet::PhysicsWorld;
 use rb_replay_ingest::ReplayFileSource;
-use rb_scenario::Scenario;
 use std::path::Path;
+
+mod scenario;
+pub use scenario::{
+    compare_scenario, simulate_scenario, ScenarioComparison, ScenarioRow, SCENARIO_TICK_SECS,
+};
 
 /// Default timestamp tolerance (seconds) `rb-verify` uses when the caller
 /// doesn't supply one explicitly (see `main.rs`'s optional third
@@ -408,36 +412,11 @@ pub fn boost_is_unlimited(frames: &[PhysicsFrame]) -> bool {
     held >= UNLIMITED_BOOST_MIN_HELD_FRAMES && !drained
 }
 
-/// Seconds per tick of a scenario run: the game's 120 Hz.
-pub const SCENARIO_TICK_SECS: f32 = 1.0 / 120.0;
-
-/// What the port does with a scenario (`docs/research/BOT-CAPTURE-PLAN.md`):
-/// the start state, then one frame after each tick of the scenario's input
-/// tape (settling and a final neutral tick included). The first frame is the
-/// start state and carries no input; later frames carry the input that
-/// produced them.
-pub fn simulate_scenario(scenario: &Scenario) -> Vec<PhysicsFrame> {
-    let start = scenario.initial_frame();
-    let mut world = PhysicsWorld::from_frame(&start);
-    let mut frames = vec![start];
-    for tick in 0..=scenario.total_ticks() {
-        let input = scenario.input_at(tick).to_controller_input();
-        world.set_car_input(0, input);
-        world.step(SCENARIO_TICK_SECS);
-        let mut frame = world.frame();
-        frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
-        if let Some(car) = frame.cars.first_mut() {
-            car.input = Some(input);
-        }
-        frames.push(frame);
-    }
-    frames
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use rb_scenario::Scenario;
 
     fn replay_fixture() -> &'static str {
         concat!(

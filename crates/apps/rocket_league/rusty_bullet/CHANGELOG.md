@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0057 (`RB-VERIFY-003-FR-011`): `rb-verify --scenario <file> --against
+  <capture>` scores a scripted scenario's recording against the port's
+  prediction (`compare_scenario`).
 - ADR-0056 (`RB-VERIFY-003-FR-010`): `rb_scenario` crate and
   `rb-verify --scenario`, which runs a scripted scenario through the port.
 - ADR-0055 (`RB-PHYSICS-001-FR-136`): `jump::JumpClock`; the second jump

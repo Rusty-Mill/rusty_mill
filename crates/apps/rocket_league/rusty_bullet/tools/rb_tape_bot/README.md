@@ -76,6 +76,15 @@ measure run-to-run noise.
 
 ## Scoring
 
+`rb-verify --scenario scenarios/<name>.json --against <capture> [every]`
+lines the capture up with the port's free-run prediction (start found by
+the car's start location, lag 0 to 3 ticks) and prints per-tick error, the
+first tick the error passes 10 and 100 uu, and how many recorded inputs
+differ from the tape (nonzero means the bot did not play the tape as
+written). The three reproduction scenarios only follow their source
+recording for the first 0.2 to 0.5 s, because the tape does not carry the
+rest of the recorded inputs.
+
 `rb-verify --self-onestep <capture>` and `--self-kstep <capture> 30`. An
 airborne start has no grounded, neutral frame, which `rb-verify` currently
 needs to seed from; settle the car on the floor first (`settle_ticks`), as

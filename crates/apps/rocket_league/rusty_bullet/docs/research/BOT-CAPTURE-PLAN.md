@@ -136,6 +136,9 @@ the ball. Each has a port prediction in `tools/rb_tape_bot/README.md`, reproduci
 `rb-verify --scenario tools/rb_tape_bot/scenarios/<name>.json` (`rb_scenario`
 crate, ADR-0056).
 
+The comparison step exists: `rb-verify --scenario <file> --against <capture>`
+(FR-011, ADR-0057).
+
 ## Next
 
 Run risk spikes 1 and 2 on the owner's machine with a trivial tape (jump
