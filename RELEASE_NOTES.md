@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick on CopilotKit: a React page and runtime
+**2026-10-06** · [#534](https://github.com/Rusty-Mill/rusty_mill/pull/534) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · `crates/apps/rusty_tick/copilotkit-demo`
+
+- **Added:** a Node project with CopilotKit 1.77's runtime (`runtime.mjs`: `CopilotRuntime` with `rusty_tick`'s `POST /api/agent` as an `@ag-ui/client` `HttpAgent`, bearer token held server side, loopback only) and a Vite React page (`CopilotChat`, a `create_task` tool through `useFrontendTool`, a task list). Typing `add buy milk` streams the assistant's text, runs the tool in the page, and shows the assistant's confirmation on the follow-up run.
+- **Added:** nothing leaves the machine: `COPILOTKIT_TELEMETRY_DISABLED` is set by the runtime, the page sets `enableInspector={false}` (the inspector otherwise fetches Google Fonts and `cdn.copilotkit.ai/notifications`), and `scarfSettings` disables install-time analytics. The browser's network panel shows only the page's own origin.
+- **Verified:** `tsc --noEmit`, `vite build`, and a headless Chromium run against a real `rusty_tick`, the runtime and Vite: the task appeared and the assistant confirmed. This is the first check of the AG-UI endpoint against CopilotKit's own runtime and React SDK; before it, only the reference client had driven it.
+- **Known limitations:** run by hand, not in CI; pins CopilotKit `1.77.0` and `@ag-ui/client` `1.0.2`; `rusty_tick`'s agent understands only `add <title>`; the page's task list is its own state, not `rusty_tick`'s store.
+
+---
+
 ## rusty_tick: fix assignee/estimate save clash and calendar view menu order
 **2026-10-06** · [#530](https://github.com/Rusty-Mill/rusty_mill/pull/530)
 
@@ -43,17 +53,6 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 - **Added:** human in the loop, twice. An `approval_request` ends the run with a call to the frontend tool `approve_tool` (tool, arguments, trigger) while the turn waits in the gate; the tool message that answers it on the next run (`allow`, `always`, anything else blocks) is delivered to the gate and the same turn is relayed on. A `plan_exit` ends the run with a call to `plan_decide` carrying the plan; the answer (`proceed`, `reject`, `annotate <feedback>`) resolves it and the feedback is the run's result for the client to send as the next turn.
 - **Tests:** five end-to-end tests with `rusty_agui`'s client over a socket against the real harness (registry, workspace policy, aisdk loop, verifier, journal) in a temporary workspace with the scripted `FakeLanguageModel`: a turn that reads a file and replies; an approval answered with `allow` (the file is written), a prompt and a stray answer refused meanwhile; an approval blocked (no file, a blocked tool result, the turn continues); a plan exit annotated and resolved; missing and blank prompts. Two unit tests for the answer parsers.
 - **Known limitations:** blocking over a tokio handle; `bash_output` is not streamed; sessions live in memory for the process; a `Session` per thread shares the workspace's `.rustykeys` state, as the gateway's multi mode does.
-
----
-
-## nexus-agui: a Nexus agent session over AG-UI
-**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `nexus-ai-runtime`
-
-- **Added:** `nexus-agui` at `crates/apps/nexus/crates/nexus-agui`: `NexusAgent::new(runtime, handle)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves a Nexus agent session to everything that speaks AG-UI. `Runtime` is the port (`subscribe` to the typed `AiEvent` stream, `submit` a session, `decide` a round); `KernelRuntime` implements it over a `KernelPluginContext` with `com.nexus.ai.runtime::submit`, a `CustomPrefix` subscription on `com.nexus.ai.runtime.`, and `com.nexus.agent::round_decide`.
-- **Added:** the mapping. The last user message is the goal of one `Session` task (`forwardedProps.archetype` picks the archetype); `TokenChunk` streams as deltas of one message; `ToolCalled` is `TOOL_CALL_START`/`ARGS`/`END` with the runtime's arguments preview (quoted when it is not JSON) and `ToolResult` is `TOOL_CALL_RESULT` (an error as `{"error": …}`); `Finished` ends the run with `{sessionId, outcome, tokensUsed}` and, when nothing streamed, the last round's text as the answer; `Failed`, `Cancelled`, a refused `submit`, a closed stream, an empty or missing user message and a tool message answering no proposed round are `RUN_ERROR`.
-- **Added:** human in the loop, opt-in through `with_approval(timeout_secs)`: rounds are gated, a `RoundProposed` sends its narration as text and ends the run with a call to the frontend tool `round_decide` (id `<session>:<round>`, arguments `round` and `narration`); the tool message that answers it on the next run of the thread is delivered as the decision (`approve`/`yes`/`ok` approve all; a JSON object passes through, so a `partial` decision works; other text aborts with that reason) and the same session is relayed until it finishes or proposes again. By default rounds are auto-approved and a run is one request.
-- **Tests:** five end-to-end tests with `rusty_agui`'s client over a socket against a scripted runtime (a streamed run with a tool call, result and final result; the last round's text when nothing streamed; a proposed round answered with approval, a stray answer on another thread refused, a second answer refused; an abort with its reason; failures, cancellation, a refused submit, no or blank user message) and three unit tests (decision parsing, the arguments preview, the last round's text).
-- **Known limitations:** one run is one session (the runtime's `submit` cannot continue a session; a resumed Nexus session is a fork), so a thread's earlier turns are not replayed; no artifacts; blocking over a tokio handle; not registered in `nexus-bootstrap`, a host mounts it with the invoker context; the `rusty_key` adapter is still to come.
 
 ---
 
@@ -811,7 +810,6 @@ Product-level detail is in the crate's own `RELEASE_NOTES.md` (v0.2.1) and
   unsigned; amending it was blocked in the session that made it. The
   trailers are a lookup shortcut for `git subtree split`, which can still
   reconstruct the split from history, so nothing depends on them.
-
 
 ## ADR-0003 Phase 4: apps/tools layer (125 crates, 21 families) — migration complete
 **2026-09-15** · spec [`PHASE-4-SPEC.md`](PHASE-4-SPEC.md) · log [`PLAN-REVIEW-LOG.md`](PLAN-REVIEW-LOG.md)
