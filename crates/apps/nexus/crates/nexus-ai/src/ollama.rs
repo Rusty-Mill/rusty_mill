@@ -306,6 +306,19 @@ fn is_unsupported_insert_error(msg: &str) -> bool {
 }
 
 #[cfg(test)]
+mod expected_dimension_tests {
+    use super::*;
+
+    #[test]
+    fn no_ollama_model_has_a_verified_dimension() {
+        for model in [None, Some("nomic-embed-text"), Some("mxbai-embed-large")] {
+            let provider = OllamaProvider::new(None, None, model.map(str::to_string));
+            assert_eq!(provider.expected_dimension(), None, "{model:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod fim_fallback_tests {
     use super::is_unsupported_insert_error;
 
@@ -633,6 +646,11 @@ impl EmbeddingProvider for OllamaProvider {
     fn dimension(&self) -> usize {
         EMBEDDING_DIMENSION
     }
+
+    // `expected_dimension` stays `None`: `EMBEDDING_DIMENSION` is the size of
+    // the default model only, the model is configurable
+    // (`ollama_embedding_model`), and nothing here verifies what Ollama
+    // returns. Not even the default model name is treated as authority.
 }
 
 // ─── Tool-aware request / response types ────────────────────────────────────

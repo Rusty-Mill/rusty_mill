@@ -437,12 +437,17 @@ pub async fn index_file_with(
         });
     }
 
+    // Read once: the shortcut and the validation below must agree on it.
+    let expected_dim = embedder.expected_dimension();
     let content_hash = blocks_content_hash(blocks);
     if mode == IndexMode::IfChanged {
         if let Some((stored_hash, stored_dim)) =
             vectorstore::stored_signature(ctx, file_path).await?
         {
-            if stored_hash == content_hash && stored_dim == embedder.dimension() {
+            // Only a *known* dimension equal to the stored one proves the
+            // stored vectors came from this embedder; an unknown dimension
+            // re-embeds rather than trust a legacy constant.
+            if stored_hash == content_hash && expected_dim == Some(stored_dim) {
                 return Ok(IndexOutcome {
                     chunks: 0,
                     skipped: true,
@@ -453,7 +458,7 @@ pub async fn index_file_with(
 
     let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
     let embeddings = embedder.embed(&texts).await?;
-    validate_embeddings(&embeddings, chunks.len())?;
+    validate_embeddings(&embeddings, chunks.len(), expected_dim)?;
 
     let chunk_embeddings: Vec<ChunkEmbedding> = chunks
         .into_iter()
@@ -477,15 +482,23 @@ pub async fn index_file_with(
 
 /// Check a provider's reply before anything is stored: exactly one embedding
 /// per chunk (a short or long reply is an error, never silently truncated by
-/// pairing), each non-empty and finite, all of one dimension.
+/// pairing), each non-empty and finite, all of one dimension, and -- when the
+/// provider reports a verified [`EmbeddingProvider::expected_dimension`] --
+/// every vector exactly that long.
 ///
-/// The dimension is deliberately not compared with
-/// [`EmbeddingProvider::dimension`]: for the Ollama and `OpenAI` providers that
-/// is a per-provider constant, not what a configured model actually emits.
+/// A reply of the wrong size would replace good vectors with ones that normal
+/// searches then exclude as a dimension mismatch. With an unknown dimension
+/// (`None`) only uniformity can be checked. The file's *previous* dimension is
+/// deliberately not required: a valid model change must be able to replace old
+/// vectors. A model change that keeps the same dimension is not detectable here.
 ///
 /// # Errors
 /// Returns [`AiError::Provider`] describing the first problem found.
-pub(crate) fn validate_embeddings(embeddings: &[Vec<f32>], expected: usize) -> Result<(), AiError> {
+pub(crate) fn validate_embeddings(
+    embeddings: &[Vec<f32>],
+    expected: usize,
+    expected_dim: Option<usize>,
+) -> Result<(), AiError> {
     if embeddings.len() != expected {
         return Err(AiError::Provider(format!(
             "embedding provider returned {} vectors for {expected} chunks",
@@ -493,6 +506,14 @@ pub(crate) fn validate_embeddings(embeddings: &[Vec<f32>], expected: usize) -> R
         )));
     }
     let dim = embeddings.first().map_or(0, Vec::len);
+    if let Some(declared) = expected_dim {
+        if let Some(i) = embeddings.iter().position(|e| e.len() != declared) {
+            return Err(AiError::Provider(format!(
+                "embedding provider returned {} dimensions for chunk {i} but its verified dimension is {declared}",
+                embeddings[i].len()
+            )));
+        }
+    }
     for (i, embedding) in embeddings.iter().enumerate() {
         if embedding.is_empty() {
             return Err(AiError::Provider(format!(
@@ -787,6 +808,9 @@ mod tests {
         }
         fn dimension(&self) -> usize {
             self.vector.len()
+        }
+        fn expected_dimension(&self) -> Option<usize> {
+            Some(self.vector.len())
         }
     }
 
@@ -1935,33 +1959,170 @@ mod tests {
         }
     }
 
+    /// An embedder with a test-chosen verified dimension (or none), whatever
+    /// it actually replies. Its legacy `dimension()` is deliberately wrong.
+    struct KnownDimEmbedder {
+        expected: Option<usize>,
+        reply: Vec<Vec<f32>>,
+        calls: Mutex<u32>,
+    }
+
+    impl KnownDimEmbedder {
+        fn new(expected: Option<usize>, reply: Vec<Vec<f32>>) -> Self {
+            Self {
+                expected,
+                reply,
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for KnownDimEmbedder {
+        async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, AiError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(self.reply.clone())
+        }
+        fn dimension(&self) -> usize {
+            768 // a legacy constant that nothing may trust
+        }
+        fn expected_dimension(&self) -> Option<usize> {
+            self.expected
+        }
+    }
+
+    #[tokio::test]
+    async fn a_known_dimension_rejects_a_uniformly_wrong_sized_reply_with_no_writes() {
+        let blocks = hello_blocks();
+        for mode in [IndexMode::IfChanged, IndexMode::Force] {
+            // Stored vectors are good: dimension 1536, from older content so
+            // IfChanged embeds too. The provider is known to return 1536 but
+            // answers with uniform 1024-dimensional vectors.
+            let dispatcher =
+                Arc::new(StubDispatcher::new(Vec::new()).seed_stored("notes/a.md", "old", 1536));
+            let embedder = KnownDimEmbedder::new(Some(1536), vec![vec![0.1; 1024]]);
+            let (ctx, _tmp) = make_ctx(dispatcher.clone());
+
+            let err = index_file_with(&ctx, &embedder, "notes/a.md", &blocks, mode)
+                .await
+                .expect_err("wrong-sized reply must fail");
+
+            assert!(
+                matches!(&err, AiError::Provider(m) if m.contains("1024") && m.contains("1536")),
+                "{mode:?}: {err:?}"
+            );
+            assert_eq!(*embedder.calls.lock().unwrap(), 1, "{mode:?}");
+            let commands = storage_commands(&dispatcher);
+            assert!(
+                !commands
+                    .iter()
+                    .any(|c| c == "vector_insert" || c == "vector_delete_by_file"),
+                "{mode:?}: stored vectors must stay untouched, saw {commands:?}"
+            );
+            assert_eq!(
+                dispatcher.stored.lock().unwrap().get("notes/a.md"),
+                Some(&("old".to_string(), 1536)),
+                "{mode:?}: stored signature changed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_dimension_change_replaces_the_old_vectors_in_both_modes() {
+        let blocks = hello_blocks();
+        let hash = blocks_content_hash(&blocks);
+        for mode in [IndexMode::IfChanged, IndexMode::Force] {
+            // Same content, but stored at 1024; the provider now verifiably
+            // returns 1536. The old dimension is not required to match.
+            let dispatcher =
+                Arc::new(StubDispatcher::new(Vec::new()).seed_stored("notes/a.md", &hash, 1024));
+            let embedder = KnownDimEmbedder::new(Some(1536), vec![vec![0.1; 1536]]);
+            let (ctx, _tmp) = make_ctx(dispatcher.clone());
+
+            let outcome = index_file_with(&ctx, &embedder, "notes/a.md", &blocks, mode)
+                .await
+                .expect("a verified dimension change must be allowed to replace");
+
+            assert!(!outcome.skipped, "{mode:?}");
+            assert_eq!(outcome.chunks, 1, "{mode:?}");
+            assert!(
+                storage_commands(&dispatcher)
+                    .iter()
+                    .any(|c| c == "vector_insert"),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_dimension_is_never_skipped_and_is_checked_for_uniformity_only() {
+        let blocks = hello_blocks();
+        let hash = blocks_content_hash(&blocks);
+        for mode in [IndexMode::IfChanged, IndexMode::Force] {
+            // Hash and dimension both match the stored signature, which would
+            // be a skip for a known dimension. With none known it re-embeds.
+            let dispatcher =
+                Arc::new(StubDispatcher::new(Vec::new()).seed_stored("notes/a.md", &hash, 5));
+            let embedder = KnownDimEmbedder::new(None, vec![vec![0.1; 5]]);
+            let (ctx, _tmp) = make_ctx(dispatcher.clone());
+
+            let outcome = index_file_with(&ctx, &embedder, "notes/a.md", &blocks, mode)
+                .await
+                .expect("uniform reply accepted");
+
+            assert!(
+                !outcome.skipped,
+                "{mode:?}: unknown dimension must re-embed"
+            );
+            assert_eq!(*embedder.calls.lock().unwrap(), 1, "{mode:?}");
+
+            // Any uniform size is accepted when nothing is known, including
+            // one that differs from the legacy `dimension()`.
+            let dispatcher = Arc::new(StubDispatcher::new(Vec::new()));
+            let embedder = KnownDimEmbedder::new(None, vec![vec![0.1; 1024]]);
+            let (ctx, _tmp) = make_ctx(dispatcher.clone());
+            index_file_with(&ctx, &embedder, "notes/b.md", &blocks, mode)
+                .await
+                .expect("uniform 1024 accepted without a verified dimension");
+        }
+    }
+
     #[test]
     fn validate_embeddings_accepts_exactly_one_finite_uniform_vector_per_chunk() {
-        assert!(validate_embeddings(&[vec![0.5, -0.5], vec![1.0, 2.0]], 2).is_ok());
-        // A configured model's real dimension may differ from the provider's
-        // constant `dimension()`, so only uniformity is required.
-        assert!(validate_embeddings(&[vec![0.5; 1024]], 1).is_ok());
-
-        for (what, bad, expected) in [
-            ("too few", vec![vec![1.0]], 2),
-            ("too many", vec![vec![1.0], vec![1.0]], 1),
-            ("none for one chunk", vec![], 1),
-            ("empty vector", vec![vec![1.0], vec![]], 2),
-            ("mixed dimensions", vec![vec![1.0, 2.0], vec![1.0]], 2),
-            ("NaN", vec![vec![1.0, f32::NAN]], 1),
-            ("negative infinity", vec![vec![f32::NEG_INFINITY]], 1),
-        ] {
-            assert!(
-                matches!(
-                    validate_embeddings(&bad, expected),
-                    Err(AiError::Provider(_))
-                ),
-                "{what}"
-            );
+        for known in [Some(2), None] {
+            assert!(validate_embeddings(&[vec![0.5, -0.5], vec![1.0, 2.0]], 2, known).is_ok());
+            for (what, bad, expected) in [
+                ("too few", vec![vec![1.0, 1.0]], 2),
+                ("too many", vec![vec![1.0, 1.0], vec![1.0, 1.0]], 1),
+                ("none for one chunk", vec![], 1),
+                ("empty vector", vec![vec![1.0, 1.0], vec![]], 2),
+                ("mixed dimensions", vec![vec![1.0, 2.0], vec![1.0]], 2),
+                ("NaN", vec![vec![1.0, f32::NAN]], 1),
+                ("negative infinity", vec![vec![f32::NEG_INFINITY, 1.0]], 1),
+            ] {
+                assert!(
+                    matches!(
+                        validate_embeddings(&bad, expected, known),
+                        Err(AiError::Provider(_))
+                    ),
+                    "{what} with expected dimension {known:?}"
+                );
+            }
         }
         // Nothing to embed is not an error here: `index_file_with` deletes
         // instead and never reaches validation.
-        assert!(validate_embeddings(&[], 0).is_ok());
+        assert!(validate_embeddings(&[], 0, Some(2)).is_ok());
+    }
+
+    #[test]
+    fn a_known_dimension_rejects_every_wrong_length_vector() {
+        let err = validate_embeddings(&[vec![0.5; 3], vec![0.5; 3]], 2, Some(1536)).unwrap_err();
+        assert!(
+            matches!(&err, AiError::Provider(m) if m.contains("3 dimensions") && m.contains("1536")),
+            "{err:?}"
+        );
+        assert!(validate_embeddings(&[vec![0.5; 3], vec![0.5; 3]], 2, Some(3)).is_ok());
+        assert!(validate_embeddings(&[vec![0.5; 1024]], 1, None).is_ok());
     }
 
     #[test]
