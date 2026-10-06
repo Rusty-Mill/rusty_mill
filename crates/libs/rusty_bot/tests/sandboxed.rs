@@ -3,9 +3,12 @@
 //! sandbox; elsewhere `start` refuses and that is the test.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use rusty_bot::{default_limits, executor, start, BotSpec, Fleet};
+#[cfg(target_os = "linux")]
+use rusty_bot::Fleet;
+use rusty_bot::{default_limits, executor, start, BotSpec};
 
 fn scratch(name: &str) -> PathBuf {
     let base = std::env::temp_dir().join(format!("rusty-bot-{name}-{}", std::process::id()));
