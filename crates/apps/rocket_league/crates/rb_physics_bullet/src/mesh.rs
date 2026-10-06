@@ -416,6 +416,7 @@ impl StaticMesh {
                     .map(|distance| RayHit {
                         distance,
                         normal: triangle.normal,
+                        dynamic: false,
                     })
             })
             .min_by(|a, b| a.distance.total_cmp(&b.distance))

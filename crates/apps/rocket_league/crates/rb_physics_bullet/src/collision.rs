@@ -899,6 +899,10 @@ pub struct RayHit {
     pub distance: f32,
     /// Surface normal at the hit, pointing back toward the ray's start side.
     pub normal: Vec3,
+    /// Whether the surface belongs to a body that moves (the ball) rather
+    /// than the static arena. Wheel pushback is for static surfaces only
+    /// (`RB-PHYSICS-001-FR-138`).
+    pub dynamic: bool,
 }
 
 /// Bisection steps of `raycast`: brackets the surface to `length / 2^16`
@@ -931,6 +935,7 @@ pub fn raycast_sphere(
     Some(RayHit {
         distance,
         normal: (origin + direction * distance - center) * (1.0 / radius),
+        dynamic: true,
     })
 }
 
@@ -976,6 +981,7 @@ pub fn raycast(
     Some(RayHit {
         distance,
         normal: hit.normal,
+        dynamic: false,
     })
 }
 /// Analytic sphere-vs-box contact: the box's closest point to the sphere

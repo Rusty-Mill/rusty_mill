@@ -391,6 +391,44 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   front-loaded (+129 uu/s on the first tick after, then +19, against the
   game's +40, +30, +23), so the ray-ball suspension force is stronger and
   shorter than the game's.
+- **Push shape, localised (2026-10-06, nothing committed to the physics)**:
+  scratch tracked runs over `hitjump` 77.6-77.72 s (an `Env` snapped to the
+  recording each tick, then parts of it left free):
+  - *Snap everything every tick* (one-step): the port's car matches the
+    game's within 4 uu/s on every tick of the hit (405 / 445 / 475 / 498 /
+    493 against 400 / 441 / 472 / 495 / 490). The wheel-ray-ball force is
+    right when fed the game's states.
+  - *Car snapped, ball left free*: the car's first push after the hit is
+    +135 uu/s (535) instead of +40 (445); later ticks are fine. *Ball
+    snapped, car free*: +36, and a slow drift (20 uu/s by 77.69 s).
+  - The trigger is the ball's height on the first tick after the hit: the
+    port's ball is at z 93.14, the game's at 92.14. Lowering the free ball
+    by 0.5 uu alone brings the push back to 441 (game 445), so it is a
+    threshold (probably a second hitbox-ball contact), not a stiffness.
+  - Why the ball is 1 uu high: the game's ball moves (-607, -787, -120)
+    uu/s' worth in the hit tick (position change times 120), the port's
+    solved ball velocity before the extra hit velocity is (-506, -709, 0).
+    The game's contact solve pushes the ball down (-120) and about 17%
+    faster horizontally; implied extra velocity in the game (total minus
+    that) is (-255, -1052, -170) against the port's formula (-305, -1084,
+    -279). So the port's contact solve gives the ball no downward velocity
+    where the game's does, and its extra velocity is larger in z; the sum
+    nearly agrees, the split does not, and the split decides the next tick.
+  - Next: find why the port's sphere-box solve leaves the ball's vertical
+    velocity at 0 on the hit tick (the ball is 73 uu below the car origin,
+    contact normal about 0.54 forward and 0.84 downward by the recorded
+    geometry), and whether the game's z scale applies to the extra velocity
+    as modelled.
+- **Push shape fixed (2026-10-06, FR-138, ADR-0063)**: the cliff was the
+  wheel pushback (`trace < pushback_reach`), Bullet's response against a
+  static surface, applied to a wheel ray that hit the ball. With the ball's
+  rays given spring and damper only, the free run's car upward speed after
+  the hit is 400, 436, 463, 483, 475, 469 uu/s against the game's 405, 445,
+  475, 498, 493, 488. The remaining difference is the hit tick's solved ball
+  velocity (the port's contact solve leaves the ball no downward velocity on
+  its floor; the game's ball drops 1 uu) and the extra velocity's z share;
+  a sleeping-ball wake rule was tried (no floor contact on the wake tick) and
+  did not change the push, so it is not that.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball
