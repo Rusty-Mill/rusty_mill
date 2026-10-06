@@ -12,6 +12,8 @@ import { useNow } from '@/lib/hooks'
 import { useReorderDrag } from '@/lib/useReorderDrag'
 import { useUi } from '@/store/ui'
 import { reorderItems, tasksForView, type ViewSpec } from '@/features/tasks/organize'
+import { assigneeMap, knownNames } from '../assignees/logic'
+import { useAssignees } from '../assignees/store'
 import { FilterDialog } from '../filters/FilterDialog'
 import type { Filter } from '../filters/logic'
 import { useFilters } from '../filters/store'
@@ -94,15 +96,18 @@ export function Sidebar() {
   const actions = useActions()
   const { api } = useServices()
   const filters = useFilters((s) => s.items)
+  const assigneeItems = useAssignees((s) => s.items)
+  const assignees = useMemo(() => assigneeMap(assigneeItems), [assigneeItems])
   const inboxId = useData((s) => s.inboxId)
   const listMap = useData((s) => s.lists)
   const taskMap = useData((s) => s.tasks)
   const tagMap = useData((s) => s.tags)
   const lists = useMemo(() => Object.values(listMap).sort((a, b) => a.sortOrder - b.sortOrder), [listMap])
   const tags = useMemo(() => Object.values(tagMap).sort((a, b) => a.sortOrder - b.sortOrder), [tagMap])
-  const entities = useMemo(() => ({ tasks: Object.values(taskMap), lists, tags, inboxId, filters }), [taskMap, lists, tags, inboxId, filters])
+  const entities = useMemo(() => ({ tasks: Object.values(taskMap), lists, tags, inboxId, filters, assignees }), [taskMap, lists, tags, inboxId, filters, assignees])
   useEffect(() => {
     void useFilters.getState().load(api, actions.notify)
+    void useAssignees.getState().load(api, actions.notify)
   }, [api, actions.notify])
   const isCollapsed = useUiSection()
 
@@ -258,6 +263,7 @@ export function Sidebar() {
         filter={filterDialog?.filter ?? null}
         lists={lists}
         tags={tags}
+        assigneeNames={knownNames(assigneeItems)}
         onClose={() => setFilterDialog(null)}
         onSubmit={(input) => {
           const editing = filterDialog?.filter

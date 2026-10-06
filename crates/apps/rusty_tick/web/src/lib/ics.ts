@@ -7,6 +7,8 @@ import { addDays, startOfDay } from './date'
 import { parseRule } from './recurrence'
 
 export interface IcsTask {
+  /** The feed's `UID`, or one made from the title and dates when it has none: stable across fetches. */
+  uid: string
   title: string
   notes: string
   startMs: number | null
@@ -122,6 +124,7 @@ function add(out: IcsResult, p: Map<string, Prop>, isTodo: boolean): void {
   const understood = rrule !== '' && parseRule(rrule) !== null
   if (rrule && !understood) out.droppedRepeats++
   out.tasks.push({
+    uid: p.get('UID')?.value.trim() || `${title}|${startMs}|${dueMs}`,
     title,
     notes: unescapeText(p.get('DESCRIPTION')?.value ?? '').trim(),
     startMs,
