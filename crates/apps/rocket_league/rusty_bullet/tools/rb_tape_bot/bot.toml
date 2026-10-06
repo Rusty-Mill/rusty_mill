@@ -8,6 +8,14 @@ run_command_linux = "target/release/rb_tape_bot"
 # One process per car; the bot only plays the tape on car index 0.
 hivemind = false
 
+# Extra environment for the bot process. RLBot core (rc17,
+# ConfigParser.GetEnvironment) reads this table and sets each key on the
+# bot's process after inheriting its own environment, so a value here wins
+# over one set in the shell that started the GUI. Edit the path per run;
+# relative paths resolve from root_dir, which defaults to this file's folder.
+[settings.environment]
+RB_TAPE = "scenarios\prompt_dodge.json"
+
 [details]
 description = "Replays a scripted input tape from a known start state, for repeatable mechanic captures."
 developer = "rusty_bullet"
