@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.139.0
+- Version: 0.140.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6541,6 +6541,37 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
     - All four captures unchanged to the printed precision (no recorded
       second jump comes later than the window).
 
+- `RB-PHYSICS-001-FR-137` (the extra ball-hit velocity is added after the
+  ball moves; implemented and verified on all four captures, ADR-0062):
+  `PhysicsWorld::step` now integrates the ball's transform with the solved
+  velocity and only then adds `extra_ball_hit_velocity` and applies the
+  speed caps, as RocketSim's `Ball::_FinishPhysicsTick` follows Bullet's
+  integration. It was added before the move, so on the tick of a hit the
+  ball travelled about a half tick too far (8.4 uu of 16.7 on the
+  `car_over_ball` hit) and, one tick later, sat out of reach of the car's
+  wheel rays that the game's ball was still touching (FR-129).
+  - Why: `RB-RESEARCH-O010`. The recorded `hitjump` 77.642 s hit: ball
+    after the hit tick at (-5.1, -6.6, 92.1) in the game; the port gave
+    (-7.0, -15.2, 90.8), now (-4.4, -6.2, 93.1). The car then gains
+    upward speed for three more ticks in the game (405, 445, 475, 498
+    uu/s) while the port's contact ended in one tick (400, 392, 387).
+    Not a parameter: a 648-combination sweep of the hit's numbers found
+    nothing the full-capture gate accepted.
+  - **Verification**:
+    - `world` test
+      `the_extra_hit_velocity_changes_the_ball_after_it_has_moved_not_before`
+      (same position, different velocity with and without the extra
+      velocity).
+    - `--self-kstep 30` before -> after: `test2` ball 0.54 -> 0.17 uu, car
+      1.99 -> 2.01 uu/s; `hitjump` ball 92.95 -> 92.86, car 10.60 -> 10.49;
+      `front` and `side` unchanged (0.50, 0.45 uu/s). The sweep windows'
+      default row: `hitjump` 77.6-77.8 s car 51.5 -> 25.3 uu/s and ball 2.36 ->
+      0.99 uu, `test2` 5.7-5.9 s ball 2.91 -> 0.49, 12.2-12.4 s ball 1.84 ->
+      1.10.
+    - Not closed: the car's push after the hit is still concentrated (the
+      port's free run gains 129 uu/s on the first tick after, then 19; the
+      game 40, 30, 23).
+
 
 ## Architecture and interfaces
 
@@ -8031,6 +8062,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.140.0 (2026-10-06): `RB-PHYSICS-001-FR-137` — the extra ball-hit
+  velocity is added after the ball moves (ADR-0062). 455 tests in
+  `rb_physics_bullet`.
 - 0.139.0 (2026-10-05): `RB-PHYSICS-001-FR-136` — the second jump expires
   1.25 s after the first jump's hold ends (ADR-0055). 452 tests in
   `rb_physics_bullet`.

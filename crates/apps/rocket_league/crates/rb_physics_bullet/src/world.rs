@@ -1182,11 +1182,6 @@ impl PhysicsWorld {
         // applied right after this step's contact resolution (including
         // any net, just above), matching real RocketSim's own placement —
         // see `clamp_ball_velocity`'s own doc comment.
-        // RocketSim adds the extra hit velocity at the end of the tick
-        // (`Ball::_FinishPhysicsTick`), before the speed caps.
-        self.ball.linear_velocity += ball_hit_velocity;
-        clamp_ball_velocity(&mut self.ball);
-
         // Sleeping (RB-PHYSICS-001-FR-037): evaluated once every other
         // contact this step has already been resolved (including the net
         // panels just above) but before the transform integrates, so a
@@ -1199,6 +1194,11 @@ impl PhysicsWorld {
         }
 
         Self::integrate_transform_and_refresh_inertia(&mut self.ball, dt);
+        // RocketSim adds the extra hit velocity at the end of the tick
+        // (`Ball::_FinishPhysicsTick`), after Bullet has moved the ball, and
+        // then applies the speed caps.
+        self.ball.linear_velocity += ball_hit_velocity;
+        clamp_ball_velocity(&mut self.ball);
         for car in &mut self.cars {
             Self::integrate_transform_and_refresh_inertia(car, dt);
             // RB-PHYSICS-001-FR-087: clamp after the orientation has moved
@@ -1701,6 +1701,36 @@ mod tests {
         world.ball.position = ball_center + Vec3::new(world.cars[0].position.x, 0.0, 0.0);
         world.step(1.0 / 120.0);
         assert_eq!(world.ball_hit_ticks, vec![Some(0)], "tick 1 is in cooldown");
+    }
+
+    #[test]
+    fn the_extra_hit_velocity_changes_the_ball_after_it_has_moved_not_before() {
+        // RocketSim adds it after Bullet integrated the step, so the tick
+        // of the hit moves the ball with the solved velocity only
+        // (RB-PHYSICS-001-FR-137): same position, different velocity.
+        let hit = |hit_scale: f32| {
+            let mut car = RigidBody::standard_car(Vec3::ZERO);
+            car.linear_velocity = Vec3::new(1000.0, 0.0, 0.0);
+            let front = CAR_HALF_EXTENTS.x + crate::body::CAR_HITBOX_OFFSET.x;
+            let ball = Vec3::new(
+                front + crate::body::BALL_RADIUS - 1.0,
+                0.0,
+                crate::body::CAR_HITBOX_OFFSET.z,
+            );
+            let mut world =
+                PhysicsWorld::new(RigidBody::standard_ball(ball), flat_ground()).with_car(car);
+            world.gravity = Vec3::ZERO;
+            world.car_ball.hit_scale = hit_scale;
+            world.step(1.0 / 120.0);
+            world.ball
+        };
+        let with = hit(1.0);
+        let without = hit(0.0);
+        assert!(
+            (with.linear_velocity - without.linear_velocity).length() > 100.0,
+            "the extra velocity is added"
+        );
+        assert_eq!(with.position, without.position, "but after the move");
     }
 
     #[test]

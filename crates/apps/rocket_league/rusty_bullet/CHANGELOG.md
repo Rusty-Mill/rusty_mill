@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- ADR-0062 (`RB-PHYSICS-001-FR-137`, spec 0.140.0): the extra ball-hit
+  velocity is added after the ball's transform integrates, as RocketSim
+  does, not before. `test2` k = 30 ball distance 0.54 -> 0.17 uu,
+  `hitjump` car 10.60 -> 10.49 uu/s, `front`/`side` unchanged; the
+  `hitjump` 77.6 s hit window's car velocity error 51.5 -> 25.3 uu/s.
 - `rb-verify --scenario --against` (`RB-VERIFY-003-FR-011`, spec 0.23.0)
   places recorded frames by timestamp, so a capture hole skips ticks
   instead of shifting every later comparison. The eleven tape-bot

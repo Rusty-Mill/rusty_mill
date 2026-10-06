@@ -378,6 +378,19 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   the full-capture k = 30 table (test2, hitjump, front, side) decides.
   The cause is structural (what keeps the car and ball in contact for four
   ticks), as the next step says.
+- **Partly fixed (2026-10-06, FR-137, ADR-0062)**: the human capture shows
+  the hit is one frame of contact: at 77.6667 s the ball (centre 123 uu
+  ahead of and 73 below the car's origin, 0.8 uu inside the hitbox) has
+  already left at 1700 uu/s; from the next frame it is a gap of 5.5 uu and
+  growing, yet the car keeps gaining speed (+95, +40, +30, +23 uu/s) from
+  its wheel rays (FR-129) still reaching the ball. The port's ball had
+  moved twice as far on the hit tick (16.6 uu against the game's 8.3)
+  because the extra hit velocity was added before the position update; it
+  now matches (-4.4, -6.2, 93.1 against -5.1, -6.6, 92.1) and the car keeps
+  gaining speed after the hit. What remains: the port's push is
+  front-loaded (+129 uu/s on the first tick after, then +19, against the
+  game's +40, +30, +23), so the ray-ball suspension force is stronger and
+  shorter than the game's.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball
