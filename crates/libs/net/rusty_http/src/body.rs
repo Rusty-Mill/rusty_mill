@@ -18,18 +18,29 @@ use crate::util::next_line;
 /// instead of to the whole head.
 pub const DEFAULT_MAX_LINE_LEN: usize = 8 * 1024;
 
-/// Default cap on a whole `Content-Length`-framed or close-delimited body
-/// a transport adapter will buffer into memory (see
-/// `sync::SyncTransport::read_content_length_body`/
-/// `read_close_delimited_body` and their `async_tokio`/`tokio_native`
-/// counterparts). Larger than [`crate::head::DEFAULT_MAX_HEAD_LEN`] since a body
-/// carries real payload rather than framing metadata, but still bounded:
-/// an untrusted peer's declared `Content-Length` (or an unbounded
-/// close-delimited stream) must not be allowed to buffer arbitrarily
-/// much into memory. 128x the head default, matching the `1 << 20`
-/// initial-allocation clamp those functions already used to avoid
-/// pre-allocating on a bogus declared length.
+/// Default cap on a whole body a transport adapter's `read_body` will
+/// buffer into memory, whatever its framing: `Content-Length` (checked
+/// against the declared length before reading), close-delimited and
+/// chunked (checked against the running decoded total) -- see
+/// `sync::SyncTransport::read_body` and its `async_tokio`/`tokio_native`
+/// counterparts. Larger than [`crate::head::DEFAULT_MAX_HEAD_LEN`] since
+/// a body carries real payload rather than framing metadata, but still
+/// bounded: an untrusted peer's declared `Content-Length` (or an
+/// unbounded close-delimited or chunked stream) must not be allowed to
+/// buffer arbitrarily much into memory. 128x the head default, matching
+/// the `1 << 20` initial-allocation clamp those functions already used
+/// to avoid pre-allocating on a bogus declared length.
 pub const DEFAULT_MAX_BODY_LEN: u64 = 1 << 20;
+
+/// Whether appending `len` more bytes to a buffer already holding
+/// `buffered` would cross `max_body_len`. Checked arithmetic, so a sum
+/// that overflows `usize` counts as over the cap rather than wrapping.
+pub(crate) fn exceeds(buffered: usize, len: usize, max_body_len: u64) -> bool {
+    match buffered.checked_add(len) {
+        Some(total) => total as u64 > max_body_len,
+        None => true,
+    }
+}
 
 /// How a message body's end is determined once the head is parsed.
 /// Requests and responses use this differently (see
@@ -392,6 +403,16 @@ pub fn write_chunked_end(out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exceeds_is_a_checked_bound() {
+        assert!(!exceeds(0, 5, 5));
+        assert!(!exceeds(4, 1, 5));
+        assert!(exceeds(5, 1, 5));
+        assert!(exceeds(1, 5, 5));
+        // A sum that overflows `usize` is over any cap, not wrapped.
+        assert!(exceeds(usize::MAX, 1, u64::MAX));
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();
