@@ -317,14 +317,41 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   itself delivered 120 packets and 120 frames per second without a gap
   over 60 s (`rb_probe`), so the hole is in the plugin's path (the
   per-tick hook or the `GetPhysicsFrame` dedupe) or a game hitch.
-- **Effect**: `rb-verify` aligns by timestamp, so the comparison skips
-  the hole, but a 5-tick hole during a dodge hides the ticks of most
-  interest.
+- **Effect**: `rb-verify --scenario --against` aligns by timestamp since
+  RB-VERIFY-003 0.23.0, so the comparison skips the hole (before that,
+  every hole shifted the rest of the comparison: prompt_dodge read 8.5 uu
+  mean instead of 1.2). A 5-tick hole during a dodge still hides the ticks
+  of most interest, and the 2 to 7 missing ticks at the set frame hid the
+  car_over_ball contact itself.
 - **Reproduce**: any `replays/<scenario>.jsonl`; list consecutive
   `timestamp_secs` deltas above 0.0125.
 - **Next**: log the physics frame number per line and compare with the
   frame RLBot reports; check whether the hole coincides with the
   plugin's first write after `rb_capture_start` or with a fixed interval.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O010 — Car-ball hit: the game's impulse is larger and lasts several ticks
+
+- **Evidence (2026-10-06)**: `car_over_ball` tape-bot capture
+  (`replays/car_over_ball.jsonl`, gitignored; scenario
+  `tools/rb_tape_bot/scenarios/car_over_ball.json`, the `hitjump.jsonl`
+  77.642 s state). Car at 2150 uu/s onto a resting ball. The first
+  contact tick agrees: port tick 3 (43.9, 112.0, 163.1) velocity
+  (-1211, -1447, 400); game (43.9, 112.1, 163.2), (-1210, -1443, 405).
+  Then the game's car keeps gaining upward velocity for four ticks (405,
+  444, 475, 498 uu/s) and its horizontal velocity falls to (-1138,
+  -1311), while the port's contact ends in one tick (400, 392, 387;
+  -1214, -1452). Total game delta-v about (+221, +348, +178) against the
+  port's (+145, +208, +77). The ball leaves at 2050 uu/s in the game
+  (-862, -1838, -290, then bounces off the floor).
+- **Reproduce**: `rb-verify --scenario tools/rb_tape_bot/scenarios/car_over_ball.json --against replays/car_over_ball.jsonl 1`
+  (156 uu mean, over 100 uu at tick 71) and `rb-verify --scenario
+  tools/rb_tape_bot/scenarios/car_over_ball.json 1` for the port's own
+  ticks 0 to 6.
+- **Next**: compare the ball's post-hit velocity between port and game
+  (`--scenario` prints only the car; add the ball), then look at the
+  contact model: a sustained (multi-tick) car-ball contact with the ball
+  pinned against the floor, versus the port's single impulse.
 - **Status**: Open. **Owner**: baileyrd.
 
 ## Change history

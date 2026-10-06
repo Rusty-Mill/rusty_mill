@@ -155,7 +155,8 @@ a file; the GUI reconnects on the next Start Match.
   -0.2194, 1.2203) by `rb-verify --scenario-from` on the set frame; `pogo`
   pitch -1.2 and `car_over_ball` yaw -2.2569 likewise. Roll sign is right.
 - **Alignment.** `rb-verify --scenario ... --against` found the start in
-  every capture with lag 0 or 1.
+  every capture with lag 0 to 2. It now places recorded frames by
+  timestamp, because of the holes below.
 - **Protocol.** `rlbot` 0.6.0 (newest crate, schema `c38374e`) against
   core rc17 (schema `f90c844`): the `.fbs` diff is comments and one
   `deprecated` attribute; no crate bump needed.
@@ -167,31 +168,38 @@ a file; the GUI reconnects on the next Start Match.
 - **Dropped ticks.** Every capture has one hole of 5 ticks (0.0417 s)
   somewhere in the first two seconds of the tape, and 2 to 7 missing
   ticks at the state-set frame itself. Backlog item RB-RESEARCH-O009.
+  `rb-verify` skips the missing ticks (RB-VERIFY-003 0.23.0); before that
+  every hole shifted the rest of the comparison and inflated every score.
 - **Noise floor.** Two `prompt_dodge` runs: after aligning on the set
   frame, position differs by 2.8 uu mean and 13.8 uu max, almost all of
   it a one-tick offset of the jump (lag 0 vs lag 1).
 
 ### Results (2026-10-06, port vs game)
 
-`rb-verify --scenario scenarios/<name>.json --against replays/<name>.jsonl`.
-"Held" is the scenario table's port prediction against what the game did.
+`rb-verify --scenario scenarios/<name>.json --against replays/<name>.jsonl`,
+with frames aligned by timestamp (RB-VERIFY-003 0.23.0; the first scoring
+of these captures aligned by row and read every capture hole as a
+permanent 30 to 100 uu offset). "Held" is the scenario table's port
+prediction against what the game did.
 
 | Scenario | Lag | Pos. error mean / max (uu) | First over 10 / 100 uu | What the game did | Port prediction held? |
 |---|---|---|---|---|---|
-| prompt_dodge (two runs) | 0, 1 | 8.5 / 27.5 and 10.1 / 27.5 | tick 308 / never | dodge fires, 502 uu/s forward | yes |
-| late_dodge | 1 | 4.2 / 20.7 | 241 / never | no dodge on the 1.6 s press; car lands | yes (1.25 s window, FR-136) |
-| wavedash_early | 0 | 36.3 / 66.2 | 98 / never | flips in the air to 1466 uu/s, rises to 152 uu, lands at tick 209 | roughly (hop up), 66 uu off |
-| wavedash_mid | 0 | 22.6 / 45.0 | 73 / never | lands tick 28, 1466 uu/s peak, coasts to 436 | peak yes, 45 uu off |
-| wavedash_late | 0 | 15.3 / 33.6 | 84 / never | lands tick 30, 1454 uu/s peak, coasts to 441 | peak yes, 34 uu off |
-| speed_flip | 0 | 81.5 / 255.0 | 193 / 241 | flip from tick 216; 1913 uu/s at the end, but 550 uu/s velocity error during the flip | no: flip direction and height differ |
-| half_flip | 0 | 6.8 / 14.5 | 186 / never | flips, lands at tick 370 | yes |
-| pogo | 0 | 7.6 / 21.1 | 32 / never | contact jump to 520 uu/s, lands tick 141 | yes |
-| hard_landing_nose_first | 0 | 64.1 / 97.4 | 78 / never | nose landing at 2300 uu/s, settles to 1514 | no: diverges after the landing |
-| corner_slide | 0 | 86.7 / 177.6 | 41 / 126 | corner slide, stops | no: diverges in the slide |
-| car_over_ball | 0 | 119.9 / 216.6 | 1 / 76 | ball struck immediately (ball to 1870 uu/s) | no: contact differs from tick 1 |
+| prompt_dodge (two runs) | 1, 1 | 1.2 / 3.6 both | never / never | dodge fires, 502 uu/s forward | yes |
+| late_dodge | 2 | 1.8 / 4.7 | never / never | no dodge on the 1.6 s press; car lands | yes (1.25 s window, FR-136) |
+| wavedash_early | 0 | 14.2 / 25.3 | 98 / never | flips in the air to 1466 uu/s, rises to 152 uu, lands at tick 209 | roughly (hop up) |
+| wavedash_mid | 0 | 4.1 / 5.1 | never / never | lands tick 28, 1466 uu/s peak, coasts to 436 | yes |
+| wavedash_late | 0 | 4.1 / 5.1 | never / never | lands tick 30, 1454 uu/s peak, coasts to 441 | yes |
+| speed_flip | 0 | 94.4 / 289.3 | 218 / 237 | flip from tick 216; 1913 uu/s at the end, 550 uu/s velocity error during the flip | no: flip direction and height differ |
+| half_flip | 0 | 4.3 / 13.9 | 320 / never | flips, lands at tick 370 | yes |
+| pogo | 0 | 2.4 / 4.3 | never / never | contact jump to 520 uu/s, lands tick 141 | yes |
+| hard_landing_nose_first | 0 | 10.0 / 22.0 | 125 / never | nose landing at 2300 uu/s, settles to 1514 | yes, within 22 uu |
+| corner_slide | 0 | 100.3 / 177.6 | 41 / 95 | climbs the corner to 326 uu, the port only to 276 and comes down earlier | no: the corner climb |
+| car_over_ball | 1 | 156.2 / 290.5 | 2 / 71 | hits the ball at once; the car gains upward speed for 4 ticks after first contact | no: the contact impulse |
 
 The input-mismatch column of `rb-verify` is omitted: inputs are not
 recorded for a bot car (above). Captures live in `replays/` (gitignored).
+Eight of eleven scenarios agree within 25 uu over their whole tape; the
+three that do not are the next physics targets, see the run sheet.
 
 ### Open risks
 

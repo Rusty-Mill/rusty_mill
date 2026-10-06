@@ -93,33 +93,54 @@ Stage 0 and 1 (prompt_dodge, two runs):
 | Roll sign | pass, checked on corner_slide/pogo/car_over_ball (`--scenario-from` of the set frame reproduces the scenario rotation to 3 decimals) |
 | Run-to-run noise | 2.8 uu mean, 13.8 uu max between the two runs, a one-tick offset of the jump |
 
-Stage 2 results (`rb-verify --scenario ... --against`, port against game):
+Stage 2 results (`rb-verify --scenario ... --against`, port against game,
+re-scored after RB-VERIFY-003 0.23.0 aligned recorded frames by timestamp;
+the first scoring aligned by row and every capture hole became a permanent
+offset, which made prompt_dodge read 8.5 uu mean and car_over_ball look
+wrong from tick 1):
 
 | Scenario | Lag | Position error mean / max (uu) | First over 10 / 100 uu | Port prediction held? |
 |---|---|---|---|---|
-| prompt_dodge run 1 | 0 | 8.5 / 27.5 | 308 / never | yes, dodge at 502 uu/s |
-| prompt_dodge run 2 | 1 | 10.1 / 27.5 | 239 / never | yes |
-| late_dodge | 1 | 4.2 / 20.7 | 241 / never | yes, no dodge (FR-136 window) |
-| wavedash_early | 0 | 36.3 / 66.2 | 98 / never | roughly |
-| wavedash_mid | 0 | 22.6 / 45.0 | 73 / never | peak speed yes |
-| wavedash_late | 0 | 15.3 / 33.6 | 84 / never | peak speed yes |
-| speed_flip | 0 | 81.5 / 255.0 | 193 / 241 | no |
-| half_flip | 0 | 6.8 / 14.5 | 186 / never | yes |
-| pogo | 0 | 7.6 / 21.1 | 32 / never | yes |
-| hard_landing_nose_first | 0 | 64.1 / 97.4 | 78 / never | no |
-| corner_slide | 0 | 86.7 / 177.6 | 41 / 126 | no |
-| car_over_ball | 0 | 119.9 / 216.6 | 1 / 76 | no |
+| prompt_dodge run 1 | 1 | 1.2 / 3.6 | never / never | yes, dodge at 502 uu/s |
+| prompt_dodge run 2 | 1 | 1.2 / 3.6 | never / never | yes |
+| late_dodge | 2 | 1.8 / 4.7 | never / never | yes, no dodge (FR-136 window) |
+| wavedash_early | 0 | 14.2 / 25.3 | 98 / never | roughly |
+| wavedash_mid | 0 | 4.1 / 5.1 | never / never | yes |
+| wavedash_late | 0 | 4.1 / 5.1 | never / never | yes |
+| speed_flip | 0 | 94.4 / 289.3 | 218 / 237 | no |
+| half_flip | 0 | 4.3 / 13.9 | 320 / never | yes |
+| pogo | 0 | 2.4 / 4.3 | never / never | yes |
+| hard_landing_nose_first | 0 | 10.0 / 22.0 | 125 / never | yes, within 22 uu |
+| corner_slide | 0 | 100.3 / 177.6 | 41 / 95 | no |
+| car_over_ball | 1 | 156.2 / 290.5 | 2 / 71 | no |
 
 Input mismatches are not reported: the plugin records all-zero inputs for
 an RLBot-driven car (RB-RESEARCH-O008), so that column only counts the
 tape's own non-neutral ticks. Every capture has one 5-tick hole in the
-first two seconds (RB-RESEARCH-O009).
+first two seconds and 2 to 7 missing ticks at the set frame
+(RB-RESEARCH-O009); `rb-verify` now skips them.
 
-Largest errors, for the next loop (largest error, diagnose, fix, record):
-car_over_ball (contact differs from the first tick), corner_slide (the
-slide), speed_flip (flip direction and height, see FR-094), hard landing
-(after touchdown). The 1.25 s second-jump window and the roll convention
-held, so nothing in the code was refuted by this session.
+The three that diverge, with the evidence for the next loop:
+
+- **car_over_ball** (RB-RESEARCH-O010): the port's first contact tick is
+  right (port tick 3 at (43.9, 112.0, 163.1), velocity (-1211, -1447,
+  400); game (43.9, 112.1, 163.2), (-1210, -1443, 405)), but the game's
+  car keeps gaining upward speed for four more ticks (405, 444, 475, 498
+  uu/s) and loses more horizontal speed (to -1138, -1311) while the
+  port's contact is over in one tick (400, 392, 387; -1214, -1452). The
+  game's hit carries about 1.6 times the port's impulse, spread over
+  about four ticks.
+- **corner_slide**: agrees to 5 uu for 36 ticks, then the game's car
+  climbs the corner higher (z 326 uu at tick 84 against the port's 263)
+  and stays up longer; 100 uu by tick 96. The 9.125 s residual of
+  `test2.jsonl`, now with exact inputs.
+- **speed_flip**: agrees to 10 uu until the flip at tick 216, then 550
+  uu/s of velocity error through the flip and 289 uu by the end of it;
+  the diagonal dodge with pitch cancel and air roll goes a different way
+  (see RB-PHYSICS-001-FR-094, the dodge-direction miss).
+
+Nothing in the code was refuted by this session: the 1.25 s second-jump
+window and the roll convention held, and the nose landing is within 22 uu.
 
 Stage 3 not run. Next session: a second run of each Stage 2 scenario for
 its own noise floor, then the car_over_ball contact.

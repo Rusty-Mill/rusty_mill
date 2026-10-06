@@ -161,8 +161,8 @@ score a recording that starts airborne.
 ## Next
 
 Done 2026-10-06: all eleven scenarios captured and scored (results in
-`BOT-RUN-SHEET.md` and the tape-bot README). Predictions held for the
-dodges, half flip and pogo; speed flip, the hard landing, the corner slide
-and the car over the ball diverge by 100 to 250 uu and are the next
-targets. Then a second run per scenario for its noise floor, and Stage 3
+`BOT-RUN-SHEET.md` and the tape-bot README). Eight of eleven agree within
+25 uu over the whole tape (both dodges within 5 uu); the speed flip, the
+corner slide and the car over the ball diverge by 180 to 290 uu and are
+the next targets (car-ball contact impulse, RB-RESEARCH-O010). Then a second run per scenario for its noise floor, and Stage 3
 (human windows via `--scenario-from`).
