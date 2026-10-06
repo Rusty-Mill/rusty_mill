@@ -1,8 +1,8 @@
 # @rusty-mill/agui-core
 
 The headless AG-UI core in TypeScript: the mirror of the `rusty_agui`
-crate, with no runtime dependencies. Every framework binding (React first,
-then others) sits on this; nothing here knows about a UI.
+crate, with no runtime dependencies. Every framework binding (React, Vue,
+Angular) sits on this; nothing here knows about a UI.
 
 | Module | What it gives you |
 |---|---|
@@ -12,6 +12,7 @@ then others) sits on this; nothing here knows about a UI.
 | `verify` | `Verifier.push(event)` → canonical events: the ordering rules, chunk expansion |
 | `reduce` | `Reducer { messages, state }`: fold canonical events into a thread and shared state |
 | `run` | `streamAgent(endpoint, input)` → async iterable of verified events; `runAgent(...)` → `{ events, messages, state, result, outcome, error }` |
+| `store` | `AgentStore`: one thread's messages and state, the registered readables and actions, and the run loop that answers frontend tool calls and follows up. An external store (`subscribe` + `getSnapshot`) that each binding wraps in a few lines |
 
 ```ts
 import { runAgent } from "@rusty-mill/agui-core";
@@ -29,6 +30,9 @@ the endpoint to substitute one (tests do). A non-200 is an `HttpError`;
 a non-SSE response or a stream that ends before `RUN_FINISHED` or
 `RUN_ERROR` is a `TransportError`; an agent that breaks the ordering
 rules is a `SequenceError` on the event that broke them.
+
+`@rusty-mill/agui-core/testing` is a scripted agent behind a fake
+`fetch` for the bindings' tests; not part of the API.
 
 ## Held to the Rust crate
 

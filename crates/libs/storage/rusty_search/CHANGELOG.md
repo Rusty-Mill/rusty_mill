@@ -4,6 +4,20 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- `rusty-search-core`: `serde_json_bridge` module behind the new,
+  default-off `serde-json` feature (optional `serde_json` dependency), with
+  `value_to_json` and `json_to_value`. Its three lossy points are
+  documented and tested: NaN and infinities become `Null`; a `UInt` that
+  fits `i64` comes back as `Int` (above `i64::MAX` it stays `UInt`); map
+  key order follows serde_json's configuration and duplicate keys collapse
+  last-wins.
+### Changed
+- `rusty-search-algolia`, `-solr`, `-elasticsearch`, `-azure-search`,
+  `-meilisearch` and `-tantivy` use the shared bridge instead of six
+  identical private copies of the same pair; their document-level
+  conversions (reserved id key, metadata stripping) stay local. The five
+  HTTP backends' conversions are byte-identical by construction.
 ### Fixed
 - `rusty-search-sqlite-fts5`: `delete` removed the full-text row and the
   content row in two separate commits, so a failure between them left a

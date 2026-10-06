@@ -83,12 +83,17 @@ socket, a non-SSE response or a stream that ends before `RUN_FINISHED` is
 [`packages/agui-core`](packages/agui-core/README.md) is this crate's
 headless mirror in TypeScript, with no runtime dependencies: the same
 types, SSE decoder, verifier with chunk expansion and reducer, plus
-`runAgent`/`streamAgent` over `fetch`. [`packages/agui-react`](packages/agui-react/README.md)
-is the React binding on it: an `AgentProvider` and the `useAgent`,
-`useReadable`, `useAction` (frontend tools, generative UI, human in the
-loop) and `useSharedState` hooks, headless. `rusty_tick`'s assistant
-(`crates/apps/rusty_tick/src/assistant.rs` and its web panel) is the
-first consumer of both the server and the binding. [`fixtures/`](fixtures/) is shared by both sides: event samples
+`runAgent`/`streamAgent` over `fetch`, and the `AgentStore` the bindings
+share: one thread, its readables and actions, and the run loop.
+[`packages/agui-react`](packages/agui-react/README.md),
+[`packages/agui-vue`](packages/agui-vue/README.md) and
+[`packages/agui-angular`](packages/agui-angular/README.md) are the
+bindings on it, each a few lines over the store in its framework's idiom:
+a provider and `useAgent`/`injectAgent`, `useReadable`, `useAction`
+(frontend tools, generative UI, human in the loop) and `useSharedState`,
+headless. `rusty_tick`'s assistant (`crates/apps/rusty_tick/src/assistant.rs`
+and its web panel) is the first consumer of both the server and the React
+binding. [`fixtures/`](fixtures/) is shared by both sides: event samples
 round-trip, chunk sequences expand and whole runs reduce identically in
 Rust and TypeScript.
 

@@ -19,6 +19,8 @@ rsi-core = { path = "../rsi-core" }
 rsi-runtime = { path = "../rsi-runtime" }
 
 [dev-dependencies]
+# The executor's own error type, matched in the invariants tests.
+rusty_sandbox = { workspace = true }
 # Never called: the tests compile the harness from its source with plain
 # rustc, as the runtime does. The edge exists so that CI's affected-crate
 # analysis re-runs these end-to-end tests whenever a0 changes.

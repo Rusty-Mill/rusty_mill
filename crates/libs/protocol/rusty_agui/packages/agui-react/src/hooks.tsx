@@ -1,8 +1,7 @@
 // The hooks. Each is a thin view over one AgentStore held in context.
 
-import type { Json, Message, ToolCall } from "@rusty-mill/agui-core";
+import { AgentStore, type ActionDefinition, type Json, type SendOptions, type Snapshot, type StoreConfig, type ToolCall, type ToolCallEntry } from "@rusty-mill/agui-core";
 import { createContext, useContext, useEffect, useId, useMemo, useSyncExternalStore, type ReactNode } from "react";
-import { AgentStore, type ActionDefinition, type ActionRenderProps, type SendOptions, type Snapshot, type StoreConfig, type ToolCallStatus } from "./store.js";
 
 const StoreContext = createContext<AgentStore | undefined>(undefined);
 
@@ -36,7 +35,7 @@ export interface AgentHandle extends Snapshot {
   /** What a registered action's `render` shows for this call, if any. */
   renderToolCall: (call: ToolCall) => unknown;
   /** Every tool call in the thread with how it stands. */
-  toolCalls: { call: ToolCall; message: Message; status: ToolCallStatus; result: Json | undefined }[];
+  toolCalls: ToolCallEntry[];
 }
 
 /** The thread: messages, state, running, error, and the verbs. */
@@ -51,24 +50,7 @@ export function useAgent(): AgentHandle {
       run: (options) => store.run(options),
       stop: () => store.stop(),
       toolCalls: store.toolCalls(),
-      renderToolCall: (call) => {
-        const action = store.action(call.function.name);
-        if (!action?.render) return undefined;
-        const entry = store.toolCalls().find((c) => c.call.id === call.id);
-        let args: Json = {};
-        try {
-          args = call.function.arguments === "" ? {} : (JSON.parse(call.function.arguments) as Json);
-        } catch {
-          args = {};
-        }
-        const props: ActionRenderProps<Json, Json> = {
-          args,
-          status: entry?.status ?? "pending",
-          result: entry?.result,
-          respond: (result) => store.respond(call.id, result),
-        };
-        return action.render(props);
-      },
+      renderToolCall: (call) => store.renderToolCall(call),
     }),
     [snapshot, store],
   );
