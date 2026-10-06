@@ -187,8 +187,16 @@ fn expand_refs(value: &str, lookup: &std::collections::HashMap<&str, &str>) -> S
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'$' {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Decode the whole UTF-8 scalar at `i` and step past it. Reading
+            // `bytes[i] as char` would re-encode each byte of a multi-byte
+            // sequence as a Latin-1 code point and corrupt non-ASCII text
+            // (and the outer pass loop would then compound the damage).
+            let ch = value[i..]
+                .chars()
+                .next()
+                .expect("i is on a char boundary and before the end");
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
 
@@ -457,6 +465,52 @@ mod tests {
         // long as the function terminates.
         let env = vec![("A".into(), "${B}".into()), ("B".into(), "${A}".into())];
         let _ = interpolate_env(&env);
+    }
+
+    #[test]
+    fn interpolate_preserves_multibyte_utf8_around_refs() {
+        // Regression: `expand_refs` used to push each UTF-8 byte as a
+        // Latin-1 char, turning "café" into "cafÃ©" and compounding on
+        // every pass.
+        let env = vec![
+            ("X".into(), "ok".into()),
+            ("A".into(), "café ${X}".into()),
+            ("B".into(), "日本語$X🙂".into()),
+            ("C".into(), "naïve — no refs at all 😀".into()),
+        ];
+        let out = interpolate_env(&env);
+        assert_eq!(out[1].1, "café ok");
+        assert_eq!(out[2].1, "日本語ok🙂");
+        assert_eq!(out[3].1, "naïve — no refs at all 😀");
+    }
+
+    #[test]
+    fn expand_refs_returns_non_ascii_value_unchanged_in_one_pass() {
+        // A value with no references must be a no-op, so the pass loop
+        // in `interpolate_env` sees `changed == false` and stops.
+        let lookup = std::collections::HashMap::new();
+        let value = "Grüße, 世界 — \u{FFFD} replacement char too";
+        assert_eq!(expand_refs(value, &lookup), value);
+    }
+
+    #[test]
+    fn interpolate_leaves_malformed_refs_literal() {
+        let env = vec![
+            ("X".into(), "ok".into()),
+            ("A".into(), "${".into()),
+            ("B".into(), "${}".into()),
+            ("C".into(), "${1abc}".into()),
+            ("D".into(), "tail$".into()),
+            ("E".into(), "${X unterminated".into()),
+            ("F".into(), "$1 and $-x".into()),
+        ];
+        let out = interpolate_env(&env);
+        assert_eq!(out[1].1, "${");
+        assert_eq!(out[2].1, "${}");
+        assert_eq!(out[3].1, "${1abc}");
+        assert_eq!(out[4].1, "tail$");
+        assert_eq!(out[5].1, "${X unterminated");
+        assert_eq!(out[6].1, "$1 and $-x");
     }
 
     // ── secret masking ────────────────────────────────────────────────
