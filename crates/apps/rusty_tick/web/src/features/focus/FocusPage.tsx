@@ -5,7 +5,7 @@ import { Confirm } from '@/components/Confirm'
 import { usePrefs } from '../settings/prefs'
 import { FocusRecords } from './FocusRecords'
 import { EstimatesPanel } from '../estimates/EstimatesPanel'
-import { actualPomos, estimateRows, MAX_ESTIMATE } from '../estimates/logic'
+import { actualPomos, estimateRows, latestByTask, MAX_ESTIMATE } from '../estimates/logic'
 import { setEstimate, useEstimates } from '../estimates/store'
 import { startAmbient } from './ambient'
 import { Overview } from './Overview'
@@ -48,7 +48,7 @@ export function FocusPage() {
   )
   const stats = useMemo(() => computeStats(records, now), [records, now])
   const rows = useMemo(() => estimateRows(estimates, records, tasks), [estimates, records, tasks])
-  const estimated = estimates.find((e) => e.taskId === taskId)?.pomos ?? 0
+  const estimated = latestByTask(estimates).find((e) => e.taskId === taskId)?.pomos ?? 0
 
   const isBreak = session?.phase === 'break'
   const shownMode: FocusMode = session ? session.mode : mode

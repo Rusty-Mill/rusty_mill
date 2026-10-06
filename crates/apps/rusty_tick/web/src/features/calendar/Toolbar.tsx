@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { useState } from 'react'
-import type { CalendarMode } from '@/app/paths'
+import { CALENDAR_MODES, type CalendarMode } from '@/app/paths'
 import { Menu } from '@/components/Menu'
 
 export const MODE_LABEL: Record<CalendarMode, string> = { m: 'Month', w: 'Week', d: 'Day', '3': '3 Days', t: '10 Days', a: 'Agenda' }
@@ -65,7 +65,7 @@ export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onN
         placement="bottom-end"
         label="Calendar view"
         items={[
-          ...(Object.keys(MODE_LABEL) as CalendarMode[]).map((m) => ({ id: m, label: MODE_LABEL[m], checked: m === mode, onSelect: () => onMode(m) })),
+          ...CALENDAR_MODES.map((m) => ({ id: m, label: MODE_LABEL[m], checked: m === mode, onSelect: () => onMode(m) })),
           'separator',
           { id: 'done', label: 'Show completed', checked: showDone, onSelect: () => onShowDone(!showDone) },
           { id: 'import', label: 'Import calendar (.ics)', onSelect: onImport },

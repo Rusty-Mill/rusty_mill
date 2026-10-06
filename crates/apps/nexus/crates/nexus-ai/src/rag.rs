@@ -403,12 +403,13 @@ pub async fn index_file(
 ///
 /// C19 (#372) — in [`IndexMode::IfChanged`], before paying for an embed pass,
 /// compares a hash of `blocks`' content against what's already stored for
-/// `file_path` (`vectorstore::stored_signature`). A match — including the
-/// stored embedding dimension matching the current embedder's, so a
-/// provider/model switch is never silently skipped — means the file's
-/// existing embeddings are still valid, and the (often remote, always
-/// costly) embedding API call is skipped entirely. [`IndexMode::Force`]
-/// skips only that shortcut.
+/// `file_path` (`vectorstore::stored_signature`). A match, including a
+/// *known* [`EmbeddingProvider::expected_dimension`] equal to the stored
+/// embedding dimension, means the file's existing embeddings are assumed
+/// valid, and the (often remote, always costly) embedding API call is
+/// skipped entirely. The signature records only content and dimension, so a
+/// model switch that keeps the same dimension is *not* detected: re-index
+/// with [`IndexMode::Force`], which skips only that shortcut.
 ///
 /// Order of operations, in both modes: chunk, embed, **validate** the
 /// provider's output, then replace the file's vectors in one storage
@@ -444,9 +445,10 @@ pub async fn index_file_with(
         if let Some((stored_hash, stored_dim)) =
             vectorstore::stored_signature(ctx, file_path).await?
         {
-            // Only a *known* dimension equal to the stored one proves the
-            // stored vectors came from this embedder; an unknown dimension
-            // re-embeds rather than trust a legacy constant.
+            // A known dimension equal to the stored one is necessary, not
+            // sufficient: it rules out a size change but cannot tell two
+            // same-sized models apart. An unknown dimension re-embeds
+            // rather than trust a legacy constant.
             if stored_hash == content_hash && expected_dim == Some(stored_dim) {
                 return Ok(IndexOutcome {
                     chunks: 0,
