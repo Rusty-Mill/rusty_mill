@@ -23,6 +23,18 @@ use replay_analyzer::model::PlayerFeatures;
 /// boxcars is slow; the full 180-replay gate lives in the `validate` binary).
 const CORPUS_TEST_LIMIT: usize = 16;
 
+/// A corpus replay that is actually on disk: absent files and un-fetched Git LFS
+/// pointers (a checkout without `git lfs pull`) both count as "not present".
+fn is_real_replay(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 24];
+    let n = f.read(&mut head).unwrap_or(0);
+    !head[..n].starts_with(b"version https://git-")
+}
+
 fn feat(pri: i32, player: &str, team: i32, sup: f32, dist: f32, boost: f32) -> PlayerFeatures {
     PlayerFeatures {
         pri,
@@ -254,7 +266,7 @@ fn bcstats_agrees_with_ballchasing() {
     let mut present = 0usize;
     for id in ids.iter().take(CORPUS_TEST_LIMIT) {
         let path = corpus.join(format!("{id}.replay"));
-        if !path.exists() {
+        if !is_real_replay(&path) {
             continue;
         }
         present += 1;
@@ -521,7 +533,7 @@ fn bcstats_full_agrees_with_ballchasing() {
     ids.sort();
     for id in ids {
         let path = corpus.join(format!("{id}.replay"));
-        if !path.exists() {
+        if !is_real_replay(&path) {
             continue;
         }
         present += 1;
@@ -666,7 +678,7 @@ fn corpus_agrees_with_ballchasing() {
     let (mut matched, mut total, mut present) = (0usize, 0usize, 0usize);
     for id in ids.iter().take(CORPUS_TEST_LIMIT) {
         let path = corpus.join(format!("{id}.replay"));
-        if !path.exists() {
+        if !is_real_replay(&path) {
             continue;
         }
         present += 1;
