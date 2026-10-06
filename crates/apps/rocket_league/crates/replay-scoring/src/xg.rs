@@ -1,6 +1,7 @@
 //! Expected goals: the chance a shot becomes a goal, from its geometry.
 //!
-//! A logistic model over six features of an [`Episode::Shot`], versioned as its own
+//! A logistic model over seven features of an [`Episode::Shot`] — six of geometry plus the
+//! lobby's rank level (corpus tiers shot 10–15% differently, see [`level_of`]) — versioned as its own
 //! artifact (`xg_model.json`, next to `rank_norms.json`). [`XgModel::default`] is a
 //! hand-set **prior** (`n_train == 0`) so the numbers are usable before a corpus fit;
 //! `xg-fit` replaces it with weights fitted on labelled shots. Calibration (Brier,
@@ -12,8 +13,27 @@ use serde::{Deserialize, Serialize};
 use crate::calibrate::solve;
 use crate::episodes::{Episode, Outcome};
 
-/// Bias + distance, speed, on-target, defenders, edge.
-pub const N: usize = 6;
+/// Bias + distance, speed, on-target, defenders, edge, rank level.
+pub const N: usize = 7;
+/// The rank brackets, lowest first (the names `RankNorms` and the corpus manifest use).
+const BRACKETS: [&str; 7] = [
+    "bronze",
+    "silver",
+    "gold",
+    "platinum",
+    "diamond",
+    "champion",
+    "grand-champion",
+];
+
+/// A bracket's position as a rank level in `[-1, 1]` (platinum, the middle, is 0), the xG model's
+/// seventh feature. Unknown brackets are `None`; callers treat that as 0, the neutral level.
+pub fn level_of(bracket: &str) -> Option<f32> {
+    BRACKETS
+        .iter()
+        .position(|b| *b == bracket)
+        .map(|i| (i as f32 - 3.0) / 3.0)
+}
 /// Goal half-width (uu), to scale how far toward a post the ball is aimed.
 const GOAL_HALF_W: f32 = 892.755;
 /// Goal height (uu).
@@ -24,7 +44,9 @@ const NO_AIM_EDGE: f32 = 2.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct XgModel {
     pub version: String,
-    /// Logistic weights over [`features`], bias first.
+    /// Logistic weights over [`features`], bias first. Models saved before the rank feature have
+    /// six weights; the missing one reads as 0, which reproduces them exactly.
+    #[serde(deserialize_with = "weights")]
     pub w: [f32; N],
     /// Shots the weights were fitted on; 0 for the hand-set prior.
     pub n_train: usize,
@@ -35,14 +57,29 @@ impl Default for XgModel {
     fn default() -> Self {
         Self {
             version: "xg-prior-v1".into(),
-            w: [-1.6, -0.30, 0.30, 1.9, -0.35, -0.5],
+            w: [-1.6, -0.30, 0.30, 1.9, -0.35, -0.5, 0.0],
             n_train: 0,
         }
     }
 }
 
-/// `[1, distance to goal (km), ball speed (km/s), on target, defenders, aim edge]`, or `None`
-/// for anything but a shot.
+fn weights<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[f32; N], D::Error> {
+    let v = Vec::<f32>::deserialize(d)?;
+    if !(N - 1..=N).contains(&v.len()) {
+        return Err(serde::de::Error::custom(format!(
+            "expected {} or {N} weights, got {}",
+            N - 1,
+            v.len()
+        )));
+    }
+    let mut w = [0.0; N];
+    w[..v.len()].copy_from_slice(&v);
+    Ok(w)
+}
+
+/// `[1, distance to goal (km), ball speed (km/s), on target, defenders, aim edge, rank level]`,
+/// or `None` for anything but a shot. The rank level is 0 (neutral); [`sample`] and
+/// [`XgModel::at_level`] supply a real one.
 ///
 /// Only what is known before the shot resolves: `on target` is the projected path alone, never
 /// the episode's `on_target` flag, which is also set for goals and saves once their outcome is known.
@@ -68,6 +105,7 @@ pub fn features(e: &Episode) -> Option<[f32; N]> {
         f32::from(on_target),
         f32::from(*def),
         edge,
+        0.0,
     ])
 }
 
@@ -76,6 +114,15 @@ fn sigmoid(z: f64) -> f64 {
 }
 
 impl XgModel {
+    /// This model for a lobby at rank `level` (see [`level_of`]): the rank term folded into the
+    /// bias, so [`predict`](Self::predict) needs no extra input.
+    pub fn at_level(&self, level: f32) -> Self {
+        let mut m = self.clone();
+        m.w[0] += m.w[N - 1] * level;
+        m.w[N - 1] = 0.0;
+        m
+    }
+
     /// P(goal) for a shot; 0 for other episodes.
     pub fn predict(&self, e: &Episode) -> f32 {
         features(e).map_or(0.0, |x| self.p(&x) as f32)
@@ -146,12 +193,14 @@ impl XgModel {
     }
 }
 
-/// A labelled training example from a shot episode (goal = 1).
-pub fn sample(e: &Episode) -> Option<([f32; N], bool)> {
+/// A labelled training example from a shot episode (goal = 1) in a lobby at rank `level`.
+pub fn sample(e: &Episode, level: f32) -> Option<([f32; N], bool)> {
     let Episode::Shot { outcome, .. } = e else {
         return None;
     };
-    Some((features(e)?, *outcome == Outcome::Goal))
+    let mut x = features(e)?;
+    x[N - 1] = level;
+    Some((x, *outcome == Outcome::Goal))
 }
 
 #[cfg(test)]
@@ -203,7 +252,7 @@ mod tests {
     fn fit_recovers_a_known_model() {
         let truth = XgModel {
             version: "t".into(),
-            w: [-1.0, -0.6, 0.0, 2.0, -0.5, 0.0],
+            w: [-1.0, -0.6, 0.0, 2.0, -0.5, 0.0, 0.4],
             n_train: 0,
         };
         let mut rng = 12345u64;
@@ -222,6 +271,7 @@ mod tests {
                     f32::from(next() > 0.5),
                     (next() * 3.0).floor(),
                     next(),
+                    2.0 * next() - 1.0,
                 ];
                 (x, f64::from(next()) < truth.p(&x))
             })
@@ -253,6 +303,41 @@ mod tests {
     #[test]
     fn too_few_shots_is_not_a_fit() {
         assert!(XgModel::fit(&[([1.0; N], true)], 1.0).is_none());
+    }
+
+    #[test]
+    fn rank_levels_run_bronze_to_grand_champion_with_platinum_neutral() {
+        assert_eq!(level_of("bronze"), Some(-1.0));
+        assert_eq!(level_of("platinum"), Some(0.0));
+        assert_eq!(level_of("grand-champion"), Some(1.0));
+        assert_eq!(level_of("unranked"), None);
+    }
+
+    #[test]
+    fn at_level_folds_the_rank_term_into_the_bias() {
+        let mut m = XgModel::default();
+        m.w[N - 1] = 0.5;
+        let x = features(&shot(1500.0, true, 0)).unwrap();
+        for level in [-1.0, 0.0, 0.7, 1.0] {
+            let mut with_level = x;
+            with_level[N - 1] = level;
+            let folded = m.at_level(level);
+            assert!((m.p(&with_level) - folded.p(&x)).abs() < 1e-6, "{level}");
+        }
+        let e = shot(1500.0, true, 0);
+        assert!(m.at_level(1.0).predict(&e) > m.at_level(-1.0).predict(&e));
+    }
+
+    #[test]
+    fn a_model_saved_with_six_weights_loads_and_keeps_its_predictions() {
+        let old = r#"{"version":"xg-fit-n1","w":[-1.0,-0.5,0.2,1.0,-0.3,-0.4],"n_train":1}"#;
+        let m: XgModel = serde_json::from_str(old).expect("old model loads");
+        assert_eq!(m.w, [-1.0, -0.5, 0.2, 1.0, -0.3, -0.4, 0.0]);
+        let e = shot(2000.0, true, 1);
+        assert_eq!(m.predict(&e), m.at_level(1.0).predict(&e), "no rank effect");
+        assert!(
+            serde_json::from_str::<XgModel>(r#"{"version":"x","w":[1.0],"n_train":0}"#).is_err()
+        );
     }
 
     /// The model must not see the outcome: a shot's features are the same whether it ended as

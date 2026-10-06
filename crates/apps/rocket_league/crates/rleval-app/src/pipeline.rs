@@ -26,8 +26,8 @@ use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
 use replay_scoring::{
-    attach_relative, chains, extract_with, score_all, Episode, RankNorms, Report, ScoreConfig,
-    XgModel,
+    attach_relative, chains, extract_with, level_of, score_all, Episode, RankNorms, Report,
+    ScoreConfig, XgModel,
 };
 
 use replay_skills::profile::{profiles, PlayerSkillProfile};
@@ -244,12 +244,18 @@ pub fn analyze(
     // 2. Decision-discipline scoring (per player) + the lobby report HTML.
     let score_cfg = ScoreConfig::default();
     let mut scores = score_all(&canonical, &score_cfg);
-    let mut episodes = extract_with(&canonical, &score_cfg, xg);
     // Additive rank-relative layer: grade each player against their bracket. No
     // norms ⇒ untouched (every report stays purely absolute).
     if let Some(norms) = norms {
         attach_relative(&mut scores, norms, &score_cfg, override_bracket);
     }
+    // The shots are scored at the lobby's rank level (neutral when the bracket is unknown).
+    let level = scores
+        .iter()
+        .find_map(|r| r.relative.as_ref())
+        .and_then(|r| level_of(&r.bracket))
+        .unwrap_or(0.0);
+    let mut episodes = extract_with(&canonical, &score_cfg, &xg.at_level(level));
     let lobby = assemble(&canonical, &score_cfg);
     let heatmaps: Vec<(i32, String)> = lobby
         .players

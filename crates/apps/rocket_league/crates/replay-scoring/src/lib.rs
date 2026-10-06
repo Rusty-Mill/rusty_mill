@@ -36,7 +36,7 @@ pub use config::{ScoreConfig, SCORE_CONFIG_VERSION};
 pub use contract::{cross_check, BallchasingReplay, CrossCheckReport};
 pub use chains::{chains, ChainEnd};
 pub use episodes::{extract, extract_with, Episode};
-pub use xg::XgModel;
+pub use xg::{level_of, XgModel};
 pub use relative::{attach_relative, BucketNorm, RankNorms, RelativeReport};
 pub use report::{Confidence, MetricBreakdown, Report};
 
