@@ -1,4 +1,4 @@
-//! A stepping environment over `rb_physics_bullet` (ADR-0059): reset to a
+//! A stepping environment over `rb_physics_bullet` (ADR-0060): reset to a
 //! frame, apply one controller input per car, step one tick, observe the
 //! next frame. The observation is a `PhysicsFrame`, the type every other
 //! part of the pipeline already speaks, so there is no second state type.

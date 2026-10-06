@@ -31,7 +31,7 @@ these.
     `tools/rb_tape_bot` (a standalone RLBot bot outside the workspace). Depends
     only on `rb_domain`.
   - `crates/rb_env` — stepping environment over `rb_physics_bullet`
-    (`reset` / `step` / observe, ADR-0059); the caller surface for scenario
+    (`reset` / `step` / observe, ADR-0060); the caller surface for scenario
     runs, sweeps and, later, policies. Depends only on `rb_domain` and
     `rb_physics_bullet`.
   - `crates/rb_verify_cli` — composition root binary (`rb-verify`); wires

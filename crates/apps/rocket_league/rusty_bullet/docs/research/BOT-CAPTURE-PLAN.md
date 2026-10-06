@@ -119,7 +119,7 @@ stating:
   scenario is about 11 ms of simulation. Today each `simulate_scenario` call
   also rebuilds the arena mesh (about 28 ms), which dominates short runs
   (6,000 to 10,000 steps/s end to end); a sweep should build the arena once
-  (ADR-0059).
+  (ADR-0060).
 - **Honest only as far as the last score.** Port predictions are trustworthy
   to the recorded fidelity (car velocity 1.99 uu/s over 30 ticks on
   `test2`), and the first game captures will say which scenarios exceed it.
@@ -128,7 +128,7 @@ Uses, in order of value: sweep a mechanic's timing in the port to choose
 which tapes are worth a game run; run the same tape on both and keep the
 diff as a regression gauge; use a game capture to extend the recorded corpus
 where the port disagrees. A stepping API for policies is a separate step:
-`ADR-0059` (proposed). A bot-protocol server is `RB-RESEARCH-O007`.
+`ADR-0060` (proposed). A bot-protocol server is `RB-RESEARCH-O007`.
 
 ## Not doing
 

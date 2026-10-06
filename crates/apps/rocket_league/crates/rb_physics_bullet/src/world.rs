@@ -528,7 +528,7 @@ impl PhysicsWorld {
     /// `from_frame` over an arena the caller already built (a
     /// `standard_arena` with no cars), cloned instead of rebuilt: the
     /// arena's collision meshes cost far more to build than to copy, which
-    /// matters to a caller that resets many times (`rb_env`, ADR-0059).
+    /// matters to a caller that resets many times (`rb_env`, ADR-0060).
     /// The arena's own ball is replaced by the frame's.
     pub fn from_frame_in(arena: &PhysicsWorld, frame: &PhysicsFrame) -> PhysicsWorld {
         let mut world = arena.clone();
