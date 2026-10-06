@@ -12469,6 +12469,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rk-agui"
+version = "0.0.0"
+dependencies = [
+ "aisdk",
+ "anyhow",
+ "rk-app",
+ "rk-config",
+ "rk-constrain",
+ "rk-kernel",
+ "rk-observe",
+ "rusty_agui",
+ "rusty_json",
+ "rusty_serve",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rk-app"
 version = "0.0.0"
 dependencies = [

@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rk-agui: a Rusty Keys session over AG-UI
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `rusty_key`; step 10 complete
+
+- **Added:** `rk-agui` at `crates/apps/rusty_key/crates/agui`: `KeyAgent::new(handle, config, model)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves Rusty Keys to everything that speaks AG-UI. A `Session` is built per thread on first contact, the way `rk_app::acp` builds one per editor session, with an `ApprovalGate` at the end of its policy chain; `with_approval(triggers)` says which tool calls the gate stops.
+- **Added:** the mapping, by the harness's own `rk://` names. The last user message is the turn's prompt and the session keeps the transcript; `token` streams as deltas of one message, or the reply goes out as one message when nothing streamed; each `tool_event` is `TOOL_CALL_START`/`ARGS`/`END` plus a `TOOL_CALL_RESULT` carrying the payload, or `{status, payload}` when the outcome was not `ok` (a blocked call is visible as such); `turn_complete` is the run's result, the boundary `TurnResult` (`reply`, `verified`, `limits`); a turn error, a missing or blank prompt, a prompt while a turn waits on an approval, and a tool message answering nothing pending are `RUN_ERROR`. `bash_output`, `entropy` and `consolidation` are not forwarded.
+- **Added:** human in the loop, twice. An `approval_request` ends the run with a call to the frontend tool `approve_tool` (tool, arguments, trigger) while the turn waits in the gate; the tool message that answers it on the next run (`allow`, `always`, anything else blocks) is delivered to the gate and the same turn is relayed on. A `plan_exit` ends the run with a call to `plan_decide` carrying the plan; the answer (`proceed`, `reject`, `annotate <feedback>`) resolves it and the feedback is the run's result for the client to send as the next turn.
+- **Tests:** five end-to-end tests with `rusty_agui`'s client over a socket against the real harness (registry, workspace policy, aisdk loop, verifier, journal) in a temporary workspace with the scripted `FakeLanguageModel`: a turn that reads a file and replies; an approval answered with `allow` (the file is written), a prompt and a stray answer refused meanwhile; an approval blocked (no file, a blocked tool result, the turn continues); a plan exit annotated and resolved; missing and blank prompts. Two unit tests for the answer parsers.
+- **Known limitations:** blocking over a tokio handle; `bash_output` is not streamed; sessions live in memory for the process; a `Session` per thread shares the workspace's `.rustykeys` state, as the gateway's multi mode does.
+
+---
+
 ## nexus-agui: a Nexus agent session over AG-UI
 **2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `nexus-ai-runtime`
 

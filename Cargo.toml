@@ -175,6 +175,7 @@ members = [
     "crates/apps/rusty_key/crates/mcp",
     "crates/apps/rusty_key/crates/compose",
     "crates/apps/rusty_key/crates/app",
+    "crates/apps/rusty_key/crates/agui",
     "crates/libs/ai/rusty_llama",
     "crates/apps/rusty_tailscale/crates/ts-types",
     "crates/apps/rusty_tailscale/crates/ts-key",
@@ -575,6 +576,7 @@ rk-feed = { path = "crates/apps/rusty_key/crates/feed" }
 rk-kernel = { path = "crates/apps/rusty_key/crates/kernel" }
 rk-mcp = { path = "crates/apps/rusty_key/crates/mcp" }
 rk-compose = { path = "crates/apps/rusty_key/crates/compose" }
+rk-app = { path = "crates/apps/rusty_key/crates/app" }
 aisdk = "0.5.2"
 schemars = "1.0.4"
 toml = "0.8"

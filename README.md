@@ -207,6 +207,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rk-mcp`](crates/apps/rusty_key/crates/mcp) | `crates/apps/rusty_key/crates/mcp` | Rusty Keys' MCP client layer: server config, policy, and stdio/SSE transports |
 | [`rk-compose`](crates/apps/rusty_key/crates/compose) | `crates/apps/rusty_key/crates/compose` | Rusty Keys' *compose* pillar: subagent composition and the ratchet |
 | [`rk-app`](crates/apps/rusty_key/crates/app) | `crates/apps/rusty_key/crates/app` | `rusty-keys`: the harness binary wiring the four pillars around the kernel |
+| [`rk-agui`](crates/apps/rusty_key/crates/agui) | `crates/apps/rusty_key/crates/agui` | Rusty Keys over AG-UI: a `Session` per thread behind `rusty_agui`'s `Agent` trait, the approval gate and plan exits as frontend tool calls (ADR-0007 follow-ons step 10) |
 | [`rusty_llama`](crates/libs/ai/rusty_llama) | `crates/libs/ai/rusty_llama` | From-scratch Llama/GGUF inference engine (CPU SIMD, optional wgpu and CUDA backends, OpenAI-compatible server) |
 | [`ts-types`](crates/apps/rusty_tailscale/crates/ts-types) | `crates/apps/rusty_tailscale/crates/ts-types` | Tailscale wire types shared across the client: node keys, status, netmap |
 | [`ts-key`](crates/apps/rusty_tailscale/crates/ts-key) | `crates/apps/rusty_tailscale/crates/ts-key` | Key material for the Tailscale client: machine, node, and disco keypairs |

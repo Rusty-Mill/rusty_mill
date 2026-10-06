@@ -16,6 +16,7 @@ sandbox of its own.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 10, `rusty_key` | `rk-agui`: a `Session` per thread behind `rusty_agui`'s `Agent` trait, built like the ACP adapter's with an `ApprovalGate`; token deltas, the turn's tool events, the boundary `TurnResult` as the result; an approval request and a plan exit as frontend tool calls answered on the next run. Step 10 is done |
 | (this PR) | step 10, `nexus-ai-runtime` | `nexus-agui`: a Nexus agent session behind `rusty_agui`'s `Agent` trait over a `Runtime` port (submit, the typed `AiEvent` stream, `round_decide`) with a kernel adapter; token chunks, tool calls and results, the finished session as the result; a `RoundProposed` as a call to the frontend tool `round_decide`, answered on the next run |
 | (this PR) | step 10, `rusty_adk` | `adk-agui`: an ADK `Runner` behind `rusty_agui`'s `Agent` trait (thread = session, the last user message is the turn, text streamed as deltas, the agent's tool calls and results reported, the session state as a snapshot, a graph suspension as a call to the frontend tool `request_input` that the answering tool message resumes); feature `agui` on the facade; the `agui-agent-server` example |
 | (this PR) | step 8 | `@rusty-mill/agui-vue` (`provideAgent`, `useAgent`, `useReadable`, `useAction`, `useSharedState` as composables and refs) and `@rusty-mill/agui-angular` (`provideAgent`, `injectAgent`, `injectReadable`, `injectAction`, `injectSharedState` as signals); the `AgentStore` hoisted from the React binding into `agui-core`, where all three bindings share it |
@@ -76,7 +77,7 @@ targets as named.
 | A routines crate (cron schedule, run as requester, disable after N failures) | Routines |
 | Per-bot isolation | Sandboxes |
 | CORS and authentication on the agent endpoint | Any cross-origin or multi-user deployment |
-| Adapters from ~~`rusty_adk`~~ (step 10, `adk-agui`), ~~`nexus-ai-runtime`~~ (step 10, `nexus-agui`) and `rusty_key` event types to AG-UI | Putting existing agents behind the SDKs |
+| ~~Adapters from `rusty_adk`, `nexus-ai-runtime` and `rusty_key` event types to AG-UI~~ Done in step 10: `adk-agui`, `nexus-agui`, `rk-agui` | Putting existing agents behind the SDKs |
 
 ## Build order
 
@@ -93,7 +94,7 @@ Both targets start with the same two pieces, so they come first.
 | 7 | **Done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
 | 8 | **Done.** Angular and Vue bindings over `agui-core` | 1 PR (see below) | No |
 | 9 | iOS (Swift) and Android (Kotlin) ports of the core | Large, when a consumer exists | Yes: new languages in the workspace |
-| 10 | Adapters from `rusty_adk` (**done**), `nexus-ai-runtime` (**done**), `rusty_key` | 1 PR each, in each family | No |
+| 10 | **Done.** Adapters from `rusty_adk`, `nexus-ai-runtime` and `rusty_key` | 1 PR each, in each family | No |
 
 Chat components come after step 3 as a thin layer over the hooks, not
 before: the hooks are the API, the components are one rendering of it.
@@ -174,6 +175,15 @@ before: the hooks are the API, the components are one rendering of it.
   handler owns the framing and the frontend bindings already have the
   tool-call path, so the suspension rides the mechanism every binding
   implements instead of a second one.
+- **Step 10's Rusty Keys adapter is the ACP adapter's shape.** `rk-agui`
+  builds a `Session` per AG-UI thread from the config and model, with an
+  `ApprovalGate` at the end of the policy chain, exactly as `rk_app::acp`
+  builds one per editor session; one run is one `send_streaming` turn and
+  the session keeps the transcript, so the thread's history lives in the
+  harness, not in the client's replay. The approval request and the plan
+  exit are the two places the harness waits for a person, and both become
+  frontend tool calls answered on the next run, the same shape as the ADK
+  and Nexus adapters: the turn waits in the gate meanwhile.
 - **Step 10's Nexus adapter is over a port, not the kernel.** The
   ai-runtime is reached through IPC and the bus, and a kernel with the
   agent plugin and a model provider is too much to stand up in a test.
@@ -242,6 +252,11 @@ before: the hooks are the API, the components are one rendering of it.
 
 ## Where this departs from the targets as named
 
+- **Step 10 forwards what the frontends need, not the whole `rk://`
+  table.** `token`, `tool_event`, `approval_request`, `plan_exit` and
+  `turn_complete` map; `bash_output`, `entropy` and `consolidation` do not.
+  They are the desktop's panels, and AG-UI has `CUSTOM` events for them
+  when a consumer wants one.
 - **One core, then bindings.** Five SDKs written in parallel is speculative
   generality. A headless TypeScript core plus a React binding gives every
   capability the target names on the web. Angular and Vue turned out to
