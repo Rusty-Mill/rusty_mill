@@ -57,6 +57,12 @@ pub enum StorageError {
     #[error("invalid configuration: {0}")]
     ConfigInvalid(String),
 
+    /// A caller supplied input the operation refuses to act on (for example
+    /// a non-finite query vector, or a vector write whose chunks disagree
+    /// about the target file or dimension). Nothing was changed.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
     /// `SQLite` error.
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
@@ -108,6 +114,12 @@ mod tests {
             reason: "invalid UTF-8".to_string(),
         };
         assert_eq!(err.to_string(), "corrupt file bad.md: invalid UTF-8");
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = StorageError::InvalidInput("query embedding: empty".to_string());
+        assert_eq!(err.to_string(), "invalid input: query embedding: empty");
     }
 
     #[test]

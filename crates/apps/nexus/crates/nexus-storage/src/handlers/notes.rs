@@ -177,7 +177,12 @@ pub(crate) fn find_duplicates(engine: &StorageEngine, args: &Value) -> Result<Va
         for j in (i + 1)..vectors.len() {
             let (path_a, emb_a) = &vectors[i];
             let (path_b, emb_b) = &vectors[j];
-            let sim = crate::vectorstore::cosine_similarity(emb_a, emb_b);
+            // `None` = no defined similarity (different dimensions, zero
+            // norm): never a near-duplicate, whatever the threshold, so a
+            // threshold of 0.0 cannot report incomparable pairs.
+            let Some(sim) = crate::vectorstore::cosine_similarity(emb_a, emb_b) else {
+                continue;
+            };
             if sim >= near_threshold {
                 let (a, b) = if path_a <= path_b {
                     (path_a.clone(), path_b.clone())
@@ -194,8 +199,7 @@ pub(crate) fn find_duplicates(engine: &StorageEngine, args: &Value) -> Result<Va
     }
     near.sort_by(|x, y| {
         y.similarity
-            .partial_cmp(&x.similarity)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&x.similarity)
             .then_with(|| x.a.cmp(&y.a))
             .then_with(|| x.b.cmp(&y.b))
     });
