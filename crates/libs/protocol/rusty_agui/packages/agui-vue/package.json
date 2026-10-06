@@ -1,7 +1,7 @@
 {
-  "name": "@rusty-mill/agui-core",
+  "name": "@rusty-mill/agui-vue",
   "version": "0.1.0",
-  "description": "Headless AG-UI core: types, SSE decoder, verifier with chunk expansion, reducer, and runAgent over fetch. No runtime dependencies. The TypeScript mirror of the rusty_agui crate.",
+  "description": "Vue binding for @rusty-mill/agui-core: provideAgent and the useAgent, useReadable, useAction and useSharedState composables. Headless: composables and render functions, no components.",
   "license": "MIT OR Apache-2.0",
   "private": true,
   "type": "module",
@@ -11,10 +11,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./testing": {
-      "types": "./dist/testing.d.ts",
-      "import": "./dist/testing.js"
     }
   },
   "files": [
@@ -25,9 +21,17 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
+  "peerDependencies": {
+    "vue": "^3.5.0"
+  },
+  "dependencies": {
+    "@rusty-mill/agui-core": "file:../agui-core"
+  },
   "devDependencies": {
     "@types/node": "^22.20.4",
+    "jsdom": "^25.0.1",
     "typescript": "^5.7.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.2",
+    "vue": "^3.5.0"
   }
 }

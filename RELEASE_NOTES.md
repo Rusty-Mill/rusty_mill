@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## @rusty-mill/agui-vue and @rusty-mill/agui-angular: the Vue and Angular bindings
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 8
+
+- **Added:** `@rusty-mill/agui-vue` at `crates/libs/protocol/rusty_agui/packages/agui-vue`: `provideAgent(config)` in a `setup` (or `app.provide(AGENT, new AgentStore(config))` for the whole app), `useAgent()` with computed refs for `messages`, `state`, `running`, `error` and `toolCalls` plus `send`, `run`, `stop` and `renderToolCall`, `useReadable` and `useAction` that follow a ref or getter and unregister when the scope ends, and `useSharedState()` as a writable computed ref. Peer dependency `vue ^3.5`.
+- **Added:** `@rusty-mill/agui-angular` at `crates/libs/protocol/rusty_agui/packages/agui-angular`: `provideAgent(config)` as providers for a component, a route or the application, `injectAgent()` with signals for the same five fields and the same verbs, `injectReadable` and `injectAction` that follow a signal through `effect` and unregister with the injection context, and `injectSharedState()` as `[signal, setState]`. Peer dependency `@angular/core >=19`.
+- **Changed:** `AgentStore` and its types (`Snapshot`, `ActionDefinition`, `ActionRenderProps`, `StoreConfig`, `SendOptions`, `ToolCallStatus`, the new `ToolCallEntry`) move from `@rusty-mill/agui-react` into `@rusty-mill/agui-core`'s `store` module, where the three bindings share them; `renderToolCall` and `parseArguments` move into the store too. The React package re-exports them, so its API is unchanged. The scripted fake agent the bindings' tests use is exported as `@rusty-mill/agui-core/testing`.
+- **Tests:** six store tests in the core (streaming and `RUN_ERROR`, readables and state both ways, a handler answered and followed up, a render-only call answered through `respond` and a second answer ignored, invalid arguments and `followUp: false`, lenient argument parsing); five Vue tests mounting components with `createApp` under jsdom; five Angular tests on a zoneless `createApplication` whose `tick()` runs the root effects. Each binding passes the same scenarios the React one does, plus a changed readable or action definition replacing its registration and a destroyed scope ending the subscription.
+- **Known limitations:** no consumer in the workspace yet for either binding (the follow-ons recorded step 8 as waiting for one; it was started on request); no components; Angular's `render` returns whatever the template hands a child, the binding does not render.
+
+---
+
 ## rusty_bot: per-bot sandboxes
 **2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 7, second PR
 

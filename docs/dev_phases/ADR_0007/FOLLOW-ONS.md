@@ -4,17 +4,19 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged and steps 1 to 6 of the build order below are done:
+ADR-0007 is merged and steps 1 to 8 of the build order below are done:
 the workspace speaks AG-UI on both sides, the reference TypeScript client
 accepts what the server sends, a headless TypeScript core mirrors the
-crate against shared fixtures, a React binding sits on the core,
-`rusty_tick` ships an assistant on it, the gateway can front any AG-UI
-endpoint with a deny-by-default rule set and an audit record either side
-of the run, any AG-UI endpoint can be a Slack, Teams or SMS bot, and a
-routine can run one on a schedule.
+crate against shared fixtures, React, Vue and Angular bindings sit on the
+core, `rusty_tick` ships an assistant on the React one, the gateway can
+front any AG-UI endpoint with a deny-by-default rule set and an audit
+record either side of the run, any AG-UI endpoint can be a Slack, Teams
+or SMS bot, a routine can run one on a schedule, and a bot runs in a
+sandbox of its own.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 8 | `@rusty-mill/agui-vue` (`provideAgent`, `useAgent`, `useReadable`, `useAction`, `useSharedState` as composables and refs) and `@rusty-mill/agui-angular` (`provideAgent`, `injectAgent`, `injectReadable`, `injectAction`, `injectSharedState` as signals); the `AgentStore` hoisted from the React binding into `agui-core`, where all three bindings share it |
 | (this PR) | step 7, second PR | `rusty_bot`: `BotSpec` confined by `rusty_sandbox` (own workspace, read roots, limits, process group, network open), `Fleet`, the `rusty-bot` runner-and-helper binary; `ProcessExecutor::start` for long-lived jobs |
 | (this PR) | step 7, first PR | `rusty_sandbox`: the executor port and Linux adapter hoisted from `rusty_rsi` unchanged, re-exported there so nothing in `rsi` moves |
 | [#524](https://github.com/Rusty-Mill/rusty_mill/pull/524) | step 6 | `rusty_routine`: cron `Schedule`, `Routine` (fresh thread per firing, `forwardedProps.routine` for gateway rules, disabled after N consecutive failures), a JSON routines file, a runner on the Rust client |
@@ -65,7 +67,7 @@ targets as named.
 | --- | --- |
 | ~~A Rust AG-UI client~~ Done in step 1, on `rusty_http` directly (see below) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
 | ~~A headless TypeScript core~~ Done in step 2 | Every frontend SDK |
-| Framework bindings (hooks, components) | Each SDK. React: done in step 3; Angular and Vue: steps 8 |
+| ~~Framework bindings (hooks)~~ React done in step 3, Vue and Angular in step 8; components are a later layer | Each SDK |
 | An AG-UI route in the gateway: CEL decision, audit record before and after, forward | The platform |
 | A bot registry (name, endpoint, policy, channel bindings) | The platform |
 | Inbound channel adapters: Slack Events API, Teams Bot Framework, Twilio SMS | Channels |
@@ -87,7 +89,7 @@ Both targets start with the same two pieces, so they come first.
 | 5 | **Done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given |
 | 6 | **Done.** Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
 | 7 | **Done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
-| 8 | Angular and Vue bindings over `agui-core` | 1 PR each, when a consumer exists | No |
+| 8 | **Done.** Angular and Vue bindings over `agui-core` | 1 PR (see below) | No |
 | 9 | iOS (Swift) and Android (Kotlin) ports of the core | Large, when a consumer exists | Yes: new languages in the workspace |
 | 10 | Adapters from `rusty_adk`, `nexus-ai-runtime`, `rusty_key` | 1 PR each, in each family | No |
 
@@ -150,6 +152,17 @@ before: the hooks are the API, the components are one rendering of it.
   converts the error, so the harness, graders and `rsi __sandbox` did
   not change. The one visible difference is the bound on `rsi-runtime`'s
   grading impls, which now take any executor whose error converts.
+- **Step 8 is one PR, before a consumer.** The plan said one PR per
+  binding, when a consumer exists. The owner called for both at once,
+  and each binding is under a hundred lines because the store they wrap
+  is shared: `AgentStore` moved from the React package into `agui-core`
+  (where it has its own tests) at the second binding, the point where a
+  copy would have been the alternative. A binding's own code is the
+  framework's idiom around that store: `useSyncExternalStore`, a
+  `shallowRef` with `watch`, a `signal` with `effect`. The first Vue or
+  Angular consumer is still the test of the API's shape; until then the
+  three bindings are held to the same scenario tests against the same
+  scripted agent, exported as `@rusty-mill/agui-core/testing`.
 - **Step 6's cron is its own.** The workspace had no cron parser and
   `rusty_time` converts civil dates to timestamps but not back, so
   `rusty_routine::schedule` carries both the five-field parser and the
@@ -186,9 +199,10 @@ before: the hooks are the API, the components are one rendering of it.
 
 - **One core, then bindings.** Five SDKs written in parallel is speculative
   generality. A headless TypeScript core plus a React binding gives every
-  capability the target names on the web. Angular and Vue are thin
-  bindings; iOS and Android are ports in other languages with no consumer
-  in the workspace. They wait for one.
+  capability the target names on the web. Angular and Vue turned out to
+  be thin bindings over the same store (step 8); iOS and Android are
+  ports in other languages with no consumer in the workspace. They wait
+  for one.
 - **Sandboxes on the executor, not containers.** OpenBot gives each bot a
   container with Chromium, files and Postgres. This workspace has a
   fail-closed Landlock and seccomp executor already. It covers the
