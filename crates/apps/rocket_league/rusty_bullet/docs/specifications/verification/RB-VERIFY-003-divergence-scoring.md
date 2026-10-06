@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.22.0
+- Version: 0.23.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -249,10 +249,15 @@ them.
   position error passes 10 and 100 uu, and how many recorded inputs differ
   from the tape.
   - Alignment: the start is the first recorded frame with the car within
-    5 uu of the scenario's start location; the lag (0 to 3 ticks, the
-    recording's delay in showing the set state) is the one that best matches
-    the first 60 ticks. A scenario with no car location, or a capture that
-    never has the car there, is an error.
+    5 uu of the scenario's start location. Every later recorded frame is
+    placed by its timestamp, in 120 Hz ticks after the start frame, not by
+    its row number: the BakkesMod plugin drops a few ticks per run
+    (`RB-RESEARCH-O009`), and a hole must skip those ticks, not shift every
+    later comparison (0.23.0; before it, a 2-tick hole at a 2000 uu/s
+    contact read as a 30 uu error for the rest of the run). The lag (0 to
+    3 ticks, the recording's delay in showing the set state) is the one
+    with the lowest mean error over the first 60 ticks. A scenario with no
+    car location, or a capture that never has the car there, is an error.
   - The capture's input may belong to a tick or the one before it; either
     counts as playing the tape.
   - Free run, not one-step: error grows with chaos, so read the tick of
@@ -260,6 +265,7 @@ them.
   - **Verification**: `rb_verify_cli` tests
     `a_recording_equal_to_the_prediction_has_no_error`,
     `a_recording_that_lags_the_start_by_a_tick_is_aligned`,
+    `a_hole_in_the_recording_skips_those_ticks_instead_of_shifting_the_rest`,
     `a_wrong_velocity_shows_up_as_error_and_a_wrong_input_as_a_mismatch`,
     `a_recording_without_the_start_or_a_scenario_without_a_location_is_an_error`.
     Run on real data: the `corner_slide` scenario against `test2.jsonl`
@@ -548,6 +554,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.23.0 (2026-10-06): `RB-VERIFY-003-FR-011` aligns recorded frames by
+  timestamp, so a capture hole skips ticks instead of shifting the rest.
+  First real tape-bot captures (eleven scenarios, `BOT-RUN-SHEET.md`
+  session 1) re-scored: prompt_dodge 8.5 uu mean became 1.2 uu.
 - 0.22.0 (2026-10-06): `RB-VERIFY-003-FR-012` and `FR-013` implemented —
   `rb-verify --scenario-from` cuts a scenario from a window of a capture;
   `--seed-first-frame` seeds the `--self*` modes from the first frame
