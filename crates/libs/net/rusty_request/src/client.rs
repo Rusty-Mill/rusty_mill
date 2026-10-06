@@ -15,7 +15,7 @@ use rusty_http::head::RequestHead;
 use rusty_http::url::percent_encode;
 use rusty_http::{HeaderMap, Method, StatusCode, Url, Version};
 use rusty_tls::TrustPolicy;
-use rusty_tokio::io::AsyncReadExt;
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -248,9 +248,12 @@ impl ClientBuilder {
 
     /// How long an idle pooled connection may sit before it's no longer
     /// offered for reuse (default 90 seconds). This is a client-side
-    /// bound only -- the server may close its end sooner, which is
-    /// handled by transparently retrying once on a fresh connection
-    /// (see the crate README).
+    /// bound only -- the server may close its end sooner, and a request
+    /// that lands on such a stale connection fails with an I/O error
+    /// like any other; whether it is retried is up to the configured
+    /// [`RetryPolicy`] (none by default), which never replays a
+    /// non-idempotent request unless told to. Set this below the
+    /// server's own keep-alive timeout to make that race rare.
     pub fn pool_idle_timeout(mut self, timeout: Duration) -> Self {
         self.pool_idle_timeout = timeout;
         self
@@ -623,7 +626,8 @@ impl RequestBuilder {
     /// pool afterward, since whether it's still safe to reuse isn't
     /// known until the body has been fully drained, which this first
     /// pass doesn't track. A pooled connection is still tried first
-    /// for the request itself, same as `.send()`.
+    /// for the request itself, same as `.send()` -- and, with no retry
+    /// loop here, a stale one surfaces as an I/O error.
     ///
     /// The configured timeout, if any, only bounds getting to the
     /// `StreamingResponse` (through any redirects) -- not each
@@ -1189,7 +1193,7 @@ async fn connect_tunnel(
 
 /// A response too small to have landed a real result yet; the wire
 /// contents of one head+body request/response round trip.
-struct RawResponse {
+struct RawResponse<S> {
     status: StatusCode,
     headers: HeaderMap,
     body: Vec<u8>,
@@ -1199,7 +1203,7 @@ struct RawResponse {
     /// `Connection: close`.
     keep_alive: bool,
     /// Handed back so the caller can pool it (when `keep_alive`).
-    stream: Conn,
+    stream: S,
 }
 
 /// Builds the `RequestHead` for one hop: `Host` first (matching every
@@ -1223,7 +1227,10 @@ fn build_request_head(request: &Request, request_target: &str) -> Result<Request
 /// Writes `body` onto the wire: raw passthrough for a fully-buffered
 /// body (`Content-Length` already covers its framing), or relayed
 /// through [`write_stream_body`] for a [`Body::Stream`].
-async fn write_request_body(t: &mut AsyncTransport<Conn>, body: &Body) -> Result<()> {
+async fn write_request_body<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    t: &mut AsyncTransport<S>,
+    body: &Body,
+) -> Result<()> {
     match body {
         Body::Empty => {}
         Body::Bytes(b) => {
@@ -1239,8 +1246,8 @@ async fn write_request_body(t: &mut AsyncTransport<Conn>, body: &Body) -> Result
 /// Relays a streaming request body onto the wire: raw passthrough when
 /// its length was declared upfront (`Content-Length` already covers
 /// framing), or `Transfer-Encoding: chunked` framing when it wasn't.
-async fn write_stream_body(
-    t: &mut AsyncTransport<Conn>,
+async fn write_stream_body<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    t: &mut AsyncTransport<S>,
     body: &crate::body::StreamBody,
 ) -> Result<()> {
     let mut reader = body.open();
@@ -1276,7 +1283,19 @@ fn connection_says_close(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-async fn attempt(stream: Conn, request: &Request, request_target: &str) -> Result<RawResponse> {
+/// One request/response round trip on `stream`, with nothing retried:
+/// a failure anywhere in it -- the head write, the body write, reading
+/// the response -- propagates as-is. Which failures may be replayed, and
+/// on what, is decided above this by [`send_with_retries`]'s policy,
+/// never here. The order matters for a [`Body::Stream`]: its factory is
+/// only invoked once the head has been written, so a head-write failure
+/// never opens the body at all, and a later failure has opened it
+/// exactly once.
+async fn attempt<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    stream: S,
+    request: &Request,
+    request_target: &str,
+) -> Result<RawResponse<S>> {
     let mut t = AsyncTransport::new(stream);
     let head = build_request_head(request, request_target)?;
     t.write_request_head(&head).await?;
@@ -1297,11 +1316,11 @@ async fn attempt(stream: Conn, request: &Request, request_target: &str) -> Resul
     })
 }
 
-async fn attempt_streaming(
-    stream: Conn,
+async fn attempt_streaming<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    stream: S,
     request: &Request,
     request_target: &str,
-) -> Result<(StatusCode, HeaderMap, BodyReader<Conn>)> {
+) -> Result<(StatusCode, HeaderMap, BodyReader<S>)> {
     let mut t = AsyncTransport::new(stream);
     let head = build_request_head(request, request_target)?;
     t.write_request_head(&head).await?;
@@ -1315,13 +1334,15 @@ async fn attempt_streaming(
 
 /// Sends one request, reusing a pooled connection for this origin (or,
 /// with `proxy` set, this proxy -- see [`hop_target`]) when one's
-/// available. A pooled connection can be stale -- the server may have
-/// closed it after its own idle timeout, a race no client can fully
-/// avoid -- so any failure on a *pooled* attempt is treated as exactly
-/// that and retried once on a fresh connection (the same one-retry
-/// convention curl and `reqwest` use), rather than surfaced to the
-/// caller as a confusing I/O error. A failure on the fresh attempt is
-/// real and does propagate.
+/// available, else dialing a fresh one. Exactly one attempt either way:
+/// a pooled connection can be stale (the server may have closed it
+/// after its own idle timeout, a race no client can fully avoid), but a
+/// failure on it is still surfaced, not silently replayed on a fresh
+/// connection. The request may already have reached the server by the
+/// time the failure shows -- a partial head write, or a drop after the
+/// body went out -- and a second submission a caller never asked for
+/// could duplicate its effect. Whether to retry, and for which methods,
+/// errors and budget, is [`send_with_retries`]'s decision alone.
 async fn send_one_hop(
     pool: Option<&ConnectionPool>,
     request: &Request,
@@ -1329,26 +1350,7 @@ async fn send_one_hop(
     trust_policy: &TrustPolicy,
 ) -> Result<Response> {
     let target = hop_target(&request.url, proxy);
-
-    if let Some(pool) = pool {
-        if let Some(stream) = pool.take(&target.pool_key) {
-            if let Ok(raw) = attempt(stream, request, &target.request_target).await {
-                if raw.keep_alive {
-                    pool.put(target.pool_key, raw.stream);
-                }
-                return Ok(Response::new(
-                    raw.status,
-                    raw.headers,
-                    request.url.clone(),
-                    raw.body,
-                ));
-            }
-        }
-    }
-
-    let addrs = resolve(target.connect_host.clone(), target.connect_port).await?;
-    let raw = connect(&addrs).await?;
-    let stream = establish(raw, &target, trust_policy).await?;
+    let stream = take_or_dial(pool, &target, trust_policy).await?;
     let raw = attempt(stream, request, &target.request_target).await?;
     if raw.keep_alive {
         if let Some(pool) = pool {
@@ -1366,8 +1368,9 @@ async fn send_one_hop(
 /// Like [`send_one_hop`], but leaves the body unread -- see
 /// [`attempt_streaming`]. The connection is never returned to the pool
 /// afterward (deliberate; see [`RequestBuilder::send_streaming`]'s
-/// docs), though a pooled one is still tried first and falls back to a
-/// fresh connection on failure, same as the buffered path.
+/// docs). Same single-attempt rule as the buffered path, and since the
+/// streaming path has no retry loop above it at all, a stale pooled
+/// connection surfaces straight to the caller.
 async fn send_one_hop_streaming(
     pool: Option<&ConnectionPool>,
     request: &Request,
@@ -1375,19 +1378,23 @@ async fn send_one_hop_streaming(
     trust_policy: &TrustPolicy,
 ) -> Result<(StatusCode, HeaderMap, BodyReader<Conn>)> {
     let target = hop_target(&request.url, proxy);
+    let stream = take_or_dial(pool, &target, trust_policy).await?;
+    attempt_streaming(stream, request, &target.request_target).await
+}
 
-    if let Some(pool) = pool {
-        if let Some(stream) = pool.take(&target.pool_key) {
-            if let Ok(result) = attempt_streaming(stream, request, &target.request_target).await {
-                return Ok(result);
-            }
-        }
+/// A pooled idle connection for `target` when there is one, else a
+/// freshly dialed and established one.
+async fn take_or_dial(
+    pool: Option<&ConnectionPool>,
+    target: &HopTarget,
+    trust_policy: &TrustPolicy,
+) -> Result<Conn> {
+    if let Some(stream) = pool.and_then(|p| p.take(&target.pool_key)) {
+        return Ok(stream);
     }
-
     let addrs = resolve(target.connect_host.clone(), target.connect_port).await?;
     let raw = connect(&addrs).await?;
-    let stream = establish(raw, &target, trust_policy).await?;
-    attempt_streaming(stream, request, &target.request_target).await
+    establish(raw, target, trust_policy).await
 }
 
 /// DNS resolution is a blocking OS call (`getaddrinfo` under the hood);
@@ -1454,5 +1461,223 @@ async fn dial(addr: SocketAddr) -> std::io::Result<RawStream> {
         rt::Flavor::Tokio => tokio::net::TcpStream::connect(addr)
             .await
             .map(|s| RawStream::Tokio(crate::tokio_compat::TokioIo::new(s))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `attempt`'s contract on a scripted transport: no retry inside it,
+    //! and a [`Body::Stream`] factory invoked zero times when the head
+    //! write fails (whole or partial) and exactly once otherwise. A
+    //! real peer closing a TCP socket can't prove how many bytes it
+    //! took, so these failures are scripted byte-exact instead.
+
+    use super::*;
+    use rusty_tokio::io::ReadBuf;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    /// Accepts at most `accept` bytes across all writes, then fails every
+    /// further write with `BrokenPipe`; reads hand out `response` and
+    /// then EOF.
+    struct Scripted {
+        accept: usize,
+        written: Vec<u8>,
+        response: Vec<u8>,
+        read_pos: usize,
+    }
+
+    impl Scripted {
+        fn new(accept: usize, response: &[u8]) -> Self {
+            Scripted {
+                accept,
+                written: Vec::new(),
+                response: response.to_vec(),
+                read_pos: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for Scripted {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let rest = &this.response[this.read_pos..];
+            let n = rest.len().min(buf.remaining());
+            buf.unfilled_mut()[..n].copy_from_slice(&rest[..n]);
+            buf.advance(n);
+            this.read_pos += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for Scripted {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            let room = this.accept.saturating_sub(this.written.len());
+            if room == 0 {
+                return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
+            }
+            let n = buf.len().min(room);
+            this.written.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A one-shot in-memory body source.
+    struct Once(Vec<u8>, usize);
+
+    impl AsyncRead for Once {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let rest = &this.0[this.1..];
+            let n = rest.len().min(buf.remaining());
+            buf.unfilled_mut()[..n].copy_from_slice(&rest[..n]);
+            buf.advance(n);
+            this.1 += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A POST whose streaming body counts how many times it is opened.
+    fn counted_post() -> (Request, Arc<AtomicUsize>) {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let opens_in_body = opens.clone();
+        let body = Body::streaming(Some(5), move || {
+            opens_in_body.fetch_add(1, Ordering::SeqCst);
+            Once(b"hello".to_vec(), 0)
+        });
+        let request = Request {
+            method: Method::Post,
+            url: Url::parse("http://example.test/submit").unwrap(),
+            headers: HeaderMap::new(),
+            body,
+            timeout: None,
+        };
+        (request, opens)
+    }
+
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        rusty_tokio::Runtime::new().unwrap().block_on(future)
+    }
+
+    fn expect_io_error<T>(result: Result<T>) {
+        match result {
+            Err(Error::Io(_)) => {}
+            Err(other) => panic!("expected an I/O error, got {other:?}"),
+            Ok(_) => panic!("expected an I/O error, got a response"),
+        }
+    }
+
+    #[test]
+    fn head_write_failure_never_opens_the_body() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(0, b"");
+            expect_io_error(attempt(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn partial_head_write_failure_never_opens_the_body() {
+        run(async {
+            let (request, opens) = counted_post();
+            // Enough for `POST /submit HTTP/1.1\r\n` and a bit of `Host`,
+            // not the whole head.
+            let io = Scripted::new(24, b"");
+            expect_io_error(attempt(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn peer_dropping_after_the_body_was_sent_opens_it_once_and_fails_once() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(usize::MAX, b"");
+            expect_io_error(attempt(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn a_full_round_trip_opens_the_body_once() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(usize::MAX, b"HTTP/1.1 204 No Content\r\n\r\n");
+            let raw = attempt(io, &request, "/submit").await.unwrap();
+            assert_eq!(raw.status.as_u16(), 204);
+            assert!(raw.stream.written.ends_with(b"\r\n\r\nhello"));
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn streaming_attempt_head_write_failure_never_opens_the_body() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(0, b"");
+            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn streaming_attempt_partial_head_write_failure_never_opens_the_body() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(24, b"");
+            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn streaming_attempt_peer_dropping_after_the_body_opens_it_once_and_fails_once() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(usize::MAX, b"");
+            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn streaming_attempt_full_round_trip_opens_the_body_once() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(
+                usize::MAX,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            );
+            let (status, _headers, mut reader) =
+                attempt_streaming(io, &request, "/submit").await.unwrap();
+            assert_eq!(status.as_u16(), 200);
+            assert_eq!(
+                reader.next_chunk().await.unwrap().as_deref(),
+                Some(&b"ok"[..])
+            );
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
     }
 }

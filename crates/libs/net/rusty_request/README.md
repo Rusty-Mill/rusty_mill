@@ -120,10 +120,13 @@ protection against an active man-in-the-middle). TLS 1.2/1.3, no ALPN
   per origin and a 90-second idle timeout by default
   (`ClientBuilder::pool_max_idle_per_host`/`pool_idle_timeout`). A
   pooled connection the server already closed (a race no client can
-  fully avoid) is retried once on a fresh connection rather than
-  surfaced as an error, the same convention curl and `reqwest` use.
-  `ClientBuilder::no_pool()` reverts to a fresh connection with
-  `Connection: close` on every request.
+  fully avoid) fails like any other I/O error and is never silently
+  replayed: the request may already have reached the server, and only
+  a configured `RetryPolicy` (idempotent methods by default) decides
+  whether it is sent again. Set `pool_idle_timeout` below the server's
+  keep-alive timeout to make the race rare. `ClientBuilder::no_pool()`
+  reverts to a fresh connection with `Connection: close` on every
+  request.
 - **JSON**: `rusty_json::Value` (re-exported as `rusty_request::Json`), used
   with its `serde`-free feature set -- no `serde`. No derive-based mapping
   to arbitrary Rust structs; build/read `Value`s directly.
