@@ -81,7 +81,8 @@ mechanic.
   captured frame equal the set state? Needed because `rb-verify` seeds its
   simulation from the capture's first grounded, neutral frame
   (`seed()` in `crates/rb_verify_cli/src/lib.rs`); an airborne start has
-  none, so a `--seed-first-frame` option is needed, a small change.
+  none. Built: `rb-verify --seed-first-frame <mode> ...` (FR-013,
+  ADR-0058) seeds from the first frame instead.
 - Determinism: run each scenario twice and diff; the difference is the
   noise floor for every later score.
 - Terms: RLBot may be used offline only; no online play, no ranked.
@@ -138,6 +139,13 @@ crate, ADR-0056).
 
 The comparison step exists: `rb-verify --scenario <file> --against <capture>`
 (FR-011, ADR-0057).
+
+Two tooling options (2026-10-06, FR-012 and FR-013, ADR-0058):
+`rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]` cuts a
+scenario from a window of a human recording (state at the first frame,
+recorded inputs as the tape) so the bot can replay a real performance, and
+`rb-verify --seed-first-frame` (first argument) lets the `--self*` modes
+score a recording that starts airborne.
 
 ## Next
 

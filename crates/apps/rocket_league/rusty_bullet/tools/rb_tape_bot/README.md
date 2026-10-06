@@ -85,7 +85,20 @@ written). The three reproduction scenarios only follow their source
 recording for the first 0.2 to 0.5 s, because the tape does not carry the
 rest of the recorded inputs.
 
-`rb-verify --self-onestep <capture>` and `--self-kstep <capture> 30`. An
-airborne start has no grounded, neutral frame, which `rb-verify` currently
-needs to seed from; settle the car on the floor first (`settle_ticks`), as
-the shipped scenarios do, until a `--seed-first-frame` option exists.
+`rb-verify --self-onestep <capture>` and `--self-kstep <capture> 30` score
+the recording's own one-step and k-step error. These seed from the first
+grounded, neutral frame, which an airborne start never has; put
+`--seed-first-frame` first (`rb-verify --seed-first-frame --self-kstep
+<capture> 30`) to seed from the capture's first frame instead. The hidden
+jump state is still assumed neutral at that frame.
+
+## Scenarios from a human performance
+
+`rb-verify --scenario-from <capture> <from-secs> <to-secs> [name] >
+scenarios/<name>.json` cuts a scenario from a window of a recording: the
+car's and ball's state at the window's first frame as the start (rotation
+converted to `[pitch, yaw, roll]`), the recorded inputs as a run-length
+tape, no settling. The bot then replays the performance exactly, and
+`--scenario <it> --against <new capture>` scores the replay. The capture
+must be 120 Hz (mean frame interval within 5%) and must carry inputs, so a
+replay-derived capture cannot be cut.
