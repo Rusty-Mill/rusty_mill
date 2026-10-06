@@ -1,6 +1,6 @@
 # RB-VERIFY-003 — Divergence Scoring
 
-- Version: 0.21.0
+- Version: 0.22.0
 - Status: Draft (all four functional requirements implemented and wired
   into `rb_verify_cli`; the first three run end-to-end against a real
   replay AND a real BakkesMod capture, closing `PHASE-0-EXIT`'s own
@@ -266,6 +266,69 @@ them.
     (its own source) stays within 10 uu for 56 ticks (0.47 s); the
     `hard_landing_nose_first` scenario within 5 uu for 24 ticks, after which
     the recording's own steering, which the tape lacks, takes over.
+- `RB-VERIFY-003-FR-012` (implemented, acceptance met): a scenario
+  cut from a capture. `rb-verify --scenario-from <capture> <from-secs>
+  <to-secs> [name]` (`scenario_from_capture`) writes to stdout, as JSON
+  `Scenario::from_json` reads back equal (`Scenario::to_json`), a scenario
+  whose start is the first car's state (location, rotation, velocity,
+  angular velocity, boost) and the ball's state at the first recorded frame
+  with a timestamp in `[from-secs, to-secs]`, and whose tape is the input
+  recorded on each frame of the window, run-length encoded. The name
+  defaults to `<capture stem> <from>-<to> s`. The point is to replay a
+  human performance exactly with the tape bot and score the replay with
+  `FR-011`.
+  - The recorded quaternion becomes RLBot `[pitch, yaw, roll]` by
+    `rb_scenario::quat_to_rotator`, the inverse of `rotator_to_quat` (same
+    roll sign; at pitch ±90° roll is reported as 0 and yaw carries the
+    turn).
+  - Consecutive frames whose inputs agree within 0.01 on every analog axis
+    and exactly on every button merge into one step; `settle_ticks` is 0.
+  - Errors: a capture whose mean frame interval (whole file) is not 1/120 s
+    within 5% (the tape counts 120 Hz ticks), a window with no frames, a
+    first frame with no car, or any frame in the window without a recorded
+    input or analog axis (a replay-derived capture).
+  - Which frame's input is tick 0: the window's first frame's own input,
+    on the reading that the plugin records the input the game is about to
+    apply to that frame. `FR-011` accepts an input one tick either way, so
+    a one-tick error here shows as zero mismatches but one tick of lag.
+  - **Verification**: `rb_verify_cli` tests
+    `a_window_of_a_capture_becomes_a_scenario_with_a_run_length_tape`,
+    `an_input_change_beyond_the_tolerance_starts_a_new_step`,
+    `a_window_without_frames_or_input_is_an_error`,
+    `a_capture_that_is_not_120_hz_is_refused`; `rb_scenario` tests
+    `a_rotator_round_trips_through_a_quaternion_and_back` (seven rotations,
+    pitch near ±90° included),
+    `a_recorded_quaternion_becomes_the_rotator_that_made_it` (the
+    `test2.jsonl` 18.308 s quaternion) and
+    `a_scenario_writes_json_that_reads_back_equal`.
+    Acceptance (`test2.jsonl` 8.95 to 9.2 s, then `--scenario <it>
+    --against replays/test2.jsonl`, expected under 5 uu for the first 20
+    ticks and zero input mismatches): measured 2026-10-06. Lag 0 ticks
+    (tick 0 input is right, no tape shift), 33 ticks compared, position
+    error mean 1.4 uu, max 2.5 uu (never over 5 uu), never over 10 uu.
+    Zero input mismatches once the comparison stops checking the one
+    frame past the tape end (it had reported that frame's neutral input as
+    a mismatch; test `the_frame_past_the_tape_is_not_an_input_mismatch`).
+    `--self-kstep
+    replays/test2.jsonl 30` is unchanged at 1.99 uu/s mean car velocity.
+- `RB-VERIFY-003-FR-013` (implemented): seeding from the first frame.
+  `rb-verify --seed-first-frame <mode> ...`, given as the first argument,
+  makes `--self`, `--self-growth`, `--self-trace`, `--self-onestep` and
+  `--self-kstep` seed their candidate simulation from the capture's first
+  frame (`SeedFrame::First`) instead of its first grounded, neutral frame
+  (`SeedFrame::FirstGroundedNeutral`, the default, unchanged). A tape-bot
+  recording starts where the bot set the state, often airborne, so without
+  the flag it has no seed frame and fails. The hidden jump state
+  `PhysicsWorld::from_frame` cannot read stays at its defaults, so a first
+  frame mid-jump or mid-dodge still seeds wrong; the flag is for starts the
+  scenario author knows are neutral.
+  - A first frame with no car is still an error; the default error message
+    now names the flag.
+  - **Verification**: `rb_verify_cli` tests
+    `an_airborne_start_needs_seed_first_frame` (synthetic falling car: the
+    default errors, the flag scores all 12 frames),
+    `seed_first_frame_starts_every_self_mode_at_the_first_frame` and
+    `seed_first_frame_still_refuses_a_capture_whose_first_frame_has_no_car`.
 
 
 ## Architecture and interfaces
@@ -485,6 +548,10 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.22.0 (2026-10-06): `RB-VERIFY-003-FR-012` and `FR-013` implemented —
+  `rb-verify --scenario-from` cuts a scenario from a window of a capture;
+  `--seed-first-frame` seeds the `--self*` modes from the first frame
+  (ADR-0058).
 - 0.21.0 (2026-10-05): `RB-VERIFY-003-FR-011` implemented — `rb-verify
   --scenario ... --against <capture>` scores a scenario against its
   recording (ADR-0057).

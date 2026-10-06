@@ -43,6 +43,15 @@
 //!   before it, scored like `--self` (`k_step_score`,
 //!   `RB-VERIFY-003-FR-008`), then the `count` (default 0) frames with the
 //!   largest car velocity error (`k_step_capture`).
+//! - `rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]`: a
+//!   scenario cut from that window of the capture (`scenario_from_capture`,
+//!   `RB-VERIFY-003-FR-012`), written to stdout as JSON, so a human
+//!   performance can be replayed by the tape bot.
+//! - `rb-verify --seed-first-frame <mode> ...`: a global flag, first on the
+//!   command line, that makes every `--self*` mode seed its simulation from
+//!   the capture's first frame instead of its first grounded, neutral frame
+//!   (`SeedFrame::First`, `RB-VERIFY-003-FR-013`), for recordings whose
+//!   start was set by the tape bot.
 
 use rb_capture_ingest::CaptureFileSource;
 use rb_domain::divergence::DivergenceScore;
@@ -51,11 +60,12 @@ use rb_domain::{ControllerInput, Vec3};
 use rb_scenario::Scenario;
 use rb_verify_cli::{
     car_frame_spin, compare_scenario, k_step_capture, k_step_score, one_step_capture,
-    rotation_rate, score_capture_against_candidate, score_capture_growth,
-    score_replay_against_capture, simulate_scenario, trace_capture, TraceRow,
+    rotation_rate, scenario_from_capture, score_capture_against_candidate, score_capture_growth,
+    score_replay_against_capture, simulate_scenario, trace_capture, SeedFrame, TraceRow,
     DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
+use std::path::Path;
 use std::process::ExitCode;
 
 fn print_score(score: &DivergenceScore) {
@@ -267,6 +277,30 @@ fn run_scenario_against(path: &str, capture: &str, every: usize) -> Result<(), S
     Ok(())
 }
 
+/// Cuts a scenario from a window of a capture and prints it as JSON.
+fn run_scenario_from(
+    capture: &str,
+    from_secs: f32,
+    to_secs: f32,
+    name: Option<String>,
+) -> Result<(), String> {
+    let frames = CaptureFileSource::new(capture)
+        .frames()
+        .map_err(|e| format!("{capture}: {e}"))?;
+    let name = name.unwrap_or_else(|| {
+        let stem = Path::new(capture).file_stem().map_or_else(
+            || capture.to_string(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        format!("{stem} {from_secs}-{to_secs} s")
+    });
+    let scenario = scenario_from_capture(&frames, from_secs, to_secs, &name)
+        .map_err(|e| format!("{capture}: {e}"))?;
+    let text = scenario.to_json().map_err(|e| e.to_string())?;
+    println!("{text}");
+    Ok(())
+}
+
 fn parse_secs(name: &str, raw: Option<String>) -> Result<f32, String> {
     let raw = raw.ok_or_else(|| format!("missing {name}"))?;
     raw.parse::<f32>()
@@ -292,15 +326,47 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]"
+    "usage:\n  rb-verify [--seed-first-frame] <mode> ...\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]\n  rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]\n\n  --seed-first-frame, given first, makes the --self* modes seed the simulation\n  from the capture's first frame instead of its first grounded, neutral frame\n  (for a recording whose start was set by the tape bot)."
 }
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
-    let Some(first) = args.next() else {
+    let Some(mut first) = args.next() else {
         eprintln!("{}", usage());
         return ExitCode::FAILURE;
     };
+    let mut seed_frame = SeedFrame::default();
+    if first == "--seed-first-frame" {
+        seed_frame = SeedFrame::First;
+        let Some(mode) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        first = mode;
+    }
+
+    if first == "--scenario-from" {
+        let Some(capture) = args.next() else {
+            eprintln!("{}", usage());
+            return ExitCode::FAILURE;
+        };
+        let window = parse_secs("from-secs", args.next())
+            .and_then(|from| parse_secs("to-secs", args.next()).map(|to| (from, to)));
+        let (from_secs, to_secs) = match window {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{e}\n{}", usage());
+                return ExitCode::FAILURE;
+            }
+        };
+        return match run_scenario_from(&capture, from_secs, to_secs, args.next()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     if first == "--scenario" {
         let Some(path) = args.next() else {
@@ -352,7 +418,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match trace_capture(capture_path, from_secs, to_secs) {
+        return match trace_capture(capture_path, seed_frame, from_secs, to_secs) {
             Err(e) => {
                 eprintln!("ingestion failed: {e}");
                 ExitCode::FAILURE
@@ -385,8 +451,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let scored = k_step_score(&capture_path, k, DEFAULT_MAX_TIMESTAMP_DELTA_SECS)
-            .and_then(|score| Ok((score, k_step_capture(&capture_path, k)?)));
+        let scored = k_step_score(
+            &capture_path,
+            seed_frame,
+            k,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        )
+        .and_then(|score| Ok((score, k_step_capture(&capture_path, seed_frame, k)?)));
         return match scored {
             Err(e) => {
                 eprintln!("ingestion failed: {e}");
@@ -413,7 +484,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match one_step_capture(capture_path) {
+        return match one_step_capture(capture_path, seed_frame) {
             Err(e) => {
                 eprintln!("ingestion failed: {e}");
                 ExitCode::FAILURE
@@ -444,7 +515,12 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        return match score_capture_growth(capture_path, max_timestamp_delta_secs, window_secs) {
+        return match score_capture_growth(
+            capture_path,
+            seed_frame,
+            max_timestamp_delta_secs,
+            window_secs,
+        ) {
             Err(e) => {
                 eprintln!("ingestion failed: {e}");
                 ExitCode::FAILURE
@@ -468,7 +544,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        score_capture_against_candidate(capture_path, max_timestamp_delta_secs)
+        score_capture_against_candidate(capture_path, seed_frame, max_timestamp_delta_secs)
     } else {
         let Some(capture_path) = args.next() else {
             eprintln!("{}", usage());

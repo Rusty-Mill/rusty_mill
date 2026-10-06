@@ -17,7 +17,8 @@ use std::path::Path;
 
 mod scenario;
 pub use scenario::{
-    compare_scenario, simulate_scenario, ScenarioComparison, ScenarioRow, SCENARIO_TICK_SECS,
+    compare_scenario, scenario_from_capture, simulate_scenario, ScenarioComparison, ScenarioRow,
+    SCENARIO_TICK_SECS,
 };
 
 /// Default timestamp tolerance (seconds) `rb-verify` uses when the caller
@@ -73,6 +74,21 @@ const SEED_FRAME_GROUND_TOLERANCE: f32 = 10.0;
 /// mid-jump or mid-fall, not demand exact zero.
 const SEED_FRAME_VERTICAL_VELOCITY_TOLERANCE: f32 = 50.0;
 
+/// Which recorded frame a capture's candidate simulation starts from
+/// (`RB-VERIFY-003-FR-013`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SeedFrame {
+    /// The first grounded, neutral frame (`is_grounded_and_neutral`), where
+    /// the hidden jump state `PhysicsWorld::from_frame` cannot read is known
+    /// to be at its defaults. The default.
+    #[default]
+    FirstGroundedNeutral,
+    /// The capture's first frame, whatever its state: for a recording whose
+    /// start was set by the tape bot (often airborne) and so has no
+    /// grounded, neutral frame to wait for. `rb-verify --seed-first-frame`.
+    First,
+}
+
 /// `RB-PHYSICS-001-FR-076`'s `PhysicsWorld::from_frame` only seeds the
 /// per-car state a `PhysicsFrame` actually carries — it can't set the
 /// hidden jump/double-jump/dodge state `PhysicsWorld` tracks internally
@@ -122,9 +138,10 @@ fn is_grounded_and_neutral(frame: &PhysicsFrame) -> bool {
 /// simulate from.
 pub fn score_capture_against_candidate(
     capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
     max_timestamp_delta_secs: f32,
 ) -> Result<DivergenceScore, IngestError> {
-    let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    let (recorded, candidate) = seed_and_simulate(capture_path, seed_frame)?;
     Ok(rb_domain::divergence::score(
         &recorded,
         &candidate,
@@ -149,10 +166,11 @@ pub const DEFAULT_GROWTH_WINDOW_SECS: f32 = 1.0;
 /// `score_windows`'s own doc comment for the windowing rule.
 pub fn score_capture_growth(
     capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
     max_timestamp_delta_secs: f32,
     window_secs: f32,
 ) -> Result<Vec<(f32, DivergenceScore)>, IngestError> {
-    let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    let (recorded, candidate) = seed_and_simulate(capture_path, seed_frame)?;
     Ok(rb_domain::divergence::score_windows(
         &recorded,
         &candidate,
@@ -255,10 +273,11 @@ pub fn rotation_rate(from: &Quat, to: &Quat, dt: f32) -> Vec3 {
 /// An empty or inverted window yields an empty trace, not an error.
 pub fn trace_capture(
     capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
     from_secs: f32,
     to_secs: f32,
 ) -> Result<Vec<TraceRow>, IngestError> {
-    let (recorded, candidate) = seed_and_simulate(capture_path)?;
+    let (recorded, candidate) = seed_and_simulate(capture_path, seed_frame)?;
     Ok(trace_rows(&recorded, &candidate, from_secs, to_secs))
 }
 
@@ -268,8 +287,11 @@ pub fn trace_capture(
 /// from the recorded frame before it, so a row's error is that one step's
 /// model error alone, not divergence carried from earlier frames. Same
 /// seed frame and time axis as [`trace_capture`].
-pub fn one_step_capture(capture_path: impl AsRef<Path>) -> Result<Vec<TraceRow>, IngestError> {
-    let (recorded, world) = seed(capture_path)?;
+pub fn one_step_capture(
+    capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
+) -> Result<Vec<TraceRow>, IngestError> {
+    let (recorded, world) = seed(capture_path, seed_frame)?;
     let candidate = simulate_recorded_one_step(world, &recorded);
     Ok(trace_rows(&recorded, &candidate, 0.0, f32::INFINITY))
 }
@@ -286,10 +308,11 @@ pub const DEFAULT_K_STEP: usize = 30;
 /// changes, and it sees positions, which one-step barely moves.
 pub fn k_step_score(
     capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
     k: usize,
     max_timestamp_delta_secs: f32,
 ) -> Result<DivergenceScore, IngestError> {
-    let (recorded, world) = seed(capture_path)?;
+    let (recorded, world) = seed(capture_path, seed_frame)?;
     let candidate = simulate_recorded_k_step(world, &recorded, k);
     Ok(rb_domain::divergence::score(
         &recorded,
@@ -303,9 +326,10 @@ pub fn k_step_score(
 /// [`k_step_score`], for finding where the quarter-second error peaks.
 pub fn k_step_capture(
     capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
     k: usize,
 ) -> Result<Vec<TraceRow>, IngestError> {
-    let (recorded, world) = seed(capture_path)?;
+    let (recorded, world) = seed(capture_path, seed_frame)?;
     let candidate = simulate_recorded_k_step(world, &recorded, k);
     Ok(trace_rows(&recorded, &candidate, 0.0, f32::INFINITY))
 }
@@ -357,25 +381,40 @@ fn trace_rows(
 /// the simulated candidate, both ready to hand to either scoring function.
 fn seed_and_simulate(
     capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
 ) -> Result<(Vec<PhysicsFrame>, Vec<PhysicsFrame>), IngestError> {
-    let (recorded, world) = seed(capture_path)?;
+    let (recorded, world) = seed(capture_path, seed_frame)?;
     let candidate = simulate_recorded(world, &recorded);
     Ok((recorded, candidate))
 }
 
-/// The capture from its first grounded, neutral frame on, and a world
-/// seeded from that frame.
-fn seed(capture_path: impl AsRef<Path>) -> Result<(Vec<PhysicsFrame>, PhysicsWorld), IngestError> {
+/// The capture from its seed frame on (`seed_frame`: its first grounded,
+/// neutral frame, or simply its first), and a world seeded from that frame.
+fn seed(
+    capture_path: impl AsRef<Path>,
+    seed_frame: SeedFrame,
+) -> Result<(Vec<PhysicsFrame>, PhysicsWorld), IngestError> {
     let captured = CaptureFileSource::new(capture_path.as_ref()).frames()?;
 
-    let seed_index = captured
-        .iter()
-        .position(is_grounded_and_neutral)
-        .ok_or_else(|| {
-            IngestError::Malformed(
-                "no grounded, neutral frame found to seed a candidate simulation from".to_string(),
-            )
-        })?;
+    let seed_index = match seed_frame {
+        SeedFrame::FirstGroundedNeutral => captured
+            .iter()
+            .position(is_grounded_and_neutral)
+            .ok_or_else(|| {
+                IngestError::Malformed(
+                    "no grounded, neutral frame found to seed a candidate simulation from (--seed-first-frame starts from the first frame regardless)".to_string(),
+                )
+            })?,
+        SeedFrame::First => {
+            if captured.first().is_none_or(|frame| frame.cars.is_empty()) {
+                return Err(IngestError::Malformed(
+                    "the capture's first frame has no car to seed a candidate simulation from"
+                        .to_string(),
+                ));
+            }
+            0
+        }
+    };
 
     let recorded = captured[seed_index..].to_vec();
     let mut world = PhysicsWorld::from_frame(&recorded[0]);
@@ -465,9 +504,12 @@ mod tests {
 
     #[test]
     fn scores_a_real_capture_against_a_candidate_simulated_from_its_own_input() {
-        let score =
-            score_capture_against_candidate(capture_fixture(), DEFAULT_MAX_TIMESTAMP_DELTA_SECS)
-                .unwrap();
+        let score = score_capture_against_candidate(
+            capture_fixture(),
+            SeedFrame::default(),
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        )
+        .unwrap();
         assert!(score.frames_compared > 0);
         assert!(score.cars.pairs_compared > 0);
     }
@@ -476,6 +518,7 @@ mod tests {
     fn capture_against_candidate_missing_file_reports_io_error() {
         let result = score_capture_against_candidate(
             "does-not-exist.capture.jsonl",
+            SeedFrame::default(),
             DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
         );
         assert!(matches!(result, Err(IngestError::Io(_))));
@@ -489,7 +532,11 @@ mod tests {
         let path = std::env::temp_dir().join("rb_verify_cli_test_no_grounded_neutral_frame.jsonl");
         std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
 
-        let result = score_capture_against_candidate(&path, DEFAULT_MAX_TIMESTAMP_DELTA_SECS);
+        let result = score_capture_against_candidate(
+            &path,
+            SeedFrame::default(),
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        );
 
         std::fs::remove_file(&path).ok();
         assert!(matches!(result, Err(IngestError::Malformed(_))));
@@ -499,6 +546,7 @@ mod tests {
     fn growth_diagnostic_runs_against_the_synthetic_capture_fixture_without_erroring() {
         let windows = score_capture_growth(
             capture_fixture(),
+            SeedFrame::default(),
             DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
             DEFAULT_GROWTH_WINDOW_SECS,
         )
@@ -513,6 +561,7 @@ mod tests {
     fn growth_diagnostic_missing_file_reports_io_error() {
         let result = score_capture_growth(
             "does-not-exist.capture.jsonl",
+            SeedFrame::default(),
             DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
             DEFAULT_GROWTH_WINDOW_SECS,
         );
@@ -521,7 +570,8 @@ mod tests {
 
     #[test]
     fn trace_starts_at_the_seed_frame_with_zero_error() {
-        let rows = trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
+        let rows =
+            trace_capture(capture_fixture(), SeedFrame::default(), 0.0, f32::INFINITY).unwrap();
         let first = rows.first().unwrap();
         assert_eq!(first.t_secs, 0.0);
         // The candidate world is seeded from this exact recorded frame.
@@ -562,11 +612,18 @@ mod tests {
 
     #[test]
     fn trace_only_returns_frames_inside_the_window() {
-        let all = trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
+        let all =
+            trace_capture(capture_fixture(), SeedFrame::default(), 0.0, f32::INFINITY).unwrap();
         let last_t = all.last().unwrap().t_secs;
         assert!(last_t > 0.0, "fixture needs more than one traced frame");
 
-        let later = trace_capture(capture_fixture(), last_t, f32::INFINITY).unwrap();
+        let later = trace_capture(
+            capture_fixture(),
+            SeedFrame::default(),
+            last_t,
+            f32::INFINITY,
+        )
+        .unwrap();
         assert!(!later.is_empty());
         assert!(later.iter().all(|row| row.t_secs >= last_t));
         assert!(later.len() < all.len());
@@ -574,8 +631,9 @@ mod tests {
 
     #[test]
     fn one_step_rows_cover_the_whole_capture_and_start_exact() {
-        let continuous = trace_capture(capture_fixture(), 0.0, f32::INFINITY).unwrap();
-        let one_step = one_step_capture(capture_fixture()).unwrap();
+        let continuous =
+            trace_capture(capture_fixture(), SeedFrame::default(), 0.0, f32::INFINITY).unwrap();
+        let one_step = one_step_capture(capture_fixture(), SeedFrame::default()).unwrap();
         assert_eq!(one_step.len(), continuous.len());
         assert_eq!(one_step[0].velocity_error(), 0.0);
         // RB-VERIFY-003-FR-007: each row carries the ball too.
@@ -585,7 +643,7 @@ mod tests {
 
     #[test]
     fn one_step_missing_file_reports_io_error() {
-        let result = one_step_capture("does-not-exist.capture.jsonl");
+        let result = one_step_capture("does-not-exist.capture.jsonl", SeedFrame::default());
         assert!(matches!(result, Err(IngestError::Io(_))));
     }
 
@@ -593,9 +651,23 @@ mod tests {
     /// further back can only let more error build up on this fixture.
     #[test]
     fn k_step_scores_every_frame_and_grows_with_k() {
-        let frames = one_step_capture(capture_fixture()).unwrap().len();
-        let one = k_step_score(capture_fixture(), 1, DEFAULT_MAX_TIMESTAMP_DELTA_SECS).unwrap();
-        let thirty = k_step_score(capture_fixture(), 30, DEFAULT_MAX_TIMESTAMP_DELTA_SECS).unwrap();
+        let frames = one_step_capture(capture_fixture(), SeedFrame::default())
+            .unwrap()
+            .len();
+        let one = k_step_score(
+            capture_fixture(),
+            SeedFrame::default(),
+            1,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        )
+        .unwrap();
+        let thirty = k_step_score(
+            capture_fixture(),
+            SeedFrame::default(),
+            30,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        )
+        .unwrap();
         assert_eq!(one.frames_compared, frames);
         assert_eq!(thirty.frames_compared, frames);
         assert!(thirty.cars.mean_position_distance >= one.cars.mean_position_distance);
@@ -603,7 +675,12 @@ mod tests {
 
     #[test]
     fn k_step_missing_file_reports_io_error() {
-        let result = k_step_score("does-not-exist.capture.jsonl", 30, 0.02);
+        let result = k_step_score(
+            "does-not-exist.capture.jsonl",
+            SeedFrame::default(),
+            30,
+            0.02,
+        );
         assert!(matches!(result, Err(IngestError::Io(_))));
     }
 
@@ -649,13 +726,18 @@ mod tests {
 
     #[test]
     fn trace_with_an_inverted_window_is_empty() {
-        let rows = trace_capture(capture_fixture(), 1.0, 0.0).unwrap();
+        let rows = trace_capture(capture_fixture(), SeedFrame::default(), 1.0, 0.0).unwrap();
         assert!(rows.is_empty());
     }
 
     #[test]
     fn trace_missing_file_reports_io_error() {
-        let result = trace_capture("does-not-exist.capture.jsonl", 0.0, 1.0);
+        let result = trace_capture(
+            "does-not-exist.capture.jsonl",
+            SeedFrame::default(),
+            0.0,
+            1.0,
+        );
         assert!(matches!(result, Err(IngestError::Io(_))));
     }
 
@@ -668,6 +750,7 @@ mod tests {
 
         let result = score_capture_growth(
             &path,
+            SeedFrame::default(),
             DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
             DEFAULT_GROWTH_WINDOW_SECS,
         );
@@ -716,5 +799,87 @@ mod tests {
         assert!(landed.cars[0].velocity.y > 1100.0, "{:?}", landed.cars[0]);
         let early = simulate_scenario(&scenario("wavedash_early"));
         assert!(early[60].cars[0].position.z > 40.0, "the early flip hops");
+    }
+
+    /// A capture whose car starts 500 uu up and falls, never touching the
+    /// floor: no frame is grounded, so the default seed has nothing to use.
+    fn airborne_capture(name: &str) -> std::path::PathBuf {
+        let lines: Vec<String> = (0..12)
+            .map(|tick| {
+                let t = tick as f32 / 120.0;
+                let z = 500.0 - 300.0 * t;
+                let x = 100.0 * t;
+                format!(
+                    r#"{{"timestamp_secs":{t},"ball":{{"position":{{"x":2000.0,"y":0.0,"z":93.15}},"rotation":{{"x":0.0,"y":0.0,"z":0.0,"w":1.0}},"velocity":{{"x":0.0,"y":0.0,"z":0.0}},"angular_velocity":{{"x":0.0,"y":0.0,"z":0.0}}}},"cars":[{{"player_id":0,"position":{{"x":{x},"y":0.0,"z":{z}}},"rotation":{{"x":0.0,"y":0.0,"z":0.0,"w":1.0}},"velocity":{{"x":100.0,"y":0.0,"z":-300.0}},"angular_velocity":{{"x":0.0,"y":0.0,"z":0.0}},"boost_amount":50.0,"input":{{"throttle":0.0,"steer":0.0,"pitch":0.0,"yaw":0.0,"roll":0.0,"jump":false,"boost":false,"handbrake":false}}}}]}}"#
+                )
+            })
+            .collect();
+        let path = std::env::temp_dir().join(format!("rb_verify_cli_test_airborne_{name}.jsonl"));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn an_airborne_start_needs_seed_first_frame() {
+        let path = airborne_capture("self");
+        let default = score_capture_against_candidate(
+            &path,
+            SeedFrame::FirstGroundedNeutral,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        );
+        assert!(
+            matches!(default, Err(IngestError::Malformed(ref msg)) if msg.contains("no grounded, neutral frame")),
+            "{default:?}"
+        );
+        let first = score_capture_against_candidate(
+            &path,
+            SeedFrame::First,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+        )
+        .unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(first.frames_compared, 12);
+        assert_eq!(first.cars.pairs_compared, 12);
+    }
+
+    #[test]
+    fn seed_first_frame_starts_every_self_mode_at_the_first_frame() {
+        let path = airborne_capture("modes");
+        assert!(one_step_capture(&path, SeedFrame::FirstGroundedNeutral).is_err());
+        let one_step = one_step_capture(&path, SeedFrame::First).unwrap();
+        assert_eq!(one_step.len(), 12);
+        assert_eq!(one_step[0].t_secs, 0.0);
+        assert_eq!(
+            one_step[0].position_error(),
+            0.0,
+            "seeded from the first frame"
+        );
+        let k_step =
+            k_step_score(&path, SeedFrame::First, 3, DEFAULT_MAX_TIMESTAMP_DELTA_SECS).unwrap();
+        assert_eq!(k_step.frames_compared, 12);
+        let growth = score_capture_growth(
+            &path,
+            SeedFrame::First,
+            DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(growth.len(), 1);
+        let trace = trace_capture(&path, SeedFrame::First, 0.0, f32::INFINITY).unwrap();
+        assert_eq!(trace.len(), 12);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn seed_first_frame_still_refuses_a_capture_whose_first_frame_has_no_car() {
+        let line = r#"{"timestamp_secs":0.0,"ball":{"position":{"x":0.0,"y":0.0,"z":93.0},"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0},"velocity":{"x":0.0,"y":0.0,"z":0.0},"angular_velocity":{"x":0.0,"y":0.0,"z":0.0}},"cars":[]}"#;
+        let path = std::env::temp_dir().join("rb_verify_cli_test_first_frame_no_car.jsonl");
+        std::fs::write(&path, format!("{line}\n{line}\n")).unwrap();
+        let result = k_step_score(&path, SeedFrame::First, 3, DEFAULT_MAX_TIMESTAMP_DELTA_SECS);
+        std::fs::remove_file(&path).ok();
+        assert!(
+            matches!(result, Err(IngestError::Malformed(_))),
+            "{result:?}"
+        );
     }
 }

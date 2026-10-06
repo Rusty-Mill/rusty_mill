@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0058 (`RB-VERIFY-003-FR-012`, `FR-013`): `rb-verify --scenario-from
+  <capture> <from> <to> [name]` cuts a scenario from a window of a capture
+  (`scenario_from_capture`, `rb_scenario::quat_to_rotator`,
+  `Scenario::to_json`), and the global `--seed-first-frame` flag seeds the
+  `--self*` modes from the capture's first frame (`SeedFrame`).
 - ADR-0057 (`RB-VERIFY-003-FR-011`): `rb-verify --scenario <file> --against
   <capture>` scores a scripted scenario's recording against the port's
   prediction (`compare_scenario`).
