@@ -7,6 +7,7 @@ import { FocusRecords } from './FocusRecords'
 import { EstimatesPanel } from '../estimates/EstimatesPanel'
 import { actualPomos, estimateRows, MAX_ESTIMATE } from '../estimates/logic'
 import { setEstimate, useEstimates } from '../estimates/store'
+import { startAmbient } from './ambient'
 import { Overview } from './Overview'
 import { SettingsRow } from './SettingsRow'
 import { TimerRing } from './TimerRing'
@@ -24,6 +25,7 @@ export function FocusPage() {
   const [taskId, setTaskId] = useState('')
   const [confirmGiveUp, setConfirmGiveUp] = useState(false)
   const running = session !== null && session.pausedAt === null
+  const focusing = running && session.phase === 'focus'
   const now = useNow(running)
   const f = useFocus.getState
 
@@ -31,6 +33,9 @@ export function FocusPage() {
     void f().load(api, notify)
     void useEstimates.getState().load(api, notify)
   }, [api, notify, f])
+
+  // Ambient sound plays while a focus session runs, not on pause or breaks.
+  useEffect(() => (focusing && settings.ambient !== 'off' ? startAmbient(settings.ambient) : undefined), [focusing, settings.ambient])
 
   // Backstop for the end-of-countdown timer in the store.
   useEffect(() => {

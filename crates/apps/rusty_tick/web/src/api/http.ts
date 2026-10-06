@@ -114,6 +114,10 @@ export class HttpAdapter implements ApiClient {
   deleteDoc(kind: DocKind, id: string): Promise<void> {
     return this.request('DELETE', `/docs/${kind}/${id}`)
   }
+
+  async fetchIcs(url: string): Promise<string> {
+    return (await this.request<{ text: string }>('POST', '/fetch-ics', { url })).text
+  }
 }
 
 function toError(status: number, body: ErrorBody | undefined): Error {

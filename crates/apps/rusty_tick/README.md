@@ -6,8 +6,9 @@ A clean-room design: it is written from the product's public behaviour and
 documented API, not from its code.
 
 Status: storage, a JSON HTTP API for one user or several, and a web UI in [`web/`](web/README.md)
-(lists, tags, Kanban, timeline and Eisenhower-matrix views, saved filters, Won't Do, calendar with
-`.ics` import, focus timer with pomo estimates and interruption tracking, countdowns, habits, summaries). Sync is by polling; there is no push channel.
+(lists, tags, Kanban, timeline and Eisenhower-matrix views, saved filters, Won't Do, calendar (month, week, day, 3-day, ten-day, agenda) with `.ics` import and feed subscriptions,
+focus timer with ambient sound, pomo estimates and interruption tracking, countdowns, assignees, habits,
+summaries). Sync is by polling; there is no push channel.
 Engine findings are in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) (issue
 [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)); the HTTP stack
 choice is in [ADR-0001](docs/decisions/ADR-0001-http-stack.md); the
@@ -71,7 +72,8 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`) |
 | GET, POST | `/api/v1/tags` | PATCH `/tags/{name}`, POST `/tags/{name}/rename` |
 | GET | `/api/v1/tags/{tag}/tasks` | |
-| GET | `/api/v1/docs/{kind}` | client documents: `PUT`/`DELETE /docs/{kind}/{id}`; kinds `habit`, `habit_checkin`, `focus`, `prefs`, `summary_template`, `comment`, `filter`, `countdown`, `estimate` |
+| POST | `/api/v1/fetch-ics` | `{"url"}` → `{"text"}`: the server fetches a calendar feed for the web UI (browsers cannot read most). `https://` or `webcal://`, port 443, public addresses only (checked before connecting, redirects re-checked), 4 MiB, 6 s per step; 422 for a URL it refuses, 502 for a feed that fails, 503 when 4 fetches are already running. It runs after the server's request lock is released, so a slow feed holds up no other request |
+| GET | `/api/v1/docs/{kind}` | client documents: `PUT`/`DELETE /docs/{kind}/{id}`; kinds `habit`, `habit_checkin`, `focus`, `prefs`, `summary_template`, `comment`, `filter`, `countdown`, `estimate`, `assignee`, `subscription` |
 | GET | `/api/v1/smart/today`, `/next7`, `/overdue` | `?utcOffsetMin=` (default 0); open tasks in non-archived lists |
 
 Priority is 0, 1, 3 or 5. A task's status is `open`, `done` or `wontdo` (PATCH `status`; closing stamps `completedMs`, reopening clears it). Times are Unix milliseconds. Subtasks nest one level

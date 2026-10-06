@@ -1,5 +1,6 @@
 /** Saved filters: a name and a rule. Pure; no clock reads. Stored as `filter` client documents. */
 import type { Priority, Task } from '@/api/types'
+import { UNASSIGNED } from '../assignees/logic'
 
 export type DateBucket = 'overdue' | 'today' | 'tomorrow' | 'next7' | 'later' | 'nodate'
 
@@ -9,6 +10,8 @@ export interface FilterRule {
   tags: string[]
   priorities: Priority[]
   dates: DateBucket[]
+  /** Names from `assignees`, or `UNASSIGNED`. */
+  assignees: string[]
 }
 
 export interface FilterBody {
@@ -36,15 +39,16 @@ export const PRIORITIES: [Priority, string][] = [
   [0, 'None'],
 ]
 
-export const emptyRule = (): FilterRule => ({ lists: [], tags: [], priorities: [], dates: [] })
+export const emptyRule = (): FilterRule => ({ lists: [], tags: [], priorities: [], dates: [], assignees: [] })
 
-/** Whether `task` passes `rule`; `bucket` is the task's due-date bucket (see `dateBucket`). */
-export function matchesFilter(task: Task, rule: FilterRule, bucket: DateBucket): boolean {
+/** Whether `task` passes `rule`; `bucket` is its due-date bucket (see `dateBucket`) and `assignee` its assignee name, `''` if none. */
+export function matchesFilter(task: Task, rule: FilterRule, bucket: DateBucket, assignee = ''): boolean {
   return (
     (rule.lists.length === 0 || rule.lists.includes(task.listId)) &&
     (rule.tags.length === 0 || task.tags.some((t) => rule.tags.includes(t))) &&
     (rule.priorities.length === 0 || rule.priorities.includes(task.priority)) &&
-    (rule.dates.length === 0 || rule.dates.includes(bucket))
+    (rule.dates.length === 0 || rule.dates.includes(bucket)) &&
+    (rule.assignees.length === 0 || rule.assignees.includes(assignee || UNASSIGNED))
   )
 }
 
@@ -65,6 +69,7 @@ export function asFilterBody(body: unknown): FilterBody | null {
       tags: strings(r.tags),
       priorities: Array.isArray(r.priorities) ? r.priorities.filter((p): p is Priority => prios.includes(p as Priority)) : [],
       dates: strings(r.dates).filter((d): d is DateBucket => buckets.includes(d as DateBucket)),
+      assignees: strings(r.assignees),
     },
   }
 }

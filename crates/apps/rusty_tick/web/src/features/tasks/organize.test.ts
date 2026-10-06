@@ -72,8 +72,8 @@ describe('tasksForView', () => {
     task({ title: 'in-3-days', listId: 'work', dueMs: day(3), tags: ['x'] }),
     task({ title: 'in-9-days', listId: 'work', dueMs: day(9) }),
   ]
-  const filters = [{ id: 'f1', name: 'Work soon', rule: { lists: ['work'], tags: [], priorities: [], dates: ['overdue' as const, 'next7' as const] } }]
-  const e = { tasks, lists, tags: [], inboxId: INBOX, filters }
+  const filters = [{ id: 'f1', name: 'Work soon', rule: { lists: ['work'], tags: [], priorities: [], dates: ['overdue' as const, 'next7' as const], assignees: [] } }]
+  const e = { tasks, lists, tags: [], inboxId: INBOX, filters, assignees: {} }
   const titles = (spec: Parameters<typeof tasksForView>[0], done = false) => ids(tasksForView(spec, e, NOW, done)).sort()
 
   it('a saved filter: its rule over open, live tasks in lists that are not archived; an unknown filter shows nothing', () => {
