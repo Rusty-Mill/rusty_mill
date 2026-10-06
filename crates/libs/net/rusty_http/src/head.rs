@@ -401,26 +401,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fragmented_head_over_the_cap_errors_before_or_at_the_terminator() {
-        // Fed the way an adapter feeds it -- a growing prefix of the same
-        // over-cap head -- the parser must report `HeadTooLarge` at some
-        // point and never `Complete`, whichever branch catches it.
-        const CAP: usize = 256;
-        let full = request_head_of_len(CAP + 1);
-        let mut outcome = None;
+    /// Feeds a growing prefix of `full`, the way an adapter does, and
+    /// returns the first non-`Incomplete` outcome as `Ok(consumed)` or
+    /// the error.
+    fn feed_fragmented<T>(
+        full: &[u8],
+        cap: usize,
+        parse: impl Fn(&[u8], usize) -> Result<Outcome<T>>,
+    ) -> Result<usize> {
         for end in 1..=full.len() {
-            match parse_request_head(&full[..end], CAP) {
-                Ok(Outcome::Incomplete) => continue,
-                other => {
-                    outcome = Some(other);
-                    break;
-                }
+            match parse(&full[..end], cap)? {
+                Outcome::Incomplete => continue,
+                Outcome::Complete { consumed, .. } => return Ok(consumed),
             }
         }
-        assert!(
-            matches!(outcome, Some(Err(Error::HeadTooLarge))),
-            "{outcome:?}"
+        panic!("the whole head was fed without a terminal outcome");
+    }
+
+    #[test]
+    fn fragmented_heads_at_every_boundary_match_the_complete_outcome() {
+        // Under and at the cap: eventually `Complete` with an exact
+        // `consumed`. Over the cap: `HeadTooLarge` at some point and
+        // never `Complete`, whichever branch catches it. Both parsers.
+        const CAP: usize = 256;
+        for len in [CAP - 1, CAP] {
+            let req = request_head_of_len(len);
+            assert_eq!(feed_fragmented(&req, CAP, parse_request_head).unwrap(), len);
+            let resp = response_head_of_len(len);
+            assert_eq!(
+                feed_fragmented(&resp, CAP, parse_response_head).unwrap(),
+                len
+            );
+        }
+        let req = request_head_of_len(CAP + 1);
+        assert_eq!(
+            feed_fragmented(&req, CAP, parse_request_head).unwrap_err(),
+            Error::HeadTooLarge
+        );
+        let resp = response_head_of_len(CAP + 1);
+        assert_eq!(
+            feed_fragmented(&resp, CAP, parse_response_head).unwrap_err(),
+            Error::HeadTooLarge
         );
     }
 

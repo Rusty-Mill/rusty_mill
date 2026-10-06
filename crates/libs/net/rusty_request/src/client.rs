@@ -1631,4 +1631,43 @@ mod tests {
             assert_eq!(opens.load(Ordering::SeqCst), 1);
         });
     }
+
+    #[test]
+    fn streaming_attempt_head_write_failure_never_opens_the_body() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(0, b"");
+            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn streaming_attempt_peer_dropping_after_the_body_opens_it_once_and_fails_once() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(usize::MAX, b"");
+            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn streaming_attempt_full_round_trip_opens_the_body_once() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(
+                usize::MAX,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            );
+            let (status, _headers, mut reader) =
+                attempt_streaming(io, &request, "/submit").await.unwrap();
+            assert_eq!(status.as_u16(), 200);
+            assert_eq!(
+                reader.next_chunk().await.unwrap().as_deref(),
+                Some(&b"ok"[..])
+            );
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+        });
+    }
 }

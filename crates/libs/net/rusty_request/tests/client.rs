@@ -1100,6 +1100,66 @@ fn send_streaming_never_replays_a_stale_pooled_connection() {
 }
 
 #[test]
+fn stale_pooled_connection_stays_an_error_when_the_policy_forbids_it() {
+    // A policy that exists but does not cover the failure is no license
+    // to replay: no I/O retries, or a zero retry budget.
+    run(async {
+        for policy in [
+            RetryPolicy::new(3)
+                .backoff(Backoff::fixed(Duration::from_millis(1)))
+                .no_io_retry(),
+            RetryPolicy::new(0),
+        ] {
+            let (addr, accepted) = start_one_request_per_connection_server();
+            let client = Client::new();
+            pool_a_stale_connection(&client, addr).await;
+
+            let err = client
+                .get(&format!("http://{addr}/b"))
+                .unwrap()
+                .retry(policy)
+                .send()
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{err:?}");
+            assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        }
+    });
+}
+
+/// A server that answers the first request on each connection and
+/// keeps it alive, then reads the second request in full and hangs up
+/// without answering. Returns the address and a count of requests read.
+fn start_drop_second_request_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let requests_in_task = requests.clone();
+    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = listener.local_addr().unwrap();
+    rusty_tokio::spawn(async move {
+        loop {
+            let (stream, _peer) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let requests = requests_in_task.clone();
+            rusty_tokio::spawn(async move {
+                if common::read_request(&stream).await.is_err() {
+                    return;
+                }
+                requests.fetch_add(1, Ordering::SeqCst);
+                let _ = stream
+                    .write_all(&http_response(200, "OK", &[], b"ok"))
+                    .await;
+                if common::read_request(&stream).await.is_ok() {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    (addr, requests)
+}
+
+#[test]
 fn post_the_peer_accepts_then_drops_is_never_resubmitted() {
     // The replay this change exists to prevent: the server reads the
     // whole second POST on the pooled connection and closes without
@@ -1107,39 +1167,11 @@ fn post_the_peer_accepts_then_drops_is_never_resubmitted() {
     // without a retry policy, and not with a default (idempotent-only)
     // one either.
     run(async {
-        let requests = Arc::new(AtomicUsize::new(0));
-        let requests_in_task = requests.clone();
-        let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-        rusty_tokio::spawn(async move {
-            loop {
-                let (stream, _peer) = match listener.accept().await {
-                    Ok(pair) => pair,
-                    Err(_) => break,
-                };
-                let requests = requests_in_task.clone();
-                rusty_tokio::spawn(async move {
-                    // First request on a connection: answered, kept
-                    // alive. Second: read in full, then hang up.
-                    if common::read_request(&stream).await.is_err() {
-                        return;
-                    }
-                    requests.fetch_add(1, Ordering::SeqCst);
-                    let _ = stream
-                        .write_all(&http_response(200, "OK", &[], b"ok"))
-                        .await;
-                    if common::read_request(&stream).await.is_ok() {
-                        requests.fetch_add(1, Ordering::SeqCst);
-                    }
-                });
-            }
-        });
-
         for policy in [
             None,
             Some(RetryPolicy::new(2).backoff(Backoff::fixed(Duration::from_millis(1)))),
         ] {
-            requests.store(0, Ordering::SeqCst);
+            let (addr, requests) = start_drop_second_request_server();
             let client = Client::new();
             let mut first = client
                 .post(&format!("http://{addr}/a"))
@@ -1165,6 +1197,41 @@ fn post_the_peer_accepts_then_drops_is_never_resubmitted() {
                 "the dropped POST must reach the server exactly once"
             );
         }
+    });
+}
+
+#[test]
+fn post_the_peer_accepts_then_drops_is_resubmitted_only_by_explicit_opt_in() {
+    // `retry_non_idempotent` is the one authority that may send the
+    // dropped POST again: it goes out exactly once more, on a fresh
+    // connection, through the retry loop.
+    run(async {
+        let (addr, requests) = start_drop_second_request_server();
+        let policy = RetryPolicy::new(1)
+            .backoff(Backoff::fixed(Duration::from_millis(1)))
+            .retry_non_idempotent();
+        let client = Client::builder().retry(policy).build();
+        assert_eq!(
+            client
+                .post(&format!("http://{addr}/a"))
+                .unwrap()
+                .body("one")
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            200
+        );
+        let second = client
+            .post(&format!("http://{addr}/b"))
+            .unwrap()
+            .body("two")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status().as_u16(), 200);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     });
 }
 
