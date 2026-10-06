@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_bot: per-bot sandboxes
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 7, second PR
+
+- **Added:** `rusty_bot` at `crates/libs/rusty_bot`. `BotSpec::sandbox()` builds the `SandboxSpec` for one agent process: write only to its workspace (also its working directory), read its roots (by default `/usr`, `/lib`, `/lib64`, `/bin`, `/etc`) and the directory its program lives in, exactly the environment it was given, and `default_limits()` (a day of CPU, a week of wall clock, 2 GiB of address space, 1 GiB files, 1024 descriptors, 256 processes). The network stays open (`Sockets::Internet`): a bot listens on a port and may call a model; the filesystem is what keeps one bot's data from another's, the same posture `rsi` takes for coding-agent CLIs. `start` runs a bot with a thread waiting on it; `Running::stop` kills the process group and `outcome`/`wait` report how it ended; `Fleet::start` is all up or all down. `load` reads a JSON bots file and refuses duplicate names.
+- **Added:** the `rusty-bot` binary: `run <bots.json> <state dir>` starts the fleet and prints each bot's end; `__sandbox` is the helper the executor spawns, single-threaded from birth. Having both in one binary is how `rsi` does it, and it means the helper is always the same build as its caller.
+- **Changed:** `rusty_sandbox::ProcessExecutor::start` returns a running `Job` instead of waiting: `Job::handle()` is a `Copy` `JobHandle` whose `kill()` sends `SIGKILL` to the group from any thread, and `Job::wait(wall)` reaps and contains it as `exec` always did (`exec_with` now runs on the same path). `start` waits for the helper to either fail setup or replace its image before reading the status file, checked through `/proc/<pid>/exe`: a helper that has not opened the file yet must not find it gone.
+- **Tests:** two unit tests (the sandbox a spec builds; loading with defaults and five bad documents); two Linux integration tests through the real binary (a shell bot writes `note.txt` in its workspace, cannot create a file outside it, and dies as a group with `SIGKILL` when stopped; a fleet with one bad spec starts nothing, a good one starts and stops); one more executor test (a started job killed from its handle). Off Linux, the test asserts the refusal.
+- **Known limitations:** no port allocation or health check (a bot's port is whatever its own arguments say); no restart policy; the fleet is in memory; wiring a bot's port to a channel runner or the gateway is the operator's, by `AGENT_URL`.
+
+---
+
 ## rusty_sandbox: the sandboxed executor, hoisted from rusty_rsi
 **2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 7, first PR · amends [ADR-0005](docs/adr/0005-rsi-harness.md) §4
 

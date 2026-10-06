@@ -28,7 +28,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 3 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 28 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 29 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
@@ -85,6 +85,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 4 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 0 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
+| libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core | 1 |
 | libs | rusty_db | rusty-db-core | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db) | 4 |
@@ -114,7 +115,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_rdp | rusty_rdp | A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format in Rust. | 0 |
 | libs | rusty_request | rusty_request | An async HTTP client -- a Rust take on Python's requests, built on rusty_tokio and rusty_http. | 14 |
 | libs | rusty_routine | rusty_routine | Routines for AG-UI agents: a cron schedule that posts a RunAgentInput on time, disabled after too many consecutive failures | 0 |
-| libs | rusty_sandbox | rusty_sandbox | Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec | 3 |
+| libs | rusty_sandbox | rusty_sandbox | Fail-closed sandboxed execution for untrusted processes: a filesystem allowlist (Landlock), socket rules (seccomp), hard rlimits and a process-group job, behind an Executor port with a sans-IO spec | 4 |
 | libs | rusty_search | rusty-search | Async, pluggable search interface for Rust: swap search engines without changing application code | 0 |
 | libs | rusty_search | rusty-search-algolia | Algolia-backed SearchBackend implementation for rusty_search: a hosted search SaaS | 1 |
 | libs | rusty_search | rusty-search-azure-search | Azure AI Search-backed SearchBackend implementation for rusty_search: a hosted search-as-a-service on Azure | 1 |

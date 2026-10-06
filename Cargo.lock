@@ -13865,6 +13865,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_bot"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_sandbox",
+]
+
+[[package]]
 name = "rusty_channel"
 version = "0.1.0"
 dependencies = [

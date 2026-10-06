@@ -21,7 +21,7 @@ pub mod helper;
 pub mod spec;
 
 pub use error::Error;
-pub use executor::{ProcessExecutor, DEFAULT_CAPTURE_BYTES};
+pub use executor::{Job, JobHandle, ProcessExecutor, DEFAULT_CAPTURE_BYTES};
 #[cfg(target_os = "linux")]
 pub use helper::require_enforced;
 pub use helper::{run_helper, HelperRequest, Sockets, SETUP_FAILED};

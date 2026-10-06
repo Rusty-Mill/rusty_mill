@@ -112,7 +112,7 @@ impl ProcessExecutor {
             program: program.into(),
             args: args.iter().map(OsString::from).collect(),
         };
-        let outcome = run(self, &request, spec.limits().wall(), stdin);
+        let outcome = spawn(self, &request, stdin).and_then(|job| job.wait(spec.limits().wall()));
         let setup_error = std::fs::read_to_string(&status);
         let removed = std::fs::remove_file(&status);
         let setup_error = setup_error.map_err(|e| Error::io("reading the status file", e))?;
@@ -121,6 +121,67 @@ impl ProcessExecutor {
         }
         removed.map_err(|e| Error::io("removing the status file", e))?;
         outcome
+    }
+}
+
+impl ProcessExecutor {
+    /// Starts `program` like [`ProcessExecutor::exec_with`] but returns the
+    /// running [`Job`] instead of waiting for it, for a long-lived process
+    /// (a bot's agent) that something else decides to stop. The sandbox
+    /// setup is checked the same way: a helper that could not confine
+    /// itself is an error here, before the job is handed back.
+    ///
+    /// # Errors
+    /// As [`Executor::exec`].
+    pub fn start(
+        &self,
+        spec: &SandboxSpec,
+        program: &str,
+        args: &[String],
+        stdin: Stdio,
+        sockets: Sockets,
+    ) -> Result<Job, Error> {
+        let state_dir = canonical(&self.state_dir)?;
+        if spec.can_reach(&state_dir) {
+            return Err(Error::Sandbox(format!(
+                "executor state directory {} is reachable from the sandbox",
+                state_dir.display()
+            )));
+        }
+        let status = self.status_file()?;
+        let request = HelperRequest {
+            status: status.clone(),
+            cwd: spec.cwd().clone(),
+            cpu_secs: spec.limits().cpu().as_secs(),
+            memory_bytes: spec.limits().memory_bytes(),
+            file_bytes: spec.limits().file_bytes(),
+            open_files: spec.limits().open_files(),
+            processes: spec.limits().processes(),
+            read: spec.read_roots().to_vec(),
+            write: spec.write_roots().to_vec(),
+            env: spec.env().to_vec(),
+            sockets,
+            program: program.into(),
+            args: args.iter().map(OsString::from).collect(),
+        };
+        let mut job = spawn(self, &request, stdin)?;
+        // The helper either failed setup (and exited with the reason in the
+        // status file) or exec'd the program (and the file stays empty).
+        // Either way the file is closed on exec, so once the helper is past
+        // setup there is nothing more to read: poll until it is gone or the
+        // process has ended.
+        let helper = self
+            .helper
+            .canonicalize()
+            .map_err(|e| Error::io("resolving the helper", e))?;
+        let setup_error = job.setup_error(&status, &helper)?;
+        let removed = std::fs::remove_file(&status);
+        if !setup_error.is_empty() {
+            let _ = job.handle().kill();
+            return Err(Error::Sandbox(setup_error));
+        }
+        removed.map_err(|e| Error::io("removing the status file", e))?;
+        Ok(job)
     }
 }
 
@@ -143,29 +204,79 @@ fn canonical(path: &Path) -> Result<PathBuf, Error> {
         .map_err(|e| Error::io(format!("resolving {}", path.display()), e))
 }
 
+/// A sandboxed process group that has been started and not yet reaped.
+///
+/// Owned by whoever started it; [`Job::wait`] reaps it, and a
+/// [`JobHandle`] can kill it from anywhere.
+#[derive(Debug)]
+pub struct Job {
+    #[cfg(target_os = "linux")]
+    inner: linux::Running,
+}
+
+/// A way to stop a [`Job`] from another thread: the group id, nothing
+/// else, so it is `Copy` and outlives nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobHandle {
+    group: i32,
+}
+
+impl JobHandle {
+    /// Sends `SIGKILL` to the whole group. A group that is already gone is
+    /// fine; the job's [`Job::wait`] then reports the signal.
+    ///
+    /// # Errors
+    /// [`Error::Sandbox`] if the kill itself fails.
+    pub fn kill(&self) -> Result<(), Error> {
+        kill_group(self.group)
+    }
+
+    /// The process group id, for logs.
+    #[must_use]
+    pub const fn group(&self) -> i32 {
+        self.group
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
-fn run(
+fn spawn(
     _executor: &ProcessExecutor,
     _request: &HelperRequest,
-    _wall: Duration,
     _stdin: Stdio,
-) -> Result<ExecOutcome, Error> {
+) -> Result<Job, Error> {
     Err(Error::Sandbox(
         "sandboxed execution is only implemented on Linux".into(),
     ))
 }
 
-#[cfg(target_os = "linux")]
-fn run(
-    executor: &ProcessExecutor,
-    request: &HelperRequest,
-    wall: Duration,
-    stdin: Stdio,
-) -> Result<ExecOutcome, Error> {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::process::Command;
+#[cfg(not(target_os = "linux"))]
+impl Job {
+    /// Never constructed off Linux.
+    pub fn handle(&self) -> JobHandle {
+        JobHandle { group: 0 }
+    }
 
-    use crate::spec::Termination;
+    /// Never constructed off Linux.
+    pub fn wait(self, _wall: Duration) -> Result<ExecOutcome, Error> {
+        Err(Error::Sandbox(
+            "sandboxed execution is only implemented on Linux".into(),
+        ))
+    }
+
+    fn setup_error(&mut self, _status: &Path, _helper: &Path) -> Result<String, Error> {
+        Ok(String::new())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_group(_group: i32) -> Result<(), Error> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn spawn(executor: &ProcessExecutor, request: &HelperRequest, stdin: Stdio) -> Result<Job, Error> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
 
     let start = std::time::Instant::now();
     let mut child = Command::new(&executor.helper)
@@ -182,43 +293,136 @@ fn run(
         .map_err(|_| Error::Sandbox("child process id out of range".into()))?;
     let stdout = capture(child.stdout.take(), executor.capture_bytes);
     let stderr = capture(child.stderr.take(), executor.capture_bytes);
-
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| Error::io("waiting for the sandboxed process", e))?
-        {
-            break status;
-        }
-        if start.elapsed() >= wall {
-            timed_out = true;
-            kill_group(group)?;
-            break child
-                .wait()
-                .map_err(|e| Error::io("reaping the timed-out process", e))?;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let elapsed = start.elapsed();
-    // Anything the program left running dies with it. The sandbox forbids
-    // leaving the group (sandbox::group_lock), so the group is the job.
-    contain(group)?;
-
-    let termination = match (timed_out, status.code(), status.signal()) {
-        (true, _, _) => Termination::TimedOut,
-        (false, Some(code), _) => Termination::Exited(code),
-        (false, None, Some(signal)) => Termination::Signaled(signal),
-        (false, None, None) => {
-            return Err(Error::Sandbox(format!("unrecognised exit status {status}")));
-        }
-    };
-    Ok(ExecOutcome {
-        termination,
-        stdout: stdout.finish(),
-        stderr: stderr.finish(),
-        wall: elapsed,
+    Ok(Job {
+        inner: linux::Running {
+            child,
+            group,
+            stdout,
+            stderr,
+            start,
+        },
     })
+}
+
+#[cfg(target_os = "linux")]
+impl Job {
+    /// A handle that can kill this job from another thread.
+    #[must_use]
+    pub fn handle(&self) -> JobHandle {
+        JobHandle {
+            group: self.inner.group,
+        }
+    }
+
+    /// Waits for the job to end, killing the whole group at `wall`, and
+    /// contains whatever it left running.
+    ///
+    /// # Errors
+    /// [`Error::Io`] when the process cannot be waited on; [`Error::Sandbox`]
+    /// when a member of the group survives being killed.
+    pub fn wait(self, wall: Duration) -> Result<ExecOutcome, Error> {
+        use std::os::unix::process::ExitStatusExt;
+
+        use crate::spec::Termination;
+
+        let linux::Running {
+            mut child,
+            group,
+            stdout,
+            stderr,
+            start,
+        } = self.inner;
+        let mut timed_out = false;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| Error::io("waiting for the sandboxed process", e))?
+            {
+                break status;
+            }
+            if start.elapsed() >= wall {
+                timed_out = true;
+                kill_group(group)?;
+                break child
+                    .wait()
+                    .map_err(|e| Error::io("reaping the timed-out process", e))?;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let elapsed = start.elapsed();
+        // Anything the program left running dies with it. The sandbox forbids
+        // leaving the group (helper::group_lock), so the group is the job.
+        contain(group)?;
+
+        let termination = match (timed_out, status.code(), status.signal()) {
+            (true, _, _) => Termination::TimedOut,
+            (false, Some(code), _) => Termination::Exited(code),
+            (false, None, Some(signal)) => Termination::Signaled(signal),
+            (false, None, None) => {
+                return Err(Error::Sandbox(format!("unrecognised exit status {status}")));
+            }
+        };
+        Ok(ExecOutcome {
+            termination,
+            stdout: stdout.finish(),
+            stderr: stderr.finish(),
+            wall: elapsed,
+        })
+    }
+
+    /// What the helper wrote to `status` before `exec`: empty once it has
+    /// exec'd the program (its image is no longer `helper`) or exited.
+    /// Polls until one of those; a helper that has not opened the file yet
+    /// must not find it gone.
+    fn setup_error(&mut self, status: &Path, helper: &Path) -> Result<String, Error> {
+        let deadline = std::time::Instant::now() + SETUP_DEADLINE;
+        loop {
+            let ended = self
+                .inner
+                .child
+                .try_wait()
+                .map_err(|e| Error::io("waiting for the sandbox helper", e))?
+                .is_some();
+            if ended || linux::has_execed(self.inner.group, helper) {
+                return std::fs::read_to_string(status)
+                    .map_err(|e| Error::io("reading the status file", e));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::Sandbox(
+                    "the sandbox helper did not finish setting up".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// How long a helper gets to confine itself and `exec` before the job is
+/// refused.
+#[cfg(target_os = "linux")]
+const SETUP_DEADLINE: Duration = Duration::from_secs(10);
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::path::Path;
+
+    use super::Capture;
+
+    #[derive(Debug)]
+    pub(super) struct Running {
+        pub(super) child: std::process::Child,
+        pub(super) group: i32,
+        pub(super) stdout: Capture,
+        pub(super) stderr: Capture,
+        pub(super) start: std::time::Instant,
+    }
+
+    /// Whether the group leader has replaced the helper's image: its
+    /// `/proc/<pid>/exe` no longer points at `helper`. A process that is
+    /// gone reads as not exec'd; the caller checks for exit separately.
+    pub(super) fn has_execed(group: i32, helper: &Path) -> bool {
+        std::fs::read_link(format!("/proc/{group}/exe")).is_ok_and(|exe| exe != helper)
+    }
 }
 
 /// Sends `SIGKILL` to the group; a group that is already gone is fine.
@@ -307,6 +511,7 @@ fn parse_stat(stat: &str) -> Option<(char, i32)> {
 
 /// A stream being drained on its own thread, keeping only the first bytes.
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
 struct Capture(Option<std::sync::mpsc::Receiver<Vec<u8>>>);
 
 #[cfg(target_os = "linux")]
@@ -395,6 +600,42 @@ mod tests {
         contain(group).expect("contained");
         child.wait().expect("reap");
         assert!(live_members(group).expect("scan").is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_started_job_can_be_killed_from_a_handle() {
+        // `sh -c "exec sleep 30"` as the "helper": it ignores the request
+        // arguments, never touches the status file, and replaces its image
+        // the way a real helper does, then runs until killed. Enough to
+        // exercise start, the exec check, the handle and wait.
+        let base = std::env::temp_dir().join(format!("sandbox-job-test-{}", std::process::id()));
+        let root = canonical(&base.join("work")).expect("temp dir");
+        let executor = ProcessExecutor::new(
+            "/bin/sh".into(),
+            vec!["-c".into(), "exec sleep 30".into()],
+            base.join("state"),
+        );
+        let job = executor
+            .start(
+                &spec(&root),
+                "unused",
+                &[],
+                Stdio::null(),
+                Sockets::NoInternet,
+            )
+            .expect("started");
+        let handle = job.handle();
+        let waiter = std::thread::spawn(move || job.wait(Duration::from_secs(20)));
+        std::thread::sleep(Duration::from_millis(100));
+        handle.kill().expect("killed");
+        let outcome = waiter.join().expect("thread").expect("waited");
+        assert_eq!(outcome.termination, crate::spec::Termination::Signaled(9));
+        assert!(
+            outcome.wall < Duration::from_secs(5),
+            "ended by the kill, not the wall"
+        );
+        std::fs::remove_dir_all(&base).expect("cleanup");
     }
 
     #[test]

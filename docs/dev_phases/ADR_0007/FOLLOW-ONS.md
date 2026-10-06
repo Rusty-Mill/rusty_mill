@@ -15,6 +15,7 @@ routine can run one on a schedule.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 7, second PR | `rusty_bot`: `BotSpec` confined by `rusty_sandbox` (own workspace, read roots, limits, process group, network open), `Fleet`, the `rusty-bot` runner-and-helper binary; `ProcessExecutor::start` for long-lived jobs |
 | (this PR) | step 7, first PR | `rusty_sandbox`: the executor port and Linux adapter hoisted from `rusty_rsi` unchanged, re-exported there so nothing in `rsi` moves |
 | [#524](https://github.com/Rusty-Mill/rusty_mill/pull/524) | step 6 | `rusty_routine`: cron `Schedule`, `Routine` (fresh thread per firing, `forwardedProps.routine` for gateway rules, disabled after N consecutive failures), a JSON routines file, a runner on the Rust client |
 | [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) | step 5, SMS | `sms::Twilio`: HMAC-SHA1 webhook signature on `rusty_sha1`, one conversation per pair of numbers, TwiML ack, `Messages.json` reply; the `ack` hook on `Channel` |
@@ -85,7 +86,7 @@ Both targets start with the same two pieces, so they come first.
 | 4 | **Done.** Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1 PR, touches `rusty_agent_gateway` | Given |
 | 5 | **Done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given |
 | 6 | **Done.** Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
-| 7 | **Hoist done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
+| 7 | **Done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
 | 8 | Angular and Vue bindings over `agui-core` | 1 PR each, when a consumer exists | No |
 | 9 | iOS (Swift) and Android (Kotlin) ports of the core | Large, when a consumer exists | Yes: new languages in the workspace |
 | 10 | Adapters from `rusty_adk`, `nexus-ai-runtime`, `rusty_key` | 1 PR each, in each family | No |
@@ -133,6 +134,16 @@ before: the hooks are the API, the components are one rendering of it.
   credential fetch before each reply. That fetch is a `Channel` hook with
   a default (`credential` returns `Ready`), so Slack did not change; the
   trait grew by what the second service needed and nothing more.
+- **Step 7's bots keep the network open.** A bot listens on a port and
+  may call a model, so its sandbox is the filesystem, the limits and the
+  process group, not the socket rules: the posture `rsi` already takes
+  for coding-agent CLIs. Keeping one bot's data from another's is the
+  point; keeping a bot off the network is the gateway's job, in front of
+  it, where the rules are.
+- **Step 7's helper is the runner.** `rusty-bot __sandbox` is the helper
+  the executor spawns, as `rsi __sandbox` is for `rsi`, so a fleet and
+  its helper are always the same build and no second binary has to be
+  found on a path.
 - **Step 7's hoist moves code, not behaviour.** `rusty_sandbox` is the
   port and the adapter as they were in `rsi`, with their tests, under one
   error type of their own; `rsi` re-exports them at the old paths and
