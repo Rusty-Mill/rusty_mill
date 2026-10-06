@@ -1,8 +1,11 @@
 /**
  * Who a task is assigned to: a free-text name per task (this app has no
  * accounts to pick from within one data store), kept as `assignee` client
- * documents keyed by the task's id so the task record itself is unchanged.
+ * documents (one per task, with an id derived from the task's id and the kind)
+ * so the task record itself is unchanged.
  */
+import { derivedId } from '@/lib/id'
+
 export interface AssigneeBody {
   taskId: string
   name: string
@@ -23,7 +26,10 @@ export function asAssigneeBody(body: unknown): AssigneeBody | null {
   return name ? { taskId: o.taskId, name } : null
 }
 
-/** Assignee name by task id. */
+/** The id of a task's assignee doc: its own per task, and different from the task's other docs. */
+export const assigneeDocId = (taskId: string): string => derivedId(`assignee|${taskId}`)
+
+/** Assignee name by task id (if a task has two docs, the later one wins). */
 export const assigneeMap = (items: readonly AssigneeBody[]): Record<string, string> => Object.fromEntries(items.map((a) => [a.taskId, a.name]))
 
 /** Every name in use, once each (case-insensitively, keeping the first spelling), sorted. */

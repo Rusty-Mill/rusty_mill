@@ -28,7 +28,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 3 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
-| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 32 |
+| foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 31 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
 | foundation | rusty_json_patch | rusty_json_patch | Sovereign JSON Pointer (RFC 6901), JSON Patch (RFC 6902) and JSON Merge Patch (RFC 7386) over rusty_json::Value: parse, apply atomically, and diff | 1 |
 | foundation | rusty_libc | rusty_libc | no_std, zero-dependency, Linux-only raw-syscall replacement for the libc crate, built for rush. | 12 |
@@ -84,7 +84,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_adk | mcp-tool-server | Serves Rust ADK tools over MCP, so ADK agents in any language can call them | 0 |
 | libs | rusty_adk | rusty-adk | A Rust implementation of the Agent Development Kit (ADK) 2.0 architecture | 4 |
 | libs | rusty_adk | weather-agent | End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop | 0 |
-| libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 8 |
+| libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
 | libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 0 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
@@ -130,7 +130,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_search | rusty-search-solr | Apache Solr-backed SearchBackend implementation for rusty_search: a remote HTTP search cluster | 1 |
 | libs | rusty_search | rusty-search-sqlite-fts5 | SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables | 1 |
 | libs | rusty_search | rusty-search-tantivy | Tantivy-backed SearchBackend implementation for rusty_search: embedded full-text search | 1 |
-| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 9 |
+| libs | rusty_serve | rusty_serve | A small blocking HTTP/1.1 server on rusty_http for a JSON API plus a built web UI: one thread per connection, bounded head, body, idle time and connection count, a sans-IO Handler, and a path-safe static file server | 8 |
 | libs | rusty_sqlite | rusty_sqlite | A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management. | 10 |
 | libs | rusty_stream | rusty_stream | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. | 0 |
 | libs | rusty_term | rusty_term | A terminal emulator written from scratch in Rust, with a deliberately small dependency surface. | 2 |
@@ -146,9 +146,8 @@ Families are the current directories immediately below `crates/`.
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
 | apps | nexus | nexus-acp | Nexus ACP host + server — outbound Agent Communication Protocol host for external agent processes (BL-144) and inbound JSON-RPC surface exposing Nexus's agent IPC to Hermes-compatible clients (BL-145) | 2 |
 | apps | nexus | nexus-agent | Nexus agent system: Agent trait, Plan/Step types, and PlanExecutor driving tool calls through kernel IPC (PRD-15 scaffold) | 1 |
-| apps | nexus | nexus-agui | Serve a Nexus agent session over AG-UI: the ai-runtime's typed AiEvent stream behind rusty_agui's Agent trait, with round approval as a frontend tool call (ADR-0007 follow-ons step 10) | 0 |
 | apps | nexus | nexus-ai | Nexus AI engine: provider traits, embeddings, RAG pipeline | 1 |
-| apps | nexus | nexus-ai-runtime | Nexus unified AI/agent event loop (BL-134, ADR 0028): task scheduler, typed AiEvent channel, dedicated worker pool. | 3 |
+| apps | nexus | nexus-ai-runtime | Nexus unified AI/agent event loop (BL-134, ADR 0028): task scheduler, typed AiEvent channel, dedicated worker pool. | 2 |
 | apps | nexus | nexus-audio | Nexus audio subsystem: STT + TTS provider traits with local / provider-routed / platform backends (BL-117) | 1 |
 | apps | nexus | nexus-bootstrap | Nexus runtime bootstrap: assembles kernel, plugin loader, and core plugins for CLI/TUI invokers | 3 |
 | apps | nexus | nexus-cli | Nexus IDE — headless CLI | 0 |
@@ -163,7 +162,7 @@ Families are the current directories immediately below `crates/`.
 | apps | nexus | nexus-fuzz | Nexus security fuzz targets (BL-103). Stable-Rust smoke runner; libFuzzer/cargo-fuzz integration is operator-side. | 0 |
 | apps | nexus | nexus-git | Nexus git integration: read-only status, diff, blame, log via libgit2 | 3 |
 | apps | nexus | nexus-hashline | Hashline patch format for Nexus: content-hash-anchored edits with TAG hashing, an applier, and 3-way merge recovery (RFC 0005 Phase 5.1) | 1 |
-| apps | nexus | nexus-kernel | Nexus kernel: event bus, plugin lifecycle, capability system | 29 |
+| apps | nexus | nexus-kernel | Nexus kernel: event bus, plugin lifecycle, capability system | 28 |
 | apps | nexus | nexus-kv | Nexus KV store backends (SQLite on disk, in-memory for tests) implementing nexus-kernel::KvStore | 1 |
 | apps | nexus | nexus-linkpreview | Nexus link-preview subsystem: best-effort OG/Twitter-card metadata fetch for canvas link nodes | 1 |
 | apps | nexus | nexus-lsp | Nexus LSP host — spawns external Language Server Protocol servers and bridges JSON-RPC to the kernel IPC bus | 1 |
