@@ -266,7 +266,7 @@ them.
     (its own source) stays within 10 uu for 56 ticks (0.47 s); the
     `hard_landing_nose_first` scenario within 5 uu for 24 ticks, after which
     the recording's own steering, which the tape lacks, takes over.
-- `RB-VERIFY-003-FR-012` (implemented, acceptance run pending): a scenario
+- `RB-VERIFY-003-FR-012` (implemented, acceptance measured: one input mismatch open): a scenario
   cut from a capture. `rb-verify --scenario-from <capture> <from-secs>
   <to-secs> [name]` (`scenario_from_capture`) writes to stdout, as JSON
   `Scenario::from_json` reads back equal (`Scenario::to_json`), a scenario
@@ -303,9 +303,12 @@ them.
     `a_scenario_writes_json_that_reads_back_equal`.
     Acceptance (`test2.jsonl` 8.95 to 9.2 s, then `--scenario <it>
     --against replays/test2.jsonl`, expected under 5 uu for the first 20
-    ticks and zero input mismatches): **not yet measured**; `replays/` was
-    absent on the machine that implemented this (2026-10-06). Record the
-    numbers here when it runs.
+    ticks and zero input mismatches): measured 2026-10-06. Lag 0 ticks
+    (tick 0 input is right, no tape shift), 33 ticks compared, position
+    error mean 1.4 uu, max 2.5 uu (never over 5 uu), never over 10 uu.
+    One recorded input differs from the tape, so the zero-mismatch bar is
+    not met; the cause is not yet identified. `--self-kstep
+    replays/test2.jsonl 30` is unchanged at 1.99 uu/s mean car velocity.
 - `RB-VERIFY-003-FR-013` (implemented): seeding from the first frame.
   `rb-verify --seed-first-frame <mode> ...`, given as the first argument,
   makes `--self`, `--self-growth`, `--self-trace`, `--self-onestep` and
