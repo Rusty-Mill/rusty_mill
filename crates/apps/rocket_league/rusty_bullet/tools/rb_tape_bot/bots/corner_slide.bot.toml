@@ -1,0 +1,21 @@
+#:schema https://rlbot.org/schemas/agent.json
+# Generated: one bot entry per scenario, so the RLBot GUI can pick the tape
+# without editing bot.toml between runs. Same binary, same agent id; only
+# the environment differs. Regenerate with the snippet in README "Running".
+
+[settings]
+name = "RB Tape: corner_slide"
+agent_id = "rusty_bullet/tape_bot"
+root_dir = ".."
+run_command = "target\release\rb_tape_bot.exe"
+run_command_linux = "target/release/rb_tape_bot"
+hivemind = false
+
+[settings.environment]
+RB_TAPE = "scenarios/corner_slide.json"
+
+[details]
+description = "reproduces test2.jsonl 8.95 s: a car at 2090 uu/s hitting the (3800, 4150) corner wall, steer, pitch and yaw held (the 8.958 s and 9.125 s residuals)"
+developer = "rusty_bullet"
+language = "rust"
+tags = []
