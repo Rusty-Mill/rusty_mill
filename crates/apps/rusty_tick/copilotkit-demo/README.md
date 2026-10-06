@@ -18,13 +18,16 @@ rusty_tick   POST /api/agent
 
 ## Run
 
-Three processes, from the repository root and then this directory:
+You need a Rust toolchain and Node 22 (the versions this was checked with).
+`rusty_tick`'s own web UI is not needed here, so there is no `--web-dir` and
+no web build step. Three processes, from the repository root and then this
+directory:
 
 ```
 export RUSTY_TICK_TOKEN=<16+ characters>
 
-# 1. the server
-cargo run -p rusty_tick -- --web-dir crates/apps/rusty_tick/web/dist
+# 1. the server (its API only; the first Rust build takes a while)
+cargo run -p rusty_tick
 
 # 2. the CopilotKit runtime, in front of it (port 4000)
 cd crates/apps/rusty_tick/copilotkit-demo
