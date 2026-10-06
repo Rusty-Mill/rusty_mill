@@ -13,6 +13,17 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Consolidation review batch 3: rusty_meshed clock migration (BREAKING)
+**2026-10-06** · PR pending · consolidation review, rusty_meshed clock helpers
+
+- **Changed (breaking):** every wall-clock read in rusty_meshed outside the entropy seed and one stored `SystemTime` now goes through `rusty-meshed-core`'s `ClockReading`, `Timestamp` and `WallClock`; the eight private `now_iso` formatters and the `now_millis` helpers are gone. A pre-1970 or out-of-range clock is an error, not 1970-01-01 or a wrapped integer. The migration guide (old call to new call, including the removed constructors and the new `Clock` error variants) is in the root `CHANGELOG.md` entry of the same name.
+- **Fixed:** the relay reads the clock once per non-empty batch before the first produce, so a clock failure sends nothing and the batch shares one `published_at` and record time. Each publisher (`DataProductProducerBase`, `PersonnelLifecycleProducer`, `SLOViolationPublisher`) and each consumer/producer `startup` reads it before any I/O.
+- **Fixed:** freshness and completeness no longer say "has never published" for a broker error, a failed request or an unreadable clock; they say "age unavailable: <reason>". An empty partition still says "never published". `actual_value` stays infinite and the lag arithmetic is bit-for-bit unchanged.
+- **Added:** the outbox relay thread logs its errors to stderr with rate limiting and a recovery line, and no new dependency.
+- **Known limitations:** the registry router handlers and the CLI's best-effort violation publish read the system clock directly, so their clock-failure paths (HTTP 500, skipped publish) are not covered by an injected-clock test. Consumers outside this repository that depend on the removed signatures by git or path will not compile. Not run: the Windows matrix and a full workspace check.
+
+---
+
 ## Consolidation review batch 3: nexus vector integrity
 **2026-10-06** · PR pending · consolidation review B9, B9b, B9c
 
