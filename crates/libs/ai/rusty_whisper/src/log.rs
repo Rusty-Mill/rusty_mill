@@ -116,30 +116,98 @@ mod tests {
     // with one scenario selected by environment variable and a wall-clock
     // bound. A deadlock becomes a timeout failure in the parent, and a
     // panic cannot poison the sink the other tests in this process share.
+    // Cleanup of a hung child is itself bounded and best-effort: the
+    // failure message says whether it was reaped.
     // ---------------------------------------------------------------
 
     const SCENARIO_VAR: &str = "RUSTY_WHISPER_LOG_SCENARIO";
     const CHILD_TIMEOUT: Duration = Duration::from_secs(20);
 
-    /// Kills and reaps `child`, returning a description of how that went
-    /// so a failure path never abandons the process and never hides a
-    /// cleanup error behind the original failure.
-    fn terminate(child: &mut std::process::Child) -> String {
-        let killed = child.kill();
-        let reaped = child.wait();
-        match (killed, reaped) {
-            (Ok(()), Ok(status)) => format!("child killed and reaped ({status})"),
-            (Ok(()), Err(e)) => format!("child killed but not reaped: {e}"),
-            (Err(k), Ok(status)) => format!("kill failed ({k}); child reaped anyway ({status})"),
-            (Err(k), Err(w)) => format!("kill failed ({k}) and reap failed ({w})"),
+    /// How long cleanup of a misbehaving child may take before it is
+    /// given up on and reported as still running.
+    const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The two process operations cleanup needs, so the bounded cleanup
+    /// below can be tested against a child that refuses to die.
+    trait Terminable {
+        fn kill(&mut self) -> std::io::Result<()>;
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+    }
+
+    impl Terminable for std::process::Child {
+        fn kill(&mut self) -> std::io::Result<()> {
+            std::process::Child::kill(self)
         }
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            std::process::Child::try_wait(self)
+        }
+    }
+
+    /// Attempts to terminate `child` and reap it within `deadline`,
+    /// polling rather than blocking so a child that is deadlocked and
+    /// cannot be killed does not hang the test. Returns a description of
+    /// the outcome; cleanup can fail, and when it does the description
+    /// says so explicitly instead of claiming the child is gone.
+    fn terminate(child: &mut impl Terminable, deadline: Duration) -> String {
+        let kill = child.kill();
+        let started = Instant::now();
+        let reaped = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(Some(status)),
+                Ok(None) if started.elapsed() >= deadline => break Ok(None),
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => break Err(e),
+            }
+        };
+        match (kill, reaped) {
+            (Ok(()), Ok(Some(status))) => format!("child killed and reaped ({status})"),
+            (Ok(()), Ok(None)) => {
+                format!("child killed but NOT reaped within {deadline:?}; it may still be running")
+            }
+            (Ok(()), Err(e)) => {
+                format!("child killed but reaping failed: {e}; it may still be running")
+            }
+            (Err(k), Ok(Some(status))) => {
+                format!("kill failed ({k}) but the child exited anyway ({status})")
+            }
+            (Err(k), Ok(None)) => {
+                format!("kill FAILED ({k}) and the child is still running after {deadline:?}")
+            }
+            (Err(k), Err(w)) => {
+                format!(
+                    "kill FAILED ({k}) and polling failed ({w}); the child may still be running"
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn terminate_reports_a_child_that_cannot_be_killed_within_the_deadline() {
+        struct Unkillable;
+        impl Terminable for Unkillable {
+            fn kill(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            }
+            fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+                Ok(None)
+            }
+        }
+        let started = Instant::now();
+        let report = terminate(&mut Unkillable, Duration::from_millis(60));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cleanup must be bounded"
+        );
+        assert!(report.contains("kill FAILED"), "{report}");
+        assert!(report.contains("still running"), "{report}");
     }
 
     /// Runs `scenario` in a child process and asserts it exits cleanly
     /// within the timeout. In the child (selected by `SCENARIO_VAR`), runs
     /// the scenario body itself and returns `true` so the caller stops.
-    /// Every failure path (timeout, poll error) terminates and reaps the
-    /// child before panicking, and reports the cleanup outcome.
+    /// Every failure path (timeout, poll error) attempts a bounded
+    /// termination of the child before panicking and reports the outcome,
+    /// including when termination or reaping did not succeed.
     fn run_isolated(scenario: &str, body: fn()) -> bool {
         if std::env::var(SCENARIO_VAR).as_deref() == Ok(scenario) {
             body();
@@ -168,12 +236,12 @@ mod tests {
                 }
                 Ok(None) => {}
                 Err(poll_error) => {
-                    let cleanup = terminate(&mut child);
+                    let cleanup = terminate(&mut child, CLEANUP_TIMEOUT);
                     panic!("polling child scenario `{scenario}` failed: {poll_error}; {cleanup}");
                 }
             }
             if started.elapsed() > CHILD_TIMEOUT {
-                let cleanup = terminate(&mut child);
+                let cleanup = terminate(&mut child, CLEANUP_TIMEOUT);
                 panic!("child scenario `{scenario}` hung: lock held while the sink ran? {cleanup}");
             }
             std::thread::sleep(Duration::from_millis(20));
