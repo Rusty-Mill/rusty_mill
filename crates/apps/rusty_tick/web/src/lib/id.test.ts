@@ -34,3 +34,13 @@ describe('isUuid', () => {
     expect(isUuid('')).toBe(false)
   })
 })
+
+describe('derivedId', () => {
+  it('is stable, UUID-shaped, and different for different texts', async () => {
+    const { derivedId } = await import('./id')
+    expect(derivedId('estimate|t1')).toBe(derivedId('estimate|t1'))
+    expect(derivedId('estimate|t1')).not.toBe(derivedId('assignee|t1'))
+    expect(derivedId('estimate|t1')).not.toBe(derivedId('estimate|t2'))
+    expect(isUuid(derivedId('estimate|t1'))).toBe(true)
+  })
+})

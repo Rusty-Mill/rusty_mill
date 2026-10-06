@@ -807,4 +807,11 @@ describe("won't do, countdowns and calendar import", () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(/need the server/)
     await waitFor(async () => expect((await api.snapshot()).lists.some((l) => l.name === 'Broken')).toBe(false))
   })
+  it('lists the calendar views in their natural order, not with the numeric ones first', async () => {
+    const user = userEvent.setup()
+    await renderApp('/c/all/calendar/m')
+    await user.click(await screen.findByRole('button', { name: 'View: Month' }))
+    const labels = within(screen.getByRole('menu')).getAllByRole('menuitemcheckbox').map((e) => e.textContent)
+    expect(labels.slice(0, 6)).toEqual(['Month', 'Week', 'Day', '3 Days', '10 Days', 'Agenda'])
+  })
 })
