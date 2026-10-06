@@ -6,11 +6,11 @@
 //! Pure data and lookup, no RLBot types, so it is testable without the game.
 
 use rb_domain::{BallState, CarState, ControllerInput, PhysicsFrame, Quat, Vec3};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One tick of controller input, the same fields as the capture format's
 /// `input` object (ADR-0005).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Input {
     pub throttle: f32,
@@ -24,7 +24,7 @@ pub struct Input {
 }
 
 /// `ticks` consecutive packets of the same input.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Step {
     pub ticks: u64,
@@ -33,29 +33,37 @@ pub struct Step {
 }
 
 /// A car's initial state; absent fields are left as the game has them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CarStart {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<[f32; 3]>,
     /// `[pitch, yaw, roll]` in radians, RLBot's convention.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub velocity: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub angular_velocity: Option<[f32; 3]>,
     /// 0 to 100.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub boost: Option<f32>,
 }
 
 /// A ball's initial state; absent fields are left as the game has them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct BallStart {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub velocity: Option<[f32; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub angular_velocity: Option<[f32; 3]>,
 }
 
 /// A scenario: where the car (and ball) start and what the car presses.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Scenario {
     pub name: String,
     /// Neutral packets after the start state is set and before the first
@@ -65,7 +73,7 @@ pub struct Scenario {
     pub settle_ticks: u64,
     #[serde(default)]
     pub car: CarStart,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ball: Option<BallStart>,
     pub steps: Vec<Step>,
 }
@@ -77,6 +85,8 @@ pub enum ScenarioError {
     Parse(serde_json::Error),
     /// No steps: nothing to play.
     Empty,
+    /// The scenario could not be written as JSON.
+    Write(serde_json::Error),
 }
 
 impl std::fmt::Display for ScenarioError {
@@ -84,6 +94,7 @@ impl std::fmt::Display for ScenarioError {
         match self {
             ScenarioError::Parse(err) => write!(f, "invalid scenario JSON: {err}"),
             ScenarioError::Empty => write!(f, "scenario has no steps"),
+            ScenarioError::Write(err) => write!(f, "cannot write scenario JSON: {err}"),
         }
     }
 }
@@ -98,6 +109,13 @@ impl Scenario {
             return Err(ScenarioError::Empty);
         }
         Ok(scenario)
+    }
+
+    /// Writes the scenario as pretty JSON that [`Scenario::from_json`]
+    /// reads back equal. Absent start fields are left out, as a hand-written
+    /// file would.
+    pub fn to_json(&self) -> Result<String, ScenarioError> {
+        serde_json::to_string_pretty(self).map_err(ScenarioError::Write)
     }
 
     /// Packets of input the scenario plays, settling included.
@@ -198,6 +216,31 @@ pub fn rotator_to_quat(rotation: [f32; 3]) -> Quat {
             z: 0.25 * s,
         }
     }
+}
+
+/// The inverse of [`rotator_to_quat`]: a quaternion as RLBot's
+/// `[pitch, yaw, roll]` (radians), same axes and signs, so the two round
+/// trip (up to the quaternion's sign). With the nose straight up or down
+/// (pitch at ±90°) yaw and roll are not separable; roll is reported as 0
+/// and yaw carries the whole turn, which still reproduces the quaternion.
+pub fn quat_to_rotator(q: Quat) -> [f32; 3] {
+    let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+    // The same matrix `rotator_to_quat` builds: columns forward, side, up.
+    let forward_x = 1.0 - 2.0 * (y * y + z * z);
+    let forward_y = 2.0 * (x * y + w * z);
+    let forward_z = 2.0 * (x * z - w * y);
+    let side_x = 2.0 * (x * y - w * z);
+    let side_y = 1.0 - 2.0 * (x * x + z * z);
+    let side_z = 2.0 * (y * z + w * x);
+    let up_z = 1.0 - 2.0 * (x * x + y * y);
+    let pitch = forward_z.clamp(-1.0, 1.0).asin();
+    if pitch.cos() < 1e-6 {
+        // Gimbal lock: with roll 0, side = (-sin yaw, cos yaw, 0).
+        return [pitch, (-side_x).atan2(side_y), 0.0];
+    }
+    let yaw = forward_y.atan2(forward_x);
+    let roll = (-side_z).atan2(up_z);
+    [pitch, yaw, roll]
 }
 
 impl Scenario {
@@ -327,6 +370,85 @@ mod tests {
         ] {
             assert!((got - want).abs() < 1e-3, "{q:?}");
         }
+    }
+
+    #[test]
+    fn a_rotator_round_trips_through_a_quaternion_and_back() {
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let cases: [[f32; 3]; 7] = [
+            [0.0, 0.0, 0.0],
+            [0.3, -1.2, 0.7],
+            [-0.4315, -1.0776, 0.4492],
+            [-1.4, 2.9, -2.5],
+            [1.5, 0.4, -0.9],
+            [half_pi - 1e-4, 1.0, 0.0],
+            [-half_pi + 1e-4, -2.0, 0.0],
+        ];
+        for rotation in cases {
+            let q = rotator_to_quat(rotation);
+            let back = quat_to_rotator(q);
+            let again = rotator_to_quat(back);
+            // The same orientation, whichever sign the quaternion took.
+            let sign = if again.w * q.w + again.x * q.x + again.y * q.y + again.z * q.z < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            for (got, want) in [
+                (sign * again.x, q.x),
+                (sign * again.y, q.y),
+                (sign * again.z, q.z),
+                (sign * again.w, q.w),
+            ] {
+                assert!((got - want).abs() < 2e-3, "{rotation:?} -> {back:?}");
+            }
+            if rotation[0].abs() < 1.45 {
+                // Away from the nose-up singularity the angles themselves
+                // come back.
+                for (got, want) in back.iter().zip(rotation.iter()) {
+                    assert!((got - want).abs() < 1e-3, "{rotation:?} -> {back:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_recorded_quaternion_becomes_the_rotator_that_made_it() {
+        // The quaternion from `a_rotator_round_trips_a_recorded_quaternion`
+        // (test2.jsonl 18.308 s), roll sign included.
+        let q = Quat {
+            x: -0.0796464,
+            y: 0.290751,
+            z: -0.447697,
+            w: 0.841836,
+        };
+        let rotation = quat_to_rotator(q);
+        for (got, want) in rotation.iter().zip([-0.4315, -1.0776, 0.4492]) {
+            assert!((got - want).abs() < 1e-3, "{rotation:?}");
+        }
+    }
+
+    #[test]
+    fn a_scenario_writes_json_that_reads_back_equal() {
+        let scenario = Scenario::from_json(JUMP_THEN_DODGE).expect("valid");
+        let text = scenario.to_json().expect("serialises");
+        assert!(
+            !text.contains("velocity"),
+            "absent fields are left out:
+{text}"
+        );
+        let back = Scenario::from_json(&text).expect("reads back");
+        assert_eq!(back, scenario);
+        let with_ball = Scenario {
+            ball: Some(BallStart {
+                location: Some([1.0, 2.0, 93.15]),
+                velocity: None,
+                angular_velocity: Some([0.0, 0.5, 0.0]),
+            }),
+            ..scenario
+        };
+        let back = Scenario::from_json(&with_ball.to_json().expect("serialises")).expect("reads");
+        assert_eq!(back, with_ball);
     }
 
     #[test]
