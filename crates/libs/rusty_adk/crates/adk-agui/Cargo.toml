@@ -1,0 +1,34 @@
+[package]
+name = "adk-agui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_adk"
+description = "Serve a Rust ADK agent over AG-UI (the Agent-User Interaction protocol)"
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+adk-core.workspace = true
+adk-graph.workspace = true
+adk-runner.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+# The protocol: the `Agent` trait this crate implements, the event types,
+# and the `serve` feature's handler a consumer mounts on `rusty_serve`.
+rusty_agui = { workspace = true, features = ["serve"] }
+# AG-UI values are `rusty_json::Value`, ADK's are `serde_json::Value`;
+# the `serde` feature is the bridge between the two.
+rusty_json = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+adk-agents.workspace = true
+adk-models = { workspace = true, default-features = false }
+adk-sessions.workspace = true
+adk-tools.workspace = true
+rusty_agui = { workspace = true, features = ["serve", "client"] }
+rusty_serve.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -18,6 +18,9 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const short = (s: string): string => s.slice(0, 3)
 
+/** Days shown by the multi-day modes, which start on the anchor day and page by that many days. */
+export const MULTI_DAYS = { '3': 3, t: 10 } as const
+
 export const parseMode = (s: string | undefined): CalendarMode => ((CALENDAR_MODES as readonly string[]).includes(s ?? '') ? (s as CalendarMode) : 'm')
 
 // ---- events ----------------------------------------------------------
@@ -250,6 +253,7 @@ export function visibleRange(mode: CalendarMode, anchor: number, weekStart: Week
     const s = startOfWeek(anchor, weekStart)
     days = Array.from({ length: 7 }, (_, i) => addDays(s, i))
   } else if (mode === 'd') days = [startOfDay(anchor)]
+  else if (mode === '3' || mode === 't') days = Array.from({ length: MULTI_DAYS[mode] }, (_, i) => addDays(startOfDay(anchor), i))
   else days = Array.from({ length: AGENDA_DAYS }, (_, i) => addDays(startOfDay(anchor), i))
   const first = days[0] ?? startOfDay(anchor)
   const last = days[days.length - 1] ?? first
@@ -261,6 +265,7 @@ export function stepAnchor(mode: CalendarMode, anchor: number, dir: 1 | -1): num
   if (mode === 'm') return addMonths(anchor, dir)
   if (mode === 'w') return addDays(anchor, 7 * dir)
   if (mode === 'd') return addDays(anchor, dir)
+  if (mode === '3' || mode === 't') return addDays(anchor, MULTI_DAYS[mode] * dir)
   return addDays(anchor, AGENDA_DAYS * dir)
 }
 
@@ -275,7 +280,7 @@ export function rangeTitle(mode: CalendarMode, anchor: number, range: Range): st
   const first = range.days[0] ?? anchor
   const last = range.days[range.days.length - 1] ?? first
   if (y(first) !== y(last)) return `${md(first)}, ${y(first)} – ${md(last)}, ${y(last)}`
-  return `${md(first)} – ${new Date(first).getMonth() === new Date(last).getMonth() && mode === 'w' ? new Date(last).getDate() : md(last)}, ${y(last)}`
+  return `${md(first)} – ${new Date(first).getMonth() === new Date(last).getMonth() && mode !== 'a' ? new Date(last).getDate() : md(last)}, ${y(last)}`
 }
 
 // ---- labels -----------------------------------------------------------

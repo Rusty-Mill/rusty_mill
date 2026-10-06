@@ -9,6 +9,7 @@ lives in the git log and in `docs/0.1.2/audits/`.
 ## [Unreleased]
 
 ### Fixed
+- **`nexus-terminal`: `interpolate_env` no longer corrupts non-ASCII values.** `expand_refs` pushed each UTF-8 byte as a Latin-1 `char`, so a value such as `café` came out as `cafÃ©` whether or not it held a `$` reference, and the pass loop compounded the damage. It now decodes whole scalars, the same way `nexus-workflow`'s `substitute_string` already did. Missing-variable, lone-`$`, malformed-reference and cycle behaviour are unchanged and now pinned by tests.
 - **`nexus-mcp` builds against `rmcp` 3.1.4 again.** The bump in #473 changed `ServerHandler::call_tool`, `get_prompt` and `read_resource` to return `CallToolResponse`, `GetPromptResponse` and `ReadResourceResponse` (a completed result, a request for client input, or a task); the Nexus handler still returned the bare `*Result` types, so the whole workspace failed to compile in every full CI sweep. The three handlers now wrap their completed results; no behaviour change.
 
 ### Changed

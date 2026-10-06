@@ -135,20 +135,17 @@ impl<T: Read> SyncTransport<T> {
         }
     }
 
-    /// Reads a whole body into memory according to `framing`. For
-    /// [`Framing::Chunked`], uses [`Self::read_chunked_body`] with
-    /// [`crate::body::DEFAULT_MAX_LINE_LEN`]; for [`Framing::ContentLength`]
-    /// and [`Framing::Close`], uses [`Self::read_content_length_body`]/
-    /// [`Self::read_close_delimited_body`] with
-    /// [`crate::body::DEFAULT_MAX_BODY_LEN`] -- call those directly for a
-    /// different bound.
+    /// Reads a whole body into memory according to `framing`, bounding
+    /// the buffered total by [`crate::body::DEFAULT_MAX_BODY_LEN`]
+    /// whichever way it is framed: a declared `Content-Length` over the
+    /// cap is refused before anything is read, a close-delimited or
+    /// chunked body once its running (decoded) total crosses it. Chunked
+    /// framing lines are additionally bounded by
+    /// [`crate::body::DEFAULT_MAX_LINE_LEN`]. Equivalent to
+    /// [`Self::read_request_body`] with the default cap; call that, or
+    /// the per-framing `read_*_body` methods, for a different bound.
     pub fn read_body(&mut self, framing: Framing) -> Result<Vec<u8>> {
-        match framing {
-            Framing::None => Ok(Vec::new()),
-            Framing::ContentLength(len) => self.read_content_length_body(len, DEFAULT_MAX_BODY_LEN),
-            Framing::Close => self.read_close_delimited_body(DEFAULT_MAX_BODY_LEN),
-            Framing::Chunked => self.read_chunked_body(DEFAULT_MAX_LINE_LEN),
-        }
+        self.read_request_body(framing, DEFAULT_MAX_BODY_LEN)
     }
 
     /// Reads a `Content-Length`-framed body into memory, rejecting a
@@ -210,15 +207,20 @@ impl<T: Read> SyncTransport<T> {
     /// Reads a `Transfer-Encoding: chunked` body into memory, bounding
     /// each framing line (chunk-size line, terminator, trailer line) by
     /// `max_line_len` -- see [`ChunkedDecoder::advance`].
+    ///
+    /// The decoded total is **not** bounded here: this is the raw
+    /// primitive, and it will buffer as much as the peer sends. Use
+    /// [`Self::read_body`] or [`Self::read_request_body`] for a chunked
+    /// read with an aggregate cap.
     pub fn read_chunked_body(&mut self, max_line_len: usize) -> Result<Vec<u8>> {
         self.read_chunked_capped(max_line_len, u64::MAX)
     }
 
-    /// Reads a request body, refusing more than `max_body_len` bytes
-    /// however it is framed: a declared `Content-Length` over the cap
-    /// before reading anything, a chunked body once its decoded total
-    /// crosses it. For a server, where every request body is untrusted
-    /// and [`Self::read_body`]'s chunked path has no total bound.
+    /// Reads a body, refusing more than `max_body_len` bytes however it
+    /// is framed: a declared `Content-Length` over the cap before reading
+    /// anything, a close-delimited or chunked body once its (decoded)
+    /// running total crosses it. [`Self::read_body`] is this with
+    /// [`crate::body::DEFAULT_MAX_BODY_LEN`].
     ///
     /// # Errors
     /// [`Error::BodyTooLarge`] past the cap; framing errors as the other
@@ -246,7 +248,7 @@ impl<T: Read> SyncTransport<T> {
                 }
                 Progress::Framing { consumed } => self.start += consumed,
                 Progress::Data { len } => {
-                    if (out.len() + len) as u64 > max_body_len {
+                    if body::exceeds(out.len(), len, max_body_len) {
                         return Err(Error::BodyTooLarge.into());
                     }
                     out.extend_from_slice(&self.buf[self.start..self.start + len]);
@@ -578,6 +580,143 @@ mod tests {
         let head = t.read_request_head(8192).unwrap();
         let framing = body::request_framing(&head.headers).unwrap();
         assert!(t.read_body(framing).is_err());
+    }
+
+    /// Hands back at most `step` bytes per read, so a body is forced
+    /// through many `fill_more` calls and chunk data arrives split.
+    struct Trickle {
+        inner: Loopback,
+        step: usize,
+    }
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.step);
+            self.inner.read(&mut buf[..n])
+        }
+    }
+
+    impl Write for Trickle {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    fn chunked_wire(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for c in chunks {
+            body::write_chunk(&mut out, c);
+        }
+        body::write_chunked_end(&mut out);
+        out
+    }
+
+    fn is_body_too_large(err: &crate::transport::Error) -> bool {
+        matches!(
+            err,
+            crate::transport::Error::Http(crate::error::Error::BodyTooLarge)
+        )
+    }
+
+    #[test]
+    fn read_body_bounds_a_chunked_body_at_the_default_cap() {
+        let max = DEFAULT_MAX_BODY_LEN as usize;
+        let over = chunked_wire(&[&vec![b'x'; max + 1]]);
+        let mut t = SyncTransport::new(Loopback::new(&over));
+        let err = t.read_body(Framing::Chunked).unwrap_err();
+        assert!(is_body_too_large(&err), "{err:?}");
+
+        let at = chunked_wire(&[&vec![b'x'; max]]);
+        let mut t = SyncTransport::new(Loopback::new(&at));
+        assert_eq!(t.read_body(Framing::Chunked).unwrap().len(), max);
+    }
+
+    #[test]
+    fn read_chunked_body_remains_aggregate_unbounded() {
+        // The raw primitive is documented as line-bounded only; this
+        // pins that a direct call still buffers past the default cap.
+        let max = DEFAULT_MAX_BODY_LEN as usize;
+        let wire = chunked_wire(&[&vec![b'x'; max + 1]]);
+        let mut t = SyncTransport::new(Loopback::new(&wire));
+        assert_eq!(
+            t.read_chunked_body(DEFAULT_MAX_LINE_LEN).unwrap().len(),
+            max + 1
+        );
+    }
+
+    #[test]
+    fn chunked_cap_boundaries_hold_across_chunk_and_read_splits() {
+        const CAP: u64 = 10;
+        let cases: [(&[&[u8]], Option<usize>); 3] = [
+            (&[b"abcd", b"efghi"], Some(9)),
+            (&[b"abcd", b"efghij"], Some(10)),
+            (&[b"abcd", b"efghi", b"jk"], None),
+        ];
+        for (chunks, expect) in cases {
+            for step in [1usize, 3, 64] {
+                let io = Trickle {
+                    inner: Loopback::new(&chunked_wire(chunks)),
+                    step,
+                };
+                let mut t = SyncTransport::new(io);
+                let result = t.read_request_body(Framing::Chunked, CAP);
+                match expect {
+                    Some(len) => assert_eq!(result.unwrap().len(), len, "step {step}"),
+                    None => assert!(is_body_too_large(&result.unwrap_err()), "step {step}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunked_cap_rejects_before_buffering_the_overflowing_chunk() {
+        // Cap 4, one 5-byte chunk: the check runs before the extend, so
+        // nothing of the oversized chunk is ever copied.
+        let wire = chunked_wire(&[b"hello"]);
+        let mut t = SyncTransport::new(Loopback::new(&wire));
+        let err = t.read_request_body(Framing::Chunked, 4).unwrap_err();
+        assert!(is_body_too_large(&err));
+    }
+
+    #[test]
+    fn chunked_cap_tolerates_extensions_and_trailers() {
+        let wire = b"5;ext=1\r\nhello\r\n0\r\nTrailer: x\r\n\r\n";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        assert_eq!(t.read_request_body(Framing::Chunked, 5).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn empty_chunked_body_is_within_any_cap() {
+        let mut t = SyncTransport::new(Loopback::new(b"0\r\n\r\n"));
+        assert_eq!(t.read_request_body(Framing::Chunked, 0).unwrap(), b"");
+    }
+
+    #[test]
+    fn premature_eof_in_a_chunked_body_is_unexpected_eof_not_too_large() {
+        let mut t = SyncTransport::new(Loopback::new(b"5\r\nhel"));
+        let err = t.read_body(Framing::Chunked).unwrap_err();
+        assert!(
+            matches!(&err, crate::transport::Error::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_complete_request_head_over_the_cap() {
+        // Whole head, terminator included, in the very first read: the
+        // sans-IO parser reports `Complete`, and the adapter must still
+        // surface `HeadTooLarge` rather than hand the head back.
+        let pad = "p".repeat(300);
+        let wire = format!("GET / HTTP/1.1\r\nX-Pad: {pad}\r\n\r\n");
+        let mut t = SyncTransport::new(Loopback::new(wire.as_bytes()));
+        let err = t.read_request_head(256).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::transport::Error::Http(crate::error::Error::HeadTooLarge)
+        ));
     }
 
     #[test]

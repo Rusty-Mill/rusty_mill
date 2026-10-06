@@ -1,5 +1,6 @@
 /** Pure focus-timer maths: no clock reads, no React. Callers pass `now`. */
 import { addDays, dayKey, diffDays, monthName, startOfDay } from '@/lib/date'
+import { isAmbient, type AmbientId } from './ambient'
 
 export type FocusMode = 'pomo' | 'stopwatch'
 
@@ -24,9 +25,11 @@ export interface FocusSettings {
   longMin: number
   /** Pomos before a long break. */
   longEvery: number
+  /** Sound played during focus sessions. */
+  ambient: AmbientId
 }
 
-export const DEFAULT_SETTINGS: FocusSettings = { focusMin: 25, shortMin: 5, longMin: 15, longEvery: 4 }
+export const DEFAULT_SETTINGS: FocusSettings = { focusMin: 25, shortMin: 5, longMin: 15, longEvery: 4, ambient: 'off' }
 
 const clampInt = (v: unknown, min: number, max: number, fallback: number): number =>
   typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fallback
@@ -38,6 +41,7 @@ export function sanitizeSettings(input: unknown): FocusSettings {
     shortMin: clampInt(o.shortMin, 1, 60, DEFAULT_SETTINGS.shortMin),
     longMin: clampInt(o.longMin, 1, 120, DEFAULT_SETTINGS.longMin),
     longEvery: clampInt(o.longEvery, 2, 12, DEFAULT_SETTINGS.longEvery),
+    ambient: isAmbient(o.ambient) ? o.ambient : DEFAULT_SETTINGS.ambient,
   }
 }
 

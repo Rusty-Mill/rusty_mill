@@ -19,6 +19,18 @@ rusty_serde = { workspace = true }
 # Send + Sync unconditionally so it satisfies async-trait's Send futures
 # - see rusty_search#25.
 rusty_err.workspace = true
+# Optional: only the `serde-json` feature's bridge module needs it. The
+# HTTP and tantivy backends all speak `serde_json::Value` on the wire and
+# `rusty_serde::Value` in `Document::fields`; this is where that one
+# conversion lives instead of in each of them.
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = []
+# `serde_json_bridge`: the shared `rusty_serde::Value` <-> `serde_json::Value`
+# conversion. Off by default so a backend that never touches serde_json
+# (memory, sqlite-fts5) keeps it out of its dependency graph.
+serde-json = ["dep:serde_json"]
 
 [dev-dependencies]
 tokio = { workspace = true }

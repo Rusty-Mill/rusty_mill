@@ -8,7 +8,7 @@ describe('parseIcs', () => {
   it('reads a UTC event as a start and a due time', () => {
     const { tasks } = parseIcs(wrap(event('SUMMARY:Standup', 'DTSTART:20261005T090000Z', 'DTEND:20261005T093000Z')))
     expect(tasks).toEqual([
-      { title: 'Standup', notes: '', startMs: Date.UTC(2026, 9, 5, 9), dueMs: Date.UTC(2026, 9, 5, 9, 30), isAllDay: false, timeZone: '', repeatFlag: '' },
+      { uid: `Standup|${Date.UTC(2026, 9, 5, 9)}|${Date.UTC(2026, 9, 5, 9, 30)}`, title: 'Standup', notes: '', startMs: Date.UTC(2026, 9, 5, 9), dueMs: Date.UTC(2026, 9, 5, 9, 30), isAllDay: false, timeZone: '', repeatFlag: '' },
     ])
   })
 
@@ -22,6 +22,12 @@ describe('parseIcs', () => {
     const { tasks } = parseIcs(wrap(event('SUMMARY:NY summer', 'DTSTART;TZID=America/New_York:20260705T120000'), event('SUMMARY:NY winter', 'DTSTART;TZID=America/New_York:20261205T120000')))
     expect(tasks[0]).toMatchObject({ dueMs: Date.UTC(2026, 6, 5, 16), timeZone: 'America/New_York' })
     expect(tasks[1]).toMatchObject({ dueMs: Date.UTC(2026, 11, 5, 17) })
+  })
+
+  it('keeps the feed UID, which stays the same when the event is edited', () => {
+    const one = parseIcs(wrap(event('UID:abc@x', 'SUMMARY:Old', 'DTSTART;VALUE=DATE:20261010'))).tasks[0]!
+    const two = parseIcs(wrap(event('UID:abc@x', 'SUMMARY:New', 'DTSTART;VALUE=DATE:20261011'))).tasks[0]!
+    expect([one.uid, two.uid]).toEqual(['abc@x', 'abc@x'])
   })
 
   it('unfolds long lines and unescapes text', () => {

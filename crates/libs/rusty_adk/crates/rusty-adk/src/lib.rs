@@ -20,6 +20,7 @@
 //! | [`runner`] | The runtime event loop |
 //! | [`mcp`] | MCP transports: serve Rust tools to an ADK agent in any language |
 //! | `a2a` | The Agent2Agent bridge (feature `a2a`): serve this agent to any A2A caller |
+//! | `agui` | The AG-UI bridge (feature `agui`): serve this agent to the workspace's frontend bindings, channels, routines and gateway |
 //!
 //! # Getting started
 //!
@@ -88,6 +89,9 @@ pub use adk_mcp as mcp;
 
 #[cfg(feature = "a2a")]
 pub use adk_a2a as a2a;
+
+#[cfg(feature = "agui")]
+pub use adk_agui as agui;
 
 #[cfg(feature = "macros")]
 pub use adk_macros::adk_tool;

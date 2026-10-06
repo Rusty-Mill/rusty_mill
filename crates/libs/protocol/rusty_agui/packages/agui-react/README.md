@@ -2,7 +2,8 @@
 
 React hooks over `@rusty-mill/agui-core`. Headless: a provider, four hooks
 and render functions. No components, no styles; a chat UI is a few lines
-over `useAgent`.
+over `useAgent`. The store behind them is the core's `AgentStore`, the
+same one the Vue and Angular bindings wrap.
 
 | Hook | What it does |
 |---|---|
@@ -49,7 +50,8 @@ the call's `status` (`running`, `pending`, `done`) and the `result`.
 **Errors.** A `RUN_ERROR`, a transport fault, or a verifier rejection ends
 the run with `error` set and `running` false; what arrived stays.
 
-Tests run the hooks under jsdom against a scripted fake agent.
+Tests run the hooks under jsdom against a scripted fake agent from
+`@rusty-mill/agui-core/testing`.
 
 ```
 npm ci && npm run typecheck && npm test && npm run build

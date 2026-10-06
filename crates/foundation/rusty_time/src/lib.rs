@@ -65,6 +65,27 @@ impl Date {
     }
 }
 
+/// Inverse of [`Date::days_since_epoch`]: the proleptic-Gregorian civil
+/// date `(year, month, day)` that is `days` days after 1970-01-01.
+/// Howard Hinnant's `civil_from_days` in `i64`. Safe for every day count
+/// derived from an `i64` number of seconds (`|days| <= i64::MAX / 86_400`),
+/// which is all [`DateTime::from_unix_secs`] ever passes; it is not
+/// defined for day counts near `i64::MIN`/`i64::MAX`, where the first
+/// addition would overflow. The year is returned as `i64` and the caller
+/// decides whether it fits the `i32` a [`Date`] stores.
+fn civil_from_days(days: i64) -> (i64, u8, u8) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// Returns true if `year` is a Gregorian leap year.
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
@@ -151,6 +172,28 @@ impl DateTime {
             time,
             offset_secs,
         }
+    }
+
+    /// The UTC datetime `secs` seconds after the Unix epoch (negative for
+    /// before it), the inverse of [`DateTime::timestamp`]. Checked: a
+    /// `Date` stores an `i32` year, so an instant whose civil year falls
+    /// outside `i32` is an error rather than a wrapped or clamped value.
+    /// The result has a zero nanosecond part and a zero offset, so
+    /// [`DateTime::to_iso8601`] renders it as `YYYY-MM-DDTHH:MM:SSZ`.
+    pub fn from_unix_secs(secs: i64) -> Result<Self, &'static str> {
+        const SECS_PER_DAY: i64 = 86_400;
+        let days = secs.div_euclid(SECS_PER_DAY);
+        let secs_of_day = secs.rem_euclid(SECS_PER_DAY);
+        let (year, month, day) = civil_from_days(days);
+        let year = i32::try_from(year).map_err(|_| "timestamp out of range for an i32 year")?;
+        let date = Date::from_ymd(year, month, day)?;
+        let time = Time::from_hms_nano(
+            (secs_of_day / 3600) as u8,
+            ((secs_of_day % 3600) / 60) as u8,
+            (secs_of_day % 60) as u8,
+            0,
+        )?;
+        Ok(Self::new(date, time, 0))
     }
 
     /// Returns the date component.
@@ -345,6 +388,105 @@ fn expect_byte(bytes: &[u8], index: usize, expected: u8) -> Result<(), &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn utc(y: i32, mo: u8, d: u8, h: u8, mi: u8, s: u8) -> DateTime {
+        DateTime::new(
+            Date::from_ymd(y, mo, d).unwrap(),
+            Time::from_hms_nano(h, mi, s, 0).unwrap(),
+            0,
+        )
+    }
+
+    #[test]
+    fn from_unix_secs_fixed_points() {
+        assert_eq!(
+            DateTime::from_unix_secs(0).unwrap(),
+            utc(1970, 1, 1, 0, 0, 0)
+        );
+        assert_eq!(
+            DateTime::from_unix_secs(-1).unwrap(),
+            utc(1969, 12, 31, 23, 59, 59)
+        );
+        assert_eq!(
+            DateTime::from_unix_secs(951_782_400).unwrap(),
+            utc(2000, 2, 29, 0, 0, 0)
+        );
+        assert_eq!(
+            DateTime::from_unix_secs(2_147_483_647).unwrap(),
+            utc(2038, 1, 19, 3, 14, 7)
+        );
+        assert_eq!(
+            DateTime::from_unix_secs(253_402_300_799).unwrap(),
+            utc(9999, 12, 31, 23, 59, 59)
+        );
+        assert_eq!(
+            DateTime::from_unix_secs(-2_208_988_800).unwrap(),
+            utc(1900, 1, 1, 0, 0, 0)
+        );
+        assert_eq!(
+            DateTime::from_unix_secs(1_609_459_200)
+                .unwrap()
+                .to_iso8601(),
+            "2021-01-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn from_unix_secs_round_trips_with_timestamp() {
+        // Every day from 1900 to 2200 at several seconds of day, plus the
+        // leap-day and year-boundary instants that trip hand-rolled
+        // calendar math.
+        let mut secs: i64 = -2_208_988_800; // 1900-01-01
+        while secs <= 7_258_118_400 {
+            // 2200-01-01
+            for sod in [0, 1, 3_599, 43_200, 86_399] {
+                let t = secs + sod;
+                let dt = DateTime::from_unix_secs(t).unwrap();
+                assert_eq!(dt.timestamp(), t, "round trip of {t}");
+            }
+            secs += 86_400;
+        }
+        for t in [
+            951_782_399,
+            951_782_400,
+            951_868_799,
+            951_868_800,
+            4_107_542_399,
+            4_107_542_400,
+            -1,
+            0,
+            1,
+            2_147_483_647,
+            2_147_483_648,
+            4_294_967_295,
+            4_294_967_296,
+        ] {
+            assert_eq!(DateTime::from_unix_secs(t).unwrap().timestamp(), t);
+        }
+    }
+
+    #[test]
+    fn from_unix_secs_rejects_instants_whose_year_overflows_i32() {
+        assert!(DateTime::from_unix_secs(i64::MAX).is_err());
+        assert!(DateTime::from_unix_secs(i64::MIN).is_err());
+
+        // The exact boundaries: the last second of year i32::MAX is fine,
+        // one second later is not; likewise around the first second of
+        // year i32::MIN.
+        let last_ok = utc(i32::MAX, 12, 31, 23, 59, 59).timestamp();
+        assert_eq!(
+            DateTime::from_unix_secs(last_ok).unwrap().timestamp(),
+            last_ok
+        );
+        assert!(DateTime::from_unix_secs(last_ok + 1).is_err());
+
+        let first_ok = utc(i32::MIN, 1, 1, 0, 0, 0).timestamp();
+        assert_eq!(
+            DateTime::from_unix_secs(first_ok).unwrap().timestamp(),
+            first_ok
+        );
+        assert!(DateTime::from_unix_secs(first_ok - 1).is_err());
+    }
 
     #[test]
     fn date_creation() {

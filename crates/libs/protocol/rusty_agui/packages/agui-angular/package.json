@@ -1,0 +1,41 @@
+{
+  "name": "@rusty-mill/agui-angular",
+  "version": "0.1.0",
+  "description": "Angular binding for @rusty-mill/agui-core: provideAgent and the injectAgent, injectReadable, injectAction and injectSharedState functions over signals. Headless: signals and render functions, no components.",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@angular/core": ">=19.0.0"
+  },
+  "dependencies": {
+    "@rusty-mill/agui-core": "file:../agui-core"
+  },
+  "devDependencies": {
+    "@angular/common": "^20.3.33",
+    "@angular/compiler": "^20.3.33",
+    "@angular/core": "^20.0.0",
+    "@angular/platform-browser": "^20.3.33",
+    "@types/node": "^22.20.4",
+    "jsdom": "^25.0.1",
+    "rxjs": "^7.8.0",
+    "typescript": "^5.8.0",
+    "vitest": "^5.0.2"
+  }
+}

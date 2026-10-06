@@ -1,10 +1,10 @@
 import { ChevronDown, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { useState } from 'react'
-import type { CalendarMode } from '@/app/paths'
+import { CALENDAR_MODES, type CalendarMode } from '@/app/paths'
 import { Menu } from '@/components/Menu'
 
-export const MODE_LABEL: Record<CalendarMode, string> = { m: 'Month', w: 'Week', d: 'Day', a: 'Agenda' }
-const NAV = { m: 'month', w: 'week', d: 'day', a: 'page' } as const
+export const MODE_LABEL: Record<CalendarMode, string> = { m: 'Month', w: 'Week', d: 'Day', '3': '3 Days', t: '10 Days', a: 'Agenda' }
+const NAV = { m: 'month', w: 'week', d: 'day', '3': 'days', t: 'days', a: 'page' } as const
 
 interface Props {
   title: string
@@ -17,11 +17,12 @@ interface Props {
   onToday: () => void
   onAdd: (anchor: HTMLElement) => void
   onImport: () => void
+  onSubscriptions: () => void
 }
 
 const btn = 'flex h-8 items-center justify-center rounded-row text-base outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary'
 
-export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onNext, onToday, onAdd, onImport }: Props) {
+export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onNext, onToday, onAdd, onImport, onSubscriptions }: Props) {
   const [viewAnchor, setViewAnchor] = useState<HTMLElement | null>(null)
   const [open, setOpen] = useState(false)
   return (
@@ -64,10 +65,11 @@ export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onN
         placement="bottom-end"
         label="Calendar view"
         items={[
-          ...(Object.keys(MODE_LABEL) as CalendarMode[]).map((m) => ({ id: m, label: MODE_LABEL[m], checked: m === mode, onSelect: () => onMode(m) })),
+          ...CALENDAR_MODES.map((m) => ({ id: m, label: MODE_LABEL[m], checked: m === mode, onSelect: () => onMode(m) })),
           'separator',
           { id: 'done', label: 'Show completed', checked: showDone, onSelect: () => onShowDone(!showDone) },
           { id: 'import', label: 'Import calendar (.ics)', onSelect: onImport },
+          { id: 'subscriptions', label: 'Calendar subscriptions…', onSelect: onSubscriptions },
         ]}
       />
     </header>

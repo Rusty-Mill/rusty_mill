@@ -71,6 +71,7 @@ graph TD
     mcp[mcp]
     compose[compose]
     app[app]
+    agui[agui]
 
     observe --> config
     constrain --> config
@@ -94,6 +95,10 @@ graph TD
     app --> kernel
     app --> mcp
     app --> compose
+    agui --> app
+    agui --> config
+    agui --> constrain
+    agui --> observe
 ```
 
 **Import rules (the contract):**
@@ -103,6 +108,10 @@ graph TD
 - `observe` **does not import `feed`.** The `EntropyAuditor`'s `BoundaryViolation` heuristic needs `TaskState.scope`, but receives those scope strings as **data** passed by `Session`, not by importing `feed`.
 - The **`agent` subagent tool** (in `feed`) must construct a child `Session` (in `app`). To avoid a `feed → app` cycle, `feed` defines a **`SessionFactory` trait**; `app` implements it and injects it into the registry (ADR-0017).
 - `app` is the only crate with a binary; it wires everything.
+- `agui` sits above `app`, like the desktop bridge: it builds a `Session` per
+  AG-UI thread with an `ApprovalGate` on the policy chain and relays one turn
+  per run over the workspace's `rusty_agui` crate. Nothing below it knows
+  AG-UI exists.
 
 ## 6. Runtime view — the turn cycle
 

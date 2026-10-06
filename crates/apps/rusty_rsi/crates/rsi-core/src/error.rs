@@ -62,3 +62,19 @@ pub enum CoreError {
         value: String,
     },
 }
+
+/// A rejected sandbox limit or path is an invalid identifier here: the
+/// spec's validators are the only `rusty_sandbox` errors a domain
+/// operation can produce, and `rsi-runtime` keeps its own I/O and
+/// sandbox-setup variants for the rest.
+impl From<rusty_sandbox::Error> for CoreError {
+    fn from(error: rusty_sandbox::Error) -> Self {
+        match error {
+            rusty_sandbox::Error::Invalid { what, value } => Self::InvalidId { kind: what, value },
+            other => Self::InvalidId {
+                kind: "sandbox",
+                value: other.to_string(),
+            },
+        }
+    }
+}

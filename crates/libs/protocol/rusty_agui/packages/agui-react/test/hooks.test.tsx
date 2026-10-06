@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { AgentProvider, lastAssistantText, useAction, useAgent, useReadable, useSharedState } from "../src/index.js";
-import { call, fakeAgent, run, say, type FakeAgent } from "./fake-agent.js";
+import { call, fakeAgent, run, say, type FakeAgent } from "@rusty-mill/agui-core/testing";
 
 afterEach(cleanup);
 
