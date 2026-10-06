@@ -16,10 +16,12 @@ use rb_replay_ingest::ReplayFileSource;
 use std::path::Path;
 
 mod scenario;
+mod sweep;
 pub use scenario::{
     compare_scenario, scenario_from_capture, simulate_scenario, ScenarioComparison, ScenarioRow,
     SCENARIO_TICK_SECS,
 };
+pub use sweep::{default_grid, sweep, window_error, Candidate, Window, WindowError};
 
 /// Default timestamp tolerance (seconds) `rb-verify` uses when the caller
 /// doesn't supply one explicitly (see `main.rs`'s optional third

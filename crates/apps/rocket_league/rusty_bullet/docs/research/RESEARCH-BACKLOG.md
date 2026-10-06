@@ -358,6 +358,26 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   (156 uu mean, over 100 uu at tick 71) and `rb-verify --scenario
   tools/rb_tape_bot/scenarios/car_over_ball.json 1` for the port's own
   ticks 0 to 6.
+- **Parameter sweep (2026-10-06, rejected, nothing committed)**: the same
+  hit is in the human capture (`hitjump.jsonl` 77.642 s: the car gains
+  405, 444, 475, 498 uu/s of upward speed over four ticks there too), so it
+  is the game's behaviour, not a bot artefact. Windowed objective: k = 8
+  prediction over `hitjump` 77.6-77.8 s plus `test2` 5.7-5.9 s and
+  12.2-12.4 s (the two guard hits), 58 ms per evaluation. Grid of 648
+  combinations over car-ball restitution (0 to 0.2), friction (0.25 to 2;
+  no effect at 1 or above), the extra-impulse scale (0.4 to 1.0), its z
+  scale (0.2 to 0.5) and forward scale (0.4 to 0.9). The window optimum
+  scales the extra impulse by 0.6-0.7 (z scale 0.5): `hitjump` window car
+  velocity error 51 -> 8 uu/s, guards' ball error up from 1.9-2.9 to
+  2.6-3.7 uu. **The full-capture gate rejects it**: with scale 0.7 and z
+  0.5, k = 30 `test2` mean ball distance doubles (0.54 -> 1.17 uu),
+  `hitjump` ball 92.95 -> 93.57, and car velocity barely moves (`hitjump`
+  10.60 -> 10.46, `test2` 1.99 unchanged). So no contact material or
+  extra-impulse setting fixes the multi-tick hit; the window win was one
+  event. Lesson for later sweeps: a windowed objective finds candidates,
+  the full-capture k = 30 table (test2, hitjump, front, side) decides.
+  The cause is structural (what keeps the car and ball in contact for four
+  ticks), as the next step says.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball

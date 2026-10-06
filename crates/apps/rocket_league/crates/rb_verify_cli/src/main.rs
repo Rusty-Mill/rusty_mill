@@ -59,10 +59,10 @@ use rb_domain::PhysicsStateSource;
 use rb_domain::{ControllerInput, Vec3};
 use rb_scenario::Scenario;
 use rb_verify_cli::{
-    car_frame_spin, compare_scenario, k_step_capture, k_step_score, one_step_capture,
+    car_frame_spin, compare_scenario, default_grid, k_step_capture, k_step_score, one_step_capture,
     rotation_rate, scenario_from_capture, score_capture_against_candidate, score_capture_growth,
-    score_replay_against_capture, simulate_scenario, trace_capture, SeedFrame, TraceRow,
-    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    score_replay_against_capture, simulate_scenario, sweep, trace_capture, Candidate, SeedFrame,
+    TraceRow, Window, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::path::Path;
@@ -301,6 +301,62 @@ fn run_scenario_from(
     Ok(())
 }
 
+/// `--sweep-hit <k> <capture> <from> <to> [<capture> <from> <to>]...`: ranks
+/// car-ball tunings over the windows (the first is the target, the rest
+/// guards). Candidates only: see `sweep`'s module doc for the full gate.
+fn run_sweep_hit(args: Vec<String>) -> Result<(), String> {
+    let mut args = args.into_iter();
+    let k = args
+        .next()
+        .ok_or("missing k")?
+        .parse::<usize>()
+        .map_err(|_| "invalid k".to_string())?;
+    let rest: Vec<String> = args.collect();
+    if rest.is_empty() || !rest.len().is_multiple_of(3) {
+        return Err("expected <capture> <from-secs> <to-secs> triples".to_string());
+    }
+    let mut windows = Vec::new();
+    for triple in rest.chunks(3) {
+        let from = parse_secs("from-secs", Some(triple[1].clone()))?;
+        let to = parse_secs("to-secs", Some(triple[2].clone()))?;
+        windows.push(
+            Window::from_capture(&triple[0], from, to)
+                .map_err(|e| format!("{}: {e}", triple[0]))?,
+        );
+    }
+    let grid = default_grid();
+    let ranked = sweep(&windows, k, &grid);
+    let describe = |c: &Candidate| {
+        let per_window: Vec<String> = c
+            .windows
+            .iter()
+            .map(|w| format!("{:.1}/{:.2}", w.car_velocity, w.ball_position))
+            .collect();
+        let t = &c.tuning;
+        format!(
+            "total {:7.2}  windows (car uu/s / ball uu) {}  rest {} fric {} scale {} z {} fwd {}",
+            c.total(),
+            per_window.join(" "),
+            t.material.restitution,
+            t.material.friction,
+            t.hit_scale,
+            t.hit_z_scale,
+            t.hit_forward_scale
+        )
+    };
+    if let Some(base) = ranked.iter().find(|c| c.tuning == grid[0]) {
+        println!("default   {}", describe(base));
+    }
+    for (i, candidate) in ranked.iter().take(10).enumerate() {
+        println!("rank {:2}   {}", i + 1, describe(candidate));
+    }
+    println!(
+        "{} tunings, k = {k}. Candidates only: check any winner against the full-capture --self-kstep 30 table.",
+        ranked.len()
+    );
+    Ok(())
+}
+
 fn parse_secs(name: &str, raw: Option<String>) -> Result<f32, String> {
     let raw = raw.ok_or_else(|| format!("missing {name}"))?;
     raw.parse::<f32>()
@@ -326,7 +382,7 @@ fn parse_window_secs(raw: Option<String>) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage:\n  rb-verify [--seed-first-frame] <mode> ...\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]\n  rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]\n\n  --seed-first-frame, given first, makes the --self* modes seed the simulation\n  from the capture's first frame instead of its first grounded, neutral frame\n  (for a recording whose start was set by the tape bot)."
+    "usage:\n  rb-verify [--seed-first-frame] <mode> ...\n  rb-verify <replay-file> <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self <capture-file> [max-timestamp-delta-secs]\n  rb-verify --self-growth <capture-file> [window-secs] [max-timestamp-delta-secs]\n  rb-verify --self-trace <capture-file> <from-secs> <to-secs>\n  rb-verify --self-onestep <capture-file> [count]\n  rb-verify --self-kstep <capture-file> [k] [count]\n  rb-verify --scenario <scenario.json> [every]\n  rb-verify --scenario <scenario.json> --against <capture> [every]\n  rb-verify --scenario-from <capture> <from-secs> <to-secs> [name]\n  rb-verify --sweep-hit <k> <capture> <from-secs> <to-secs> [<capture> <from-secs> <to-secs>]...\n\n  --seed-first-frame, given first, makes the --self* modes seed the simulation\n  from the capture's first frame instead of its first grounded, neutral frame\n  (for a recording whose start was set by the tape bot)."
 }
 
 fn main() -> ExitCode {
@@ -343,6 +399,16 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         first = mode;
+    }
+
+    if first == "--sweep-hit" {
+        return match run_sweep_hit(args.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}\n{}", usage());
+                ExitCode::FAILURE
+            }
+        };
     }
 
     if first == "--scenario-from" {

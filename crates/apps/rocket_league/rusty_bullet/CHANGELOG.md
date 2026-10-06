@@ -10,6 +10,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   instead of shifting every later comparison. The eleven tape-bot
   captures re-scored: eight within 25 uu, prompt_dodge 1.2 uu mean.
 ### Added
+- ADR-0061 (`RB-VERIFY-003-FR-014`, spec 0.24.0): `rb-verify --sweep-hit <k>
+  <capture> <from> <to> [...]` ranks car-ball hit tunings over windows of
+  recordings on `rb_env::Env` (`Env::snap`, `Env::peek`,
+  `rb_physics_bullet::CarBallTuning`, RocketSim's values by default). Output
+  is candidates; the full-capture `--self-kstep 30` table decides.
 - `rb_env` (ADR-0060, accepted): `Env` with `reset`/`step` over
   `PhysicsWorld`, building the arena once (29 ms) and resetting in 0.25 ms;
   `PhysicsWorld::from_frame_in`; `simulate_scenario` now runs on it with
