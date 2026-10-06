@@ -14,7 +14,7 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 ---
 
 ## rusty_tick on CopilotKit: a React page and runtime
-**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · `crates/apps/rusty_tick/copilotkit-demo`
+**2026-10-06** · [#534](https://github.com/Rusty-Mill/rusty_mill/pull/534) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · `crates/apps/rusty_tick/copilotkit-demo`
 
 - **Added:** a Node project with CopilotKit 1.77's runtime (`runtime.mjs`: `CopilotRuntime` with `rusty_tick`'s `POST /api/agent` as an `@ag-ui/client` `HttpAgent`, bearer token held server side, loopback only) and a Vite React page (`CopilotChat`, a `create_task` tool through `useFrontendTool`, a task list). Typing `add buy milk` streams the assistant's text, runs the tool in the page, and shows the assistant's confirmation on the follow-up run.
 - **Added:** nothing leaves the machine: `COPILOTKIT_TELEMETRY_DISABLED` is set by the runtime, the page sets `enableInspector={false}` (the inspector otherwise fetches Google Fonts and `cdn.copilotkit.ai/notifications`), and `scarfSettings` disables install-time analytics. The browser's network panel shows only the page's own origin.
