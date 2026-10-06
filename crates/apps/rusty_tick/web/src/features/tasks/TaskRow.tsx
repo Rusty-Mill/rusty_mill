@@ -27,6 +27,8 @@ interface Props {
   showList: boolean
   list: List | undefined
   tagsByName: Record<string, Tag>
+  /** Who the task is assigned to, if anyone. */
+  assignee?: string
   lists: List[]
   actions: RowActions
   dragProps?: React.HTMLAttributes<HTMLElement>
@@ -34,7 +36,7 @@ interface Props {
 }
 
 /** One 40px task row. Memoised: a list of hundreds re-renders only the rows that changed. */
-export const TaskRow = memo(function TaskRow({ task, selected, now, hour12, showDetails, showList, list, tagsByName, lists, actions, dragProps, dropIndicator }: Props) {
+export const TaskRow = memo(function TaskRow({ task, selected, now, hour12, showDetails, showList, list, tagsByName, assignee, lists, actions, dragProps, dropIndicator }: Props) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [at, setAt] = useState<{ x: number; y: number } | null>(null)
   const moreRef = useRef<HTMLButtonElement>(null)
@@ -106,6 +108,11 @@ export const TaskRow = memo(function TaskRow({ task, selected, now, hour12, show
             {t.label}
           </span>
         ))}
+        {showDetails && assignee && (
+          <span className="max-w-[90px] shrink-0 truncate rounded-full bg-black/5 px-1.5 text-s text-grey" title={`Assigned to ${assignee}`}>
+            {assignee}
+          </span>
+        )}
         {showDetails && showList && list && <span className="max-w-[110px] shrink-0 truncate text-s text-grey">{list.name}</span>}
         {due && (
           <span className={`flex shrink-0 items-center gap-1 text-s ${done ? 'text-grey' : TONE_CLASS[due.tone]}`}>

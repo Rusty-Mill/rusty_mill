@@ -253,6 +253,17 @@ describe('visibleRange and stepping', () => {
     expect(a.start).toBe(at(2026, 9, 29))
   })
 
+  it('multi-day modes start on the anchor day and page by their length', () => {
+    const three = visibleRange('3', at(2026, 9, 29, 15), 1)
+    expect(three.days.map((d) => new Date(d).getDate())).toEqual([29, 30, 1])
+    expect(three.end).toBe(at(2026, 10, 2))
+    expect(visibleRange('t', at(2026, 9, 29), 0).days).toHaveLength(10)
+    expect(stepAnchor('3', at(2026, 9, 29), 1)).toBe(at(2026, 10, 2))
+    expect(stepAnchor('t', at(2026, 9, 29), -1)).toBe(at(2026, 9, 19))
+    expect(parseMode('3')).toBe('3')
+    expect(parseMode('t')).toBe('t')
+  })
+
   it('a week across the fall-back change still has seven calendar days', () => {
     const r = visibleRange('w', at(2026, 11, 1, 12), 0)
     expect(r.days.map((d) => new Date(d).getDate())).toEqual([1, 2, 3, 4, 5, 6, 7])
@@ -279,7 +290,7 @@ describe('visibleRange and stepping', () => {
 })
 
 describe('titles and labels', () => {
-  const title = (mode: 'm' | 'w' | 'd' | 'a', anchor: number, ws: 0 | 1 | 6 = 0): string => rangeTitle(mode, anchor, visibleRange(mode, anchor, ws))
+  const title = (mode: 'm' | 'w' | 'd' | '3' | 't' | 'a', anchor: number, ws: 0 | 1 | 6 = 0): string => rangeTitle(mode, anchor, visibleRange(mode, anchor, ws))
   it('titles each mode', () => {
     expect(title('m', at(2026, 9, 29))).toBe('September 2026')
     expect(title('w', at(2026, 9, 29))).toBe('Sep 27 – Oct 3, 2026')

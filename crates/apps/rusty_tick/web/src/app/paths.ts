@@ -6,7 +6,7 @@
  *   #t/<tag>/tasks[/<taskId>]            a tag
  *   #f/<filterId>/tasks[/<taskId>]       a saved filter
  *   #q/all/completed  #q/all/trash  #q/all/summary  #q/all/habit
- *   #c/all/calendar/<m|w|d|a>            calendar
+ *   #c/all/calendar/<m|w|d|3|t|a> (month, week, day, 3-day, ten-day, agenda)            calendar
  *   #focus                               Pomodoro
  *   #countdown                           Countdown
  */
@@ -48,7 +48,7 @@ export function viewPath(spec: ViewSpec): string {
 /** The URL of a view with `taskId` open in the detail pane. */
 export const taskPath = (spec: ViewSpec, taskId: string): string => `${viewPath(spec)}/${taskId}`
 
-export const CALENDAR_MODES = ['m', 'w', 'd', 'a'] as const
+export const CALENDAR_MODES = ['m', 'w', 'd', '3', 't', 'a'] as const
 export type CalendarMode = (typeof CALENDAR_MODES)[number]
 export const calendarPath = (mode: CalendarMode = 'm'): string => `/c/all/calendar/${mode}`
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Task } from '@/api/types'
+import { UNASSIGNED } from '../assignees/logic'
 import { asFilterBody, emptyRule, matchesFilter } from './logic'
 
 const task = (o: Partial<Task> = {}): Task => ({
@@ -24,6 +25,12 @@ describe('matchesFilter', () => {
     expect(matchesFilter(task(), rule, 'later')).toBe(false)
     expect(matchesFilter(task({ listId: 'b' }), rule, 'today')).toBe(false)
   })
+  it('assignees, with a value for unassigned', () => {
+    const rule = { ...emptyRule(), assignees: ['Ada', UNASSIGNED] }
+    expect(matchesFilter(task(), rule, 'nodate', 'Ada')).toBe(true)
+    expect(matchesFilter(task(), rule, 'nodate')).toBe(true)
+    expect(matchesFilter(task(), rule, 'nodate', 'Bo')).toBe(false)
+  })
 })
 
 describe('asFilterBody', () => {
@@ -35,7 +42,7 @@ describe('asFilterBody', () => {
     expect(asFilterBody({ name: 'f' })).toEqual({ name: 'f', rule: emptyRule() })
     expect(asFilterBody({ name: 'f', rule: { priorities: [5, 2], dates: ['today', 'bogus'], tags: ['a', 1] } })).toEqual({
       name: 'f',
-      rule: { lists: [], tags: ['a'], priorities: [5], dates: ['today'] },
+      rule: { lists: [], tags: ['a'], priorities: [5], dates: ['today'], assignees: [] },
     })
   })
 })

@@ -29,7 +29,7 @@ import type {
 export const INBOX_ID = '00000000-0000-7000-8000-000000000001'
 export const STORAGE_KEY = 'tick-local:memory:v1'
 const STEP = 1024
-const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter', 'countdown', 'estimate']
+const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter', 'countdown', 'estimate', 'assignee', 'subscription']
 const MAX_DOC_BYTES = 64 * 1024
 
 interface State {
@@ -448,6 +448,10 @@ export class MemoryAdapter implements ApiClient {
     this.state.docs = [...this.state.docs.filter((d) => d.id !== id), doc]
     this.save()
     return clone(doc) as Doc<T>
+  }
+
+  async fetchIcs(): Promise<string> {
+    throw new InvalidError(400, 'Calendar subscriptions need the server: the browser demo cannot fetch feeds')
   }
 
   async deleteDoc(kind: DocKind, id: string): Promise<void> {

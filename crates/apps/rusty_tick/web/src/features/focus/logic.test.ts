@@ -103,7 +103,9 @@ describe('breaks and settings', () => {
   })
   it('sanitizes settings', () => {
     expect(sanitizeSettings(null)).toEqual(DEFAULT_SETTINGS)
-    expect(sanitizeSettings({ focusMin: 0, shortMin: 999, longMin: 'x', longEvery: 3.4 })).toEqual({ focusMin: 1, shortMin: 60, longMin: 15, longEvery: 3 })
+    expect(sanitizeSettings({ focusMin: 0, shortMin: 999, longMin: 'x', longEvery: 3.4 })).toEqual({ focusMin: 1, shortMin: 60, longMin: 15, longEvery: 3, ambient: 'off' })
+    expect(sanitizeSettings({ ambient: 'rain' }).ambient).toBe('rain')
+    expect(sanitizeSettings({ ambient: 'thunder' }).ambient).toBe('off')
   })
   it('tells records from the settings doc', () => {
     expect(asRecordBody(DEFAULT_SETTINGS)).toBeNull()

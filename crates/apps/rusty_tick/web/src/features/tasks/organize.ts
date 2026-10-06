@@ -35,6 +35,8 @@ export interface Entities {
   tags: Tag[]
   inboxId: string
   filters: Filter[]
+  /** Assignee name by task id. */
+  assignees: Record<string, string>
 }
 
 /** Stable key for storing per-view options. */
@@ -90,7 +92,7 @@ export function tasksForView(spec: ViewSpec, e: Entities, now: number, includeDo
       return e.tasks.filter((t) => wanted(t) && t.tags.includes(spec.name))
     case 'filter': {
       const rule = e.filters.find((f) => f.id === spec.id)?.rule
-      return rule ? e.tasks.filter((t) => wanted(t) && visible.has(t.listId) && matchesFilter(t, rule, dateBucket(t, now))) : []
+      return rule ? e.tasks.filter((t) => wanted(t) && visible.has(t.listId) && matchesFilter(t, rule, dateBucket(t, now), e.assignees[t.id])) : []
     }
   }
 }
