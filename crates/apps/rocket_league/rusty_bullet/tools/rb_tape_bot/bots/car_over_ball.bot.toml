@@ -8,6 +8,8 @@ name = "RB Tape: car_over_ball"
 agent_id = "rusty_bullet/tape_bot"
 root_dir = ".."
 run_command = 'targeteleaseb_tape_bot.exe'
+elease
+b_tape_bot.exe'
 run_command_linux = "target/release/rb_tape_bot"
 hivemind = false
 
