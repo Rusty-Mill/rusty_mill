@@ -29,7 +29,7 @@ import type {
 export const INBOX_ID = '00000000-0000-7000-8000-000000000001'
 export const STORAGE_KEY = 'tick-local:memory:v1'
 const STEP = 1024
-const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment']
+const DOC_KINDS: DocKind[] = ['habit', 'habit_checkin', 'focus', 'prefs', 'summary_template', 'comment', 'filter', 'countdown', 'estimate', 'assignee', 'subscription']
 const MAX_DOC_BYTES = 64 * 1024
 
 interface State {
@@ -167,7 +167,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.color !== undefined) list.color = cleanColor(patch.color)
     if (patch.archived !== undefined) list.archived = patch.archived
     if (patch.viewMode !== undefined) {
-      if (!['list', 'kanban', 'timeline'].includes(patch.viewMode)) throw new InvalidError(400, 'unknown viewMode')
+      if (!['list', 'kanban', 'timeline', 'matrix'].includes(patch.viewMode)) throw new InvalidError(400, 'unknown viewMode')
       list.viewMode = patch.viewMode
     }
     if (patch.sortType !== undefined) list.sortType = patch.sortType
@@ -254,7 +254,7 @@ export class MemoryAdapter implements ApiClient {
     if (patch.kind !== undefined) task.kind = patch.kind
     if (patch.status !== undefined && patch.status !== task.status) {
       task.status = patch.status
-      task.completedMs = patch.status === 'done' ? this.now() : null
+      task.completedMs = patch.status === 'open' ? null : (task.completedMs ?? this.now())
     }
     if (patch.priority !== undefined) task.priority = cleanPriority(patch.priority)
     if (patch.startMs !== undefined) task.startMs = patch.startMs
@@ -448,6 +448,10 @@ export class MemoryAdapter implements ApiClient {
     this.state.docs = [...this.state.docs.filter((d) => d.id !== id), doc]
     this.save()
     return clone(doc) as Doc<T>
+  }
+
+  async fetchIcs(): Promise<string> {
+    throw new InvalidError(400, 'Calendar subscriptions need the server: the browser demo cannot fetch feeds')
   }
 
   async deleteDoc(kind: DocKind, id: string): Promise<void> {

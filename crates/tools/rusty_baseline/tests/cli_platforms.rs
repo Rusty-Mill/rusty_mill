@@ -32,7 +32,7 @@ impl Fixture {
 
     fn workspace(&self, bins: &[&str]) {
         let mut manifest = String::from(
-            "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+            "[workspace]\n\n[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         );
         for bin in bins {
             manifest.push_str(&format!(
@@ -41,6 +41,11 @@ impl Fixture {
         }
         fs::create_dir_all(self.path("src")).unwrap();
         fs::write(self.path("Cargo.toml"), manifest).unwrap();
+        fs::write(
+            self.path("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
         fs::write(self.path("src/main.rs"), "fn main() {}\n").unwrap();
     }
 
@@ -256,4 +261,189 @@ fn an_eligible_missing_binary_is_an_error_and_later_measurement_completes() {
         .find(|line| line.starts_with("| `nonzero`"))
         .unwrap();
     assert!(nonzero.contains("ended Exited(7)"));
+    assert_eq!(output.status.code(), Some(1), "{table}");
+}
+
+#[test]
+fn every_exit_sample_is_validated_and_later_products_still_run() {
+    let fixture = Fixture::new();
+    fixture.workspace(&["warmup", "early", "last", "good"]);
+    let target = fixture.path("prebuilt");
+    for (name, failed_run) in [("warmup", 0), ("early", 1), ("last", 3)] {
+        let counter = fixture.path(&format!("{name}-count"));
+        fixture.compile_helper(
+            name,
+            &format!(
+                r#"fn main() {{
+                    let path = {counter:?};
+                    let n: usize = std::fs::read_to_string(path)
+                        .unwrap_or_else(|_| "0".into()).parse().unwrap();
+                    std::fs::write(path, (n + 1).to_string()).unwrap();
+                    if n == {failed_run} {{ std::process::exit(7); }}
+                }}"#
+            ),
+            &target.join("release"),
+        );
+    }
+    let marker = fixture.path("good-ran");
+    fixture.compile_helper("good", &marker_helper(&marker, 0), &target.join("release"));
+    let products = fixture.products(
+        "fixture warmup exit\nfixture early exit\nfixture last exit\nfixture good exit\n",
+    );
+    let output = fixture.run(
+        &products,
+        &["--prebuilt", target.to_str().unwrap(), "--runs", "3"],
+    );
+    let table = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{table}");
+    for (name, phase) in [
+        ("warmup", "warm-up"),
+        ("early", "timed run 1"),
+        ("last", "timed run 3"),
+    ] {
+        let row = table
+            .lines()
+            .find(|line| line.starts_with(&format!("| `{name}`")))
+            .unwrap();
+        assert!(row.contains(phase), "{row}");
+        assert!(row.contains("ended Exited(7); expected exit 0"), "{row}");
+        assert!(row.contains("failed"), "{row}");
+    }
+    assert!(marker.exists());
+    assert!(table.find("`last`").unwrap() < table.find("`good`").unwrap());
+}
+
+#[test]
+fn declared_nonzero_exit_is_success_and_not_passed_to_the_product() {
+    let fixture = Fixture::new();
+    fixture.workspace(&["expected"]);
+    let target = fixture.path("prebuilt");
+    fixture.compile_helper(
+        "expected",
+        r#"fn main() {
+            assert_eq!(std::env::args().skip(1).collect::<Vec<_>>(), ["--help"]);
+            std::process::exit(2);
+        }"#,
+        &target.join("release"),
+    );
+    for declaration in [
+        "@expect-exit=2".to_owned(),
+        format!("@expect-exit={}:2", std::env::consts::OS),
+    ] {
+        let products = fixture.products(&format!("fixture expected exit {declaration} --help\n"));
+        let output = fixture.run(
+            &products,
+            &["--prebuilt", target.to_str().unwrap(), "--runs", "2"],
+        );
+        let table = stdout(&output);
+        assert!(output.status.success(), "{table}");
+        assert!(table.contains("ended Exited(2)"), "{table}");
+        assert!(!table.contains("failed"), "{table}");
+    }
+    let products = fixture.products("fixture expected exit @expect-exit=7 --help\n");
+    let output = fixture.run(
+        &products,
+        &["--prebuilt", target.to_str().unwrap(), "--runs", "1"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("ended Exited(2); expected exit 7"));
+}
+
+#[test]
+fn dependency_failure_keeps_successful_runtime_measurement() {
+    let fixture = Fixture::new();
+    fixture.workspace(&["good"]);
+    // metadata --no-deps succeeds, but cargo tree --locked must fail.
+    fs::remove_file(fixture.path("Cargo.lock")).unwrap();
+    let target = fixture.path("prebuilt");
+    let marker = fixture.path("good-ran");
+    fixture.compile_helper("good", &marker_helper(&marker, 0), &target.join("release"));
+    let products = fixture.products("fixture good exit\n");
+    let output = fixture.run(
+        &products,
+        &["--prebuilt", target.to_str().unwrap(), "--runs", "1"],
+    );
+    let table = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{table}");
+    assert!(table.contains("deps:"), "{table}");
+    assert!(table.contains(" ms |"), "{table}");
+    assert!(marker.exists());
+}
+
+#[test]
+fn failed_build_keeps_dependency_measurement_and_returns_failure() {
+    let fixture = Fixture::new();
+    fixture.workspace(&["broken"]);
+    fs::write(
+        fixture.path("src/main.rs"),
+        "compile_error!(\"owned fixture build failure\");\nfn main() {}\n",
+    )
+    .unwrap();
+    let products = fixture.products("fixture broken exit\n");
+    let output = fixture.run(&products, &["--runs", "1"]);
+    let table = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{table}");
+    assert!(table.contains("| 0 + 0 | failed |"), "{table}");
+    assert!(table.contains("build:"), "{table}");
+    assert!(!fixture.path("work/target/broken").exists());
+}
+
+#[test]
+fn spawn_failure_keeps_later_rows_and_is_not_unsupported() {
+    let fixture = Fixture::new();
+    fixture.workspace(&["invalid", "good"]);
+    let target = fixture.path("prebuilt");
+    let marker = fixture.path("good-ran");
+    fixture.compile_helper("good", &marker_helper(&marker, 0), &target.join("release"));
+    fs::create_dir(
+        target
+            .join("release")
+            .join(format!("invalid{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
+    let products = fixture.products("fixture invalid exit\nfixture good exit\n");
+    let output = fixture.run(
+        &products,
+        &["--prebuilt", target.to_str().unwrap(), "--runs", "1"],
+    );
+    let table = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{table}");
+    assert!(table.contains("run: warm-up starting"), "{table}");
+    assert!(!table.contains("unsupported"), "{table}");
+    assert!(marker.exists());
+}
+
+#[test]
+fn idle_early_exit_fails_but_intentional_teardown_succeeds() {
+    let fixture = Fixture::new();
+    fixture.workspace(&["early", "idle", "good"]);
+    let target = fixture.path("prebuilt");
+    let marker = fixture.path("good-ran");
+    fixture.compile_helper("good", &marker_helper(&marker, 0), &target.join("release"));
+    fixture.compile_helper("early", "fn main() {}", &target.join("release"));
+    fixture.compile_helper(
+        "idle",
+        "fn main() { loop { std::thread::park(); } }",
+        &target.join("release"),
+    );
+    for (bin, success) in [("early", false), ("idle", true)] {
+        let products = fixture.products(&format!("fixture {bin} idle\nfixture good exit\n"));
+        let output = fixture.run(
+            &products,
+            &[
+                "--prebuilt",
+                target.to_str().unwrap(),
+                "--settle",
+                "1",
+                "--runs",
+                "1",
+            ],
+        );
+        let table = stdout(&output);
+        assert_eq!(output.status.success(), success, "{table}");
+        assert_eq!(table.contains("before settling"), !success, "{table}");
+        assert!(table.find(&format!("`{bin}`")).unwrap() < table.find("`good`").unwrap());
+        assert!(marker.exists(), "later product did not run");
+        fs::remove_file(&marker).unwrap();
+    }
 }

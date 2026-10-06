@@ -17,6 +17,9 @@ rusty_multimodal_db_engine = { workspace = true }
 # own crates (ADR-0002), not hyper/axum/serde_json.
 rusty_http = { workspace = true }
 rusty_serve = { workspace = true }
+rusty_tls = { workspace = true }
+# The assistant behind `POST /api/agent` (ADR-0007 follow-ons step 3).
+rusty_agui = { workspace = true, features = ["serve"] }
 rusty_json = { workspace = true }
 rusty_url = { workspace = true }
 # Per-user tokens (ADR-0002): random secrets, their encoding, and a digest of
@@ -31,4 +34,5 @@ uuid = { version = "1", features = ["v7", "v5", "serde"] }
 
 [dev-dependencies]
 tempfile = "3"
+rusty_agui = { workspace = true, features = ["serve", "client"] }
 rusty_multimodal_db_engine = { workspace = true, features = ["test-support"] }

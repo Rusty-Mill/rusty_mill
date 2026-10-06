@@ -1,4 +1,5 @@
 import { ArrowLeft, Calendar, Copy, FileText, History, Link2, ListChecks, ListPlus, MessageSquare, MoreHorizontal, Paperclip, Pin, Plus, Printer, RotateCcw, StickyNote, Tag, Target, Trash2, Type, Upload, X, XCircle } from 'lucide-react'
+import { AssigneeField } from '../../assignees/AssigneeField'
 import { useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import type { Task } from '@/api/types'
@@ -135,7 +136,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
         <button type="button" aria-label="Back to the list" onClick={() => navigate(paths.list)} className="hidden h-8 w-8 items-center justify-center rounded-row text-grey hover:bg-hover max-[999px]:flex">
           <ArrowLeft size={18} />
         </button>
-        <TaskCheck checked={task.status === 'done'} priority={task.priority} label={`Complete: ${task.title}`} onChange={() => taskActions.toggle(task.id)} size={18} />
+        <TaskCheck checked={task.status !== 'open'} priority={task.priority} label={`Complete: ${task.title}`} onChange={() => taskActions.toggle(task.id)} size={18} />
         <span aria-hidden className="mx-1 h-4 w-px bg-line" />
         <button
           ref={dateBtn}
@@ -180,9 +181,10 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
               el.style.height = `${el.scrollHeight}px`
             }
           }}
-          className={`w-full resize-none bg-transparent text-h1 font-semibold outline-none ${task.status === 'done' ? 'text-grey line-through' : ''}`}
+          className={`w-full resize-none bg-transparent text-h1 font-semibold outline-none ${task.status !== 'open' ? 'text-grey line-through' : ''}`}
         />
 
+        <AssigneeField taskId={task.id} disabled={trashed} />
         <div className="relative flex-1">
           <button
             type="button"
@@ -276,7 +278,9 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
           items={[
             { id: 'sub', label: 'Add Subtask', icon: <ListPlus size={16} />, disabled: true },
             { id: 'pin', label: 'Pin', icon: <Pin size={16} />, disabled: true },
-            { id: 'wontdo', label: "Won't Do", icon: <XCircle size={16} />, disabled: true },
+            task.status === 'wontdo'
+              ? { id: 'wontdo', label: 'Mark as open', icon: <XCircle size={16} />, disabled: trashed, onSelect: () => taskActions.setStatus(task.id, 'open') }
+              : { id: 'wontdo', label: "Won't Do", icon: <XCircle size={16} />, disabled: trashed, onSelect: () => taskActions.setStatus(task.id, 'wontdo') },
             { id: 'tags', label: 'Tags', icon: <Tag size={16} />, disabled: trashed, onSelect: () => setTagsOpen(true) },
             { id: 'attach', label: 'Upload Attachment', icon: <Paperclip size={16} />, disabled: true },
             { id: 'focus', label: 'Start Focus', icon: <Target size={16} />, disabled: trashed, onSelect: () => navigate(PATHS.focus) },

@@ -27,7 +27,7 @@ sessionStorage unless you tick "remember"). With per-user tokens (`rusty_tick us
   `HttpAdapter` (`/api/v1`). A single contract suite (`contract.ts`) runs against both.
 - `src/store/` — Zustand store: server "base" state plus a persisted queue of pending operations replayed over it.
   Writes are optimistic, retried with backoff when offline, and retried once on `412` (etag).
-- `src/features/` — tasks (list, kanban, detail pane, date popover), lists/tags, search, calendar, focus, habits, summary, settings.
+- `src/features/` — tasks (list, kanban, timeline, Eisenhower matrix, detail pane, date popover), saved filters, lists/tags, search, calendar (3-day and ten-day views, `.ics` import, subscriptions), focus (estimates, interruptions, ambient sound), assignees, countdown, habits, summary, settings.
 - `src/components/` — Popover, Menu, Dialog, Confirm, Tooltip, toasts: keyboard-operable and labelled.
 
 | | |
@@ -52,5 +52,10 @@ The prompt's selections (database, HTTP stack) are fixed by the backend, so the 
 - Search modal has no footer; the sort menu adds a "Custom" option for manual order.
 - Calendar: later occurrences of repeating tasks are shown faded and cannot be dragged; the agenda has no drag; "+N more" lists all of the day's tasks.
 - Habits: the goal amount counts — each click adds one until the goal is met; a day only keeps a streak and silences its reminder once it is. Changing a habit's goal later re-judges its past days.
+- Calendar import reads a `.ics` file you choose (events and todos become Inbox tasks; repeat rules outside the app's subset import once). Re-importing a file adds the tasks again.
+- Calendar subscriptions (Calendar view menu) are fetched by the server (`POST /api/v1/fetch-ics`), each into its own list; refresh is manual, plus automatic when the calendar opens and a feed is more than six hours old. A refresh overwrites the title, notes, dates and repeat the feed owns, adds new events, and trashes tasks whose event left the feed; a task you deleted stays deleted. It needs the server (the browser demo cannot fetch feeds). The server runs the fetch off its request lock, with at most 4 in flight (a fifth is refused with 503 "temporarily unavailable", which the dialog shows).
+- Assignees are free-text names (this app has no accounts to pick from within one data store), stored as `assignee` docs keyed by task id; the saved-filter dialog can filter on them. A purged task's assignee doc stays until its name is cleared elsewhere.
+- Ambient sound is synthesised in the browser (white noise, rain, waves): there are no audio files, and the browser may need a click before it plays.
+- Pomo estimates are `estimate` docs keyed by task id; one for a task that is purged for good stays until it is cleared from the Pomodoro page's stepper (the Estimates list skips it).
 - Sync is by polling every 30 s and on window focus. A push channel would need a streaming endpoint and a service worker, which the self-hosted server does not have; it is not planned.
 - Compared by eye against screenshots of the real app (not pixel-diffed); differences that remain are listed in the pull requests that closed the gap.

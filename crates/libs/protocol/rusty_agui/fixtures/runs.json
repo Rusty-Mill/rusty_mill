@@ -1,0 +1,31 @@
+[
+  {
+    "name": "text, a tool call on its parent, a result, a delta, an activity",
+    "input": {"threadId": "t", "runId": "r", "state": {"count": 0}, "messages": [{"id": "u1", "role": "user", "content": "hi"}]},
+    "events": [
+      {"type": "RUN_STARTED", "threadId": "t", "runId": "r"},
+      {"type": "STATE_SNAPSHOT", "snapshot": {"count": 1, "items": []}},
+      {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"},
+      {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "Hel"},
+      {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "lo"},
+      {"type": "TEXT_MESSAGE_END", "messageId": "m1"},
+      {"type": "TOOL_CALL_START", "toolCallId": "c1", "toolCallName": "f", "parentMessageId": "m1"},
+      {"type": "TOOL_CALL_ARGS", "toolCallId": "c1", "delta": "{\"a\":"},
+      {"type": "TOOL_CALL_ARGS", "toolCallId": "c1", "delta": "1}"},
+      {"type": "TOOL_CALL_END", "toolCallId": "c1"},
+      {"type": "TOOL_CALL_RESULT", "messageId": "t1", "toolCallId": "c1", "content": "42", "role": "tool"},
+      {"type": "STATE_DELTA", "delta": [{"op": "replace", "path": "/count", "value": 2}, {"op": "add", "path": "/items/-", "value": "x"}]},
+      {"type": "ACTIVITY_SNAPSHOT", "messageId": "a1", "activityType": "PLAN", "content": {"steps": ["one"]}},
+      {"type": "ACTIVITY_SNAPSHOT", "messageId": "a1", "activityType": "PLAN", "content": {"done": false}, "replace": false},
+      {"type": "ACTIVITY_DELTA", "messageId": "a1", "activityType": "PLAN", "patch": [{"op": "replace", "path": "/done", "value": true}]},
+      {"type": "RUN_FINISHED", "threadId": "t", "runId": "r", "result": {"ok": true}, "outcome": {"type": "success"}}
+    ],
+    "messages": [
+      {"id": "u1", "role": "user", "content": "hi"},
+      {"id": "m1", "role": "assistant", "content": "Hello", "toolCalls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{\"a\":1}"}}]},
+      {"id": "t1", "role": "tool", "content": "42", "toolCallId": "c1"},
+      {"id": "a1", "role": "activity", "activityType": "PLAN", "content": {"steps": ["one"], "done": true}}
+    ],
+    "state": {"count": 2, "items": ["x"]}
+  }
+]

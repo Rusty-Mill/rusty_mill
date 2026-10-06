@@ -10,6 +10,6 @@ export function useView(): { spec: ViewSpec | null; taskId: string | null } {
   const inboxId = useData((s) => s.inboxId)
   return useMemo(
     () => ({ spec: parseView(params, inboxId), taskId: params.taskId ?? null }),
-    [params.smart, params.listId, params.tag, params.taskId, inboxId], // eslint-disable-line react-hooks/exhaustive-deps
+    [params.smart, params.listId, params.tag, params.filterId, params.taskId, inboxId], // eslint-disable-line react-hooks/exhaustive-deps
   )
 }

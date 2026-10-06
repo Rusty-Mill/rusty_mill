@@ -1,6 +1,6 @@
 # The products rusty_baseline measures: each app's shipped binaries.
 #
-#   <package>[:<features>] <bin> <exit|idle> [@platform=<os>|@unsupported=<os>] [KEY=value...] [args...]
+#   <package>[:<features>] <bin> <exit|idle> [@platform=<os>|@unsupported=<os>] [@expect-exit=<code>|<os>:<code>] [KEY=value...] [args...]
 #
 # `@platform=linux`, `@platform=windows`, or `@platform=macos` immediately
 # after the mode restricts a product to that OS. With no declaration a product
@@ -9,6 +9,10 @@
 # on every other host when a product has one narrow, temporary platform gap.
 #
 # `exit`: a cheap command that runs to completion; startup is its wall time.
+# Every warm-up and timed invocation must exit 0 unless `@expect-exit` declares
+# an exact code. An OS prefix changes the expectation only on that OS; other
+# hosts still expect 0. The declaration follows the optional platform policy.
+# Unexpected exits (including signals) fail the run, not a valid startup sample.
 # `idle`: a server or daemon, started with no real config (dummy secrets,
 # data in the scratch home), sampled once settled, then killed.
 #
@@ -32,10 +36,11 @@ rusty-meshed-cli      meshed               exit  --help
 rusty_homelab_mcp     rusty_homelab_mcp    exit  --help
 rusty_fedora_agent    rusty_fedora_agent   exit  @platform=linux  --help
 agentgateway          agentgateway         exit  --help
-ts-cli                ts-cli               exit  --help
+# Both argument parsers return exit 2 for --help; ts-daemon's parser is Linux-only.
+ts-cli                ts-cli               exit  @expect-exit=2 --help
 # Temporary until ts-daemon has a real Windows implementation; its current
 # Windows binary is only a stub and must not be treated as a measured daemon.
-ts-daemon             ts-daemon            exit  @unsupported=windows  --help
+ts-daemon             ts-daemon            exit  @unsupported=windows @expect-exit=linux:2 --help
 
 # Servers and daemons
 rusty_tick                     rusty_tick           idle  RUSTY_TICK_TOKEN=baseline-dummy-token

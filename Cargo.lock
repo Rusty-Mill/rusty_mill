@@ -198,6 +198,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "adk-agui"
+version = "0.1.0"
+dependencies = [
+ "adk-agents",
+ "adk-core",
+ "adk-graph",
+ "adk-models",
+ "adk-runner",
+ "adk-sessions",
+ "adk-tools",
+ "futures",
+ "rusty_agui",
+ "rusty_json",
+ "rusty_serve",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "adk-core"
 version = "0.1.0"
 dependencies = [
@@ -376,6 +395,7 @@ name = "agentgateway"
 version = "0.1.0"
 dependencies = [
  "agentgateway-a2a",
+ "agentgateway-agui",
  "agentgateway-auth",
  "agentgateway-config",
  "agentgateway-core",
@@ -423,6 +443,23 @@ dependencies = [
  "regex",
  "reqwest 0.13.4",
  "rusty_a2a",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-agui"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "bytes",
+ "cel",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "rusty_agui",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -557,6 +594,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "agui-agent-server"
+version = "0.1.0"
+dependencies = [
+ "rusty-adk",
+ "rusty_agui",
+ "rusty_serve",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -8404,6 +8452,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nexus-agui"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "nexus-ai-runtime",
+ "nexus-kernel",
+ "rusty_agui",
+ "rusty_json",
+ "rusty_serve",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "nexus-ai"
 version = "0.1.0"
 dependencies = [
@@ -12405,6 +12469,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rk-agui"
+version = "0.0.0"
+dependencies = [
+ "aisdk",
+ "anyhow",
+ "rk-app",
+ "rk-config",
+ "rk-constrain",
+ "rk-kernel",
+ "rk-observe",
+ "rusty_agui",
+ "rusty_json",
+ "rusty_serve",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rk-app"
 version = "0.0.0"
 dependencies = [
@@ -12722,6 +12805,7 @@ dependencies = [
  "rsi-core",
  "rsi-harness",
  "rsi-runtime",
+ "rusty_sandbox",
 ]
 
 [[package]]
@@ -12730,6 +12814,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_err",
  "rusty_rsa",
+ "rusty_sandbox",
 ]
 
 [[package]]
@@ -12740,13 +12825,12 @@ version = "0.1.0"
 name = "rsi-runtime"
 version = "0.1.0"
 dependencies = [
- "platform",
- "platform-linux",
  "rsi-core",
  "rusty_err",
  "rusty_http",
  "rusty_json",
  "rusty_libc",
+ "rusty_sandbox",
 ]
 
 [[package]]
@@ -13165,6 +13249,7 @@ version = "0.1.0"
 dependencies = [
  "adk-a2a",
  "adk-agents",
+ "adk-agui",
  "adk-core",
  "adk-graph",
  "adk-macros",
@@ -13621,6 +13706,7 @@ dependencies = [
  "async-trait",
  "rusty_err",
  "rusty_serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -13843,6 +13929,29 @@ dependencies = [
  "rusty_vulkan",
  "rusty_win32",
  "rusty_wire",
+]
+
+[[package]]
+name = "rusty_bot"
+version = "0.1.0"
+dependencies = [
+ "rusty_json",
+ "rusty_sandbox",
+]
+
+[[package]]
+name = "rusty_channel"
+version = "0.1.0"
+dependencies = [
+ "rusty_agui",
+ "rusty_base64",
+ "rusty_http",
+ "rusty_json",
+ "rusty_oauth",
+ "rusty_serve",
+ "rusty_sha1",
+ "rusty_tls",
+ "rusty_uuid",
 ]
 
 [[package]]
@@ -14251,8 +14360,28 @@ name = "rusty_retry"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_routine"
+version = "0.1.0"
+dependencies = [
+ "rusty_agui",
+ "rusty_channel",
+ "rusty_json",
+ "rusty_serve",
+]
+
+[[package]]
 name = "rusty_rsa"
 version = "0.1.0"
+
+[[package]]
+name = "rusty_sandbox"
+version = "0.1.0"
+dependencies = [
+ "platform",
+ "platform-linux",
+ "rusty_err",
+ "rusty_libc",
+]
 
 [[package]]
 name = "rusty_serde"
@@ -14366,6 +14495,7 @@ dependencies = [
 name = "rusty_tick"
 version = "0.0.1"
 dependencies = [
+ "rusty_agui",
  "rusty_atomic_file",
  "rusty_base64",
  "rusty_http",
@@ -14374,6 +14504,7 @@ dependencies = [
  "rusty_rand",
  "rusty_rsa",
  "rusty_serve",
+ "rusty_tls",
  "rusty_url",
  "serde",
  "tempfile",

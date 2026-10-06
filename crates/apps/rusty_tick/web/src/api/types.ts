@@ -7,10 +7,10 @@
  * the UI follows its contract instead; see README "Where this differs".)
  */
 
-export type Status = 'open' | 'done'
+export type Status = 'open' | 'done' | 'wontdo'
 export type Priority = 0 | 1 | 3 | 5
 export type TaskKind = 'text' | 'checklist' | 'note'
-export type ViewMode = 'list' | 'kanban' | 'timeline'
+export type ViewMode = 'list' | 'kanban' | 'timeline' | 'matrix'
 
 export interface ChecklistItem {
   id: string
@@ -76,7 +76,7 @@ export interface Snapshot {
   tags: Tag[]
 }
 
-export type DocKind = 'habit' | 'habit_checkin' | 'focus' | 'prefs' | 'summary_template' | 'comment'
+export type DocKind = 'habit' | 'habit_checkin' | 'focus' | 'prefs' | 'summary_template' | 'comment' | 'filter' | 'countdown' | 'estimate' | 'assignee' | 'subscription'
 
 export interface Doc<T = unknown> {
   id: string

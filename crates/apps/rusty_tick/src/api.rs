@@ -11,7 +11,7 @@
 //! | GET | `/snapshot` | lists, tasks (trash and completed included), tags: one boot read |
 //! | GET, POST | `/lists` | POST accepts a client-chosen `id` |
 //! | GET, PATCH, DELETE | `/lists/{id}` | delete sends its tasks to the trash; the Inbox is permanent |
-//! | GET | `/lists/{id}/tasks?status=open\|done&sort=manual\|due` | |
+//! | GET | `/lists/{id}/tasks?status=open\|done\|wontdo&sort=manual\|due` | |
 //! | POST | `/tasks` | accepts a client-chosen `id` |
 //! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes; `?permanent=true` purges |
 //! | POST | `/tasks/{id}/complete`, `/reopen`, `/restore` | |
@@ -128,6 +128,8 @@ enum ApiError {
     Conflict(String),
     Internal,
     Unavailable,
+    /// A remote server this one called for the client failed or sent junk.
+    Upstream(String),
 }
 
 impl ApiError {
@@ -140,6 +142,7 @@ impl ApiError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Upstream(_) => StatusCode::BAD_GATEWAY,
         }
     }
 
@@ -152,15 +155,18 @@ impl ApiError {
             Self::Conflict(_) => "conflict",
             Self::Internal => "internal",
             Self::Unavailable => "unavailable",
+            Self::Upstream(_) => "upstream",
         }
     }
 
     /// Internal errors never leak detail to the client.
     fn message(&self) -> String {
         match self {
-            Self::BadRequest(m) | Self::NotFound(m) | Self::Invalid(m) | Self::Conflict(m) => {
-                m.clone()
-            }
+            Self::BadRequest(m)
+            | Self::NotFound(m)
+            | Self::Invalid(m)
+            | Self::Conflict(m)
+            | Self::Upstream(m) => m.clone(),
             Self::Unauthorized => "missing or invalid bearer token".to_string(),
             Self::Internal => "internal error".to_string(),
             Self::Unavailable => "temporarily unavailable".to_string(),
@@ -225,6 +231,37 @@ impl Api {
     /// [`Denied`] when there is none; [`Response::unauthorized`] is its answer.
     pub fn authenticate(&mut self, request: &Request<'_>) -> std::result::Result<UserKey, Denied> {
         self.auth.authenticate(request.authorization)
+    }
+
+    /// `POST /api/v1/fetch-ics {"url"}`: the calendar feed at `url`, as
+    /// `{"text"}`. It touches the network, not the user's data, so it is
+    /// answered by the server adapter after authentication rather than by
+    /// [`Api::serve`].
+    pub fn fetch_ics(body: &[u8]) -> Response {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            url: String,
+        }
+        #[derive(Serialize)]
+        struct Output {
+            text: String,
+        }
+        let result = rusty_json::from_slice::<Input>(body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
+            .and_then(|input| {
+                crate::fetch::fetch_text(&input.url).map_err(|e| match e {
+                    crate::fetch::FetchError::Invalid(m) | crate::fetch::FetchError::Refused(m) => {
+                        ApiError::Invalid(m)
+                    }
+                    crate::fetch::FetchError::Upstream(m) => ApiError::Upstream(m),
+                    crate::fetch::FetchError::Busy => ApiError::Unavailable,
+                })
+            });
+        match result {
+            Ok(text) => Response::json(StatusCode::OK, &Output { text }),
+            Err(error) => Response::error(&error),
+        }
     }
 
     /// Route an authenticated request within one user's data.
@@ -426,7 +463,12 @@ fn route_lists(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 None => None,
                 Some("open") => Some(Status::Open),
                 Some("done") => Some(Status::Done),
-                Some(_) => return Err(ApiError::BadRequest("status must be open or done".into())),
+                Some("wontdo") => Some(Status::WontDo),
+                Some(_) => {
+                    return Err(ApiError::BadRequest(
+                        "status must be open, done or wontdo".into(),
+                    ))
+                }
             };
             let order = match cx.query.get("sort") {
                 None | Some("manual") => ListOrderBy::Manual,

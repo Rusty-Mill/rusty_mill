@@ -11,6 +11,7 @@ import { NARROW } from '@/app/Shell'
 import { useUi } from '@/store/ui'
 import { usePrefs } from '../settings/prefs'
 import { KanbanBoard } from './KanbanBoard'
+import { MatrixBoard } from './MatrixBoard'
 import { TimelineView } from './TimelineView'
 import { QuickAdd } from './QuickAdd'
 import { TaskRow, type RowActions } from './TaskRow'
@@ -20,6 +21,8 @@ import { useTaskActions } from './useTaskActions'
 import { useViewData } from './useViewData'
 import { MoreMenu, SortMenu } from './ViewMenus'
 import { ChevronDown, ChevronRight } from 'lucide-react'
+import { assigneeMap } from '../assignees/logic'
+import { useAssignees } from '../assignees/store'
 
 interface Props {
   spec: ViewSpec
@@ -53,6 +56,8 @@ export function ListColumn({ spec, selectedId }: Props) {
   }
 
   const listById = useMemo(() => Object.fromEntries(lists.map((l) => [l.id, l])), [lists])
+  const assigneeItems = useAssignees((s) => s.items)
+  const assignees = useMemo(() => assigneeMap(assigneeItems), [assigneeItems])
   const tagsByName = useMemo(() => Object.fromEntries(tags.map((t) => [t.name, t])), [tags])
   const rows = useMemo(() => buildRows(groups, collapsedGroups, key), [groups, collapsedGroups, key])
 
@@ -101,6 +106,8 @@ export function ListColumn({ spec, selectedId }: Props) {
 
       {viewMode === 'kanban' ? (
         <KanbanBoard spec={spec} data={data} selectedId={selectedId} />
+      ) : viewMode === 'matrix' ? (
+        <MatrixBoard spec={spec} data={data} selectedId={selectedId} />
       ) : viewMode === 'timeline' ? (
         <TimelineView spec={spec} data={data} selectedId={selectedId} />
       ) : total === 0 ? (
@@ -125,6 +132,7 @@ export function ListColumn({ spec, selectedId }: Props) {
                 showList={showList}
                 list={listById[r.task.listId]}
                 tagsByName={tagsByName}
+                assignee={assignees[r.task.id]}
                 lists={lists}
                 actions={rowActions}
                 dragProps={canDrag && r.groupKey !== 'done' ? drag.bind(r.task.id) : undefined}

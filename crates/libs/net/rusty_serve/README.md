@@ -8,13 +8,18 @@ one copy.
 
 ## Shape
 
-- `Handler`: `fn handle(&mut self, &Request) -> Response`. A `Request` is
+- `Handler`: `fn handle(&mut self, &Request) -> Response`. A `Request` carries
+  the method, target, body, the `Authorization` and `If-Match` values, and
+  every header (`headers`, for a webhook's signature, say). A `Request` is
   the method, the origin-form target, the `Authorization` and `If-Match`
   header values and the body; a `Response` is a status and a `Body`:
   `Body::Json` (a document, empty for 204, built with `Response::json`)
   or `Body::Stream` (chunks from an iterator, built with
   `Response::stream`, sent as chunked transfer encoding after the
-  handler's lock is released, for `text/event-stream` and the like). The handler never sees the transport, so every route
+  handler's lock is released, for `text/event-stream` and the like) or
+  `Body::Deferred` (a job that produces the status and body, built with
+  `Response::deferred` and run after the lock is released, for a route that
+  waits on something slow and must not hold up the others). The handler never sees the transport, so every route
   is testable without a socket, and it runs under one lock, so it may
   hold `&mut` state.
 - `Server::bind(addr, handler)`, `.with_web_dir(dir)`, `.run()`,

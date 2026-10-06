@@ -19,6 +19,7 @@ PATH_JOB_PREFIXES = {
     "key_desktop": "crates/apps/rusty_key/desktop/",
     "tick": "crates/apps/rusty_tick/",
     "fair_play": "crates/apps/rusty_fair_play/",
+    "agui": "crates/libs/protocol/rusty_agui/",
 }
 
 PACKAGE_JOB_PREFIXES = {
@@ -30,6 +31,7 @@ PACKAGE_JOB_NAMES = {
     "term_web": frozenset({"rusty_term"}),
     "tick": frozenset({"rusty_tick"}),
     "fair_play": frozenset({"rusty_fair_play"}),
+    "agui": frozenset({"rusty_agui"}),
     "win32": frozenset({"rusty_win32"}),
     "multimodal_db": frozenset({"rusty_multimodal_db"}),
     "rusty_config_no_std": frozenset({"rusty_config"}),
@@ -150,6 +152,11 @@ def specialized_job_flags(
         flags[job] = flags.get(job, False) or any(
             package.startswith(prefix) for package in package_set for prefix in prefixes
         )
+    # rusty_tick's web UI links the agui TypeScript packages, which no Cargo
+    # edge represents.
+    flags["tick"] = flags.get("tick", False) or any(
+        path.startswith("crates/libs/protocol/rusty_agui/packages/") for path in paths
+    )
     flags["remind_me"] = any(
         path.startswith("crates/apps/rusty_remind_me/") for path in paths
     ) or any(

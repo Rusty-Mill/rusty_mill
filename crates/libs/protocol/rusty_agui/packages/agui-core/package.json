@@ -1,0 +1,33 @@
+{
+  "name": "@rusty-mill/agui-core",
+  "version": "0.1.0",
+  "description": "Headless AG-UI core: types, SSE decoder, verifier with chunk expansion, reducer, and runAgent over fetch. No runtime dependencies. The TypeScript mirror of the rusty_agui crate.",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

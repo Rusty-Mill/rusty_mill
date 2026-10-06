@@ -44,9 +44,10 @@
 //!   follow-ups.
 //! - Connection pooling: every `Client` reuses idle connections per
 //!   origin when the server allows it (HTTP/1.1's keep-alive default),
-//!   bounded by a per-origin idle cap and timeout, with a stale pooled
-//!   connection transparently retried once on a fresh connection.
-//!   `ClientBuilder::no_pool` opts out.
+//!   bounded by a per-origin idle cap and timeout. A pooled connection
+//!   the server has since closed fails like any other I/O error; it is
+//!   never silently replayed, so a `RetryPolicy` is the only thing that
+//!   ever sends a request twice. `ClientBuilder::no_pool` opts out.
 //! - Retries: opt-in via `ClientBuilder::retry`/`RequestBuilder::retry`
 //!   with a [`RetryPolicy`] -- connection errors and a configurable set
 //!   of statuses (429/500/502/503/504 by default), fixed or exponential

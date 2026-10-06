@@ -49,8 +49,8 @@ pub use matcher::{
 };
 pub use methods::{MCP_SERVED_METHODS, pattern_is_matchable, resolve};
 pub use policy::{
-    A2aPolicy, AgentCardPolicy, AiPolicy, AuthorizationRule, BackendAuth, Builtin, CorsPolicy,
-    DurationString, ExtAuthzPolicy, FailureMode, GuardAction, GuardPattern, GuardRule,
+    A2aPolicy, AgentCardPolicy, AguiPolicy, AiPolicy, AuthorizationRule, BackendAuth, Builtin,
+    CorsPolicy, DurationString, ExtAuthzPolicy, FailureMode, GuardAction, GuardPattern, GuardRule,
     GuardWebhook, HeaderFilter, HeaderModifier, JwtAuth, JwtSource, LocalRateLimit,
     McpAuthorization, McpGuardrails, Moderation, ModerationPolicies, PathRewrite, Phase, Policies,
     Processor, PromptCaching, PromptGuard, PromptMessage, Prompts, RateLimitKind, RegexGuard,

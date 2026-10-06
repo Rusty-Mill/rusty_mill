@@ -4,6 +4,10 @@ import { useActions, useData, useServices } from '@/app/services'
 import { Confirm } from '@/components/Confirm'
 import { usePrefs } from '../settings/prefs'
 import { FocusRecords } from './FocusRecords'
+import { EstimatesPanel } from '../estimates/EstimatesPanel'
+import { actualPomos, estimateRows, latestByTask, MAX_ESTIMATE } from '../estimates/logic'
+import { setEstimate, useEstimates } from '../estimates/store'
+import { startAmbient } from './ambient'
 import { Overview } from './Overview'
 import { SettingsRow } from './SettingsRow'
 import { TimerRing } from './TimerRing'
@@ -17,15 +21,21 @@ export function FocusPage() {
   const hour12 = usePrefs((s) => s.prefs.hour12)
   const { records, settings, mode, session, offer } = useFocus()
   const tasks = useData((s) => s.tasks)
+  const estimates = useEstimates((s) => s.items)
   const [taskId, setTaskId] = useState('')
   const [confirmGiveUp, setConfirmGiveUp] = useState(false)
   const running = session !== null && session.pausedAt === null
+  const focusing = running && session.phase === 'focus'
   const now = useNow(running)
   const f = useFocus.getState
 
   useEffect(() => {
     void f().load(api, notify)
+    void useEstimates.getState().load(api, notify)
   }, [api, notify, f])
+
+  // Ambient sound plays while a focus session runs, not on pause or breaks.
+  useEffect(() => (focusing && settings.ambient !== 'off' ? startAmbient(settings.ambient) : undefined), [focusing, settings.ambient])
 
   // Backstop for the end-of-countdown timer in the store.
   useEffect(() => {
@@ -37,6 +47,8 @@ export function FocusPage() {
     [tasks],
   )
   const stats = useMemo(() => computeStats(records, now), [records, now])
+  const rows = useMemo(() => estimateRows(estimates, records, tasks), [estimates, records, tasks])
+  const estimated = latestByTask(estimates).find((e) => e.taskId === taskId)?.pomos ?? 0
 
   const isBreak = session?.phase === 'break'
   const shownMode: FocusMode = session ? session.mode : mode
@@ -108,6 +120,20 @@ export function FocusPage() {
           </select>
         </label>
 
+        {taskId && !session && shownMode === 'pomo' && (
+          <div role="group" aria-label="Pomo estimate" className="mt-3 flex items-center gap-2 text-s text-grey">
+            <span>Estimated pomos</span>
+            <button type="button" aria-label="Fewer estimated pomos" disabled={estimated === 0} onClick={() => setEstimate(taskId, estimated - 1)} className={stepper}>
+              −
+            </button>
+            <span aria-live="polite" className="min-w-6 text-center tabular-nums text-text">{estimated}</span>
+            <button type="button" aria-label="More estimated pomos" disabled={estimated >= MAX_ESTIMATE} onClick={() => setEstimate(taskId, estimated + 1)} className={stepper}>
+              +
+            </button>
+            <span>· {actualPomos(records, taskId)} done</span>
+          </div>
+        )}
+
         <div className="mt-6">
           <TimerRing
             progress={offer ? 0 : ringProgress(session, shownMode, now)}
@@ -119,6 +145,7 @@ export function FocusPage() {
         <p className="sr-only" aria-live="polite">{live}</p>
 
         {session?.taskTitle && <p className="mt-2 text-s text-grey">Focusing on {session.taskTitle}</p>}
+        {session && !isBreak && <p className="mt-1 text-s text-grey" aria-live="polite">Interruptions: {session.interruptions}</p>}
 
         <div className="mt-6 flex gap-3">
           {offer ? (
@@ -136,6 +163,11 @@ export function FocusPage() {
             </button>
           ) : (
             <>
+              {!isBreak && (
+                <button type="button" onClick={() => f().interrupt()} className={secondary}>
+                  Interrupted
+                </button>
+              )}
               <button type="button" onClick={() => (session.pausedAt === null ? f().pause() : f().resume())} className={primary}>
                 {session.pausedAt === null ? 'Pause' : 'Continue'}
               </button>
@@ -163,6 +195,7 @@ export function FocusPage() {
 
       <aside aria-label="Focus overview" className="flex w-[340px] shrink-0 flex-col border-l border-line max-[1000px]:w-[280px]">
         <Overview stats={stats} />
+        <EstimatesPanel rows={rows} />
         <div className="flex items-center justify-between px-5 pb-1 pt-5">
           <h3 className="font-semibold">Focus Record</h3>
           <Plus size={18} aria-hidden className="text-grey opacity-50" />
@@ -187,4 +220,5 @@ export function FocusPage() {
 }
 
 const primary = 'h-12 min-w-[170px] rounded-full bg-primary px-8 font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface'
+const stepper = 'flex h-6 w-6 items-center justify-center rounded-full border border-line text-text hover:bg-hover disabled:opacity-40'
 const secondary = 'h-12 min-w-[120px] rounded-full border border-line px-6 hover:bg-hover'

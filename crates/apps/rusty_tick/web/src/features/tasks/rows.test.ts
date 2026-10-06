@@ -70,12 +70,15 @@ describe('windowRows', () => {
 describe('viewTitle', () => {
   const lists = [{ id: 'i', name: 'Inbox' }, { id: 'w', name: 'Work' }] as never
   const tags = [{ name: 'q4', label: 'Q4' }] as never
+  const filters = [{ id: 'f', name: 'Soon', rule: { lists: [], tags: [], priorities: [], dates: [], assignees: [] } }]
   it('names each kind of view', () => {
-    expect(viewTitle({ kind: 'all' }, lists, tags, 'i')).toBe('All')
-    expect(viewTitle({ kind: 'week' }, lists, tags, 'i')).toBe('Next 7 Days')
-    expect(viewTitle({ kind: 'inbox' }, lists, tags, 'i')).toBe('Inbox')
-    expect(viewTitle({ kind: 'list', id: 'w' }, lists, tags, 'i')).toBe('Work')
-    expect(viewTitle({ kind: 'tag', name: 'q4' }, lists, tags, 'i')).toBe('Q4')
-    expect(viewTitle({ kind: 'tag', name: 'gone' }, lists, tags, 'i')).toBe('gone')
+    expect(viewTitle({ kind: 'all' }, lists, tags, filters, 'i')).toBe('All')
+    expect(viewTitle({ kind: 'week' }, lists, tags, filters, 'i')).toBe('Next 7 Days')
+    expect(viewTitle({ kind: 'inbox' }, lists, tags, filters, 'i')).toBe('Inbox')
+    expect(viewTitle({ kind: 'list', id: 'w' }, lists, tags, filters, 'i')).toBe('Work')
+    expect(viewTitle({ kind: 'tag', name: 'q4' }, lists, tags, filters, 'i')).toBe('Q4')
+    expect(viewTitle({ kind: 'filter', id: 'f' }, lists, tags, filters, 'i')).toBe('Soon')
+    expect(viewTitle({ kind: 'filter', id: 'x' }, lists, tags, filters, 'i')).toBe('Filter')
+    expect(viewTitle({ kind: 'tag', name: 'gone' }, lists, tags, filters, 'i')).toBe('gone')
   })
 })

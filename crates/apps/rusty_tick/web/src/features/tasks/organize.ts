@@ -4,6 +4,7 @@
  */
 import type { List, Priority, Tag, Task, ViewMode } from '@/api/types'
 import { addDays, diffDays, startOfDay } from '@/lib/date'
+import { matchesFilter, type Filter } from '../filters/logic'
 
 export type ViewSpec =
   | { kind: 'all' }
@@ -12,6 +13,7 @@ export type ViewSpec =
   | { kind: 'inbox' }
   | { kind: 'list'; id: string }
   | { kind: 'tag'; name: string }
+  | { kind: 'filter'; id: string }
 
 export type GroupBy = 'date' | 'list' | 'priority' | 'tag' | 'none'
 export type SortBy = 'manual' | 'date' | 'title' | 'priority' | 'created'
@@ -32,6 +34,9 @@ export interface Entities {
   lists: List[]
   tags: Tag[]
   inboxId: string
+  filters: Filter[]
+  /** Assignee name by task id. */
+  assignees: Record<string, string>
 }
 
 /** Stable key for storing per-view options. */
@@ -39,6 +44,8 @@ export function viewKey(spec: ViewSpec): string {
   switch (spec.kind) {
     case 'list':
       return `list:${spec.id}`
+    case 'filter':
+      return `filter:${spec.id}`
     case 'tag':
       return `tag:${spec.name}`
     default:
@@ -48,7 +55,7 @@ export function viewKey(spec: ViewSpec): string {
 
 /** Smart lists group by date; lists and tags keep manual order, ungrouped. */
 export function defaultOptions(spec: ViewSpec): ViewOptions {
-  const smart = spec.kind === 'all' || spec.kind === 'today' || spec.kind === 'week'
+  const smart = spec.kind === 'all' || spec.kind === 'today' || spec.kind === 'week' || spec.kind === 'filter'
   return { groupBy: smart ? 'date' : 'none', sortBy: smart ? 'date' : 'manual', order: 'asc', showCompleted: false, showDetails: true, viewMode: 'list' }
 }
 
@@ -83,6 +90,10 @@ export function tasksForView(spec: ViewSpec, e: Entities, now: number, includeDo
       return e.tasks.filter((t) => wanted(t) && t.listId === spec.id)
     case 'tag':
       return e.tasks.filter((t) => wanted(t) && t.tags.includes(spec.name))
+    case 'filter': {
+      const rule = e.filters.find((f) => f.id === spec.id)?.rule
+      return rule ? e.tasks.filter((t) => wanted(t) && visible.has(t.listId) && matchesFilter(t, rule, dateBucket(t, now), e.assignees[t.id])) : []
+    }
   }
 }
 
@@ -138,7 +149,7 @@ const DATE_GROUPS = [
   ['nodate', 'No Date'],
 ] as const
 
-function dateBucket(t: Task, now: number): (typeof DATE_GROUPS)[number][0] {
+export function dateBucket(t: Task, now: number): (typeof DATE_GROUPS)[number][0] {
   if (t.dueMs === null) return 'nodate'
   const days = diffDays(now, t.dueMs)
   const overdue = t.isAllDay ? days < 0 : t.dueMs < now && days <= 0

@@ -4,11 +4,33 @@ As of 2026-10-05 · follows [ADR-0007](../../adr/0007-agui-and-json-patch.md)
 
 ## Status
 
-ADR-0007 is merged in one PR. The workspace now speaks AG-UI on the
-server side; nothing consumes it yet.
+ADR-0007 is merged and steps 1 to 8 of the build order below are done:
+the workspace speaks AG-UI on both sides, the reference TypeScript client
+accepts what the server sends, a headless TypeScript core mirrors the
+crate against shared fixtures, React, Vue and Angular bindings sit on the
+core, `rusty_tick` ships an assistant on the React one, the gateway can
+front any AG-UI endpoint with a deny-by-default rule set and an audit
+record either side of the run, any AG-UI endpoint can be a Slack, Teams
+or SMS bot, a routine can run one on a schedule, and a bot runs in a
+sandbox of its own.
 
 | PR | Merged | What it shipped |
 | --- | --- | --- |
+| (this PR) | step 10, `rusty_key` | `rk-agui`: a `Session` per thread behind `rusty_agui`'s `Agent` trait, built like the ACP adapter's with an `ApprovalGate`; token deltas, the turn's tool events, the boundary `TurnResult` as the result; an approval request and a plan exit as frontend tool calls answered on the next run. Step 10 is done |
+| (this PR) | step 10, `nexus-ai-runtime` | `nexus-agui`: a Nexus agent session behind `rusty_agui`'s `Agent` trait over a `Runtime` port (submit, the typed `AiEvent` stream, `round_decide`) with a kernel adapter; token chunks, tool calls and results, the finished session as the result; a `RoundProposed` as a call to the frontend tool `round_decide`, answered on the next run |
+| (this PR) | step 10, `rusty_adk` | `adk-agui`: an ADK `Runner` behind `rusty_agui`'s `Agent` trait (thread = session, the last user message is the turn, text streamed as deltas, the agent's tool calls and results reported, the session state as a snapshot, a graph suspension as a call to the frontend tool `request_input` that the answering tool message resumes); feature `agui` on the facade; the `agui-agent-server` example |
+| (this PR) | step 8 | `@rusty-mill/agui-vue` (`provideAgent`, `useAgent`, `useReadable`, `useAction`, `useSharedState` as composables and refs) and `@rusty-mill/agui-angular` (`provideAgent`, `injectAgent`, `injectReadable`, `injectAction`, `injectSharedState` as signals); the `AgentStore` hoisted from the React binding into `agui-core`, where all three bindings share it |
+| (this PR) | step 7, second PR | `rusty_bot`: `BotSpec` confined by `rusty_sandbox` (own workspace, read roots, limits, process group, network open), `Fleet`, the `rusty-bot` runner-and-helper binary; `ProcessExecutor::start` for long-lived jobs |
+| (this PR) | step 7, first PR | `rusty_sandbox`: the executor port and Linux adapter hoisted from `rusty_rsi` unchanged, re-exported there so nothing in `rsi` moves |
+| [#524](https://github.com/Rusty-Mill/rusty_mill/pull/524) | step 6 | `rusty_routine`: cron `Schedule`, `Routine` (fresh thread per firing, `forwardedProps.routine` for gateway rules, disabled after N consecutive failures), a JSON routines file, a runner on the Rust client |
+| [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) | step 5, SMS | `sms::Twilio`: HMAC-SHA1 webhook signature on `rusty_sha1`, one conversation per pair of numbers, TwiML ack, `Messages.json` reply; the `ack` hook on `Channel` |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Teams | `teams::Teams` over the Azure Bot Framework (JWT verified with `rusty_oauth`, replies with a client-credentials token); the runner hoisted into `bot::Bot` for both examples |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 5, Slack | `rusty_channel`: the sans-IO `Channel` trait, a `Thread` per conversation, the Slack Events API adapter, and a bot example on `rusty_serve` that runs any AG-UI endpoint |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 4 | `rusty_agent_gateway`'s `agui` route policy (`agentgateway-agui`): CEL rules over the run input, the request and the caller's claims, deny by default; a decision record before the upstream call and an outcome record when the stream ends |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, second PR | `rusty_tick`'s assistant: a store-free agent at `POST /api/agent`, and the web UI's Assistant panel on the React binding (view as context, `create_task` as a frontend tool) |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 3, first PR | `@rusty-mill/agui-react`: `AgentProvider`, `useAgent`, `useReadable`, `useAction` (handler, or render-only with `respond` for human in the loop), `useSharedState` |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 2 | `@rusty-mill/agui-core`, the headless TypeScript core; shared `fixtures/`; the core run in conformance beside the reference client |
+| [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) | step 1 | `rusty_agui`'s `client` feature (`HttpAgent`, blocking, on `rusty_http`); the `echo_agent` example; `conformance/`, where `@ag-ui/client` drives the example in CI |
 | [#512](https://github.com/Rusty-Mill/rusty_mill/pull/512) | 2026-10-05 | `rusty_json_patch` (RFC 6901/6902/7386), `rusty_agui` (types, events, codec, SSE, verifier, reducer, `serve` feature with `Agent` and `AgentHandler`), streaming bodies in `rusty_serve` |
 
 ## The goal this document plans for
@@ -46,16 +68,16 @@ targets as named.
 
 | Gap | Needed by |
 | --- | --- |
-| A Rust AG-UI client (`HttpAgent` over `rusty_request`) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
-| A headless TypeScript core: SSE decoder, verifier, reducer, `runAgent` | Every frontend SDK |
-| Framework bindings (hooks, components) | Each SDK |
+| ~~A Rust AG-UI client~~ Done in step 1, on `rusty_http` directly (see below) | The gateway proxy, routines, channels: anything that *consumes* an AG-UI endpoint |
+| ~~A headless TypeScript core~~ Done in step 2 | Every frontend SDK |
+| ~~Framework bindings (hooks)~~ React done in step 3, Vue and Angular in step 8; components are a later layer | Each SDK |
 | An AG-UI route in the gateway: CEL decision, audit record before and after, forward | The platform |
 | A bot registry (name, endpoint, policy, channel bindings) | The platform |
 | Inbound channel adapters: Slack Events API, Teams Bot Framework, Twilio SMS | Channels |
 | A routines crate (cron schedule, run as requester, disable after N failures) | Routines |
 | Per-bot isolation | Sandboxes |
 | CORS and authentication on the agent endpoint | Any cross-origin or multi-user deployment |
-| Adapters from `rusty_adk`, `nexus-ai-runtime` and `rusty_key` event types to AG-UI | Putting existing agents behind the SDKs |
+| ~~Adapters from `rusty_adk`, `nexus-ai-runtime` and `rusty_key` event types to AG-UI~~ Done in step 10: `adk-agui`, `nexus-agui`, `rk-agui` | Putting existing agents behind the SDKs |
 
 ## Build order
 
@@ -63,27 +85,184 @@ Both targets start with the same two pieces, so they come first.
 
 | Step | What | Size | Needs sign-off |
 | --- | --- | --- | --- |
-| 1 | `rusty_agui` client over `rusty_request`, and a smoke test of CopilotKit's React SDK against `AgentHandler` (proves the wire format against the reference client) | 1 PR | No |
-| 2 | `agui-core` (TypeScript, headless): decoder, verifier, reducer, `runAgent`; the Rust crate's wire samples as shared fixtures | 1 PR | No |
-| 3 | React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function), `useSharedState`; `rusty_tick` as the first consumer | 1–2 PRs | No |
-| 4 | Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1–2 PRs, touches `rusty_agent_gateway` | Yes: new gateway surface |
-| 5 | Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Yes: external service credentials and dependencies |
-| 6 | Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
-| 7 | Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Yes: ADR-0005 scoped the executor to `rsi` |
-| 8 | Angular and Vue bindings over `agui-core` | 1 PR each, when a consumer exists | No |
+| 1 | **Done.** `rusty_agui` client and a conformance test against the reference client (`@ag-ui/client`, the package CopilotKit's React SDK and OpenBot drive agents with) | 1 PR | No |
+| 2 | **Done.** `@rusty-mill/agui-core` (TypeScript, headless): parser, SSE decoder, JSON patch, verifier, reducer, `runAgent`; `fixtures/` shared with the Rust tests | 1 PR | No |
+| 3 | **Done.** React binding: `useAgent`, `useReadable`, `useAction` (frontend tools and generative UI through its render function, `respond` for human in the loop), `useSharedState`; `rusty_tick` as the first consumer | 2 PRs | No |
+| 4 | **Done.** Gateway AG-UI route: CEL over run input and caller, deny by default, one audit record before the upstream call and one after | 1 PR, touches `rusty_agent_gateway` | Given |
+| 5 | **Done.** Channels: one `Channel` trait in libs mapping an inbound message to `RunAgentInput` and reply events back; Slack first, then Teams, then SMS | 1 PR per channel | Given |
+| 6 | **Done.** Routines: cron schedule posting a `RunAgentInput` through the gateway as the requester; disable after N consecutive failures | 1 PR | No |
+| 7 | **Done.** Per-bot sandboxes on `rusty_rsi`'s executor, hoisted to libs | 2 PRs | Given (the hoist amends ADR-0005) |
+| 8 | **Done.** Angular and Vue bindings over `agui-core` | 1 PR (see below) | No |
 | 9 | iOS (Swift) and Android (Kotlin) ports of the core | Large, when a consumer exists | Yes: new languages in the workspace |
-| 10 | Adapters from `rusty_adk`, `nexus-ai-runtime`, `rusty_key` | 1 PR each, in each family | No |
+| 10 | **Done.** Adapters from `rusty_adk`, `nexus-ai-runtime` and `rusty_key` | 1 PR each, in each family | No |
 
 Chat components come after step 3 as a thin layer over the hooks, not
 before: the hooks are the API, the components are one rendering of it.
 
+## Departures made while building
+
+- **Step 1's client is on `rusty_http`, not `rusty_request`.** `rusty_request`
+  is async on `rusty_tokio` with `rusty_tls`. The server side is blocking
+  on `rusty_serve`, and the one consumer that will be async (the gateway)
+  runs on tokio and axum with its own HTTP stack. A blocking client over
+  `std::net` mirrors `serve`, keeps the crate's manifest first-party only,
+  and is what a routine or a channel adapter on the same host needs. An
+  async adapter can be added behind a feature when a consumer appears.
+- **Step 1's smoke test is `@ag-ui/client`, not a browser-driven React
+  app.** That package is the client CopilotKit's React SDK and OpenBot
+  embed, so a run it verifies and reduces is a run those products accept,
+  and it runs in Node in CI without a browser.
+
+- **Step 4 is a route policy, not a backend kind.** `agui` sits beside
+  `a2a` in `policies` and gates a `host` backend, so it composes with
+  `jwtAuth`, `extAuthz`, rate limits, rewrites and retries the way every
+  other policy does, and the gateway gains no new `BackendState` variant.
+  An AG-UI endpoint is an HTTP endpoint; the gateway proxies it and judges
+  what passes.
+- **Step 4's audit is a pair of structured `tracing` records, not a
+  store.** The gateway has no audit module and no persistence of its own;
+  every decision it makes today is a tracing event. Two records on a
+  dedicated target (`agentgateway::audit`) give a log pipeline something
+  to route, and a store can subscribe to that target when one is wanted.
+  What the records carry is fixed by what the gateway sees: the run input
+  before, the stream's shape after. It does not read the agent's content.
+
+- **Step 5's `Channel` is sans-IO.** `receive` reads a request the
+  runner already accepted and `reply` returns the `POST` to send, so the
+  library has no socket, no clock and no credential of its own, and
+  every Slack rule (signature, skew, retries, bots, thread keys) is
+  tested without a network. The runner is an example, not a crate:
+  there is one channel so far, and a daemon that multiplexes several is
+  step 6's shape (routines) as much as this step's.
+- **Step 5's runner became a module at the second channel.** `bot::Bot`
+  was the Slack example's body until Teams needed the same loop plus a
+  credential fetch before each reply. That fetch is a `Channel` hook with
+  a default (`credential` returns `Ready`), so Slack did not change; the
+  trait grew by what the second service needed and nothing more.
+- **Step 7's bots keep the network open.** A bot listens on a port and
+  may call a model, so its sandbox is the filesystem, the limits and the
+  process group, not the socket rules: the posture `rsi` already takes
+  for coding-agent CLIs. Keeping one bot's data from another's is the
+  point; keeping a bot off the network is the gateway's job, in front of
+  it, where the rules are.
+- **Step 7's helper is the runner.** `rusty-bot __sandbox` is the helper
+  the executor spawns, as `rsi __sandbox` is for `rsi`, so a fleet and
+  its helper are always the same build and no second binary has to be
+  found on a path.
+- **Step 7's hoist moves code, not behaviour.** `rusty_sandbox` is the
+  port and the adapter as they were in `rsi`, with their tests, under one
+  error type of their own; `rsi` re-exports them at the old paths and
+  converts the error, so the harness, graders and `rsi __sandbox` did
+  not change. The one visible difference is the bound on `rsi-runtime`'s
+  grading impls, which now take any executor whose error converts.
+- **Step 10's ADK adapter lives in `rusty_adk`, beside `adk-a2a`.**
+  The follow-ons said "in each family", and the A2A bridge set the
+  pattern: a small crate in the family that implements the protocol's
+  server-side trait over the family's runner, with the protocol crate as
+  a dependency and nothing of the family leaking into `rusty_agui`. The
+  one asymmetry is the runtime: ADK is async on tokio and `rusty_agui`'s
+  `Agent` is blocking, so `AdkAgent` takes a runtime handle and drives
+  each run with `block_on` from the handler's thread. A blocking server
+  in front of an async runner is the arrangement step 1 chose for the
+  whole Rust side; an async handler is a later addition behind a feature
+  when a consumer needs it.
+- **Step 10 answers human-in-the-loop with a frontend tool.** ADK's graph
+  suspension (`resume_or_request_input`) becomes a `TOOL_CALL_*` for a
+  tool named `request_input` whose id is the interrupt id; the client
+  renders it through `useAction`'s `render` and answers through
+  `respond`, and the tool message that comes back resumes the graph.
+  AG-UI's `RUN_FINISHED` has an `Interrupt` outcome too, but the
+  handler owns the framing and the frontend bindings already have the
+  tool-call path, so the suspension rides the mechanism every binding
+  implements instead of a second one.
+- **Step 10's Rusty Keys adapter is the ACP adapter's shape.** `rk-agui`
+  builds a `Session` per AG-UI thread from the config and model, with an
+  `ApprovalGate` at the end of the policy chain, exactly as `rk_app::acp`
+  builds one per editor session; one run is one `send_streaming` turn and
+  the session keeps the transcript, so the thread's history lives in the
+  harness, not in the client's replay. The approval request and the plan
+  exit are the two places the harness waits for a person, and both become
+  frontend tool calls answered on the next run, the same shape as the ADK
+  and Nexus adapters: the turn waits in the gate meanwhile.
+- **Step 10's Nexus adapter is over a port, not the kernel.** The
+  ai-runtime is reached through IPC and the bus, and a kernel with the
+  agent plugin and a model provider is too much to stand up in a test.
+  `nexus-agui` names the three things it needs (`Runtime::subscribe`,
+  `submit`, `decide`) and the kernel adapter is thirty lines; the tests
+  drive the mapping end to end against a scripted runtime through the
+  real handler, client and socket, the way the ADK adapter's tests drive
+  a real runner.
+- **Step 10's Nexus runs are one session each.** `submit` starts a
+  session and cannot continue one, and a resumed Nexus session is a fork
+  with a new id. So a user turn is a new session whose goal is that
+  message, and the thread's earlier turns are not replayed; Nexus's own
+  session memory carries context between sessions. Threading one Nexus
+  session across AG-UI runs waits on the runtime's own continuation
+  story (ADR 0028's later phases).
+- **Step 10's Nexus approval is answered on the next run.** A gated
+  round blocks the session in the worker until `round_decide`. An AG-UI
+  run is one request, and the bindings' store sends nothing while a run
+  is open, so the proposal ends the run as a frontend tool call (the ADK
+  shape) and the answer arrives as the next run, which delivers the
+  decision and relays the same session on. The session waits meanwhile,
+  bounded by its approval timeout. Auto-approval is the default; the
+  gate is opt-in for a UI that will answer it.
+- **Step 8 is one PR, before a consumer.** The plan said one PR per
+  binding, when a consumer exists. The owner called for both at once,
+  and each binding is under a hundred lines because the store they wrap
+  is shared: `AgentStore` moved from the React package into `agui-core`
+  (where it has its own tests) at the second binding, the point where a
+  copy would have been the alternative. A binding's own code is the
+  framework's idiom around that store: `useSyncExternalStore`, a
+  `shallowRef` with `watch`, a `signal` with `effect`. The first Vue or
+  Angular consumer is still the test of the API's shape; until then the
+  three bindings are held to the same scenario tests against the same
+  scripted agent, exported as `@rusty-mill/agui-core/testing`.
+- **Step 6's cron is its own.** The workspace had no cron parser and
+  `rusty_time` converts civil dates to timestamps but not back, so
+  `rusty_routine::schedule` carries both the five-field parser and the
+  reverse conversion (sixty lines, Hinnant's algorithm, tested against
+  known dates). Hoisting the conversion into `rusty_time` is a one-line
+  change when a second caller wants it.
+- **Step 6 skips missed firings.** A runner that slept through a firing
+  runs the routine once, not once per missed slot: a digest that was due
+  at nine is wanted once at ten, not three times. The `scheduledAt` the
+  run carries is the slot that was due, so the agent can tell.
+- **Step 6 prints; it does not deliver.** The runner reports each reply on
+  one line. A routine whose reply goes to a Slack thread is `rusty_routine`
+  and `rusty_channel` composed, which needs a reply target with no inbound
+  message to answer; that is the shape of a proactive message, and it
+  waits for the first routine that needs one.
+- **Step 5's SMS channel is Twilio only.** The `Channel` trait is the
+  seam; another carrier is another adapter. Twilio's signature covers the
+  webhook's own public URL, which is why `sms::Twilio` is told that URL
+  rather than reading it off the request: the request's `Host` is
+  whatever the tunnel or proxy set, and trusting it would let a forwarded
+  request be signed for a different address.
+- **Step 5 ignores Slack's retries.** Slack re-sends an event it got no
+  `200` for within three seconds; an agent run can take longer. The
+  runner answers first and runs after, and a delivery marked as a retry
+  is dropped rather than run twice. The cost is that a run lost between
+  the `200` and the reply is lost; a store for threads and in-flight runs
+  (open question 2) is where that gets fixed.
+- **HMAC-SHA256 comes from `rusty_oauth`.** The workspace has it there
+  and nowhere lower; a second copy was not worth avoiding one first-party
+  dependency. Hoisting it (and SHA-256, which `rusty_rsa` carries) into a
+  foundation crate is a `dedupe-loop` candidate, not this step's.
+
 ## Where this departs from the targets as named
 
+- **Step 10 forwards what the frontends need, not the whole `rk://`
+  table.** `token`, `tool_event`, `approval_request`, `plan_exit` and
+  `turn_complete` map; `bash_output`, `entropy` and `consolidation` do not.
+  They are the desktop's panels, and AG-UI has `CUSTOM` events for them
+  when a consumer wants one.
 - **One core, then bindings.** Five SDKs written in parallel is speculative
   generality. A headless TypeScript core plus a React binding gives every
-  capability the target names on the web. Angular and Vue are thin
-  bindings; iOS and Android are ports in other languages with no consumer
-  in the workspace. They wait for one.
+  capability the target names on the web. Angular and Vue turned out to
+  be thin bindings over the same store (step 8); iOS and Android are
+  ports in other languages with no consumer in the workspace. They wait
+  for one.
 - **Sandboxes on the executor, not containers.** OpenBot gives each bot a
   container with Chromium, files and Postgres. This workspace has a
   fail-closed Landlock and seccomp executor already. It covers the
@@ -100,11 +279,14 @@ before: the hooks are the API, the components are one rendering of it.
 
 ## Open questions
 
-1. Does the TypeScript core live in this workspace (beside the React apps,
-   under a `packages/` directory with its own CI job) or in a separate
-   repository? The React apps' precedent is in-workspace.
+1. ~~Does the TypeScript core live in this workspace or in a separate
+   repository?~~ Answered in step 2: in-workspace, at
+   `crates/libs/protocol/rusty_agui/packages/agui-core`, so the `agui`
+   planner flag covers it and the shared fixtures sit beside the Rust
+   tests. Publishing to a registry is a later decision.
 2. Where does the bot registry persist? `rusty_multimodal_db_engine` is the
    workspace's own store and already backs `rusty_tick` and `remind_me`.
-3. Which agent is the first bot? `rusty_adk`'s weather example is the
-   smallest with human-in-the-loop; `rusty_key` has the richest existing
-   contract.
+3. Which agent is the first bot? `rusty_tick`'s assistant now exists and
+   is the simplest candidate (store-free, deterministic); `rusty_adk`'s
+   weather example is the smallest with human-in-the-loop; `rusty_key`
+   has the richest existing contract.

@@ -18,7 +18,7 @@ import {
 
 const at = (y: number, mo: number, d: number, h = 12, mi = 0): number => new Date(y, mo - 1, d, h, mi).getTime()
 const rec = (id: string, endMs: number, durationSec: number, kind: FocusRecord['kind'] = 'pomo'): FocusRecord => ({
-  id, startMs: endMs - durationSec * 1000, endMs, durationSec, kind, taskId: null, taskTitle: null,
+  id, startMs: endMs - durationSec * 1000, endMs, durationSec, kind, taskId: null, taskTitle: null, interruptions: 0,
 })
 
 describe('formatting', () => {
@@ -70,7 +70,7 @@ describe('groupByDay', () => {
 })
 
 describe('sessions', () => {
-  const base: Session = { mode: 'pomo', phase: 'focus', targetSec: 1500, startedMs: 1_000_000, pausedAt: null, pausedTotalMs: 0, taskId: null, taskTitle: null }
+  const base: Session = { mode: 'pomo', phase: 'focus', targetSec: 1500, startedMs: 1_000_000, pausedAt: null, pausedTotalMs: 0, taskId: null, taskTitle: null, interruptions: 0 }
   it('derives remaining time from timestamps', () => {
     expect(remainingSec(base, 1_000_000)).toBe(1500)
     expect(remainingSec(base, 1_000_000 + 90_500)).toBe(1410)
@@ -103,10 +103,16 @@ describe('breaks and settings', () => {
   })
   it('sanitizes settings', () => {
     expect(sanitizeSettings(null)).toEqual(DEFAULT_SETTINGS)
-    expect(sanitizeSettings({ focusMin: 0, shortMin: 999, longMin: 'x', longEvery: 3.4 })).toEqual({ focusMin: 1, shortMin: 60, longMin: 15, longEvery: 3 })
+    expect(sanitizeSettings({ focusMin: 0, shortMin: 999, longMin: 'x', longEvery: 3.4 })).toEqual({ focusMin: 1, shortMin: 60, longMin: 15, longEvery: 3, ambient: 'off' })
+    expect(sanitizeSettings({ ambient: 'rain' }).ambient).toBe('rain')
+    expect(sanitizeSettings({ ambient: 'thunder' }).ambient).toBe('off')
   })
   it('tells records from the settings doc', () => {
     expect(asRecordBody(DEFAULT_SETTINGS)).toBeNull()
     expect(asRecordBody({ startMs: 1, endMs: 2, durationSec: 1, kind: 'pomo', taskId: null, taskTitle: null })).not.toBeNull()
+    const rec = (interruptions: unknown) => asRecordBody({ startMs: 1, endMs: 2, durationSec: 1, kind: 'pomo', interruptions })
+    expect(rec(2.9)?.interruptions).toBe(2)
+    expect(rec(-1)?.interruptions).toBe(0)
+    expect(rec(undefined)?.interruptions).toBe(0)
   })
 })

@@ -385,6 +385,7 @@ impl<'a> HarnessProcess<'a> {
         connect_and_run(service, |stdin| {
             self.executor
                 .exec_with(&spec, &program, &args, stdin, Sockets::None)
+                .map_err(RuntimeError::from)
         })
     }
 

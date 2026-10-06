@@ -5,7 +5,10 @@ A self-hosted, TickTick-style task manager built on
 A clean-room design: it is written from the product's public behaviour and
 documented API, not from its code.
 
-Status: storage plus a JSON HTTP API, for one user or several. No web UI or sync yet.
+Status: storage, a JSON HTTP API for one user or several, and a web UI in [`web/`](web/README.md)
+(lists, tags, Kanban, timeline and Eisenhower-matrix views, saved filters, Won't Do, calendar (month, week, day, 3-day, ten-day, agenda) with `.ics` import and feed subscriptions,
+focus timer with ambient sound, pomo estimates and interruption tracking, countdowns, assignees, habits,
+summaries). Sync is by polling; there is no push channel.
 Engine findings are in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) (issue
 [#382](https://github.com/Rusty-Mill/rusty_mill/issues/382)); the HTTP stack
 choice is in [ADR-0001](docs/decisions/ADR-0001-http-stack.md); the
@@ -16,7 +19,7 @@ proposed per-user token design is in
 
 ```
 RUSTY_TICK_TOKEN=<16+ characters> cargo run -p rusty_tick -- \
-    [--data-dir rusty_tick_data] [--addr 127.0.0.1:8787] [--allow-remote]
+    [--data-dir rusty_tick_data] [--addr 127.0.0.1:8787] [--web-dir web/dist] [--allow-remote]
 
 curl -H "Authorization: Bearer $RUSTY_TICK_TOKEN" -d '{"name":"Inbox"}' localhost:8787/api/v1/lists
 ```
@@ -57,20 +60,26 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/health` | no auth |
+| GET | `/api/v1/snapshot` | lists, tags and tasks in one read |
 | GET, POST | `/api/v1/lists` | `{"name"}` |
-| GET, PATCH, DELETE | `/api/v1/lists/{id}` | PATCH `{"name","archived"}`; delete removes its tasks |
-| GET | `/api/v1/lists/{id}/tasks` | `?status=open\|done&sort=manual\|due` |
-| POST | `/api/v1/tasks` | `{"listId","title","notes","priority","dueMs","tags","parentId"}` |
+| GET, PATCH, DELETE | `/api/v1/lists/{id}` | PATCH `{"name","color","archived","viewMode","sortType","sortOrder"}` (`viewMode`: `list`, `kanban`, `timeline`, `matrix`); delete removes its tasks |
+| GET | `/api/v1/lists/{id}/tasks` | `?status=open\|done\|wontdo&sort=manual\|due` |
+| POST | `/api/v1/tasks` | `{"listId","title","notes","priority","startMs","dueMs","isAllDay","timeZone","reminders","repeatFlag","items","tags","parentId"}` |
 | GET, PATCH, DELETE | `/api/v1/tasks/{id}` | PATCH: absent = keep, `"dueMs":null` = clear; delete removes subtasks |
-| POST | `/api/v1/tasks/{id}/complete`, `/reopen` | |
+| POST | `/api/v1/tasks/{id}/complete`, `/reopen`, `/restore` | `DELETE /tasks/{id}` moves to the trash; `?purge=true` removes it for good |
+| DELETE | `/api/v1/trash` | empties the trash |
 | PUT | `/api/v1/tasks/{id}/order` | `{"sortOrder": n}`: one durable slot write |
 | GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`) |
+| GET, POST | `/api/v1/tags` | PATCH `/tags/{name}`, POST `/tags/{name}/rename` |
 | GET | `/api/v1/tags/{tag}/tasks` | |
+| POST | `/api/v1/fetch-ics` | `{"url"}` → `{"text"}`: the server fetches a calendar feed for the web UI (browsers cannot read most). `https://` or `webcal://`, port 443, public addresses only (checked before connecting, redirects re-checked), 4 MiB, 6 s per step; 422 for a URL it refuses, 502 for a feed that fails, 503 when 4 fetches are already running. It runs after the server's request lock is released, so a slow feed holds up no other request |
+| GET | `/api/v1/docs/{kind}` | client documents: `PUT`/`DELETE /docs/{kind}/{id}`; kinds `habit`, `habit_checkin`, `focus`, `prefs`, `summary_template`, `comment`, `filter`, `countdown`, `estimate`, `assignee`, `subscription` |
 | GET | `/api/v1/smart/today`, `/next7`, `/overdue` | `?utcOffsetMin=` (default 0); open tasks in non-archived lists |
 
-Priority is 0, 1, 3 or 5. Times are Unix milliseconds. Subtasks nest one level
-and stay in their parent's list (moving a parent moves them). Not yet:
-recurrence, reminders.
+Priority is 0, 1, 3 or 5. A task's status is `open`, `done` or `wontdo` (PATCH `status`; closing stamps `completedMs`, reopening clears it). Times are Unix milliseconds. Subtasks nest one level
+and stay in their parent's list (moving a parent moves them). `repeatFlag` is an RFC 5545
+`RRULE` and `reminders` are `TRIGGER:` strings; the server stores both, and the web UI expands
+recurrence and raises reminders as browser notifications.
 
 ## Layout
 

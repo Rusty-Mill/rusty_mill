@@ -13,6 +13,244 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: fix assignee/estimate save clash and calendar view menu order
+**2026-10-06** · [#530](https://github.com/Rusty-Mill/rusty_mill/pull/530)
+
+- **Fixed:** a task could not have both an assignee and a pomo estimate: both docs used the task id as their document id, the server keeps one document per id whatever its kind, and the refused second save (409) was hidden by the optimistic UI, so it was gone on reload. Each kind now has its own derived id (`derivedId` in `lib/id.ts`, the hash `checkinId` already used, with check-in ids unchanged). A doc saved under the bare task id by #520 or #525 is removed when that task's assignee or estimate next changes.
+- **Fixed:** the calendar view menu listed "3 Days" above "Month" (integer-like object keys sort first); it now follows `CALENDAR_MODES`.
+- **Verified:** web `tsc --noEmit`, `vitest` (645, with regression tests for both), `npm run build`; the new features run in Chromium against the real server with no console errors. Rust unchanged.
+- Known limitations: the web app's background save takes about 20 s for a 317-event import (the on-screen count appears after about 2 s); tasks still queued when a tab closes are sent on the next open; subscriptions are not recreated for tasks whose queued creation was lost.
+
+---
+
+## Consolidation review batch 2: whisper log sink, nexus env UTF-8, Provider FIFO, search Value bridge, rusty_time from_unix_secs
+**2026-10-06** · [#527](https://github.com/Rusty-Mill/rusty_mill/pull/527) · consolidation review B4, B5, B6, B7, B8 part 1
+
+- **Fixed:** `rusty_whisper::log` runs the installed sink with no lock held and drops a replaced sink after the lock is released; poisoned locks are recovered. A reentrant sink, a sink whose captured values log on drop, and a panicking sink are covered by child-process tests.
+- **Fixed:** `nexus-terminal::interpolate_env` decodes whole UTF-8 scalars instead of pushing bytes as Latin-1 chars; `café ${X}` interpolates to `café ok`. Malformed references and cycles behave as before, now pinned.
+- **Changed:** `rp-router` caches share one crate-private `fifo::FifoMap`; `ReasoningReplayCache` gains an eviction test. `RateLimiter` in `rp-core` deferred.
+- **Added:** `rusty-search-core::serde_json_bridge` behind default-off `serde-json` (optional `serde_json`); six backend copies removed; lossy points tested. Verified with the feature off (no `serde_json` in the core's dependency tree), on, per backend, and with a joint check of the twelve crates that depend on the core; a full workspace check was blocked in the build container by a missing `libdbus` system library and is left to hosted CI.
+- **Added:** `rusty_time::DateTime::from_unix_secs(i64) -> Result`, checked against the `i32` year range, round-trip tested across 1900–2200 plus the `i64` and `i32`-year extremes. The meshed clock-helper migration is held: its proposed epoch fallback would have recorded a false timestamp on conversion failure, and is being redesigned around explicit error propagation.
+- **Known limitations:** eight equivalent `now_iso` copies remain in rusty_meshed; `rp-core::RateLimiter` still carries its own FIFO block.
+
+---
+
+## rk-agui: a Rusty Keys session over AG-UI
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `rusty_key`; step 10 complete
+
+- **Added:** `rk-agui` at `crates/apps/rusty_key/crates/agui`: `KeyAgent::new(handle, config, model)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves Rusty Keys to everything that speaks AG-UI. A `Session` is built per thread on first contact, the way `rk_app::acp` builds one per editor session, with an `ApprovalGate` at the end of its policy chain; `with_approval(triggers)` says which tool calls the gate stops.
+- **Added:** the mapping, by the harness's own `rk://` names. The last user message is the turn's prompt and the session keeps the transcript; `token` streams as deltas of one message, or the reply goes out as one message when nothing streamed; each `tool_event` is `TOOL_CALL_START`/`ARGS`/`END` plus a `TOOL_CALL_RESULT` carrying the payload, or `{status, payload}` when the outcome was not `ok` (a blocked call is visible as such); `turn_complete` is the run's result, the boundary `TurnResult` (`reply`, `verified`, `limits`); a turn error, a missing or blank prompt, a prompt while a turn waits on an approval, and a tool message answering nothing pending are `RUN_ERROR`. `bash_output`, `entropy` and `consolidation` are not forwarded.
+- **Added:** human in the loop, twice. An `approval_request` ends the run with a call to the frontend tool `approve_tool` (tool, arguments, trigger) while the turn waits in the gate; the tool message that answers it on the next run (`allow`, `always`, anything else blocks) is delivered to the gate and the same turn is relayed on. A `plan_exit` ends the run with a call to `plan_decide` carrying the plan; the answer (`proceed`, `reject`, `annotate <feedback>`) resolves it and the feedback is the run's result for the client to send as the next turn.
+- **Tests:** five end-to-end tests with `rusty_agui`'s client over a socket against the real harness (registry, workspace policy, aisdk loop, verifier, journal) in a temporary workspace with the scripted `FakeLanguageModel`: a turn that reads a file and replies; an approval answered with `allow` (the file is written), a prompt and a stray answer refused meanwhile; an approval blocked (no file, a blocked tool result, the turn continues); a plan exit annotated and resolved; missing and blank prompts. Two unit tests for the answer parsers.
+- **Known limitations:** blocking over a tokio handle; `bash_output` is not streamed; sessions live in memory for the process; a `Session` per thread shares the workspace's `.rustykeys` state, as the gateway's multi mode does.
+
+---
+
+## nexus-agui: a Nexus agent session over AG-UI
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `nexus-ai-runtime`
+
+- **Added:** `nexus-agui` at `crates/apps/nexus/crates/nexus-agui`: `NexusAgent::new(runtime, handle)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves a Nexus agent session to everything that speaks AG-UI. `Runtime` is the port (`subscribe` to the typed `AiEvent` stream, `submit` a session, `decide` a round); `KernelRuntime` implements it over a `KernelPluginContext` with `com.nexus.ai.runtime::submit`, a `CustomPrefix` subscription on `com.nexus.ai.runtime.`, and `com.nexus.agent::round_decide`.
+- **Added:** the mapping. The last user message is the goal of one `Session` task (`forwardedProps.archetype` picks the archetype); `TokenChunk` streams as deltas of one message; `ToolCalled` is `TOOL_CALL_START`/`ARGS`/`END` with the runtime's arguments preview (quoted when it is not JSON) and `ToolResult` is `TOOL_CALL_RESULT` (an error as `{"error": …}`); `Finished` ends the run with `{sessionId, outcome, tokensUsed}` and, when nothing streamed, the last round's text as the answer; `Failed`, `Cancelled`, a refused `submit`, a closed stream, an empty or missing user message and a tool message answering no proposed round are `RUN_ERROR`.
+- **Added:** human in the loop, opt-in through `with_approval(timeout_secs)`: rounds are gated, a `RoundProposed` sends its narration as text and ends the run with a call to the frontend tool `round_decide` (id `<session>:<round>`, arguments `round` and `narration`); the tool message that answers it on the next run of the thread is delivered as the decision (`approve`/`yes`/`ok` approve all; a JSON object passes through, so a `partial` decision works; other text aborts with that reason) and the same session is relayed until it finishes or proposes again. By default rounds are auto-approved and a run is one request.
+- **Tests:** five end-to-end tests with `rusty_agui`'s client over a socket against a scripted runtime (a streamed run with a tool call, result and final result; the last round's text when nothing streamed; a proposed round answered with approval, a stray answer on another thread refused, a second answer refused; an abort with its reason; failures, cancellation, a refused submit, no or blank user message) and three unit tests (decision parsing, the arguments preview, the last round's text).
+- **Known limitations:** one run is one session (the runtime's `submit` cannot continue a session; a resumed Nexus session is a fork), so a thread's earlier turns are not replayed; no artifacts; blocking over a tokio handle; not registered in `nexus-bootstrap`, a host mounts it with the invoker context; the `rusty_key` adapter is still to come.
+
+---
+
+## adk-agui: a Rust ADK agent over AG-UI
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 10, `rusty_adk`
+
+- **Added:** `adk-agui` at `crates/libs/rusty_adk/crates/adk-agui`, the AG-UI counterpart to `adk-a2a`: `AdkAgent::new(runner, handle)` implements `rusty_agui::serve::Agent`, so `AgentHandler` on `rusty_serve` serves any ADK agent or graph to everything in the workspace that speaks AG-UI. `with_user_resolver` maps a run to an ADK user (default: `forwardedProps.userId`, else the thread id); `with_run_config` applies one `RunConfig` to every run, streaming included.
+- **Added:** the mapping. Thread = session, created on first contact; the last user message is the new turn and the client's history is not replayed (ADK keeps its own); a model text part is a text message, streamed as deltas under one message when the run config streams and the aggregated event closes it without repeating the text; `FunctionCall` and `FunctionResponse` parts are `TOOL_CALL_START`/`ARGS`/`END` and `TOOL_CALL_RESULT`; a run that changed non-`temp:` state ends with a `STATE_SNAPSHOT` of the session; an event with an error, a failed stream, a run without a user message or a tool message answering no pending interrupt is `RUN_ERROR`. Artifacts and thoughts are not forwarded.
+- **Added:** human in the loop. A graph node's `resume_or_request_input` ends the run with a call to the frontend tool `request_input` (id = the interrupt id, arguments = the node's `hint` and `payload`); the tool message that answers it, on the next run of the thread, resumes the graph at that node with the answer (JSON when it parses, text otherwise) as the payload. A React, Vue or Angular client registers an action named `request_input` with a `render` and the person answers through `respond`.
+- **Added:** feature `agui` on `rusty-adk` (`rusty_adk::agui`), and the `agui-agent-server` example: the same approval graph as `a2a-agent-server`, served at `http://127.0.0.1:8080/api/agent`, with the two `curl` calls that suspend and resume it.
+- **Tests:** five end-to-end tests with `rusty_agui`'s blocking client against the handler over a socket (a tool-calling agent with its text, calls, result and state; two turns on one thread landing in one session; a streamed run whose deltas arrive once; a suspension answered and resumed, and a stray answer refused; a run with no user message), plus two unit tests for the value bridge.
+- **Known limitations:** blocking only (`Handle::block_on` from the handler's thread; a current-thread runtime that something else blocks would deadlock); no artifacts; one agent serves one run at a time, as `AgentHandler` does; the `nexus-ai-runtime` and `rusty_key` adapters are still to come.
+
+---
+
+## @rusty-mill/agui-vue and @rusty-mill/agui-angular: the Vue and Angular bindings
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 8
+
+- **Added:** `@rusty-mill/agui-vue` at `crates/libs/protocol/rusty_agui/packages/agui-vue`: `provideAgent(config)` in a `setup` (or `app.provide(AGENT, new AgentStore(config))` for the whole app), `useAgent()` with computed refs for `messages`, `state`, `running`, `error` and `toolCalls` plus `send`, `run`, `stop` and `renderToolCall`, `useReadable` and `useAction` that follow a ref or getter and unregister when the scope ends, and `useSharedState()` as a writable computed ref. Peer dependency `vue ^3.5`.
+- **Added:** `@rusty-mill/agui-angular` at `crates/libs/protocol/rusty_agui/packages/agui-angular`: `provideAgent(config)` as providers for a component, a route or the application, `injectAgent()` with signals for the same five fields and the same verbs, `injectReadable` and `injectAction` that follow a signal through `effect` and unregister with the injection context, and `injectSharedState()` as `[signal, setState]`. Peer dependency `@angular/core >=19`.
+- **Changed:** `AgentStore` and its types (`Snapshot`, `ActionDefinition`, `ActionRenderProps`, `StoreConfig`, `SendOptions`, `ToolCallStatus`, the new `ToolCallEntry`) move from `@rusty-mill/agui-react` into `@rusty-mill/agui-core`'s `store` module, where the three bindings share them; `renderToolCall` and `parseArguments` move into the store too. The React package re-exports them, so its API is unchanged. The scripted fake agent the bindings' tests use is exported as `@rusty-mill/agui-core/testing`.
+- **Tests:** six store tests in the core (streaming and `RUN_ERROR`, readables and state both ways, a handler answered and followed up, a render-only call answered through `respond` and a second answer ignored, invalid arguments and `followUp: false`, lenient argument parsing); five Vue tests mounting components with `createApp` under jsdom; five Angular tests on a zoneless `createApplication` whose `tick()` runs the root effects. Each binding passes the same scenarios the React one does, plus a changed readable or action definition replacing its registration and a destroyed scope ending the subscription.
+- **Known limitations:** no consumer in the workspace yet for either binding (the follow-ons recorded step 8 as waiting for one; it was started on request); no components; Angular's `render` returns whatever the template hands a child, the binding does not render.
+
+---
+
+## rusty_bot: per-bot sandboxes
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 7, second PR
+
+- **Added:** `rusty_bot` at `crates/libs/rusty_bot`. `BotSpec::sandbox()` builds the `SandboxSpec` for one agent process: write only to its workspace (also its working directory), read its roots (by default `/usr`, `/lib`, `/lib64`, `/bin`, `/etc`) and the directory its program lives in, exactly the environment it was given, and `default_limits()` (a day of CPU, a week of wall clock, 2 GiB of address space, 1 GiB files, 1024 descriptors, 256 processes). The network stays open (`Sockets::Internet`): a bot listens on a port and may call a model; the filesystem is what keeps one bot's data from another's, the same posture `rsi` takes for coding-agent CLIs. `start` runs a bot with a thread waiting on it; `Running::stop` kills the process group and `outcome`/`wait` report how it ended; `Fleet::start` is all up or all down. `load` reads a JSON bots file and refuses duplicate names.
+- **Added:** the `rusty-bot` binary: `run <bots.json> <state dir>` starts the fleet and prints each bot's end; `__sandbox` is the helper the executor spawns, single-threaded from birth. Having both in one binary is how `rsi` does it, and it means the helper is always the same build as its caller.
+- **Changed:** `rusty_sandbox::ProcessExecutor::start` returns a running `Job` instead of waiting: `Job::handle()` is a `Copy` `JobHandle` whose `kill()` sends `SIGKILL` to the group from any thread, and `Job::wait(wall)` reaps and contains it as `exec` always did (`exec_with` now runs on the same path). `start` waits for the helper to either fail setup or replace its image before reading the status file, checked through `/proc/<pid>/exe`: a helper that has not opened the file yet must not find it gone.
+- **Tests:** two unit tests (the sandbox a spec builds; loading with defaults and five bad documents); two Linux integration tests through the real binary (a shell bot writes `note.txt` in its workspace, cannot create a file outside it, and dies as a group with `SIGKILL` when stopped; a fleet with one bad spec starts nothing, a good one starts and stops); one more executor test (a started job killed from its handle). Off Linux, the test asserts the refusal.
+- **Known limitations:** no port allocation or health check (a bot's port is whatever its own arguments say); no restart policy; the fleet is in memory; wiring a bot's port to a channel runner or the gateway is the operator's, by `AGENT_URL`.
+
+---
+
+## rusty_sandbox: the sandboxed executor, hoisted from rusty_rsi
+**2026-10-06** · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 7, first PR · amends [ADR-0005](docs/adr/0005-rsi-harness.md) §4
+
+- **Added:** `rusty_sandbox` at `crates/libs/rusty_sandbox`: the sandboxed-execution port (`SandboxSpec`, `Limits`, `Executor`, `ExecOutcome`, `Termination`) and its Linux adapter (`ProcessExecutor`, the helper's `run_helper`, `HelperRequest`, `Sockets`, `SETUP_FAILED`, `require_enforced`), moved from `rsi-core` and `rsi-runtime` with their fifteen tests. The code is unchanged but for its error type: `rusty_sandbox::Error` has `Io`, `Sandbox` and `Invalid` (a rejected limit or path), where the port used `CoreError::InvalidParameter`/`InvalidId` and the adapter `RuntimeError`.
+- **Changed:** `rsi-core::exec` re-exports the port; `rsi_runtime::executor` and `rsi_runtime::sandbox` re-export the adapter, so `rsi __sandbox`, the harness, the graders, the coding-agent runner and every test keep their paths. `CoreError` and `RuntimeError` gain `From<rusty_sandbox::Error>` (a rejected spec is an `InvalidId`; I/O and setup failures keep their runtime variants), and `rsi-runtime`'s grading impls take any `Executor` whose error converts rather than one whose error *is* `RuntimeError`. `rsi-runtime` keeps `rusty_libc` for its own file flags; `platform` and `platform-linux` moved with the helper.
+- **Why now:** step 7's second PR gives each bot a sandbox of its own; that needs the executor in `libs`, where an app family other than `rsi` can depend on it (ADR-0003 forbids `apps → apps`). ADR-0005 scoped the executor to `rsi`; this amends it with the user's sign-off.
+- **Known limitations:** unchanged from `rsi`: Linux only, and the helper must be a single-threaded binary; the next PR adds one for bots.
+
+---
+
+## rusty_routine: routines for AG-UI agents
+**2026-10-05** · [#524](https://github.com/Rusty-Mill/rusty_mill/pull/524) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 6
+
+- **Added:** `rusty_routine` at `crates/libs/protocol/rusty_routine`. `Schedule` is five-field cron in UTC with `*`, numbers, ranges, lists and steps; `0` and `7` are Sunday; when both day fields are restricted either matches, as in cron; `next_after(t)` finds the first scheduled minute strictly after `t` by Hinnant's civil-date arithmetic and gives up after five years for a date that never comes. `Routine::fire(now)` returns the run (a fresh thread per firing, the prompt as the person's message, `forwardedProps.routine` and `scheduledAt` for gateway rules) and advances the schedule past `now`, so a firing the runner slept through is skipped rather than made up. `Routine::record` counts consecutive failures and disables the routine at its budget; a success resets it. `load` reads a JSON array of `{"name", "cron", "prompt", "maxFailures"?}` and refuses duplicate names.
+- **Added:** behind the `run` feature, `run::tick` fires every due routine against one `HttpAgent`, reads the reply back through `rusty_channel::Thread`, and reports one line per run; `run::run` sleeps until the earliest next firing and stops once every routine is disabled. The `routines` example reads `ROUTINES`, `AGENT_URL` and an optional `AGENT_TOKEN`, the bearer token that makes the routine the gateway's requester.
+- **Tests:** seven unit tests with fixed times (civil-date round trips against known dates; every-minute, hourly and daily schedules; weekdays, month ends, a leap day, both day fields, an impossible date; nine bad expressions; firing, skipping, disabling and resetting; loading and five bad documents) and two runner tests against a scripted agent served in-process on `rusty_serve` (a reply reported, a failing agent counted down to disabled).
+- **Known limitations:** UTC only; no seconds, names, `L`, `W` or `#`; state is in memory; the reply is printed, not delivered to a channel (a routine that posts to Slack is the two crates composed, a later step).
+
+## rusty_tick: calendar subscriptions, assignees, ambient sound, 3- and 10-day views
+**2026-10-05** · [#525](https://github.com/Rusty-Mill/rusty_mill/pull/525)
+
+- **Added:** `POST /api/v1/fetch-ics {"url"}` (`crates/apps/rusty_tick/src/fetch.rs`) and a Calendar subscriptions dialog: each feed (`https://` or `webcal://`) gets its own list, refreshes in place by the feed's UID, and refreshes on opening the calendar when older than six hours. The fetcher is HTTPS on port 443 only, refuses any non-public resolved address (checked before connecting, redirects re-checked, at most 3), 6 s per step, 4 MiB, body must be an iCalendar. `rusty_tick` now depends on `rusty_tls` (already in the workspace); `docs/WORKSPACE-MAP.md` regenerated.
+- **Added:** `assignee` and `subscription` doc kinds; task assignees (free-text, a field, a row chip, an Assignee group in saved filters); 3-day and ten-day calendar views; ambient focus sound (white noise, rain, waves, synthesised with Web Audio).
+- **Verified:** `cargo fmt --check`, `clippy -D warnings`, `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (640), `npm run build`; workspace layer, dependency and map checks.
+- **Added:** `rusty_serve::Body::Deferred` / `Response::deferred`: a job run after the handler's lock is released, so the feed fetch holds up no other request; at most 4 fetches run at once (a fifth gets 503).
+- Known limitations: a refresh overwrites the feed-owned fields of a task; no feeds with credentials; at most 500 events per feed; assignees are names, not accounts; not run against a live feed or in a browser.
+
+---
+
+## rusty_http and rusty_request: head cap, chunked body bound, no hidden pool replay
+**2026-10-06** · [#526](https://github.com/Rusty-Mill/rusty_mill/pull/526) · consolidation review first batch B1, B2(a), B3
+
+- **Fixed:** `rusty_http::head::parse_request_head`/`parse_response_head` enforce `max_head_len` on a head that completes, not only on one that has not; a terminated head over the cap is `HeadTooLarge`. Only the head's own bytes count, so body or upgrade bytes buffered after the blank line never trip it. All three transport adapters inherit the fix.
+- **Fixed:** `read_body` on the `sync`, `async_tokio` and `tokio_native` adapters bounds a chunked body's decoded total by `DEFAULT_MAX_BODY_LEN` (1 MiB), as it already did for `Content-Length` and close-delimited framing, with a checked addition before each extend. `read_chunked_body` stays a line-bounded primitive with no aggregate cap and is documented as such.
+- **Fixed:** `rusty_request` no longer replays a failed pooled-connection attempt on a fresh connection. That replay ignored method, retry policy and how far the request had got, so a `POST` the server accepted and then dropped could be submitted twice. The configured `RetryPolicy` is now the only replay authority; `send_streaming` keeps ignoring retry policy; a `Body::Stream` factory is opened zero times on a head-write failure and once otherwise.
+- **Changed:** a `rusty_request` request with no retry policy that lands on a pooled connection the server has since closed returns `Error::Io` where it used to succeed on a second connection. Set `pool_idle_timeout` below the server's keep-alive timeout or configure a `RetryPolicy`.
+- **Tests:** cap−1/cap/cap+1 for complete and fragmented heads with trailing body and upgrade bytes; chunked boundaries across chunk and read splits, extensions, trailers, empty body, premature EOF, and the unbounded primitive pinned; scripted-transport tests for head-write, partial head-write and post-body failures counting body-factory opens; loopback tests for a stale pooled connection without and with a policy, for streaming, and for a `POST` the peer accepts then drops reaching the server exactly once.
+- **Known limitations:** no per-client body limit in `rusty_request` (a chunked response over 1 MiB is now an error); no idle-connection liveness probe, which is a separate improvement.
+
+---
+
+## rusty_channel: SMS over Twilio
+**2026-10-05** · [#521](https://github.com/Rusty-Mill/rusty_mill/pull/521) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, third channel
+
+- **Added:** `sms::Twilio`. Inbound, `X-Twilio-Signature` is checked in constant time against base64 of HMAC-SHA1 (hand-rolled on `rusty_sha1`, RFC 2202 vectors in the tests) over the webhook's public URL followed by every form field sorted by name; the channel is therefore constructed with the URL Twilio was given, and a webhook moved without telling it is refused rather than trusted. `From` and `To` make the conversation key (SMS has no threads), the trimmed `Body` is the text, and a message without text (media only) is ignored. Outbound, the reply is a `POST` to `Messages.json` with basic auth from the account SID and auth token, cut at Twilio's 1600-character limit with an ellipsis.
+- **Changed:** `Channel` gains a defaulted `ack` hook: what the runner answers an accepted message with before the agent has run. Twilio wants TwiML, so its ack is an empty `<Response/>` as `text/xml`; the others keep the default `{}`. `bot::Bot` sends a non-JSON ack as a one-chunk `rusty_serve` stream, the server's way of carrying a chosen content type.
+- **Added:** the `sms_bot` example on the shared runner.
+- **Tests:** five, no network: the signature against an independently computed value and HMAC-SHA1 against RFC 2202; a signed text accepted, keyed, acknowledged and replied to; a missing header, a wrong signature, a changed body and a moved webhook refused; a media-only message ignored and long replies cut on a character boundary.
+- **Known limitations:** no replay detection (Twilio signs no timestamp; a repeated `MessageSid` is not tracked); inbound media is ignored; no TwiML reply in the webhook response, the agent is too slow for that.
+
+---
+
+## rusty_tick: Won't Do, countdowns, pomo estimates, interruptions, .ics import
+**2026-10-05** · [#520](https://github.com/Rusty-Mill/rusty_mill/pull/520)
+
+- **Added:** `Status::WontDo` (`status: "wontdo"`, `?status=wontdo`), appended last so stored tasks still decode. Closing stamps `completedMs` and keeps the first stamp; the task menu has Won't Do and Mark as open; closed tasks list under Completed.
+- **Added:** a Countdown page over a `countdown` doc kind; pomo estimates over an `estimate` doc kind (a stepper on the Pomodoro page and an estimated-against-actual list); an Interrupted button whose count is stored on the focus record.
+- **Added:** `.ics` import from the Calendar view menu: events and todos become Inbox tasks (all-day end dates exclusive, `TZID` converted, cancelled/completed skipped, unsupported repeat rules imported once), capped at 500 per file.
+- **Changed:** a shared `createDocStore` backs filters, countdowns and estimates.
+- **Verified:** `cargo fmt --check`, `clippy -D warnings`, `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (616), `npm run build`.
+- Known limitations: no calendar subscription by URL (needs a server-side fetcher); re-importing a file duplicates its tasks; an estimate for a purged task stays stored; a new web UI needs a new server (an old one rejects `wontdo` and the new doc kinds); doc saves are reported but not retried.
+
+---
+
+## rusty_channel: Microsoft Teams
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, second channel
+
+- **Added:** `teams::Teams`, the Azure Bot Framework adapter. Inbound, the framework's bearer JWT is verified with `rusty_oauth`: `RS256` against the key the token's `kid` names in the framework's JWK Set, issuer `https://api.botframework.com`, audience equal to the app id, `exp` and `nbf` with five minutes of leeway, and a `serviceurl` claim that must match the activity's `serviceUrl`, so a forged activity pointing replies at another host is refused before its body is read. Only `message` activities become runs; `<at>` mentions are stripped; the Teams conversation id (which carries `;messageid=` for a channel thread) is the thread key. Outbound, a reply activity is posted to `{serviceUrl}v3/conversations/{id}/activities/{activityId}` with a token from the client-credentials grant.
+- **Changed:** `Channel` gains two defaulted hooks. `credential(now)` returns `Ready` or `Fetch(Outbound)`, and `accept_credential(body, now)` takes the response: Teams' token is short-lived, so the runner fetches one before a reply and a minute before it expires. `reply_accepted(status, body)` lets a service that reports failure in a `200` body (Slack's `"ok": false`) say so. `Channel` is now `Send + Sync`.
+- **Changed:** the runner moves from the Slack example into `bot::Bot` behind the `bot` feature, with `bot::get` and `bot::post` over `rusty_tls`; `slack_bot` and `teams_bot` are thin examples over it sharing an `examples/common` module. The Teams example fetches the framework's signing keys once at start.
+- **Tests:** five for Teams, no network, against an RSA key and tokens produced with `openssl` outside the crate: a signed message accepted and keyed; no token, an altered payload, a wrong audience, an expired token, a not-yet-valid token, a token without `serviceurl`, an activity naming a foreign service, and an unknown key all refused; other activity types and bot messages ignored; the token fetch, its acceptance and expiry, and the reply URL, headers and body.
+- **Known limitations:** keys are fetched once per process; a Bot Framework retry is not deduplicated (unlike Slack's, it carries no marker); outbound proactive messages are not supported, only replies.
+
+---
+
+## rusty_channel: chat channels for AG-UI agents, Slack first
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 5, first channel
+
+- **Added:** `rusty_channel` at `crates/libs/protocol/rusty_channel`. `Channel` is sans-IO: `receive(headers, body, now)` authenticates one inbound request and returns `Challenge`, `Message(Inbound)` or `Ignored(why)`; `reply(to, text)` returns the `Outbound` `POST` (URL, headers, body) the runner sends. `Thread` keeps one conversation: `run(&inbound)` appends the person's message and builds a `RunAgentInput` carrying the whole thread and no tools; `absorb(events)` runs the events through the verifier and reducer and returns a `Reply` with the new assistant text and the error if the run ended in `RUN_ERROR`, a broken stream or an event out of order (the partial text is kept).
+- **Added:** `slack::Slack`, the Events API adapter: `v0=` HMAC-SHA256 over `v0:<timestamp>:<body>` compared in constant time, a five-minute timestamp skew, `url_verification` answered, `app_mention` anywhere and `message` in a direct message accepted, a bot's own messages, subtypes, plain channel messages and Slack's retries ignored. A mention threads under itself so one Slack thread is one AG-UI thread; a direct message is one thread per person. Replies go through `chat.postMessage` with `&`, `<` and `>` escaped.
+- **Added:** `examples/slack_bot.rs` behind the `bot` feature: `rusty_serve` in, `rusty_agui::HttpAgent` to the agent (or to `rusty_agent_gateway`'s `agui` route), `rusty_tls` out to Slack. The request is answered before the run (Slack wants a `200` within three seconds); runs are serialised per process and threads live in memory.
+- **Changed:** `rusty_serve::Request` gains `headers`, every header of the request, and the crate re-exports `HeaderMap`.
+- **Tests:** eleven, no network: thread building and absorbing (text, chunks, errors, a cut stream), an independent HMAC fixture, bad signature, stale clock, missing headers, a tampered body, the challenge, mention and thread keys, the direct-message key and reply body, every ignore case, text cleaning and escaping.
+- **Known limitations:** Slack only; threads are not persisted; one run at a time per process; the bot example is not exercised in CI (it needs Slack credentials). Teams and SMS are the next two PRs of this step.
+
+---
+
+## rusty_agent_gateway: the `agui` route policy
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 4
+
+- **Added:** `agentgateway-agui`, a crate beside `agentgateway-a2a`: `AguiGateway` compiles a route's `agui.rules` (CEL, the same language as `mcpAuthorization.rules`) and judges each run; `AuditedBody` wraps the proxied response and reports once, when the stream ends or the body is dropped; `audit::record_decision` and `audit::record_outcome` write the two records on the `agentgateway::audit` target.
+- **Added:** `policies.agui` in `agentgateway-config` (`rules: [allow|deny|require]`) and its dispatch in the gateway: a `POST` is buffered (bounded like the A2A read), checked, recorded, then forwarded buffered; anything else on the route is proxied as is. Deny by default: no `allow` rule, no runs. Refusals are `403` with the reason; a `POST` that is not a `RunAgentInput` is `400`; `a2a` and `agui` on one route is a config error.
+- **Rule context:** `agui.{threadId,runId,parentRunId,messages,lastUserMessage,tools,forwardedProps}`, `request.{method,path,headers}`, `jwt` (the claims `jwtAuth` verified).
+- **Tests:** seven unit tests in the crate (default refusal, deny and require precedence, the context the rules see, a bad expression at build time, a non-POST and a bad body; the audited body passing bytes through and reporting finished, error, invalid, incomplete and disconnected runs) and five end-to-end tests against a mock agent through a running gateway (nothing reaches the agent on refusal; an allowed run streams through untouched; a GET passes through; the config pair is refused).
+- **Known limitations:** audit records are tracing events, not a store; the gate reads the run input only, not the agent's response, so what the agent *did* is the outcome record's event count and ending, not its content.
+
+---
+
+## rusty_tick: the assistant, the React binding's first consumer
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, second PR
+
+- **Added:** `rusty_tick::assistant`, an AG-UI agent served at `POST /api/agent` through `rusty_agui::AgentHandler`, behind the same bearer token as every other route (`Backend::authorize`; the streaming route lives in `server.rs` because it cannot return the buffered API response). It is deterministic and holds no store: it reads the thread, the context the UI exposes and the tools the UI offers, and answers as a pure function (`decide`). "add buy milk" becomes a `create_task` tool call the browser runs; a tool message answering it becomes "Added “buy milk”."; "what's due?" reads the open view; anything else gets help. An LLM-backed agent can replace it behind the same trait.
+- **Added:** the web UI's Assistant panel (`src/features/assistant`, a rail button, `assistantOpen` in the UI store), on `@rusty-mill/agui-react`: `useReadable` for the open view and its tasks, `useAction` for `create_task` against the app's own store, `useAgent` for the thread. The agui packages are linked as `file:` dependencies; Vite dedupes React and inlines them in tests.
+- **Tests:** three Rust tests on `decide` and one over a socket (a bad token gets 401, a good one streams a run with the tool call); two web tests through the real panel, store and hooks over a scripted agent (the task lands in the store and the confirmation shows; a 404 is shown and the panel stays usable).
+- **CI:** the `rusty_tick web` and `rusty_tick e2e` jobs build the agui packages first; a change under `packages/` also selects the tick jobs.
+
+---
+
+## rusty_agui: the React binding
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 3, first PR
+
+- **Added:** `@rusty-mill/agui-react` at `crates/libs/protocol/rusty_agui/packages/agui-react`, headless hooks over the core. `AgentProvider` holds one thread with one agent in a `useSyncExternalStore` store. `useAgent` gives messages, state, running and error plus `send`, `run`, `stop`, the thread's tool calls and `renderToolCall`. `useReadable` exposes application context for as long as the component lives. `useAction` registers a frontend tool: with a `handler` the agent's call is answered and a follow-up run starts; with only a `render` the call stays pending until the rendered UI calls `respond`, the human-in-the-loop pattern; `render` is the generative UI, given the parsed arguments, the call's status and its result. `useSharedState` sets state the next run sends and receives the agent's snapshots and deltas.
+- **Tests:** four hook tests under jsdom against a scripted fake agent: a streamed reply and a `RUN_ERROR`; context and state sent and state received; a handled tool call answered and followed up with the tool message in the next run's thread; a render-only call that waits for the person and then continues.
+- **Changed:** the `rusty_agui conformance` CI job typechecks, tests and builds the binding after the core.
+- Not in this PR, by choice: the first consumer. Wiring an agent and a chat panel into `rusty_tick` is step 3's second PR, so it can be reviewed as an app change.
+
+---
+
+## rusty_agui: the headless TypeScript core
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 2
+
+- **Added:** `@rusty-mill/agui-core` at `crates/libs/protocol/rusty_agui/packages/agui-core`, the headless TypeScript mirror of the crate with no runtime dependencies. Wire types and a validating `parseEvent` (unknown members kept, as the Rust codec ignores them); RFC 6901/6902/7386 pointers, atomic patch and merge patch; SSE `encode` and an incremental `Decoder`; a `Verifier` with the same ordering rules and chunk expansion as the Rust one; a `Reducer`; `streamAgent` (an async iterable of verified events) and `runAgent` (events, messages, state, result, outcome or error) over `fetch`. ESM, built with `tsc`.
+- **Added:** `crates/libs/protocol/rusty_agui/fixtures/`: `events.json` (one sample per event type), `chunks.json` (chunk sequences and their canonical expansion) and `runs.json` (a whole run with its expected messages and state). The Rust codec, verifier and reducer tests and the TypeScript tests both read them, so the two implementations cannot drift apart without a test saying so.
+- **Changed:** the conformance project also runs `@rusty-mill/agui-core` against the echo agent, beside `@ag-ui/client`; the `rusty_agui conformance` CI job runs the package's typecheck, tests and build first and consumes it as a `file:` dependency.
+- **Verified:** `cargo test -p rusty_agui --all-features` (29, three of them the shared fixtures), `clippy -D warnings`, `fmt --check`; package `typecheck`, 16 unit tests and `build`; conformance 5 tests against the built example; workflow lint with pinned actionlint.
+- Answers open question 1 of the follow-ons: the TypeScript core lives in-workspace under the crate, as the React apps do, so the `agui` planner flag covers it and the fixtures stay beside the Rust tests.
+
+---
+
+## rusty_agui: a client, and conformance against the reference TypeScript client
+**2026-10-05** · [#515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md) · follow-ons step 1
+
+- **Added:** `rusty_agui`'s `client` feature: `HttpAgent::new(url).run(&input)` posts a `RunAgentInput` and returns a `RunStream`, an iterator of verified events (through the same `Verifier` the server uses). Blocking, on `rusty_http`'s sync transport over `std::net`, plain `http://`; `Error::Status` for a refused run, `Error::Transport` for a closed socket, a non-SSE response or a stream that ends early.
+- **Added:** the `echo_agent` example (`--features serve`): state snapshot and delta, a step, a tool call when the client offers a tool, an echoed assistant message; `fail` ends the run with `RUN_ERROR`.
+- **Added:** `crates/libs/protocol/rusty_agui/conformance/`, a Node project where `@ag-ui/client` 1.0.2, the reference client CopilotKit's SDK and OpenBot embed, runs the example: a full run the reference client verifies and reduces (state, result, new messages), a frontend tool call with streamed arguments, and an agent failure delivered as `RUN_ERROR`. CI job `rusty_agui conformance (@ag-ui/client)`; planner flag `agui` (path and package).
+- **Verified:** `cargo test -p rusty_agui --all-features` (27, plus the client doc test), `clippy -D warnings` with examples, `fmt --check`, the CI script tests (35), the three conformance tests locally against the built example, workspace map and layer checks.
+- Two departures from the follow-ons document, recorded there: the client is on `rusty_http` directly rather than `rusty_request` (sync, mirroring `serve`; the gateway is async on its own stack), and the smoke test uses the reference `@ag-ui/client` rather than a browser-driven React app, since that client is what the React SDK drives agents with.
+---
+
+## rusty_baseline: honest measurement status
+**2026-10-05** — [#428](https://github.com/Rusty-Mill/rusty_mill/issues/428)
+
+- **Fixed:** The runner prints the full table and exits 1 if any measured stage fails. Unsupported rows, intentionally prebuilt binaries, and unavailable platform RSS counters are not failures. Other products and successful stages remain visible.
+- **Fixed:** Exit-mode warm-ups and timed samples must match an exact expected code. Products default to 0; `@expect-exit=2` records the existing `ts-cli --help` contract, and `@expect-exit=linux:2` records Linux `ts-daemon --help` while leaving other hosts at 0 and preserving the Windows exclusion. A bad sample invalidates that product's runtime measurement; it cannot be hidden by a later successful sample. Idle mode retains its separate requirement to stay alive until intentional teardown.
+- **Fixed:** The manual baseline workflow appends the partial report to the job summary and uploads it even when the measurement step fails, preserving the original failure status.
+- Scope: no product implementation, dependency, support policy, or benchmark workload changed. Non-Linux `ts-daemon` remains a stub; any further host-support policy requires an owner decision.
+
+---
+
+## rusty_tick: Eisenhower matrix view and saved filters
+**2026-10-05** · [#516](https://github.com/Rusty-Mill/rusty_mill/pull/516)
+
+- **Added:** an Eisenhower matrix view mode (`viewMode: "matrix"`) beside list, Kanban and timeline. Important = any priority set; urgent = due by tomorrow or overdue. Dropping a card on a quadrant edits only the axes that differ (priority, due date). Kanban and matrix share one `TaskCard`.
+- **Added:** saved filters: `filter` client documents holding a rule over lists, tags, priorities and due-date buckets (any-of within a field, all fields must match), a sidebar section with add/edit/delete, and a `/f/<id>/tasks` view with the usual grouping, sorting and view modes. The sidebar Filters placeholder is gone.
+- **Changed:** `rusty_tick`'s README describes the web UI and the full route and field set; it had said "no web UI" and "not yet: recurrence, reminders".
+- **Verified:** `cargo test -p rusty_tick`; web `tsc --noEmit`, `vitest` (594) and `npm run build`.
+- Known limitations: a filter that fails to save is reported but not retried (habits are); filters are not cached offline; no Playwright e2e or real-binary integration test covers the new views; a filter cannot match "no tag" or use text or completion-state rules.
+
+---
+
 ## rusty_agui: follow-ons document
 **2026-10-05** · [#513](https://github.com/Rusty-Mill/rusty_mill/pull/513) · [ADR-0007](docs/adr/0007-agui-and-json-patch.md)
 

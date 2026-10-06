@@ -22,7 +22,9 @@ adk-a2a   adk-runner  adk-mcp   adk-agents    adk-macros      │
 ```
 
 `adk-a2a` also depends on the external `rusty_a2a` crate for the protocol
-itself; it contributes the bridge, not an A2A implementation.
+itself; it contributes the bridge, not an A2A implementation. `adk-agui`
+(not drawn: it sits where `adk-a2a` does, on `adk-runner`, `adk-graph` and
+`adk-core`) is the same shape over the workspace's `rusty_agui` crate.
 
 | Crate | Responsibility |
 |---|---|
@@ -36,6 +38,7 @@ itself; it contributes the bridge, not an A2A implementation.
 | `adk-macros` | `#[adk_tool]`. |
 | `adk-mcp` | MCP server and client: cross-SDK interop for tools. |
 | `adk-a2a` | Cross-SDK interop for agents, both ways: an `AgentExecutor` backed by a `Runner`, and an `Agent` backed by an A2A client. |
+| `adk-agui` | Interop with this workspace's frontends: `rusty_agui`'s `Agent` backed by a `Runner`, served by `AgentHandler` on `rusty_serve`. |
 | `rusty-adk` | Facade and prelude. |
 
 Service **traits** live in `adk-core` rather than `adk-sessions` so that every
@@ -223,6 +226,14 @@ protocol is `rmcp`'s, the workspace's shared MCP stack, pinned to MCP
 `2025-06-18` (the revision the other SDKs speak); `adk-mcp` owns only the
 mapping between ADK tools and MCP tools. `tests/conformance.rs` holds that
 behavior in place at the wire.
+
+For the workspace's own frontends the protocol is AG-UI, and `adk-agui`
+(feature `agui`) is the same shape as the A2A bridge below: `rusty_agui`'s
+blocking `Agent` trait over a `Runner`, each run driven with `block_on` on a
+runtime handle the agent is given, since `rusty_agui`'s server is blocking and
+the runner is async. A graph suspension there is a call to the frontend tool
+`request_input`, answered by a tool message on the next run; the two protocols'
+ideas of waiting for a person line up as they do with A2A.
 
 For agents there *is* a protocol, so `adk-a2a` (feature `a2a` on the facade)
 implements A2A's `AgentExecutor` over a `Runner`, using the `rusty_a2a` crate

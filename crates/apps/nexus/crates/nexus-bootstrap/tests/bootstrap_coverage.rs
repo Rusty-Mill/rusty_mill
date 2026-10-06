@@ -56,6 +56,12 @@ const EXEMPT_CRATES: &[(&str, &str)] = &[
     ("nexus-mcp", "IPC proxy (MCP server)"),
     ("nexus-acp", "IPC proxy (ACP host/server)"),
     ("nexus-remote", "IPC proxy (remote-forge JSON-RPC server)"),
+    (
+        "nexus-agui",
+        "IPC proxy (AG-UI agent over rusty_agui): a host mounts it on \
+         rusty_serve with the invoker context; it submits sessions through \
+         com.nexus.ai.runtime and is not a CorePlugin (ADR-0007 step 10)",
+    ),
     // #188 / R5 — library crates that are not, and were never intended to be,
     // CorePlugins. Each is a building block the AI / agent loop will consume
     // (vs. an IPC-reachable service); the audit's framing of "subsystems

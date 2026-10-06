@@ -30,6 +30,7 @@ unwrap_used = "warn"
 
 [dependencies]
 agentgateway-a2a = { workspace = true }
+agentgateway-agui = { workspace = true }
 agentgateway-auth = { workspace = true }
 agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }

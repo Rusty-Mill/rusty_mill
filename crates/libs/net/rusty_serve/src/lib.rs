@@ -22,7 +22,11 @@ pub mod static_files;
 use rusty_http::body::{request_framing, Framing};
 use rusty_http::head::ResponseHead;
 use rusty_http::sync::SyncTransport;
-use rusty_http::{HeaderMap, Method, StatusCode, TransportError, TransportResult, Version};
+use rusty_http::{Method, StatusCode, TransportError, TransportResult, Version};
+
+/// Re-exported so a handler can name the header type without depending on
+/// `rusty_http` itself.
+pub use rusty_http::HeaderMap;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -43,6 +47,9 @@ pub struct Request<'a> {
     pub target: &'a str,
     pub authorization: Option<&'a str>,
     pub if_match: Option<&'a str>,
+    /// Every header, for a handler that needs more than the two above (a
+    /// webhook's signature, say).
+    pub headers: &'a HeaderMap,
     pub body: &'a [u8],
 }
 
@@ -68,7 +75,16 @@ pub enum Body {
         /// is the only one waiting.
         chunks: Box<dyn Iterator<Item = Vec<u8>> + Send>,
     },
+    /// Work that produces the real response, run after the handler has
+    /// returned and its lock is released, on the connection's own thread. For
+    /// a route that waits on something slow (another server, say) and so must
+    /// not hold up every other request. The [`Response::status`] it is built
+    /// with is a placeholder; the job's own status is what is sent.
+    Deferred(Job),
 }
+
+/// The work of a [`Body::Deferred`]: the status and JSON body to send.
+pub type Job = Box<dyn FnOnce() -> (StatusCode, Vec<u8>) + Send>;
 
 impl Response {
     /// A JSON response (an empty body for 204).
@@ -90,6 +106,16 @@ impl Response {
                 content_type,
                 chunks: Box::new(chunks),
             },
+        }
+    }
+
+    /// A response computed by `job` after the handler's lock is released; see
+    /// [`Body::Deferred`]. The job gets no access to the handler, so copy
+    /// whatever it needs out of the request first.
+    pub fn deferred(job: impl FnOnce() -> (StatusCode, Vec<u8>) + Send + 'static) -> Self {
+        Self {
+            status: StatusCode::OK,
+            body: Body::Deferred(Box::new(job)),
         }
     }
 
@@ -247,6 +273,7 @@ fn serve_connection<H: Handler>(stream: TcpStream, app: &App<H>) -> TransportRes
             target: &head.target,
             authorization: head.headers.get("authorization"),
             if_match: head.headers.get("if-match"),
+            headers: &head.headers,
             body: &body,
         };
         let response = match app.handler.lock() {
@@ -257,6 +284,10 @@ fn serve_connection<H: Handler>(stream: TcpStream, app: &App<H>) -> TransportRes
         };
         match response.body {
             Body::Json(body) => write_response(&mut transport, response.status, &body, keep_alive)?,
+            Body::Deferred(job) => {
+                let (status, body) = job();
+                write_response(&mut transport, status, &body, keep_alive)?;
+            }
             Body::Stream {
                 content_type,
                 chunks,
@@ -399,6 +430,10 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    /// Held shut until a test opens it; see `/api/slow`.
+    static GATE: std::sync::LazyLock<(Mutex<bool>, std::sync::Condvar)> =
+        std::sync::LazyLock::new(|| (Mutex::new(false), std::sync::Condvar::new()));
+
     /// Echoes the method and target as JSON; `/boom` panics so the lock
     /// poisons.
     struct Echo;
@@ -406,6 +441,16 @@ mod tests {
     impl Handler for Echo {
         fn handle(&mut self, request: &Request<'_>) -> Response {
             assert!(request.target != "/api/boom", "poison the lock");
+            if request.target == "/api/slow" {
+                // Answered only once the test opens the gate, and not under the lock.
+                return Response::deferred(|| {
+                    let (open, opened) = &*GATE;
+                    let _guard = opened
+                        .wait_while(open.lock().unwrap(), |open| !*open)
+                        .unwrap();
+                    (StatusCode::ACCEPTED, br#"{"slow":true}"#.to_vec())
+                });
+            }
             if request.target == "/api/stream" {
                 // Three chunks, the second produced after the first was sent.
                 return Response::stream(
@@ -557,6 +602,33 @@ mod tests {
             second.contains("/api/after"),
             "keep-alive survives a stream"
         );
+        stop.shutdown();
+    }
+
+    #[test]
+    fn a_deferred_response_runs_without_the_lock_so_other_requests_are_not_held_up() {
+        let (addr, stop) = start(None);
+        let slow = std::thread::spawn(move || {
+            exchange(
+                addr,
+                "GET /api/slow HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+            )
+        });
+        // Give the slow request time to reach its job and start waiting.
+        std::thread::sleep(Duration::from_millis(300));
+        let fast = exchange(
+            addr,
+            "GET /api/fast HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(status(&fast), 200, "answered while the slow one waits");
+        assert!(!slow.is_finished(), "the slow one is still waiting");
+
+        let (open, opened) = &*GATE;
+        *open.lock().unwrap() = true;
+        opened.notify_all();
+        let slow = slow.join().unwrap();
+        assert_eq!(status(&slow), 202, "the job's own status is what is sent");
+        assert!(slow.ends_with(r#"{"slow":true}"#), "{slow}");
         stop.shutdown();
     }
 

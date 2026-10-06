@@ -1,4 +1,4 @@
-import { Bell, HelpCircle, RefreshCw, WifiOff } from 'lucide-react'
+import { Bell, HelpCircle, Hourglass, RefreshCw, Sparkles, WifiOff } from 'lucide-react'
 import { useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { calendarPath, HOME, PATHS, railSection } from '@/app/paths'
@@ -34,6 +34,8 @@ export function IconRail() {
   const { pathname } = useLocation()
   const section = railSection(pathname)
   const setSearchOpen = useUi((s) => s.setSearchOpen)
+  const assistantOpen = useUi((s) => s.assistantOpen)
+  const toggleAssistant = useUi((s) => s.toggleAssistant)
   const [account, setAccount] = useState(false)
   const avatarRef = useRef<HTMLButtonElement>(null)
 
@@ -63,8 +65,14 @@ export function IconRail() {
       <RailButton label="Habit Tracker" active={section === 'habit'} onClick={() => navigate(PATHS.habit)}>
         <HabitIcon />
       </RailButton>
+      <RailButton label="Countdown" active={section === 'countdown'} onClick={() => navigate(PATHS.countdown)}>
+        <Hourglass size={ICON} strokeWidth={STROKE} />
+      </RailButton>
       <RailButton label="Search" onClick={() => setSearchOpen(true)}>
         <SearchIcon />
+      </RailButton>
+      <RailButton label="Assistant" active={assistantOpen} onClick={toggleAssistant}>
+        <Sparkles size={ICON} strokeWidth={STROKE} />
       </RailButton>
 
       <div className="mt-auto flex flex-col items-center pb-2">

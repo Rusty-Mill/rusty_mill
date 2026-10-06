@@ -653,6 +653,40 @@ describe('large lists', () => {
     await user.click(within(timeline).getByRole('button', { name: 'spans, bar' }))
     expect(router.state.location.pathname).toMatch(/^\/p\/inbox\/tasks\/[0-9a-f-]{36}$/)
   })
+  it('sorts tasks into Eisenhower quadrants by priority and due date', async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'fire', priority: 5, dueMs: startOfDay(Date.now()), isAllDay: true })
+      await a.createTask({ listId: INBOX_ID, title: 'goal', priority: 5 })
+      await a.createTask({ listId: INBOX_ID, title: 'noise' })
+    })
+    await user.click(screen.getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('radio', { name: 'Eisenhower Matrix' }))
+    const quadrant = (name: string) => within(screen.getByRole('listitem', { name }))
+    expect(quadrant('Do First').getByText('fire')).toBeInTheDocument()
+    expect(quadrant('Schedule').getByText('goal')).toBeInTheDocument()
+    expect(quadrant('Eliminate').getByText('noise')).toBeInTheDocument()
+    expect(quadrant('Delegate').queryByRole('button')).toBeNull()
+  })
+  it('saves a filter, shows its tasks in the sidebar view, and deletes it', async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'urgent thing', priority: 5 })
+      await a.createTask({ listId: INBOX_ID, title: 'idle thing' })
+    })
+    await user.click(screen.getByRole('button', { name: 'Add filter' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByPlaceholderText('Filter name'), 'Big stuff')
+    await user.click(within(dialog).getByRole('button', { name: 'High' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+    expect(await screen.findByRole('heading', { name: 'Big stuff' })).toBeInTheDocument()
+    expect(within(tasksList()).getByText('urgent thing')).toBeInTheDocument()
+    expect(within(tasksList()).queryByText('idle thing')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Big stuff options' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete' }))
+    expect(screen.queryByRole('link', { name: /Big stuff/ })).toBeNull()
+  })
   it('keeps comments on a task: add one, reopen the task, delete it', async () => {
     const user = userEvent.setup()
     const { api } = await renderApp('/p/inbox/tasks', async (a) => {
@@ -667,5 +701,117 @@ describe('large lists', () => {
     await waitFor(async () => expect(await api.listDocs('comment')).toHaveLength(1))
     await user.click(within(pane).getByRole('button', { name: 'Delete comment' }))
     await waitFor(async () => expect(await api.listDocs('comment')).toHaveLength(0))
+  })
+})
+
+describe("won't do, countdowns and calendar import", () => {
+  it("closes a task as won't do from the task menu, lists it under Completed, and reopens it", async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'skip me' })
+    })
+    await user.click(screen.getByText('skip me'))
+    await screen.findByLabelText('Title')
+    await user.click(pane().getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('menuitem', { name: "Won't Do" }))
+    await waitFor(async () => expect((await api.snapshot()).tasks[0]?.status).toBe('wontdo'))
+    await user.click(pane().getByRole('button', { name: 'More' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Mark as open' }))
+    await waitFor(async () => expect((await api.snapshot()).tasks[0]?.status).toBe('open'))
+  })
+
+  it('adds a countdown, shows the days left, and deletes it', async () => {
+    const user = userEvent.setup()
+    await renderApp('/countdown')
+    await user.type(await screen.findByPlaceholderText('Exam, launch, birthday'), 'Launch')
+    const day = within(screen.getByRole('main')).getByLabelText('Date')
+    await user.clear(day)
+    await user.type(day, '2999-01-01')
+    await user.click(screen.getByRole('button', { name: 'Add countdown' }))
+    const list = await screen.findByRole('list', { name: 'Countdowns' })
+    expect(within(list).getByText('Launch')).toBeInTheDocument()
+    expect(within(list).getByText(/days left/)).toBeInTheDocument()
+    await user.click(within(list).getByRole('button', { name: 'Delete Launch' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Countdowns' })).toBeNull())
+  })
+
+  it('imports an .ics file as Inbox tasks', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    const ics = ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'SUMMARY:Dentist', 'DTSTART;VALUE=DATE:20261010', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n')
+    await user.upload(await screen.findByLabelText('Import calendar file'), new File([ics], 'cal.ics', { type: 'text/calendar' }))
+    expect(await screen.findByText(/Imported 1 from cal\.ics into Inbox/)).toBeInTheDocument()
+    const tasks = (await api.snapshot()).tasks
+    expect(tasks.map((t) => [t.title, t.listId, t.isAllDay])).toContainEqual(['Dentist', INBOX_ID, true])
+  })
+  it('assigns a task to someone, shows them on the row, and filters by assignee', async () => {
+    const user = userEvent.setup()
+    await renderApp('/p/inbox/tasks', async (a) => {
+      await a.createTask({ listId: INBOX_ID, title: 'review draft' })
+      await a.createTask({ listId: INBOX_ID, title: 'water plants' })
+    })
+    await user.click(screen.getByText('review draft'))
+    await user.type(await screen.findByLabelText('Assignee'), 'Ada{Enter}')
+    expect(await within(tasksList()).findByTitle('Assigned to Ada')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add filter' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByPlaceholderText('Filter name'), 'Ada work')
+    await user.click(within(dialog).getByRole('button', { name: 'Ada' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+    expect(await screen.findByRole('heading', { name: 'Ada work' })).toBeInTheDocument()
+    expect(within(tasksList()).getByText('review draft')).toBeInTheDocument()
+    expect(within(tasksList()).queryByText('water plants')).toBeNull()
+  })
+  it('subscribes to a calendar feed, refreshes it in place, and unsubscribes', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    const feed = (...events: string[]) => ['BEGIN:VCALENDAR', ...events.flatMap((e) => ['BEGIN:VEVENT', ...e.split('|'), 'END:VEVENT']), 'END:VCALENDAR'].join('\r\n')
+    let text = feed('UID:a|SUMMARY:Planning|DTSTART;VALUE=DATE:20261010', 'UID:b|SUMMARY:Retro|DTSTART;VALUE=DATE:20261011')
+    api.fetchIcs = async () => text
+
+    await user.click(await screen.findByRole('button', { name: 'View: Month' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Calendar subscriptions…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Calendar subscriptions' })
+    await user.type(within(dialog).getByPlaceholderText('Team calendar'), 'Team')
+    await user.type(within(dialog).getByPlaceholderText('https://example.com/calendar.ics'), 'https://example.com/team.ics')
+    await user.click(within(dialog).getByRole('button', { name: 'Subscribe' }))
+    await within(dialog).findByRole('button', { name: 'Refresh Team' })
+
+    const snap = async () => await api.snapshot()
+    const list = (await snap()).lists.find((l) => l.name === 'Team')!
+    expect((await snap()).tasks.filter((t) => t.listId === list.id).map((t) => t.title).sort()).toEqual(['Planning', 'Retro'])
+
+    text = feed('UID:a|SUMMARY:Planning v2|DTSTART;VALUE=DATE:20261012')
+    await user.click(within(dialog).getByRole('button', { name: 'Refresh Team' }))
+    await waitFor(async () => {
+      const tasks = (await snap()).tasks.filter((t) => t.listId === list.id)
+      expect(tasks.find((t) => t.title === 'Planning v2')?.deletedMs).toBeNull()
+      expect(tasks.find((t) => t.title === 'Retro')?.deletedMs).not.toBeNull()
+      expect(tasks).toHaveLength(2) // updated in place, not duplicated
+    })
+
+    await user.click(within(dialog).getByRole('button', { name: 'Unsubscribe from Team' }))
+    await waitFor(async () => expect((await snap()).lists.some((l) => l.name === 'Team')).toBe(false))
+  })
+
+  it('reports a feed that cannot be fetched and leaves nothing behind', async () => {
+    const user = userEvent.setup()
+    const { api } = await renderApp('/c/all/calendar/m')
+    await user.click(await screen.findByRole('button', { name: 'View: Month' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Calendar subscriptions…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Calendar subscriptions' })
+    await user.type(within(dialog).getByPlaceholderText('Team calendar'), 'Broken')
+    await user.type(within(dialog).getByPlaceholderText('https://example.com/calendar.ics'), 'https://example.com/x.ics')
+    await user.click(within(dialog).getByRole('button', { name: 'Subscribe' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/need the server/)
+    await waitFor(async () => expect((await api.snapshot()).lists.some((l) => l.name === 'Broken')).toBe(false))
+  })
+  it('lists the calendar views in their natural order, not with the numeric ones first', async () => {
+    const user = userEvent.setup()
+    await renderApp('/c/all/calendar/m')
+    await user.click(await screen.findByRole('button', { name: 'View: Month' }))
+    const labels = within(screen.getByRole('menu')).getAllByRole('menuitemcheckbox').map((e) => e.textContent)
+    expect(labels.slice(0, 6)).toEqual(['Month', 'Week', 'Day', '3 Days', '10 Days', 'Agenda'])
   })
 })

@@ -4,10 +4,12 @@
 
 pub mod admin;
 pub mod api;
+pub mod assistant;
 pub mod auth;
 pub mod backend;
 pub mod docs;
 pub mod dto;
+pub mod fetch;
 pub mod lists;
 pub mod pool;
 pub mod server;

@@ -6,6 +6,22 @@ limitations plainly rather than leaving them implied.
 
 ---
 
+## rusty_mill #515 — The `agui` route policy
+**2026-10-05** · [rusty_mill #515](https://github.com/Rusty-Mill/rusty_mill/pull/515) · ADR-0007 follow-ons step 4
+
+- **Added:** `agentgateway-agui` and `policies.agui`. A route in front of a
+  `host` backend reads every `POST` as an AG-UI `RunAgentInput` and judges
+  it by CEL `rules` over `agui`, `request` and `jwt`. Deny by default: no
+  `allow` rule, no runs (`403` with the reason; `400` for a body that is
+  not a run). Two audit records per run on the `agentgateway::audit`
+  tracing target, one before the upstream call and one when the stream
+  ends or the client disconnects. `a2a` and `agui` on one route is a
+  config error. See README, "Agent-user interaction".
+- **Known limitations:** audit is tracing, not a store; the gate reads the
+  run input, not the agent's reply.
+
+---
+
 ## PR #44 — Apply the standard governance file set
 **2026-08-08** · [#44](https://github.com/baileyrd/rusty_agent_gateway/pull/44)
 

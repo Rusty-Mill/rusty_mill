@@ -12,7 +12,7 @@ authors.workspace = true
 layer = "libs"
 
 [dependencies]
-rusty-search-core = { workspace = true }
+rusty-search-core = { workspace = true, features = ["serde-json"] }
 async-trait = { workspace = true }
 rusty_serde = { workspace = true }
 # Solr's wire protocol goes through reqwest's real-serde-backed `.json()`

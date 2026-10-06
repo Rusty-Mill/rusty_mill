@@ -455,4 +455,25 @@ mod tests {
             ]
         );
     }
+
+    /// Whole runs with their expected reduction, shared with the TypeScript
+    /// core's tests.
+    #[test]
+    fn run_fixture_reduces_identically() {
+        let cases = rusty_json::Value::parse(include_str!("../fixtures/runs.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let input = crate::RunAgentInput::from_value(&case["input"]).unwrap();
+            let mut reducer = Reducer::from_input(&input);
+            let mut verifier = crate::Verifier::new();
+            for raw in case["events"].as_array().unwrap() {
+                for event in verifier.push(Event::from_value(raw).unwrap()).unwrap() {
+                    reducer.apply(&event).unwrap();
+                }
+            }
+            let messages: Vec<Value> = reducer.messages.iter().map(Message::to_value).collect();
+            assert_eq!(Value::Array(messages), case["messages"], "{name}: messages");
+            assert_eq!(reducer.state, case["state"], "{name}: state");
+        }
+    }
 }

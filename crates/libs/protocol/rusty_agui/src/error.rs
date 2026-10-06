@@ -20,6 +20,15 @@ pub enum Error {
     Closed,
     /// The agent itself failed; the message becomes `RUN_ERROR`.
     Agent(String),
+    /// The connection, request or response framing failed (client).
+    Transport(String),
+    /// The server refused the run with a non-200 status (client).
+    Status {
+        /// The HTTP status.
+        status: u16,
+        /// The response body, for the message.
+        body: String,
+    },
 }
 
 impl Error {
@@ -40,6 +49,8 @@ impl fmt::Display for Error {
             Error::Patch(e) => write!(f, "state delta failed: {e}"),
             Error::Closed => f.write_str("event stream closed"),
             Error::Agent(why) => write!(f, "agent failed: {why}"),
+            Error::Transport(why) => write!(f, "transport error: {why}"),
+            Error::Status { status, body } => write!(f, "server answered {status}: {body}"),
         }
     }
 }

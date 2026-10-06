@@ -31,6 +31,10 @@ export interface UiState extends Persisted {
   /** Bumped to ask the quick-add box to take focus (the `N` shortcut). */
   quickAddFocus: number
   searchOpen: boolean
+  /** The assistant chat panel. Never remembered. */
+  assistantOpen: boolean
+  toggleAssistant(): void
+  closeAssistant(): void
   /** Group collapse state within the task list, keyed `${view}:${group}`. */
   collapsedGroups: Record<string, boolean>
   toggleSidebar(): void
@@ -59,6 +63,9 @@ export const useUi = create<UiState>()((set, get) => {
     closeDrawer: () => set({ drawerOpen: false }),
     quickAddFocus: 0,
     searchOpen: false,
+    assistantOpen: false,
+    toggleAssistant: () => set((s) => ({ assistantOpen: !s.assistantOpen })),
+    closeAssistant: () => set({ assistantOpen: false }),
     collapsedGroups: {},
     toggleSidebar: () => {
       set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed }))

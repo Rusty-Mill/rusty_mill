@@ -1,0 +1,18 @@
+{
+  "name": "rusty-agui-conformance",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Runs the reference AG-UI TypeScript client (@ag-ui/client, the one CopilotKit embeds) and this workspace's own @rusty-mill/agui-core against rusty_agui's AgentHandler",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@ag-ui/client": "^1.0.2",
+    "@rusty-mill/agui-core": "file:../packages/agui-core",
+    "@types/node": "^22.20.4",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

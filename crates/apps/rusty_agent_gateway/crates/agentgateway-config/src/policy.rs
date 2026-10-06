@@ -71,6 +71,10 @@ pub struct Policies {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aPolicy>,
 
+    /// Agent-user interaction (AG-UI) run gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agui: Option<AguiPolicy>,
+
     /// LLM-specific request shaping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiPolicy>,
@@ -91,6 +95,11 @@ impl Policies {
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if let Some(cors) = &self.cors {
             cors.validate()?;
+        }
+        if self.a2a.is_some() && self.agui.is_some() {
+            return Err(ConfigError::Invalid(
+                "a route carries either `a2a` or `agui`, not both".into(),
+            ));
         }
         Ok(())
     }
@@ -729,6 +738,23 @@ pub struct A2aPolicy {
     /// Serve an agent card for the agents behind this route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_card: Option<AgentCardPolicy>,
+}
+
+/// Agent-user interaction (AG-UI) run gating.
+///
+/// Marks a route as carrying AG-UI runs. Every `POST` is read as a
+/// `RunAgentInput` and judged by `rules` before it reaches the agent; the
+/// decision and the run's outcome are each written as an audit record.
+/// Unlike `a2a`, this is deny by default: a route with no `allow` rule
+/// refuses every run, so a misspelled or forgotten policy fails closed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AguiPolicy {
+    /// CEL rules over `agui`, `request` and `jwt`. A `deny` that holds
+    /// refuses; a `require` that fails refuses; otherwise an `allow` must
+    /// hold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<AuthorizationRule>,
 }
 
 /// How the gateway presents the agents behind a route.

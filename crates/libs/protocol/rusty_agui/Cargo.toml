@@ -19,6 +19,10 @@ default = []
 # server. Off by default so a client-only or framework-agnostic consumer
 # pulls in no HTTP server.
 serve = ["dep:rusty_serve", "dep:rusty_http"]
+# `client::HttpAgent`: a blocking AG-UI client on `rusty_http`'s sync
+# transport over `std::net` (plain `http://`). Off by default for the same
+# reason as `serve`.
+client = ["dep:rusty_http"]
 
 [dependencies]
 # First-party only (ADR-0002 Tier S). `rusty_json` without its `serde`
@@ -29,6 +33,10 @@ rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", defau
 rusty_json_patch = { workspace = true }
 rusty_serve = { workspace = true, optional = true }
 rusty_http = { workspace = true, optional = true }
+
+[[example]]
+name = "echo_agent"
+required-features = ["serve"]
 
 [lints.rust]
 unsafe_code = "forbid"
