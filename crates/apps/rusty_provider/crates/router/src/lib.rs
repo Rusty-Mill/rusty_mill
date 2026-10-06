@@ -154,7 +154,7 @@ impl GenerationCache {
     }
 
     fn get(&self, id: &str) -> Option<GenerationRecord> {
-        self.by_id.get(&id.to_string()).cloned()
+        self.by_id.get(id).cloned()
     }
 }
 
@@ -197,7 +197,7 @@ impl ReasoningReplayCache {
     }
 
     fn get(&self, tool_call_id: &str) -> Option<String> {
-        self.by_tool_call_id.get(&tool_call_id.to_string()).cloned()
+        self.by_tool_call_id.get(tool_call_id).cloned()
     }
 }
 

@@ -191,10 +191,11 @@ fn expand_refs(value: &str, lookup: &std::collections::HashMap<&str, &str>) -> S
             // `bytes[i] as char` would re-encode each byte of a multi-byte
             // sequence as a Latin-1 code point and corrupt non-ASCII text
             // (and the outer pass loop would then compound the damage).
-            let ch = value[i..]
-                .chars()
-                .next()
-                .expect("i is on a char boundary and before the end");
+            // `i` always sits on a char boundary here, so `None` cannot
+            // happen; if it ever did, stopping is the safe answer.
+            let Some(ch) = value[i..].chars().next() else {
+                break;
+            };
             out.push(ch);
             i += ch.len_utf8();
             continue;

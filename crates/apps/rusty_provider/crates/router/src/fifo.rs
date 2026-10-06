@@ -8,6 +8,7 @@
 //! across the crate boundary would need a public API this crate does not
 //! want to commit to yet.
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
@@ -44,11 +45,21 @@ impl<K: Eq + Hash + Clone, V> FifoMap<K, V> {
     }
 
     #[cfg(test)]
-    pub(crate) fn contains_key(&self, key: &K) -> bool {
+    pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.entries.contains_key(key)
     }
 
-    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+    /// Looks a key up by any borrowed form of it (`&str` for a `String`
+    /// key), so a lookup never has to allocate an owned key.
+    pub(crate) fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.entries.get(key)
     }
 
@@ -70,9 +81,13 @@ impl<K: Eq + Hash + Clone, V> FifoMap<K, V> {
     /// Removes `key` from both the map and the eviction queue, so a later
     /// re-insert of the same key cannot leave a stale queue entry that
     /// would make the next eviction pop the wrong key.
-    pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
+    pub(crate) fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let removed = self.entries.remove(key)?;
-        self.order.retain(|k| k != key);
+        self.order.retain(|k| k.borrow() != key);
         Some(removed)
     }
 }
@@ -122,6 +137,17 @@ mod tests {
         assert!(!map.contains_key(&"b"));
         assert!(map.contains_key(&"a") && map.contains_key(&"c"));
         assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn string_keys_are_looked_up_by_str_without_allocating_a_key() {
+        let mut map: FifoMap<String, u8> = FifoMap::with_capacity(2);
+        map.insert("alpha".to_string(), 1);
+        let key: &str = "alpha";
+        assert_eq!(map.get(key), Some(&1));
+        assert!(map.contains_key(key));
+        assert_eq!(map.remove(key), Some(1));
+        assert!(!map.contains_key(key));
     }
 
     #[test]

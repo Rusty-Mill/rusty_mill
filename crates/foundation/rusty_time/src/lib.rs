@@ -67,9 +67,12 @@ impl Date {
 
 /// Inverse of [`Date::days_since_epoch`]: the proleptic-Gregorian civil
 /// date `(year, month, day)` that is `days` days after 1970-01-01.
-/// Howard Hinnant's `civil_from_days`, in `i64` so the whole `i64` day
-/// range maps without overflow; the year is returned as `i64` and the
-/// caller decides whether it fits the `i32` a [`Date`] stores.
+/// Howard Hinnant's `civil_from_days` in `i64`. Safe for every day count
+/// derived from an `i64` number of seconds (`|days| <= i64::MAX / 86_400`),
+/// which is all [`DateTime::from_unix_secs`] ever passes; it is not
+/// defined for day counts near `i64::MIN`/`i64::MAX`, where the first
+/// addition would overflow. The year is returned as `i64` and the caller
+/// decides whether it fits the `i32` a [`Date`] stores.
 fn civil_from_days(days: i64) -> (i64, u8, u8) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

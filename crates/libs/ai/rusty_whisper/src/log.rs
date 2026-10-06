@@ -10,7 +10,10 @@
 //! after the lock is released. A sink may therefore log again, replace
 //! itself, or own values whose destructors log, without deadlocking, and
 //! a sink that panics cannot leave the slot poisoned for the rest of the
-//! process.
+//! process. The flip side of cloning the handle out: a `log` call that
+//! already took its clone keeps using that sink even if another thread
+//! replaces it meanwhile, so the old sink is only truly gone once every
+//! such in-flight call has returned.
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -43,7 +46,10 @@ fn swap_sink(next: LogFn) -> LogFn {
 /// threads at once (every logging thread calls it directly, including
 /// the audio capture thread) and must not rely on being serialised. It
 /// may itself call [`set_log_sink`] or [`reset_log_sink`]; the sink
-/// installed that way takes effect for the *next* message.
+/// installed that way takes effect for the *next* message. Replacement
+/// is not a barrier: a concurrent `log` call that has already picked up
+/// the previous sink finishes with it, and the previous sink is dropped
+/// once the last such call releases its handle.
 pub fn set_log_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     let previous = swap_sink(Arc::new(f));
     drop(previous);
@@ -115,16 +121,33 @@ mod tests {
     const SCENARIO_VAR: &str = "RUSTY_WHISPER_LOG_SCENARIO";
     const CHILD_TIMEOUT: Duration = Duration::from_secs(20);
 
+    /// Kills and reaps `child`, returning a description of how that went
+    /// so a failure path never abandons the process and never hides a
+    /// cleanup error behind the original failure.
+    fn terminate(child: &mut std::process::Child) -> String {
+        let killed = child.kill();
+        let reaped = child.wait();
+        match (killed, reaped) {
+            (Ok(()), Ok(status)) => format!("child killed and reaped ({status})"),
+            (Ok(()), Err(e)) => format!("child killed but not reaped: {e}"),
+            (Err(k), Ok(status)) => format!("kill failed ({k}); child reaped anyway ({status})"),
+            (Err(k), Err(w)) => format!("kill failed ({k}) and reap failed ({w})"),
+        }
+    }
+
     /// Runs `scenario` in a child process and asserts it exits cleanly
     /// within the timeout. In the child (selected by `SCENARIO_VAR`), runs
     /// the scenario body itself and returns `true` so the caller stops.
+    /// Every failure path (timeout, poll error) terminates and reaps the
+    /// child before panicking, and reports the cleanup outcome.
     fn run_isolated(scenario: &str, body: fn()) -> bool {
         if std::env::var(SCENARIO_VAR).as_deref() == Ok(scenario) {
             body();
             return true;
         }
         let test_name = format!("log::tests::{scenario}");
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let exe = std::env::current_exe().expect("locate the running test binary");
+        let mut child = Command::new(exe)
             .args(["--exact", &test_name, "--nocapture", "--test-threads=1"])
             .env(SCENARIO_VAR, scenario)
             .stdout(Stdio::null())
@@ -133,18 +156,25 @@ mod tests {
             .expect("spawn child test process");
         let started = Instant::now();
         loop {
-            if let Some(status) = child.try_wait().expect("poll child") {
-                let output = child.wait_with_output().expect("collect child output");
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                assert!(
-                    status.success(),
-                    "child scenario `{scenario}` failed ({status}):\n{stderr}"
-                );
-                return false;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let output = child.wait_with_output().expect("collect child output");
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        status.success(),
+                        "child scenario `{scenario}` failed ({status}):\n{stderr}"
+                    );
+                    return false;
+                }
+                Ok(None) => {}
+                Err(poll_error) => {
+                    let cleanup = terminate(&mut child);
+                    panic!("polling child scenario `{scenario}` failed: {poll_error}; {cleanup}");
+                }
             }
             if started.elapsed() > CHILD_TIMEOUT {
-                let _ = child.kill();
-                panic!("child scenario `{scenario}` hung: lock held while the sink ran?");
+                let cleanup = terminate(&mut child);
+                panic!("child scenario `{scenario}` hung: lock held while the sink ran? {cleanup}");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
