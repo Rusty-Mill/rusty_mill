@@ -50,6 +50,10 @@ pub struct XgModel {
     pub w: [f32; N],
     /// Shots the weights were fitted on; 0 for the hand-set prior.
     pub n_train: usize,
+    /// Monotone `[raw p, calibrated p]` knots mapping the logistic output onto the observed
+    /// goal rate (see [`XgModel::fit_calibrated`]); empty means the output is used as is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calib: Vec<[f32; 2]>,
 }
 
 impl Default for XgModel {
@@ -59,6 +63,7 @@ impl Default for XgModel {
             version: "xg-prior-v1".into(),
             w: [-1.6, -0.30, 0.30, 1.9, -0.35, -0.5, 0.0],
             n_train: 0,
+            calib: Vec::new(),
         }
     }
 }
@@ -109,6 +114,46 @@ pub fn features(e: &Episode) -> Option<[f32; N]> {
     ])
 }
 
+/// Folds for the out-of-fold predictions the calibration map is learned from.
+const CALIB_FOLDS: usize = 5;
+/// Shots per bin before pooling: enough that a bin's goal rate is not noise.
+const CALIB_BIN: usize = 200;
+
+/// Monotone `[mean prediction, goal rate]` knots from `(prediction, goal)` pairs: equal-count
+/// bins, then pool-adjacent-violators so the rate never falls as the prediction rises. Empty
+/// (identity) with too few pairs to calibrate on.
+fn isotonic(mut pairs: Vec<(f32, bool)>) -> Vec<[f32; 2]> {
+    if pairs.len() < 2 * CALIB_BIN {
+        return Vec::new();
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let bins = pairs.len() / CALIB_BIN;
+    // (sum of predictions, goals, shots) per block, pooled left to right.
+    let mut blocks: Vec<(f64, f64, f64)> = Vec::new();
+    for b in 0..bins {
+        let end = if b + 1 == bins {
+            pairs.len()
+        } else {
+            (b + 1) * CALIB_BIN
+        };
+        let chunk = &pairs[b * CALIB_BIN..end];
+        let mut cur = (
+            chunk.iter().map(|p| f64::from(p.0)).sum::<f64>(),
+            chunk.iter().filter(|p| p.1).count() as f64,
+            chunk.len() as f64,
+        );
+        while let Some(prev) = blocks.last().filter(|p| p.1 / p.2 > cur.1 / cur.2) {
+            cur = (prev.0 + cur.0, prev.1 + cur.1, prev.2 + cur.2);
+            blocks.pop();
+        }
+        blocks.push(cur);
+    }
+    blocks
+        .iter()
+        .map(|b| [(b.0 / b.2) as f32, (b.1 / b.2) as f32])
+        .collect()
+}
+
 fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z).exp())
 }
@@ -128,8 +173,32 @@ impl XgModel {
         features(e).map_or(0.0, |x| self.p(&x) as f32)
     }
 
-    fn p(&self, x: &[f32; N]) -> f64 {
+    /// The raw logistic output, before calibration.
+    fn raw(&self, x: &[f32; N]) -> f64 {
         sigmoid(x.iter().zip(&self.w).map(|(a, b)| f64::from(a * b)).sum())
+    }
+
+    fn p(&self, x: &[f32; N]) -> f64 {
+        self.calibrated(self.raw(x))
+    }
+
+    /// `raw` mapped through the calibration knots (linear between them, flat past the ends).
+    fn calibrated(&self, raw: f64) -> f64 {
+        let k = &self.calib;
+        let (Some(first), Some(last)) = (k.first(), k.last()) else {
+            return raw;
+        };
+        if raw <= f64::from(first[0]) {
+            return f64::from(first[1]);
+        }
+        match k.windows(2).find(|w| raw <= f64::from(w[1][0])) {
+            Some(w) => {
+                let (x0, x1) = (f64::from(w[0][0]), f64::from(w[1][0]));
+                let t = if x1 > x0 { (raw - x0) / (x1 - x0) } else { 1.0 };
+                f64::from(w[0][1]) + t * (f64::from(w[1][1]) - f64::from(w[0][1]))
+            }
+            None => f64::from(last[1]),
+        }
     }
 
     /// Ridge-regularised logistic regression by Newton's method (the bias is not
@@ -166,7 +235,28 @@ impl XgModel {
             version: format!("xg-fit-n{}", samples.len()),
             w: w.map(|v| v as f32),
             n_train: samples.len(),
+            calib: Vec::new(),
         })
+    }
+
+    /// [`fit`](Self::fit), then a calibration map learned from out-of-fold predictions: every
+    /// shot is predicted by a model that never saw its fold, so the map corrects the model's
+    /// real (not memorised) bias — here a mid-range overshoot and an underrated top.
+    pub fn fit_calibrated(samples: &[([f32; N], bool)], ridge: f64) -> Option<Self> {
+        let mut model = Self::fit(samples, ridge)?;
+        let mut oof = Vec::with_capacity(samples.len());
+        for fold in 0..CALIB_FOLDS {
+            let (held, rest): (Vec<_>, Vec<_>) = samples
+                .iter()
+                .enumerate()
+                .partition(|(i, _)| i % CALIB_FOLDS == fold);
+            let rest: Vec<_> = rest.into_iter().map(|(_, s)| *s).collect();
+            let m = Self::fit(&rest, ridge)?;
+            oof.extend(held.into_iter().map(|(_, (x, y))| (m.raw(x) as f32, *y)));
+        }
+        model.calib = isotonic(oof);
+        model.version.push_str("-iso");
+        Some(model)
     }
 
     /// Mean squared error of the predicted probabilities (lower is better).
@@ -254,6 +344,7 @@ mod tests {
             version: "t".into(),
             w: [-1.0, -0.6, 0.0, 2.0, -0.5, 0.0, 0.4],
             n_train: 0,
+            calib: Vec::new(),
         };
         let mut rng = 12345u64;
         let mut next = || {
@@ -303,6 +394,93 @@ mod tests {
     #[test]
     fn too_few_shots_is_not_a_fit() {
         assert!(XgModel::fit(&[([1.0; N], true)], 1.0).is_none());
+    }
+
+    /// Predictions that are systematically wrong in the middle and at the top are pulled onto the
+    /// observed rate, the map stays monotone, and an uncalibrated model is unchanged.
+    #[test]
+    fn calibration_corrects_a_distorted_model_and_stays_monotone() {
+        let mut rng = 99u64;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 33) as f32 / (1u64 << 31) as f32
+        };
+        // True goal rate is the prediction squashed toward 0.5 in the middle, lifted at the top.
+        let pairs: Vec<(f32, bool)> = (0..6000)
+            .map(|_| {
+                let p = next();
+                let truth = if p > 0.8 { 0.95 } else { 0.1 + 0.6 * p * p };
+                (p, next() < truth)
+            })
+            .collect();
+        let knots = isotonic(pairs.clone());
+        assert!(
+            knots
+                .windows(2)
+                .all(|w| w[0][0] <= w[1][0] && w[0][1] <= w[1][1]),
+            "{knots:?}"
+        );
+        let m = XgModel {
+            calib: knots,
+            ..XgModel::default()
+        };
+        let err = |f: &dyn Fn(f32) -> f32| {
+            pairs
+                .iter()
+                .map(|(p, y)| (f(*p) - f32::from(*y)).powi(2))
+                .sum::<f32>()
+                / pairs.len() as f32
+        };
+        let raw = err(&|p| p);
+        let cal = err(&|p| m.calibrated(f64::from(p)) as f32);
+        assert!(cal < raw - 0.01, "calibrated {cal} vs raw {raw}");
+        assert!((m.calibrated(0.9) - 0.95).abs() < 0.05);
+        assert_eq!(
+            XgModel::default().calibrated(0.37),
+            0.37,
+            "no knots = identity"
+        );
+        assert!(
+            isotonic(vec![(0.5, true); 10]).is_empty(),
+            "too little data to calibrate"
+        );
+    }
+
+    #[test]
+    fn calibrated_fit_is_out_of_fold_and_a_saved_model_without_knots_loads() {
+        let mut rng = 7u64;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 33) as f32 / (1u64 << 31) as f32
+        };
+        let data: Vec<_> = (0..3000)
+            .map(|_| {
+                let x = [
+                    1.0,
+                    0.5 + 4.0 * next(),
+                    1.0 + next(),
+                    f32::from(next() > 0.5),
+                    0.0,
+                    next(),
+                    0.0,
+                ];
+                let p = 1.0 / (1.0 + (-(1.0 - 0.6 * x[1] + 2.0 * x[3])).exp());
+                (x, next() < p)
+            })
+            .collect();
+        let m = XgModel::fit_calibrated(&data, 1.0).expect("fit");
+        assert!(m.version.ends_with("-iso") && !m.calib.is_empty());
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<XgModel>(&json).unwrap(), m);
+        let plain = r#"{"version":"v","w":[0,0,0,0,0,0,0],"n_train":1}"#;
+        assert!(serde_json::from_str::<XgModel>(plain)
+            .unwrap()
+            .calib
+            .is_empty());
     }
 
     #[test]

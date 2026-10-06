@@ -82,9 +82,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let prior = XgModel::default();
-    let fit = XgModel::fit(&train, RIDGE).ok_or(
+    let raw_fit = XgModel::fit(&train, RIDGE).ok_or(
         "too few shots to fit (are the corpus replays on disk? see assets/corpus/README.md)",
     )?;
+    // Calibrated on out-of-fold predictions of the training shots only, so the held-out
+    // numbers below are honest for both.
+    let fit = XgModel::fit_calibrated(&train, RIDGE).ok_or("too few shots to calibrate")?;
     // The same fit without the rank feature, to show what it buys on held-out shots.
     let blind = |d: &[Sample]| -> Vec<Sample> {
         d.iter()
@@ -102,24 +105,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let no_rank = XgModel::fit(&blind(&train), RIDGE).ok_or("too few shots to fit")?;
     println!(
-        "held-out Brier: base rate {:.4} | prior {:.4} | fitted without rank {:.4} | fitted {:.4}",
+        "held-out Brier: base rate {:.4} | prior {:.4} | fitted without rank {:.4} | fitted {:.4} | calibrated {:.4}",
         base_brier(&test),
         prior.brier(&test),
         no_rank.brier(&blind(&test)),
+        raw_fit.brier(&test),
         fit.brier(&test)
     );
-    println!("reliability on held-out shots (mean predicted → observed, n):");
+    println!("reliability on held-out shots, uncalibrated (mean predicted → observed, n):");
+    for (p, o, n) in raw_fit.reliability(&test) {
+        println!("  {p:.2} → {o:.2}  ({n})");
+    }
+    println!("reliability on held-out shots, calibrated:");
     for (p, o, n) in fit.reliability(&test) {
         println!("  {p:.2} → {o:.2}  ({n})");
     }
     println!(
         "weights [bias, dist, speed, on_target, defenders, edge, rank]: {:?}",
-        fit.w
+        raw_fit.w
     );
 
     // Ship the fit on everything once it has been validated out of sample.
     let all: Vec<Sample> = train.into_iter().chain(test).collect();
-    let final_model = XgModel::fit(&all, RIDGE).ok_or("refit failed")?;
+    let final_model = XgModel::fit_calibrated(&all, RIDGE).ok_or("refit failed")?;
     let out = dir.join("xg_model.json");
     std::fs::write(&out, serde_json::to_vec_pretty(&final_model)?)?;
     println!("wrote {} ({})", out.display(), final_model.version);
