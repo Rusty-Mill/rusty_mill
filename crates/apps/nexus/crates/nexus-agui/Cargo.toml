@@ -1,0 +1,30 @@
+[package]
+name = "nexus-agui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Serve a Nexus agent session over AG-UI: the ai-runtime's typed AiEvent stream behind rusty_agui's Agent trait, with round approval as a frontend tool call (ADR-0007 follow-ons step 10)"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+async-trait = { workspace = true }
+futures = "0.3"
+nexus-ai-runtime = { path = "../nexus-ai-runtime" }
+nexus-kernel = { path = "../nexus-kernel" }
+# The protocol: the `Agent` trait this crate implements, the event types,
+# and the `serve` feature's handler a consumer mounts on `rusty_serve`.
+rusty_agui = { workspace = true, features = ["serve"] }
+# AG-UI values are `rusty_json::Value`, Nexus's are `serde_json::Value`;
+# the `serde` feature is the bridge between the two.
+rusty_json = { workspace = true, features = ["serde"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+rusty_agui = { workspace = true, features = ["serve", "client"] }
+rusty_serve = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }

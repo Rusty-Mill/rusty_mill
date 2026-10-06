@@ -1,0 +1,44 @@
+[package]
+name = "rusty_routine"
+version = "0.1.0"
+edition = "2021"
+description = "Routines for AG-UI agents: a cron schedule that posts a RunAgentInput on time, disabled after too many consecutive failures"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["ag-ui", "agent", "cron", "schedule"]
+categories = ["date-and-time"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[features]
+default = []
+# `run::run`: a loop that fires due routines against an agent with
+# `rusty_agui`'s client. Off by default: the library itself does no I/O.
+run = ["rusty_agui/client"]
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_agui = { workspace = true }
+# `Thread::absorb` and `Reply`: a routine's run is read back the way a
+# channel's is.
+rusty_channel = { workspace = true }
+# `rusty_json` without `serde`, as the crates above take it (a path
+# dependency: Cargo ignores `default-features = false` on a workspace entry
+# whose defaults are on).
+rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# The runner test serves a scripted agent in-process.
+rusty_agui = { workspace = true, features = ["serve", "client"] }
+rusty_serve = { workspace = true }
+
+[[example]]
+name = "routines"
+required-features = ["run"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

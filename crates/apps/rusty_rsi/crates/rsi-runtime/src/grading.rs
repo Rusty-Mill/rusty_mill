@@ -50,7 +50,10 @@ pub struct SolutionRunner<E> {
     scratch: PathBuf,
 }
 
-impl<E: Executor<Error = RuntimeError>> SolutionRunner<E> {
+impl<E: Executor> SolutionRunner<E>
+where
+    RuntimeError: From<E::Error>,
+{
     /// A runner whose sandboxes may read `read_roots` (those that exist) and
     /// write one fresh directory under `scratch`.
     ///
@@ -122,7 +125,7 @@ impl<E: Executor<Error = RuntimeError>> SolutionRunner<E> {
             Ok(outcome) => outcome,
             Err(error) => {
                 remove_work(&work)?;
-                return Err(error);
+                return Err(error.into());
             }
         };
         // The executor has killed and verified the whole process group by
@@ -218,7 +221,10 @@ impl<'a, E> LocalTask<'a, E> {
     }
 }
 
-impl<E: Executor<Error = RuntimeError>> PublicTask for LocalTask<'_, E> {
+impl<E: Executor> PublicTask for LocalTask<'_, E>
+where
+    RuntimeError: From<E::Error>,
+{
     type Error = RuntimeError;
 
     fn id(&self) -> &TaskId {
@@ -328,7 +334,10 @@ impl<'a, E> SandboxedGrader<'a, E> {
     }
 }
 
-impl<E: Executor<Error = RuntimeError>> PrivateGrader for SandboxedGrader<'_, E> {
+impl<E: Executor> PrivateGrader for SandboxedGrader<'_, E>
+where
+    RuntimeError: From<E::Error>,
+{
     type Error = RuntimeError;
 
     fn private_score(

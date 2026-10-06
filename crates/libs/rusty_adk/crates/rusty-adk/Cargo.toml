@@ -26,6 +26,9 @@ models = ["adk-models/gemini", "adk-models/anthropic"]
 sqlite = ["adk-sessions/sqlite"]
 # Serve an ADK agent over the Agent2Agent protocol.
 a2a = ["dep:adk-a2a"]
+# Serve an ADK agent over AG-UI, to the workspace's frontend bindings,
+# channels, routines and gateway.
+agui = ["dep:adk-agui"]
 
 [dependencies]
 adk-core.workspace = true
@@ -38,6 +41,7 @@ adk-tools.workspace = true
 adk-macros = { workspace = true, optional = true }
 adk-mcp = { workspace = true, optional = true }
 adk-a2a = { workspace = true, optional = true }
+adk-agui = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

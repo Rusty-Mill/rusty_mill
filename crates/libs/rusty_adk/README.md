@@ -86,6 +86,7 @@ rusty-adk = { version = "0.1", default-features = false, features = ["macros"] }
 | `models` | the Gemini and Anthropic connectors | yes |
 | `sqlite` | `SqliteStore` — durable session, artifact, and memory services | no |
 | `a2a` | Agent2Agent in both directions, via `adk-a2a` | no |
+| `agui` | AG-UI, via `adk-agui`: serve an agent to this workspace's frontend bindings, channels, routines and gateway | no |
 
 ## Concepts
 
@@ -238,6 +239,14 @@ weather = RemoteA2aAgent(
 One A2A `contextId` is one ADK session, and — the mapping worth having — an ADK
 graph suspension becomes an A2A `InputRequired` task that the caller's next
 message on that task resumes. See the `a2a-agent-server` example.
+
+The same agent is served over AG-UI, the protocol this workspace's React, Vue
+and Angular bindings, Slack, Teams and SMS channels, routines and gateway
+speak, by `adk-agui` (feature `agui`): `AdkAgent` wraps a `Runner` in
+`rusty_agui`'s `Agent` trait and `rusty_agui::serve::AgentHandler` serves it on
+`rusty_serve`. There a graph suspension is a call to the frontend tool
+`request_input`, which a client renders and the person answers; the answering
+tool message resumes the graph. See the `agui-agent-server` example.
 
 The reverse works too. `RemoteA2aAgent` makes a remote A2A agent implement
 ADK's `Agent` trait, so it can be a sub-agent or a graph node like any local

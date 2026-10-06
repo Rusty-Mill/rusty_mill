@@ -98,8 +98,8 @@ Four harness verbs wrap the aisdk agent kernel:
 └─────────────────────────────────────────────────┘
 ```
 
-**Eight crates** (DAG: `config ← observe ← constrain ← feed`; `kernel → constrain`;
-`compose → feed`; `app → all`):
+**Nine crates** (DAG: `config ← observe ← constrain ← feed`; `kernel → constrain`;
+`compose → feed`; `app → all`; `agui → app`):
 
 | Crate | Responsibility |
 |---|---|
@@ -111,6 +111,7 @@ Four harness verbs wrap the aisdk agent kernel:
 | `mcp` | MCP client (manager/policy/namespacing/inspection) + `rmcp` transport (feature-gated) + server mode |
 | `compose` | `Verifier`/`Check`, `FailureType` attribution, `CriteriaJudge`, evidence journal |
 | `app` | `Session` (the centre) + the CLI |
+| `agui` | `KeyAgent`: a `Session` per thread served over AG-UI (`rusty_agui`), the approval gate and plan exits as frontend tool calls |
 
 The authoritative component map and crate DAG live in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §4-5.

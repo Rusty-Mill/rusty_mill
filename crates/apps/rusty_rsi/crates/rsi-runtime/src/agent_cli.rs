@@ -338,13 +338,13 @@ impl CliConfig {
         let stdin = File::open(prompt).map_err(|e| {
             RuntimeError::io(format!("opening the {} prompt", self.agent.name()), e)
         })?;
-        executor.exec_with(
+        Ok(executor.exec_with(
             &spec,
             &self.program.display().to_string(),
             args,
             Stdio::from(stdin),
             Sockets::Internet,
-        )
+        )?)
     }
 
     /// A failed run as an error, with a hint for the common cases.

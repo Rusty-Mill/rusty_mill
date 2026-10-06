@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `DateTime::from_unix_secs(i64) -> Result<DateTime, &str>`: the checked
+  inverse of `DateTime::timestamp` (UTC, zero nanoseconds, zero offset;
+  euclidean split so pre-1970 instants work). An instant whose civil year
+  does not fit a `Date`'s `i32` year is an error, never wrapped or clamped.
+  The crate stays `no_std` and clock-free: reading "now" is the caller's job.
 ### Changed
 ### Fixed
 - `Time::from_hms_nano` now rejects `nano >= 1_000_000_000` instead of accepting
