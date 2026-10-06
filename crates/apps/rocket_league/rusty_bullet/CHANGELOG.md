@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- ADR-0059: verified RLBot v5 install and run sequence for `rb_tape_bot`
+  (launcher MSI, BakkesMod first, `freeplay` and `enable_state_setting`,
+  `RB_TAPE` in `bot.toml`'s `[settings.environment]`); `rlbot` 0.6.0
+  confirmed wire-compatible with core rc17. First run session recorded in
+  `docs/research/BOT-RUN-SHEET.md` (stopped before Stage 0: installing
+  RLBot was refused by the session's tool permissions).
 - ADR-0058 (`RB-VERIFY-003-FR-012`, `FR-013`): `rb-verify --scenario-from
   <capture> <from> <to> [name]` cuts a scenario from a window of a capture
   (`scenario_from_capture`, `rb_scenario::quat_to_rotator`,

@@ -74,9 +74,24 @@ mechanic.
 
 - Does BakkesMod load and record when the game is started by RLBot (its
   `-rlbot` flag disables online play)? People combine them, but I have not
-  confirmed it for this plugin.
+  confirmed it for this plugin. 2026-10-06: still not observed, but the
+  v5 match option `freeplay` is documented as allowing "Bakkesmod plugins"
+  and the wiki's LAN guide runs BakkesMod first, then launches the game
+  through RLBot; core kills and relaunches the game itself, so BakkesMod
+  must be running before the match starts (ADR-0059).
 - Does RLBot v5 run on the owner's current game build and launcher (Epic or
-  Steam)? RLBot says PC only, Epic and Steam.
+  Steam)? RLBot says PC only, Epic and Steam. 2026-10-06: core has an
+  Epic launch path (`Epic.Windows.cs`) and the owner's install is Epic;
+  not yet run, because installing RLBot was refused by the session's tool
+  permissions (see `BOT-RUN-SHEET.md`, session 1).
+- Does core accept state setting from a bot rather than a script?
+  2026-10-06: settled from core's source, no bot/script distinction, only
+  the match's `enable_state_setting` (default on).
+- Does the `rlbot` crate speak core's protocol? 2026-10-06: settled,
+  0.6.0 is the newest release and its schema is wire-identical to rc17's.
+- Do packets arrive at 120 per second? Core starts the game with
+  `RLBot_PacketSendRate=240`; the wiki caps the bot tick rate at 120.
+  Measure on the first capture (lag and drift).
 - Does state setting land on the tick we expect, and does the first
   captured frame equal the set state? Needed because `rb-verify` seeds its
   simulation from the capture's first grounded, neutral frame
@@ -150,4 +165,7 @@ score a recording that starts airborne.
 ## Next
 
 Run risk spikes 1 and 2 on the owner's machine with a trivial tape (jump
-once), capture it, and run `rb-verify` on the result.
+once), capture it, and run `rb-verify` on the result. The first attempt
+(2026-10-06, `BOT-RUN-SHEET.md` session 1) stopped at installing RLBot;
+the verified install and run sequence is in `tools/rb_tape_bot/README.md`
+and the owner installs with one `msiexec` line, then starts at Stage 0.
