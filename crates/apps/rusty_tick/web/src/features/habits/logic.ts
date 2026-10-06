@@ -1,4 +1,5 @@
 /** Pure habit rules: due days, streaks, completion, week ranges, deterministic ids. No clock reads. */
+import { derivedId } from '@/lib/id'
 import { addDays, dayKey, parseDayKey, startOfDay, startOfWeek, type WeekStart } from '@/lib/date'
 
 export type Frequency = { kind: 'daily' } | { kind: 'weekdays'; days: number[] } | { kind: 'perWeek'; times: number }
@@ -35,33 +36,12 @@ export interface Streak {
 
 // ---- ids ----------------------------------------------------------------
 
-/** cyrb128: a small, well-mixed 128-bit string hash (four 32-bit words). Not cryptographic; it only needs to be stable. */
-function hash128(text: string): [number, number, number, number] {
-  let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762
-  for (let i = 0; i < text.length; i++) {
-    const k = text.charCodeAt(i)
-    h1 = h2 ^ Math.imul(h1 ^ k, 597399067)
-    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233)
-    h3 = h4 ^ Math.imul(h3 ^ k, 951274213)
-    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179)
-  }
-  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067)
-  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233)
-  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213)
-  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179)
-  return [(h1 ^ h2 ^ h3 ^ h4) >>> 0, (h2 ^ h1) >>> 0, (h3 ^ h1) >>> 0, (h4 ^ h1) >>> 0]
-}
-
 /**
  * The id of the check-in doc for a habit on a day. Every device derives the
  * same id, so checking in twice is one upsert and unchecking is one delete.
- * UUID-shaped (version nibble 5, RFC 4122 variant) because the server parses ids as UUIDs.
  */
 export function checkinId(habitId: string, day: string): string {
-  const words = hash128(`${habitId.toLowerCase()}|${day}`)
-  const hex = words.map((w) => w.toString(16).padStart(8, '0')).join('')
-  const variant = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+  return derivedId(`${habitId.toLowerCase()}|${day}`)
 }
 
 // ---- weeks and due days ----------------------------------------------------

@@ -13,6 +13,16 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## rusty_tick: fix assignee/estimate save clash and calendar view menu order
+**2026-10-06** · [#530](https://github.com/Rusty-Mill/rusty_mill/pull/530)
+
+- **Fixed:** a task could not have both an assignee and a pomo estimate: both docs used the task id as their document id, the server keeps one document per id whatever its kind, and the refused second save (409) was hidden by the optimistic UI, so it was gone on reload. Each kind now has its own derived id (`derivedId` in `lib/id.ts`, the hash `checkinId` already used, with check-in ids unchanged). A doc saved under the bare task id by #520 or #525 is removed when that task's assignee or estimate next changes.
+- **Fixed:** the calendar view menu listed "3 Days" above "Month" (integer-like object keys sort first); it now follows `CALENDAR_MODES`.
+- **Verified:** web `tsc --noEmit`, `vitest` (645, with regression tests for both), `npm run build`; the new features run in Chromium against the real server with no console errors. Rust unchanged.
+- Known limitations: the web app's background save takes about 20 s for a 317-event import (the on-screen count appears after about 2 s); tasks still queued when a tab closes are sent on the next open; subscriptions are not recreated for tasks whose queued creation was lost.
+
+---
+
 ## Consolidation review batch 2: whisper log sink, nexus env UTF-8, Provider FIFO, search Value bridge, rusty_time from_unix_secs
 **2026-10-06** · [#527](https://github.com/Rusty-Mill/rusty_mill/pull/527) · consolidation review B4, B5, B6, B7, B8 part 1
 
