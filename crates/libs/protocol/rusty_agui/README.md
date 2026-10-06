@@ -56,7 +56,8 @@ To mount the agent on one route of an existing `rusty_serve` handler, call
 `AgentHandler::handle_run(body)` from your own `Handler`.
 
 Point CopilotKit's React SDK at the endpoint through its runtime
-(`HttpAgent({ url })`), or any AG-UI client.
+(`HttpAgent({ url })`), or any AG-UI client. `rusty_tick`'s
+[`copilotkit-demo`](../../../apps/rusty_tick/copilotkit-demo) does exactly that.
 
 ## Call an agent
 
