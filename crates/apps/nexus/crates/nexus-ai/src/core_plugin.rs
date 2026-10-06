@@ -79,7 +79,8 @@ pub const PLUGIN_ID: &str = "com.nexus.ai";
 
 /// Handler id for `ask` (RAG query).
 pub const HANDLER_ASK: u32 = 1;
-/// Handler id for `index_file` (chunk + embed + upsert).
+/// Handler id for `index_file` (chunk + embed + upsert). Optional boolean
+/// `force` skips the unchanged-file shortcut; a non-boolean is rejected.
 pub const HANDLER_INDEX_FILE: u32 = 2;
 /// Handler id for `vectorstore_count` (proxy to storage).
 pub const HANDLER_VECTORSTORE_COUNT: u32 = 3;

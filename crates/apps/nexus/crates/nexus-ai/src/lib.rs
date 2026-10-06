@@ -68,7 +68,10 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use privacy::{PrivacyPolicy, Redaction, Redactor};
 pub use provider::{AiProvider, ChatMessage, ChatTurn, ChatTurnOutput, Role, ToolCall};
-pub use rag::{index_file as rag_index_file, query as rag_query, Citation, RagResponse};
+pub use rag::{
+    index_file as rag_index_file, index_file_with as rag_index_file_with, query as rag_query,
+    Citation, IndexMode, RagResponse,
+};
 pub use sanitize::{Finding, InjectionPolicy, InjectionSource, ScanResult, Scanner};
 pub use tokens::{ApproxTokenCounter, BudgetWarning, ContextSourceKind, TokenBudget, TokenCounter};
 pub use tools::{

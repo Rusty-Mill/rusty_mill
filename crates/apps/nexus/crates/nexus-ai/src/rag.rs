@@ -368,24 +368,64 @@ pub struct IndexOutcome {
     pub skipped: bool,
 }
 
+/// Whether [`index_file_with`] may skip a file whose stored vectors already
+/// match its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexMode {
+    /// Skip the embed pass when the stored content hash and embedding
+    /// dimension still match (C19 / #372). The default.
+    #[default]
+    IfChanged,
+    /// Always embed, ignoring the stored signature. For repairing a file
+    /// whose stored vectors are damaged in a way the signature cannot see
+    /// (for example a non-finite component). The replacement still happens
+    /// only after the new embeddings are validated.
+    Force,
+}
+
 /// Index a file's blocks by chunking, embedding, and upserting via storage
-/// IPC.
-///
-/// C19 (#372) — before paying for an embed pass, compares a hash of
-/// `blocks`' content against what's already stored for `file_path`
-/// (`vectorstore::stored_signature`). A match — including the stored
-/// embedding dimension matching the current embedder's, so a
-/// provider/model switch is never silently skipped — means the file's
-/// existing embeddings are still valid, and the (often remote, always
-/// costly) embedding API call is skipped entirely.
+/// IPC. Equivalent to [`index_file_with`] with [`IndexMode::IfChanged`].
 ///
 /// # Errors
-/// Returns [`AiError`] if embedding or the storage call fails.
+/// Returns [`AiError`] if embedding, validating the embeddings, or the
+/// storage call fails.
 pub async fn index_file(
     ctx: &KernelPluginContext,
     embedder: &dyn EmbeddingProvider,
     file_path: &str,
     blocks: &[(u64, String, String, Option<i32>)],
+) -> Result<IndexOutcome, AiError> {
+    index_file_with(ctx, embedder, file_path, blocks, IndexMode::IfChanged).await
+}
+
+/// Index a file's blocks by chunking, embedding, and upserting via storage
+/// IPC.
+///
+/// C19 (#372) — in [`IndexMode::IfChanged`], before paying for an embed pass,
+/// compares a hash of `blocks`' content against what's already stored for
+/// `file_path` (`vectorstore::stored_signature`). A match — including the
+/// stored embedding dimension matching the current embedder's, so a
+/// provider/model switch is never silently skipped — means the file's
+/// existing embeddings are still valid, and the (often remote, always
+/// costly) embedding API call is skipped entirely. [`IndexMode::Force`]
+/// skips only that shortcut.
+///
+/// Order of operations, in both modes: chunk, embed, **validate** the
+/// provider's output, then replace the file's vectors in one storage
+/// transaction. The old vectors are never deleted before a validated
+/// replacement exists, so a failed embed or a malformed provider reply leaves
+/// the file as it was. (A file with no embeddable content is the one
+/// deliberate delete.)
+///
+/// # Errors
+/// Returns [`AiError`] if embedding fails, the provider returns a malformed
+/// result (see `validate_embeddings`), or the storage call fails.
+pub async fn index_file_with(
+    ctx: &KernelPluginContext,
+    embedder: &dyn EmbeddingProvider,
+    file_path: &str,
+    blocks: &[(u64, String, String, Option<i32>)],
+    mode: IndexMode,
 ) -> Result<IndexOutcome, AiError> {
     let chunks = chunks_from_blocks(file_path, blocks, DEFAULT_MAX_CHUNK_SIZE);
 
@@ -398,17 +438,22 @@ pub async fn index_file(
     }
 
     let content_hash = blocks_content_hash(blocks);
-    if let Some((stored_hash, stored_dim)) = vectorstore::stored_signature(ctx, file_path).await? {
-        if stored_hash == content_hash && stored_dim == embedder.dimension() {
-            return Ok(IndexOutcome {
-                chunks: 0,
-                skipped: true,
-            });
+    if mode == IndexMode::IfChanged {
+        if let Some((stored_hash, stored_dim)) =
+            vectorstore::stored_signature(ctx, file_path).await?
+        {
+            if stored_hash == content_hash && stored_dim == embedder.dimension() {
+                return Ok(IndexOutcome {
+                    chunks: 0,
+                    skipped: true,
+                });
+            }
         }
     }
 
     let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
     let embeddings = embedder.embed(&texts).await?;
+    validate_embeddings(&embeddings, chunks.len())?;
 
     let chunk_embeddings: Vec<ChunkEmbedding> = chunks
         .into_iter()
@@ -428,6 +473,45 @@ pub async fn index_file(
         chunks: n,
         skipped: false,
     })
+}
+
+/// Check a provider's reply before anything is stored: exactly one embedding
+/// per chunk (a short or long reply is an error, never silently truncated by
+/// pairing), each non-empty and finite, all of one dimension.
+///
+/// The dimension is deliberately not compared with
+/// [`EmbeddingProvider::dimension`]: for the Ollama and `OpenAI` providers that
+/// is a per-provider constant, not what a configured model actually emits.
+///
+/// # Errors
+/// Returns [`AiError::Provider`] describing the first problem found.
+pub(crate) fn validate_embeddings(embeddings: &[Vec<f32>], expected: usize) -> Result<(), AiError> {
+    if embeddings.len() != expected {
+        return Err(AiError::Provider(format!(
+            "embedding provider returned {} vectors for {expected} chunks",
+            embeddings.len()
+        )));
+    }
+    let dim = embeddings.first().map_or(0, Vec::len);
+    for (i, embedding) in embeddings.iter().enumerate() {
+        if embedding.is_empty() {
+            return Err(AiError::Provider(format!(
+                "embedding provider returned an empty vector for chunk {i}"
+            )));
+        }
+        if embedding.len() != dim {
+            return Err(AiError::Provider(format!(
+                "embedding provider returned {} dimensions for chunk {i} but {dim} for chunk 0",
+                embedding.len()
+            )));
+        }
+        if embedding.iter().any(|v| !v.is_finite()) {
+            return Err(AiError::Provider(format!(
+                "embedding provider returned a non-finite value for chunk {i}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Embed the question and retrieve the top-`limit` chunks from the
@@ -1716,6 +1800,168 @@ mod tests {
         assert!(!outcome.skipped);
         assert_eq!(outcome.chunks, 1);
         assert_eq!(embedder.seen.lock().unwrap().len(), 1);
+    }
+
+    // ── B9c — force re-index, and validation before replacement ─────────
+
+    /// Embedder stub that returns a canned reply whatever it is asked, so a
+    /// test can model a provider that returns too few, too many or malformed
+    /// vectors.
+    struct ScriptedEmbedder {
+        reply: Vec<Vec<f32>>,
+        calls: Mutex<usize>,
+    }
+
+    impl ScriptedEmbedder {
+        fn new(reply: Vec<Vec<f32>>) -> Self {
+            Self {
+                reply,
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for ScriptedEmbedder {
+        async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, AiError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(self.reply.clone())
+        }
+        fn dimension(&self) -> usize {
+            self.reply.first().map_or(0, Vec::len)
+        }
+    }
+
+    fn storage_commands(dispatcher: &StubDispatcher) -> Vec<String> {
+        dispatcher
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, cmd, _)| cmd.clone())
+            .collect()
+    }
+
+    fn hello_blocks() -> Vec<(u64, String, String, Option<i32>)> {
+        vec![(
+            1u64,
+            "paragraph".to_string(),
+            "hello world".to_string(),
+            None,
+        )]
+    }
+
+    #[tokio::test]
+    async fn force_re_embeds_a_file_whose_stored_signature_still_matches() {
+        let blocks = hello_blocks();
+        let hash = blocks_content_hash(&blocks);
+        let dispatcher =
+            Arc::new(StubDispatcher::new(Vec::new()).seed_stored("notes/a.md", &hash, 2));
+        let embedder = StubEmbedder {
+            vector: vec![0.1, 0.2],
+            seen: Mutex::new(Vec::new()),
+        };
+        let (ctx, _tmp) = make_ctx(dispatcher.clone());
+
+        let normal = index_file_with(&ctx, &embedder, "notes/a.md", &blocks, IndexMode::IfChanged)
+            .await
+            .expect("ok");
+        assert!(normal.skipped, "unforced still skips a matching signature");
+        assert!(embedder.seen.lock().unwrap().is_empty());
+
+        let forced = index_file_with(&ctx, &embedder, "notes/a.md", &blocks, IndexMode::Force)
+            .await
+            .expect("ok");
+        assert!(!forced.skipped);
+        assert_eq!(forced.chunks, 1);
+        assert_eq!(embedder.seen.lock().unwrap().as_slice(), &["hello world"]);
+
+        let commands = storage_commands(&dispatcher);
+        assert_eq!(
+            commands.iter().filter(|c| *c == "vector_insert").count(),
+            1,
+            "{commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|c| c == "vector_delete_by_file"),
+            "the replace is one transactional upsert, not a delete then insert: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_provider_reply_changes_nothing_in_either_mode() {
+        let blocks = hello_blocks();
+        let hash = blocks_content_hash(&blocks);
+        // One chunk is produced from `hello_blocks`.
+        let replies: Vec<(&str, Vec<Vec<f32>>)> = vec![
+            ("no vectors for one chunk", vec![]),
+            (
+                "two vectors for one chunk",
+                vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+            ),
+            ("empty vector", vec![vec![]]),
+            ("NaN", vec![vec![0.1, f32::NAN]]),
+            ("infinity", vec![vec![f32::INFINITY, 0.2]]),
+        ];
+        for mode in [IndexMode::IfChanged, IndexMode::Force] {
+            for (what, reply) in &replies {
+                // Seeded with a different dimension so IfChanged also embeds.
+                let dispatcher =
+                    Arc::new(StubDispatcher::new(Vec::new()).seed_stored("notes/a.md", &hash, 99));
+                let embedder = ScriptedEmbedder::new(reply.clone());
+                let (ctx, _tmp) = make_ctx(dispatcher.clone());
+
+                let err = index_file_with(&ctx, &embedder, "notes/a.md", &blocks, mode)
+                    .await
+                    .expect_err(what);
+                assert!(
+                    matches!(err, AiError::Provider(_)),
+                    "{mode:?} {what}: {err:?}"
+                );
+                assert_eq!(*embedder.calls.lock().unwrap(), 1, "{mode:?} {what}");
+                let commands = storage_commands(&dispatcher);
+                assert!(
+                    !commands
+                        .iter()
+                        .any(|c| c == "vector_insert" || c == "vector_delete_by_file"),
+                    "{mode:?} {what}: stored vectors must stay untouched, saw {commands:?}"
+                );
+                assert_eq!(
+                    dispatcher.stored.lock().unwrap().get("notes/a.md"),
+                    Some(&(hash.clone(), 99)),
+                    "{mode:?} {what}: stored signature changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_embeddings_accepts_exactly_one_finite_uniform_vector_per_chunk() {
+        assert!(validate_embeddings(&[vec![0.5, -0.5], vec![1.0, 2.0]], 2).is_ok());
+        // A configured model's real dimension may differ from the provider's
+        // constant `dimension()`, so only uniformity is required.
+        assert!(validate_embeddings(&[vec![0.5; 1024]], 1).is_ok());
+
+        for (what, bad, expected) in [
+            ("too few", vec![vec![1.0]], 2),
+            ("too many", vec![vec![1.0], vec![1.0]], 1),
+            ("none for one chunk", vec![], 1),
+            ("empty vector", vec![vec![1.0], vec![]], 2),
+            ("mixed dimensions", vec![vec![1.0, 2.0], vec![1.0]], 2),
+            ("NaN", vec![vec![1.0, f32::NAN]], 1),
+            ("negative infinity", vec![vec![f32::NEG_INFINITY]], 1),
+        ] {
+            assert!(
+                matches!(
+                    validate_embeddings(&bad, expected),
+                    Err(AiError::Provider(_))
+                ),
+                "{what}"
+            );
+        }
+        // Nothing to embed is not an error here: `index_file_with` deletes
+        // instead and never reaches validation.
+        assert!(validate_embeddings(&[], 0).is_ok());
     }
 
     #[test]
