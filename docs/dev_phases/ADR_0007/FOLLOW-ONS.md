@@ -111,6 +111,10 @@ before: the hooks are the API, the components are one rendering of it.
   app.** That package is the client CopilotKit's React SDK and OpenBot
   embed, so a run it verifies and reduces is a run those products accept,
   and it runs in Node in CI without a browser.
+  A CopilotKit React page against `rusty_tick`'s assistant followed in
+  `crates/apps/rusty_tick/copilotkit-demo` (CopilotKit's own runtime and
+  `CopilotChat`, a frontend tool, run by hand in a headless browser, not in
+  CI), which is the one check that CopilotKit itself accepts the endpoint.
 
 - **Step 4 is a route policy, not a backend kind.** `agui` sits beside
   `a2a` in `policies` and gates a `host` backend, so it composes with
