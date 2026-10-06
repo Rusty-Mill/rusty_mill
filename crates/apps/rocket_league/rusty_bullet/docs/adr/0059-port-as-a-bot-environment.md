@@ -21,8 +21,14 @@ scripted scenarios.
 
 Measured today (2026-10-06): runs are deterministic (identical output across
 runs, no hash-order iteration in the physics crate); `--self` over 2818
-frames takes 0.35 s wall including startup. Steps per second has not been
-benchmarked.
+frames takes 0.35 s wall including startup. Throughput, measured with a
+throwaway release-mode loop (one car and the ball driving, 4-core container,
+one thread): about 36,000 steps/s in steady state (6,000-tick tape, 20
+runs), but only 6,000 to 10,000 steps/s through `simulate_scenario` on the
+300 to 400-tick shipped scenarios, because each run rebuilds the world and
+the arena mesh (about 28 ms per build). So an `Env` must build the arena
+once and reuse it across `reset`s; that is a design requirement, not an
+optimisation.
 
 ## Decision drivers
 
@@ -78,8 +84,8 @@ frame.
 
 ## Validation and revisit triggers
 
-- Benchmark `step` first (target to be set after the first measurement;
-  RocketSim-class tools do thousands of steps per second per core).
+- Throughput target: keep the steady-state 36,000 steps/s per core, and
+  make `reset` far cheaper than the 28 ms world build (reuse the arena).
 - `Env` reproduces every shipped scenario exactly versus
   `simulate_scenario`; determinism test runs a scenario twice and compares.
 - Revisit if the first game captures show the port's error on a trained

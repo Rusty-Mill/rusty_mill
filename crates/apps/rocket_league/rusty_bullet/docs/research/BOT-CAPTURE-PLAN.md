@@ -114,11 +114,12 @@ stating:
 
 - **Deterministic.** Three runs of `speed_flip` print identical output, and
   the physics crate iterates no `HashMap` (the mesh grid only looks cells up).
-- **Fast enough to sweep.** `--self` on `test2.jsonl` (2818 frames, one car
-  and the ball) finishes in 0.35 s wall including startup, so a scenario
-  sweep (timing offsets, input variants) costs seconds, where the game costs
-  a human-supervised run each. A proper steps-per-second benchmark is not
-  written yet.
+- **Fast enough to sweep.** About 36,000 steps/s per core in steady state
+  (one car and the ball, release build, measured 2026-10-06), so a 400-tick
+  scenario is about 11 ms of simulation. Today each `simulate_scenario` call
+  also rebuilds the arena mesh (about 28 ms), which dominates short runs
+  (6,000 to 10,000 steps/s end to end); a sweep should build the arena once
+  (ADR-0059).
 - **Honest only as far as the last score.** Port predictions are trustworthy
   to the recorded fidelity (car velocity 1.99 uu/s over 30 ticks on
   `test2`), and the first game captures will say which scenarios exceed it.
