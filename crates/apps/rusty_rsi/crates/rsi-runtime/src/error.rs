@@ -46,6 +46,16 @@ pub enum RuntimeError {
     Core(#[from] CoreError),
 }
 
+impl From<rusty_sandbox::Error> for RuntimeError {
+    fn from(error: rusty_sandbox::Error) -> Self {
+        match error {
+            rusty_sandbox::Error::Io { context, source } => Self::Io { context, source },
+            rusty_sandbox::Error::Sandbox(why) => Self::Sandbox(why),
+            invalid @ rusty_sandbox::Error::Invalid { .. } => Self::Core(invalid.into()),
+        }
+    }
+}
+
 impl RuntimeError {
     /// Wraps an I/O error with what was being attempted.
     pub fn io(context: impl Into<String>, source: std::io::Error) -> Self {

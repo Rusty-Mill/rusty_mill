@@ -49,6 +49,9 @@ members = [
     "crates/foundation/rusty_json/rusty_json-derive",
     "crates/libs/net/rusty_oauth",
     "crates/libs/protocol/rusty_channel",
+    "crates/libs/protocol/rusty_routine",
+    "crates/libs/rusty_sandbox",
+    "crates/libs/rusty_bot",
     "crates/libs/homelab/rusty_proxmox",
     "crates/libs/homelab/rusty_opnsense",
     "crates/libs/homelab/rusty_fedora",
@@ -172,6 +175,7 @@ members = [
     "crates/apps/rusty_key/crates/mcp",
     "crates/apps/rusty_key/crates/compose",
     "crates/apps/rusty_key/crates/app",
+    "crates/apps/rusty_key/crates/agui",
     "crates/libs/ai/rusty_llama",
     "crates/apps/rusty_tailscale/crates/ts-types",
     "crates/apps/rusty_tailscale/crates/ts-key",
@@ -199,10 +203,12 @@ members = [
     "crates/libs/rusty_adk/crates/adk-runner",
     "crates/libs/rusty_adk/crates/adk-mcp",
     "crates/libs/rusty_adk/crates/adk-a2a",
+    "crates/libs/rusty_adk/crates/adk-agui",
     "crates/libs/rusty_adk/crates/rusty-adk",
     "crates/libs/rusty_adk/examples/weather-agent",
     "crates/libs/rusty_adk/examples/mcp-tool-server",
     "crates/libs/rusty_adk/examples/a2a-agent-server",
+    "crates/libs/rusty_adk/examples/agui-agent-server",
     "crates/apps/rusty_provider/crates/core",
     "crates/apps/rusty_provider/crates/providers",
     "crates/apps/rusty_provider/crates/router",
@@ -238,6 +244,7 @@ members = [
     "crates/apps/nexus/crates/nexus-plugins",
     "crates/apps/nexus/crates/nexus-ai",
     "crates/apps/nexus/crates/nexus-ai-runtime",
+    "crates/apps/nexus/crates/nexus-agui",
     "crates/apps/nexus/crates/nexus-mcp",
     "crates/apps/nexus/crates/nexus-lsp",
     "crates/apps/nexus/crates/nexus-dap",
@@ -425,6 +432,9 @@ rusty_json = { path = "crates/foundation/rusty_json" }
 rusty_json_patch = { path = "crates/foundation/rusty_json_patch" }
 rusty_agui = { path = "crates/libs/protocol/rusty_agui" }
 rusty_channel = { path = "crates/libs/protocol/rusty_channel" }
+rusty_routine = { path = "crates/libs/protocol/rusty_routine" }
+rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
+rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
 rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"
@@ -566,6 +576,7 @@ rk-feed = { path = "crates/apps/rusty_key/crates/feed" }
 rk-kernel = { path = "crates/apps/rusty_key/crates/kernel" }
 rk-mcp = { path = "crates/apps/rusty_key/crates/mcp" }
 rk-compose = { path = "crates/apps/rusty_key/crates/compose" }
+rk-app = { path = "crates/apps/rusty_key/crates/app" }
 aisdk = "0.5.2"
 schemars = "1.0.4"
 toml = "0.8"
@@ -639,6 +650,7 @@ adk-agents = { path = "crates/libs/rusty_adk/crates/adk-agents", version = "0.1.
 adk-runner = { path = "crates/libs/rusty_adk/crates/adk-runner", version = "0.1.0" }
 adk-mcp = { path = "crates/libs/rusty_adk/crates/adk-mcp", version = "0.1.0" }
 adk-a2a = { path = "crates/libs/rusty_adk/crates/adk-a2a", version = "0.1.0" }
+adk-agui = { path = "crates/libs/rusty_adk/crates/adk-agui", version = "0.1.0" }
 futures = "0.3"
 tokio-test = "0.4"
 # rusty_a2a is a merged sibling -- retiring adk-a2a's and

@@ -1,0 +1,30 @@
+[package]
+name = "rusty_bot"
+version = "0.1.0"
+edition = "2021"
+description = "Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+readme = "README.md"
+keywords = ["ag-ui", "agent", "sandbox", "bot"]
+categories = ["os"]
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+# First-party only (ADR-0002 Tier S).
+rusty_sandbox = { workspace = true }
+# `rusty_json` without `serde`, as the agui crates take it (a path
+# dependency: Cargo ignores `default-features = false` on a workspace entry
+# whose defaults are on).
+rusty_json = { path = "../../foundation/rusty_json", version = "0.1.0", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "rusty-bot"
+path = "src/bin/rusty-bot.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

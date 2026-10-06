@@ -475,7 +475,7 @@ fn run_python(
         .collect();
     let env = vec![("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned())];
     let spec = SandboxSpec::new(roots, vec![work.clone()], work, env, limits).expect("spec");
-    executor(scratch).exec(&spec, "python3", &["snippet.py".to_owned()])
+    Ok(executor(scratch).exec(&spec, "python3", &["snippet.py".to_owned()])?)
 }
 
 fn stdout(outcome: &rsi_core::ExecOutcome) -> String {
@@ -590,7 +590,7 @@ fn sandbox_setup_failure_fails_closed() {
     .expect("spec");
     let result = executor(&scratch).exec(&spec, "touch", &[marker.display().to_string()]);
     assert!(
-        matches!(result, Err(RuntimeError::Sandbox(_))),
+        matches!(result, Err(rusty_sandbox::Error::Sandbox(_))),
         "{result:?}"
     );
     assert!(!marker.exists(), "the program ran unconfined");

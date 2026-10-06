@@ -1,0 +1,18 @@
+[package]
+name = "agui-agent-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+description = "Serves a Rust ADK agent over AG-UI, so the workspace's frontend bindings, channels, routines and gateway can drive it"
+
+[package.metadata.rusty_mill]
+layer = "libs"
+
+[dependencies]
+rusty-adk = { path = "../../crates/rusty-adk", features = ["agui"] }
+rusty_agui = { workspace = true, features = ["serve"] }
+rusty_serve.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }

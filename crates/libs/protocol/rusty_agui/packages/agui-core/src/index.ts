@@ -10,3 +10,5 @@ export { SequenceError, Verifier } from "./verify.js";
 export { Reducer } from "./reduce.js";
 export { HttpError, TransportError, runAgent, streamAgent } from "./run.js";
 export type { AgentEndpoint, RunOptions, RunResult, StreamOptions } from "./run.js";
+export { AgentStore, lastAssistantText, parseArguments } from "./store.js";
+export type { ActionDefinition, ActionRenderProps, SendOptions, Snapshot, StoreConfig, ToolCallEntry, ToolCallStatus } from "./store.js";

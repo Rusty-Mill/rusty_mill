@@ -1,13 +1,14 @@
-// The agent store behind the hooks: one thread's messages and state, the
-// registered readables and actions, and the run loop. Framework-free
-// except for the shape `useSyncExternalStore` wants (subscribe +
-// getSnapshot), so the hooks stay thin and the loop is testable alone.
+// The agent store behind every framework binding: one thread's messages
+// and state, the registered readables and actions, and the run loop. The
+// shape is an external store (subscribe + getSnapshot), which React's
+// `useSyncExternalStore`, a Vue `shallowRef` and an Angular `signal` each
+// wrap in a few lines, so the bindings stay thin and the loop is tested
+// once, here.
 
+import { Reducer } from "./reduce.js";
+import { streamAgent, type AgentEndpoint } from "./run.js";
 import {
-  Reducer,
   contentText,
-  streamAgent,
-  type AgentEndpoint,
   type Context,
   type Event,
   type Json,
@@ -17,7 +18,7 @@ import {
   type ToolCall,
   type ToolMessage,
   type UserMessage,
-} from "@rusty-mill/agui-core";
+} from "./types.js";
 
 export interface Snapshot {
   messages: Message[];
@@ -29,6 +30,14 @@ export interface Snapshot {
 
 /** How a frontend tool call stands, for its render function. */
 export type ToolCallStatus = "running" | "pending" | "done";
+
+/** One tool call in the thread with how it stands. */
+export interface ToolCallEntry {
+  call: ToolCall;
+  message: Message;
+  status: ToolCallStatus;
+  result: Json | undefined;
+}
 
 export interface ActionRenderProps<Args = Json, Result = Json> {
   args: Args;
@@ -149,10 +158,10 @@ export class AgentStore {
   // --------------------------------------------------------------- calls
 
   /** Every tool call in the thread, with how it stands. */
-  toolCalls(): { call: ToolCall; message: Message; status: ToolCallStatus; result: Json | undefined }[] {
+  toolCalls(): ToolCallEntry[] {
     const answered = new Set<string>();
     for (const m of this.snapshot.messages) if (m.role === "tool") answered.add(m.toolCallId);
-    const out: { call: ToolCall; message: Message; status: ToolCallStatus; result: Json | undefined }[] = [];
+    const out: ToolCallEntry[] = [];
     for (const message of this.snapshot.messages) {
       if (message.role !== "assistant") continue;
       for (const call of message.toolCalls ?? []) {
@@ -166,6 +175,20 @@ export class AgentStore {
 
   action(name: string): ActionDefinition<Json, Json> | undefined {
     return this.actions.get(name);
+  }
+
+  /** What the registered action's `render` shows for this call, if any. */
+  renderToolCall(call: ToolCall): unknown {
+    const action = this.actions.get(call.function.name);
+    if (!action?.render) return undefined;
+    const entry = this.toolCalls().find((c) => c.call.id === call.id);
+    const props: ActionRenderProps<Json, Json> = {
+      args: parseArguments(call) ?? {},
+      status: entry?.status ?? "pending",
+      result: entry?.result,
+      respond: (result) => this.respond(call.id, result),
+    };
+    return action.render(props);
   }
 
   /** Answers a pending call and, by default, continues the run. */
@@ -242,10 +265,8 @@ export class AgentStore {
       if (status === "done") continue;
       const action = this.actions.get(call.function.name);
       if (!action?.handler) continue;
-      let args: Json;
-      try {
-        args = call.function.arguments === "" ? {} : (JSON.parse(call.function.arguments) as Json);
-      } catch {
+      const args = parseArguments(call);
+      if (args === undefined) {
         this.answer(call.id, { error: `invalid arguments: ${call.function.arguments}` });
         answered += 1;
         continue;
@@ -259,6 +280,16 @@ export class AgentStore {
       answered += 1;
     }
     if (answered > 0 && this.config.followUp !== false) await this.run();
+  }
+}
+
+/** The call's arguments parsed, `{}` when empty, `undefined` when not JSON. */
+export function parseArguments(call: ToolCall): Json | undefined {
+  if (call.function.arguments === "") return {};
+  try {
+    return JSON.parse(call.function.arguments) as Json;
+  } catch {
+    return undefined;
   }
 }
 

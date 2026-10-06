@@ -700,7 +700,8 @@ jobs:
           path: crates/apps/rusty_tick/web/test-results
 
   # rusty_agui conformance: the headless TypeScript core (packages/agui-core)
-  # and the React binding (packages/agui-react) are unit-tested and built,
+  # and the React, Vue and Angular bindings (packages/agui-*) are unit-tested
+  # and built,
   # then the core and the reference AG-UI client
   # (@ag-ui/client, which CopilotKit's SDK and OpenBot embed) each drive the
   # `echo_agent` example served by rusty_agui's AgentHandler. Proves the wire
@@ -732,6 +733,8 @@ jobs:
           cache-dependency-path: |
             crates/libs/protocol/rusty_agui/packages/agui-core/package-lock.json
             crates/libs/protocol/rusty_agui/packages/agui-react/package-lock.json
+            crates/libs/protocol/rusty_agui/packages/agui-vue/package-lock.json
+            crates/libs/protocol/rusty_agui/packages/agui-angular/package-lock.json
             crates/libs/protocol/rusty_agui/conformance/package-lock.json
       - run: cargo build -p rusty_agui --features serve --example echo_agent
         working-directory: .
@@ -755,6 +758,24 @@ jobs:
         working-directory: crates/libs/protocol/rusty_agui/packages/agui-react
       - run: npm run build
         working-directory: crates/libs/protocol/rusty_agui/packages/agui-react
+      # The Vue binding: composable tests under jsdom, same scripted agent.
+      - run: npm ci --no-audit --no-fund
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-vue
+      - run: npm run typecheck
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-vue
+      - run: npm test
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-vue
+      - run: npm run build
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-vue
+      # The Angular binding: signal tests on a zoneless application.
+      - run: npm ci --no-audit --no-fund
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-angular
+      - run: npm run typecheck
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-angular
+      - run: npm test
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-angular
+      - run: npm run build
+        working-directory: crates/libs/protocol/rusty_agui/packages/agui-angular
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
