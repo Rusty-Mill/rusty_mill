@@ -13,6 +13,18 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## Consolidation review batch 2: whisper log sink, nexus env UTF-8, Provider FIFO, search Value bridge, rusty_time from_unix_secs
+**2026-10-06** · PR pending (branch `claude/new-session-cihrd9`) · consolidation review B4, B5, B6, B7, B8 part 1
+
+- **Fixed:** `rusty_whisper::log` runs the installed sink with no lock held and drops a replaced sink after the lock is released; poisoned locks are recovered. A reentrant sink, a sink whose captured values log on drop, and a panicking sink are covered by child-process tests.
+- **Fixed:** `nexus-terminal::interpolate_env` decodes whole UTF-8 scalars instead of pushing bytes as Latin-1 chars; `café ${X}` interpolates to `café ok`. Malformed references and cycles behave as before, now pinned.
+- **Changed:** `rp-router` caches share one crate-private `fifo::FifoMap`; `ReasoningReplayCache` gains an eviction test. `RateLimiter` in `rp-core` deferred.
+- **Added:** `rusty-search-core::serde_json_bridge` behind default-off `serde-json` (optional `serde_json`); six backend copies removed; lossy points tested. Verified with the feature off (no `serde_json` in the core's dependency tree), on, per backend, and with a workspace-wide check.
+- **Added:** `rusty_time::DateTime::from_unix_secs(i64) -> Result`, checked against the `i32` year range, round-trip tested across 1900–2200 plus the `i64` and `i32`-year extremes. The meshed clock-helper migration is held: its proposed epoch fallback would have recorded a false timestamp on conversion failure, and is being redesigned around explicit error propagation.
+- **Known limitations:** eight equivalent `now_iso` copies remain in rusty_meshed; `rp-core::RateLimiter` still carries its own FIFO block.
+
+---
+
 ## rusty_http and rusty_request: head cap, chunked body bound, no hidden pool replay
 **2026-10-06** · [#526](https://github.com/Rusty-Mill/rusty_mill/pull/526) · consolidation review first batch B1, B2(a), B3
 
