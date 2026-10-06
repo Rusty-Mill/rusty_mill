@@ -22,8 +22,11 @@ use rlbot::{
 struct TapeBot {
     index: u32,
     scenario: Scenario,
-    /// Active packets seen so far.
-    packets: u64,
+    /// Physics frame of the previous packet, to tell a ticking game from a
+    /// paused one.
+    last_frame: Option<u32>,
+    /// Physics frame of the first live packet, where the state was set.
+    start_frame: Option<u32>,
 }
 
 fn float(val: f32) -> Option<Float> {
@@ -102,27 +105,56 @@ impl BotAgent for TapeBot {
         Self {
             index: controllable_info.index,
             scenario,
-            packets: 0,
+            last_frame: None,
+            start_frame: None,
         }
     }
 
     fn tick(&mut self, game_packet: &GamePacket, packet_queue: &mut PacketQueue) {
         // Only the first car plays the tape; any other stays neutral.
-        if self.index != 0 || game_packet.match_info.match_phase != MatchPhase::Active {
+        if self.index != 0 {
             return;
         }
-        let packet = self.packets;
-        self.packets += 1;
-        if packet == 0 {
-            packet_queue.push(DesiredGameState {
-                ball_states: self.scenario.ball.iter().map(ball_state).collect(),
-                car_states: vec![car_state(&self.scenario.car)],
-                ..Default::default()
-            });
+        let info = &game_packet.match_info;
+        // Freeplay started by RLBot core reports `MatchPhase::Paused` even
+        // while physics runs (observed 2026-10-06, core rc17), and a game
+        // paused with Escape repeats one packet 240 times a second with the
+        // same frame number. So the gate is the physics frame counter, not
+        // the phase: act only when the frame advanced since the last packet.
+        if matches!(
+            info.match_phase,
+            MatchPhase::Replay | MatchPhase::Ended | MatchPhase::GoalScored
+        ) {
+            return;
         }
-        // The first packet only sets the state; the tape starts on the next.
-        let input = match packet.checked_sub(1) {
-            Some(tick) => self.scenario.input_at(tick),
+        let frame = info.frame_num;
+        let Some(last) = self.last_frame.replace(frame) else {
+            return;
+        };
+        if frame == last {
+            return;
+        }
+        let start = match self.start_frame {
+            Some(start) => start,
+            None => {
+                println!(
+                    "tape bot: physics ticking at frame {frame} (phase {:?}), setting the start state",
+                    info.match_phase
+                );
+                self.start_frame = Some(frame);
+                packet_queue.push(DesiredGameState {
+                    ball_states: self.scenario.ball.iter().map(ball_state).collect(),
+                    car_states: vec![car_state(&self.scenario.car)],
+                    ..Default::default()
+                });
+                frame
+            }
+        };
+        // The first live frame only sets the state; the tape starts on the
+        // next one, indexed by physics frame so a dropped packet does not
+        // shift the tape.
+        let input = match (frame - start).checked_sub(1) {
+            Some(tick) => self.scenario.input_at(u64::from(tick)),
             None => Input::default(),
         };
         packet_queue.push(PlayerInput {

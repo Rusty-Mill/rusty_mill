@@ -4,7 +4,20 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- `rb-verify --scenario --against` (`RB-VERIFY-003-FR-011`, spec 0.23.0)
+  places recorded frames by timestamp, so a capture hole skips ticks
+  instead of shifting every later comparison. The eleven tape-bot
+  captures re-scored: eight within 25 uu, prompt_dodge 1.2 uu mean.
 ### Added
+- ADR-0059: first real `rb_tape_bot` session (RLBot core v5.0.0-rc17,
+  Epic, BakkesMod): all eleven scenarios captured and scored
+  (`docs/research/BOT-RUN-SHEET.md` session 1). The bot now gates on the
+  physics frame counter (core reports `Paused` for all of freeplay), one
+  `bots/<scenario>.bot.toml` per scenario for the GUI, `rb_probe`
+  diagnostic, verified install and run sequence in the README. New
+  backlog items RB-RESEARCH-O008 (no inputs recorded for a bot car) and
+  RB-RESEARCH-O009 (one 5-tick hole per capture).
 - ADR-0058 (`RB-VERIFY-003-FR-012`, `FR-013`): `rb-verify --scenario-from
   <capture> <from> <to> [name]` cuts a scenario from a window of a capture
   (`scenario_from_capture`, `rb_scenario::quat_to_rotator`,

@@ -72,20 +72,31 @@ mechanic.
 
 ## Risks to settle first (one spike each)
 
-- Does BakkesMod load and record when the game is started by RLBot (its
-  `-rlbot` flag disables online play)? People combine them, but I have not
-  confirmed it for this plugin.
-- Does RLBot v5 run on the owner's current game build and launcher (Epic or
-  Steam)? RLBot says PC only, Epic and Steam.
-- Does state setting land on the tick we expect, and does the first
-  captured frame equal the set state? Needed because `rb-verify` seeds its
-  simulation from the capture's first grounded, neutral frame
-  (`seed()` in `crates/rb_verify_cli/src/lib.rs`); an airborne start has
-  none. Built: `rb-verify --seed-first-frame <mode> ...` (FR-013,
-  ADR-0058) seeds from the first frame instead.
-- Determinism: run each scenario twice and diff; the difference is the
-  noise floor for every later score.
-- Terms: RLBot may be used offline only; no online play, no ranked.
+All settled on 2026-10-06, first real session (`BOT-RUN-SHEET.md` session
+1, `tools/rb_tape_bot/README.md`, ADR-0059):
+
+- BakkesMod loads and records when core starts the game with `-rlbot`:
+  yes. BakkesMod runs first, core relaunches the game, the injector
+  attaches, `plugin load rusty_bullet_capture` works. Eleven captures.
+- RLBot v5 runs on the owner's Epic install: yes (core rc17, launcher
+  Epic).
+- State setting lands on the expected tick and the first captured frame
+  equals the set state: yes, to the decimal, including rotation (roll
+  sign right), velocity, angular velocity, boost and the ball. The
+  capture misses 2 to 7 ticks at the set frame itself.
+- Core accepts state setting from a bot: yes (gated only by the match's
+  `enable_state_setting`).
+- The `rlbot` crate speaks core's protocol: yes, 0.6.0 against rc17.
+- Packets at 120 per second: yes, 120 packets and 120 physics frames per
+  second measured; 240 identical packets per second only while paused.
+- Determinism: two `prompt_dodge` runs differ by 2.8 uu mean, 13.8 uu max,
+  a one-tick offset of the jump; that is the noise floor.
+- Terms: offline only, freeplay via RLBot's own `freeplay` match option.
+
+Surprises: core reports `MatchPhase::Paused` for all of freeplay (the bot
+now gates on the frame counter); the game pauses when unfocused; the
+plugin records all-zero inputs for an RLBot-driven car
+(RB-RESEARCH-O008); one 5-tick hole per capture (RB-RESEARCH-O009).
 
 ## Mechanics, in order
 
@@ -149,5 +160,9 @@ score a recording that starts airborne.
 
 ## Next
 
-Run risk spikes 1 and 2 on the owner's machine with a trivial tape (jump
-once), capture it, and run `rb-verify` on the result.
+Done 2026-10-06: all eleven scenarios captured and scored (results in
+`BOT-RUN-SHEET.md` and the tape-bot README). Eight of eleven agree within
+25 uu over the whole tape (both dodges within 5 uu); the speed flip, the
+corner slide and the car over the ball diverge by 180 to 290 uu and are
+the next targets (car-ball contact impulse, RB-RESEARCH-O010). Then a second run per scenario for its noise floor, and Stage 3
+(human windows via `--scenario-from`).
