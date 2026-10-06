@@ -13,11 +13,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `rb_env` (ADR-0060, accepted): `Env` with `reset`/`step` over
   `PhysicsWorld`, building the arena once (29 ms) and resetting in 0.25 ms;
   `PhysicsWorld::from_frame_in`; `simulate_scenario` now runs on it with
-  identical output.
-- ADR-0060 (proposed): the physics port as a stepping environment for bots
-  (`rb_env` sketch), plus a "port as the bot's second target" section in
+  identical output. Also a "port as the bot's second target" section in
   `BOT-CAPTURE-PLAN.md` and a shared-bot-surface note on `RB-RESEARCH-O007`.
-  Docs only; no code.
 - ADR-0059: first real `rb_tape_bot` session (RLBot core v5.0.0-rc17,
   Epic, BakkesMod): all eleven scenarios captured and scored
   (`docs/research/BOT-RUN-SHEET.md` session 1). The bot now gates on the
