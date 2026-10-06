@@ -1643,6 +1643,16 @@ mod tests {
     }
 
     #[test]
+    fn streaming_attempt_partial_head_write_failure_never_opens_the_body() {
+        run(async {
+            let (request, opens) = counted_post();
+            let io = Scripted::new(24, b"");
+            expect_io_error(attempt_streaming(io, &request, "/submit").await);
+            assert_eq!(opens.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
     fn streaming_attempt_peer_dropping_after_the_body_opens_it_once_and_fails_once() {
         run(async {
             let (request, opens) = counted_post();
