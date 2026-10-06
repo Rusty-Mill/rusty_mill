@@ -3627,3 +3627,30 @@ fn the_second_jump_expires_after_the_double_jump_window() {
     assert!(dodge_after(true, 1.6).abs() < 1.0, "past the window");
     assert!(dodge_after(false, 3.0) > 100.0, "never jumped: no expiry");
 }
+
+/// RB-PHYSICS-001-FR-138: a wheel resting on the ball is sprung like one on
+/// the floor, but gets no pushback (that impulse treats the surface as still
+/// and unpushable, which a ball is not).
+#[test]
+fn a_wheel_ray_that_hits_the_ball_gets_no_pushback() {
+    let car = level_car_at_height(15.0);
+    let floor = floor();
+    let on_floor = cast_wheels(&car, plane_contact(&floor), TICK);
+    let on_ball = cast_wheels(
+        &car,
+        |origin, direction, length| {
+            plane_contact(&floor)(origin, direction, length).map(|hit| crate::collision::RayHit {
+                dynamic: true,
+                ..hit
+            })
+        },
+        TICK,
+    );
+    let (floor_wheel, ball_wheel) = (on_floor[0].unwrap(), on_ball[0].unwrap());
+    assert!(floor_wheel.pushback > 0.0, "the floor pushes the car back");
+    assert_eq!(ball_wheel.pushback, 0.0, "the ball does not");
+    assert_eq!(
+        ball_wheel.suspension_length, floor_wheel.suspension_length,
+        "the spring is the same"
+    );
+}

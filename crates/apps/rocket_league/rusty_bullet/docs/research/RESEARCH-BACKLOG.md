@@ -419,6 +419,16 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
     contact normal about 0.54 forward and 0.84 downward by the recorded
     geometry), and whether the game's z scale applies to the extra velocity
     as modelled.
+- **Push shape fixed (2026-10-06, FR-138, ADR-0063)**: the cliff was the
+  wheel pushback (`trace < pushback_reach`), Bullet's response against a
+  static surface, applied to a wheel ray that hit the ball. With the ball's
+  rays given spring and damper only, the free run's car upward speed after
+  the hit is 400, 436, 463, 483, 475, 469 uu/s against the game's 405, 445,
+  475, 498, 493, 488. The remaining difference is the hit tick's solved ball
+  velocity (the port's contact solve leaves the ball no downward velocity on
+  its floor; the game's ball drops 1 uu) and the extra velocity's z share;
+  a sleeping-ball wake rule was tried (no floor contact on the wake tick) and
+  did not change the push, so it is not that.
 - **Next**: compare the ball's post-hit velocity between port and game
   (`--scenario` prints only the car; add the ball), then look at the
   contact model: a sustained (multi-tick) car-ball contact with the ball

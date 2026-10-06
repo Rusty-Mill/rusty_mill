@@ -98,14 +98,14 @@ pub struct WheelContact {
     pub normal: Vec3,
     front: bool,
     /// Clamped to `rest_length ± MAX_SUSPENSION_TRAVEL`.
-    suspension_length: f32,
+    pub(super) suspension_length: f32,
     /// `1 / (normal · car up)`, or `None` when the surface is too steep
     /// (`approach <= 0.1`), where Bullet zeroes the suspension velocity and
     /// clips the spring by 10.
     inv_contact_dot: Option<f32>,
     /// `m_extraPushback`: a quarter of the impulse that would stop the
     /// wheel sinking past its rest reach.
-    pushback: f32,
+    pub(super) pushback: f32,
 }
 
 /// The four wheels' hits, in `WHEELS` order.
@@ -158,7 +158,10 @@ fn cast_wheel(
     let rel_pos = point - car.position;
     let inv_contact_dot = (approach > 0.1).then(|| 1.0 / approach);
     let pushback_reach = wheel.rest_length + wheel.radius - SUSPENSION_SUBTRACTION;
-    let pushback = if trace < pushback_reach {
+    // Pushback is Bullet's collision response against a static surface
+    // (the surface takes no impulse and its velocity is ignored); a wheel on
+    // the ball is only sprung (`RB-PHYSICS-001-FR-138`).
+    let pushback = if trace < pushback_reach && !hit.dynamic {
         stopping_impulse(car, rel_pos, normal, trace - pushback_reach, dt) / WHEELS.len() as f32
     } else {
         0.0

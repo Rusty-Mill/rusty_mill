@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- ADR-0063 (`RB-PHYSICS-001-FR-138`, spec 0.141.0): a wheel ray that hits
+  the ball gets no pushback impulse (spring and damper only). The car's lift
+  after a ball hit now follows the game (+36, +27, +20 uu/s against +40, +30,
+  +23; was +129); `hitjump` 77.6-77.8 s window car velocity error 25.3 ->
+  11.0 uu/s; the four k = 30 scores unchanged.
 - ADR-0062 (`RB-PHYSICS-001-FR-137`, spec 0.140.0): the extra ball-hit
   velocity is added after the ball's transform integrates, as RocketSim
   does, not before. `test2` k = 30 ball distance 0.54 -> 0.17 uu,

@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.140.0
+- Version: 0.141.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -6572,6 +6572,32 @@ FR-020/FR-021/FR-022/FR-023/FR-024/FR-025/FR-026/FR-027/FR-028/FR-029.
       port's free run gains 129 uu/s on the first tick after, then 19; the
       game 40, 30, 23).
 
+- `RB-PHYSICS-001-FR-138` (a wheel on the ball gets no pushback; implemented
+  and verified on all four captures, ADR-0063): `collision::RayHit` says
+  whether the surface is dynamic (the ball's ray, FR-129) or static, and
+  `drive::wheels::cast_wheel` applies the pushback impulse (Bullet's
+  collision response against a static surface, `PUSHBACK_ERP`) only to
+  static surfaces. A wheel on the ball keeps its spring and damper.
+  - Why: `RB-RESEARCH-O010`. After FR-137 the port's car gained +129 uu/s
+    the tick after a hit where the game's gains +40, +30, +23. Tracked runs
+    showed the push right when fed the game's states and a cliff otherwise
+    (0.5 uu of ball height moved it from 535 to 441 uu/s against the game's
+    445), the signature of the pushback's `trace < reach` threshold. The
+    pushback treats its surface as still and unpushable (it takes no
+    impulse and ignores its velocity), which holds for the arena and not for
+    a ball moving away at 1700 uu/s.
+  - **Verification**:
+    - `drive` test `a_wheel_ray_that_hits_the_ball_gets_no_pushback` (floor:
+      pushback above zero; ball: zero; same spring length).
+    - The `car_over_ball` free run, car upward speed after the hit: 400,
+      436, 463, 483, 475, 469 uu/s against the game's 405, 445, 475, 498,
+      493, 488 (was 400, 529, 548, 540, 534, 529).
+    - `--self-kstep 30` unchanged to the printed precision: `test2` ball
+      0.17 uu and car 2.01 uu/s; `hitjump` ball 92.86 and car 10.49 -> 10.47;
+      `front` 0.50, `side` 0.45. The `hitjump` 77.6-77.8 s sweep window's car
+      velocity error 25.3 -> 11.0 uu/s (ball 0.99 unchanged), `test2` guard
+      windows unchanged.
+
 
 ## Architecture and interfaces
 
@@ -8062,6 +8088,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.141.0 (2026-10-06): `RB-PHYSICS-001-FR-138` — a wheel ray that hits the
+  ball gets no pushback (ADR-0063). 456 tests in `rb_physics_bullet`.
 - 0.140.0 (2026-10-06): `RB-PHYSICS-001-FR-137` — the extra ball-hit
   velocity is added after the ball moves (ADR-0062). 455 tests in
   `rb_physics_bullet`.
