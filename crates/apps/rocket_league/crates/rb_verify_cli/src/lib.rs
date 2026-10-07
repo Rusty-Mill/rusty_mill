@@ -18,8 +18,8 @@ use std::path::Path;
 mod scenario;
 mod sweep;
 pub use scenario::{
-    compare_scenario, scenario_from_capture, simulate_scenario, ScenarioComparison, ScenarioRow,
-    SCENARIO_TICK_SECS,
+    compare_scenario, compare_scenario_recorded, scenario_from_capture, simulate_scenario,
+    ScenarioComparison, ScenarioRow, SCENARIO_TICK_SECS,
 };
 pub use sweep::{default_grid, sweep, window_error, Candidate, Window, WindowError};
 

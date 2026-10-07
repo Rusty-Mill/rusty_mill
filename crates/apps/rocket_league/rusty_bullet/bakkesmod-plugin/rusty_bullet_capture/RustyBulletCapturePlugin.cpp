@@ -11,7 +11,7 @@
 // THREADED, THREADEDUNLOAD exist. `PLUGINTYPE_FREEPLAY` is this plugin's
 // primary use case (see README); it doesn't gate loading during a normal
 // match, since there's no bit for one to begin with.
-BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.4", PLUGINTYPE_FREEPLAY)
+BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.5", PLUGINTYPE_FREEPLAY)
 
 namespace
 {
@@ -80,7 +80,7 @@ std::string inputJson(ControllerInput input)
     std::ostringstream out;
     out << "{\"throttle\":" << input.Throttle << ",\"steer\":" << input.Steer << ",\"pitch\":" << input.Pitch
         << ",\"yaw\":" << input.Yaw << ",\"roll\":" << input.Roll << ",\"jump\":" << (input.Jump ? "true" : "false")
-        << ",\"boost\":" << (input.HoldingBoost ? "true" : "false")
+        << ",\"boost\":" << ((input.HoldingBoost || input.ActivateBoost) ? "true" : "false")
         << ",\"handbrake\":" << (input.Handbrake ? "true" : "false") << "}";
     return out.str();
 }
@@ -219,7 +219,7 @@ void RustyBulletCapturePlugin::pollJobs(std::shared_ptr<bool> alive)
 
     // `capturing=` lets the runner confirm a start took effect.
     std::ofstream beat(dir / "heartbeat.txt", std::ios::out | std::ios::trunc);
-    beat << "version=1.4\ncapturing=" << (capturing_ ? 1 : 0) << "\n";
+    beat << "version=1.5\ncapturing=" << (capturing_ ? 1 : 0) << "\n";
 
     gameWrapper->SetTimeout([this, alive](GameWrapper *) { pollJobs(alive); }, 1.0f);
 }

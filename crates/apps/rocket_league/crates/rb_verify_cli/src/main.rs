@@ -33,7 +33,7 @@
 //!   a scripted scenario (`simulate_scenario`, `docs/research/BOT-CAPTURE-PLAN.md`):
 //!   the car's position, velocity and spin every `every` ticks (default 12)
 //!   and on every tick a jump is pressed.
-//! - `rb-verify --scenario <scenario.json> --against <capture> [every]`:
+//! - `rb-verify --scenario <scenario.json> --against <capture> [--recorded-inputs] [every]`:
 //!   the same scenario's recording lined up with that prediction
 //!   (`compare_scenario`): per-tick position, velocity and spin error, when
 //!   the error first passes 10 and 100 uu, and whether the recorded inputs
@@ -59,10 +59,11 @@ use rb_domain::PhysicsStateSource;
 use rb_domain::{ControllerInput, Vec3};
 use rb_scenario::Scenario;
 use rb_verify_cli::{
-    car_frame_spin, compare_scenario, default_grid, k_step_capture, k_step_score, one_step_capture,
-    rotation_rate, scenario_from_capture, score_capture_against_candidate, score_capture_growth,
-    score_replay_against_capture, simulate_scenario, sweep, trace_capture, Candidate, SeedFrame,
-    TraceRow, Window, DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
+    car_frame_spin, compare_scenario, compare_scenario_recorded, default_grid, k_step_capture,
+    k_step_score, one_step_capture, rotation_rate, scenario_from_capture,
+    score_capture_against_candidate, score_capture_growth, score_replay_against_capture,
+    simulate_scenario, sweep, trace_capture, Candidate, SeedFrame, TraceRow, Window,
+    DEFAULT_GROWTH_WINDOW_SECS, DEFAULT_K_STEP, DEFAULT_MAX_TIMESTAMP_DELTA_SECS,
 };
 use std::env;
 use std::path::Path;
@@ -229,13 +230,23 @@ fn run_scenario(path: &str, every: usize) -> Result<(), String> {
 }
 
 /// Prints a scenario's recording against the port's prediction.
-fn run_scenario_against(path: &str, capture: &str, every: usize) -> Result<(), String> {
+fn run_scenario_against(
+    path: &str,
+    capture: &str,
+    every: usize,
+    recorded_inputs: bool,
+) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
     let scenario = Scenario::from_json(&text).map_err(|e| format!("{path}: {e}"))?;
     let frames = CaptureFileSource::new(capture)
         .frames()
         .map_err(|e| format!("{capture}: {e}"))?;
-    let comparison = compare_scenario(&scenario, &frames).map_err(|e| format!("{capture}: {e}"))?;
+    let comparison = if recorded_inputs {
+        compare_scenario_recorded(&scenario, &frames)
+    } else {
+        compare_scenario(&scenario, &frames)
+    }
+    .map_err(|e| format!("{capture}: {e}"))?;
     println!("{}", scenario.name);
     println!(
         "recording starts at capture frame {} (lag {} ticks); {} ticks compared",
@@ -243,6 +254,9 @@ fn run_scenario_against(path: &str, capture: &str, every: usize) -> Result<(), S
         comparison.lag_ticks,
         comparison.rows.len()
     );
+    if let Some(offset) = comparison.input_offset {
+        println!("port fed the recorded input (offset {offset}), not the tape");
+    }
     println!("tick  pos err  vel err  spin err   recorded position (x, y, z)    predicted position (x, y, z)   ball err   recorded ball (x, y, z)    predicted ball (x, y, z)");
     for row in &comparison.rows {
         if row.tick % every.max(1) != 0 {
@@ -455,6 +469,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         let mut capture = None;
+        let mut recorded_inputs = false;
         let mut next = args.next();
         if next.as_deref() == Some("--against") {
             let Some(capture_path) = args.next() else {
@@ -463,6 +478,10 @@ fn main() -> ExitCode {
             };
             capture = Some(capture_path);
             next = args.next();
+            if next.as_deref() == Some("--recorded-inputs") {
+                recorded_inputs = true;
+                next = args.next();
+            }
         }
         let every = match next.map(|raw| raw.parse::<usize>()) {
             None => 12,
@@ -474,7 +493,7 @@ fn main() -> ExitCode {
         };
         let result = match capture {
             None => run_scenario(&path, every),
-            Some(capture) => run_scenario_against(&path, &capture, every),
+            Some(capture) => run_scenario_against(&path, &capture, every, recorded_inputs),
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
