@@ -299,6 +299,14 @@ fn run_scenario_against(
         first_ball(10.0),
         first_ball(100.0),
     );
+    for index in 0..comparison.other_rows.len() {
+        println!(
+            "car {} error: mean {:.1} uu, max {:.1} uu",
+            index + 1,
+            comparison.mean_other_error(index),
+            comparison.max_other_error(index),
+        );
+    }
     println!(
         "recorded inputs that differ from the tape: {}",
         comparison.input_mismatches
