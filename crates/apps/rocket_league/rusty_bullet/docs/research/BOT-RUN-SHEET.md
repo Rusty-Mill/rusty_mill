@@ -152,8 +152,8 @@ that happens to answer part of it. Plugin 1.3 (built and installed this
 session). The operator started the capture in the game, then went to the
 RLBot GUI and pressed Start Match four times about 10 s apart, leaving the
 GUI in front each time, and returned to the game to stop the capture. So
-Rocket League was **behind another window** (not minimised, not on a
-second monitor) for all four tapes. One capture, `replays/v13_prompt_dodge.jsonl`
+The operator confirmed afterwards that the game window was **minimised to
+the taskbar** (and the GUI focused) for all four tapes. One capture, `replays/v13_prompt_dodge.jsonl`
 (gitignored), 11047 frames in 92.3 s (119.6 per second); cut at the four
 state-set teleports into `v13_run1..4.jsonl`.
 
@@ -169,9 +169,10 @@ state-set teleports into `v13_run1..4.jsonl`.
 - **Focus:** with the game window behind the GUI, tapes ran at full rate and
   matched the focused session-1 results (lag 0 to 2, error inside the 2.8 uu
   noise floor). So "the window must stay focused" (session 1) is not
-  supported for the behind-another-window case. **Not tested:** minimised,
-  second monitor, `rb_probe` alongside, and the window state is not recorded
-  in the capture, so it rests on the operator's account. Session 1's freeze
+  supported: a minimised, unfocused game ran the tape normally.
+  **Not tested:** a second monitor, `rb_probe` alongside, and the window
+  state is not recorded in the capture, so it rests on the operator's
+  account. Only `prompt_dodge`, the shortest tape, was run this way. Session 1's freeze
   may have been the Escape pause menu.
 - **Plugin 1.3 (RB-RESEARCH-O008):** the recorded inputs are non-zero and
   match the tape (jump for 24 frames, then once 0.5 s later); runs 1 to 3

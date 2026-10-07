@@ -111,8 +111,8 @@ difference is noted.
 5. Press **Start Match**, then **click into the game window and keep it
    focused** for the tape's length plus a few seconds. (Session 1 believed
    Rocket League pauses freeplay when unfocused; a later run of four
-   tapes with the game behind the RLBot GUI showed no pause, so focus is
-   probably unnecessary, minimised untested.) Escape opens a
+   tapes with the game minimised and the RLBot GUI focused showed no
+   pause, so focus is not needed for `prompt_dodge`.) Escape opens a
    pause menu that froze the game for us; while paused core repeats one
    packet 240 times a second with the same frame number, and the bot
    waits. Core's log (and the bot's stdout, which core forwards) shows

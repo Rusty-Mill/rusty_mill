@@ -102,11 +102,12 @@ the choices below (the bot's gate and how a scenario is selected).
 
 The consequence above that the operator must keep the game window focused
 is not supported by a later run: four tapes ran at 119.6 frames per second
-with no gap over 0.067 s while the RLBot GUI, not the game, had focus
-(`BOT-RUN-SHEET.md`, session 2 stage 1, partial). Minimised and
-second-monitor cases are untested. The original session-1 freeze may have
-been the Escape pause menu. Treat the focus rule as unconfirmed until the
-controlled test is run.
+with no gap over 0.067 s while the RLBot GUI, not the game, had focus and the game window was
+minimised to the taskbar
+(`BOT-RUN-SHEET.md`, session 2 stage 1, partial). A second-monitor
+case and the longer scenarios are untested. The original session-1 freeze may have
+been the Escape pause menu. Treat focus as not needed, pending the controlled
+test.
 
 ## Validation and revisit triggers
 
