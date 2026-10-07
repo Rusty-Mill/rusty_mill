@@ -13,6 +13,8 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
+import { fileURLToPath } from 'node:url';
+import { assertThemeCss } from './theme-css.mjs';
 
 const MOCK_PORT = 7799;
 const PREVIEW_PORT = 4173;
@@ -136,7 +138,7 @@ let previewOutput = '';
 const preview = spawn(
   process.execPath,
   [
-    new URL('node_modules/vite/bin/vite.js', webRoot).pathname,
+    fileURLToPath(new URL('node_modules/vite/bin/vite.js', webRoot)),
     'preview',
     '--port',
     String(PREVIEW_PORT),
@@ -432,11 +434,13 @@ try {
       getComputedStyle(document.documentElement).getPropertyValue('--nebula-accent').trim(),
     );
   assert((await accentVar()) === '76 225 247', 'nebula accent is the default');
+  await assertThemeCss(page, 'nebula');
   await page.keyboard.press('Control+k');
   await page.locator('[data-testid="palette-input"]').fill('theme cyber');
   await clickAction(page, 'Theme: cyberpunk');
   await page.locator('[data-testid="command-palette"]').waitFor({ state: 'detached' });
   assert((await accentVar()) === '255 42 109', 'cyberpunk accent applied via palette');
+  await assertThemeCss(page, 'cyberpunk');
   assert(
     (await page.evaluate(() => document.documentElement.dataset.theme)) === 'cyberpunk',
     'data-theme stamped on <html>',
@@ -453,6 +457,7 @@ try {
   await page.reload();
   await page.locator('[data-testid="command-card"]').first().waitFor();
   assert((await accentVar()) === '255 42 109', 'theme choice survives a reload');
+  await assertThemeCss(page, 'cyberpunk');
   await page.waitForTimeout(300);
   await page.keyboard.press('Control+k');
   await page.locator('[data-testid="palette-input"]').fill('theme nebula');
@@ -823,6 +828,7 @@ try {
   // Switching theme from the sheet updates the live custom property.
   await page.locator('[data-testid="settings-theme-option"]').filter({ hasText: 'minimal' }).click();
   assert((await accentVar()) === '143 168 199', 'theme switch from settings applies immediately');
+  await assertThemeCss(page, 'minimal');
   await page.locator('[data-testid="settings-theme-option"]').filter({ hasText: 'nebula' }).click();
   assert((await accentVar()) === '76 225 247', 'switched back to nebula from settings');
 

@@ -334,7 +334,7 @@ export default function CommandPalette({
           placeholder="Type a command, snippet, or action…"
           aria-label="Palette query"
           data-testid="palette-input"
-          className="border-b border-white/10 bg-nebula-surface px-4 py-3 font-nebula-command text-sm text-nebula-text placeholder:text-nebula-text/30 focus:outline-none"
+          className="border-b border-white/10 bg-nebula-surface px-4 py-3 font-nebula-command text-sm text-nebula-text placeholder:text-nebula-text/30 focus:outline-hidden"
         />
         <div ref={listRef} className="max-h-[40vh] overflow-y-auto p-1.5">
           {items.length === 0 && (

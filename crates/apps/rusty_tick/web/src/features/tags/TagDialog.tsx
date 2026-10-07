@@ -40,7 +40,7 @@ function TagForm({ tag, onCancel, onSubmit }: { tag: Tag | null; onCancel: () =>
           maxLength={64}
           onChange={(e) => setLabel(e.target.value)}
           placeholder="Tag name"
-          className="h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary"
+          className="h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary"
         />
       </label>
       <fieldset className="flex flex-col gap-1.5">

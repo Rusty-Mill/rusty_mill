@@ -109,7 +109,7 @@ export function TimeGridView({ range, events, ctx }: Props) {
                 }}
                 onDragLeave={() => setOver((o) => (o === -day ? null : o))}
                 onDrop={(e) => dropAllDay(e, day)}
-                className={`border-l border-line outline-none first:border-l-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${over === -day ? 'bg-selected' : ''}`}
+                className={`border-l border-line outline-hidden first:border-l-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${over === -day ? 'bg-selected' : ''}`}
               />
             ))}
             {segments.map((s) => (
@@ -171,7 +171,7 @@ export function TimeGridView({ range, events, ctx }: Props) {
                 onDragLeave={() => setOver((o) => (o === day ? null : o))}
                 onDrop={(e) => dropSlot(e, day)}
                 style={{ backgroundImage: 'linear-gradient(to bottom, rgb(var(--line)) 1px, transparent 1px)', backgroundSize: `100% ${HOUR_PX}px` }}
-                className={`relative border-l border-line outline-none first:border-l-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${over === day ? 'bg-selected/40' : ''}`}
+                className={`relative border-l border-line outline-hidden first:border-l-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${over === day ? 'bg-selected/40' : ''}`}
               >
                 {slot !== null && (
                   <div className="pointer-events-none absolute inset-x-0.5 rounded bg-primary/20 ring-1 ring-primary" style={{ top: `${(minutesOfDay(slot) / MINUTES_PER_DAY) * 100}%`, height: HOUR_PX / 2 }} />
@@ -203,7 +203,7 @@ export function TimeGridView({ range, events, ctx }: Props) {
                         backgroundColor: wash(color, b.event.done ? 14 : 40),
                         opacity: b.event.done ? 0.7 : 1,
                       }}
-                      className={`absolute z-10 flex flex-col overflow-hidden rounded-[6px] px-1.5 py-1 text-left text-s leading-4 outline-none ring-1 ring-surface focus-visible:ring-2 focus-visible:ring-primary ${b.event.done ? 'text-grey line-through' : 'text-text'}`}
+                      className={`absolute z-10 flex flex-col overflow-hidden rounded-[6px] px-1.5 py-1 text-left text-s leading-4 outline-hidden ring-1 ring-surface focus-visible:ring-2 focus-visible:ring-primary ${b.event.done ? 'text-grey line-through' : 'text-text'}`}
                     >
                       <span className="flex items-center gap-1.5">
                         <span aria-hidden className="h-3 w-3 shrink-0 rounded-[3px] border-[1.5px]" style={{ borderColor: color, backgroundColor: b.event.done ? color : 'transparent' }} />

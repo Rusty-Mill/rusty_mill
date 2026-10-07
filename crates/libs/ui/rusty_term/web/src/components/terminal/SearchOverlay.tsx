@@ -70,7 +70,7 @@ function Highlighted({ hit }: { hit: SearchHit }) {
     <span className="truncate font-nebula-output text-xs text-nebula-text/60">
       {hit.matchStart > 40 && '…'}
       {before}
-      <mark className="rounded-sm bg-nebula-accent2/30 px-0.5 text-nebula-accent2">{match}</mark>
+      <mark className="rounded-xs bg-nebula-accent2/30 px-0.5 text-nebula-accent2">{match}</mark>
       {after}
     </span>
   );
@@ -148,7 +148,7 @@ export default function SearchOverlay({ open, onClose, sessions, onJump }: Searc
           placeholder="Search commands and output across all sessions…"
           aria-label="History search query"
           data-testid="search-input"
-          className="border-b border-white/10 bg-nebula-surface px-4 py-3 font-nebula-command text-sm text-nebula-text placeholder:text-nebula-text/30 focus:outline-none"
+          className="border-b border-white/10 bg-nebula-surface px-4 py-3 font-nebula-command text-sm text-nebula-text placeholder:text-nebula-text/30 focus:outline-hidden"
         />
         <div ref={listRef} className="max-h-[46vh] overflow-y-auto p-1.5">
           {query.trim().length > 0 && hits.length === 0 && (

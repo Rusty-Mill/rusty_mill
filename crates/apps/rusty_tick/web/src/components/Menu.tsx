@@ -122,7 +122,7 @@ export function Menu({ anchor, open, onClose, items, placement = 'bottom-start',
                 tabIndex={i === active ? 0 : -1}
                 onMouseEnter={() => setActive(i)}
                 onClick={(e) => choose(entry, e.currentTarget)}
-                className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-base outline-none hover:bg-hover focus-visible:bg-hover ${entry.danger ? 'text-danger' : ''} ${entry.disabled ? 'cursor-default opacity-40' : ''}`}
+                className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-base outline-hidden hover:bg-hover focus-visible:bg-hover ${entry.danger ? 'text-danger' : ''} ${entry.disabled ? 'cursor-default opacity-40' : ''}`}
               >
                 {entry.icon && <span className="flex h-5 w-5 items-center justify-center text-grey">{entry.icon}</span>}
                 <span className="flex-1 truncate">{entry.label}</span>

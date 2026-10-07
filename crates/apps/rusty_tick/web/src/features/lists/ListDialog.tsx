@@ -40,7 +40,7 @@ function ListForm({ list, onCancel, onSubmit }: { list: List | null; onCancel: (
           maxLength={200}
           onChange={(e) => setName(e.target.value)}
           placeholder="List name"
-          className="h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary"
+          className="h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary"
         />
       </label>
       <fieldset className="flex flex-col gap-1.5">

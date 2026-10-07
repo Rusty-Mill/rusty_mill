@@ -20,8 +20,8 @@ export function DayPopover({ anchor, day, events, colorOf, hour12, onPick, onClo
       <ul className="max-h-[300px] overflow-y-auto px-1.5">
         {list.map((e) => (
           <li key={e.task.id}>
-            <button type="button" onClick={() => onPick(e, anchor)} className="flex w-full items-center gap-2 rounded-row px-1.5 py-1 text-left outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary">
-              <span aria-hidden className="h-4 w-1 shrink-0 rounded-sm" style={{ backgroundColor: colorOf(e) }} />
+            <button type="button" onClick={() => onPick(e, anchor)} className="flex w-full items-center gap-2 rounded-row px-1.5 py-1 text-left outline-hidden hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary">
+              <span aria-hidden className="h-4 w-1 shrink-0 rounded-xs" style={{ backgroundColor: colorOf(e) }} />
               <span className={`min-w-0 flex-1 truncate ${e.done ? 'text-grey line-through' : ''}`}>{e.task.title}</span>
               <span className="shrink-0 text-s text-grey">{barTime(e, hour12)}</span>
             </button>

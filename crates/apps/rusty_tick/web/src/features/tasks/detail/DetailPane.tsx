@@ -181,7 +181,7 @@ function TaskDetail({ task, paths }: { task: Task; paths: PanePaths }) {
               el.style.height = `${el.scrollHeight}px`
             }
           }}
-          className={`w-full resize-none bg-transparent text-h1 font-semibold outline-none ${task.status !== 'open' ? 'text-grey line-through' : ''}`}
+          className={`w-full resize-none bg-transparent text-h1 font-semibold outline-hidden ${task.status !== 'open' ? 'text-grey line-through' : ''}`}
         />
 
         <AssigneeField taskId={task.id} disabled={trashed} />

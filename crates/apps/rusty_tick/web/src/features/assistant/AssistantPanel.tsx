@@ -84,7 +84,7 @@ function Panel() {
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Ask the assistant"
           disabled={running}
-          className="h-9 w-full rounded-row border border-line bg-surface px-3 outline-none focus:border-primary"
+          className="h-9 w-full rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary"
         />
       </form>
     </aside>

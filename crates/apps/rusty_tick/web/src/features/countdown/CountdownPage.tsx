@@ -35,11 +35,11 @@ export function CountdownPage() {
       <form onSubmit={submit} className="flex flex-wrap items-end gap-3 px-4 pb-4">
         <label className="flex flex-col gap-1">
           <span className="text-s text-grey">Name</span>
-          <input value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Exam, launch, birthday" className="h-9 w-64 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary" />
+          <input value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Exam, launch, birthday" className="h-9 w-64 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary" />
         </label>
         <label className="flex flex-col gap-1">
           <span className="text-s text-grey">Date</span>
-          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary" />
+          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary" />
         </label>
         <button type="submit" disabled={!body} className="h-9 rounded-row bg-primary px-4 text-white disabled:opacity-40">
           Add countdown

@@ -97,7 +97,7 @@ export function Checklist({ taskId, items, disabled = false, onChange }: Props) 
                     remove(item.id)
                   }
                 }}
-                className={`h-full min-w-0 flex-1 bg-transparent outline-none ${item.done ? 'text-grey line-through' : ''}`}
+                className={`h-full min-w-0 flex-1 bg-transparent outline-hidden ${item.done ? 'text-grey line-through' : ''}`}
               />
               {!disabled && (
                 <button type="button" aria-label="Remove item" onClick={() => remove(item.id)} className="hidden h-6 w-6 items-center justify-center rounded text-grey hover:bg-black/5 group-hover:flex">

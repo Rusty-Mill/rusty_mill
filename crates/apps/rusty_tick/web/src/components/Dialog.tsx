@@ -72,7 +72,7 @@ export function Dialog({ open, onClose, title, labelledBy, width = 480, height, 
         aria-labelledby={labelledBy ?? (title ? titleId : undefined)}
         tabIndex={-1}
         style={{ width, height, maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100vh - 32px)' }}
-        className={`relative flex flex-col overflow-hidden rounded-dialog bg-surface text-text pop-shadow outline-none ${className}`}
+        className={`relative flex flex-col overflow-hidden rounded-dialog bg-surface text-text pop-shadow outline-hidden ${className}`}
       >
         {title && (
           <h2 id={titleId} className="px-6 pb-2 pt-5 text-title font-semibold">

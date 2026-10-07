@@ -52,7 +52,7 @@ function HabitForm({ habit, onCancel, onSubmit }: { habit: Habit | null; onCance
   }
 
   const toggleDay = (d: number): void => setDays((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]))
-  const input = 'h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary'
+  const input = 'h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary'
 
   const field = 'grid grid-cols-[104px_1fr] items-center gap-x-3'
   const label = 'text-base'

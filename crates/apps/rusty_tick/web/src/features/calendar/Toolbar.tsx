@@ -20,7 +20,7 @@ interface Props {
   onSubscriptions: () => void
 }
 
-const btn = 'flex h-8 items-center justify-center rounded-row text-base outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary'
+const btn = 'flex h-8 items-center justify-center rounded-row text-base outline-hidden hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary'
 
 export function Toolbar({ title, mode, showDone, onMode, onShowDone, onPrev, onNext, onToday, onAdd, onImport, onSubscriptions }: Props) {
   const [viewAnchor, setViewAnchor] = useState<HTMLElement | null>(null)

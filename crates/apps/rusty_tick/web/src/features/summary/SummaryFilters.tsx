@@ -54,7 +54,7 @@ function Check({ label, checked, onChange }: { label: string; checked: boolean; 
 }
 
 const rowClass = 'flex min-h-10 items-center justify-between gap-3 text-base'
-const valueClass = 'h-8 min-w-0 max-w-[190px] cursor-pointer bg-transparent text-right text-grey outline-none'
+const valueClass = 'h-8 min-w-0 max-w-[190px] cursor-pointer bg-transparent text-right text-grey outline-hidden'
 
 /** A label on the left and a select on the right, as the real app lays out its filters. */
 function SelectRow({ label, value, onChange, children }: { label: string; value: string; onChange: (v: string) => void; children: ReactNode }) {
@@ -81,7 +81,7 @@ function OpenRow({ label, value, children }: { label: string; value: string; chi
   )
 }
 
-const field = 'h-8 w-full rounded-row border border-line bg-surface px-2 text-base outline-none focus:border-primary'
+const field = 'h-8 w-full rounded-row border border-line bg-surface px-2 text-base outline-hidden focus:border-primary'
 
 /** Template, Filter (range, lists, status, more) and Display Options: the summary's right-hand panel. */
 export function SummaryFilters({ options: o, onChange, lists, tags }: Props) {
@@ -98,7 +98,7 @@ export function SummaryFilters({ options: o, onChange, lists, tags }: Props) {
               aria-label={TEMPLATE_LABELS[t]}
               aria-checked={o.template === t}
               onClick={() => onChange({ template: t })}
-              className={`h-7 flex-1 rounded-[6px] px-1 text-s ${o.template === t ? 'bg-surface font-semibold text-text shadow-sm' : 'text-grey hover:text-text'}`}
+              className={`h-7 flex-1 rounded-[6px] px-1 text-s ${o.template === t ? 'bg-surface font-semibold text-text shadow-xs' : 'text-grey hover:text-text'}`}
             >
               {TEMPLATE_SHORT[t]}
             </button>

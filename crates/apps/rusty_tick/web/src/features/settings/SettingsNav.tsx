@@ -62,7 +62,7 @@ export function SettingsNav({ selected, onSelect }: Props) {
             tabIndex={on ? 0 : -1}
             data-autofocus={on || undefined} // the dialog opens with the current tab focused, not its close button
             onClick={() => onSelect(t.id)}
-            className={`flex h-9 shrink-0 items-center gap-2.5 rounded-row px-2.5 text-left text-base outline-none focus-visible:ring-2 focus-visible:ring-primary ${on ? 'bg-selected font-semibold' : 'hover:bg-hover'}`}
+            className={`flex h-9 shrink-0 items-center gap-2.5 rounded-row px-2.5 text-left text-base outline-hidden focus-visible:ring-2 focus-visible:ring-primary ${on ? 'bg-selected font-semibold' : 'hover:bg-hover'}`}
           >
             <t.icon size={16} strokeWidth={1.5} className="shrink-0 text-grey" aria-hidden />
             <span className="truncate">{t.label}</span>

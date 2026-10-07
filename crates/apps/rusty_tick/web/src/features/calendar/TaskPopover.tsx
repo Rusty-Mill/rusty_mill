@@ -60,7 +60,7 @@ export function TaskPopover({ taskId, anchor, color, hour12, onClose }: Props) {
             onClose()
             navigate(taskPath({ kind: 'list', id: task.listId }, task.id))
           }}
-          className="flex h-8 items-center gap-1 rounded-row border border-line px-3 outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary"
+          className="flex h-8 items-center gap-1 rounded-row border border-line px-3 outline-hidden hover:bg-hover focus-visible:ring-2 focus-visible:ring-primary"
         >
           Open
           <ArrowUpRight size={16} strokeWidth={1.5} aria-hidden />

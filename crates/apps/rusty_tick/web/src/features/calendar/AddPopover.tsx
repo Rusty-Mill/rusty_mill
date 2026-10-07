@@ -54,9 +54,9 @@ export function AddPopover({ anchor, target, onClose }: Props) {
             onChange={(e) => setText(e.target.value)}
             aria-label="Task title"
             placeholder="Add task"
-            className="h-8 min-w-0 flex-1 rounded-row border border-line bg-surface px-2.5 outline-none focus:border-primary"
+            className="h-8 min-w-0 flex-1 rounded-row border border-line bg-surface px-2.5 outline-hidden focus:border-primary"
           />
-          <button type="submit" className="h-8 rounded-row bg-primary px-3 text-white outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-50" disabled={!text.trim()}>
+          <button type="submit" className="h-8 rounded-row bg-primary px-3 text-white outline-hidden focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:opacity-50" disabled={!text.trim()}>
             Add
           </button>
         </div>

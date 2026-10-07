@@ -57,7 +57,7 @@ export function SettingsModal() {
           </h2>
           <SettingsNav selected={tab} onSelect={(t) => edit((p) => p.set('tabs', t))} />
         </div>
-        <div role="tabpanel" id={panelId(tab)} aria-labelledby={tabId(tab)} tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto px-8 pb-6 pt-6 outline-none">
+        <div role="tabpanel" id={panelId(tab)} aria-labelledby={tabId(tab)} tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto px-8 pb-6 pt-6 outline-hidden">
           <Pane tab={tab} />
         </div>
       </div>

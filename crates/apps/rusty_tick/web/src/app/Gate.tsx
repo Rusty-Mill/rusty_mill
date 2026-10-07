@@ -53,7 +53,7 @@ export function TokenPrompt({ error, onSubmit, onDemo }: { error?: string | null
             value={token}
             onChange={(e) => setTokenText(e.target.value)}
             placeholder={getToken() ? 'The saved token was not accepted' : 'The token the server was started with'}
-            className="h-10 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary"
+            className="h-10 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary"
           />
         </label>
         {error && <p role="alert" className="text-s text-danger">{error}</p>}
