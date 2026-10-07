@@ -634,12 +634,17 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   nose (64.5 uu ahead of its origin); both cars in a head-on.
 - **Done**: `RB-PHYSICS-001-FR-140` (the bump) and `FR-141` (box-box contacts
   as `dBoxBox`), ADR-0068; thirteen scenarios within about 10 uu per car.
-- **Open**: demolitions (opposing teams, a supersonic bumper, the demolished
-  car's respawn), a victim in the air, a bumper on a wall or ceiling, the
-  bump's cooldown against a second car; bumper speed 2100 (second car 10 uu)
-  and the off-centre clip (10 / 37 uu max) are the loosest fits.
-- **Next**: a team-aware hive (a second bot on team 1) for demolitions.
-- **Status**: Partly done. **Owner**: baileyrd.
+- **Demolitions (done)**: `RB-PHYSICS-001-FR-142`. A supersonic (>= 2200 uu/s,
+  held to 2100) nose on an enemy removes it at the contact tick (the attacker
+  still takes the collision: 2300 -> 1042 uu/s); enemies hit at 1300 and 2100
+  are bumped; a teammate at 2300 is bumped. The scenario's `team` makes a
+  second car an enemy (its own passive bot).
+- **Open**: the respawn (three seconds later, at a spawn point the game picks,
+  still, with 0 or 33 boost), a victim in the air, a bumper on a wall or
+  ceiling, the bump's cooldown against a second car; bumper speed 2100
+  (second car 10 uu) and the off-centre clip (10 / 37 uu max) are the loosest
+  fits.
+- **Status**: Mostly done. **Owner**: baileyrd.
 
 ## Change history
 

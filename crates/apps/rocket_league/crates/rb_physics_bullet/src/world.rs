@@ -126,6 +126,12 @@ const BUMP_VELOCITY_CURVE: [(f32, f32); 3] = [(0.0, 5.0 / 6.0), (1400.0, 1100.0)
 /// hits: 109, 162, 213, 259 uu/s at 540, 804, 1054, 1287).
 const BUMP_UPWARD_SCALE: f32 = 0.2;
 
+/// `SUPERSONIC_START_SPEED` and `SUPERSONIC_MAINTAIN_MIN_SPEED` (uu/s): a car
+/// is supersonic from 2200 until it falls under 2100. A supersonic car
+/// bumping an enemy with its nose demolishes it (`RB-PHYSICS-001-FR-142`).
+const SUPERSONIC_START_SPEED: f32 = 2200.0;
+const SUPERSONIC_MAINTAIN_MIN_SPEED: f32 = 2100.0;
+
 /// `BALL_CAR_EXTRA_IMPULSE_*` (`RLConst.h`).
 const BALL_HIT_Z_SCALE: f32 = 0.35;
 const BALL_HIT_FORWARD_SCALE: f32 = 0.65;
@@ -346,6 +352,16 @@ pub struct PhysicsWorld {
     /// Per (bumper, victim) pair of cars, the step of the bumper's last bump
     /// (`RB-PHYSICS-001-FR-140`).
     bump_ticks: Vec<Vec<Option<u64>>>,
+    /// Each car's team (0 for all unless set; cars of one team never
+    /// demolish each other).
+    car_teams: Vec<u32>,
+    /// Cars demolished and out of the simulation: not driven, not in contact,
+    /// not in `frame()` (the game's capture drops them too). They respawn
+    /// after three seconds at a spawn point the game picks, which this port
+    /// does not model.
+    demolished: Vec<bool>,
+    /// Each car's supersonic state.
+    supersonic: Vec<bool>,
     /// The car-ball hit's adjustable numbers (RocketSim's by default).
     pub car_ball: CarBallTuning,
     /// Warm-starting's own persistent state (`RB-PHYSICS-001-FR-035`) for
@@ -497,6 +513,9 @@ impl PhysicsWorld {
             tick_count: 0,
             ball_hit_ticks: Vec::new(),
             bump_ticks: Vec::new(),
+            car_teams: Vec::new(),
+            demolished: Vec::new(),
+            supersonic: Vec::new(),
             car_ball: CarBallTuning::default(),
             dynamic_manifold_caches: HashMap::new(),
             car_static_manifolds: Vec::new(),
@@ -709,7 +728,18 @@ impl PhysicsWorld {
         });
         self.cars.push(car);
         self.car_inputs.push(ControllerInput::default());
+        self.car_teams.push(0);
+        self.demolished.push(false);
+        self.supersonic.push(false);
         self
+    }
+
+    /// Puts car `index` on `team`. Cars on different teams can demolish each
+    /// other (`RB-PHYSICS-001-FR-142`); every car starts on team 0.
+    pub fn set_car_team(&mut self, index: usize, team: u32) {
+        if let Some(slot) = self.car_teams.get_mut(index) {
+            *slot = team;
+        }
     }
 
     /// Sets car `index`'s current controller input, which persists across
@@ -1043,14 +1073,18 @@ impl PhysicsWorld {
             .collect();
 
         Self::apply_forces_and_integrate_velocities(&mut self.ball, self.gravity, dt);
-        for ((((car, input), wheels), wall_normal), drive_state) in self
+        for (((((car, input), wheels), wall_normal), drive_state), gone) in self
             .cars
             .iter_mut()
             .zip(self.car_inputs.iter())
             .zip(car_wheels.iter())
             .zip(car_wall_normal.iter())
             .zip(self.car_drive.iter_mut())
+            .zip(self.demolished.iter())
         {
+            if *gone {
+                continue;
+            }
             Self::drive_and_integrate_velocities(
                 car,
                 input,
@@ -1097,6 +1131,9 @@ impl PhysicsWorld {
         let mut static_manifolds: Vec<(usize, solver::StaticMaterial, Vec<collision::Contact>)> =
             Vec::new();
         for (body_index, body) in bodies.iter().enumerate() {
+            if body_index > 0 && self.demolished[body_index - 1] {
+                continue;
+            }
             let plane_manifolds = body_index
                 .checked_sub(1)
                 .and_then(|car_index| self.car_static_manifolds.get_mut(car_index))
@@ -1160,6 +1197,9 @@ impl PhysicsWorld {
             radius: crate::body::BALL_COLLISION_RADIUS,
         };
         for (car_index, car) in self.cars.iter().enumerate() {
+            if self.demolished[car_index] {
+                continue;
+            }
             let contacts = collision::contacts_between(&hit_sphere, car);
             if contacts.is_empty() {
                 continue;
@@ -1177,8 +1217,17 @@ impl PhysicsWorld {
             row.resize(car_count, None);
         }
         let mut bump_velocity = vec![Vec3::ZERO; car_count];
+        let mut newly_demolished: Vec<usize> = Vec::new();
+        for (state, car) in self.supersonic.iter_mut().zip(&self.cars) {
+            let speed = car.linear_velocity.length();
+            *state = speed >= SUPERSONIC_START_SPEED
+                || (*state && speed >= SUPERSONIC_MAINTAIN_MIN_SPEED);
+        }
         for i in 0..car_count {
             for j in (i + 1)..car_count {
+                if self.demolished[i] || self.demolished[j] {
+                    continue;
+                }
                 let contacts = collision::contacts_between(&self.cars[i], &self.cars[j]);
                 if contacts.is_empty() {
                     continue;
@@ -1201,7 +1250,15 @@ impl PhysicsWorld {
                         && last.is_none_or(|tick| self.tick_count >= tick + BUMP_COOLDOWN_TICKS)
                     {
                         *last = Some(self.tick_count);
-                        bump_velocity[victim] += bump_velocity_of(&self.cars[bumper]);
+                        if self.supersonic[bumper]
+                            && self.car_teams[bumper] != self.car_teams[victim]
+                        {
+                            // A supersonic nose on an enemy: demolished (the
+                            // collision itself still happens this tick).
+                            newly_demolished.push(victim);
+                        } else {
+                            bump_velocity[victim] += bump_velocity_of(&self.cars[bumper]);
+                        }
                     }
                 }
                 dynamic_manifolds.push((i + 1, j + 1, Some(CAR_CAR_MATERIAL), contacts));
@@ -1258,7 +1315,15 @@ impl PhysicsWorld {
         // then applies the speed caps.
         self.ball.linear_velocity += ball_hit_velocity;
         clamp_ball_velocity(&mut self.ball);
-        for (car, bump) in self.cars.iter_mut().zip(&bump_velocity) {
+        for ((car, bump), gone) in self
+            .cars
+            .iter_mut()
+            .zip(&bump_velocity)
+            .zip(&self.demolished)
+        {
+            if *gone {
+                continue;
+            }
             Self::integrate_transform_and_refresh_inertia(car, dt);
             // The bump's extra velocity goes on after Bullet has moved the car,
             // as the ball's does, then the speed cap below applies.
@@ -1269,6 +1334,12 @@ impl PhysicsWorld {
             // capture shows a flipping car turning at ~7.6 rad/s while its
             // reported spin stays at the 5.5 cap.
             drive::clamp_velocity(car);
+        }
+
+        for victim in newly_demolished {
+            self.demolished[victim] = true;
+            self.cars[victim].linear_velocity = Vec3::ZERO;
+            self.cars[victim].angular_velocity = Vec3::ZERO;
         }
 
         self.elapsed_secs += dt;
@@ -1327,6 +1398,7 @@ impl PhysicsWorld {
             .zip(self.car_inputs.iter())
             .zip(self.car_drive.iter())
             .enumerate()
+            .filter(|(i, _)| !self.demolished[*i])
             .map(|(i, ((car, input), drive_state))| CarState {
                 player_id: i as u32,
                 position: car.position,
@@ -2484,6 +2556,61 @@ mod tests {
             "{:?}",
             world.cars[0].linear_velocity
         );
+    }
+
+    /// `RB-PHYSICS-001-FR-142`: a supersonic nose on an enemy demolishes it:
+    /// the game's capture drops the car from that tick on, and the attacker
+    /// still takes the ordinary collision (2300 -> 1042 uu/s).
+    #[test]
+    fn a_supersonic_nose_demolishes_an_enemy() {
+        let mut world = bump_world([
+            (
+                Vec3::new(0.0, -130.0, 500.0),
+                FACING_PLUS_Y,
+                Vec3::new(0.0, 2300.0, 0.0),
+            ),
+            (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+        ]);
+        world.set_car_team(1, 1);
+        for _ in 0..4 {
+            world.step(1.0 / 120.0);
+        }
+        let frame = world.frame();
+        assert_eq!(frame.cars.len(), 1, "the enemy is gone: {:?}", frame.cars);
+        assert_eq!(frame.cars[0].player_id, 0);
+        assert!(
+            frame.cars[0].velocity.y < 1500.0,
+            "the collision still slowed the attacker"
+        );
+        // Gone for good: the attacker drives through where it was.
+        for _ in 0..60 {
+            world.step(1.0 / 120.0);
+        }
+        assert!(world.frame().cars[0].position.y > 100.0);
+    }
+
+    /// The same hit on a teammate, or below supersonic on an enemy, is only a
+    /// bump: both cars stay.
+    #[test]
+    fn a_teammate_or_a_slower_nose_is_bumped_not_demolished() {
+        let hit = |speed: f32, enemy: bool| {
+            let mut world = bump_world([
+                (
+                    Vec3::new(0.0, -130.0, 500.0),
+                    FACING_PLUS_Y,
+                    Vec3::new(0.0, speed, 0.0),
+                ),
+                (Vec3::new(0.0, 0.0, 500.0), FACING_PLUS_Y, Vec3::ZERO),
+            ]);
+            world.set_car_team(1, u32::from(enemy));
+            for _ in 0..6 {
+                world.step(1.0 / 120.0);
+            }
+            world.frame().cars.len()
+        };
+        assert_eq!(hit(2300.0, false), 2, "a teammate is never demolished");
+        assert_eq!(hit(1800.0, true), 2, "1800 uu/s is not supersonic");
+        assert_eq!(hit(2300.0, true), 1);
     }
 
     /// A car reversing into another with its tail does not bump it.

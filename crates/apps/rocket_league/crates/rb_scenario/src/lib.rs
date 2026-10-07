@@ -70,6 +70,9 @@ pub struct BallStart {
 pub struct OtherCar {
     pub car: CarStart,
     pub steps: Vec<Step>,
+    /// 0 (the first car's team) or 1. A car on the other team is its own
+    /// passive bot, so it stays neutral; same-team cars share one hivemind.
+    pub team: u32,
 }
 
 /// A scenario: where the car (and ball) start and what the car presses.
@@ -136,6 +139,13 @@ impl Scenario {
     /// Cars in the scenario: the first and every other.
     pub fn car_count(&self) -> usize {
         1 + self.others.len()
+    }
+
+    /// The team of every car, in car order (the first car is on team 0).
+    pub fn teams(&self) -> Vec<u32> {
+        std::iter::once(0)
+            .chain(self.others.iter().map(|other| other.team))
+            .collect()
     }
 
     /// Packets of input the scenario plays, settling included: until the
@@ -400,6 +410,21 @@ mod tests {
         assert_eq!(scenario.input_at_car(5, 4), Input::default());
         // The tape runs until the longest car's last step: 2 + 8.
         assert_eq!(scenario.total_ticks(), 10);
+    }
+
+    #[test]
+    fn a_car_on_the_other_team_is_listed_in_car_order() {
+        let scenario = Scenario::from_json(
+            r#"{ "name": "demo", "steps": [ { "ticks": 4 } ],
+                 "others": [ { "car": { "location": [0, 500, 17] }, "team": 1 },
+                             { "car": { "location": [0, 900, 17] } } ] }"#,
+        )
+        .expect("valid");
+        assert_eq!(scenario.teams(), vec![0, 1, 0]);
+        assert_eq!(
+            Scenario::from_json(TWO_CARS).expect("valid").teams(),
+            vec![0, 0]
+        );
     }
 
     #[test]

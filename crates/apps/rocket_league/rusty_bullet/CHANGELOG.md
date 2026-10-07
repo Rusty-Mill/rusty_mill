@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `RB-PHYSICS-001-FR-142` (spec 0.144.0): demolition. A supersonic car whose nose
+  touches an enemy-team car removes it (teams in `PhysicsWorld`, `Env` and
+  scenarios; `"team": 1` makes a scenario car an enemy and its own passive
+  bot). Six recordings: the enemy tracks the game to 0.1 uu until removed, the
+  attacker to about 1 uu; the respawn (3 s later at a spawn point) is not
+  modelled.
+### Added
 - ADR-0068 (`RB-PHYSICS-001-FR-140`, `FR-141`, spec 0.143.0): car bumps. A car
   whose nose touches another gives it an extra velocity along its heading
   (about 0.8 of its speed, 0.2 upward, once per pair per 0.25 s), as measured

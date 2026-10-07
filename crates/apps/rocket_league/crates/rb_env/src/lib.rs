@@ -18,6 +18,7 @@ pub struct Env {
     arena: PhysicsWorld,
     world: PhysicsWorld,
     car_ball: CarBallTuning,
+    teams: Vec<u32>,
 }
 
 impl Env {
@@ -30,6 +31,7 @@ impl Env {
             world: arena.clone(),
             arena,
             car_ball: CarBallTuning::default(),
+            teams: Vec::new(),
         }
     }
 
@@ -39,12 +41,21 @@ impl Env {
         self.car_ball = tuning;
     }
 
+    /// Sets every car's team (in car order) for every later `reset`; cars
+    /// on different teams can demolish each other. Teams default to 0.
+    pub fn set_teams(&mut self, teams: &[u32]) {
+        self.teams = teams.to_vec();
+    }
+
     /// Replaces the simulation with `start` (ball and every car), keeping
     /// its timestamp as the clock. Returns the observation, which is
     /// `start` as the port represents it.
     pub fn reset(&mut self, start: &PhysicsFrame) -> PhysicsFrame {
         self.world = PhysicsWorld::from_frame_in(&self.arena, start);
         self.world.car_ball = self.car_ball;
+        for (index, team) in self.teams.iter().enumerate() {
+            self.world.set_car_team(index, *team);
+        }
         self.world.frame()
     }
 

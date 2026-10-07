@@ -208,12 +208,14 @@ fn ensure_core(out: &Path) -> Result<()> {
     Err("core did not accept connections within 60 s".into())
 }
 
-/// The match for a scenario: one tape bot for a one-car scenario, or one
-/// hivemind process driving `car_count` cars of team 0 (they share one clock).
+/// The match for a scenario: one tape bot for a one-car scenario; one hivemind
+/// process driving every car of team 0 when there are several and all share a
+/// team (they share one clock); and, when a car is on the other team, one
+/// player per car (the first plays the tape, the rest stay neutral).
 fn match_configuration(
     name: &str,
     scenario_path: &Path,
-    car_count: usize,
+    teams: &[u32],
 ) -> Result<MatchConfiguration> {
     let tape = scenario_path
         .to_str()
@@ -223,36 +225,41 @@ fn match_configuration(
         .to_str()
         .ok_or("package path is not UTF-8")?
         .to_owned();
-    let hive = car_count > 1;
-    let bot = CustomBot {
-        name: format!("RB Tape: {name}"),
-        root_dir,
-        // cmd.exe needs backslashes here (see bots/*.bot.toml).
-        run_command: if hive {
-            r"target\release\rb_tape_hive.exe".into()
-        } else {
-            r"target\release\rb_tape_bot.exe".into()
-        },
-        agent_id: if hive {
-            "rusty_bullet/tape_hive".into()
-        } else {
-            "rusty_bullet/tape_bot".into()
-        },
-        hivemind: hive,
-        environment: Some(vec![EnvironmentVariable {
-            name: "RB_TAPE".into(),
-            value: tape,
-        }]),
-        ..Default::default()
+    let hive = teams.len() > 1 && teams.iter().all(|team| *team == teams[0]);
+    let player = |index: usize, team: u32| PlayerConfiguration {
+        variety: PlayerClass::CustomBot(Box::new(CustomBot {
+            name: format!("RB Tape: {name}"),
+            root_dir: root_dir.clone(),
+            // cmd.exe needs backslashes here (see bots/*.bot.toml).
+            run_command: if hive {
+                r"target\release\rb_tape_hive.exe".into()
+            } else {
+                r"target\release\rb_tape_bot.exe".into()
+            },
+            agent_id: if hive {
+                "rusty_bullet/tape_hive".into()
+            } else {
+                format!("rusty_bullet/tape_bot_{index}")
+            },
+            hivemind: hive,
+            environment: Some(vec![EnvironmentVariable {
+                name: "RB_TAPE".into(),
+                value: tape.clone(),
+            }]),
+            ..Default::default()
+        })),
+        team,
+        player_id: 0,
     };
-    // Core wants every car of a hivemind as its own player entry.
-    let players = (0..car_count.max(1))
-        .map(|_| PlayerConfiguration {
-            variety: PlayerClass::CustomBot(Box::new(bot.clone())),
-            team: 0,
-            player_id: 0,
-        })
-        .collect();
+    let players = if teams.is_empty() {
+        vec![player(0, 0)]
+    } else {
+        teams
+            .iter()
+            .enumerate()
+            .map(|(index, team)| player(index, *team))
+            .collect()
+    };
     Ok(MatchConfiguration {
         launcher: Launcher::Epic,
         auto_start_agents: true,
@@ -391,7 +398,7 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
         .car
         .location
         .ok_or_else(|| format!("{name} has no car.location to detect the start by"))?;
-    let config = match_configuration(name, path, scenario.car_count())?;
+    let config = match_configuration(name, path, &scenario.teams())?;
     ensure_game_up(dir, &config)?;
 
     send_job(dir, &format!(r#"{{"start": "{}"}}"#, json_escape(capture)?))?;
@@ -503,7 +510,7 @@ mod tests {
     #[test]
     fn match_configuration_is_freeplay_with_state_setting_and_the_tape() {
         let (name, path) = list_scenarios(&["pogo".into()]).expect("list").remove(0);
-        let config = match_configuration(&name, &path, 1).expect("config");
+        let config = match_configuration(&name, &path, &[0]).expect("config");
         assert!(config.freeplay && config.enable_state_setting);
         let PlayerClass::CustomBot(bot) = &config.player_configurations[0].variety else {
             panic!("not a custom bot");
@@ -520,7 +527,7 @@ mod tests {
     #[test]
     fn a_two_car_scenario_is_one_hivemind_team_of_two_players() {
         let (name, path) = list_scenarios(&["pogo".into()]).expect("list").remove(0);
-        let config = match_configuration(&name, &path, 2).expect("config");
+        let config = match_configuration(&name, &path, &[0, 0]).expect("config");
         assert_eq!(config.player_configurations.len(), 2);
         for player in &config.player_configurations {
             let PlayerClass::CustomBot(bot) = &player.variety else {
@@ -530,8 +537,31 @@ mod tests {
             assert!(bot.run_command.ends_with("rb_tape_hive.exe"));
             assert_eq!(player.team, 0);
         }
-        let single = match_configuration(&name, &path, 1).expect("config");
+        let single = match_configuration(&name, &path, &[0]).expect("config");
         assert_eq!(single.player_configurations.len(), 1);
+    }
+
+    #[test]
+    fn cars_on_both_teams_are_separate_players_not_a_hivemind() {
+        let (name, path) = list_scenarios(&["pogo".into()]).expect("list").remove(0);
+        let config = match_configuration(&name, &path, &[0, 1]).expect("config");
+        assert_eq!(config.player_configurations.len(), 2);
+        let teams: Vec<u32> = config
+            .player_configurations
+            .iter()
+            .map(|p| p.team)
+            .collect();
+        assert_eq!(teams, vec![0, 1]);
+        let mut agent_ids = Vec::new();
+        for player in &config.player_configurations {
+            let PlayerClass::CustomBot(bot) = &player.variety else {
+                panic!("not a custom bot");
+            };
+            assert!(!bot.hivemind);
+            assert!(bot.run_command.ends_with("rb_tape_bot.exe"));
+            agent_ids.push(bot.agent_id.clone());
+        }
+        assert_ne!(agent_ids[0], agent_ids[1], "core pairs players by agent id");
     }
 
     #[test]
