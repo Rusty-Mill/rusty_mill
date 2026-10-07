@@ -1,0 +1,58 @@
+{
+  "name": "corner_slide_far: corner_slide started 0.5 s earlier on its ballistic path (O011 experiment)",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      2736.865,
+      4302.695,
+      121.08499999999998
+    ],
+    "rotation": [
+      0.4624,
+      -0.2194,
+      1.2204
+    ],
+    "velocity": [
+      2091.13,
+      -296.41,
+      289.53
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      0,
+      0,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 72,
+      "throttle": 1,
+      "steer": -1,
+      "pitch": -1,
+      "yaw": -1
+    },
+    {
+      "ticks": 72,
+      "throttle": 1,
+      "steer": -1,
+      "roll": -1,
+      "handbrake": true
+    },
+    {
+      "ticks": 96
+    }
+  ]
+}

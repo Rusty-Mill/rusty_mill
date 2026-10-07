@@ -124,7 +124,8 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// Scenario (name, path) pairs, sorted; all of `scenarios/` unless named.
+/// Scenario (name, path) pairs, sorted; all of `scenarios/` unless named
+/// (a name may also be a file in `experiments/`).
 fn list_scenarios(names: &[String]) -> Result<Vec<(String, PathBuf)>> {
     let dir = package_dir().join("scenarios");
     let mut found = Vec::new();
@@ -141,14 +142,25 @@ fn list_scenarios(names: &[String]) -> Result<Vec<(String, PathBuf)>> {
     if names.is_empty() {
         return Ok(found);
     }
+    let experiments = package_dir().join("experiments");
     names
         .iter()
         .map(|name| {
-            found
-                .iter()
-                .find(|(n, _)| n == name)
-                .cloned()
-                .ok_or_else(|| format!("no scenario named '{name}' in {}", dir.display()).into())
+            if let Some(found) = found.iter().find(|(n, _)| n == name) {
+                return Ok(found.clone());
+            }
+            // Not shipped: an experiment variant, which stays out of the
+            // default set.
+            let path = experiments.join(format!("{name}.json"));
+            if path.is_file() {
+                return Ok((name.clone(), path));
+            }
+            Err(format!(
+                "no scenario named '{name}' in {} or {}",
+                dir.display(),
+                experiments.display()
+            )
+            .into())
         })
         .collect()
 }

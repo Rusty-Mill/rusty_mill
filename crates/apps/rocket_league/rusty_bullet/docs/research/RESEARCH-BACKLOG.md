@@ -458,7 +458,28 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   which fits (the car is at 2112 uu/s and meets the wall within a second)
   but does not explain it alone: runs with the same delay still split (two
   at 0.0167 s gave 288.7 and 326.5 uu).
-- **Next**: find the discrete variable. Candidates: the bot's state set
+- **Two experiments (2026-10-06, `batch_20261006-201038`, six runs each,
+  scenarios in `tools/rb_tape_bot/experiments/`)**:
+  `corner_slide_far` (the car started 0.5 s earlier on its ballistic path,
+  60 neutral ticks, then the same steps) is **bit-identical in all six runs**
+  (pairwise distance 0.0 uu, peak 272.9 uu, port error 23.0 mean / 41.3 max
+  every time). `corner_slide_padded` (original start, 24 neutral ticks before
+  the first input) still splits into three outcomes (peak 317, 340 uu;
+  pairwise up to 93 uu). So the game is repeatable once the car is not set
+  next to the wall, and padding the first input does not help: the
+  variation comes from the state set itself (the car is placed about three
+  ticks from the wall at 2112 uu/s, and whatever differs between runs in the
+  first ticks after a set, such as that tick's step size or sub-tick phase,
+  decides the contact), not from input timing. The input-delay hypothesis
+  above is rejected.
+- **Consequence**: `corner_slide` as shipped is a poor ground truth. Cut the
+  corner target from a start with a clear approach (`corner_slide_far` is a
+  candidate replacement, repeatable, port 23.0 / 41.3 uu: the port's corner
+  climb is about 67 uu low at the peak, 273 against the game's). Any
+  scenario that starts within a few ticks of a contact (car_over_ball and
+  the hard landings start in contact or a few ticks from it) deserves the
+  same check.
+- **Next (superseded)**: find the discrete variable. Candidates: the bot's state set
   and first input landing 1 to 4 ticks apart (move the first tape input,
   or pre-roll the car further from the wall so the contact is not the first
   thing that happens); the physics sub-tick phase at the set. Compare run

@@ -13,7 +13,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   twice in about five minutes, nobody touching the machine; ten repeat to
   under 4 uu, `corner_slide` does not (RB-RESEARCH-O011; ten more runs
   cluster into three outcomes). `run_batch.ps1` reports repeatability over
-  all runs.
+  all runs. Experiments in `tools/rb_tape_bot/experiments/`: started 0.5 s
+  earlier, `corner_slide` is bit-identical in six runs; padded, it is not
+  (the variation is the state set beside the wall).
 ### Fixed
 - Plugin 1.3 verified on four bot-driven tapes (inputs recorded, match the
   tape); focus claim corrected: tapes ran with the game minimised and unfocused

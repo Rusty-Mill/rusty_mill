@@ -16,6 +16,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# `powershell -File ... -Scenarios a,b` delivers "a,b" as one string.
+$Scenarios = @($Scenarios | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $bot = Join-Path $root "tools\rb_tape_bot"
 $verify = Join-Path $root "target\release\rb-verify.exe"
@@ -81,13 +83,14 @@ function Get-RunScore([string]$scenario, [string]$capture) {
 }
 
 $scenarioDir = Join-Path $bot "scenarios"
+$experimentDir = Join-Path $bot "experiments"
 $names = Get-ChildItem $out -Filter "*_run1.jsonl" | ForEach-Object { $_.Name -replace '_run1\.jsonl$', '' } | Sort-Object
 
 $rows = @()
 foreach ($name in $names) {
     $runs = @()
     foreach ($capture in (Get-ChildItem $out -Filter "${name}_run*.jsonl" | Sort-Object Name)) {
-        $runs += Get-RunScore (Join-Path $scenarioDir "$name.json") $capture.FullName
+        $runs += Get-RunScore $(if (Test-Path (Join-Path $scenarioDir "$name.json")) { Join-Path $scenarioDir "$name.json" } else { Join-Path $experimentDir "$name.json" }) $capture.FullName
     }
     $good = @($runs | Where-Object { $_.Ok })
     if ($good.Count -eq 0) { $rows += "| $name | scoring failed: $($runs[0].Note) |||||||"; continue }

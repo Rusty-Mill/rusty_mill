@@ -123,6 +123,9 @@ build the plugin (`bakkesmod-plugin/rusty_bullet_capture/README.md`), copy
 `%APPDATA%\bakkesmod\bakkesmod\cfg\plugins.cfg` so it loads at game start.
 Start `BakkesMod.exe` before running.
 
+`-Scenarios` takes shipped names or files in `experiments/` (variants kept out
+of the default set).
+
 Window focus is not needed: the game was minimised during four manual tapes
 and during the batches (`docs/research/BOT-RUN-SHEET.md`, session 2).
 

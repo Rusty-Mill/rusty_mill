@@ -227,6 +227,12 @@ script's own `results.md` is in that folder.
   but does not fully explain it. RB-RESEARCH-O011 has the detail. The
   script's repeatability check compared only runs 1 and 2 (it said "yes"
   here); it now uses the spread over all runs.
+- **corner_slide experiments** (six runs each, `batch_20261006-201038`):
+  the car started 0.5 s earlier (`experiments/corner_slide_far.json`) is
+  bit-identical in all six runs (port error 23.0 / 41.3 uu every time);
+  the original start with 24 neutral ticks first (`corner_slide_padded`)
+  still splits into three outcomes (up to 93 uu apart). The variation comes
+  from the state set next to the wall, not from input timing. See O011.
 - **Session 1's three divergences stand:** car_over_ball (155.7 mean against
   156.2), speed_flip (85 to 87 against 94.4) and the higher corner_slide runs
   (79.7 to 100.5 against 100.3) reproduce, so they stay the physics targets
