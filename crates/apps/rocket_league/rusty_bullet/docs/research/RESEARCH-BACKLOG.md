@@ -800,8 +800,49 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   fresh match each time with the pad list as the only variable.
 - **Status**: Open. **Owner**: baileyrd.
 
+
+### RB-RESEARCH-O022 — A nose-down car bouncing on the floor under boost (fuzz_512): chaotic, the game splits too
+
+- **Evidence (2026-10-07)**: `fuzz_512` (seeds 501-524 batch, the worst of the
+  holdout: 1474 uu mean, 5512 max). The first real divergence is not the dodge at
+  tick 255. From tick 187 the recorded car holds an origin height of 76 to 84 uu
+  while boosting with, it seems, the nose down; its vertical speed falls 14 uu/s a tick
+  (gravity plus boost along a downward nose) and is kicked up by +95 to +100 uu/s
+  every 14 ticks (ticks 190 to 191 and 204 to 206: -61 to +39, -148 to -55 to
+  +30), with no jump input and nothing else in the arena (one car, the ball
+  3500 uu away). Inferred, not yet checked against the recorded
+  orientation: the car's nose or corner on the floor, bouncing off a
+  nose-first contact while the boost presses it down. The port has kicks at
+  other ticks (202 to 205: +36, then the boost changes it again), so by tick 224
+  the position error is 10 uu and by tick 250 it is 300 uu/s in speed. A jump
+  press at tick 255 then makes the port double-jump (+294 uu/s up, its press is
+  available: the game ignored the press, no impulse in 4 rows), probably because
+  the two disagree on whether the flip was spent by then (not traced); a second,
+  smaller difference.
+- **Related**: `hard_landing_nose_first` (O011: start-sensitive in the game
+  itself), ADR-0069 (box against mesh edges), O019 (suspension).
+- **Probe (2026-10-07)**: `experiments/nosebounce.json`, cut from the `fuzz_512`
+  recording (`rb-verify --scenario-from ... 1.62 2.05`): the car state-set at tick
+  185 (pitch -1.34 rad, nose down, boost) and the recorded inputs for 0.43 s, run
+  5 times in the game. Four runs are identical (kicks of +105, +101, +45 uu/s at
+  ticks 14, 27 and 36); run 1 bounces differently (kicks at 15, 21, 31, 46, 48),
+  so the game itself splits here, as in `corner_slide` (O011): 812 uu max between
+  runs. The port, started from the same state and fed the recorded inputs, scores
+  2.9 to 4.4 uu mean (max 10 to 15) on all five runs. So the port does reproduce
+  this regime, and the full tape's divergence is sensitivity: at tick 185 it is
+  already 1.3 uu and 0.07 rad/s off, and a nose-down bounce chain amplifies that
+  into a different sequence. The earlier "port resolves the contacts
+  differently" reading is withdrawn. A fix to the port would not help here; the
+  target for such a tape is not "matches the game" but "inside the game's own
+  split", which the spread run did not cover (it found no split on 23 of 24
+  tapes).
+- **Next**: find what makes the game's run 1 differ (start frame, first-tick
+  state, hidden variable as in O011) before spending effort on `fuzz_508`, which
+  may be the same family (first over 10 uu at tick 244, z 45, throttle, steer,
+  boost and handbrake held). Not started.
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O022 (nose-down floor bounce under boost).
 - 2026-10-07: Added RB-RESEARCH-O021 (boost pads).
 - 2026-10-07: Added RB-RESEARCH-O020 (a resting ball hit from above).
 - 2026-10-07: Added RB-RESEARCH-O019 (suspension damper reading order).
