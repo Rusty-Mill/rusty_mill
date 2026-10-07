@@ -693,6 +693,12 @@ impl JumpClock {
         }
     }
 
+    /// Whether this airtime began with a jump whose record is still held
+    /// (a grounded car keeps it for `JUMP_RESET_WINDOW`).
+    pub(super) fn has_jumped(&self) -> bool {
+        self.has_jumped
+    }
+
     /// Whether the second jump or dodge is still inside its window.
     pub(super) fn window_open(&self) -> bool {
         self.air_time_since_jump < DOUBLE_JUMP_MAX_DELAY

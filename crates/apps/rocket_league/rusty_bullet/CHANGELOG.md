@@ -4,6 +4,12 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- ADR-0065 (`RB-PHYSICS-001-FR-139`, spec 0.142.0): a jump press within 6
+  ticks of the first jump is ignored, as in the game (a 28-tape sweep of
+  jump hold and release gaps found the rule). `speed_flip` position error
+  87.4 / 273.7 -> 4.8 / 16.6 uu (mean / max); the port no longer starts a
+  second ground jump or flips a tick early.
 ### Changed
 - The shipped `hard_landing_nose_first` starts 0.3 s earlier on its ballistic
   path (repeatable, port 4.9 / 11.2 uu); the original start is

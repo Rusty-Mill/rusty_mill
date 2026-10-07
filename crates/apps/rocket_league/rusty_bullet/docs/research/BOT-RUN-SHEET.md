@@ -181,6 +181,18 @@ state-set teleports into `v13_run1..4.jsonl`.
   five `bakkesmod.log` diagnostic lines show all-zero from both sources
   because they are logged before the tape starts; they do not test the fix.
 
+## Session 3 (2026-10-07, autonomous): second-jump acceptance and `speed_flip`
+
+With the rebuilt `rb-verify` (the session-1 binary predated FR-137/138)
+`car_over_ball` reads 35.3 uu mean, not 155.7; the largest left was
+`speed_flip` at 87.4. Its dodge press is 6 ticks after the first jump
+press; the game ignored it (recorded input shows the press, velocity
+continues smoothly), the port flipped. A 28-tape sweep
+(`experiments/jumpgap_H<hold>_R<release>.json`, `batch_20261006-202935`)
+gives the game's rule: a press at most 6 ticks after the first is ignored
+(no second jump, no dodge), 7 or more flips. FR-139 / ADR-0065 implement it:
+`speed_flip` 87.4 / 273.7 -> 4.8 / 16.6 uu; the other scenarios unchanged.
+
 ## Session 2, stage 2 (2026-10-06): unattended batch of all eleven scenarios
 
 One command from the repository root, nobody touching the machine:

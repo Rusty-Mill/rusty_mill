@@ -8086,8 +8086,37 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
   data or a concrete visible-artifact motivation to justify the added
   complexity over either heuristic.
 
+- `RB-PHYSICS-001-FR-139` (a jump press just after a jump is ignored;
+  implemented and verified on 28 `jumpgap` captures and `speed_flip`,
+  ADR-0065): a ground press does nothing while the jump record is held
+  (`JumpClock::has_jumped`, for `JUMP_RESET_WINDOW` after the jump), and an
+  airborne press (double jump or dodge) is taken only once the previous step
+  was also airborne, the same one-step lag as FR-095.
+  - Why: `speed_flip` (87.4 uu mean against the game). Its dodge press
+    comes 6 ticks after the first jump press; the game ignored it (no
+    dodge, no double jump; the recorded input shows the press) while the
+    port flipped. A sweep of 28 tapes (first jump held 1, 3, 6 or 12 ticks,
+    released 1 to 15 ticks, then a one-tick forward dodge press;
+    `tools/rb_tape_bot/experiments/jumpgap_*`) shows the rule exactly:
+    a press at most 6 ticks after the first press is ignored, 7 or more
+    flips (500 uu/s impulse, 5.5 rad/s spin). The port also started a second
+    ground jump for presses 1 to 5 ticks after the first (about +292 uu/s
+    up, 54 uu mean position error on those tapes) and flipped on the sixth.
+  - **Verification**:
+    - `drive` test `a_press_just_after_a_jump_is_ignored_until_the_car_is_airborne`
+      (fails without the change: a second jump of 316 uu/s).
+    - All 28 `jumpgap` outcomes match the game (ignored or flip); the six
+      ignored-press tapes 54 -> 0.6 to 2.1 uu mean position error.
+    - `speed_flip` capture: 87.4 / 273.7 -> 4.8 / 16.6 uu (mean / max).
+      `car_over_ball`, `half_flip`, `pogo`, `late_dodge`, `prompt_dodge`,
+      the wavedashes, `corner_slide` and `hard_landing_nose_first` unchanged.
+    - Not run: the owner's `test2`/`hitjump`/`front`/`side` k = 30 gate (the
+      recordings are not on the machine that ran this).
+
 ## Change history
 
+- 0.142.0 (2026-10-07): `RB-PHYSICS-001-FR-139` — a jump press just after a
+  jump is ignored (ADR-0065). 457 tests in `rb_physics_bullet`.
 - 0.141.0 (2026-10-06): `RB-PHYSICS-001-FR-138` — a wheel ray that hits the
   ball gets no pushback (ADR-0063). 456 tests in `rb_physics_bullet`.
 - 0.140.0 (2026-10-06): `RB-PHYSICS-001-FR-137` — the extra ball-hit

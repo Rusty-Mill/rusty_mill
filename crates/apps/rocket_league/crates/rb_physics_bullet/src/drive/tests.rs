@@ -3628,6 +3628,64 @@ fn the_second_jump_expires_after_the_double_jump_window() {
     assert!(dodge_after(false, 3.0) > 100.0, "never jumped: no expiry");
 }
 
+/// RB-PHYSICS-001-FR-139: the game ignores a jump press in the first ticks
+/// after a jump (28 `jumpgap` captures: a press 1 to 6 ticks after the first
+/// is ignored, 7 or more flips). While the wheels still touch, a second press
+/// must not start a second ground jump; the step after they let go still
+/// counts as grounded, so a dodge press then is ignored too, and the next
+/// one flips.
+#[test]
+fn a_press_just_after_a_jump_is_ignored_until_the_car_is_airborne() {
+    let dt = 1.0 / 120.0;
+    let press = ControllerInput {
+        jump: true,
+        ..Default::default()
+    };
+    let dodge = ControllerInput {
+        jump: true,
+        pitch: Some(-1.0),
+        ..Default::default()
+    };
+    let idle = ControllerInput::default();
+    let mut car = car();
+    let mut state = DriveState::new();
+    let mut step = |car: &mut RigidBody, input: &ControllerInput, on_ground: bool| {
+        car.clear_forces();
+        apply_driven_forces(
+            car,
+            input,
+            &wheels_for(car, on_ground),
+            None,
+            &mut state,
+            dt,
+        );
+        integrate::integrate_velocities(car, dt);
+    };
+    step(&mut car, &press, true);
+    step(&mut car, &idle, true);
+    let after_first_jump = car.linear_velocity;
+    // Wheels still touching: no second jump (that would add JUMP_SPEED; the
+    // few uu/s here are the first jump's own hold force).
+    step(&mut car, &press, true);
+    assert!(
+        (car.linear_velocity.z - after_first_jump.z).abs() < JUMP_SPEED / 4.0,
+        "a second ground press added {} uu/s",
+        car.linear_velocity.z - after_first_jump.z
+    );
+    step(&mut car, &idle, true);
+    // The wheels let go this step: the press is still ignored.
+    car.linear_velocity.x = 0.0;
+    step(&mut car, &dodge, false);
+    assert!(
+        car.linear_velocity.x.abs() < 1.0,
+        "flipped on the first airborne step"
+    );
+    // One airborne step later a fresh press flips.
+    step(&mut car, &idle, false);
+    step(&mut car, &dodge, false);
+    assert!(car.linear_velocity.x > 100.0, "no flip once airborne");
+}
+
 /// RB-PHYSICS-001-FR-138: a wheel resting on the ball is sprung like one on
 /// the floor, but gets no pushback (that impulse treats the surface as still
 /// and unpushable, which a ball is not).
