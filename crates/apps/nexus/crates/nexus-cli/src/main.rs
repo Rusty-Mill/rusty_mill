@@ -251,7 +251,7 @@ fn main() {
     let mcp_server = matches!(
         &cli.command,
         Commands::Mcp(McpArgs {
-            command: McpCommand::Serve { .. },
+            command: McpCommand::Serve,
         })
     );
     let subscriber = tracing_subscriber::fmt()
@@ -804,7 +804,7 @@ fn main() {
             }
         },
         Commands::Mcp(args) => match args.command {
-            McpCommand::Serve { transport, bind } => commands::mcp::serve(&app, transport, bind),
+            McpCommand::Serve => commands::mcp::serve(&app),
             McpCommand::Servers => commands::mcp::host_servers(&mut app),
             McpCommand::Tools { server } => commands::mcp::host_tools(&mut app, &server),
             McpCommand::Call {
