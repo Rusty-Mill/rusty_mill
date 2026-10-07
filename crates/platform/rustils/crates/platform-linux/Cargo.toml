@@ -11,6 +11,7 @@ license = "MIT"
 layer = "platform"
 
 [dependencies]
+rusty_hex.workspace = true
 platform.workspace = true
 # Certificate bundles are base64 (PEM); zero-dependency, so this crate's
 # dependency set stays first-party.

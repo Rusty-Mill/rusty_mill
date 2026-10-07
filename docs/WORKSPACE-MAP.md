@@ -26,6 +26,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 17 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
+| foundation | rusty_hex | rusty_hex | Hand-rolled, dependency-free hex encode and decode: lowercase output, either case accepted, fixed-size arrays for keys and digests. | 8 |
 | foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
 | foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 31 |

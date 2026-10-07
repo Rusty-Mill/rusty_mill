@@ -16,7 +16,6 @@
 
 #![forbid(unsafe_code)]
 
-mod hex;
 mod ids;
 mod ipnstate;
 mod key;

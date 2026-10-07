@@ -1,0 +1,18 @@
+[package]
+name = "rusty_hex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Hand-rolled, dependency-free hex encode and decode: lowercase output, either case accepted, fixed-size arrays for keys and digests."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+
+[dev-dependencies]

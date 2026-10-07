@@ -9324,6 +9324,7 @@ dependencies = [
  "platform-mock",
  "platform-parity",
  "rusty_base64",
+ "rusty_hex",
  "rusty_libc",
 ]
 
@@ -10507,6 +10508,7 @@ dependencies = [
  "rusqlite",
  "rusty_atomic_file",
  "rusty_crypto_key",
+ "rusty_hex",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
  "serde",
@@ -10560,6 +10562,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "rusty_base64",
+ "rusty_hex",
  "rusty_oauth",
  "serde",
  "serde_json",
@@ -11076,6 +11079,7 @@ name = "rsi-core"
 version = "0.1.0"
 dependencies = [
  "rusty_err",
+ "rusty_hex",
  "rusty_rsa",
  "rusty_sandbox",
 ]
@@ -11555,6 +11559,7 @@ dependencies = [
  "rand 0.8.8",
  "rusty_base64",
  "rusty_confined_fs",
+ "rusty_hex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12372,6 +12377,10 @@ name = "rusty_h2"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_hex"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_homelab_mcp"
 version = "0.1.0"
 dependencies = [
@@ -12732,6 +12741,7 @@ dependencies = [
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",
+ "rusty_hex",
  "rusty_regx",
  "rusty_sha1",
  "rusty_term_l13",
@@ -16079,6 +16089,7 @@ version = "0.0.1"
 dependencies = [
  "rand_core 0.6.4",
  "rusty_crypto_key",
+ "rusty_hex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -16158,6 +16169,7 @@ dependencies = [
 name = "ts-types"
 version = "0.0.1"
 dependencies = [
+ "rusty_hex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

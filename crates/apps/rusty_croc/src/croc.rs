@@ -340,11 +340,7 @@ pub fn room_name(shared_secret: &str) -> String {
     let mut h = Sha256::new();
     h.update(&shared_secret.as_bytes()[..4]);
     h.update(b"croc");
-    hex_encode(&h.finalize())
-}
-
-fn hex_encode(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    rusty_hex::encode(&h.finalize())
 }
 
 /// The PAKE password is everything after the pin + dash (Go: `secret[5:]`).

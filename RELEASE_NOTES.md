@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - rusty_hex (pending review)
+
+- **Added:** `rusty_hex` foundation crate; **Changed:** eight crates drop their private hex codecs for it. `ts-key` and `ts-types` no longer each carry a copy.
+- **Known limitation:** `rusty_term`'s `gui` feature and `platform-bsd` were not built here. `rusty_term` clippy fails without gui on unused `Grid` methods, also on the untouched baseline.
+
+---
+
 ## 2026-10-07 - base64 copies replaced (pending review)
 
 - **Changed:** six hand-written base64 encoders/decoders now call `rusty_base64`; new `decode_standard_lenient` (+2 tests) covers PEM and terminal payloads.
