@@ -304,6 +304,34 @@ const CASES: &[Case] = &[
         ball: None,
         other: Some((3.4, 7.3)),
     },
+    Case {
+        scenario: "experiments/bumpd_1800.json",
+        fixture: "bumpd_1800.jsonl",
+        car: (0.9, 1.5),
+        ball: None,
+        other: Some((8.4, 20.0)),
+    },
+    Case {
+        scenario: "experiments/bumpd_2300.json",
+        fixture: "bumpd_2300.jsonl",
+        car: (1.4, 1.9),
+        ball: None,
+        other: Some((0.5, 1.5)),
+    },
+    Case {
+        scenario: "experiments/bumpd_side_2300.json",
+        fixture: "bumpd_side_2300.jsonl",
+        car: (1.2, 3.0),
+        ball: None,
+        other: Some((0.5, 1.5)),
+    },
+    Case {
+        scenario: "experiments/bumpd_mate_2300.json",
+        fixture: "bumpd_mate_2300.jsonl",
+        car: (1.2, 1.8),
+        ball: None,
+        other: Some((16.9, 40.8)),
+    },
 ];
 
 fn bot_dir() -> PathBuf {

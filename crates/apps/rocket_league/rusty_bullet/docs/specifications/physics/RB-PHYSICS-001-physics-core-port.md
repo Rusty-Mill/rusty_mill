@@ -8143,6 +8143,29 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
     retreating target 1.4 / 2.7, was 13 / 11.
 
+- `RB-PHYSICS-001-FR-142` (demolition; implemented and verified on six
+  two-car recordings, ADR-0068): a supersonic car whose nose bumps an
+  enemy-team car demolishes it instead of bumping it. A car is supersonic from
+  2200 uu/s until it falls under 2100; `PhysicsWorld::set_car_team` (and
+  `Env::set_teams`, the scenario's `team`) say who is an enemy. The demolished
+  car leaves the simulation: not driven, not in any contact, and not in
+  `frame()` (the game's capture drops it too); the collision itself still
+  happens that tick, so the attacker is slowed as by a bump (2300 -> 1042 uu/s).
+  - Not modelled: the respawn. The game brings the car back exactly three
+    seconds later (t = 0.3 s gone, 3.3 s back, `batch_20261006-220315`) at a
+    spawn point it picks (2048, -2560 and (0, -4608) seen), still, with 33 or
+    0 boost.
+  - Why: a stopped enemy hit from behind by a 2300 uu/s boosting car
+    disappeared from the capture on the contact tick; enemies hit at about 1300
+    and 2100 uu/s were bumped exactly like teammates; a teammate hit at 2300
+    was bumped.
+  - **Verification**: `world` tests `a_supersonic_nose_demolishes_an_enemy` and
+    `a_teammate_or_a_slower_nose_is_bumped_not_demolished`; four more
+    two-car recordings in the golden gate (`bumpd_*`): the enemy tracks the game
+    to 0.1 uu until it is removed, the attacker 0.9 to 1.1 uu mean after it,
+    enemies bumped at 1000 and 1800 uu/s 3.4 and 6.7, the teammate bumped at 2300
+    13.5 uu.
+
 - `RB-PHYSICS-001-FR-141` (box-box contact as `dBoxBox`; implemented and
   verified on the same recordings): two changes to `collision::box_vs_box`.
   The incident face is clipped to the reference face's rectangle
@@ -8167,6 +8190,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.144.0 (2026-10-07): `RB-PHYSICS-001-FR-142` (demolition: a supersonic nose
+  on an enemy removes it; teams in `PhysicsWorld`, `Env` and scenarios).
+  466 tests in `rb_physics_bullet`.
 - 0.143.0 (2026-10-07): `RB-PHYSICS-001-FR-140` (car bumps, ADR-0068) and
   `FR-141` (box-box contact as `dBoxBox`). 464 tests in `rb_physics_bullet`.
 - 0.142.0 (2026-10-07): `RB-PHYSICS-001-FR-139` — a jump press just after a

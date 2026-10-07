@@ -16,6 +16,7 @@ pub const SCENARIO_TICK_SECS: f32 = 1.0 / 120.0;
 /// produced them.
 pub fn simulate_scenario(scenario: &Scenario) -> Vec<PhysicsFrame> {
     let mut env = Env::new();
+    env.set_teams(&scenario.teams());
     let start = scenario.initial_frame();
     let mut frames = vec![start.clone()];
     env.reset(&start);
@@ -342,9 +343,11 @@ pub fn compare_scenario(
 /// start frame, then one frame after each input.
 fn simulate_with_inputs(
     start: &PhysicsFrame,
+    teams: &[u32],
     inputs: &[Vec<ControllerInput>],
 ) -> Vec<PhysicsFrame> {
     let mut env = Env::new();
+    env.set_teams(teams);
     let mut frames = vec![start.clone()];
     env.reset(start);
     for (tick, input) in inputs.iter().enumerate() {
@@ -417,6 +420,7 @@ pub fn compare_scenario_recorded(
         .collect();
 
     let start = scenario.initial_frame();
+    let teams = scenario.teams();
     type Rows = (Vec<ScenarioRow>, Vec<Vec<(usize, CarState, CarState)>>);
     // `lag`: recorded tick t is the port's tick t - lag (the state set can
     // land a tick or two after the frame the recording first shows it);
@@ -430,7 +434,7 @@ pub fn compare_scenario_recorded(
                     .collect()
             })
             .collect();
-        let predicted = simulate_with_inputs(&start, &inputs);
+        let predicted = simulate_with_inputs(&start, &teams, &inputs);
         let mut rows = Vec::new();
         let mut other_rows: Vec<Vec<(usize, CarState, CarState)>> =
             vec![Vec::new(); cars.saturating_sub(1)];

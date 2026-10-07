@@ -273,8 +273,9 @@ first car's clock):
 
 `rb_run_tapes` then starts `rb_tape_hive`, one hivemind bot that drives every
 car of team 0 from one process, so the tapes cannot drift apart. The cars are
-teammates: bumps are measured, demolitions (opposing teams) are not yet.
-`rb-verify` scores each car (`car 1 error: ...`; `RB_OTHERS=1` lists the
+teammates, so bumps are measured; give a car `"team": 1` and every car becomes
+its own player (the first plays the tape, the others stay neutral), which is how
+a demolition is measured. `rb-verify` scores each car (`car 1 error: ...`; `RB_OTHERS=1` lists the
 second car's states). ADR-0067.
 
 ## Fidelity gate and probes
