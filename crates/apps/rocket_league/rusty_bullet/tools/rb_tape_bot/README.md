@@ -262,6 +262,26 @@ three that do not are the next physics targets, see the run sheet.
 | New: inputs not recorded for the bot car | open, RB-RESEARCH-O008 |
 | New: one 5-tick hole per capture | open, RB-RESEARCH-O009 |
 
+## Fidelity gate and probes
+
+`experiments/probe_*.json` (made by `gen_probes.py`) probe one mechanic each:
+accelerating, braking, steering at speed, powerslides, dodges, boost in the
+air, wall rides, ball bounces off the floor, walls, ceiling and goal, and
+car-ball hits. Run them with `run_batch.ps1 -Scenarios probe_brake,...` and
+score against the port with the recording's own input:
+
+```
+rb-verify --scenario experiments/probe_brake.json --against <capture> --recorded-inputs
+```
+
+`--recorded-inputs` (`RB-VERIFY-003-FR-016`) feeds the port what the game
+actually applied instead of the tape, whose start the bot delays by a variable
+one to four ticks; what is left is physics. `fixtures/` holds 24 recordings,
+trimmed to their tapes by `make_fixture.py <scenario> <capture>`, and
+`crates/rb_verify_cli/tests/golden_captures.rs` fails `cargo test` if the port
+gets worse on any of them (ADR-0066). After a physics change that improves a
+scenario, lower its bound there; to add a fixture, add its case.
+
 ## Scoring
 
 `rb-verify --scenario scenarios/<name>.json --against <capture> [every]`

@@ -1,0 +1,45 @@
+{
+  "name": "probe_hit_offset: car clips a resting ball off-centre",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      100,
+      -3000,
+      17
+    ],
+    "rotation": [
+      0,
+      1.5708,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      0,
+      -1000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 300,
+      "throttle": 1
+    }
+  ]
+}

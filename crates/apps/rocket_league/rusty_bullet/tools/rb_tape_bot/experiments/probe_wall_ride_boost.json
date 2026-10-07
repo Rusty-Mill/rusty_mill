@@ -1,0 +1,46 @@
+{
+  "name": "probe_wall_ride_boost: boosting at 1800 uu/s into the side wall at 30 degrees",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      2900,
+      -3500,
+      17
+    ],
+    "rotation": [
+      0,
+      1.0472,
+      0
+    ],
+    "velocity": [
+      900,
+      1559,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      3500,
+      3500,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 300,
+      "throttle": 1,
+      "boost": true
+    }
+  ]
+}

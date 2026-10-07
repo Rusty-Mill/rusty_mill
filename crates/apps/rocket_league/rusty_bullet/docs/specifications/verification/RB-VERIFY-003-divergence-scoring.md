@@ -362,6 +362,15 @@ them.
   0.3, `turn_fast` 38.1 -> 3.1 uu mean. Test
   `a_recorded_input_replay_absorbs_a_late_tape_start`.
 
+- `RB-VERIFY-003-FR-017` (implemented): the golden-capture gate (ADR-0066).
+  `tools/rb_tape_bot/fixtures/` holds 24 tape-bot recordings of real Rocket
+  League trimmed to their tapes (`make_fixture.py`); the integration test
+  `crates/rb_verify_cli/tests/golden_captures.rs` replays each one's recorded
+  input in the port (FR-016) and fails when the car's or ball's mean or max
+  position error exceeds a per-case bound (measured 2026-10-07 plus a
+  quarter). Tests: the bound check over all cases, a shifted recording
+  exceeds its bound, every fixture has a case. Reverting FR-139 fails it.
+
 - `RB-VERIFY-003-FR-014` (implemented): car-ball hit sweeps, the second
   caller of `rb_env::Env` (ADR-0060, ADR-0061). `rb-verify --sweep-hit <k>
   <capture> <from> <to> [<capture> <from> <to>]...` scores a grid of
@@ -607,6 +616,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.27.0 (2026-10-07): `RB-VERIFY-003-FR-017` implemented: the golden-capture
+  gate (ADR-0066).
 - 0.26.0 (2026-10-07): `RB-VERIFY-003-FR-016` implemented: the scenario
   comparison can replay the recorded input. 45 tests in `rb_verify_cli`.
 - 0.25.0 (2026-10-07): `RB-VERIFY-003-FR-015` implemented: the scenario
