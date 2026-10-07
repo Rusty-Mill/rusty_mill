@@ -770,7 +770,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   gain of 12 per pad, a game artifact), so they may be a different story.
   Neither a cylinder around the origin, the hitbox centre, an axis-aligned box nor
   the hitbox's xy distance separated pickup frames from the frames before them.
-- **Next**: dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
+- **2026-10-07 update**: the runner now logs the pad list and every pad's
+  `is_active`/`timer` (ADR-0071, `<capture>.pads.jsonl`). First data (24 fuzz
+  tapes): 34 pads, 6 big; `timer` counts down from 3.99 (small) / 9.99 (big) at
+  pickup, so the respawn times are 4 s and 10 s; 19 pickups so far. The
+  geometry still needs targeted tapes (one pad, many offsets, no state-set
+  teleport).
+- **Next** (first part done): dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
   record the pad `is_active`/`timer` per tick (the game packet has them), which
   says exactly when a pad is taken, and drive over one pad at many offsets from a
   fresh match each time with the pad list as the only variable.

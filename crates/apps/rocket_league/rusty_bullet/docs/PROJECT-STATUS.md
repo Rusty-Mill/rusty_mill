@@ -43,6 +43,14 @@ version: `a245d35`).
 
 ## Recently completed
 
+- 2026-10-07 (parity plan, PRs #273 to #274): `docs/roadmap/PARITY-PLAN.md`;
+  pad sidecar log in `rb_run_tapes` and `spread_report.py` (ADR-0071). Game
+  spread measured on seeds 501-524 x 5 runs: 0.0 uu mean on 23 of 24 tapes, so
+  the game is repeatable and the port's median 103.8 uu is all port error.
+  Pad log: 34 pads (6 big), timer counts down from 3.99 (small) / 9.99 (big)
+  at pickup. Game launch from the runner needs the game up from the RLBot GUI
+  (EAC/Epic launch problem, see PARITY-PLAN).
+
 - 2026-10-07 (autonomous session continued, PRs #258 to #265):
   `RB-PHYSICS-001-FR-144` (the engine fades with the absolute forward speed:
   `hb_rev_*` 212 -> 0.2 uu, the reverse powerslides 35 -> 4.8, O013 closed),

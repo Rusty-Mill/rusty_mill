@@ -18,10 +18,16 @@ real game with the port fed the input the game applied
 | Random ball launches | 8.3 uu per 6 s | stay under 10 uu |
 | Wall, ceiling and ball-contact tapes (the weak regimes) | wall-start median 132 uu; hit tapes 203 uu mean | median under 40 uu |
 
-The noise floor matters: the game is not deterministic everywhere (O020: the
-same recorded state gives two outcomes, probably Bullet's randomized solver
-order). Parity cannot mean zero on every tape. The target is "indistinguishable
-within the game's own run-to-run spread", which Workstream F measures.
+The noise floor is smaller than first thought. Workstream F (2026-10-07, 24
+tapes x 5 runs, seeds 501-524) found the game repeats itself to 0.0 uu mean on
+23 of 24 tapes (`fuzz_505`: 0.0 mean, 97 uu max; `fuzz_521`: 0.1 mean), so on
+bot-driven tapes there is no noise to hide behind: the criterion "inside the
+game's own spread" reduces to the 5 uu floor. Only rare discrete events differ
+between runs (O011 near a wall at the state-set; O020 is therefore an
+input-dependent difference, not noise, until a repeat of its tape shows
+otherwise). Port error against those recordings: median 103.8 uu best-run mean
+(0 of 24 inside 25 uu); the largest are single-event divergences
+(`fuzz_512` 1474, `fuzz_508` 1075, `fuzz_501` 527, `fuzz_504` 521 uu).
 
 ## 2. Where we are
 
@@ -133,7 +139,11 @@ the net's behaviour on a goal. Each needs its own recording; the capture
 plugin already sees the game state. Do after A to C, since they matter less
 to a bot environment than to a full match.
 
-### F. Measure the game's own spread (do first, small)
+### F. Measure the game's own spread (done 2026-10-07)
+
+Result: spread 0.0 uu mean on 23 of 24 tapes (see section 1); tool
+`spread_report.py`, data `replays/batch_20261007-165122` (local, not
+committed). The text below is the plan as written.
 
 Without it the exit numbers above are guesses. Repeat each of 24 fixed
 tapes 5 times in the game with identical inputs (the runner supports
@@ -164,7 +174,7 @@ Part-time cycles (one cycle is roughly a session of a few PRs):
 
 | Step | Work | Cycles |
 |---|---|---|
-| 1 | F: game spread measurement (tooling done, ADR-0071; the 24 x 5 run is next) | 0.5 |
+| 1 | F: game spread measurement (done: spread 0.0 uu on 23 of 24 tapes) | 0.5 |
 | 2 | C step 1 and 2: pad data (fits on the same tape-bot runs as F) | 1 |
 | 3 | A steps 1 and 2: instrument and clean probes | 1 to 2 |
 | 4 | C step 3: pads in the port | 1 |
