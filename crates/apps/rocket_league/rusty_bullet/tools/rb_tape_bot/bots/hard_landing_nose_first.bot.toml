@@ -17,7 +17,7 @@ hivemind = false
 RB_TAPE = "scenarios/hard_landing_nose_first.json"
 
 [details]
-description = "reproduces test2.jsonl 18.308 s: a nose-first landing at 1600 uu/s down, neutral until the recording's throttle at 18.367 s (the 18.35 s residual)"
+description = "hard_landing_nose_first: the test2.jsonl 18.308 s nose-first landing, started 0.3 s earlier on its ballistic path with spin zeroed (repeatable; the original start is not, O011)"
 developer = "rusty_bullet"
 language = "rust"
 tags = []

@@ -1,11 +1,11 @@
 {
-  "name": "hard_landing_far: hard_landing_nose_first started 0.3 s earlier on its ballistic path, spin zeroed (O011 check)",
+  "name": "hard_landing_nose_first_original: the test2.jsonl 18.308 s state, set 2 ticks from the floor (not repeatable, O011)",
   "settle_ticks": 0,
   "car": {
     "location": [
-      -2333.491,
-      23.947000000000003,
-      501.85299999999995
+      -2141.5,
+      -431.33,
+      49.48
     ],
     "rotation": [
       -0.4315,
@@ -15,12 +15,12 @@
     "velocity": [
       639.97,
       -1517.59,
-      -1410.41
+      -1605.41
     ],
     "angular_velocity": [
-      0,
-      0,
-      0
+      0.99,
+      -0.22,
+      1.44
     ],
     "boost": 100
   },
@@ -38,7 +38,7 @@
   },
   "steps": [
     {
-      "ticks": 43
+      "ticks": 7
     },
     {
       "ticks": 233,

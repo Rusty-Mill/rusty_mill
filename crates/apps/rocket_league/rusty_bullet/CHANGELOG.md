@@ -4,6 +4,10 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- The shipped `hard_landing_nose_first` starts 0.3 s earlier on its ballistic
+  path (repeatable, port 4.9 / 11.2 uu); the original start is
+  `experiments/hard_landing_original.json` (RB-RESEARCH-O011).
 ### Added
 - ADR-0064: unattended tape runs. Capture plugin 1.4 polls a job file
   (`{"start": path}` / `{"stop": true}`, plus a heartbeat file);
