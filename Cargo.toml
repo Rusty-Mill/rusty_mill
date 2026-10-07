@@ -234,6 +234,35 @@ members = [
     "crates/apps/rusty_agent_gateway/crates/agentgateway-tls",
     "crates/apps/rusty_agent_gateway/crates/agentgateway-core",
     "crates/apps/rusty_agent_gateway/crates/agentgateway",
+]
+# cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
+# it was excluded from rusty_term's own workspace before the merge.
+# crates/libs/ui/rusty_lines/bench is a standalone on-demand benchmark harness
+# (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
+# own, run only via `cd crates/libs/ui/rusty_lines/bench && cargo run --release` —
+# excluded so it doesn't try to join this workspace.
+# crates/foundation/rusty_libc/bench is the same shape: its own standalone `[workspace]`
+# comparing rusty_libc against the `libc` crate, deliberately outside the
+# library's own zero-dependency build.
+exclude = [
+    "crates/libs/ui/rusty_term/fuzz",
+    "crates/apps/rush/fuzz",
+    "crates/libs/ui/rusty_lines/bench",
+    "crates/foundation/rusty_libc/bench",
+    "crates/libs/net/rusty_tls/fuzz",
+    "crates/libs/protocol/rusty_lsp/fuzz",
+    "crates/platform/rustils/fuzz",
+    "crates/apps/rusty_croc/fuzz",
+    "crates/apps/rusty_key/desktop/src-tauri",
+    # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
+    # was excluded from nexus's own workspace too: it is built by `tauri
+    # build` from the pnpm side, carries its own dependency graph (tauri
+    # plugins, WebKitGTK), and is not a `cargo test` target.
+    "crates/apps/nexus/shell",
+    # Nexus is FROZEN (2026-10-07): not in use, kept as a source to extract
+    # from or retire, not a target. Its 42 crates are excluded rather than
+    # deleted so nothing is lost and `git revert` of the freeze commit
+    # restores them as members. See crates/apps/nexus/FROZEN.md.
     "crates/apps/nexus/crates/nexus-types",
     "crates/apps/nexus/crates/nexus-plugin-api",
     "crates/apps/nexus/crates/nexus-hashline",
@@ -275,31 +304,6 @@ members = [
     "crates/apps/nexus/crates/nexus-memory-hub",
     "crates/apps/nexus/crates/nexus-context",
     "crates/apps/nexus/crates/nexus-protocol",
-]
-# cargo-fuzz needs nightly; kept out of ordinary workspace builds, same as
-# it was excluded from rusty_term's own workspace before the merge.
-# crates/libs/ui/rusty_lines/bench is a standalone on-demand benchmark harness
-# (rusty_lines vs rustyline vs reedline) with no `[workspace]` table of its
-# own, run only via `cd crates/libs/ui/rusty_lines/bench && cargo run --release` —
-# excluded so it doesn't try to join this workspace.
-# crates/foundation/rusty_libc/bench is the same shape: its own standalone `[workspace]`
-# comparing rusty_libc against the `libc` crate, deliberately outside the
-# library's own zero-dependency build.
-exclude = [
-    "crates/libs/ui/rusty_term/fuzz",
-    "crates/apps/rush/fuzz",
-    "crates/libs/ui/rusty_lines/bench",
-    "crates/foundation/rusty_libc/bench",
-    "crates/libs/net/rusty_tls/fuzz",
-    "crates/libs/protocol/rusty_lsp/fuzz",
-    "crates/platform/rustils/fuzz",
-    "crates/apps/rusty_croc/fuzz",
-    "crates/apps/rusty_key/desktop/src-tauri",
-    # nexus's Tauri desktop shell (`shell/src-tauri`, crate `nexus-shell`)
-    # was excluded from nexus's own workspace too: it is built by `tauri
-    # build` from the pnpm side, carries its own dependency graph (tauri
-    # plugins, WebKitGTK), and is not a `cargo test` target.
-    "crates/apps/nexus/shell",
 ]
 
 # Hoisted from rusty_search's own former `[workspace.package]`/

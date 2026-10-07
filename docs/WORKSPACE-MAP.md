@@ -16,7 +16,7 @@ Families are the current directories immediately below `crates/`.
 | --- | --- | --- | --- | ---: |
 | foundation | rpath | rpath | Path translation and normalization engine for MSYS2/Git Bash/POSIX to Windows interop | 5 |
 | foundation | rusty_ansder | rusty_ansder | ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire | 0 |
-| foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 10 |
+| foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. | 5 |
 | foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. | 13 |
 | foundation | rusty_codec | rusty_codec | A #![no_std] + alloc sovereign TOML configuration parser and binary buffer serialization crate | 2 |
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA | 2 |
@@ -26,7 +26,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application | 1 |
 | foundation | rusty_err | rusty_err | A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library | 17 |
 | foundation | rusty_err | rusty_err_derive | Proc-macro #[derive(Error)] for rusty_err, matching thiserror's #[error("...")] / #[from] shape | 1 |
-| foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 3 |
+| foundation | rusty_ip | rusty_ip | Allocation-free IP address classification facts without connection policy | 1 |
 | foundation | rusty_jinja | rusty_jinja | A #![no_std] + alloc sovereign zero-dependency Jinja2 LLM chat template evaluator | 1 |
 | foundation | rusty_json | rusty_json | A from-scratch JSON library for Rust | 31 |
 | foundation | rusty_json | rusty_json-derive | Proc-macro #[derive(RustyJson)] attribute for rusty_json | 1 |
@@ -44,7 +44,7 @@ Families are the current directories immediately below `crates/`.
 | foundation | rusty_std | rusty_std | A #![no_std] + alloc sovereign standard library built on top of rusty_libc and rusty_win32 | 15 |
 | foundation | rusty_sync | rusty_sync | A #![no_std] + alloc sovereign atomic spinlock, spinlock-protected MPMC channel, and ring buffer crate | 3 |
 | foundation | rusty_time | rusty_time | A #![no_std] + alloc sovereign DateTime, Date, Time, ISO-8601, and timezone offset calculation crate | 8 |
-| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 5 |
+| foundation | rusty_url | rusty_url | A from-scratch WHATWG URL Standard implementation, aiming for parity with the \`url\` crate | 4 |
 | foundation | rusty_uuid | rusty_uuid | Minimal, dependency-free UUID v4 generation | 14 |
 | foundation | rusty_win32 | rusty_win32 | A #![no_std]-where-possible, minimal-dependency Windows backend for rush's sys::win32 | 11 |
 | foundation | rusty_wire | rusty_wire | A minimal, zero-dependency endian-explicit byte cursor Reader/Writer for Rust | 14 |
@@ -107,7 +107,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. | 2 |
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust | 0 |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. | 1 |
-| libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 9 |
+| libs | rusty_mcp | rusty-mcp | Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28) | 7 |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on the rusty-mcp scaffold | 0 |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs | 7 |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. | 1 |
@@ -144,47 +144,6 @@ Families are the current directories immediately below `crates/`.
 | apps | coreutils | coreutils | Modular pure-Rust implementation of core GNU/POSIX utilities | 0 |
 | apps | coreutils-async | coreutils-async | Reference consumer for platform-async: arun, an async port of rustils' rrun. | 0 |
 | apps | mill-term | mill-term | Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement) | 0 |
-| apps | nexus | nexus-acp | Nexus ACP host + server — outbound Agent Communication Protocol host for external agent processes (BL-144) and inbound JSON-RPC surface exposing Nexus's agent IPC to Hermes-compatible clients (BL-145) | 2 |
-| apps | nexus | nexus-agent | Nexus agent system: Agent trait, Plan/Step types, and PlanExecutor driving tool calls through kernel IPC (PRD-15 scaffold) | 1 |
-| apps | nexus | nexus-ai | Nexus AI engine: provider traits, embeddings, RAG pipeline | 1 |
-| apps | nexus | nexus-ai-runtime | Nexus unified AI/agent event loop (BL-134, ADR 0028): task scheduler, typed AiEvent channel, dedicated worker pool. | 2 |
-| apps | nexus | nexus-audio | Nexus audio subsystem: STT + TTS provider traits with local / provider-routed / platform backends (BL-117) | 1 |
-| apps | nexus | nexus-bootstrap | Nexus runtime bootstrap: assembles kernel, plugin loader, and core plugins for CLI/TUI invokers | 3 |
-| apps | nexus | nexus-cli | Nexus IDE — headless CLI | 0 |
-| apps | nexus | nexus-collab | Nexus live-collaboration network transport (BL-143 Phase 1) — WebSocket relay that ferries CRDT op + presence envelopes between peers | 2 |
-| apps | nexus | nexus-comments | Nexus side-margin comments subsystem (BL-050): persistent threads anchored to stable block ids | 1 |
-| apps | nexus | nexus-context | Typed context construction pipeline for Nexus AI sessions | 0 |
-| apps | nexus | nexus-crdt | Operation-based CRDT layer for collaborative editing (BL-074, PRD-08 §8) | 2 |
-| apps | nexus | nexus-dap | Nexus DAP host — spawns external Debug Adapter Protocol adapters and bridges them to the kernel IPC bus | 1 |
-| apps | nexus | nexus-database | Nexus database support library: property types, validation, formula language, CSV import/export. No SQL — SQL-backed query/schema lives in nexus-storage::bases. | 2 |
-| apps | nexus | nexus-editor | Nexus editor engine: block tree, annotations, transactions (PRD 08 §1/§2/§5) | 3 |
-| apps | nexus | nexus-formats | Nexus file-format library: markdown, canvas, bases, config parsing (PRD 06) | 5 |
-| apps | nexus | nexus-fuzz | Nexus security fuzz targets (BL-103). Stable-Rust smoke runner; libFuzzer/cargo-fuzz integration is operator-side. | 0 |
-| apps | nexus | nexus-git | Nexus git integration: read-only status, diff, blame, log via libgit2 | 3 |
-| apps | nexus | nexus-hashline | Hashline patch format for Nexus: content-hash-anchored edits with TAG hashing, an applier, and 3-way merge recovery (RFC 0005 Phase 5.1) | 1 |
-| apps | nexus | nexus-kernel | Nexus kernel: event bus, plugin lifecycle, capability system | 28 |
-| apps | nexus | nexus-kv | Nexus KV store backends (SQLite on disk, in-memory for tests) implementing nexus-kernel::KvStore | 1 |
-| apps | nexus | nexus-linkpreview | Nexus link-preview subsystem: best-effort OG/Twitter-card metadata fetch for canvas link nodes | 1 |
-| apps | nexus | nexus-lsp | Nexus LSP host — spawns external Language Server Protocol servers and bridges JSON-RPC to the kernel IPC bus | 1 |
-| apps | nexus | nexus-mcp | Nexus MCP server (forge ops → AI clients) + Host client (external MCP servers → Nexus) | 2 |
-| apps | nexus | nexus-memory | AI-native memory layer for Nexus: episodic, semantic, and procedural stores | 2 |
-| apps | nexus | nexus-memory-hub | Central sync hub for Nexus memory — a standalone HTTP server that multiple Nexus instances push to and pull from. | 1 |
-| apps | nexus | nexus-notifications | Nexus multi-channel notification dispatcher (BL-133): desktop OS notifications + Discord webhooks + Telegram bot + SMTP email. | 1 |
-| apps | nexus | nexus-panic-log | Local panic hook that appends to ~/.nexus-shell/logs/panic.log with 1 MB rotation. | 1 |
-| apps | nexus | nexus-plugin-api | Stable plugin contract for Nexus — capability types, IPC abstractions, event types, and the versioned plugin ABI | 9 |
-| apps | nexus | nexus-plugins | Nexus plugin system: manifest parsing, WASM sandbox, host functions, plugin loader, settings, hot-reload | 27 |
-| apps | nexus | nexus-protocol | Speech-act protocol layer for Nexus agent communication | 0 |
-| apps | nexus | nexus-remote | Nexus remote-forge JSON-RPC server (BL-140 Phase 1) — exposes the kernel IPC surface and event bus over stdio so a local frontend can drive a headless Nexus instance | 2 |
-| apps | nexus | nexus-security | Nexus security: capability risk metadata, credential vault, audit logging, path validation | 5 |
-| apps | nexus | nexus-skills | Nexus skills subsystem: .skill.md parser + registry + activation (PRD-13 scaffold) | 1 |
-| apps | nexus | nexus-storage | Nexus storage engine: forge layout, atomic writes, SQLite index, markdown parsing, file watching, Tantivy search | 2 |
-| apps | nexus | nexus-templates | Page-template subsystem: .template.md files with parameterized bodies and target-path patterns. | 2 |
-| apps | nexus | nexus-terminal | Nexus terminal &amp; process manager: PTY sessions, shell detection, output capture (PRD-09) | 2 |
-| apps | nexus | nexus-theme | Nexus theming engine: CSS variable registry, theme packages, resolution cascade, CSS snippets | 1 |
-| apps | nexus | nexus-tui | Nexus IDE — terminal UI | 1 |
-| apps | nexus | nexus-types | Shared types used by the Nexus kernel and plugins | 21 |
-| apps | nexus | nexus-vt | Headless VT engine for Nexus: a GUI-free, l13-free in-tree port of baileyrd/rusty_term's core/ (VT parser + grid + scrollback + OSC 133 command tracking), for server-side terminal screen introspection (RFC 0003 Track B). No GUI, no in-band channel. | 1 |
-| apps | nexus | nexus-workflow | Nexus workflow subsystem: .workflow.toml parser + typed model + registry (PRD-16 scaffold) | 1 |
 | apps | rush | rush | A small, bash-compatible shell written in Rust | 1 |
 | apps | rusty_agent_gateway | agentgateway | An AI-native gateway for MCP, speaking agentgateway's configuration | 0 |
 | apps | rusty_agent_gateway | agentgateway-a2a | Agent2Agent (A2A) method gating and agent-card discovery for rusty_agent_gateway | 1 |

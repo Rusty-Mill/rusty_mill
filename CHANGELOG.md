@@ -8,6 +8,9 @@ and per-crate logs are separate). Format: Added / Changed / Deprecated /
 Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- **Nexus frozen**: its 41 crates move from `[workspace] members` to `exclude` (not deleted; `crates/apps/nexus/FROZEN.md` explains how to unfreeze). `Cargo.lock` loses 162 packages, 41 of them `nexus-*`, and no package is added or upgraded. `docs/WORKSPACE-MAP.md` regenerated. Nothing outside Nexus depended on it.
+
 ### Added
 - **`nexus-ai`: forced re-index, and `nexus-storage`: `StorageError::InvalidInput`** (consolidation review batch 3, B9c and B9/B9b, PR pending). The `index_file` handler takes an optional boolean `force`; `rag::index_file_with` and `IndexMode` are new. See `crates/apps/nexus/CHANGELOG.md`.
 - **`rusty_tick` on CopilotKit: a React page and runtime** ([#534](https://github.com/Rusty-Mill/rusty_mill/pull/534), `crates/apps/rusty_tick/copilotkit-demo`): CopilotKit 1.77's own runtime, with `rusty_tick`'s `POST /api/agent` registered as an AG-UI `HttpAgent`, and a page on its React SDK (`CopilotChat`, a `create_task` frontend tool that adds the task to `rusty_tick`'s Inbox through a small runtime route). It is the first check of the AG-UI endpoint against CopilotKit itself rather than its reference client. Telemetry, the dev inspector and install-time analytics are off, so the page calls only its own servers. Run by hand; not in CI.

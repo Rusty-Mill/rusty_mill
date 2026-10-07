@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - Nexus frozen (pending review)
+
+- **Changed:** the 41 `nexus-*` crates are excluded from the workspace (`exclude` in the root `Cargo.toml`), so CI, `--workspace` runs, the workspace map and `Cargo.lock` no longer cover them. `Cargo.lock` only loses packages (162 removed, 41 Nexus); none added or upgraded.
+- **Known limitation:** frozen crates do not build until unfrozen (`crates/apps/nexus/FROZEN.md`). `NEXUS_NO_KEYRING` and the D-Bus setup in CI are left in place, now unused. Dependabot's config never listed Nexus. `docs/WORKSPACE-ATLAS.html` was not regenerated.
+
+---
+
 ## 2026-10-07 - Term and Tick Tailwind 4 CI repair (pending review)
 
 - **Fixed:** both web builds use `@tailwindcss/vite` 4.3.3, import Tailwind's v4 CSS, and explicitly load their existing theme configurations. Existing dependency versions, React integration, aliases, chunking, proxies, and CI gates are unchanged.

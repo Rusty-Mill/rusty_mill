@@ -28,6 +28,10 @@ Tauri desktop shell, `shell/src-tauri`) is `exclude`d the same way as
 `rusty_key`'s `desktop/src-tauri` — it's a separate pnpm-driven Tauri
 workspace, not a `cargo test` target.
 
+**Nexus is frozen** (2026-10-07): its crates are `exclude`d from the
+workspace and CI, not deleted. See
+[`crates/apps/nexus/FROZEN.md`](crates/apps/nexus/FROZEN.md).
+
 A sixth merge, also outside the wave numbering, brought in
 `baileyrd/rusty_multimodal_db` — a single-crate benchmark harness for
 record-store backend design — under `crates/rusty_multimodal_db/`, the
