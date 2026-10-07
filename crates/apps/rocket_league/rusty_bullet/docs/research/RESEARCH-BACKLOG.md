@@ -446,11 +446,25 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 - **Effect**: the 100 uu "corner climb miss" of session 1 is one draw of a
   distribution the game itself spans (19 to 100 uu mean); the port cannot be
   judged to 100 uu on one capture, and a fit to it could chase noise.
-- **Next**: capture it 10+ times (`run_batch.ps1 -Repeat 10 -Scenarios
-  corner_slide`), compare run against run (not against the port), and find
-  the source (the sub-tick phase of the state set against the physics tick;
-  a start state a few ticks before the wall, so the contact is not the
-  first thing that happens).
+- **Ten more runs (2026-10-06, `replays/batch_20261006-200506`)**: mean
+  error against the port 16.6, 19.4, 19.4, 79.7, 80.0, 100.1, 101.0, 106.0,
+  106.5 uu, a spread of 89.9 mean / 166.5 max; run against run, the largest
+  pairwise distance within the first 200 ticks is 139.5 uu (median 44.6).
+  The outcomes cluster: peak height at the corner 288 to 289 uu (three runs,
+  two bit-identical), 312 uu (three, bit-identical at tick 120) and 326 to
+  331 uu (four), so the game is deterministic for some discrete input, not
+  noisy. The delay between the state-set frame and the first recorded
+  steer input is 1 to 4 ticks (0.008 to 0.033 s) and varies run to run,
+  which fits (the car is at 2112 uu/s and meets the wall within a second)
+  but does not explain it alone: runs with the same delay still split (two
+  at 0.0167 s gave 288.7 and 326.5 uu).
+- **Next**: find the discrete variable. Candidates: the bot's state set
+  and first input landing 1 to 4 ticks apart (move the first tape input,
+  or pre-roll the car further from the wall so the contact is not the first
+  thing that happens); the physics sub-tick phase at the set. Compare run
+  against run, not against the port. `run_batch.ps1` now reports the spread
+  over all runs (its first version compared only runs 1 and 2 and called
+  this scenario repeatable in a ten-run batch).
 - **Status**: Open. **Owner**: baileyrd.
 
 ## Change history

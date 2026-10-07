@@ -219,6 +219,14 @@ script's own `results.md` is in that folder.
   sensitive to something the tape and start state do not fix (sub-tick
   phase of the state set). One capture of it is therefore not a ground truth
   at the 100 uu level. RB-RESEARCH-O011.
+- **corner_slide, ten more runs** (`batch_20261006-200506`): mean error 16.6
+  to 106.5 uu, spread 89.9 / 166.5. The outcomes cluster in three groups by
+  corner peak height (288 to 289, 312, 326 to 331 uu), several runs
+  bit-identical, so it is deterministic in some discrete variable; the delay
+  from the state set to the first steer input (1 to 4 ticks) is a candidate
+  but does not fully explain it. RB-RESEARCH-O011 has the detail. The
+  script's repeatability check compared only runs 1 and 2 (it said "yes"
+  here); it now uses the spread over all runs.
 - **Session 1's three divergences stand:** car_over_ball (155.7 mean against
   156.2), speed_flip (85 to 87 against 94.4) and the higher corner_slide runs
   (79.7 to 100.5 against 100.3) reproduce, so they stay the physics targets

@@ -94,10 +94,14 @@ foreach ($name in $names) {
     $join = { param($f) ($good | ForEach-Object { $_.$f }) -join "; " }
     $repeatable = "n/a (1 run)"
     if ($good.Count -ge 2) {
-        $dMean = [math]::Abs($good[0].Mean - $good[1].Mean)
-        $dMax = [math]::Abs($good[0].Max - $good[1].Max)
+        # Spread over all runs, not just the first two.
+        $means = $good | ForEach-Object { $_.Mean }
+        $maxes = $good | ForEach-Object { $_.Max }
+        $dMean = ($means | Measure-Object -Maximum).Maximum - ($means | Measure-Object -Minimum).Minimum
+        $dMax = ($maxes | Measure-Object -Maximum).Maximum - ($maxes | Measure-Object -Minimum).Minimum
         # Session 1's floor was 2.8 uu mean / 13.8 uu max; allow a little over it.
-        $repeatable = if ($dMean -le 5 -and $dMax -le 20) { "yes (d mean {0:N1}, d max {1:N1})" -f $dMean, $dMax } else { "NO (d mean {0:N1}, d max {1:N1})" -f $dMean, $dMax }
+        $verdict = if ($dMean -le 5 -and $dMax -le 20) { "yes" } else { "NO" }
+        $repeatable = "{0} (spread of {1} runs: mean {2:N1}, max {3:N1})" -f $verdict, $good.Count, $dMean, $dMax
     }
     $gap = "{0:N3}" -f (($good | Measure-Object Gap -Maximum).Maximum)
     $rows += "| $name | $(& $join 'Lag') | $(($good | ForEach-Object { '{0:N1} / {1:N1}' -f $_.Mean, $_.Max }) -join '; ') | $(($good | ForEach-Object { '{0} / {1}' -f $_.Over10, $_.Over100 }) -join '; ') | $(& $join 'Frames') | $gap | $(& $join 'Start') | $repeatable |"
