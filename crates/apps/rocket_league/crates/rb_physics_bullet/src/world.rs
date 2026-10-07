@@ -307,6 +307,9 @@ pub struct PhysicsWorld {
     /// Fuel every car drains per second of held boost
     /// (`set_boost_used_per_second`).
     boost_used_per_second: f32,
+    /// Every car's dodge forward part follows the throttle when the pitch
+    /// stick is centred (`set_dodge_forward_from_throttle`).
+    dodge_forward_from_throttle: bool,
     pub ground: StaticPlane,
     pub walls: Vec<StaticPlane>,
     /// Curved wall-to-floor/wall-to-ceiling fillets (`RB-PHYSICS-001-FR-020`),
@@ -512,6 +515,7 @@ impl PhysicsWorld {
             car_inputs: Vec::new(),
             car_drive: Vec::new(),
             boost_used_per_second: drive::BOOST_USED_PER_SECOND,
+            dodge_forward_from_throttle: false,
             ground,
             walls: Vec::new(),
             curves: Vec::new(),
@@ -736,6 +740,7 @@ impl PhysicsWorld {
     pub fn with_car(mut self, car: RigidBody) -> PhysicsWorld {
         self.car_drive.push(drive::DriveState {
             boost_used_per_second: self.boost_used_per_second,
+            dodge_forward_from_throttle: self.dodge_forward_from_throttle,
             ..drive::DriveState::new()
         });
         self.cars.push(car);
@@ -771,6 +776,17 @@ impl PhysicsWorld {
         self.boost_used_per_second = rate.max(0.0);
         for drive in &mut self.car_drive {
             drive.boost_used_per_second = self.boost_used_per_second;
+        }
+    }
+
+    /// Whether every car, present and later, dodges forward by the throttle
+    /// when the pitch stick is centred (`RB-PHYSICS-001-FR-103`,
+    /// `RB-PHYSICS-001-FR-147`). Off by default, as RocketSim; the owner's
+    /// keyboard captures (which do not record the dodge input) need it on.
+    pub fn set_dodge_forward_from_throttle(&mut self, on: bool) {
+        self.dodge_forward_from_throttle = on;
+        for drive in &mut self.car_drive {
+            drive.dodge_forward_from_throttle = on;
         }
     }
 

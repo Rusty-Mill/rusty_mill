@@ -19,6 +19,7 @@ pub struct Env {
     world: PhysicsWorld,
     car_ball: CarBallTuning,
     teams: Vec<u32>,
+    dodge_forward_from_throttle: bool,
 }
 
 impl Env {
@@ -32,6 +33,7 @@ impl Env {
             arena,
             car_ball: CarBallTuning::default(),
             teams: Vec::new(),
+            dodge_forward_from_throttle: false,
         }
     }
 
@@ -47,12 +49,21 @@ impl Env {
         self.teams = teams.to_vec();
     }
 
+    /// Whether a dodge with the pitch stick centred goes forward by the
+    /// throttle, for every later `reset` (`RB-PHYSICS-001-FR-147`): off by
+    /// default, as RocketSim; on for the owner's keyboard captures.
+    pub fn set_dodge_forward_from_throttle(&mut self, on: bool) {
+        self.dodge_forward_from_throttle = on;
+    }
+
     /// Replaces the simulation with `start` (ball and every car), keeping
     /// its timestamp as the clock. Returns the observation, which is
     /// `start` as the port represents it.
     pub fn reset(&mut self, start: &PhysicsFrame) -> PhysicsFrame {
         self.world = PhysicsWorld::from_frame_in(&self.arena, start);
         self.world.car_ball = self.car_ball;
+        self.world
+            .set_dodge_forward_from_throttle(self.dodge_forward_from_throttle);
         for (index, team) in self.teams.iter().enumerate() {
             self.world.set_car_team(index, *team);
         }

@@ -1,6 +1,6 @@
 """Seeded random controller tapes, for a holistic fidelity check.
 
-    python -I tools/rb_tape_bot/gen_fuzz.py [count]
+    python -I tools/rb_tape_bot/gen_fuzz.py [count [first_seed]]
 
 Writes tools/rb_tape_bot/experiments/fuzz_<seed>.json: a car on the floor near
 the middle of the field, 6 s of random driving, boosting, handbrake turns,
@@ -58,8 +58,9 @@ def random_tape(rng: random.Random) -> list:
 
 def main() -> None:
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 24
+    first = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     names = []
-    for seed in range(1, count + 1):
+    for seed in range(first, first + count):
         rng = random.Random(seed)
         x, y = rng.randint(-2000, 2000), rng.randint(-3000, 3000)
         yaw = rng.uniform(-3.14, 3.14)

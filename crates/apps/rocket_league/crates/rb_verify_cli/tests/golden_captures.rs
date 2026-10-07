@@ -228,6 +228,20 @@ const CASES: &[Case] = &[
         other: None,
     },
     Case {
+        scenario: "experiments/dodgeth_yaw.json",
+        fixture: "dodgeth_yaw.jsonl",
+        car: (0.5, 1.3),
+        ball: None,
+        other: None,
+    },
+    Case {
+        scenario: "experiments/dodgeth_pitch.json",
+        fixture: "dodgeth_pitch.jsonl",
+        car: (1.5, 7.7),
+        ball: None,
+        other: None,
+    },
+    Case {
         scenario: "experiments/probe_reverse.json",
         fixture: "probe_reverse.jsonl",
         car: (0.5, 1.5),

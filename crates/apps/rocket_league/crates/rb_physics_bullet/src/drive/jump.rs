@@ -569,15 +569,23 @@ pub(super) const FLIP_INPUT_DEADZONE: f32 = 0.5;
 /// impulse and no torque. Yaw against air roll (`test2.jsonl` 15.617 s:
 /// yaw +1, roll -1) is the usual stall input.
 ///
-/// With a side part and pitch centred, the forward part comes from the
-/// throttle (`RB-PHYSICS-001-FR-103`, ADR-0023). In the owner's keyboard
-/// captures, a yaw-only press with throttle held dodges diagonally
-/// (forward 354, side 354 scaled: `test2.jsonl` 6.058 s and 12.55 s), and
-/// one without throttle dodges purely sideways. Rocket League dodges from
-/// its own `DodgeForward` input, which the captures do not record; for
-/// them it follows the throttle. The throttle never starts a flip on its
-/// own, and no capture shows it during a stall, so a stall stays one.
-pub(super) fn dodge_direction(input: &ControllerInput) -> Option<(f32, f32)> {
+/// With a side part and pitch centred, the forward part is zero, as
+/// RocketSim's `dodgeDir = (-pitch, yaw + roll)`: a yaw-only press with the
+/// throttle held dodges purely sideways (`fuzz_23`, a bot at 1735 uu/s: the
+/// whole 842 uu/s impulse along the car's flat right,
+/// `RB-PHYSICS-001-FR-147`). With `forward_from_throttle` (the owner's
+/// keyboard captures, `RB-PHYSICS-001-FR-103`, ADR-0023) the forward part
+/// comes from the throttle instead: there a yaw-only press with throttle
+/// held dodges diagonally (forward 354, side 354 scaled: `test2.jsonl`
+/// 6.058 s and 12.55 s), and one without throttle dodges purely sideways.
+/// Rocket League dodges from its own `DodgeForward` input, which those
+/// captures do not record; on keyboard it follows the throttle. The
+/// throttle never starts a flip on its own, and no capture shows it during
+/// a stall, so a stall stays one.
+pub(super) fn dodge_direction(
+    input: &ControllerInput,
+    forward_from_throttle: bool,
+) -> Option<(f32, f32)> {
     let axis = |value: Option<f32>| value.unwrap_or(0.0).clamp(-1.0, 1.0).abs();
     let deflection = axis(input.pitch) + axis(input.yaw) + axis(input.roll);
     if deflection < FLIP_INPUT_DEADZONE {
@@ -587,10 +595,12 @@ pub(super) fn dodge_direction(input: &ControllerInput) -> Option<(f32, f32)> {
     if forward.abs() < DODGE_DEADZONE && side.abs() < DODGE_DEADZONE {
         return Some((0.0, 0.0));
     }
-    let forward = if forward.abs() < DODGE_DEADZONE {
+    let forward = if forward.abs() >= DODGE_DEADZONE {
+        forward
+    } else if forward_from_throttle {
         input.throttle.clamp(-1.0, 1.0)
     } else {
-        forward
+        0.0
     };
     Some((forward, side))
 }
@@ -721,13 +731,14 @@ pub(super) fn airborne_jump_press(
     wall_normal: Option<Vec3>,
     double_jump_available: &mut bool,
     flip: &mut Option<FlipState>,
+    dodge_forward_from_throttle: bool,
 ) {
     if let Some(wall_normal) = wall_normal {
         // Wall jump takes priority over the double jump on this press: push
         // off outward along the wall's normal, plus the same upward
         // JUMP_SPEED every jump variant uses.
         let push = wall_normal * WALL_JUMP_HORIZONTAL_SPEED + Vec3::new(0.0, 0.0, JUMP_SPEED);
-        if let Some(stick) = dodge_direction(input) {
+        if let Some(stick) = dodge_direction(input, dodge_forward_from_throttle) {
             // Wall-jump dodge: unlike the plain wall jump below, this
             // *does* consume double_jump_available — the same resource a
             // ground dodge spends — a deliberate simplification (see the
@@ -742,7 +753,7 @@ pub(super) fn airborne_jump_press(
             car.apply_impulse(push * car.mass(), Vec3::ZERO);
         }
     } else if *double_jump_available {
-        if let Some(stick) = dodge_direction(input) {
+        if let Some(stick) = dodge_direction(input, dodge_forward_from_throttle) {
             // Dodge: a directional flip instead of a plain vertical double
             // jump. Purely horizontal, with no vertical JUMP_SPEED
             // component — see the parent module doc comment.

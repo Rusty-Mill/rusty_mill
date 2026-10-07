@@ -159,6 +159,7 @@ fn step_with_input_and_dodge_flip(
         sticky_surface_up: None,
         was_on_ground: false,
         boost_used_per_second: BOOST_USED_PER_SECOND,
+        dodge_forward_from_throttle: false,
         world_contact_normal: None,
         auto_flip: None,
     };
@@ -1334,7 +1335,7 @@ fn yaw_against_air_roll_is_a_stall_not_a_double_jump() {
         yaw: Some(-1.0),
         ..Default::default()
     };
-    assert_eq!(dodge_direction(&input), Some((0.0, 0.0)));
+    assert_eq!(dodge_direction(&input, false), Some((0.0, 0.0)));
     step_with_input_and_double_jump_state(
         &mut c,
         &input,
@@ -1362,7 +1363,7 @@ fn a_small_stick_deflection_double_jumps() {
         yaw: Some(0.2),
         ..Default::default()
     };
-    assert_eq!(dodge_direction(&input), None);
+    assert_eq!(dodge_direction(&input, false), None);
 }
 
 #[test]
@@ -2471,6 +2472,7 @@ fn drive_state_new_starts_full_boost_released_with_double_jump_available() {
             sticky_surface_up: None,
             was_on_ground: false,
             boost_used_per_second: BOOST_USED_PER_SECOND,
+            dodge_forward_from_throttle: false,
             world_contact_normal: None,
             auto_flip: None,
         }
@@ -3374,29 +3376,48 @@ fn stick_input(throttle: f32, pitch: f32, yaw: f32) -> ControllerInput {
 }
 
 #[test]
-fn a_side_dodge_with_throttle_held_goes_diagonally_forward() {
-    // RB-PHYSICS-001-FR-103: test2.jsonl 6.058 s and 12.55 s.
+fn a_side_dodge_with_throttle_held_goes_diagonally_forward_for_keyboard_captures() {
+    // RB-PHYSICS-001-FR-103: test2.jsonl 6.058 s and 12.55 s; only with the
+    // keyboard-capture flag (FR-147).
     assert_eq!(
-        dodge_direction(&stick_input(1.0, 0.0, 1.0)),
+        dodge_direction(&stick_input(1.0, 0.0, 1.0), true),
         Some((1.0, 1.0))
     );
     assert_eq!(
-        dodge_direction(&stick_input(0.0, 0.0, -1.0)),
+        dodge_direction(&stick_input(0.0, 0.0, -1.0), true),
         Some((0.0, -1.0))
     );
     assert_eq!(
-        dodge_direction(&stick_input(-1.0, 0.0, 1.0)),
+        dodge_direction(&stick_input(-1.0, 0.0, 1.0), true),
         Some((-1.0, 1.0))
     );
 }
 
 #[test]
+fn a_side_dodge_goes_purely_sideways_whatever_the_throttle_as_rocketsim() {
+    // RB-PHYSICS-001-FR-147: a bot's yaw-only dodge with throttle held
+    // (`fuzz_23`: the game's impulse is all along the car's flat right).
+    for throttle in [1.0, 0.0, -1.0] {
+        assert_eq!(
+            dodge_direction(&stick_input(throttle, 0.0, 1.0), false),
+            Some((0.0, 1.0)),
+            "throttle {throttle}"
+        );
+    }
+}
+
+#[test]
 fn pitch_still_sets_the_dodge_and_throttle_alone_never_starts_one() {
-    assert_eq!(
-        dodge_direction(&stick_input(-1.0, -1.0, 0.0)),
-        Some((1.0, 0.0))
-    );
-    assert_eq!(dodge_direction(&stick_input(1.0, 0.0, 0.0)), None);
+    for from_throttle in [false, true] {
+        assert_eq!(
+            dodge_direction(&stick_input(-1.0, -1.0, 0.0), from_throttle),
+            Some((1.0, 0.0))
+        );
+        assert_eq!(
+            dodge_direction(&stick_input(1.0, 0.0, 0.0), from_throttle),
+            None
+        );
+    }
 }
 
 #[test]
