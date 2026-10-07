@@ -207,12 +207,8 @@ impl Blobs {
         if path.exists() {
             return Ok(id);
         }
-        // Written aside and renamed, so a blob is never seen half-written.
-        let partial = self
-            .dir
-            .join(format!("{id}.partial-{}", std::process::id()));
-        std::fs::write(&partial, bytes)
-            .and_then(|()| std::fs::rename(&partial, &path))
+        // Written aside, synced and renamed, so a blob is never seen half-written.
+        rusty_atomic_file::write(&path, bytes)
             .map_err(|e| RuntimeError::io("writing a blob", e))?;
         Ok(id)
     }

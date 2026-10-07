@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - rmcp pin and rsi blob writes (pending review)
+
+- **Changed:** `remind_me_remote` uses the workspace `rmcp`; `rsi-runtime` blob writes are now fsynced (slightly slower, durable).
+- **Known limitation:** `rusty_fair_play`'s `write_by_rename` and `rusty_lines`' history writer were not moved to `rusty_atomic_file`. Fair Play's tests make a directory at the fixed `<file>.tmp` name to force a write failure, which `rusty_atomic_file`'s unique temp names defeat; `rusty_lines` preserves an existing file's permissions, which `rusty_atomic_file` does not.
+
+---
+
 ## 2026-10-07 - Retry-After and backoff consolidated (pending review)
 
 - **Changed:** five crates use `rusty_retry` for backoff or `Retry-After`; `rusty_http` gains a `rusty_retry` dependency (it re-exports the date parser).

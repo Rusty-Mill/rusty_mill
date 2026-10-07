@@ -11099,6 +11099,7 @@ name = "rsi-runtime"
 version = "0.1.0"
 dependencies = [
  "rsi-core",
+ "rusty_atomic_file",
  "rusty_err",
  "rusty_http",
  "rusty_json",
