@@ -30,7 +30,7 @@ run-to-run spread per tape, which no tool reports.
 ## Decision
 
 Option 3. For each run `rb_run_tapes` writes `<capture>.pads.jsonl`: one
-`field` line (every pad's position and whether it is a full pad, in the game's
+`field` line (a new one whenever core sends a different list; every pad's position and whether it is a full pad, in the game's
 order, by y then x) and a `pads` line for the first packet after the start
 state and for every later packet in which a pad's `is_active` flipped:
 `{"frame", "car":[x,y,z,boost], "pads":[[index,is_active,timer],...]}`.

@@ -776,6 +776,24 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   pickup, so the respawn times are 4 s and 10 s; 19 pickups so far. The
   geometry still needs targeted tapes (one pad, many offsets, no state-set
   teleport).
+- **2026-10-07 clean pickup data** (`padp_*` tapes, `gen_pad_probes.py`: the car
+  waits 5 s at the start spot, then drives past one pad from rest; the 5 s matters
+  because the state-set teleport takes every pad on the straight line from the
+  previous tape's end to the new start, which is the "48 boost from the state-set"
+  above). The car's origin, heading +y, first frame in which the pad flips:
+  small pad 14 at (0, -1024): taken at planar origin-to-centre distance 167 to
+  174 uu for lateral offsets 40 to 170, not taken at 180, 200, 220, 260, so the
+  radius is in [174, 180); big pad 18 at (3584, 0): taken at 201 to 205 uu for
+  offsets 0 to 200, not at 210 and up, radius in [205, 210). Frontal and
+  lateral approaches give the same distance, so it is a circle on the origin,
+  not on the hitbox (a box overlap would differ by about 30 uu between nose and
+  side). Height: a car dropped from 400 uu is taken at origin height 154 (the
+  first frame inside, 5 uu per tick) at lateral 0, 60, 120 and 150, not at 180:
+  a flat top, so a cylinder. Still to pin: the exact radii (a tick is 7 to 9 uu),
+  the bottom (a car on the floor is taken, origin height 17) and whether the
+  radius shrinks with height. The field line of the first run in a batch can be
+  a stale one (38 pads, the GUI's previous match); the log now writes a new
+  field line whenever core sends a different one.
 - **Next** (first part done): dump `FieldInfo` (the pad list and kinds) from the tape bot's `new`;
   record the pad `is_active`/`timer` per tick (the game packet has them), which
   says exactly when a pad is taken, and drive over one pad at many offsets from a
