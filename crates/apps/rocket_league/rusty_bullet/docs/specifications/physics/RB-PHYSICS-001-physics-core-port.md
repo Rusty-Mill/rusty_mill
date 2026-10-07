@@ -8196,9 +8196,26 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     mean (max 8.7); every other recording unchanged. Not verified: edge and
     vertex contacts on convex ridges (no recording isolates one).
 
+- `RB-PHYSICS-001-FR-148` (the wheels' throttle ignores the minimum burn;
+  implemented and verified; amends FR-145): `effective_throttle` (the throttle
+  the wheels see) is forced to 1 only while the boost button is held with fuel,
+  not through the burn's `BOOST_MIN_TIME`; only `air_throttle` (FR-145) reads
+  the minimum burn.
+  - Why: `fuzz_103`: a jump with a 5-tick boost tap, then a reverse throttle
+    while the wheels still touch (the jump's first ticks) and the burn goes on:
+    the game brakes the car 30 uu/s in that tick (brake 3500 uu/s^2) while the boost
+    keeps pushing 8.8 uu/s per tick; with the burn forcing the throttle the port
+    did not brake and ran 35 uu/s ahead for good (first 10 uu miss at tick 122,
+    after the fix 266).
+  - **Verification**: the `drive` test
+    `a_short_boost_press_gives_no_air_throttle_but_the_wheels_see_the_real_throttle`
+    (the old effective-throttle assertion fails on FR-145's code); golden
+    `bt_rev` (a jump with a boost tap, then reverse) 0.4 uu and `bt_rev_ground`
+    (a boost tap on the ground, then reverse) 0.1 uu; `fuzz_110` 73 -> 30 uu.
+
 - `RB-PHYSICS-001-FR-145` (a short boost press keeps its throttle for the
-  minimum burn; implemented and verified): the throttle the drive code sees
-  (`effective_throttle`, `air_throttle`) is "boosting" while the burn runs
+  minimum burn; implemented and verified; the wheels' part amended by FR-148):
+  the throttle `air_throttle` sees is "boosting" while the burn runs
   its `BOOST_MIN_TIME` (0.1 s), not only while the button is held.
   - Why: a 6-tick boost press with throttle held, in the air: the game's boost
     kept pushing for 12 ticks (boost level falling, 8.8 uu/s per tick), while
@@ -8287,6 +8304,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.150.0 (2026-10-07): `RB-PHYSICS-001-FR-148` (the wheels' throttle ignores the
+  minimum burn; amends FR-145). 472 tests in `rb_physics_bullet`.
 - 0.149.0 (2026-10-07): `RB-PHYSICS-001-FR-147` (a dodge's forward part follows
   the throttle only for keyboard captures, ADR-0070). 472 tests in
   `rb_physics_bullet`.

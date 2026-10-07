@@ -10,6 +10,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   the car's velocity in wheel order, not Bullet's order) recorded, not fixed.
 
 ### Fixed
+- `RB-PHYSICS-001-FR-148` (spec 0.150.0): the wheels' throttle is forced to 1 only
+  while the boost button is held, not through the 0.1 s minimum burn (amends
+  FR-145, which keeps the air throttle off): a reverse press during a boost
+  tap's burn brakes. Golden fixtures `bt_rev`, `bt_rev_ground`; `fuzz_110`
+  73 -> 30 uu.
 - `RB-PHYSICS-001-FR-147` (spec 0.149.0, ADR-0070): a dodge's forward part follows
   the throttle only for the owner's keyboard captures
   (`set_dodge_forward_from_throttle`, on in `rb-verify`'s capture modes, off by
