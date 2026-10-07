@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- Scoreboard: random drives on fresh seeds 501 to 524, before FR-144 against now: 354 -> 239 uu
+  mean of means (median 143 -> 104).
 - `padpass_*` probes and `RB-RESEARCH-O021` (boost pads are in the recordings, not in the
   port; their geometry is not settled).
 - `gen_wall_fuzz.py` and `wallfuzz_401` to `416` (random tapes from a wall start): median 132 uu
