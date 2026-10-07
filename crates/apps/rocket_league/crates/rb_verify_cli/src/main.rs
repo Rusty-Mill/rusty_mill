@@ -283,11 +283,19 @@ fn run_scenario_against(
                 continue;
             }
             println!(
-                "car 0 tick {tick:>4}: rec vel {} spin {} | pred vel {} spin {}",
+                "car 0 tick {tick:>4}: rec vel {} spin {} | pred vel {} spin {} | rot rec ({:.4}, {:.4}, {:.4}, {:.4}) pred ({:.4}, {:.4}, {:.4}, {:.4})",
                 fmt_vec(&row.recorded.velocity),
                 fmt_vec(&row.recorded.angular_velocity),
                 fmt_vec(&row.predicted.velocity),
                 fmt_vec(&row.predicted.angular_velocity),
+                row.recorded.rotation.x,
+                row.recorded.rotation.y,
+                row.recorded.rotation.z,
+                row.recorded.rotation.w,
+                row.predicted.rotation.x,
+                row.predicted.rotation.y,
+                row.predicted.rotation.z,
+                row.predicted.rotation.w,
                 tick = row.tick,
             );
         }

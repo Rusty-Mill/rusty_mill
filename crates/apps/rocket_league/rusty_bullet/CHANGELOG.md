@@ -4,6 +4,11 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `rb-verify --scenario` with `RB_STATES=1` also prints the recorded and predicted
+  orientation of the first car. RB-RESEARCH-O019 (the suspension damper reads
+  the car's velocity in wheel order, not Bullet's order) recorded, not fixed.
+
 ### Fixed
 - `RB-PHYSICS-001-FR-146` (spec 0.148.0, ADR-0069): a box meets a mesh
   triangle's edge or vertex by the separating-axis test, with the ball's
