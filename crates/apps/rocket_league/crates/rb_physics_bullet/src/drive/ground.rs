@@ -41,24 +41,15 @@ pub(super) const THROTTLE_ACCELERATION: f32 = 1600.0;
 pub(super) const DRIVE_SPEED_TAPER_BREAKPOINTS: [(f32, f32); 3] =
     [(0.0, 1.0), (1400.0, 0.1), (UNBOOSTED_MAX_CAR_SPEED, 0.0)];
 
-/// Linearly interpolates `DRIVE_SPEED_TAPER_BREAKPOINTS` at
-/// `signed_speed_in_throttle_direction` (the same
-/// `throttle.signum() * forward_speed` quantity `apply_driven_forces`'s
-/// own throttle gate already computes) — `1.0` (full acceleration) at or
-/// below the first breakpoint, `0.0` at or beyond the last. Deliberately
-/// evaluated against this port's own pre-existing *signed*,
-/// direction-aware speed (clamped to non-negative here, since a negative
-/// value means "not yet moving this way," which should read as a
-/// standing start, not an out-of-range lookup) rather than switching to
-/// real RocketSim's own direction-agnostic `abs(forward speed)` — that
-/// would be a second, independent behavioral change (whether accelerating
-/// against your own current motion tapers too) this requirement doesn't
-/// take on; see its own Non-goals.
-pub(super) fn drive_speed_taper(signed_speed_in_throttle_direction: f32) -> f32 {
-    curve(
-        &DRIVE_SPEED_TAPER_BREAKPOINTS,
-        signed_speed_in_throttle_direction.max(0.0),
-    )
+/// Linearly interpolates `DRIVE_SPEED_TAPER_BREAKPOINTS` at `speed` — `1.0`
+/// (full acceleration) at or below the first breakpoint, `0.0` at or beyond
+/// the last. The caller passes the car's absolute forward speed, as
+/// RocketSim does (`RB-PHYSICS-001-FR-144`): the engine fades with speed in
+/// either direction, so a reverse throttle held against a fast forward
+/// motion (only possible under the handbrake, otherwise it brakes) barely
+/// pushes. Negative input reads as a standing start.
+pub(super) fn drive_speed_taper(speed: f32) -> f32 {
+    curve(&DRIVE_SPEED_TAPER_BREAKPOINTS, speed.max(0.0))
 }
 
 /// Piecewise-linear lookup of `x` in `points` (sorted by x), clamped to the
@@ -366,7 +357,7 @@ pub(super) fn apply_ground_control(
     // RocketSim quarters the engine with fewer than three wheels touching.
     let touching = contacts.iter().flatten().count();
     let partial_contact = if touching < 3 { 0.25 } else { 1.0 };
-    let taper = drive_speed_taper(engine.signum() * forward_speed) * partial_contact;
+    let taper = drive_speed_taper(forward_speed.abs()) * partial_contact;
     let acceleration = engine * THROTTLE_ACCELERATION * taper * longitudinal_grip;
     let deceleration = BRAKE_DECELERATION * brake * longitudinal_grip;
 

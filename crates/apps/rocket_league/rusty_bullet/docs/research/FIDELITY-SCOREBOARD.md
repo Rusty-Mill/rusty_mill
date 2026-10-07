@@ -1,10 +1,10 @@
 # Fidelity scoreboard: the port against real Rocket League
 
-State on 2026-10-07 (spec `RB-PHYSICS-001` 0.145.0). Every number is the mean
+State on 2026-10-07 (spec `RB-PHYSICS-001` 0.146.0). Every number is the mean
 position error in uu between the port, fed the input the game recorded
 (`rb-verify --scenario S --against C --recorded-inputs`), and a tape-bot
 recording of real Rocket League: the car, and where it matters the ball and a
-second car. The recordings are `replays/` (gitignored); 47 of them, trimmed to
+second car. The recordings are `replays/` (gitignored); 54 of them, trimmed to
 their tapes, are in `tools/rb_tape_bot/fixtures/` and fail `cargo test` if the
 port gets worse (ADR-0066). How it was measured: `tools/rb_tape_bot/README.md`;
 the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
@@ -23,7 +23,7 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 | Landings on the wheels, tilted | `land_wheels`, `land_tilted` | 0.2 to 0.3 |
 | Ball: floor, wall, ceiling, corner, goal, rolling, spin | `probe_ball_*` | 1.4 to 4.2 (ball) |
 | Car-ball hits: throttle, boost, off-centre, glancing, side | `hit_*`, `nose_hit_glancing`, `ball_bounce_car_side` | 0.1 to 0.6 car, 0.3 to 1.4 ball |
-| Powerslide: straight, half-left, release | `ps_straight` 0.3, `ps_half_left` 1.1 to 4.3, `ps_release` 2.8 to 5.1 | under 5 |
+| Powerslide: straight, half-left, release, long reverse slides; reverse + handbrake | `ps_straight` 0.3, `ps_half_left` 1.1 to 4.3, `ps_release` 2.8 to 5.1, `powerslide` 4.8, `ps_boost` 4.9, `hb_rev_*` 0.2 | under 8 |
 | **Car-car bumps**: rear (300 to 2100 uu/s), side, head-on, off-centre, moving, crossing, in the air | 36 `bump*` scenarios | 0.1 to 11 per car |
 | **Demolition** (supersonic nose on an enemy; teammates only bumped) | `bumpd_*` | enemy 0.0 until removed, attacker about 1 |
 
@@ -33,7 +33,6 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 |---|---|---|
 | Climbing a wall or ramp | `wall_ride` 9, `wall_ride_slow` 16, `wall_ride_boost` 12 to 19, `corner_slide` 22 | The port climbs about 10% slowly; a family of suspension and pushback constants trades errors (O012) |
 | A car landing on a wall or hitting the ceiling | `wall_land` 77, `ceiling` 31 | Car-body contact against the ramp mesh from the air differs; a uniform material cannot fix it (O017) |
-| A long reverse powerslide | `powerslide` 35, `ps_boost` 18, `ps_slow` 12 | The constants are at their joint optimum; the regime is rare (O013) |
 | Wheels on the ball | `car_over_ball` 27 car / 44 ball | Ordinary hits agree; the wheel-on-ball contact does not (O014) |
 | A flip into a car | `bumpf_flip` 39 / 65 | The dodge's own impulse is in play |
 | Respawn after a demolition | not modelled | The game brings the car back after exactly 3 s at a spawn point it picks (O018) |

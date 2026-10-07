@@ -557,9 +557,13 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   steer scale, lateral curve end): no value improves the joint error, each is
   at its optimum. The single-capture wins (steer scale 0.85 -> 25 uu) do not
   hold on the others.
-- **Next**: the regime is rare in play (a sustained backwards slide); look
-  at what a wheel does when its rolling speed reverses under a held throttle.
-- **Status**: Open. **Owner**: baileyrd.
+- **Fixed (2026-10-07)**: `RB-PHYSICS-001-FR-144`. The cause was not the
+  slide but the engine's speed fade: the port read it from the speed along
+  the throttle (a reverse press on a forward car = standing start = full
+  force), the game from the absolute speed. Found with a fuzz tape
+  (`gen_fuzz.py`) and probes `hb_rev_*`: `probe_powerslide` 35.2 -> 4.8,
+  `ps_boost` 18.4 -> 4.9, `ps_slow` 11.8 -> 7.3.
+- **Status**: Done. **Owner**: baileyrd.
 
 ### RB-RESEARCH-O014 — A car landing on the ball with its wheels
 
@@ -656,6 +660,7 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 
 ## Change history
 
+- 2026-10-07: O013 fixed (FR-144, the engine fades with absolute speed).
 - 2026-10-07: Added RB-RESEARCH-O018 (car bumps and demolitions): bumps
   modelled (FR-140, FR-141), demolitions open.
 - 2026-10-07: Added RB-RESEARCH-O017 (car hitting the side ramp from the air;
