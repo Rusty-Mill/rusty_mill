@@ -420,6 +420,8 @@ fn seed(
 
     let recorded = captured[seed_index..].to_vec();
     let mut world = PhysicsWorld::from_frame(&recorded[0]);
+    // The captures scored here are the owner's keyboard recordings.
+    world.set_dodge_forward_from_throttle(true);
     if boost_is_unlimited(&recorded) {
         world.set_boost_used_per_second(0.0);
     }

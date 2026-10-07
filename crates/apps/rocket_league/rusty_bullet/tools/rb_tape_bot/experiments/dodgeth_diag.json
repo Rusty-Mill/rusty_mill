@@ -1,0 +1,61 @@
+{
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   0,
+   -3500,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   1.5707963,
+   0
+  ],
+  "velocity": [
+   0,
+   1500,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 100
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "name": "dodgeth_diag: dodge with throttle held, {'pitch': -1, 'yaw': 1}",
+ "steps": [
+  {
+   "ticks": 4,
+   "throttle": 1,
+   "jump": true
+  },
+  {
+   "ticks": 10,
+   "throttle": 1
+  },
+  {
+   "ticks": 2,
+   "throttle": 1,
+   "jump": true,
+   "pitch": -1,
+   "yaw": 1
+  },
+  {
+   "ticks": 90,
+   "throttle": 1
+  }
+ ]
+}

@@ -158,6 +158,8 @@ impl Candidate {
 /// first. Ties keep the order given, so put the default first.
 pub fn sweep(windows: &[Window], k: usize, tunings: &[CarBallTuning]) -> Vec<Candidate> {
     let mut env = Env::new();
+    // The windows come from the owner's keyboard captures.
+    env.set_dodge_forward_from_throttle(true);
     let mut candidates: Vec<Candidate> = tunings
         .iter()
         .map(|&tuning| Candidate {

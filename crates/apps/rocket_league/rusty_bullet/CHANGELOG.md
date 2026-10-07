@@ -10,6 +10,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   the car's velocity in wheel order, not Bullet's order) recorded, not fixed.
 
 ### Fixed
+- `RB-PHYSICS-001-FR-147` (spec 0.149.0, ADR-0070): a dodge's forward part follows
+  the throttle only for the owner's keyboard captures
+  (`set_dodge_forward_from_throttle`, on in `rb-verify`'s capture modes, off by
+  default): a bot's yaw-only dodge with the throttle held is purely sideways, as
+  RocketSim and the game (`fuzz_23` 123 -> 54 uu). Golden fixtures `dodgeth_yaw`,
+  `dodgeth_pitch`. `Env::set_dodge_forward_from_throttle` is new.
 - `RB-PHYSICS-001-FR-146` (spec 0.148.0, ADR-0069): a box meets a mesh
   triangle's edge or vertex by the separating-axis test, with the ball's
   internal-edge normal adjustment. `probe_wall_land` (a car hitting the side

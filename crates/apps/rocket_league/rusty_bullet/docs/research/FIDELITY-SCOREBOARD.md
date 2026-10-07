@@ -1,10 +1,10 @@
 # Fidelity scoreboard: the port against real Rocket League
 
-State on 2026-10-07 (spec `RB-PHYSICS-001` 0.148.0). Every number is the mean
+State on 2026-10-07 (spec `RB-PHYSICS-001` 0.149.0). Every number is the mean
 position error in uu between the port, fed the input the game recorded
 (`rb-verify --scenario S --against C --recorded-inputs`), and a tape-bot
 recording of real Rocket League: the car, and where it matters the ball and a
-second car. The recordings are `replays/` (gitignored); 56 of them, trimmed to
+second car. The recordings are `replays/` (gitignored); 58 of them, trimmed to
 their tapes, are in `tools/rb_tape_bot/fixtures/` and fail `cargo test` if the
 port gets worse (ADR-0066). How it was measured: `tools/rb_tape_bot/README.md`;
 the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
@@ -17,7 +17,7 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 | Throttle, boost, coasting, braking, reversing | `probe_accel`, `accel_boost`, `coast`, `brake`, `reverse` | 0.2 to 0.6 |
 | Steering | `turn_slow` 2.7, `turn_fast` 3.0, `turn_half_boost` (to the wall) | 1.4 to 3 |
 | Jumps, double jumps, the second-jump window | `jump_short/mid/long`, `double_jump`, `late_dodge` | 0.4 to 1.4 |
-| Dodges in every direction, flip cancel, air roll after a flip | `dodge_back/side/diag`, `dodge_fast_*`, `flip_cancel`, `flip_air_roll` | 0.2 to 1.3 |
+| Dodges in every direction, flip cancel, air roll after a flip, a dodge with the throttle held at 1500 uu/s | `dodge_back/side/diag`, `dodge_fast_*`, `flip_cancel`, `flip_air_roll`, `dodgeth_*` | 0.2 to 1.6 |
 | Speed flip, half flip, wavedash (mid, late), pogo, hard landing | shipped scenarios | 0.3 to 2.6 |
 | Air control, boost in the air | `air_roll`, `air_yaw_pitch`, `boost_air_*` | 1.0 to 2.5 |
 | Landings on the wheels, tilted | `land_wheels`, `land_tilted` | 0.2 to 0.3 |

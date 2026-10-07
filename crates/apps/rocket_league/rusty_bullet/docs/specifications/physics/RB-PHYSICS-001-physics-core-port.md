@@ -8147,6 +8147,29 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
     retreating target 1.4 / 2.7, was 13 / 11.
 
+- `RB-PHYSICS-001-FR-147` (a dodge's forward part follows the throttle only
+  for keyboard captures; implemented and verified on two recordings, ADR-0070):
+  `DriveState::dodge_forward_from_throttle` (`PhysicsWorld::
+  set_dodge_forward_from_throttle`, `Env::set_dodge_forward_from_throttle`)
+  is off by default, so the dodge direction is RocketSim's `(-pitch, yaw +
+  roll)` whatever the throttle. `rb-verify`'s capture modes (`--self*`,
+  `--sweep-hit`: the owner's keyboard recordings, FR-103/ADR-0023) turn it
+  on; its `--scenario` modes (bot recordings) leave it off.
+  - Why: `fuzz_23` (a bot at 1735 uu/s, a yaw-only press with the throttle held
+    and the car banked): the game's impulse is 842 uu/s purely along the car's
+    flat right (500 x (1 + 0.9 x 0.754)); the port, following the keyboard rule,
+    added 363 uu/s forward as well (k = 15 velocity error 431 uu/s). The keyboard
+    captures do not record `DodgeForward`, which for them follows the throttle
+    (FR-103); a bot's controller sets it from the pitch alone.
+  - **Verification**: `drive` tests
+    `a_side_dodge_goes_purely_sideways_whatever_the_throttle_as_rocketsim` (fails
+    on the old default) and the FR-103 test now with the flag; golden
+    `dodgeth_yaw` 0.4 uu, `dodgeth_pitch` 1.2 uu (a pure side and a pure forward
+    dodge at 1500 uu/s with the throttle held; `dodgeth_roll` 0.6 and
+    `dodgeth_diag` 1.6 not in the gate); `fuzz_23` 123 -> 54 uu mean. Not
+    verified: the owner's keyboard recordings (not on this machine; the flag
+    keeps their rule).
+
 - `RB-PHYSICS-001-FR-146` (a box meets a mesh triangle's edge or vertex;
   implemented and verified on `probe_wall_land`, ADR-0069): for each nearby
   triangle `collision::BoxCorners::separating_axis_contact` runs the box-triangle
@@ -8264,6 +8287,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.149.0 (2026-10-07): `RB-PHYSICS-001-FR-147` (a dodge's forward part follows
+  the throttle only for keyboard captures, ADR-0070). 472 tests in
+  `rb_physics_bullet`.
 - 0.148.0 (2026-10-07): `RB-PHYSICS-001-FR-146` (box against a triangle's edge
   or vertex by the separating-axis test, ADR-0069). 470 tests in
   `rb_physics_bullet`.

@@ -438,6 +438,12 @@ pub struct DriveState {
     /// Fuel drained per second of held boost: `BOOST_USED_PER_SECOND`, or
     /// 0 with unlimited boost (`RB-PHYSICS-001-FR-111`).
     pub boost_used_per_second: f32,
+    /// Whether a dodge with the pitch stick centred goes forward as the
+    /// throttle says, as the owner's keyboard captures show
+    /// (`RB-PHYSICS-001-FR-103`). Off by default: RocketSim's dodge
+    /// direction is `(-pitch, yaw + roll)` and a bot's throttle does not
+    /// change it (`RB-PHYSICS-001-FR-147`).
+    pub dodge_forward_from_throttle: bool,
     /// The normal of the last surface the car's body (not its wheels)
     /// touched in the previous step, RocketSim's `worldContact`; `None`
     /// when it touched nothing. Set by the world (`RB-PHYSICS-001-FR-123`).
@@ -462,6 +468,7 @@ impl DriveState {
             sticky_surface_up: None,
             was_on_ground: false,
             boost_used_per_second: BOOST_USED_PER_SECOND,
+            dodge_forward_from_throttle: false,
             world_contact_normal: None,
             auto_flip: None,
         }
@@ -614,6 +621,7 @@ pub fn apply_driven_forces(
                 wall_normal,
                 &mut state.double_jump_available,
                 &mut state.flip,
+                state.dodge_forward_from_throttle,
             );
         }
         // RB-PHYSICS-001-FR-095: the step after the wheels let go still
