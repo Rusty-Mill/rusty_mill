@@ -91,7 +91,7 @@ export function MonthView({ range, anchor, events, ctx }: Props) {
                     const delta = diffDays(info.grabDay, day)
                     if (delta !== 0) ctx.move(info.task, moveByDays(info.task, delta))
                   }}
-                  className={`cursor-default border-l border-line outline-none first:border-l-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${over === day ? 'bg-selected' : ''}`}
+                  className={`cursor-default border-l border-line outline-hidden first:border-l-0 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary ${over === day ? 'bg-selected' : ''}`}
                 >
                   <span
                     aria-hidden
@@ -133,7 +133,7 @@ export function MonthView({ range, anchor, events, ctx }: Props) {
                   <button
                     type="button"
                     onClick={(e) => ctx.openDay(week[i]!, e.currentTarget)}
-                    className="pointer-events-auto rounded px-1.5 text-s text-grey outline-none hover:bg-hover hover:text-text focus-visible:ring-2 focus-visible:ring-primary"
+                    className="pointer-events-auto rounded px-1.5 text-s text-grey outline-hidden hover:bg-hover hover:text-text focus-visible:ring-2 focus-visible:ring-primary"
                   >
                     +{n} more
                   </button>

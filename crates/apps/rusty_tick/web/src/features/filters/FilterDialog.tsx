@@ -41,7 +41,7 @@ function FilterForm({ filter, lists, tags, assigneeNames, onCancel, onSubmit }: 
     <form onSubmit={submit} className="flex flex-col gap-4 px-6 pb-6 pt-2">
       <label className="flex flex-col gap-1.5">
         <span className="text-s text-grey">Name</span>
-        <input data-autofocus value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Filter name" className="h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary" />
+        <input data-autofocus value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Filter name" className="h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary" />
       </label>
       <Chips legend="Lists" options={lists.filter((l) => !l.archived).map((l) => [l.id, l.name])} selected={rule.lists} onToggle={(v) => setRule({ ...rule, lists: toggle(rule.lists, v) })} />
       <Chips legend="Tags" options={tags.map((t) => [t.name, t.label])} selected={rule.tags} onToggle={(v) => setRule({ ...rule, tags: toggle(rule.tags, v) })} />

@@ -30,7 +30,7 @@ export function AssigneeField({ taskId, disabled }: { taskId: string; disabled?:
         onKeyDown={(e) => {
           if (e.key === 'Enter') e.currentTarget.blur()
         }}
-        className="h-7 min-w-0 flex-1 rounded-row bg-transparent px-1 text-base text-text outline-none placeholder:text-grey hover:bg-hover focus:bg-hover"
+        className="h-7 min-w-0 flex-1 rounded-row bg-transparent px-1 text-base text-text outline-hidden placeholder:text-grey hover:bg-hover focus:bg-hover"
       />
       <datalist id={listId}>
         {names.map((n) => (

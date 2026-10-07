@@ -108,7 +108,7 @@ function PopoverBody({ onClose, fields, now, onApply }: Props) {
     <div className="flex flex-col gap-2.5 text-base">
       <div role="tablist" aria-label="Date type" className="grid grid-cols-2 gap-1 rounded-row bg-black/[.05] p-0.5">
         {(['date', 'duration'] as const).map((t) => (
-          <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`h-7 rounded-md text-base ${tab === t ? 'bg-surface font-semibold shadow-sm' : 'text-grey'}`}>
+          <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`h-7 rounded-md text-base ${tab === t ? 'bg-surface font-semibold shadow-xs' : 'text-grey'}`}>
             {t === 'date' ? 'Date' : 'Duration'}
           </button>
         ))}
@@ -162,7 +162,7 @@ function PopoverBody({ onClose, fields, now, onApply }: Props) {
             aria-label="Time"
             value={timeValue(sel.time)}
             onChange={(e) => setTime(parseTime(e.target.value))}
-            className="h-7 rounded border border-line bg-surface px-1.5 text-base outline-none focus:border-primary"
+            className="h-7 rounded border border-line bg-surface px-1.5 text-base outline-hidden focus:border-primary"
           />
           {sel.time && (
             <button type="button" onClick={() => setTime(null)} className="text-s text-grey hover:text-text">
@@ -177,7 +177,7 @@ function PopoverBody({ onClose, fields, now, onApply }: Props) {
           value={reminderValid ? sel.reminder : ''}
           disabled={sel.day === null}
           onChange={(e) => setSel((s) => ({ ...s, reminder: e.target.value }))}
-          className="h-7 max-w-[170px] rounded border border-line bg-surface px-1 text-base outline-none focus:border-primary disabled:opacity-40"
+          className="h-7 max-w-[170px] rounded border border-line bg-surface px-1 text-base outline-hidden focus:border-primary disabled:opacity-40"
         >
           {reminderChoices.map((r) => (
             <option key={r.value} value={r.value}>
@@ -192,7 +192,7 @@ function PopoverBody({ onClose, fields, now, onApply }: Props) {
           value={preset}
           disabled={sel.day === null}
           onChange={(e) => chooseRepeat(e.target.value as RepeatPreset)}
-          className="h-7 max-w-[170px] rounded border border-line bg-surface px-1 text-base outline-none focus:border-primary disabled:opacity-40"
+          className="h-7 max-w-[170px] rounded border border-line bg-surface px-1 text-base outline-hidden focus:border-primary disabled:opacity-40"
         >
           <option value="none">Does not repeat</option>
           <option value="daily">Daily</option>
@@ -216,7 +216,7 @@ function PopoverBody({ onClose, fields, now, onApply }: Props) {
               setCustom(next)
               setSel((s) => ({ ...s, repeat: repeatRule('custom', dueAnchor, next) }))
             }}
-            className="h-7 w-14 rounded border border-line bg-surface px-1.5 outline-none focus:border-primary"
+            className="h-7 w-14 rounded border border-line bg-surface px-1.5 outline-hidden focus:border-primary"
           />
           <select
             aria-label="Repeat unit"
@@ -226,7 +226,7 @@ function PopoverBody({ onClose, fields, now, onApply }: Props) {
               setCustom(next)
               setSel((s) => ({ ...s, repeat: repeatRule('custom', dueAnchor, next) }))
             }}
-            className="h-7 rounded border border-line bg-surface px-1 outline-none focus:border-primary"
+            className="h-7 rounded border border-line bg-surface px-1 outline-hidden focus:border-primary"
           >
             <option value="DAILY">days</option>
             <option value="WEEKLY">weeks</option>

@@ -77,7 +77,7 @@ export const RichEditor = forwardRef<EditorHandle, Props>(function RichEditor({ 
         contentEditable
         suppressContentEditableWarning
         spellCheck
-        className="summary-editor h-full overflow-y-auto px-8 py-6 text-base outline-none"
+        className="summary-editor h-full overflow-y-auto px-8 py-6 text-base outline-hidden"
         onInput={(e) => {
           const ne = e.nativeEvent as InputEvent
           const root = el.current

@@ -26,7 +26,7 @@ export function SettingsRow({ settings, onChange }: Props) {
           value={settings.ambient}
           aria-label="Ambient sound"
           onChange={(e) => isAmbient(e.target.value) && onChange({ ambient: e.target.value })}
-          className="h-7 rounded-row border border-line bg-surface px-2 text-base text-text outline-none focus:border-primary"
+          className="h-7 rounded-row border border-line bg-surface px-2 text-base text-text outline-hidden focus:border-primary"
         >
           {AMBIENT.map((a) => (
             <option key={a.id} value={a.id}>
@@ -60,7 +60,7 @@ function NumberField({ label, unit, value, onCommit }: { label: string; unit: st
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => e.key === 'Enter' && commit()}
-        className="h-7 w-14 rounded-row border border-line bg-surface px-2 text-base text-text outline-none focus:border-primary"
+        className="h-7 w-14 rounded-row border border-line bg-surface px-2 text-base text-text outline-hidden focus:border-primary"
       />
     </label>
   )

@@ -30,7 +30,7 @@ function Row({ e, day, ctx, listName, first }: { e: CalEvent; day: number; ctx: 
       <button
         type="button"
         onClick={(ev) => ctx.openTask(e.task, ev.currentTarget)}
-        className="flex min-w-0 flex-col rounded-row border-l-[3px] px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+        className="flex min-w-0 flex-col rounded-row border-l-[3px] px-3 py-2 text-left outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
         style={{ backgroundColor: wash(color, 10), borderLeftColor: color }}
       >
         <span className="text-s text-primary">{e.kind === 'timed' ? `${formatTime(e.startMs, ctx.hour12)} - ${formatTime(e.endMs, ctx.hour12)}` : e.startDay === e.endDay ? 'All day' : `${shortDate(e.startDay)} - ${shortDate(e.endDay)}`}</span>

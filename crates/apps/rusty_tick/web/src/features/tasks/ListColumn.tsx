@@ -111,7 +111,7 @@ export function ListColumn({ spec, selectedId }: Props) {
       ) : viewMode === 'timeline' ? (
         <TimelineView spec={spec} data={data} selectedId={selectedId} />
       ) : total === 0 ? (
-        <button type="button" onClick={() => useUi.getState().focusQuickAdd()} className="flex flex-1 flex-col items-center justify-center gap-2 pb-24 text-grey outline-none">
+        <button type="button" onClick={() => useUi.getState().focusQuickAdd()} className="flex flex-1 flex-col items-center justify-center gap-2 pb-24 text-grey outline-hidden">
           <NoTasksArt />
           <span className="text-base font-semibold text-text">No tasks</span>
           <span className="text-s">Click the input box to add</span>

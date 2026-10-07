@@ -85,7 +85,7 @@ export function FocusPage() {
               aria-selected={shownMode === m}
               disabled={session !== null}
               onClick={() => f().setMode(m)}
-              className={`h-7 rounded-full px-5 disabled:cursor-default ${shownMode === m ? 'bg-surface font-semibold shadow-sm' : 'text-grey hover:text-text'}`}
+              className={`h-7 rounded-full px-5 disabled:cursor-default ${shownMode === m ? 'bg-surface font-semibold shadow-xs' : 'text-grey hover:text-text'}`}
             >
               {m === 'pomo' ? 'Pomo' : 'Stopwatch'}
             </button>
@@ -219,6 +219,6 @@ export function FocusPage() {
   )
 }
 
-const primary = 'h-12 min-w-[170px] rounded-full bg-primary px-8 font-semibold text-white outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface'
+const primary = 'h-12 min-w-[170px] rounded-full bg-primary px-8 font-semibold text-white outline-hidden focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface'
 const stepper = 'flex h-6 w-6 items-center justify-center rounded-full border border-line text-text hover:bg-hover disabled:opacity-40'
 const secondary = 'h-12 min-w-[120px] rounded-full border border-line px-6 hover:bg-hover'

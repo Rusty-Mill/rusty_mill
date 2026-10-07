@@ -102,7 +102,7 @@ export function QuickAdd({ view, lists, inboxId, tasks, now }: Props) {
         autoComplete="off"
         spellCheck={false}
         // The typed text is drawn by the layer behind (so tokens can be highlighted); the caret stays visible.
-        className="h-full w-full bg-transparent pl-10 pr-3 text-base text-transparent caret-[rgb(var(--text))] outline-none placeholder:text-grey"
+        className="h-full w-full bg-transparent pl-10 pr-3 text-base text-transparent caret-[rgb(var(--text))] outline-hidden placeholder:text-grey"
       />
     </div>
   )

@@ -35,7 +35,7 @@ export function Segmented<T extends string | number>({ name, label, value, optio
       {options.map((o) => (
         <label key={String(o.value)} className="cursor-pointer">
           <input type="radio" name={name} checked={value === o.value} onChange={() => onChange(o.value)} className="peer sr-only" />
-          <span className="flex h-7 items-center rounded-[6px] px-3 text-base text-grey peer-checked:bg-surface peer-checked:font-semibold peer-checked:text-text peer-checked:shadow-sm peer-focus-visible:ring-2 peer-focus-visible:ring-primary">
+          <span className="flex h-7 items-center rounded-[6px] px-3 text-base text-grey peer-checked:bg-surface peer-checked:font-semibold peer-checked:text-text peer-checked:shadow-xs peer-focus-visible:ring-2 peer-focus-visible:ring-primary">
             {o.label}
           </span>
         </label>
@@ -61,4 +61,4 @@ export function Switch({ id, checked, onChange, label }: { id: string; checked: 
   )
 }
 
-export const selectClass = 'h-8 rounded-row border border-line bg-surface px-2 text-base text-text outline-none focus:border-primary'
+export const selectClass = 'h-8 rounded-row border border-line bg-surface px-2 text-base text-text outline-hidden focus:border-primary'

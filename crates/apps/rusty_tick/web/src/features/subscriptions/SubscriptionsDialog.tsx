@@ -71,11 +71,11 @@ export function SubscriptionsDialog({ open, onClose }: { open: boolean; onClose:
         <form onSubmit={add} className="flex flex-col gap-3 border-t border-line pt-4">
           <label className="flex flex-col gap-1.5">
             <span className="text-s text-grey">Name</span>
-            <input data-autofocus value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Team calendar" className="h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary" />
+            <input data-autofocus value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Team calendar" className="h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary" />
           </label>
           <label className="flex flex-col gap-1.5">
             <span className="text-s text-grey">Calendar link</span>
-            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/calendar.ics" inputMode="url" className="h-9 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary" />
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/calendar.ics" inputMode="url" className="h-9 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary" />
           </label>
           {error && <p role="alert" className="text-danger">{error}</p>}
           <div className="flex items-center justify-end gap-2">

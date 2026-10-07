@@ -1,3 +1,4 @@
+import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
@@ -7,7 +8,7 @@ import { defineConfig } from 'vitest/config'
 const backend = process.env.TICK_BACKEND ?? 'http://127.0.0.1:8787'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   // The agui packages are `file:` links with their own dev copy of React; one React per page.
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) }, dedupe: ['react', 'react-dom'] },
   server: { proxy: { '/api': backend, '/health': backend } },

@@ -85,7 +85,7 @@ export function Comments({ taskId, disabled }: { taskId: string; disabled: boole
       </ul>
       {!disabled && (
         <form onSubmit={add} className="flex gap-2">
-          <input aria-label="Add a comment" value={text} maxLength={2000} onChange={(e) => setText(e.target.value)} placeholder="Add a comment" className="h-8 min-w-0 flex-1 rounded-row border border-line bg-surface px-3 outline-none focus:border-primary" />
+          <input aria-label="Add a comment" value={text} maxLength={2000} onChange={(e) => setText(e.target.value)} placeholder="Add a comment" className="h-8 min-w-0 flex-1 rounded-row border border-line bg-surface px-3 outline-hidden focus:border-primary" />
           <button type="submit" disabled={!text.trim()} className="h-8 rounded-row bg-primary px-4 text-white disabled:opacity-40">
             Send
           </button>

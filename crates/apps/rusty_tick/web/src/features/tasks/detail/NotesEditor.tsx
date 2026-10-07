@@ -164,7 +164,7 @@ export const NotesEditor = forwardRef<NotesHandle, Props>(function NotesEditor({
               setSlash(null)
               setEditing(false)
             }}
-            className="block w-full resize-none bg-transparent text-base leading-[22px] outline-none placeholder:text-grey"
+            className="block w-full resize-none bg-transparent text-base leading-[22px] outline-hidden placeholder:text-grey"
             style={{ minHeight: 96 }}
           />
           {slash && commands.length > 0 && (

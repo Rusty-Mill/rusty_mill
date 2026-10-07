@@ -13,6 +13,15 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - Term and Tick Tailwind 4 CI repair (pending review)
+
+- **Fixed:** both web builds use `@tailwindcss/vite` 4.3.3, import Tailwind's v4 CSS, and explicitly load their existing theme configurations. Existing dependency versions, React integration, aliases, chunking, proxies, and CI gates are unchanged.
+- **Fixed:** renamed outline, small shadow, and small radius utilities retain their intended appearance; base compatibility rules retain unspecified border/placeholder colors and button cursors.
+- **Added:** production Chromium regressions verify Term's three theme presets and opacity, plus Tick's light/dark colors, opacity, focus rings, forced-colors outlines, popovers, and editor styles. Term's preview launcher now converts its file URL correctly on Windows.
+- **Validation:** Node 22 builds, Tick's 645 unit and 20 backend integration tests, and both browser suites passed locally. Term's existing immediate-count pane-cap assertion failed on one earlier run and passed unchanged on rerun; Linux CI and the separate Term live-bridge suite have not been run.
+
+---
+
 ## Consolidation review batch 3: rusty_meshed clock migration (BREAKING)
 **2026-10-06** · PR pending · consolidation review, rusty_meshed clock helpers
 

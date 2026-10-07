@@ -158,7 +158,7 @@ export default function SettingsSheet({
                   placeholder="Anthropic API key…"
                   aria-label="Anthropic API key"
                   autoComplete="off"
-                  className="min-w-0 flex-1 rounded-nebula-sm border border-white/10 bg-black/30 px-2 py-1 font-nebula-command text-xs text-nebula-text placeholder:text-nebula-text/30 focus:border-nebula-accent/50 focus:outline-none"
+                  className="min-w-0 flex-1 rounded-nebula-sm border border-white/10 bg-black/30 px-2 py-1 font-nebula-command text-xs text-nebula-text placeholder:text-nebula-text/30 focus:border-nebula-accent/50 focus:outline-hidden"
                 />
                 <button
                   type="submit"

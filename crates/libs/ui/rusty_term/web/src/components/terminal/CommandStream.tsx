@@ -246,7 +246,7 @@ export default function CommandStream({
           placeholder="Type a command…"
           spellCheck={false}
           autoComplete="off"
-          className="flex-1 bg-transparent font-nebula-command text-sm text-nebula-text caret-nebula-accent outline-none transition-colors duration-nebula-fast ease-nebula placeholder:text-nebula-text/25"
+          className="flex-1 bg-transparent font-nebula-command text-sm text-nebula-text caret-nebula-accent outline-hidden transition-colors duration-nebula-fast ease-nebula placeholder:text-nebula-text/25"
           aria-label="Command input"
         />
       </form>

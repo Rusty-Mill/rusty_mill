@@ -128,7 +128,7 @@ export function SummaryToolbar({ editor }: { editor: React.RefObject<EditorHandl
             }}
             placeholder="https://example.com"
             aria-invalid={bad}
-            className="h-8 rounded-row border border-line bg-surface px-2 text-base outline-none focus:border-primary"
+            className="h-8 rounded-row border border-line bg-surface px-2 text-base outline-hidden focus:border-primary"
           />
           {bad && (
             <p role="alert" className="text-s text-danger">

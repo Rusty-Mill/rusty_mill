@@ -57,7 +57,7 @@ function Body({ tags, selected, onToggle, onCreate }: Pick<Props, 'tags' | 'sele
         }}
         placeholder="Search or create a tag"
         aria-label="Search or create a tag"
-        className="mb-1.5 h-8 w-full rounded-row border border-line bg-surface px-2 text-base outline-none focus:border-primary"
+        className="mb-1.5 h-8 w-full rounded-row border border-line bg-surface px-2 text-base outline-hidden focus:border-primary"
       />
       <ul role="listbox" aria-label="Tags" aria-multiselectable className="scroll-thin max-h-56 overflow-y-auto">
         {matches.map((t) => {

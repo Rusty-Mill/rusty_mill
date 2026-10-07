@@ -63,7 +63,7 @@ export function HabitRow({ habit, days, counts, today, weekStart, onToggle, onEd
               disabled={future}
               onClick={() => onToggle(key)}
               style={done ? { backgroundColor: habit.color, borderColor: habit.color } : partial ? { borderColor: habit.color, color: habit.color } : undefined}
-              className={`flex h-7 w-7 items-center justify-center rounded-full border-[1.5px] outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface disabled:cursor-default ${
+              className={`flex h-7 w-7 items-center justify-center rounded-full border-[1.5px] outline-hidden focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface disabled:cursor-default ${
                 done ? 'text-white' : partial ? 'text-s font-semibold' : `border-dashed border-grey hover:bg-selected ${due ? 'opacity-90' : 'opacity-40'} ${future ? 'opacity-30' : ''}`
               }`}
             >

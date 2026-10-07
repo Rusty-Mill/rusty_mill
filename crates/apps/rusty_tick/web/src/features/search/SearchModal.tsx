@@ -12,7 +12,7 @@ function Marked({ text, query }: { text: string; query: string }) {
     <>
       {highlight(text, query).map((s, i) =>
         s.hit ? (
-          <mark key={i} className="rounded-sm bg-mark text-text">
+          <mark key={i} className="rounded-xs bg-mark text-text">
             {s.text}
           </mark>
         ) : (
@@ -102,7 +102,7 @@ function SearchBody({ onDone }: { onDone: () => void }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={mode === 'task' ? 'Search tasks' : 'Search lists'}
-          className="h-full min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-grey"
+          className="h-full min-w-0 flex-1 bg-transparent text-[16px] outline-hidden placeholder:text-grey"
         />
         {query && (
           <button type="button" aria-label="Clear search" onClick={() => setQuery('')} className="flex h-6 w-6 items-center justify-center rounded-full text-grey hover:bg-hover">
