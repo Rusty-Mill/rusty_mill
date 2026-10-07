@@ -507,8 +507,101 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   this scenario repeatable in a ten-run batch).
 - **Status**: Open. **Owner**: baileyrd.
 
+### RB-RESEARCH-O012 — Wall and ramp climbing: the port climbs about 10% slowly
+
+- **Evidence (2026-10-07)**: recorded-input replay (`rb-verify --scenario ...
+  --against ... --recorded-inputs`, `batch_20261006-205659`): `probe_wall_ride`
+  9.0 / 41.3 uu mean / max, `probe_wall_ride_slow` 16.0 / 58.6,
+  `probe_wall_ride_boost` 19.2 / 66.5 (11.8 on its second capture),
+  `corner_slide` 22.3, the end of `probe_turn_boost` and `probe_turn_half_boost`.
+  Up to the wall's curved base they agree to under 1 uu; on the flat wall the
+  game's car climbs about 10% faster (vz 347 against 316 uu/s) at about 1.5%
+  lower total speed, a heading difference of about 1.5 degrees built up in
+  the floor-to-wall transition. The arena is RocketSim's own collision
+  meshes (FR-117), so it is not the geometry.
+- **Tried (scratch, nothing committed)**: runtime overrides on
+  `PUSHBACK_ERP`, `STICKY_FORCE_BASE`, `SUSPENSION_STIFFNESS`,
+  `WHEELS_DAMPING_*`, `SUSPENSION_SUBTRACTION` and a joint coordinate
+  descent over 42 recordings. The best set (ERP 0.05, damping 30 / 32,
+  subtraction 1.5, stiffness 450) lowers the mean of all 42 from 5.56 to 4.63
+  uu and the wall rides by half, but trades against others: `hard_landing`
+  2.6 -> 6.1, `turn_boost` 9.2 -> 15.3, `wavedash_early` 7.3 -> 15.4,
+  `wall_ride_45` 0.5 -> 1.9. A lower `STICKY_FORCE_BASE` (0.3) alone helps
+  walls and hurts every airborne scenario (`half_flip` 2.4 -> 6.3). Sticky force
+  along the car's up axis instead of the contact normal is worse everywhere
+  (`brake` 0.3 -> 2.1, `pogo` 2.4 -> 15.7). A parameter family that helps some
+  and hurts others means missing structure, not a wrong constant.
+- **Not run**: the owner's `test2`/`hitjump`/`front`/`side` k = 30 gate, on
+  which `PUSHBACK_ERP` 0.1 was calibrated (FR-122); they are not on the
+  machine that did this.
+- **Next**: find what differs in the wall transition itself, with a
+  recording that isolates it (a car placed on the ramp with no input, at rest
+  and rolling) before touching constants. Compare the wheel ray hits and
+  suspension lengths tick by tick; the game's vz is jumpier than the port's
+  (a 3 to 4 tick pattern), so look at the ray cast against the ramp mesh.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O013 — Powerslide: a long reverse slide loses speed too fast
+
+- **Evidence (2026-10-07)**: `probe_powerslide` (1400 uu/s, handbrake, full
+  right steer, throttle) 35.2 / 127.0 uu with the recorded input; the other
+  slides agree (`ps_straight` 0.3, `ps_left_slow_release` 1.3, `ps_half_left`
+  4.3, `ps_release` 5.1) but `ps_boost` 18.4 and `ps_slow` 12.6 do not.
+  Every miss starts at tick 127 to 139, when the car has turned past 90
+  degrees from its velocity and slides backwards (forward speed -600 uu/s):
+  the port's speed falls faster (646 against 750 uu/s) and its spin stays
+  high (4.9 against 4.6 rad/s) then decays slower.
+- **Tried**: braking while the handbrake is held (worse, 35 -> 127); a joint
+  fit of seven handbrake and grip constants over the seven slide captures
+  (handbrake lateral and longitudinal grip, rise and fall rates, powerslide
+  steer scale, lateral curve end): no value improves the joint error, each is
+  at its optimum. The single-capture wins (steer scale 0.85 -> 25 uu) do not
+  hold on the others.
+- **Next**: the regime is rare in play (a sustained backwards slide); look
+  at what a wheel does when its rolling speed reverses under a held throttle.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O014 — A car landing on the ball with its wheels
+
+- **Evidence (2026-10-07)**: `car_over_ball` with the recorded input: car
+  26.6 / 51.6 uu, ball 43.8 / 84.9. Ordinary hits agree to a fraction of a
+  uu: `hit_boost` 0.3 car, 0.4 ball; `hit_offset` 0.2 / 0.3; `hit_ground`
+  0.3 / 0.3. So the contact model is right; what differs is the wheels
+  resting on the ball (the ball is about 1.2 uu lower and 5% faster in the
+  game after the first ticks).
+- **Tried**: the wheels' suspension impulse reacted on the ball (Newton's
+  third law, scratch): any scale makes the car much worse (0.03: car 26.6 ->
+  65.8 while the ball 43.8 -> 13.9; 0.5: ball 242), so the game does not
+  react on the ball, as Bullet.
+- **Status**: Open. **Owner**: baileyrd.
+
+### RB-RESEARCH-O015 — Smaller residuals
+
+- `wavedash_early` 7.3 / 17.4 uu (recorded input): the flip that hops back
+  up; chaotic in the landing. `half_flip` 2.4 / 11.8, `pogo` 2.4 / 4.3,
+  `turn_fast` 3.0 / 10.9, `turn_slow` 2.7, `hard_landing_nose_first` 2.6 /
+  5.4. `corner_slide` (the repeatable start) 22.3 / 40.5 with a port peak
+  about 25 uu above the game's.
+- **Status**: Open (low priority). **Owner**: baileyrd.
+
+### RB-RESEARCH-O016 — A ball set at rest in the air hovers in the game
+
+- **Evidence (2026-10-07)**: `probe_ball_drop` (ball set at (0, 0, 1500),
+  velocity exactly zero): the game's ball stays at z = 1500 with zero
+  velocity for the whole 3.5 s tape (the capture shows it), while the port
+  drops it (750 uu mean error). A ball with any velocity set (`ball_drop_spin`
+  has angular velocity, `ball_wall`, `roof_drop`'s -1 uu/s) moves normally.
+  It looks like a sleeping body that nothing wakes until it is touched.
+- **Effect**: only state setting can produce it (a training pack's still
+  ball); harmless for scoring if scenarios set a nonzero velocity.
+- **Status**: Open (low priority). **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O012 (wall and ramp climb), O013 (powerslide
+  reverse slide), O014 (car landing on the ball), O015 (smaller residuals),
+  O016 (ball hovering when set at rest). RB-RESEARCH-O009's tape-start delay is
+  worked around by the recorded-input replay (RB-VERIFY-003-FR-016).
 - 2026-10-06: Added RB-RESEARCH-O011 (corner_slide not repeatable);
   RB-RESEARCH-O008 fixed (plugin 1.3, verified). Largest capture hole in the
   22-capture batch 0.075 s (O009 unchanged).

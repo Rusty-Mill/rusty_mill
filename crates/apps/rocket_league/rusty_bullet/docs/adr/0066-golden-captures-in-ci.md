@@ -36,7 +36,7 @@ hand-written expectations. The ground truth lived in `replays/`
 ## Decision
 
 Option 2. `tools/rb_tape_bot/fixtures/<scenario>.jsonl` holds each recording
-trimmed to its tape (`make_fixture.py`, 100 to 360 KB each, 24 files, 4.4 MB).
+trimmed to its tape (`make_fixture.py`, 70 to 360 KB each, 30 files, 5.1 MB).
 `crates/rb_verify_cli/tests/golden_captures.rs` replays each fixture's
 recorded input in the port and asserts car (and, where the scenario moves it,
 ball) mean and max position error stay within a bound: the 2026-10-07
@@ -55,7 +55,7 @@ owner's replays, which stay gitignored).
 
 ### Negative / tradeoffs
 
-- 4.4 MB of fixtures, and about 13 s of unoptimised test time.
+- 5.1 MB of fixtures, and about 3 s of test time (one thread per case).
 - Bounds are a quarter over one measurement of a deterministic recording;
   a legitimate model change that trades error between scenarios must move
   several bounds in the same PR and say why.

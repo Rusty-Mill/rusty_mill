@@ -62,7 +62,7 @@ const CASES: &[Case] = &[
     Case {
         scenario: "scenarios/pogo.json",
         fixture: "pogo.jsonl",
-        car: (3.0, 5.4),
+        car: (2.8, 10.5),
         ball: None,
     },
     Case {
@@ -173,6 +173,42 @@ const CASES: &[Case] = &[
         car: (0.5, 1.5),
         ball: None,
     },
+    Case {
+        scenario: "experiments/probe_land_wheels.json",
+        fixture: "probe_land_wheels.jsonl",
+        car: (0.5, 1.5),
+        ball: None,
+    },
+    Case {
+        scenario: "experiments/probe_flip_cancel.json",
+        fixture: "probe_flip_cancel.jsonl",
+        car: (0.5, 1.5),
+        ball: None,
+    },
+    Case {
+        scenario: "experiments/probe_dodge_fast_side.json",
+        fixture: "probe_dodge_fast_side.jsonl",
+        car: (0.5, 1.5),
+        ball: None,
+    },
+    Case {
+        scenario: "experiments/probe_double_jump_moving.json",
+        fixture: "probe_double_jump_moving.jsonl",
+        car: (0.7, 1.5),
+        ball: None,
+    },
+    Case {
+        scenario: "experiments/probe_ball_bounce_car_side.json",
+        fixture: "probe_ball_bounce_car_side.jsonl",
+        car: (0.5, 1.5),
+        ball: Some((1.0, 3.0)),
+    },
+    Case {
+        scenario: "experiments/probe_nose_hit_glancing.json",
+        fixture: "probe_nose_hit_glancing.jsonl",
+        car: (0.8, 2.4),
+        ball: Some((1.8, 5.7)),
+    },
 ];
 
 fn bot_dir() -> PathBuf {
@@ -194,27 +230,29 @@ fn compare(
 
 #[test]
 fn the_port_stays_within_its_error_bounds_on_every_golden_capture() -> Result<(), Box<dyn Error>> {
+    // One thread per case: each is an independent simulation, and the debug
+    // build is slow.
+    let results: Vec<Result<Vec<String>, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = CASES
+            .iter()
+            .map(|case| {
+                scope.spawn(move || check(case).map_err(|e| format!("{}: {e}", case.fixture)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("a case panicked".to_string()))
+            })
+            .collect()
+    });
     let mut failures = Vec::new();
-    for case in CASES {
-        let comparison = compare(case, |_, _| {})?;
-        let (mean, max) = (
-            comparison.mean_position_error(),
-            comparison.max_position_error(),
-        );
-        if mean > case.car.0 || max > case.car.1 {
-            failures.push(format!(
-                "{}: car mean {mean:.2} / max {max:.2} uu over the bound {:?}",
-                case.fixture, case.car
-            ));
-        }
-        if let Some(bound) = case.ball {
-            let (mean, max) = (comparison.mean_ball_error(), comparison.max_ball_error());
-            if mean > bound.0 || max > bound.1 {
-                failures.push(format!(
-                    "{}: ball mean {mean:.2} / max {max:.2} uu over the bound {bound:?}",
-                    case.fixture
-                ));
-            }
+    for result in results {
+        match result {
+            Ok(mut found) => failures.append(&mut found),
+            Err(e) => failures.push(e),
         }
     }
     assert!(
@@ -227,6 +265,32 @@ fn the_port_stays_within_its_error_bounds_on_every_golden_capture() -> Result<()
         )
     );
     Ok(())
+}
+
+/// The bound violations of one case (empty when it passes).
+fn check(case: &Case) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut failures = Vec::new();
+    let comparison = compare(case, |_, _| {})?;
+    let (mean, max) = (
+        comparison.mean_position_error(),
+        comparison.max_position_error(),
+    );
+    if mean > case.car.0 || max > case.car.1 {
+        failures.push(format!(
+            "{}: car mean {mean:.2} / max {max:.2} uu over the bound {:?}",
+            case.fixture, case.car
+        ));
+    }
+    if let Some(bound) = case.ball {
+        let (mean, max) = (comparison.mean_ball_error(), comparison.max_ball_error());
+        if mean > bound.0 || max > bound.1 {
+            failures.push(format!(
+                "{}: ball mean {mean:.2} / max {max:.2} uu over the bound {bound:?}",
+                case.fixture
+            ));
+        }
+    }
+    Ok(failures)
 }
 
 /// A recording the port cannot match (the car shifted 50 uu) must fail the

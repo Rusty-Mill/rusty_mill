@@ -360,10 +360,13 @@ them.
   timing error that is not physics. 27 mechanics probes: `brake` 18.2 -> 0.3,
   `reverse` 7.4 -> 0.3, the three dodges 9 to 11 -> 0.5, `hit_ground` 6.6 ->
   0.3, `turn_fast` 38.1 -> 3.1 uu mean. Test
-  `a_recorded_input_replay_absorbs_a_late_tape_start`.
+  `a_recorded_input_replay_absorbs_a_late_tape_start`. The replay also finds
+  the start lag (0 to 3 ticks, as the tape replay does; a falling start shows
+  the state set a tick late): lag first at offset 0, then the offset, each on
+  the whole run; test `a_recorded_input_replay_finds_the_start_lag`.
 
 - `RB-VERIFY-003-FR-017` (implemented): the golden-capture gate (ADR-0066).
-  `tools/rb_tape_bot/fixtures/` holds 24 tape-bot recordings of real Rocket
+  `tools/rb_tape_bot/fixtures/` holds 30 tape-bot recordings of real Rocket
   League trimmed to their tapes (`make_fixture.py`); the integration test
   `crates/rb_verify_cli/tests/golden_captures.rs` replays each one's recorded
   input in the port (FR-016) and fails when the car's or ball's mean or max
@@ -616,6 +619,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.28.0 (2026-10-07): the recorded-input replay finds the start lag; the
+  golden-capture gate holds 30 fixtures (bounds re-measured under the lag
+  search).
 - 0.27.0 (2026-10-07): `RB-VERIFY-003-FR-017` implemented: the golden-capture
   gate (ADR-0066).
 - 0.26.0 (2026-10-07): `RB-VERIFY-003-FR-016` implemented: the scenario
