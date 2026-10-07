@@ -85,7 +85,7 @@ Families are the current directories immediately below `crates/`.
 | libs | rusty_adk | rusty-adk | A Rust implementation of the Agent Development Kit (ADK) 2.0 architecture | 4 |
 | libs | rusty_adk | weather-agent | End-to-end rusty-adk example: tools, an LlmAgent, a routing graph, and human-in-the-loop | 0 |
 | libs | rusty_agui | rusty_agui | Sovereign AG-UI (Agent-User Interaction protocol) implementation: typed events and run input, JSON and SSE codecs, an event verifier with chunk expansion, a state/messages reducer, and an optional rusty_serve agent endpoint | 7 |
-| libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 0 |
+| libs | rusty_ansi | rusty_ansi | A zero-allocation, no_std VT/CSI/OSC ANSI escape sequence parser core for Rust | 2 |
 | libs | rusty_audio | rusty_audio | A #![no_std] + alloc sovereign PCM audio capture and playback device driver library | 2 |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary | 0 |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters | 1 |

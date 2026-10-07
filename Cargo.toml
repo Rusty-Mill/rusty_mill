@@ -614,6 +614,7 @@ ts-net = { path = "crates/apps/rusty_tailscale/crates/ts-net" }
 rusty_http = { path = "crates/libs/net/rusty_http" }
 rusty_serve = { path = "crates/libs/net/rusty_serve" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
+rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
 http-body-util = "0.1"

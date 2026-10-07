@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - One strip_ansi (pending review)
+
+- **Changed:** `rusty_ansi` parses two-byte escapes and string sequences (new `AnsiToken::Escape`); `rp-router` and `rusty_lines`' PTY tests use `rusty_ansi::strip_ansi` instead of private copies. Five new `rusty_ansi` tests; all 43 `rusty_lines` PTY tests pass.
+- **Known limitation:** an unterminated string sequence (`ESC _ ...` with no `ST`) still leaks its text; only the `ESC` is dropped. The Nexus copies are untouched (frozen).
+
+---
+
 ## 2026-10-07 - Emitter helpers for AG-UI adapters (pending review)
 
 - **Added:** `Emitter::{text_delta, end_text, tool_call, tool_result}` in `rusty_agui`; **Changed:** `adk-agui`, `rk-agui`, `rusty_tick` and the `echo_agent` example use them instead of private copies.

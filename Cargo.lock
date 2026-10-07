@@ -10992,6 +10992,7 @@ dependencies = [
  "rp-providers",
  "rustls 0.23.45",
  "rustls-native-certs",
+ "rusty_ansi",
  "rusty_retry",
  "rusty_sqlite",
  "serde",
@@ -12445,6 +12446,7 @@ name = "rusty_lines"
 version = "0.4.0"
 dependencies = [
  "libc 0.2.189",
+ "rusty_ansi",
  "rusty_libc",
  "rusty_win32",
  "unicode-width 0.2.2",
