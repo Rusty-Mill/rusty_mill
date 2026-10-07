@@ -51,10 +51,10 @@ capture is the test of that prediction.
 | `half_flip` | car facing -y moving +y, jump, back flip, cancel, air roll | keeps spinning (pitch spin about -5 rad/s) for the flip window | flip cancel rule, air roll |
 | `pogo` | drop nose-first from 260 uu, jump on contact, rotate nose down | the contact jump pushes the car along its own up axis (about +270 uu/s forward) and it lands again | hard nose landings, jump on contact |
 | `hard_landing_nose_first` | the `test2.jsonl` 18.308 s state, no input | the recorded landing (rebounds, then rests) | the 18.35 s residual, with exact inputs |
-| `corner_slide` | the `test2.jsonl` 8.95 s state and inputs | hits the corner and slides | the 8.958 s and 9.125 s residuals |
+| `corner_slide` | the `test2.jsonl` 8.95 s state and inputs, started 0.5 s earlier on its ballistic path | hits the corner and slides; the port peaks about 25 uu above the game's 272.9 uu | the 8.958 s and 9.125 s residuals. The original start (3 ticks from the wall) is kept as `experiments/corner_slide_original.json`: it is not repeatable (RB-RESEARCH-O011) |
 | `car_over_ball` | the `hitjump.jsonl` 77.642 s state, ball resting | wheels over the ball | the 77.667 s ball residual |
 
-The last three start from states read out of the owner's captures, so the new
+The last three start from states read out of the owner's captures (corner_slide moved 0.5 s back, see its row), so the new
 capture can be compared directly with the old one. Rotations were converted
 from the capture's quaternions to RLBot's pitch/yaw/roll and checked by
 converting back (the 18.308 s quaternion round-trips to four decimals); the

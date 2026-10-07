@@ -13,7 +13,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   twice in about five minutes, nobody touching the machine; ten repeat to
   under 4 uu, `corner_slide` does not (RB-RESEARCH-O011; ten more runs
   cluster into three outcomes). `run_batch.ps1` reports repeatability over
-  all runs. Experiments in `tools/rb_tape_bot/experiments/`: started 0.5 s
+  all runs. The shipped `corner_slide` is now the repeatable start 0.5 s earlier (the
+  original is `experiments/corner_slide_original.json`).
+  `hard_landing_nose_first` shows the same fault and a repeatable far variant
+  exists in `experiments/`; `car_over_ball` repeats as shipped. Experiments in `tools/rb_tape_bot/experiments/`: started 0.5 s
   earlier, `corner_slide` is bit-identical in six runs; padded, it is not
   (the variation is the state set beside the wall).
 ### Fixed

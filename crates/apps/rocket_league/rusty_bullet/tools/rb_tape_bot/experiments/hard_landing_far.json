@@ -1,0 +1,48 @@
+{
+  "name": "hard_landing_far: hard_landing_nose_first started 0.3 s earlier on its ballistic path, spin zeroed (O011 check)",
+  "settle_ticks": 0,
+  "car": {
+    "location": [
+      -2333.491,
+      23.947000000000003,
+      501.85299999999995
+    ],
+    "rotation": [
+      -0.4315,
+      -1.0776,
+      0.4492
+    ],
+    "velocity": [
+      639.97,
+      -1517.59,
+      -1410.41
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 100
+  },
+  "ball": {
+    "location": [
+      2000,
+      2000,
+      93.15
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 43
+    },
+    {
+      "ticks": 233,
+      "throttle": 1
+    }
+  ]
+}

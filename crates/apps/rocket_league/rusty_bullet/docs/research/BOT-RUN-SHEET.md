@@ -233,6 +233,14 @@ script's own `results.md` is in that folder.
   the original start with 24 neutral ticks first (`corner_slide_padded`)
   still splits into three outcomes (up to 93 uu apart). The variation comes
   from the state set next to the wall, not from input timing. See O011.
+- **Same check on the other two** (`batch_20261006-201506`, six runs each):
+  `hard_landing_nose_first` as shipped varies (mean error 7.3 to 11.4 uu,
+  cars up to 54.8 uu apart) and its start 0.3 s earlier
+  (`experiments/hard_landing_far.json`) is bit-identical in all six runs
+  (4.9 / 11.2 uu against the port). `car_over_ball` as shipped repeats (4.7
+  uu apart at most) but its start 0.25 s earlier does not (up to 81 uu
+  apart, two outcomes), so that one is not a state-set effect. `corner_slide`
+  in the shipped set is now the repeatable 0.5 s-earlier start.
 - **Session 1's three divergences stand:** car_over_ball (155.7 mean against
   156.2), speed_flip (85 to 87 against 94.4) and the higher corner_slide runs
   (79.7 to 100.5 against 100.3) reproduce, so they stay the physics targets

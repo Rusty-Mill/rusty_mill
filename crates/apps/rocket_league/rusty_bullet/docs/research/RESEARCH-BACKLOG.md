@@ -481,6 +481,20 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   scenario that starts within a few ticks of a contact (car_over_ball and
   the hard landings start in contact or a few ticks from it) deserves the
   same check.
+- **Promoted and checked on the others (2026-10-06,
+  `batch_20261006-201506`, six runs each)**: `corner_slide_far` is now the
+  shipped `corner_slide` (the original is `experiments/corner_slide_original.json`).
+  `hard_landing_nose_first` as shipped has the same fault: three outcomes
+  (mean error 7.3, 9.9, 11.4 uu; cars up to 54.8 uu apart), while
+  `experiments/hard_landing_far.json` (started 0.3 s earlier, spin zeroed,
+  fitted so the port reaches the original start state at the original
+  tick) is bit-identical in all six runs (port error 4.9 / 11.2 uu).
+  `car_over_ball` as shipped is repeatable (cars at most 4.7 uu apart, ball
+  0.8 uu), but its far variant (`experiments/car_over_ball_far.json`, 0.25 s
+  earlier, fitted the same way) is **not** (two outcomes, 113.5 and 146.7 uu
+  mean, cars up to 81 uu apart): its variation is not the state set beside
+  a contact, so something else varies in a ball hit during free flight
+  that the original start does not exercise. Not investigated.
 - **Next (superseded)**: find the discrete variable. Candidates: the bot's state set
   and first input landing 1 to 4 ticks apart (move the first tape input,
   or pre-roll the car further from the wall so the contact is not the first

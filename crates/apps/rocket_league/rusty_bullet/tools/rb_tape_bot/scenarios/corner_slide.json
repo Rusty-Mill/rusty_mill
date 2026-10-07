@@ -1,11 +1,11 @@
 {
-  "name": "reproduces test2.jsonl 8.95 s: a car at 2090 uu/s hitting the (3800, 4150) corner wall, steer, pitch and yaw held (the 8.958 s and 9.125 s residuals)",
-  "settle_ticks": 0,
+  "name": "corner_slide: test2.jsonl 8.95 s state and inputs, started 0.5 s earlier on its ballistic path so the corner contact is not the first thing after the state set (repeatable; the original start is not, O011)",
+  "settle_ticks": 60,
   "car": {
     "location": [
-      3782.43,
-      4154.49,
-      184.6
+      2736.865,
+      4302.695,
+      121.08499999999998
     ],
     "rotation": [
       0.4624,
@@ -15,12 +15,12 @@
     "velocity": [
       2091.13,
       -296.41,
-      -35.47
+      289.53
     ],
     "angular_velocity": [
-      4.05,
-      -1.4,
-      1.92
+      0,
+      0,
+      0
     ],
     "boost": 100
   },
