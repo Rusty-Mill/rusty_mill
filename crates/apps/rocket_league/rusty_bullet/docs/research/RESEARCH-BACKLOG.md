@@ -596,8 +596,38 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   ball); harmless for scoring if scenarios set a nonzero velocity.
 - **Status**: Open (low priority). **Owner**: baileyrd.
 
+### RB-RESEARCH-O017 — A car hitting the side ramp from the air bounces differently
+
+- **Evidence (2026-10-07)**: `probe_wall_land` (a car jumping at 850 uu/s
+  toward the side wall at 45 degrees, `batch_20261006-212011`), recorded input:
+  77.1 / 278.4 uu. Agrees to 0.2 uu until the first contact at tick 78
+  (car at x 4007, z 194, in the air, velocity (651, 650, 106)); then the
+  game's car goes to (-31, 452, 119) (it bounces off and falls back, x
+  falling slowly) and the port's to (79, 492, 205) (it sticks and rides up
+  the wall): a 145 uu/s velocity error that stays. The port's contact is
+  the real mesh normal (-0.955, 0, 0.297) at (4091.8, ., 196.8), depth
+  1.97; the game's change of velocity (-682, -198, +13) looks like a larger
+  normal impulse and about 0.4 friction against that same normal, the
+  port's (-572, -158, +99) like 0.3.
+- **Tried (scratch)**: a uniform car-vs-world restitution and friction
+  (`CAR_WORLD_MATERIAL`, 0.3 / 0.3): the best for this contact (0.3 / 0.4)
+  gives 30.4 uu but wrecks `corner_slide` (22 -> 78), `hard_landing` (2.6 ->
+  45) and `wavedash_early` (7.3 -> 38); 0.3 / 0.3 is the best for all the
+  others. So a uniform material is not it; something specific to this
+  contact (a hitbox corner against the ramp mesh, Bullet's per-contact
+  friction or solver row order) differs.
+- `probe_ceiling` (boosting up into the ceiling, 31.5 / 149.1 uu) is the
+  same family: car-body contact with a surface from the air.
+- **Next**: a recording that isolates one hitbox corner against the ramp
+  at a few angles and speeds (a car dropped sideways onto the ramp), and the
+  same for the ceiling; compare the per-tick velocity change with the
+  port's solver rows.
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O017 (car hitting the side ramp from the air;
+  `probe_ceiling` in the same family).
 - 2026-10-07: Added RB-RESEARCH-O012 (wall and ramp climb), O013 (powerslide
   reverse slide), O014 (car landing on the ball), O015 (smaller residuals),
   O016 (ball hovering when set at rest). RB-RESEARCH-O009's tape-start delay is
