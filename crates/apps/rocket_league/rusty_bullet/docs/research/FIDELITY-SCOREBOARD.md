@@ -1,10 +1,10 @@
 # Fidelity scoreboard: the port against real Rocket League
 
-State on 2026-10-07 (spec `RB-PHYSICS-001` 0.149.0). Every number is the mean
+State on 2026-10-07 (spec `RB-PHYSICS-001` 0.150.0). Every number is the mean
 position error in uu between the port, fed the input the game recorded
 (`rb-verify --scenario S --against C --recorded-inputs`), and a tape-bot
 recording of real Rocket League: the car, and where it matters the ball and a
-second car. The recordings are `replays/` (gitignored); 58 of them, trimmed to
+second car. The recordings are `replays/` (gitignored); 60 of them, trimmed to
 their tapes, are in `tools/rb_tape_bot/fixtures/` and fail `cargo test` if the
 port gets worse (ADR-0066). How it was measured: `tools/rb_tape_bot/README.md`;
 the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and

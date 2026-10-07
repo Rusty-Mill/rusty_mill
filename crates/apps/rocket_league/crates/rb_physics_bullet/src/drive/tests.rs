@@ -638,30 +638,36 @@ fn a_reverse_throttle_under_the_handbrake_fades_with_speed_like_a_forward_one() 
     assert!(drop_at(600.0) > 4.0, "600 uu/s: {}", drop_at(600.0));
 }
 
-/// `RB-PHYSICS-001-FR-145`: a short boost press keeps the boost's throttle
-/// (and so no air throttle) for the whole `BOOST_MIN_TIME` burn.
+/// `RB-PHYSICS-001-FR-145`: a short boost press gives no air throttle for the
+/// whole `BOOST_MIN_TIME` burn.
 #[test]
-fn a_short_boost_press_keeps_the_boost_throttle_until_the_minimum_burn_ends() {
+fn a_short_boost_press_gives_no_air_throttle_but_the_wheels_see_the_real_throttle() {
     let released = ControllerInput {
         throttle: -1.0,
         ..Default::default()
     };
     let mut state = DriveState::new();
-    assert_eq!(effective_throttle(&released, &state), -1.0, "not boosting");
+    assert_eq!(air_throttle(&released, &state), -1.0, "not boosting");
     state.boosting = true;
     state.boosting_time = BOOST_MIN_TIME / 2.0;
-    assert_eq!(effective_throttle(&released, &state), 1.0, "burning");
     assert_eq!(
         air_throttle(&released, &state),
         0.0,
         "burning: no air throttle"
     );
+    // FR-148: the wheels see the real throttle during the minimum burn (a
+    // reverse press brakes while the boost keeps pushing, fuzz_103).
+    assert_eq!(effective_throttle(&released, &state), -1.0, "burning");
+    let held = ControllerInput {
+        boost: true,
+        ..released
+    };
+    assert_eq!(effective_throttle(&held, &state), 1.0, "button held");
     state.boosting_time = BOOST_MIN_TIME;
-    assert_eq!(effective_throttle(&released, &state), -1.0, "burn over");
     assert_eq!(air_throttle(&released, &state), -1.0, "burn over");
     state.boosting_time = BOOST_MIN_TIME / 2.0;
     state.boost_amount = 0.0;
-    assert_eq!(effective_throttle(&released, &state), -1.0, "empty tank");
+    assert_eq!(air_throttle(&released, &state), -1.0, "empty tank");
 }
 
 #[test]
