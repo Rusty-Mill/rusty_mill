@@ -25,6 +25,7 @@ todo = "warn"
 unwrap_used = "warn"
 
 [dependencies]
+rusty_percent = { workspace = true }
 rmcp = { version = "3.1", default-features = false, features = [
     "server",
     "macros",

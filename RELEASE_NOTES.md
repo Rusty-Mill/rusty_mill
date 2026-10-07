@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - rusty_percent (pending review)
+
+- **Added:** `rusty_percent` foundation crate; **Changed:** eleven crates drop their private percent-encode/decode helpers for it. Fixes trailing-escape decoding in `remind_me_core`, `remind_me_hub`, `remind_me_api` and `rusty_fedora_agent`.
+- **Known limitation:** `rusty_url` keeps its own spec-driven `percent_decode`; `remind_me_hub`'s test helper `urlencode` and eight crates that use the external `percent-encoding` crate (`rusty-mcp` trace, `rp-providers`, `rusty-search-*`, meshed) are untouched. Follow-up, not part of this change.
+
+---
+
 ## 2026-10-07 - rusty_hex (pending review)
 
 - **Added:** `rusty_hex` foundation crate; **Changed:** eight crates drop their private hex codecs for it. `ts-key` and `ts-types` no longer each carry a copy.

@@ -495,6 +495,7 @@ dependencies = [
  "agentgateway-config",
  "http 1.5.0",
  "regex",
+ "rusty_percent",
  "rusty_retry",
  "thiserror 2.0.20",
  "tracing",
@@ -10484,6 +10485,7 @@ version = "0.3.0"
 dependencies = [
  "remind_me_core",
  "rusty_oauth",
+ "rusty_percent",
  "serde",
  "serde_json",
 ]
@@ -10511,6 +10513,7 @@ dependencies = [
  "rusty_hex",
  "rusty_multimodal_db_engine",
  "rusty_oauth",
+ "rusty_percent",
  "serde",
  "serde_json",
  "sha256",
@@ -10533,6 +10536,7 @@ dependencies = [
  "rusqlite",
  "rusty_crypto_key",
  "rusty_multimodal_db_engine",
+ "rusty_percent",
  "serde",
  "serde_json",
  "uuid",
@@ -10564,6 +10568,7 @@ dependencies = [
  "rusty_base64",
  "rusty_hex",
  "rusty_oauth",
+ "rusty_percent",
  "serde",
  "serde_json",
  "sha256",
@@ -11740,6 +11745,7 @@ dependencies = [
  "rmcp",
  "rsa",
  "rusty_base64",
+ "rusty_percent",
  "rusty_url",
  "schemars 1.2.2",
  "serde",
@@ -11854,6 +11860,7 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_kafka",
+ "rusty_percent",
  "rusty_request",
  "rusty_sqlite",
  "rusty_tokio",
@@ -12325,6 +12332,7 @@ dependencies = [
  "platform-linux",
  "platform-mock",
  "rusty_confined_fs",
+ "rusty_percent",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -12403,6 +12411,7 @@ dependencies = [
 name = "rusty_http"
 version = "0.1.0"
 dependencies = [
+ "rusty_percent",
  "rusty_tokio",
  "tokio",
 ]
@@ -12490,6 +12499,7 @@ version = "0.6.2"
 dependencies = [
  "criterion 0.5.1",
  "rusty_json",
+ "rusty_percent",
  "rusty_tokio",
  "serde",
  "serde_json",
@@ -12573,6 +12583,10 @@ dependencies = [
  "orch-store",
  "rusty_json",
 ]
+
+[[package]]
+name = "rusty_percent"
+version = "0.1.0"
 
 [[package]]
 name = "rusty_proxmox"

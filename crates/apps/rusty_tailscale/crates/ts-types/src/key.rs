@@ -7,7 +7,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-
 /// Error parsing a prefixed public key string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyParseError {

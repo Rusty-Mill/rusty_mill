@@ -487,10 +487,7 @@ impl UriTemplate {
 /// (or one that decodes to invalid UTF-8) is treated as a rejection, not a
 /// best-effort decode, since this feeds a traversal check.
 fn percent_decode(value: &str) -> Option<String> {
-    percent_encoding::percent_decode_str(value)
-        .decode_utf8()
-        .ok()
-        .map(|decoded| decoded.into_owned())
+    rusty_percent::decode_utf8(value)
 }
 
 /// Implement the three resource methods by forwarding to a
