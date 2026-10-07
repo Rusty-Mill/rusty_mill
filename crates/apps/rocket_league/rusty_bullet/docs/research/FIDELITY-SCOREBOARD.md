@@ -75,6 +75,17 @@ the tapes never touch the ball. The one-step prediction of every recorded
 car-ball hit shows the gap: a resting ball hit from above (O020); the rest of the
 hits agree.
 
+## Random drives that start on a wall
+
+`gen_wall_fuzz.py` (`wallfuzz_401` to `416`): the car state-set on a side wall at
+a random height and speed, then 6 s of random driving up the wall, onto the
+ceiling and off it with jumps: mean position error per tape **median 132 uu,
+mean 284 uu** (4.8 to 1613); the weakest regime by far (wall climbs O012, the
+ceiling, falling off a wall). The first ticks after the state-set already differ
+(the car on a wall falls 15 uu/s faster in the game over the first four ticks),
+so these tapes mix a start transient with the climb; use the isolated
+`wallg_*` and `wall_ride*` probes to measure a fix.
+
 ## What changed on 2026-10-07
 
 - The recorded-input replay (`--recorded-inputs`) removed the tape bot's
