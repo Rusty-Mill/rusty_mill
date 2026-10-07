@@ -292,15 +292,6 @@ struct Health {
     status: &'static str,
 }
 
-/// Compare without exiting early on the first differing byte.
-pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = a.len() ^ b.len();
-    for i in 0..a.len().max(b.len()) {
-        diff |= usize::from(a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0));
-    }
-    diff == 0
-}
-
 struct Query(Vec<(String, String)>);
 
 impl Query {
@@ -685,16 +676,7 @@ fn utc_offset(query: &Query) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{constant_time_eq, decode_segment};
-
-    #[test]
-    fn constant_time_eq_matches_ordinary_equality() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(!constant_time_eq(b"", b"a"));
-        assert!(constant_time_eq(b"", b""));
-    }
+    use super::decode_segment;
 
     #[test]
     fn path_segments_decode_percent_escapes_but_keep_plus() {

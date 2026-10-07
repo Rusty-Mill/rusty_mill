@@ -10,6 +10,7 @@ publish = false
 layer = "apps"
 
 [dependencies]
+rusty_crypto_key = { workspace = true }
 rk-config.workspace = true
 rk-observe.workspace = true
 rk-constrain.workspace = true

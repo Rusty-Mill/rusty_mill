@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - One constant_time_eq (pending review)
+
+- **Changed:** `rusty_crypto_key::constant_time_eq` replaces seven hand-written copies and the one inside `SecretBytes::eq`; the length is folded into the accumulator and the shorter side zero-padded, so a wrong-length token no longer returns early. New edges: `rusty_oauth`, `remind_me_core`, `remind_me_hub`, `rk-app`, `rusty_fair_play`, `rusty_tick` depend on `rusty_crypto_key`.
+- **Known limitation:** the two Nexus copies (`nexus-collab`, `nexus-memory-hub`) are untouched because Nexus is frozen. `rk-app`'s old `&str` unit test moved to `rusty_crypto_key`.
+
+---
+
 ## 2026-10-07 - Nexus frozen (pending review)
 
 - **Changed:** the 41 `nexus-*` crates are excluded from the workspace (`exclude` in the root `Cargo.toml`), so CI, `--workspace` runs, the workspace map and `Cargo.lock` no longer cover them. `Cargo.lock` only loses packages (162 removed, 41 Nexus); none added or upgraded.

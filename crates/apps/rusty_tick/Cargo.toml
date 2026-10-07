@@ -11,6 +11,7 @@ publish = false
 layer = "apps"
 
 [dependencies]
+rusty_crypto_key = { workspace = true }
 rusty_atomic_file = { workspace = true }
 rusty_multimodal_db_engine = { workspace = true }
 # HTTP/1.1 framing, JSON and query-string decoding come from the monorepo's

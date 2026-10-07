@@ -10,8 +10,8 @@
 //! A refusal never says why. It carries the user key the caller *claimed*, if
 //! the token parsed, so the server can log it; the secret is never kept.
 
-use crate::api::constant_time_eq;
 use crate::users::{RegistryFile, Token, UserKey};
+use rusty_crypto_key::constant_time_eq;
 
 /// Shortest accepted single-user token: a guessable token defeats the check.
 pub const MIN_TOKEN_LEN: usize = 16;

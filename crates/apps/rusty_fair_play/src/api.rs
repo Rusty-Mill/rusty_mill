@@ -43,6 +43,7 @@ use crate::dto::{
 use crate::service::{
     CardPatch, CardView, NewCard, Service, ServiceError, SplitChild, SplitRequest,
 };
+use rusty_crypto_key::constant_time_eq;
 use rusty_http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -253,15 +254,6 @@ impl Api {
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
-}
-
-/// Compare without exiting early on the first differing byte.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = a.len() ^ b.len();
-    for i in 0..a.len().max(b.len()) {
-        diff |= usize::from(a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0));
-    }
-    diff == 0
 }
 
 /// What a route handler needs besides the service.

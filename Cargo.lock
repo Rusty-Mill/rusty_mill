@@ -10503,6 +10503,7 @@ dependencies = [
  "rten-tensor",
  "rusqlite",
  "rusty_atomic_file",
+ "rusty_crypto_key",
  "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
@@ -10524,6 +10525,7 @@ dependencies = [
  "chrono",
  "postgres",
  "rusqlite",
+ "rusty_crypto_key",
  "rusty_multimodal_db_engine",
  "serde",
  "serde_json",
@@ -10755,6 +10757,7 @@ dependencies = [
  "rk-mcp",
  "rk-observe",
  "rmcp",
+ "rusty_crypto_key",
  "serde",
  "serde_json",
  "tokio",
@@ -12262,6 +12265,7 @@ dependencies = [
 name = "rusty_fair_play"
 version = "0.1.0"
 dependencies = [
+ "rusty_crypto_key",
  "rusty_fair_play_domain",
  "rusty_http",
  "rusty_json",
@@ -12518,6 +12522,7 @@ name = "rusty_oauth"
 version = "0.1.0"
 dependencies = [
  "rusty_base64",
+ "rusty_crypto_key",
  "rusty_json",
  "rusty_rand",
  "rusty_rsa",
@@ -12751,6 +12756,7 @@ dependencies = [
  "rusty_agui",
  "rusty_atomic_file",
  "rusty_base64",
+ "rusty_crypto_key",
  "rusty_http",
  "rusty_json",
  "rusty_multimodal_db_engine",
