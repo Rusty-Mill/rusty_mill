@@ -642,11 +642,14 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   friction or solver row order) differs.
 - `probe_ceiling` (boosting up into the ceiling, 31.5 / 149.1 uu) is the
   same family: car-body contact with a surface from the air.
-- **Next**: a recording that isolates one hitbox corner against the ramp
-  at a few angles and speeds (a car dropped sideways onto the ramp), and the
-  same for the ceiling; compare the per-tick velocity change with the
-  port's solver rows.
-- **Status**: Open. **Owner**: baileyrd.
+- **Wall landing fixed (2026-10-07)**: the contact tick's impulse fit a single
+  contact along the *upper facet's* normal (6 degrees up) at friction 0.3,
+  not the lower ramp's: a box edge against the lip, with the internal-edge
+  normal adjustment. `RB-PHYSICS-001-FR-146`, ADR-0069: `probe_wall_land`
+  77.1 -> 4.4 uu with the material unchanged.
+- **Open**: `probe_ceiling` (31 uu): a nose landing on the ceiling plane,
+  not the mesh; a ridge or goal-post contact has no recording.
+- **Status**: Partly done. **Owner**: baileyrd.
 
 ### RB-RESEARCH-O018 — Car bumps and demolitions
 

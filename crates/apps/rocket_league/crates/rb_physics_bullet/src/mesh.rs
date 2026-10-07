@@ -374,6 +374,13 @@ impl StaticMesh {
     }
 
     /// Triangles whose grid cells overlap the box `min..max`.
+    pub fn near_indexed(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = (usize, &Triangle)> {
+        self.near_indices(min, max)
+            .into_iter()
+            .filter_map(|index| Some((index as usize, self.triangles.get(index as usize)?)))
+    }
+
+    /// Triangles whose grid cells overlap the box `min..max`.
     pub fn near(&self, min: Vec3, max: Vec3) -> impl Iterator<Item = &Triangle> {
         self.near_indices(min, max)
             .into_iter()
@@ -649,7 +656,7 @@ fn add_manifold_point(kept: &mut Vec<ManifoldEntry>, entry: ManifoldEntry, break
 impl StaticMesh {
     /// `normal` for a contact at `point` on triangle `index`, adjusted for
     /// the edge nearest `point` if one is within `EDGE_DISTANCE_THRESHOLD`.
-    fn adjust_edge_normal(&self, index: usize, point: &Vec3, normal: Vec3) -> Vec3 {
+    pub(crate) fn adjust_edge_normal(&self, index: usize, point: &Vec3, normal: Vec3) -> Vec3 {
         let (Some(triangle), Some(kinds)) = (self.triangles.get(index), self.edges.get(index))
         else {
             return normal;

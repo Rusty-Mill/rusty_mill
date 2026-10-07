@@ -8147,6 +8147,32 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     37 to 163; head-on 5.4 / 5.4, was 24 / 19; clip 2.3 / 10.4, was 60 / 11.5;
     retreating target 1.4 / 2.7, was 13 / 11.
 
+- `RB-PHYSICS-001-FR-146` (a box meets a mesh triangle's edge or vertex;
+  implemented and verified on `probe_wall_land`, ADR-0069): for each nearby
+  triangle `collision::BoxCorners::separating_axis_contact` runs the box-triangle
+  separating-axis test (the triangle normal, the box's three face axes, the nine
+  edge cross products). Where the axis of least penetration is not the
+  triangle's normal, the contact is the closest feature pair: a triangle
+  vertex on a box face (normal = the face's), or a triangle edge on a box
+  edge (normal = their cross product). The contact normal is then adjusted
+  for the triangle's edge as for the ball (FR-109, `adjust_edge_normal`): a
+  seam between flat or concave facets takes the facet's own normal, an open
+  or convex edge keeps the axis. The box-corner-on-face contact is unchanged
+  where the normal's axis wins. `ManifoldPoint`s may now be box edge or face
+  points (the margin rounding reads only the axes on the box surface).
+  - Why: `probe_wall_land` (a car turned 45 degrees to the side wall, vertical
+    edge just under the lip between a 17 degree and a 6 degree facet): the game's
+    impulse is along the upper facet's normal (its direction fits the facet to
+    0.03 degrees with friction 0.3); the port saw only the lower ramp (the
+    corner is below the upper facet's edge) and its contact stuck to the wall
+    (velocity error 136 uu/s, 77 uu mean).
+  - **Verification**: `collision` tests
+    `a_box_edge_just_under_a_facet_takes_the_facets_own_normal_not_the_ramp_below`
+    and `a_box_face_beside_a_lone_triangle_edge_is_pushed_along_its_own_normal`
+    (both fail without the axis test); golden `probe_wall_land` 77.1 -> 4.4 uu
+    mean (max 8.7); every other recording unchanged. Not verified: edge and
+    vertex contacts on convex ridges (no recording isolates one).
+
 - `RB-PHYSICS-001-FR-145` (a short boost press keeps its throttle for the
   minimum burn; implemented and verified): the throttle the drive code sees
   (`effective_throttle`, `air_throttle`) is "boosting" while the burn runs
@@ -8238,6 +8264,9 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.148.0 (2026-10-07): `RB-PHYSICS-001-FR-146` (box against a triangle's edge
+  or vertex by the separating-axis test, ADR-0069). 470 tests in
+  `rb_physics_bullet`.
 - 0.147.0 (2026-10-07): `RB-PHYSICS-001-FR-145` (a short boost press keeps its
   throttle for the minimum burn). 468 tests in `rb_physics_bullet`.
 - 0.146.0 (2026-10-07): `RB-PHYSICS-001-FR-144` (the engine fades with the

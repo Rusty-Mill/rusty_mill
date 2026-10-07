@@ -5,6 +5,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- `RB-PHYSICS-001-FR-146` (spec 0.148.0, ADR-0069): a box meets a mesh
+  triangle's edge or vertex by the separating-axis test, with the ball's
+  internal-edge normal adjustment. `probe_wall_land` (a car hitting the side
+  wall below the lip) 77 -> 4.4 uu; no other recording moves. Golden fixture
+  `probe_wall_land`. `RB_STATES=1` in `rb-verify --scenario` lists the first
+  car's velocity and spin.
 - `RB-PHYSICS-001-FR-145` (spec 0.147.0): a short boost press keeps the boost's
   throttle (and no air throttle) for the whole 0.1 s minimum burn; an airborne
   boost tap with throttle held ended 4 uu/s too fast. Golden fixture `ja_thr`.
