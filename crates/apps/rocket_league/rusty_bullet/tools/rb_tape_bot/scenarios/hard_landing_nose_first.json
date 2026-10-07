@@ -1,11 +1,11 @@
 {
-  "name": "reproduces test2.jsonl 18.308 s: a nose-first landing at 1600 uu/s down, neutral until the recording's throttle at 18.367 s (the 18.35 s residual)",
+  "name": "hard_landing_nose_first: the test2.jsonl 18.308 s nose-first landing, started 0.3 s earlier on its ballistic path with spin zeroed (repeatable; the original start is not, O011)",
   "settle_ticks": 0,
   "car": {
     "location": [
-      -2141.5,
-      -431.33,
-      49.48
+      -2333.491,
+      23.947000000000003,
+      501.85299999999995
     ],
     "rotation": [
       -0.4315,
@@ -15,12 +15,12 @@
     "velocity": [
       639.97,
       -1517.59,
-      -1605.41
+      -1410.41
     ],
     "angular_velocity": [
-      0.99,
-      -0.22,
-      1.44
+      0,
+      0,
+      0
     ],
     "boost": 100
   },
@@ -38,7 +38,7 @@
   },
   "steps": [
     {
-      "ticks": 7
+      "ticks": 43
     },
     {
       "ticks": 233,

@@ -495,6 +495,9 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   mean, cars up to 81 uu apart): its variation is not the state set beside
   a contact, so something else varies in a ball hit during free flight
   that the original start does not exercise. Not investigated.
+- **Promoted 2026-10-07**: `hard_landing_far` is now the shipped
+  `hard_landing_nose_first` (original: `experiments/hard_landing_original.json`);
+  port error 4.9 / 11.2 uu, bit-identical over six runs.
 - **Next (superseded)**: find the discrete variable. Candidates: the bot's state set
   and first input landing 1 to 4 ticks apart (move the first tape input,
   or pre-roll the car further from the wall so the contact is not the first

@@ -50,7 +50,7 @@ capture is the test of that prediction.
 | `speed_flip` | kickoff: boost, jump, nose up, diagonal flip, cancel pitch, air roll | flips to about 1100 uu/s forward-side, 70 uu up | flip torque, cancel, boost together |
 | `half_flip` | car facing -y moving +y, jump, back flip, cancel, air roll | keeps spinning (pitch spin about -5 rad/s) for the flip window | flip cancel rule, air roll |
 | `pogo` | drop nose-first from 260 uu, jump on contact, rotate nose down | the contact jump pushes the car along its own up axis (about +270 uu/s forward) and it lands again | hard nose landings, jump on contact |
-| `hard_landing_nose_first` | the `test2.jsonl` 18.308 s state, no input | the recorded landing (rebounds, then rests) | the 18.35 s residual, with exact inputs |
+| `hard_landing_nose_first` | the `test2.jsonl` 18.308 s state, started 0.3 s earlier on its ballistic path (spin zeroed) | the recorded landing (rebounds, then rests) | the 18.35 s residual. The original start (2 ticks from the floor) is `experiments/hard_landing_original.json`: not repeatable (O011) |
 | `corner_slide` | the `test2.jsonl` 8.95 s state and inputs, started 0.5 s earlier on its ballistic path | hits the corner and slides; the port peaks about 25 uu above the game's 272.9 uu | the 8.958 s and 9.125 s residuals. The original start (3 ticks from the wall) is kept as `experiments/corner_slide_original.json`: it is not repeatable (RB-RESEARCH-O011) |
 | `car_over_ball` | the `hitjump.jsonl` 77.642 s state, ball resting | wheels over the ball | the 77.667 s ball residual |
 
