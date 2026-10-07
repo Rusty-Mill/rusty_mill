@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- Capture plugin 1.3 (`RB-RESEARCH-O008`): the recorded car `input` is the
+  `SetVehicleInput` hook's argument, not `CarWrapper::GetInput()`, which
+  stays all-zero for an RLBot-driven car. Logs both sources for the first
+  five ticks of a capture. Built-from-source change only: not yet built or
+  run against the game.
 - ADR-0063 (`RB-PHYSICS-001-FR-138`, spec 0.141.0): a wheel ray that hits
   the ball gets no pushback impulse (spring and damper only). The car's lift
   after a ball hit now follows the game (+36, +27, +20 uu/s against +40, +30,

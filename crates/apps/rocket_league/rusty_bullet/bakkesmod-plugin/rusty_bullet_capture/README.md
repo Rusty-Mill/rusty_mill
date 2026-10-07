@@ -111,4 +111,12 @@ call stack inside this DLL). The plugin now reads only live actors
 skips a tick with none, and keeps timestamps increasing across a respawn.
 It also reads boost fuel only when the car has a boost component, and
 removes its per-tick hook on unload. BakkesMod's console prints the loaded
-plugin's version on `plugin load`; it should say 1.2.
+plugin's version on `plugin load`; it should say 1.3.
+
+1.3 (RB-RESEARCH-O008): the recorded `input` is the argument of the
+`SetVehicleInput` hook (the input the game applies to that car that tick),
+cached per car, with `CarWrapper::GetInput()` as the fallback. Reason:
+`GetInput()` stayed all-zero for an RLBot-driven car. For the first five
+ticks after `rb_capture_start` the plugin logs both sources to
+`bakkesmod.log` (`input argument ... | CarWrapper::GetInput() ...`).
+Not yet built or run against the game.

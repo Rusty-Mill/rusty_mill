@@ -314,7 +314,7 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   from the PRI/controller rather than `GetInput()`, or record RLBot's
   `last_input` on the bot side; check with a human-driven and a
   bot-driven car in one capture.
-- **Status**: Open. **Owner**: baileyrd.
+- **Status**: Fix written in plugin 1.3 (records the `SetVehicleInput` argument); not yet built or checked against a bot-driven capture, so still Open. **Owner**: baileyrd.
 
 ### RB-RESEARCH-O009 — One 5-tick hole per tape-bot capture
 
