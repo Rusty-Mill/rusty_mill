@@ -8,15 +8,20 @@ per-unit status in [ROADMAP.md](./roadmap/ROADMAP.md),
 "Completed" log this file used to carry is in git history (last full
 version: `a245d35`).
 
-- Last verified main commit: `a245d35` (merge of [#165](https://github.com/baileyrd/rusty_bullet/pull/165))
-- Verified at: 2026-09-30
+- Last verified main commit: the merge of
+  [#257](https://github.com/baileyrd/rusty_bullet/pull/257)
+- Verified at: 2026-10-07
 - Current milestone: `PHASE-1-PHYSICS-CORE` (In Progress) — mechanics are
-  broad (box cars, multi-contact solve, full standard arena with fillets,
-  goals and nets, driving, boost, handbrake, jumps, dodges, wall jumps,
-  air control); real-data fidelity is not yet established (see
-  Validation). `RB-PHYSICS-001-FR-005` (real-data constant calibration)
-  has not started.
-- Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`
+  broad and, since the tape bot (ADR-0059, ADR-0064), measured against the real
+  game on controlled recordings: driving, jumps, flips, boost, ball bounces,
+  car-ball hits and car-car bumps and demolitions agree to a few uu; wall
+  climbing, car-body contact from the air, long powerslides and wheels on the
+  ball do not (see
+  [FIDELITY-SCOREBOARD.md](./research/FIDELITY-SCOREBOARD.md)).
+  `RB-PHYSICS-001-FR-005` (real-data constant calibration) has not started
+  as a unit.
+- Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`;
+  47 real recordings gate `cargo test` (ADR-0066)
 
 ## Phases
 
@@ -33,6 +38,16 @@ version: `a245d35`).
 | `PHASE-4-POLISH` | Not Started |
 
 ## Recently completed
+
+- 2026-10-07 (autonomous session, PRs #246 to #257; evidence in
+  [FIDELITY-SCOREBOARD.md](./research/FIDELITY-SCOREBOARD.md)):
+  `RB-PHYSICS-001-FR-139` (a second jump press within 6 ticks is ignored:
+  `speed_flip` 87 -> 0.8 uu, ADR-0065), `FR-140`/`FR-143` (car bumps, ground
+  and air), `FR-141` (box-box contacts as `dBoxBox`), `FR-142` (demolition),
+  ADR-0068; `rb-verify --recorded-inputs` (`RB-VERIFY-003-FR-016`) and ball
+  scoring (`FR-015`), two-car scenarios and a hivemind bot (`FR-018`,
+  ADR-0067), the golden-capture gate (`FR-017`, ADR-0066), capture plugin
+  1.5, unattended batches (ADR-0064), `RB-RESEARCH-O011` to `O018`.
 
 - [#186](https://github.com/baileyrd/rusty_bullet/pull/186) —
   `RB-PHYSICS-001-FR-094`, flip clock starts after the press tick.
