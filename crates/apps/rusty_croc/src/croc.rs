@@ -30,6 +30,7 @@ use crate::pake::Pake;
 use crate::tcp;
 use crate::utils;
 use rand::RngCore;
+use rusty_retry::Backoff;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -54,24 +55,22 @@ const RECONNECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 100ms · 2^(n−1), capped at 5 s — mirrors `reconnectBackoff`.
 fn reconnect_backoff(attempt: usize) -> Duration {
-    if attempt == 0 {
-        return Duration::ZERO;
+    const BACKOFF: Backoff = Backoff::Exponential {
+        base: Duration::from_millis(100),
+        max: Duration::from_secs(5),
+        jitter: 0.0,
+    };
+    match attempt.checked_sub(1) {
+        Some(n) => BACKOFF.delay_for(u32::try_from(n).unwrap_or(u32::MAX)),
+        None => Duration::ZERO,
     }
-    let mut delay = Duration::from_millis(100);
-    for _ in 1..attempt {
-        delay *= 2;
-        if delay >= Duration::from_secs(5) {
-            return Duration::from_secs(5);
-        }
-    }
-    delay
 }
 
 /// Random 32-byte hex room for reconnects (`generateReconnectRoom`).
 fn generate_reconnect_room() -> String {
     let mut b = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    rusty_hex::encode(&b)
 }
 
 /// Mirrors the parts of Go's `croc.Options` that are ported.

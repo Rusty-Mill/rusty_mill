@@ -10960,6 +10960,7 @@ dependencies = [
  "rp-core",
  "rp-router",
  "rusty-mcp",
+ "rusty_retry",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -11565,6 +11566,7 @@ dependencies = [
  "rusty_base64",
  "rusty_confined_fs",
  "rusty_hex",
+ "rusty_retry",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12115,6 +12117,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rusty_base64",
  "rusty_ip",
+ "rusty_retry",
  "rusty_uuid",
  "serde",
  "serde_json",
@@ -12412,6 +12415,7 @@ name = "rusty_http"
 version = "0.1.0"
 dependencies = [
  "rusty_percent",
+ "rusty_retry",
  "rusty_tokio",
  "tokio",
 ]

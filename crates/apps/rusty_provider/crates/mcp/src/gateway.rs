@@ -25,6 +25,7 @@ use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{Peer, RoleClient, ServiceExt};
+use rusty_retry::Backoff;
 use tokio::sync::RwLock;
 
 use rp_router::{McpConfig, McpUpstreamConfig, McpUpstreamTransport};
@@ -244,7 +245,7 @@ fn spawn_supervisor(
             }
             peers.write().await.remove(&upstream.name);
 
-            let mut backoff = policy.initial_backoff;
+            let backoff = Backoff::exponential(policy.initial_backoff, policy.max_backoff, 0.0);
             let mut attempts: u32 = 0;
             let reconnected = loop {
                 if should_give_up(attempts, policy.max_attempts) {
@@ -255,7 +256,7 @@ fn spawn_supervisor(
                     );
                     break None;
                 }
-                tokio::time::sleep(backoff).await;
+                tokio::time::sleep(backoff.delay_for(attempts)).await;
                 attempts += 1;
                 match connect_one(&upstream).await {
                     Ok(new_service) => {
@@ -267,10 +268,9 @@ fn spawn_supervisor(
                             upstream = %upstream.name,
                             %error,
                             attempts,
-                            next_backoff_secs = backoff.as_secs(),
+                            next_backoff_secs = backoff.delay_for(attempts).as_secs(),
                             "MCP upstream reconnect attempt failed"
                         );
-                        backoff = next_backoff(backoff, policy.max_backoff);
                     }
                 }
             };
@@ -289,13 +289,6 @@ fn spawn_supervisor(
     });
 }
 
-/// Doubles `current`, capped at `max` -- standard exponential backoff, no
-/// jitter (a handful of upstreams reconnecting in lockstep isn't a
-/// thundering-herd concern at this scale).
-fn next_backoff(current: Duration, max: Duration) -> Duration {
-    (current * 2).min(max)
-}
-
 /// `true` once `attempts` has reached `max_attempts` (if one is
 /// configured) -- `None` retries forever.
 fn should_give_up(attempts: u32, max_attempts: Option<u32>) -> bool {
@@ -305,25 +298,6 @@ fn should_give_up(attempts: u32, max_attempts: Option<u32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn next_backoff_doubles_each_time() {
-        let max = Duration::from_secs(60);
-        let a = Duration::from_secs(1);
-        let b = next_backoff(a, max);
-        let c = next_backoff(b, max);
-        assert_eq!(b, Duration::from_secs(2));
-        assert_eq!(c, Duration::from_secs(4));
-    }
-
-    #[test]
-    fn next_backoff_caps_at_max() {
-        let max = Duration::from_secs(60);
-        let near_max = Duration::from_secs(50);
-        assert_eq!(next_backoff(near_max, max), max);
-        // Once at the cap, doubling again stays at the cap, not above it.
-        assert_eq!(next_backoff(max, max), max);
-    }
 
     #[test]
     fn should_give_up_is_false_when_max_attempts_is_unset() {

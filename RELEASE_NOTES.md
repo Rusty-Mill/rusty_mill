@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - Retry-After and backoff consolidated (pending review)
+
+- **Changed:** five crates use `rusty_retry` for backoff or `Retry-After`; `rusty_http` gains a `rusty_retry` dependency (it re-exports the date parser).
+- **Known limitation:** the gateway's `initial_backoff` larger than `max_backoff` now sleeps `max_backoff` from the first attempt (it slept the initial value once before). Nexus's four retry copies are untouched (frozen).
+
+---
+
 ## 2026-10-07 - rusty_percent (pending review)
 
 - **Added:** `rusty_percent` foundation crate; **Changed:** eleven crates drop their private percent-encode/decode helpers for it. Fixes trailing-escape decoding in `remind_me_core`, `remind_me_hub`, `remind_me_api` and `rusty_fedora_agent`.
