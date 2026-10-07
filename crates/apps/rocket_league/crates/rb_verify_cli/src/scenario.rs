@@ -2,7 +2,7 @@
 //! port does with a scripted scenario, how that compares with its recording,
 //! and a scenario cut from a window of a recording.
 
-use rb_domain::{CarState, IngestError, PhysicsFrame, Vec3};
+use rb_domain::{CarState, ControllerInput, IngestError, PhysicsFrame, Vec3};
 use rb_env::Env;
 use rb_scenario::{quat_to_rotator, BallStart, CarStart, Input, Scenario, Step};
 
@@ -91,6 +91,10 @@ pub struct ScenarioComparison {
     /// the first (state-setting) tick: nonzero means the bot did not play
     /// the tape as written.
     pub input_mismatches: usize,
+    /// For a recorded-input replay (`compare_scenario_recorded`): which
+    /// recorded input fed each step, 0 for the previous tick's, 1 for the
+    /// same tick's. `None` for a tape replay.
+    pub input_offset: Option<usize>,
 }
 
 impl ScenarioComparison {
@@ -283,6 +287,120 @@ pub fn compare_scenario(
         lag_ticks,
         rows,
         input_mismatches,
+        input_offset: None,
+    })
+}
+
+/// What the port does from `start` when fed `inputs`, one per tick: the
+/// start frame, then one frame after each input.
+fn simulate_with_inputs(start: &PhysicsFrame, inputs: &[ControllerInput]) -> Vec<PhysicsFrame> {
+    let mut env = Env::new();
+    let mut frames = vec![start.clone()];
+    env.reset(start);
+    for (tick, input) in inputs.iter().enumerate() {
+        let mut frame = env.step(&[*input]);
+        frame.timestamp_secs = (tick + 1) as f32 * SCENARIO_TICK_SECS;
+        frames.push(frame);
+    }
+    frames
+}
+
+/// `compare_scenario`, but the port is fed the input the recording shows
+/// instead of the tape (`RB-VERIFY-003-FR-016`). The tape bot's input
+/// reaches the game a variable one to four ticks after the state set (the
+/// capture has a hole there, `RB-RESEARCH-O009`), so against the tape every
+/// scenario carries that timing error; against the recorded input what is
+/// left is physics. A tick the capture lacks takes the last recorded input.
+/// The recorded input may belong to this tick or the previous one, so both
+/// are tried and the one with the smaller error is used.
+pub fn compare_scenario_recorded(
+    scenario: &Scenario,
+    recorded: &[PhysicsFrame],
+) -> Result<ScenarioComparison, IngestError> {
+    let Some(location) = scenario.car.location else {
+        return Err(IngestError::Malformed(
+            "the scenario sets no car location, so the recording cannot be aligned".to_string(),
+        ));
+    };
+    let location = Vec3::new(location[0], location[1], location[2]);
+    let start_index = recorded
+        .iter()
+        .position(|frame| {
+            frame
+                .cars
+                .first()
+                .is_some_and(|car| near(&car.position, &location, START_MATCH_RADIUS))
+        })
+        .ok_or_else(|| {
+            IngestError::Malformed(format!(
+                "no recorded frame has the car within {START_MATCH_RADIUS} uu of the scenario start"
+            ))
+        })?;
+    let start_secs = recorded[start_index].timestamp_secs;
+    let limit = scenario.total_ticks() as usize + 2;
+    let recorded_ticks: Vec<(usize, &PhysicsFrame)> = recorded[start_index..]
+        .iter()
+        .map(|frame| (tick_after(start_secs, frame.timestamp_secs), frame))
+        .take_while(|(tick, _)| *tick <= limit)
+        .collect();
+
+    // The recorded input of each tick, holes filled with the last one seen.
+    let mut by_tick: Vec<Option<ControllerInput>> = vec![None; limit + 1];
+    for (tick, frame) in &recorded_ticks {
+        if let Some(input) = frame.cars.first().and_then(|car| car.input) {
+            by_tick[*tick] = Some(input);
+        }
+    }
+    let mut last = ControllerInput::default();
+    let filled: Vec<ControllerInput> = by_tick
+        .iter()
+        .map(|input| {
+            last = input.unwrap_or(last);
+            last
+        })
+        .collect();
+
+    let start = scenario.initial_frame();
+    let run = |offset: usize| -> (Vec<ScenarioRow>, f32) {
+        let inputs: Vec<ControllerInput> = (0..limit)
+            .map(|tick| filled[(tick + offset).min(limit)])
+            .collect();
+        let predicted = simulate_with_inputs(&start, &inputs);
+        let mut rows = Vec::new();
+        let mut total = 0.0;
+        for (tick, r) in &recorded_ticks {
+            let (Some(p), Some(car)) = (predicted.get(*tick), r.cars.first()) else {
+                continue;
+            };
+            let Some(pc) = p.cars.first() else {
+                continue;
+            };
+            total +=
+                pc.position.distance(&car.position) + p.ball.position.distance(&r.ball.position);
+            rows.push(ScenarioRow {
+                tick: *tick,
+                recorded: *car,
+                predicted: *pc,
+                recorded_ball: r.ball.position,
+                predicted_ball: p.ball.position,
+            });
+        }
+        let mean = total / rows.len().max(1) as f32;
+        (rows, mean)
+    };
+    let (rows0, error0) = run(0);
+    let (rows1, error1) = run(1);
+    let (rows, input_offset) = if error1 < error0 {
+        (rows1, 1)
+    } else {
+        (rows0, 0)
+    };
+    Ok(ScenarioComparison {
+        start_index,
+        lag_ticks: 0,
+        rows,
+        input_mismatches: 0,
+        input_offset: Some(input_offset),
     })
 }
 
@@ -468,6 +586,40 @@ mod tests {
             frame.timestamp_secs = i as f32 * SCENARIO_TICK_SECS;
         }
         frames
+    }
+
+    /// `RB-VERIFY-003-FR-016`: fed the recorded input, a recording whose bot
+    /// started the tape late compares at zero error where the tape replay
+    /// carries the whole delay.
+    #[test]
+    fn a_recorded_input_replay_absorbs_a_late_tape_start() {
+        let sc = Scenario::from_json(
+            r#"{ "name": "boosting", "settle_ticks": 0,
+                 "car": { "location": [0, -4500, 17], "rotation": [0, 1.5708, 0],
+                          "velocity": [0, 1400, 0], "boost": 100 },
+                 "steps": [ { "ticks": 90, "throttle": 1, "boost": true } ] }"#,
+        )
+        .unwrap();
+        let late = {
+            let mut delayed = sc.clone();
+            delayed.settle_ticks += 3;
+            delayed
+        };
+        // The "game" ran the tape three ticks late; the recording shows it.
+        let capture = fake_capture(&late, 4, 0);
+        let against_tape = compare_scenario(&sc, &capture).unwrap();
+        let against_recorded = compare_scenario_recorded(&sc, &capture).unwrap();
+        assert!(
+            against_tape.max_position_error() > 3.0,
+            "the tape replay carries the delay: {}",
+            against_tape.max_position_error()
+        );
+        assert!(
+            against_recorded.max_position_error() < 0.5,
+            "{}",
+            against_recorded.max_position_error()
+        );
+        assert!(against_recorded.input_offset.is_some());
     }
 
     #[test]
