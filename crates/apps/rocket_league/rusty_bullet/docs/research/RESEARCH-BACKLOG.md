@@ -706,8 +706,36 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   set; the wall's normal on the wheels) and then read in Bullet's order.
 - **Status**: Open. **Owner**: baileyrd.
 
+### RB-RESEARCH-O020 — A resting ball hit from above: the floor sometimes does not push back
+
+- **Evidence (2026-10-07)**: `hitfuzz_*` (a run at the ball, then random driving) and
+  `bsl_*` (a jumping car clipping a ball at rest, 14 recordings). When a car hits
+  a ball resting on the floor from above, the ball's downward speed after the hit
+  is in the game either what the car's contact gives with the floor absent
+  (`hitfuzz_306`: rec -389 uu/s, the port with the floor dropped -391, with the
+  floor -148; next tick the ball rises at +233 = 0.6 x 389, so the floor acts
+  the tick after) or what it gives with the floor pushing back (`bsl_*_76`:
+  -47.7, the port's -47.7). Same geometry, same car state in the recording to
+  0.1 uu, both outcomes: `bsl_0_76` -47.7, `bsl_120_76` -211.1, `bsl_360_76` -47.7,
+  `bsl_840_76` -211.1; no pattern in the rest time (so not sleeping). With the floor
+  dropped, the one-step prediction of the car and the ball matches the game to
+  2 to 4 uu/s where it applies (`hitfuzz_306`: ball error 261 -> 5, car 53 -> 1).
+- **Likely cause**: the resting ball sits 1.9 uu above the world sphere, at the
+  threshold where its floor contact is generated, and a sub-uu difference in its
+  height decides whether the contact exists on the hit tick. Not reproducible
+  without Bullet's exact resting micro-motion.
+- **Tried (scratch)**: dropping the ball's world contacts on the first tick of a
+  car-ball contact: `hitfuzz` car error 203 -> 170 uu, ball 77 -> 60, but a ball
+  already rolling (`hitfuzz_320`: ball error 6 -> 250) and half the resting
+  cases get worse; no fixture changes. Not adopted.
+- **Next**: a recording that puts a ball at rest, then reads its height every
+  tick for a second (is it exactly 93.15?), and the contact generation margin
+  in RocketSim's ball-world code.
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O020 (a resting ball hit from above).
 - 2026-10-07: Added RB-RESEARCH-O019 (suspension damper reading order).
 - 2026-10-07: O013 fixed (FR-144, the engine fades with absolute speed).
 - 2026-10-07: Added RB-RESEARCH-O018 (car bumps and demolitions): bumps

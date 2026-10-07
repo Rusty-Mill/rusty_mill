@@ -34,6 +34,7 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 |---|---|---|
 | Climbing a wall or ramp | `wall_ride` 9, `wall_ride_slow` 16, `wall_ride_boost` 12 to 19, `corner_slide` 22 | The port climbs about 10% slowly; a family of suspension and pushback constants trades errors (O012) |
 | A car hitting the ceiling | `ceiling` 31 | A nose landing on the ceiling plane; not yet traced (O017) |
+| A resting ball hit from above by a car | `hitfuzz_304/306` ball 4 to 260 uu/s of velocity | The floor's push back on the hit tick is there in half the game's cases (O020) |
 | Wheels on the ball | `car_over_ball` 27 car / 44 ball | Ordinary hits agree; the wheel-on-ball contact does not (O014) |
 | A flip into a car | `bumpf_flip` 39 / 65 | The dodge's own impulse is in play |
 | Respawn after a demolition | not modelled | The game brings the car back after exactly 3 s at a spawn point it picks (O018) |
@@ -65,6 +66,14 @@ ceiling, corners, goals and posts: mean ball position error per tape **8.3 uu**
 (median 8.0, worst tape 15.4, worst moment 53 uu). The one-step ball prediction
 from every recorded frame is exact to 0.1 uu, including the bounces; the drift is
 0.01 uu per tick of accumulated rounding. Two tapes are in the golden gate.
+
+## Random drives that start at the ball
+
+`gen_hit_fuzz.py`: 24 seeded runs at the ball, then 6 s of random driving
+(`hitfuzz_301` to `324`): car mean of means 203 uu (median 89), ball 77 uu; half
+the tapes never touch the ball. The one-step prediction of every recorded
+car-ball hit shows the gap: a resting ball hit from above (O020); the rest of the
+hits agree.
 
 ## What changed on 2026-10-07
 
