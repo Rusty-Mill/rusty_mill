@@ -681,8 +681,34 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   are the loosest fits.
 - **Status**: Mostly done. **Owner**: baileyrd.
 
+### RB-RESEARCH-O019 — The wheels' damper reads the car's velocity in wheel order
+
+- **Evidence (2026-10-07)**: `apply_wheel_forces` applies each wheel's
+  suspension impulse before the next wheel reads its damper velocity
+  (`drive/wheels.rs`, FR-091). Bullet reads every wheel's velocity before any
+  impulse (`rayCast`, then `updateSuspension`). Settling a car at rest, the
+  port's order leaves a roll of 0.003 rad and a pitch of 0.0112 rad; the game
+  rests at roll 0 and pitch 0.0096 (`probe_ceiling`'s first 60 ticks). The
+  roll turns a straight jump into 0.9 uu/s of sideways speed, which decides
+  the side a symmetric loop lands on (`probe_ceiling` 31 uu: the game's x
+  speed after the landing is -31, the port's +39).
+- **Tried (scratch)**: all four wheels reading before any impulse
+  (Bullet's order): the rest pose matches the game exactly (roll 0, pitch
+  0.0096); 10 recordings improve (`turn_fast` 3.0 -> 0.9, `late_dodge` 1.4 ->
+  0.1, `speed_flip` 0.8 -> 0.4) but `probe_wall_ride_45` goes 0.5 -> 9.6
+  (13 uu/s slower up the wall; the game's first tick at speed dips 6 uu/s,
+  the old order dips 6, Bullet's order 3), `probe_boost_air_pitchup` 2.4 ->
+  5.5 and a few bump scenarios worsen; net about +5 uu over 57 recordings.
+  Reading per axle (front pair, then rear pair) is in between (wall ride 3.9).
+  Not adopted.
+- **Next**: find what the sequential order stands in for (the damper
+  reading after the drive impulses, FR-091; the first tick after a state
+  set; the wall's normal on the wheels) and then read in Bullet's order.
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
 
+- 2026-10-07: Added RB-RESEARCH-O019 (suspension damper reading order).
 - 2026-10-07: O013 fixed (FR-144, the engine fades with absolute speed).
 - 2026-10-07: Added RB-RESEARCH-O018 (car bumps and demolitions): bumps
   modelled (FR-140, FR-141), demolitions open.
