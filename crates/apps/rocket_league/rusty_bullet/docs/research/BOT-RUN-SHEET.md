@@ -144,3 +144,38 @@ window and the roll convention held, and the nose landing is within 22 uu.
 
 Stage 3 not run. Next session: a second run of each Stage 2 scenario for
 its own noise floor, then the car_over_ball contact.
+
+## Session 2, stage 1 (partial, 2026-10-06): focus and plugin 1.3
+
+Not the controlled four-way test the plan asks for; one uncontrolled run
+that happens to answer part of it. Plugin 1.3 (built and installed this
+session). The operator started the capture in the game, then went to the
+RLBot GUI and pressed Start Match four times about 10 s apart, leaving the
+GUI in front each time, and returned to the game to stop the capture. So
+Rocket League was **behind another window** (not minimised, not on a
+second monitor) for all four tapes. One capture, `replays/v13_prompt_dodge.jsonl`
+(gitignored), 11047 frames in 92.3 s (119.6 per second); cut at the four
+state-set teleports into `v13_run1..4.jsonl`.
+
+| Run | Frames compared | Lag | Pos. error mean / max (uu) | Input mismatches | Dodge fired |
+|---|---|---|---|---|---|
+| 1 | 543 | 1 | 1.2 / 3.6 | 0 | yes |
+| 2 | 542 | 1 | 1.2 / 3.6 | 0 | yes |
+| 3 | 542 | 1 | 1.2 / 3.6 | 0 | yes |
+| 4 | 541 | 2 | 2.2 / 5.5 | 3 | yes |
+
+- Largest gap between frames in the whole capture: 0.067 s (8 ticks), the
+  known 5-tick hole at each state-set (RB-RESEARCH-O009). No pause, no stall.
+- **Focus:** with the game window behind the GUI, tapes ran at full rate and
+  matched the focused session-1 results (lag 0 to 2, error inside the 2.8 uu
+  noise floor). So "the window must stay focused" (session 1) is not
+  supported for the behind-another-window case. **Not tested:** minimised,
+  second monitor, `rb_probe` alongside, and the window state is not recorded
+  in the capture, so it rests on the operator's account. Session 1's freeze
+  may have been the Escape pause menu.
+- **Plugin 1.3 (RB-RESEARCH-O008):** the recorded inputs are non-zero and
+  match the tape (jump for 24 frames, then once 0.5 s later); runs 1 to 3
+  have zero mismatches. Run 4's jump came one tick early (lag 2, three
+  mismatches), the same one-tick jitter as the session-1 noise floor. The
+  five `bakkesmod.log` diagnostic lines show all-zero from both sources
+  because they are logged before the tape starts; they do not test the fix.

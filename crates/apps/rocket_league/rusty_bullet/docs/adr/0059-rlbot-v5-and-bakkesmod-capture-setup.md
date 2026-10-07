@@ -98,6 +98,16 @@ the choices below (the bot's gate and how a scenario is selected).
 - The plugin records no inputs for an RLBot-driven car, so the tape is
   the only input record (RB-RESEARCH-O008).
 
+## Revisited 2026-10-06 (focus)
+
+The consequence above that the operator must keep the game window focused
+is not supported by a later run: four tapes ran at 119.6 frames per second
+with no gap over 0.067 s while the RLBot GUI, not the game, had focus
+(`BOT-RUN-SHEET.md`, session 2 stage 1, partial). Minimised and
+second-monitor cases are untested. The original session-1 freeze may have
+been the Escape pause menu. Treat the focus rule as unconfirmed until the
+controlled test is run.
+
 ## Validation and revisit triggers
 
 - Validated 2026-10-06: prompt_dodge captured twice, first frame equal

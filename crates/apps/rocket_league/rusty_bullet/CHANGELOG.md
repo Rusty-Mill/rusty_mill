@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- Plugin 1.3 verified on four bot-driven tapes (inputs recorded, match the
+  tape); focus claim softened: tapes ran with the game behind the GUI
+  (`BOT-RUN-SHEET.md` session 2 stage 1, partial).
 - Capture plugin 1.3 (`RB-RESEARCH-O008`): the recorded car `input` is the
   `SetVehicleInput` hook's argument, not `CarWrapper::GetInput()`, which
   stays all-zero for an RLBot-driven car. Logs both sources for the first
