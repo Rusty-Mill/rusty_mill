@@ -59,8 +59,9 @@ function Get-RunScore([string]$scenario, [string]$capture) {
     $text = (& $verify --scenario $scenario --against $capture 2>&1) -join "`n"
     $lag = [regex]::Match($text, 'lag (\d+) ticks').Groups[1].Value
     $err = [regex]::Match($text, 'position error: mean ([0-9.]+) uu, max ([0-9.]+) uu; first over 10 uu: (\S+); first over 100 uu: (\S+)')
-    # Tick 0 row: position error of the capture's start frame against the scenario's start.
-    $tick0 = [regex]::Match($text, '(?m)^\s*0\s+([0-9.]+)\s').Groups[1].Value
+    # First table row (tick 0, or the first tick kept after a capture hole):
+    # position error of the capture's start frame against the scenario's start.
+    $tick0 = [regex]::Match($text, '(?m)^\s*\d+\s+([0-9.]+)\s+[0-9.]+\s+[0-9.]+\s+\(').Groups[1].Value
     if (-not $tick0) { $tick0 = "n/a" }
     $stats = Get-CaptureStats $capture
     if (-not $err.Success) {

@@ -304,19 +304,14 @@ fn ensure_game_up(dir: &Path, config: &MatchConfiguration) -> Result<()> {
     println!("no plugin heartbeat; launching the game through core");
     let mut conn = connect()?;
     conn.send_packet(config.clone())?;
-    let deadline = Instant::now() + GAME_LAUNCH_TIMEOUT;
-    while !heartbeat_fresh(dir) {
-        if Instant::now() > deadline {
-            return Err(format!(
-                "no heartbeat in {} after {:?}: is BakkesMod running and the plugin set to \
-                 load at game start?",
-                dir.display(),
-                GAME_LAUNCH_TIMEOUT
-            )
-            .into());
-        }
-        sleep(Duration::from_secs(1));
-    }
+    // Keep reading while waiting: core drops a session whose outbound
+    // queue fills, and a game launch takes tens of seconds.
+    pump(
+        &mut conn,
+        GAME_LAUNCH_TIMEOUT,
+        "waiting for the plugin heartbeat (is BakkesMod running and the plugin set to load at game start?)",
+        |_| heartbeat_fresh(dir),
+    )?;
     conn.send_packet(StopCommand {
         shutdown_server: false,
     })?;
