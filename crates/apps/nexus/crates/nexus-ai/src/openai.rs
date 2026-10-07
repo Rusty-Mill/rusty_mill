@@ -476,6 +476,14 @@ impl EmbeddingProvider for OpenAiProvider {
     fn dimension(&self) -> usize {
         EMBEDDING_DIMENSION
     }
+
+    /// Verified: [`embed`](Self::embed) always requests
+    /// [`DEFAULT_EMBEDDING_MODEL`], whatever the configuration says, and that
+    /// model returns `EMBEDDING_DIMENSION` components. If `embed` ever sends
+    /// a configurable model this must return `None`.
+    fn expected_dimension(&self) -> Option<usize> {
+        Some(EMBEDDING_DIMENSION)
+    }
 }
 
 // ─── Tool-aware request / response types ────────────────────────────────────
@@ -718,6 +726,13 @@ fn parse_openai_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_expected_dimension_is_1536_for_text_embedding_3_small() {
+        assert_eq!(DEFAULT_EMBEDDING_MODEL, "text-embedding-3-small");
+        let provider = OpenAiProvider::new("key".to_string(), None, 4096, false);
+        assert_eq!(provider.expected_dimension(), Some(1536));
+    }
 
     #[test]
     fn tool_schema_serializes_into_openai_envelope() {

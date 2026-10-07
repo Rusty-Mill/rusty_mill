@@ -230,7 +230,8 @@ mod tests {
     use super::*;
     use crate::http::request::Request as HttpRequest;
     use rusty_http::{HeaderMap, Method};
-    use rusty_meshed_observability::record_violation;
+    use rusty_meshed_core::Timestamp;
+    use rusty_meshed_observability::record_violation_at;
     use rusty_sqlite::rusqlite::Connection;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -397,8 +398,20 @@ mod tests {
         create_output_port(&state, product_id, "commerce.orders");
         {
             let conn = state.get_session().unwrap();
-            record_violation(&conn, "commerce.orders-value", "field removed").unwrap();
-            record_violation(&conn, "commerce.orders-value", "type changed").unwrap();
+            record_violation_at(
+                &conn,
+                &Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+                "commerce.orders-value",
+                "field removed",
+            )
+            .unwrap();
+            record_violation_at(
+                &conn,
+                &Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+                "commerce.orders-value",
+                "type changed",
+            )
+            .unwrap();
         }
         let (product_name, port, violation_count) = resolve(&state, product_id);
 

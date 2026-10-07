@@ -17,7 +17,7 @@ pub use contract_gate::{
 };
 pub use lineage::{LineageRecord, LineageTracker, TopologyDependency};
 pub use metrics::{
-    ensure_schema as ensure_metrics_schema, get_violation_count, record_violation,
+    ensure_schema as ensure_metrics_schema, get_violation_count, record_violation_at,
     MetricsCollector, MetricsError, ProductMetrics,
 };
 pub use slo::{PublishError, SLOMonitor, SLOResult, SLOViolationPayload, SLOViolationPublisher};

@@ -16,6 +16,7 @@ use crate::http::request::Request;
 use crate::http::response::Response;
 use crate::http::router::Router;
 use rusty_http::StatusCode;
+use rusty_meshed_core::ClockReading;
 use rusty_request::Json;
 use rusty_sqlite::rusqlite::types::ToSql;
 use rusty_sqlite::rusqlite::{
@@ -179,7 +180,10 @@ async fn create(state: Arc<AppState>, req: Request) -> Response {
     }
 
     // REG-090: server-generated ISO-8601 UTC timestamp.
-    let granted_at = now_iso();
+    let Ok(reading) = ClockReading::now() else {
+        return internal_error();
+    };
+    let granted_at = reading.timestamp().as_str().to_string();
     if let Err(response) = insert_grant_or_conflict(
         &conn,
         output_port_id,
@@ -361,39 +365,6 @@ async fn resolve(state: Arc<AppState>, req: Request) -> Response {
     json.insert("topic_name", topic_name.as_str());
     json.insert("schema_subject", schema_subject.as_str());
     Response::json(StatusCode::OK, &json)
-}
-
-/// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
-/// civil-from-days algorithm (Howard Hinnant's) used elsewhere in this
-/// crate family for a `created_at`/`granted_at` timestamp no test
-/// asserts the exact value of; see `transformation::engine::now_iso`'s
-/// doc for why there's no shared clock type to build on instead.
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Builds the access-grant CRUD router plus the RBAC-checked resolve

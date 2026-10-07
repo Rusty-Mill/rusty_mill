@@ -174,7 +174,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusty_meshed_observability::{ensure_metrics_schema, record_violation};
+    use rusty_meshed_observability::{ensure_metrics_schema, record_violation_at};
     use rusty_meshed_registry::models;
 
     fn seeded_connection() -> Connection {
@@ -243,7 +243,13 @@ mod tests {
         let conn = seeded_connection();
         let id = insert_product(&conn, "orders");
         insert_output_port(&conn, id, "commerce.orders");
-        record_violation(&conn, "commerce.orders-value", "bad field").unwrap();
+        record_violation_at(
+            &conn,
+            &rusty_meshed_core::Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            "commerce.orders-value",
+            "bad field",
+        )
+        .unwrap();
 
         let output = run(&conn, UNREACHABLE_KAFKA, "orders", None, OutputFormat::Json).await;
         assert_eq!(output.exit_code, 0);

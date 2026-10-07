@@ -21,7 +21,7 @@
 //!   differs from `run_continuous`'s own `:8100` default, matching the
 //!   source exactly)
 
-use rusty_meshed_core::PlatformConfig;
+use rusty_meshed_core::{ClockReading, PlatformConfig};
 use rusty_meshed_domains::generators::topics::{create_phase4_topics, event_topic, PHASE4_TOPICS};
 use rusty_meshed_domains::generators::{ScenarioBuilder, ScenarioEvent};
 use rusty_meshed_domains::products::{PersonnelLifecycleProducer, PositionManagementProducer};
@@ -32,8 +32,8 @@ use std::collections::BTreeMap;
 /// people activated, 3 positions authorized under `UNIT-ALPHA`, all 3
 /// assigned and filled, one promotion, and one retroactive correction
 /// on P1's assignment.
-fn build_demo_scenario() -> (String, Vec<ScenarioEvent>) {
-    let builder = ScenarioBuilder::new();
+fn build_demo_scenario(reading: &ClockReading) -> (String, Vec<ScenarioEvent>) {
+    let builder = ScenarioBuilder::new_at(reading);
 
     let builder = builder
         .add_status_change("P1", "ACTIVE", "NONE", 1)
@@ -122,7 +122,11 @@ async fn main() {
 
     // -- Step 2: Build demo scenario -------------------------------------
     println!("--- Step 2: Building demo scenario ---");
-    let (correlation_id, events) = build_demo_scenario();
+    let reading = ClockReading::now().unwrap_or_else(|err| {
+        eprintln!("Cannot read the system clock: {err}");
+        std::process::exit(1);
+    });
+    let (correlation_id, events) = build_demo_scenario(&reading);
     println!("Scenario correlation_id: {correlation_id}");
     println!("Total events generated: {}", events.len());
     for event in &events {
@@ -228,9 +232,13 @@ async fn main() {
 mod tests {
     use super::*;
 
+    fn reading() -> ClockReading {
+        ClockReading::from_duration(std::time::Duration::from_secs(1_700_000_000)).unwrap()
+    }
+
     #[test]
     fn build_demo_scenario_produces_exactly_fourteen_events_in_source_order() {
-        let (_correlation_id, events) = build_demo_scenario();
+        let (_correlation_id, events) = build_demo_scenario(&reading());
         let names: Vec<&str> = events.iter().map(ScenarioEvent::event_name).collect();
         assert_eq!(
             names,
@@ -255,7 +263,7 @@ mod tests {
 
     #[test]
     fn build_demo_scenario_events_all_share_one_correlation_id() {
-        let (correlation_id, events) = build_demo_scenario();
+        let (correlation_id, events) = build_demo_scenario(&reading());
         for event in &events {
             assert_eq!(event.base().correlation_id, correlation_id);
         }
@@ -263,7 +271,7 @@ mod tests {
 
     #[test]
     fn build_demo_scenario_final_event_is_the_retroactive_correction() {
-        let (_correlation_id, events) = build_demo_scenario();
+        let (_correlation_id, events) = build_demo_scenario(&reading());
         match events.last().unwrap() {
             ScenarioEvent::PersonnelAssigned(a) => {
                 assert_eq!(a.person_id, "P1");
@@ -275,7 +283,7 @@ mod tests {
 
     #[test]
     fn build_demo_scenario_position_fills_link_back_to_their_assignments() {
-        let (_correlation_id, events) = build_demo_scenario();
+        let (_correlation_id, events) = build_demo_scenario(&reading());
         let assigned_event_id = |person_id: &str| {
             events
                 .iter()

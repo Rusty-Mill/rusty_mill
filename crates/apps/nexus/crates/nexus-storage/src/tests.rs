@@ -1559,3 +1559,42 @@ fn base_load_handler_rejects_traversal_path() {
         other => panic!("expected ExecutionFailed, got {other:?}"),
     }
 }
+
+// ── near-duplicate notes: incomparable pairs are never reported ───────────
+
+#[test]
+fn note_find_duplicates_never_reports_incomparable_pairs_even_at_threshold_zero() {
+    let dir = tmp();
+    let engine = StorageEngine::init(dir.path()).expect("init");
+    let put = |path: &str, embedding: Vec<f32>| {
+        let chunk = crate::vectorstore::ChunkEmbedding {
+            file_path: path.to_string(),
+            block_id: 1,
+            chunk_text: "t".to_string(),
+            embedding,
+            content_hash: None,
+        };
+        engine
+            .vector_insert("notes", path, &[chunk])
+            .expect("vector_insert");
+    };
+    put("a.md", vec![1.0, 0.0]);
+    put("c.md", vec![0.0, 1.0]); // comparable with a.md: cosine 0.0
+    put("other_model.md", vec![1.0, 0.0, 0.0]); // different dimension
+    put("zero1.md", vec![0.0, 0.0]); // zero norm: no defined similarity
+    put("zero2.md", vec![0.0, 0.0]);
+
+    let out = crate::handlers::notes::find_duplicates(
+        &engine,
+        &serde_json::json!({ "near_threshold": 0.0 }),
+    )
+    .expect("find_duplicates");
+    let near = out["near"].as_array().expect("near array");
+    let pairs: Vec<(&str, &str)> = near
+        .iter()
+        .map(|p| (p["a"].as_str().unwrap(), p["b"].as_str().unwrap()))
+        .collect();
+    // Before: every pair scored >= 0.0, including the mismatched-dimension
+    // and the zero-vector ones.
+    assert_eq!(pairs, vec![("a.md", "c.md")], "{out}");
+}

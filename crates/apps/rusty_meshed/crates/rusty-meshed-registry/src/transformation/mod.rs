@@ -8,8 +8,8 @@ mod enums;
 mod seed;
 
 pub use engine::{
-    advance_quarter, ensure_schema, get_or_create_clock, get_state, queue_decision, DecisionRef,
-    LegacySystem, MaturityPoint, TransformationState, DUAL_WRITE_MIN_QUARTERS,
+    advance_quarter_at, ensure_schema, get_or_create_clock, get_state, queue_decision_at,
+    DecisionRef, LegacySystem, MaturityPoint, TransformationState, DUAL_WRITE_MIN_QUARTERS,
 };
 pub use enums::{CapabilityDimension, DecisionType, SystemStatus};
 pub use seed::seed_transformation_state;

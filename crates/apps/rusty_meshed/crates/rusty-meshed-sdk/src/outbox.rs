@@ -1,11 +1,11 @@
 //! The transactional outbox pattern -- the Rust port of
 //! `meshed.infrastructure.outbox` (SDK-055..064).
 //!
-//! [`OutboxEntry`] (SDK-055) and [`write_outbox_entry`] (SDK-056):
+//! [`OutboxEntry`] (SDK-055) and [`write_outbox_entry_at`] (SDK-056):
 //! plain data plus a SQLite insert that deliberately doesn't manage
 //! its own transaction boundary, so a caller can wrap it and their own
 //! business-entity write in one atomic `rusqlite::Transaction` -- the
-//! core invariant this pattern exists for (see [`write_outbox_entry`]'s
+//! core invariant this pattern exists for (see [`write_outbox_entry_at`]'s
 //! own doc for how).
 //!
 //! [`OutboxRelay`] (SDK-057..064) is built on `rusty_kafka`'s
@@ -30,21 +30,23 @@
 //! `KafkaClient::connect` itself isn't unit tested anywhere in this
 //! crate family: no live broker in this environment).
 
+use crate::relay_log::{ErrorKind, Outcome, RelayLog};
 use rusty_err::Error;
 use rusty_kafka::protocol::produce::{
     ProducePartitionRequest, ProduceRequest, ProduceTopicRequest,
 };
 use rusty_kafka::record_batch::Record;
 use rusty_kafka::{ClientError, KafkaClient};
+use rusty_meshed_core::{ClockError, ClockReading, SystemClock, Timestamp, WallClock};
 use rusty_sqlite::rusqlite::{params, Connection, Result as SqlResult};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A pending outbox event waiting to be relayed to Kafka (SDK-055).
 /// Written atomically with its associated business data via
-/// [`write_outbox_entry`] plus the caller's own write, inside one
+/// [`write_outbox_entry_at`] plus the caller's own write, inside one
 /// `rusqlite` transaction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboxEntry {
@@ -87,14 +89,18 @@ pub fn ensure_schema(conn: &Connection) -> SqlResult<()> {
 /// own the moment this function returns (SQLite's normal autocommit
 /// behavior), which is fine for a standalone outbox write but forfeits
 /// the atomicity guarantee this pattern exists for.
-pub fn write_outbox_entry(
+///
+/// `created_at` is the caller's `at`; read it once from
+/// [`ClockReading`] before opening the transaction.
+pub fn write_outbox_entry_at(
     conn: &Connection,
+    at: &Timestamp,
     event_type: &str,
     topic: &str,
     payload: &rusty_json::Value,
     headers: Option<&rusty_json::Value>,
 ) -> SqlResult<OutboxEntry> {
-    let created_at = now_iso();
+    let created_at = at.as_str().to_string();
     let payload_json = rusty_json::to_string(payload).unwrap_or_else(|_| "null".to_string());
     let headers_json = headers
         .map(|h| rusty_json::to_string(h).unwrap_or_else(|_| "{}".to_string()))
@@ -158,6 +164,21 @@ pub enum RelayError {
     /// The outbox database read/write itself failed.
     #[error("outbox database error: {0}")]
     Sql(String),
+    /// The system clock could not be read, so nothing was sent.
+    #[error("clock unavailable: {0}")]
+    Clock(#[from] ClockError),
+}
+
+impl RelayError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            RelayError::Kafka(_)
+            | RelayError::MissingPartitionResult
+            | RelayError::KafkaErrorCode(_) => ErrorKind::Kafka,
+            RelayError::Sql(_) => ErrorKind::Database,
+            RelayError::Clock(_) => ErrorKind::Clock,
+        }
+    }
 }
 
 /// Selects up to `limit` pending entries (`published_at IS NULL`,
@@ -196,20 +217,42 @@ pub enum RelayError {
 /// retrying again. [`OutboxRelay`]'s own background thread implements
 /// the *documented* retry-next-cycle intent instead of that latent bug
 /// -- see its own doc.
+///
+/// The clock is read once, after the pending batch is fetched and before
+/// the first produce, and only if the batch is non-empty: every
+/// `published_at` and every record time in the batch comes from that one
+/// reading (so both are batch-start values, within one batch duration of
+/// each entry's acknowledgement). A clock failure therefore aborts the
+/// batch before anything is sent.
 pub async fn relay_pending<S: AsyncRead + AsyncWrite + Unpin + Send>(
     conn: &mut Connection,
     client: &mut KafkaClient<S>,
     limit: i64,
 ) -> Result<usize, RelayError> {
+    relay_pending_with(conn, client, limit, &SystemClock).await
+}
+
+/// [`relay_pending`] with an explicit `clock`.
+pub async fn relay_pending_with<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    conn: &mut Connection,
+    client: &mut KafkaClient<S>,
+    limit: i64,
+    clock: &impl WallClock,
+) -> Result<usize, RelayError> {
     let tx = conn
         .transaction()
         .map_err(|err| RelayError::Sql(err.to_string()))?;
     let pending = fetch_pending(&tx, limit).map_err(|err| RelayError::Sql(err.to_string()))?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let reading = clock.read()?;
 
     let mut published = 0;
     for entry in &pending {
-        publish_one(client, entry).await?;
-        mark_published(&tx, entry.id).map_err(|err| RelayError::Sql(err.to_string()))?;
+        publish_one(client, entry, &reading).await?;
+        mark_published(&tx, entry.id, reading.timestamp())
+            .map_err(|err| RelayError::Sql(err.to_string()))?;
         published += 1;
     }
 
@@ -221,11 +264,12 @@ pub async fn relay_pending<S: AsyncRead + AsyncWrite + Unpin + Send>(
 async fn publish_one<S: AsyncRead + AsyncWrite + Unpin + Send>(
     client: &mut KafkaClient<S>,
     entry: &OutboxEntry,
+    reading: &ClockReading,
 ) -> Result<(), RelayError> {
     let request = ProduceRequest {
         acks: -1,
         timeout_ms: 5000,
-        base_timestamp_ms: now_millis(),
+        base_timestamp_ms: reading.unix_millis(),
         topics: vec![ProduceTopicRequest {
             name: entry.topic.clone(),
             partitions: vec![ProducePartitionRequest {
@@ -252,7 +296,7 @@ async fn publish_one<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
 /// `entry.headers`'s JSON object as Kafka wire headers. A string value
 /// becomes its own UTF-8 bytes; anything else (a number, `null`, a
-/// nested object -- `write_outbox_entry` accepts any JSON value as a
+/// nested object -- `write_outbox_entry_at` accepts any JSON value as a
 /// header, not just strings) falls back to that value's own JSON
 /// encoding, so nothing here panics or silently drops a non-string
 /// header. Malformed JSON (shouldn't happen -- only this module ever
@@ -306,11 +350,10 @@ fn has_pending(conn: &Connection) -> SqlResult<bool> {
     )
 }
 
-fn mark_published(conn: &Connection, id: i64) -> SqlResult<()> {
-    let published_at = now_iso();
+fn mark_published(conn: &Connection, id: i64, at: &Timestamp) -> SqlResult<()> {
     conn.execute(
         "UPDATE outbox_entries SET published_at = ?1 WHERE id = ?2",
-        params![published_at, id],
+        params![at.as_str(), id],
     )?;
     Ok(())
 }
@@ -393,8 +436,10 @@ fn relay_loop(db_path: &str, bootstrap_servers: &str, stop_rx: &mpsc::Receiver<(
     let Ok(runtime) = rusty_tokio::Builder::new_current_thread().build() else {
         return;
     };
+    let mut log = RelayLog::new(std::io::stderr(), crate::relay_log::WINDOW);
     loop {
-        runtime.block_on(poll_once(db_path, bootstrap_servers));
+        let outcome = runtime.block_on(poll_once(db_path, bootstrap_servers));
+        log.record(Instant::now(), outcome);
         match stop_rx.recv_timeout(Duration::from_secs_f64(OutboxRelay::POLL_INTERVAL_SECONDS)) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -404,73 +449,49 @@ fn relay_loop(db_path: &str, bootstrap_servers: &str, stop_rx: &mpsc::Receiver<(
 
 /// One polling cycle: open a fresh connection (this crate's per-call-
 /// connection convention), skip Kafka entirely if nothing is pending,
-/// otherwise connect and hand off to [`relay_pending`]. Every failure
-/// here -- can't open the database, can't connect, a
-/// [`RelayError`] from `relay_pending` -- is deliberately swallowed:
-/// this is the one place that implements SDK-064's documented
+/// otherwise connect and hand off to [`relay_pending`]. Failures are
+/// returned as an [`Outcome`] for the rate-limited log rather than
+/// raised: this is the one place that implements SDK-064's documented
 /// retry-next-cycle intent (see [`relay_pending`]'s own doc for why
-/// that's not simply "port the source's exception handling") by making
-/// sure nothing thrown from a single cycle ever reaches
-/// [`relay_loop`] and ends the background thread.
-async fn poll_once(db_path: &str, bootstrap_servers: &str) {
-    let Ok(mut conn) = Connection::open(db_path) else {
-        return;
+/// that's not simply "port the source's exception handling"), so nothing
+/// from a single cycle ever reaches [`relay_loop`] and ends the thread.
+async fn poll_once(db_path: &str, bootstrap_servers: &str) -> Outcome {
+    let failed = |kind, detail: String| Outcome::Failed { kind, detail };
+    let mut conn = match Connection::open(db_path) {
+        Ok(conn) => conn,
+        Err(err) => return failed(ErrorKind::Database, format!("cannot open outbox: {err}")),
     };
-    let Ok(true) = has_pending(&conn) else {
-        return;
-    };
-    let Ok(mut client) = KafkaClient::<TcpStream>::connect(
+    match has_pending(&conn) {
+        Ok(true) => {}
+        Ok(false) => return Outcome::Idle,
+        Err(err) => return failed(ErrorKind::Database, err.to_string()),
+    }
+    let mut client = match KafkaClient::<TcpStream>::connect(
         bootstrap_servers,
         Some("rusty_meshed_outbox_relay".to_string()),
     )
     .await
-    else {
-        return;
+    {
+        Ok(client) => client,
+        Err(err) => return failed(ErrorKind::Kafka, format!("cannot connect: {err}")),
     };
-    let _ = relay_pending(&mut conn, &mut client, 100).await;
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-/// A minimal RFC 3339 UTC "now" formatter -- same hand-rolled
-/// civil-from-days algorithm duplicated elsewhere in this crate family.
-fn now_iso() -> String {
-    let since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = since_epoch.as_secs();
-    let mut days = (total_secs / 86_400) as i64;
-    let secs_of_day = total_secs % 86_400;
-    let (hour, minute, second) = (
-        secs_of_day / 3600,
-        (secs_of_day % 3600) / 60,
-        secs_of_day % 60,
-    );
-
-    days += 719_468;
-    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
-    let day_of_era = (days - era * 146_097) as u64;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era as i64 + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = if month <= 2 { year + 1 } else { year };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    match relay_pending(&mut conn, &mut client, 100).await {
+        Ok(0) => Outcome::Idle,
+        Ok(_) => Outcome::Relayed,
+        Err(err) => failed(err.kind(), err.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusty_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn at() -> Timestamp {
+        Timestamp::from_unix_secs(1_700_000_000).unwrap()
+    }
 
     fn seeded_connection() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -482,7 +503,8 @@ mod tests {
     fn write_outbox_entry_defaults_headers_to_an_empty_object() {
         let conn = seeded_connection();
         let payload = json!({"a": 1});
-        let entry = write_outbox_entry(&conn, "PersonnelAssigned", "t", &payload, None).unwrap();
+        let entry =
+            write_outbox_entry_at(&conn, &at(), "PersonnelAssigned", "t", &payload, None).unwrap();
         assert_eq!(entry.headers, "{}");
         assert_eq!(entry.payload, "{\"a\":1}");
         assert!(entry.published_at.is_none());
@@ -494,8 +516,15 @@ mod tests {
         let conn = seeded_connection();
         let payload = json!({});
         let headers = json!({"source": "demo", "version": "1"});
-        let entry =
-            write_outbox_entry(&conn, "PersonnelAssigned", "t", &payload, Some(&headers)).unwrap();
+        let entry = write_outbox_entry_at(
+            &conn,
+            &at(),
+            "PersonnelAssigned",
+            "t",
+            &payload,
+            Some(&headers),
+        )
+        .unwrap();
         let parsed: rusty_json::Value = rusty_json::from_str(&entry.headers).unwrap();
         assert_eq!(parsed.get("source").unwrap().as_str(), Some("demo"));
     }
@@ -504,8 +533,8 @@ mod tests {
     fn fetch_all_returns_entries_oldest_first() {
         let conn = seeded_connection();
         let payload = json!({});
-        write_outbox_entry(&conn, "A", "t1", &payload, None).unwrap();
-        write_outbox_entry(&conn, "B", "t2", &payload, None).unwrap();
+        write_outbox_entry_at(&conn, &at(), "A", "t1", &payload, None).unwrap();
+        write_outbox_entry_at(&conn, &at(), "B", "t2", &payload, None).unwrap();
 
         let entries = fetch_all(&conn).unwrap();
         assert_eq!(entries.len(), 2);
@@ -522,7 +551,7 @@ mod tests {
         let payload = json!({});
         {
             let tx = conn.transaction().unwrap();
-            write_outbox_entry(&tx, "A", "t1", &payload, None).unwrap();
+            write_outbox_entry_at(&tx, &at(), "A", "t1", &payload, None).unwrap();
             // No commit -- tx is dropped here, rolling back.
         }
         assert!(fetch_all(&conn).unwrap().is_empty());
@@ -534,7 +563,7 @@ mod tests {
         let payload = json!({});
         {
             let tx = conn.transaction().unwrap();
-            write_outbox_entry(&tx, "A", "t1", &payload, None).unwrap();
+            write_outbox_entry_at(&tx, &at(), "A", "t1", &payload, None).unwrap();
             tx.commit().unwrap();
         }
         assert_eq!(fetch_all(&conn).unwrap().len(), 1);
@@ -553,7 +582,21 @@ mod tests {
         topic: &str,
         error_code: i16,
     ) -> DecodedProduceRequest {
+        respond_to_produce_observed(peer, topic, error_code, || {})
+            .await
+            .0
+    }
+
+    /// Like [`respond_to_produce`], calling `on_request` once the request
+    /// has arrived and before replying, and also returning the raw body.
+    async fn respond_to_produce_observed(
+        peer: &mut (impl rusty_tokio::io::AsyncRead + rusty_tokio::io::AsyncWrite + Unpin + Send),
+        topic: &str,
+        error_code: i16,
+        on_request: impl FnOnce(),
+    ) -> (DecodedProduceRequest, Vec<u8>) {
         let (header, body) = recv_request(peer).await.unwrap();
+        on_request();
         assert_eq!(header.api_key, rusty_kafka::protocol::api_key::PRODUCE);
         let mut reader = rusty_wire::Reader::new(&body);
         let request = DecodedProduceRequest::decode(&mut reader).unwrap();
@@ -575,7 +618,7 @@ mod tests {
         send_response(peer, header.correlation_id, &writer.into_vec())
             .await
             .unwrap();
-        request
+        (request, body)
     }
 
     #[test]
@@ -607,8 +650,8 @@ mod tests {
         let mut conn = seeded_connection();
         let payload = json!({"a": 1});
         let headers = json!({"source": "demo"});
-        write_outbox_entry(&conn, "A", "topic-a", &payload, Some(&headers)).unwrap();
-        write_outbox_entry(&conn, "B", "topic-b", &payload, None).unwrap();
+        write_outbox_entry_at(&conn, &at(), "A", "topic-a", &payload, Some(&headers)).unwrap();
+        write_outbox_entry_at(&conn, &at(), "B", "topic-b", &payload, None).unwrap();
 
         let (client_io, mut peer) = duplex(8192);
         let mut client = KafkaClient::new(client_io, None);
@@ -635,8 +678,8 @@ mod tests {
     async fn relay_pending_leaves_the_whole_batch_pending_when_one_produce_fails() {
         let mut conn = seeded_connection();
         let payload = json!({});
-        write_outbox_entry(&conn, "A", "topic-a", &payload, None).unwrap();
-        write_outbox_entry(&conn, "B", "topic-b", &payload, None).unwrap();
+        write_outbox_entry_at(&conn, &at(), "A", "topic-a", &payload, None).unwrap();
+        write_outbox_entry_at(&conn, &at(), "B", "topic-b", &payload, None).unwrap();
 
         let (client_io, mut peer) = duplex(8192);
         let mut client = KafkaClient::new(client_io, None);
@@ -701,5 +744,148 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// A clock that counts its reads and returns a fixed result.
+    #[derive(Clone)]
+    struct ScriptedClock {
+        reads: Arc<AtomicUsize>,
+        result: Result<ClockReading, ClockError>,
+    }
+
+    impl ScriptedClock {
+        fn working() -> Self {
+            let reading =
+                ClockReading::from_duration(Duration::new(1_700_000_000, 123_456_789)).unwrap();
+            ScriptedClock {
+                reads: Arc::default(),
+                result: Ok(reading),
+            }
+        }
+
+        fn broken() -> Self {
+            ScriptedClock {
+                reads: Arc::default(),
+                result: Err(ClockError::BeforeEpoch),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl WallClock for ScriptedClock {
+        fn read(&self) -> Result<ClockReading, ClockError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.result.clone()
+        }
+    }
+
+    fn seeded_with(n: usize) -> Connection {
+        let conn = seeded_connection();
+        for i in 0..n {
+            write_outbox_entry_at(&conn, &at(), "E", &format!("topic-{i}"), &json!({}), None)
+                .unwrap();
+        }
+        conn
+    }
+
+    #[rusty_tokio::test]
+    async fn an_unreadable_clock_aborts_a_non_empty_batch_before_anything_is_sent() {
+        use rusty_tokio::io::AsyncReadExt;
+        let mut conn = seeded_with(2);
+        let (client_io, mut peer) = duplex(8192);
+        let mut client = KafkaClient::new(client_io, None);
+        let clock = ScriptedClock::broken();
+
+        let err = relay_pending_with(&mut conn, &mut client, 100, &clock)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, RelayError::Clock(ClockError::BeforeEpoch)),
+            "{err:?}"
+        );
+        assert_eq!(clock.reads(), 1);
+        drop(client);
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        assert!(received.is_empty(), "{} bytes were sent", received.len());
+        assert!(fetch_all(&conn)
+            .unwrap()
+            .iter()
+            .all(|e| e.published_at.is_none()));
+    }
+
+    #[rusty_tokio::test]
+    async fn an_empty_batch_never_reads_the_clock() {
+        let mut conn = seeded_connection();
+        let (client_io, _peer) = duplex(4096);
+        let mut client = KafkaClient::new(client_io, None);
+        let clock = ScriptedClock::broken();
+
+        let published = relay_pending_with(&mut conn, &mut client, 100, &clock)
+            .await
+            .unwrap();
+
+        assert_eq!(published, 0);
+        assert_eq!(clock.reads(), 0);
+    }
+
+    #[rusty_tokio::test]
+    async fn a_batch_reads_the_clock_once_before_the_first_send_and_stamps_it_everywhere() {
+        let mut conn = seeded_with(3);
+        let (client_io, mut peer) = duplex(8192);
+        let mut client = KafkaClient::new(client_io, None);
+        let clock = ScriptedClock::working();
+
+        let reads_seen = clock.reads.clone();
+        let server = rusty_tokio::spawn(async move {
+            let mut seen_at_request = Vec::new();
+            let mut bodies = Vec::new();
+            for i in 0..3 {
+                let reads = reads_seen.clone();
+                let mut observed = 0;
+                let (_req, body) =
+                    respond_to_produce_observed(&mut peer, &format!("topic-{i}"), 0, || {
+                        observed = reads.load(Ordering::SeqCst)
+                    })
+                    .await;
+                seen_at_request.push(observed);
+                bodies.push(body);
+            }
+            (seen_at_request, bodies)
+        });
+
+        let published = relay_pending_with(&mut conn, &mut client, 100, &clock)
+            .await
+            .unwrap();
+        let (seen_at_request, bodies) = server.await.unwrap();
+
+        assert_eq!(published, 3);
+        assert_eq!(clock.reads(), 1, "one reading for the whole batch");
+        assert_eq!(
+            seen_at_request,
+            [1, 1, 1],
+            "read before the first send, never again"
+        );
+        let millis = 1_700_000_000_123_i64.to_be_bytes();
+        assert!(bodies.iter().all(|b| b.windows(8).any(|w| w == millis)));
+        let entries = fetch_all(&conn).unwrap();
+        assert!(entries
+            .iter()
+            .all(|e| e.published_at.as_deref() == Some("2023-11-14T22:13:20Z")));
+    }
+
+    #[test]
+    fn relay_errors_map_to_bounded_log_kinds() {
+        assert_eq!(RelayError::KafkaErrorCode(3).kind(), ErrorKind::Kafka);
+        assert_eq!(RelayError::MissingPartitionResult.kind(), ErrorKind::Kafka);
+        assert_eq!(RelayError::Sql("x".into()).kind(), ErrorKind::Database);
+        assert_eq!(
+            RelayError::Clock(ClockError::OutOfRange).kind(),
+            ErrorKind::Clock
+        );
     }
 }

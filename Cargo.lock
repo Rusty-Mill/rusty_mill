@@ -13509,6 +13509,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_err",
  "rusty_json",
+ "rusty_time",
  "rusty_uuid",
 ]
 
@@ -13544,6 +13545,7 @@ name = "rusty-meshed-observability"
 version = "0.1.0"
 dependencies = [
  "percent-encoding",
+ "rusty-meshed-core",
  "rusty-meshed-schema-registry",
  "rusty_err",
  "rusty_http",

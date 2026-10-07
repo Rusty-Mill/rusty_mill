@@ -61,7 +61,9 @@ use rusty_kafka::protocol::produce::{
 };
 use rusty_kafka::record_batch::Record;
 use rusty_kafka::{ClientError, KafkaClient};
-use rusty_meshed_core::{DomainEvent, PlatformConfig};
+use rusty_meshed_core::{
+    ClockError, ClockReading, DomainEvent, PlatformConfig, SystemClock, WallClock,
+};
 use rusty_meshed_observability::LineageTracker;
 use rusty_meshed_schema_registry::{RegisterSchemaError, SchemaRegistryEnforcer};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, TcpStream};
@@ -118,6 +120,9 @@ pub enum PublishError {
     /// failed.
     #[error("lineage recording failed: {0}")]
     Lineage(String),
+    /// The system clock could not be read, so nothing was sent.
+    #[error("clock unavailable: {0}")]
+    Clock(#[from] ClockError),
 }
 
 /// Abstract base for meshed data product producers (SDK-013). See the
@@ -242,6 +247,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> DataProductProducerBase<S> {
     /// - **Step 4** (SDK-021): records one topology lineage job run
     ///   listing every output port's topic.
     pub async fn startup(&mut self) -> Result<(), ProducerError> {
+        self.startup_with(&SystemClock).await
+    }
+
+    /// [`startup`](Self::startup) reading the lineage time from `clock`.
+    /// The clock is read before any registry or Kafka call.
+    async fn startup_with(&mut self, clock: &impl WallClock) -> Result<(), ProducerError> {
+        let at = clock
+            .read()
+            .map_err(|err| ProducerError::Lineage(err.to_string()))?;
         for port in &self.output_ports {
             let spec = TopicSpec::new(port.topic.clone(), TopicType::Events);
             match self.topic_manager.create_topic(spec).await {
@@ -294,7 +308,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> DataProductProducerBase<S> {
             .map(|port| ("kafka".to_string(), port.topic.clone()))
             .collect();
         self.lineage_tracker
-            .record_job_run(&self.product_name, "meshed", &[], &outputs)
+            .record_job_run_at(at.timestamp(), &self.product_name, "meshed", &[], &outputs)
             .map_err(|err| ProducerError::Lineage(err.to_string()))?;
 
         Ok(())
@@ -338,10 +352,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> DataProductProducerBase<S> {
     /// then records record-level lineage once the broker has confirmed
     /// the produce succeeded (SDK-026) -- see the module doc for why
     /// there's no separate `TypeError`/delivery-callback path to build.
+    ///
+    /// Reads the clock once, before any I/O, for the Kafka record time; a
+    /// clock failure sends nothing. See [`publish_at`](Self::publish_at)
+    /// to supply the reading.
     pub async fn publish<E: DomainEvent>(
         &mut self,
         topic: &str,
         event: &E,
+    ) -> Result<(), PublishError> {
+        self.publish_with(topic, event, &SystemClock).await
+    }
+
+    async fn publish_with<E: DomainEvent>(
+        &mut self,
+        topic: &str,
+        event: &E,
+        clock: &impl WallClock,
+    ) -> Result<(), PublishError> {
+        let reading = clock.read()?;
+        self.publish_at(topic, event, &reading).await
+    }
+
+    /// [`publish`](Self::publish) with an explicit clock `reading`.
+    pub async fn publish_at<E: DomainEvent>(
+        &mut self,
+        topic: &str,
+        event: &E,
+        reading: &ClockReading,
     ) -> Result<(), PublishError> {
         if !self.started_topics.contains(topic) {
             let mut declared: Vec<String> = self.started_topics.iter().cloned().collect();
@@ -371,7 +409,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> DataProductProducerBase<S> {
         let request = ProduceRequest {
             acks: -1,
             timeout_ms: 5000,
-            base_timestamp_ms: now_millis(),
+            base_timestamp_ms: reading.unix_millis(),
             topics: vec![ProduceTopicRequest {
                 name: topic.to_string(),
                 partitions: vec![ProducePartitionRequest {
@@ -414,13 +452,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> DataProductProducerBase<S> {
     pub fn flush(&mut self, _timeout_seconds: f64) {}
 }
 
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,7 +478,7 @@ mod tests {
     impl TestEvent {
         fn new(correlation_id: &str) -> Self {
             TestEvent {
-                base: BaseEvent::new(correlation_id),
+                base: BaseEvent::try_new(correlation_id).unwrap(),
             }
         }
     }
@@ -900,6 +931,99 @@ mod tests {
             vec!["upstream-1".to_string(), "upstream-2".to_string()]
         );
 
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// A clock that cannot be read.
+    struct BrokenClock;
+
+    impl WallClock for BrokenClock {
+        fn read(&self) -> Result<ClockReading, ClockError> {
+            Err(ClockError::BeforeEpoch)
+        }
+    }
+
+    fn idle_producer(
+        label: &str,
+    ) -> (
+        DataProductProducerBase<rusty_tokio::io::DuplexStream>,
+        rusty_tokio::io::DuplexStream,
+        rusty_tokio::io::DuplexStream,
+        String,
+    ) {
+        let (admin_io, admin_peer) = duplex(4096);
+        let topic_manager = TopicManager::new(KafkaClient::new(admin_io, None));
+        let (client_io, client_peer) = duplex(8192);
+        let client = KafkaClient::new(client_io, None);
+        let db_path = temp_db_path(label);
+        let producer = DataProductProducerBase::new(
+            "personnel-lifecycle",
+            "manpower",
+            "1.0.0",
+            "manpower-team",
+            "",
+            two_ports(),
+            SchemaRegistryEnforcer::new("http://unused.invalid"),
+            RegistryClient::new("http://unused.invalid"),
+            LineageTracker::new(&db_path).unwrap(),
+            topic_manager,
+            client,
+        );
+        (producer, admin_peer, client_peer, db_path)
+    }
+
+    async fn bytes_received(mut peer: rusty_tokio::io::DuplexStream) -> usize {
+        use rusty_tokio::io::AsyncReadExt;
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).await.unwrap();
+        received.len()
+    }
+
+    #[rusty_tokio::test]
+    async fn publish_with_an_unreadable_clock_sends_nothing_and_records_no_lineage() {
+        let (mut producer, _admin_peer, client_peer, db_path) = idle_producer("publish_no_clock");
+        producer
+            .started_topics
+            .insert("manpower.personnel-lifecycle.assignments".to_string());
+        let event = TestEvent::new("req-1");
+
+        let err = producer
+            .publish_with(
+                "manpower.personnel-lifecycle.assignments",
+                &event,
+                &BrokenClock,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, PublishError::Clock(ClockError::BeforeEpoch)),
+            "{err:?}"
+        );
+        let lineage = producer
+            .lineage_tracker
+            .get_record_lineage(&event.base.correlation_id)
+            .unwrap();
+        assert!(lineage.is_empty());
+        drop(producer);
+        assert_eq!(bytes_received(client_peer).await, 0);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[rusty_tokio::test]
+    async fn startup_with_an_unreadable_clock_makes_no_kafka_or_registry_call() {
+        let (mut producer, admin_peer, client_peer, db_path) = idle_producer("startup_no_clock");
+
+        let err = producer.startup_with(&BrokenClock).await.unwrap_err();
+
+        assert!(
+            matches!(&err, ProducerError::Lineage(msg) if msg.contains("before the Unix epoch")),
+            "{err:?}"
+        );
+        assert!(producer.started_topics.is_empty());
+        drop(producer);
+        assert_eq!(bytes_received(admin_peer).await, 0);
+        assert_eq!(bytes_received(client_peer).await, 0);
         let _ = std::fs::remove_file(&db_path);
     }
 
