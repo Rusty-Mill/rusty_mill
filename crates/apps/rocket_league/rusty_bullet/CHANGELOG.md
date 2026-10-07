@@ -5,6 +5,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Fixed
+- `RB-PHYSICS-001-FR-145` (spec 0.147.0): a short boost press keeps the boost's
+  throttle (and no air throttle) for the whole 0.1 s minimum burn; an airborne
+  boost tap with throttle held ended 4 uu/s too fast. Golden fixture `ja_thr`.
 - `RB-PHYSICS-001-FR-144` (spec 0.146.0): the engine's speed fade reads the
   absolute forward speed, as RocketSim. A reverse throttle under the handbrake
   on a fast forward car no longer pushes at full strength: `hb_rev_1400` 212 ->

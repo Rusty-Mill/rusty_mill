@@ -1,0 +1,54 @@
+{
+ "settle_ticks": 60,
+ "car": {
+  "location": [
+   917,
+   136,
+   17
+  ],
+  "rotation": [
+   -0.0096,
+   2.1339423440385645,
+   0
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ],
+  "angular_velocity": [
+   0,
+   0,
+   0
+  ],
+  "boost": 100
+ },
+ "ball": {
+  "location": [
+   3500,
+   3500,
+   93.15
+  ],
+  "velocity": [
+   0,
+   0,
+   0
+  ]
+ },
+ "name": "ja_roll: jump+throttle+boost then {'roll': 0.5}",
+ "steps": [
+  {
+   "ticks": 6,
+   "throttle": 1,
+   "boost": true,
+   "jump": true
+  },
+  {
+   "ticks": 30,
+   "roll": 0.5
+  },
+  {
+   "ticks": 60
+  }
+ ]
+}
