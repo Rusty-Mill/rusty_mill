@@ -335,6 +335,14 @@ them.
     default errors, the flag scores all 12 frames),
     `seed_first_frame_starts_every_self_mode_at_the_first_frame` and
     `seed_first_frame_still_refuses_a_capture_whose_first_frame_has_no_car`.
+- `RB-VERIFY-003-FR-015` (implemented): `rb-verify --scenario ... --against`
+  scores the ball beside the car. Each `ScenarioRow` carries the recorded
+  and predicted ball positions of its tick, and the output gains a line
+  `ball error: mean .. uu, max .. uu; first over 10 uu: ..; first over 100
+  uu: ..`. Why: the first ball-only scenarios (bounces off the floor, walls
+  and ceiling) have no car trajectory to judge. Test
+  `a_wrong_ball_shows_up_as_ball_error_and_not_car_error`.
+
 - `RB-VERIFY-003-FR-014` (implemented): car-ball hit sweeps, the second
   caller of `rb_env::Env` (ADR-0060, ADR-0061). `rb-verify --sweep-hit <k>
   <capture> <from> <to> [<capture> <from> <to>]...` scores a grid of
@@ -580,6 +588,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.25.0 (2026-10-07): `RB-VERIFY-003-FR-015` implemented: the scenario
+  comparison scores the ball. 43 tests in `rb_verify_cli`.
 - 0.24.0 (2026-10-06): `RB-VERIFY-003-FR-014` implemented: `rb-verify
   --sweep-hit`, car-ball hit sweeps over `Env` (ADR-0061).
 - 0.23.0 (2026-10-06): `RB-VERIFY-003-FR-011` aligns recorded frames by
