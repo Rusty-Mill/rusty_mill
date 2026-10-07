@@ -348,11 +348,11 @@ pub const MAX_CAR_ANGULAR_SPEED: f32 = 5.5;
 /// here instead.
 pub const UNBOOSTED_MAX_CAR_SPEED: f32 = 1410.0;
 
-fn forward_axis(car: &RigidBody) -> Vec3 {
+pub(crate) fn forward_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(1.0, 0.0, 0.0))
 }
 
-fn up_axis(car: &RigidBody) -> Vec3 {
+pub(crate) fn up_axis(car: &RigidBody) -> Vec3 {
     car.orientation.rotate(&Vec3::new(0.0, 0.0, 1.0))
 }
 

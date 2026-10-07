@@ -1295,6 +1295,46 @@ fn closest_points_on_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, 
     (p1 + d1 * s, p2 + d2 * t)
 }
 
+/// `btBoxBoxDetector`'s `fudge_factor`: a box-box edge axis must be this much
+/// tighter than the best face axis to be chosen.
+const DBOXBOX_EDGE_FUDGE_FACTOR: f32 = 1.05;
+
+/// `btBoxBoxDetector::dBoxBox` keeps at most four contact points
+/// (`cullPoints`): when clipping gives more (two rectangles crossed at an
+/// angle give up to eight), the deepest point and then the three that spread
+/// the polygon's area most.
+fn cull_contacts(mut contacts: Vec<Contact>) -> Vec<Contact> {
+    const MAX_POINTS: usize = 4;
+    if contacts.len() <= MAX_POINTS {
+        return contacts;
+    }
+    let mut chosen = Vec::with_capacity(MAX_POINTS);
+    let deepest = contacts
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.penetration_depth.total_cmp(&b.1.penetration_depth))
+        .map_or(0, |(k, _)| k);
+    chosen.push(contacts.swap_remove(deepest));
+    while chosen.len() < MAX_POINTS && !contacts.is_empty() {
+        // The remaining point farthest from every chosen one.
+        let next = contacts
+            .iter()
+            .enumerate()
+            .max_by(|a, b| {
+                let spread = |c: &Contact| {
+                    chosen
+                        .iter()
+                        .map(|k| c.point.distance(&k.point))
+                        .fold(f32::INFINITY, f32::min)
+                };
+                spread(a.1).total_cmp(&spread(b.1))
+            })
+            .map_or(0, |(k, _)| k);
+        chosen.push(contacts.swap_remove(next));
+    }
+    chosen
+}
+
 /// A face contact between two boxes: `ref_*` is the reference box (whose
 /// face normal is the chosen separating axis) and `inc_*` the incident box.
 /// Clips the incident box's face nearest to facing into the reference
@@ -1361,32 +1401,88 @@ fn face_contact(
         }
     }
 
-    let mut contacts = Vec::with_capacity(4);
-    for corner in corners {
+    // The incident face as a polygon in the reference face's (t0, t1) plane,
+    // with each corner's depth below the reference face, clipped to the
+    // reference face's rectangle as `dBoxBox` clips it (Sutherland-Hodgman):
+    // a corner a hair outside the rectangle becomes a point on its edge
+    // instead of being dropped. Corner order: the four corners walk the
+    // incident face's boundary in `[(-,-), (-,+), (+,-), (+,+)]` order, so
+    // swap the last two to get a loop.
+    let limit0 = get_axis(ref_half, ref_tangents[0]);
+    let limit1 = get_axis(ref_half, ref_tangents[1]);
+    let to_plane = |corner: Vec3| {
         let local = ref_orient.conjugate().rotate(&(corner - ref_pos));
-        let t0 = get_axis(local, ref_tangents[0]);
-        let t1 = get_axis(local, ref_tangents[1]);
-        let limit0 = get_axis(ref_half, ref_tangents[0]) + CONTACT_PROCESSING_THRESHOLD;
-        let limit1 = get_axis(ref_half, ref_tangents[1]) + CONTACT_PROCESSING_THRESHOLD;
-        if t0.abs() > limit0 || t1.abs() > limit1 {
-            continue;
+        let depth = get_axis(ref_half, ref_axis_index) - get_axis(local, ref_axis_index) * ref_sign;
+        (
+            get_axis(local, ref_tangents[0]),
+            get_axis(local, ref_tangents[1]),
+            depth,
+        )
+    };
+    let mut polygon: Vec<(f32, f32, f32)> = [corners[0], corners[1], corners[3], corners[2]]
+        .into_iter()
+        .map(to_plane)
+        .collect();
+    // Four half-planes: t0 <= limit0, t0 >= -limit0, t1 <= limit1, t1 >= -limit1.
+    for (axis, bound, keep_below) in [
+        (0usize, limit0, true),
+        (0, -limit0, false),
+        (1, limit1, true),
+        (1, -limit1, false),
+    ] {
+        let coordinate = |p: &(f32, f32, f32)| if axis == 0 { p.0 } else { p.1 };
+        let inside = |p: &(f32, f32, f32)| {
+            if keep_below {
+                coordinate(p) <= bound
+            } else {
+                coordinate(p) >= bound
+            }
+        };
+        let mut clipped = Vec::with_capacity(polygon.len() + 2);
+        for k in 0..polygon.len() {
+            let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
+            let (a_in, b_in) = (inside(&a), inside(&b));
+            if a_in {
+                clipped.push(a);
+            }
+            if a_in != b_in {
+                let span = coordinate(&b) - coordinate(&a);
+                let u = if span.abs() > f32::EPSILON {
+                    (bound - coordinate(&a)) / span
+                } else {
+                    0.0
+                };
+                clipped.push((
+                    a.0 + (b.0 - a.0) * u,
+                    a.1 + (b.1 - a.1) * u,
+                    a.2 + (b.2 - a.2) * u,
+                ));
+            }
         }
-        let face_coord = get_axis(local, ref_axis_index) * ref_sign;
-        let depth = get_axis(ref_half, ref_axis_index) - face_coord;
+        polygon = clipped;
+        if polygon.is_empty() {
+            break;
+        }
+    }
+    let mut contacts = Vec::with_capacity(polygon.len());
+    for (t0, t1, depth) in polygon {
         if depth < -CONTACT_PROCESSING_THRESHOLD {
             continue;
         }
-        let projected = set_axis(
-            local,
+        let mut projected = set_axis(
+            Vec3::ZERO,
             ref_axis_index,
             ref_sign * get_axis(ref_half, ref_axis_index),
         );
+        projected = set_axis(projected, ref_tangents[0], t0);
+        projected = set_axis(projected, ref_tangents[1], t1);
         contacts.push(Contact {
             normal,
             point: ref_pos + ref_orient.rotate(&projected),
             penetration_depth: depth.max(0.0),
         });
     }
+    contacts = cull_contacts(contacts);
 
     if contacts.is_empty() {
         // Safety net: SAT confirmed real overlap along this axis, but every
@@ -1563,9 +1659,12 @@ fn box_vs_box(
             // Edge axes are noisier than face axes (a near-parallel pair
             // just barely above the skip threshold can slightly
             // under-report separation), so an edge axis only overrides a
-            // face axis when it's a genuinely tighter fit, not by noise —
-            // the same face-biased tie-break `dBoxBox`-style detectors use.
-            if overlap < best_overlap - 1e-4 {
+            // face axis when it's a genuinely tighter fit: `dBoxBox`'s
+            // `fudge_factor = 1.05` (`RB-PHYSICS-001-FR-141`), the edge's
+            // overlap must be under `1 / 1.05` of the best so far. A
+            // near-tie between two nose-down cars meeting head-on is a face
+            // contact, not one edge point.
+            if overlap * DBOXBOX_EDGE_FUDGE_FACTOR < best_overlap {
                 best_overlap = overlap;
                 best_axis = axis;
                 best_feature = SatFeature::Edge(i, j);
@@ -1933,6 +2032,25 @@ mod tests {
         assert_eq!(ab.len(), ba.len());
         assert!((ab[0].normal + ba[0].normal).length() < 1e-5);
         assert!((ab[0].penetration_depth - ba[0].penetration_depth).abs() < 1e-3);
+    }
+
+    /// `RB-PHYSICS-001-FR-141`: faces of equal height, a hair apart, still give
+    /// the whole clipped face. Two cars on one floor are exactly this (their
+    /// suspensions differ by hundredths of a uu); keeping only the incident
+    /// corners inside the reference face lost the two lower ones and gave a
+    /// top-edge torque (a victim spinning at 5 rad/s where the game's does
+    /// 1.5).
+    #[test]
+    fn two_faces_of_equal_height_a_hair_apart_clip_to_four_contacts() {
+        let a = RigidBody::car_box(Vec3::new(59.0, 42.0, 18.0), 1.0, Vec3::ZERO);
+        let b = RigidBody::car_box(
+            Vec3::new(59.0, 42.0, 18.0),
+            1.0,
+            Vec3::new(115.0, 0.0, -0.03),
+        );
+        let contacts = contacts_between(&a, &b);
+        assert_eq!(contacts.len(), 4, "{contacts:?}");
+        assert!(contacts.iter().all(|c| c.penetration_depth > 2.9));
     }
 
     #[test]
