@@ -474,8 +474,10 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   above is rejected.
 - **Consequence**: `corner_slide` as shipped is a poor ground truth. Cut the
   corner target from a start with a clear approach (`corner_slide_far` is a
-  candidate replacement, repeatable, port 23.0 / 41.3 uu: the port's corner
-  climb is about 67 uu low at the peak, 273 against the game's). Any
+  candidate replacement, repeatable, port 23.0 / 41.3 uu; from this start the
+  port peaks at 297.8 uu against the game's 272.9, about 25 uu high, the
+  opposite sign to session 1's "port climbs only to 276 against 326", which
+  was one draw of the unrepeatable original). Any
   scenario that starts within a few ticks of a contact (car_over_ball and
   the hard landings start in contact or a few ticks from it) deserves the
   same check.
