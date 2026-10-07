@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - Emitter helpers for AG-UI adapters (pending review)
+
+- **Added:** `Emitter::{text_delta, end_text, tool_call, tool_result}` in `rusty_agui`; **Changed:** `adk-agui`, `rk-agui`, `rusty_tick` and the `echo_agent` example use them instead of private copies.
+- **Known limitation:** an adapter must still call `end_text` before a non-text event (the verifier rejects a tool call inside an open message). The helpers do not close it for you.
+
+---
+
 ## 2026-10-07 - One Bearer parser (pending review)
 
 - **Changed:** `rusty_oauth::bearer::token_from_authorization` replaces nine call-site copies. Behaviour change: scheme matched case-insensitively and an empty token is rejected up front. New `rusty_oauth` edges: `remind_me_core`, `remind_me_api`, `remind_me_remote`, `rp-server`, `rk-app`, `rusty_fair_play`, `rusty_tick`.
