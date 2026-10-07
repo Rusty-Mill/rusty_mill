@@ -270,6 +270,18 @@ fn run_scenario_against(path: &str, capture: &str, every: usize) -> Result<(), S
         first(10.0),
         first(100.0),
     );
+    let first_ball = |threshold: f32| {
+        comparison
+            .first_ball_error_over(threshold)
+            .map_or_else(|| "never".to_string(), |tick| format!("tick {tick}"))
+    };
+    println!(
+        "ball error: mean {:.1} uu, max {:.1} uu; first over 10 uu: {}; first over 100 uu: {}",
+        comparison.mean_ball_error(),
+        comparison.max_ball_error(),
+        first_ball(10.0),
+        first_ball(100.0),
+    );
     println!(
         "recorded inputs that differ from the tape: {}",
         comparison.input_mismatches

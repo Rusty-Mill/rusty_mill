@@ -4,6 +4,10 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- `RB-VERIFY-003-FR-015` (spec 0.25.0): `rb-verify --scenario --against`
+  prints the ball's position error beside the car's (`car_over_ball`: 61.3
+  mean / 120.0 max uu).
 ### Fixed
 - ADR-0065 (`RB-PHYSICS-001-FR-139`, spec 0.142.0): a jump press within 6
   ticks of the first jump is ignored, as in the game (a 28-tape sweep of

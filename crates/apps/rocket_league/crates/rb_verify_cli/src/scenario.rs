@@ -46,12 +46,21 @@ pub struct ScenarioRow {
     pub tick: usize,
     pub recorded: CarState,
     pub predicted: CarState,
+    /// The ball's recorded and predicted positions on the same tick
+    /// (`RB-VERIFY-003-FR-015`).
+    pub recorded_ball: Vec3,
+    pub predicted_ball: Vec3,
 }
 
 impl ScenarioRow {
     /// Distance (uu) between recorded and predicted car positions.
     pub fn position_error(&self) -> f32 {
         self.recorded.position.distance(&self.predicted.position)
+    }
+
+    /// Distance (uu) between recorded and predicted ball positions.
+    pub fn ball_error(&self) -> f32 {
+        self.recorded_ball.distance(&self.predicted_ball)
     }
 
     /// Distance (uu/s) between recorded and predicted car velocities.
@@ -99,6 +108,30 @@ impl ScenarioComparison {
             .iter()
             .map(ScenarioRow::position_error)
             .fold(0.0, f32::max)
+    }
+
+    /// First tick whose ball position error exceeds `threshold` uu.
+    pub fn first_ball_error_over(&self, threshold: f32) -> Option<usize> {
+        self.rows
+            .iter()
+            .find(|row| row.ball_error() > threshold)
+            .map(|row| row.tick)
+    }
+
+    /// Largest ball position error (uu) over the run.
+    pub fn max_ball_error(&self) -> f32 {
+        self.rows
+            .iter()
+            .map(ScenarioRow::ball_error)
+            .fold(0.0, f32::max)
+    }
+
+    /// Mean ball position error (uu) over the run.
+    pub fn mean_ball_error(&self) -> f32 {
+        if self.rows.is_empty() {
+            return 0.0;
+        }
+        self.rows.iter().map(ScenarioRow::ball_error).sum::<f32>() / self.rows.len() as f32
     }
 
     /// Mean position error (uu) over the run.
@@ -215,12 +248,14 @@ pub fn compare_scenario(
         let Some(tick) = recorded_tick.checked_sub(lag_ticks) else {
             continue;
         };
-        let Some(p) = predicted.get(tick) else {
+        let Some(predicted_frame) = predicted.get(tick) else {
             continue;
         };
-        let (Some(p), Some(r)) = (p.cars.first(), r.cars.first()) else {
+        let (Some(p), Some(car)) = (predicted_frame.cars.first(), r.cars.first()) else {
             continue;
         };
+        let (recorded_ball, predicted_ball) = (r.ball.position, predicted_frame.ball.position);
+        let r = car;
         // The capture's input may belong to this tick or the previous one;
         // either counts as playing the tape.
         let next = predicted.get(tick + 1).and_then(|f| f.cars.first());
@@ -233,6 +268,8 @@ pub fn compare_scenario(
             tick,
             recorded: *r,
             predicted: *p,
+            recorded_ball,
+            predicted_ball,
         });
     }
     Ok(ScenarioComparison {
@@ -453,6 +490,26 @@ mod tests {
         assert_eq!(comparison.input_mismatches, 0);
         assert_eq!(comparison.first_position_error_over(1.0), None);
         assert_eq!(comparison.rows.len() as u64, sc.total_ticks() + 2);
+    }
+
+    /// `RB-VERIFY-003-FR-015`: the ball is scored beside the car.
+    #[test]
+    fn a_wrong_ball_shows_up_as_ball_error_and_not_car_error() {
+        let sc = scenario("prompt_dodge");
+        let mut capture = fake_capture(&sc, 3, 0);
+        assert_eq!(
+            compare_scenario(&sc, &capture).unwrap().max_ball_error(),
+            0.0
+        );
+        for frame in capture.iter_mut().skip(23) {
+            frame.ball.position.x += 30.0;
+        }
+        let comparison = compare_scenario(&sc, &capture).unwrap();
+        assert_eq!(comparison.max_position_error(), 0.0);
+        assert!((comparison.max_ball_error() - 30.0).abs() < 1e-3);
+        assert_eq!(comparison.first_ball_error_over(10.0), Some(20));
+        assert_eq!(comparison.first_ball_error_over(100.0), None);
+        assert!(comparison.mean_ball_error() > 0.0);
     }
 
     #[test]
