@@ -51,7 +51,9 @@ per tape: seeds 1 to 24 (used to find gaps) 190 -> 160 uu mean of means (median
 95 uu); seeds 101 to 124 (held out, never tuned on) **140 uu mean of means,
 median 48 uu**, none under 10 uu throughout. They are chaotic: a 0.5 uu/s
 difference across a brake/engine switch at |forward speed| 25 costs 13 uu/s in
-one tick, and a wall or goal-post hit amplifies. The smoother number is the
+one tick, and a wall or goal-post hit amplifies. Before and after, on 24 tapes never looked at (seeds 501 to 524): the port at
+commit `97ec2e0` (before FR-144) 354 uu mean of means (median 143), now **239 uu
+(median 104)**, nine tapes better and six worse by over 1 uu. The smoother number is the
 15-tick-ahead velocity error from each recorded frame over the 48 tapes: mean
 **5.2 uu/s** (median 4.5). Every calibrated constant tried (handbrake lateral
 grip, powerslide steer, rise and fall rates, lateral curve end, pushback ERP,
