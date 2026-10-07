@@ -243,19 +243,22 @@ fn run_scenario_against(path: &str, capture: &str, every: usize) -> Result<(), S
         comparison.lag_ticks,
         comparison.rows.len()
     );
-    println!("tick  pos err  vel err  spin err   recorded position (x, y, z)    predicted position (x, y, z)");
+    println!("tick  pos err  vel err  spin err   recorded position (x, y, z)    predicted position (x, y, z)   ball err   recorded ball (x, y, z)    predicted ball (x, y, z)");
     for row in &comparison.rows {
         if row.tick % every.max(1) != 0 {
             continue;
         }
         println!(
-            "{tick:>4}  {pe:>7.1}  {ve:>7.1}  {se:>8.2}   {rp}  {pp}",
+            "{tick:>4}  {pe:>7.1}  {ve:>7.1}  {se:>8.2}   {rp}  {pp}   {be:>8.1}   {rb}  {pb}",
             tick = row.tick,
             pe = row.position_error(),
             ve = row.velocity_error(),
             se = row.spin_error(),
             rp = fmt_vec(&row.recorded.position),
             pp = fmt_vec(&row.predicted.position),
+            be = row.ball_error(),
+            rb = fmt_vec(&row.recorded_ball),
+            pb = fmt_vec(&row.predicted_ball),
         );
     }
     let first = |threshold: f32| {

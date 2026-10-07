@@ -4,6 +4,11 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `rb-verify --scenario --against` chooses its lag on car and ball together and
+  prints the ball columns; `tools/rb_tape_bot/score_dir.py` scores a batch
+  directory in one line per capture. Ball-only probes read 1.4 to 4.2 uu mean
+  instead of 15 to 65.
 ### Added
 - `RB-VERIFY-003-FR-015` (spec 0.25.0): `rb-verify --scenario --against`
   prints the ball's position error beside the car's (`car_over_ball`: 61.3
