@@ -4,6 +4,13 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- `RB-VERIFY-003-FR-016` (spec 0.26.0): `rb-verify --scenario --against
+  --recorded-inputs` replays the recording's own input in the port, so what is
+  left is physics, not the tape bot's variable start delay. Probes: `brake`
+  18.2 -> 0.3, `reverse` 7.4 -> 0.3, dodges 9 to 11 -> 0.5, `turn_fast` 38 -> 3
+  uu mean. Capture plugin 1.5 records boost from `ActivateBoost` as well as
+  `HoldingBoost` (RLBot's boost never set the latter).
 ### Changed
 - `rb-verify --scenario --against` chooses its lag on car and ball together and
   prints the ball columns; `tools/rb_tape_bot/score_dir.py` scores a batch

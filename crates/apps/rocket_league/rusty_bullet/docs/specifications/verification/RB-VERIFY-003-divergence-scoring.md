@@ -348,6 +348,20 @@ them.
   up to 3 ticks (a 65 uu mean error that was 2.2 uu once aligned). Test
   `a_ball_only_scenario_is_aligned_by_the_ball`.
 
+- `RB-VERIFY-003-FR-016` (implemented): `rb-verify --scenario <s> --against
+  <capture> --recorded-inputs` feeds the port the input the recording shows
+  (the plugin records the input the game applied, 1.3+) instead of the tape,
+  one input per tick by timestamp, a tick the capture lacks taking the last
+  recorded input, and tries the recorded input as belonging to the same tick
+  or the previous one and keeps the smaller error (`compare_scenario_recorded`,
+  `ScenarioComparison::input_offset`). Why: the tape bot's input reaches the
+  game a variable one to four ticks after the state set (the capture's hole
+  there, `RB-RESEARCH-O009`), so against the tape every probe carries a
+  timing error that is not physics. 27 mechanics probes: `brake` 18.2 -> 0.3,
+  `reverse` 7.4 -> 0.3, the three dodges 9 to 11 -> 0.5, `hit_ground` 6.6 ->
+  0.3, `turn_fast` 38.1 -> 3.1 uu mean. Test
+  `a_recorded_input_replay_absorbs_a_late_tape_start`.
+
 - `RB-VERIFY-003-FR-014` (implemented): car-ball hit sweeps, the second
   caller of `rb_env::Env` (ADR-0060, ADR-0061). `rb-verify --sweep-hit <k>
   <capture> <from> <to> [<capture> <from> <to>]...` scores a grid of
@@ -593,6 +607,8 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
 
 ## Change history
 
+- 0.26.0 (2026-10-07): `RB-VERIFY-003-FR-016` implemented: the scenario
+  comparison can replay the recorded input. 45 tests in `rb_verify_cli`.
 - 0.25.0 (2026-10-07): `RB-VERIFY-003-FR-015` implemented: the scenario
   comparison scores the ball. 43 tests in `rb_verify_cli`.
 - 0.24.0 (2026-10-06): `RB-VERIFY-003-FR-014` implemented: `rb-verify

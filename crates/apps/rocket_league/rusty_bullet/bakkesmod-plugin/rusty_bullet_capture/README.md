@@ -133,7 +133,12 @@ call stack inside this DLL). The plugin now reads only live actors
 skips a tick with none, and keeps timestamps increasing across a respawn.
 It also reads boost fuel only when the car has a boost component, and
 removes its per-tick hook on unload. BakkesMod's console prints the loaded
-plugin's version on `plugin load`; it should say 1.4.
+plugin's version on `plugin load`; it should say 1.5.
+
+1.5: the recorded `boost` input is `ActivateBoost || HoldingBoost`; RLBot's
+boost sets `ActivateBoost` only, so 1.3 and 1.4 captures show `boost: false` on
+every frame of a boosting car (the `boost_amount` column still shows the
+use).
 
 1.3 (RB-RESEARCH-O008): the recorded `input` is the argument of the
 `SetVehicleInput` hook (the input the game applies to that car that tick),
