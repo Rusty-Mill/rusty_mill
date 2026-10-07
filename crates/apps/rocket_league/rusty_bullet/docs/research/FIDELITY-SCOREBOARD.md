@@ -42,6 +42,21 @@ the evidence for each row: `BOT-RUN-SHEET.md` (session 3) and
 Smaller: `wavedash_early` 7 (a chaotic hop), `half_flip` 2.4 / 11.8 max,
 `turn_fast` 11 max.
 
+## Random drives (the holistic number)
+
+Seeded random 6 s controller tapes (`gen_fuzz.py`; driving, boost, handbrake,
+jumps, dodges, air control), scored with the recorded input, mean position error
+per tape: seeds 1 to 24 (used to find gaps) 190 -> 160 uu mean of means (median
+95 uu); seeds 101 to 124 (held out, never tuned on) **140 uu mean of means,
+median 48 uu**, none under 10 uu throughout. They are chaotic: a 0.5 uu/s
+difference across a brake/engine switch at |forward speed| 25 costs 13 uu/s in
+one tick, and a wall or goal-post hit amplifies. The smoother number is the
+15-tick-ahead velocity error from each recorded frame over the 48 tapes: mean
+**5.2 uu/s** (median 4.5). Every calibrated constant tried (handbrake lateral
+grip, powerslide steer, rise and fall rates, lateral curve end, pushback ERP,
+sticky force) worsens it when moved: the remaining error is structural, not a
+constant.
+
 ## What changed on 2026-10-07
 
 - The recorded-input replay (`--recorded-inputs`) removed the tape bot's
@@ -50,8 +65,15 @@ Smaller: `wavedash_early` 7 (a chaotic hop), `half_flip` 2.4 / 11.8 max,
 - Real fixes: a second jump press within 6 ticks is ignored (FR-139,
   `speed_flip`); car bumps (FR-140, FR-143); box-box contacts as `dBoxBox`
   (FR-141: clipped faces and the 1.05 edge fudge factor); demolition (FR-142).
+- Later the same day: the engine fades with the absolute forward speed (FR-144),
+  the boost minimum burn (FR-145, FR-148), box against a triangle's edge or
+  vertex (FR-146), a dodge ignores the throttle unless it is a keyboard capture
+  (FR-147). Open: O019 (suspension damper order: the rest pose is wrong by 0.003
+  rad of roll, fixing it breaks wall rides), wall climbs (O012), wheels on the
+  ball (O014).
 - Tooling: unattended runs (ADR-0064), two-car scenarios (ADR-0067), the
-  golden-capture gate (ADR-0066), plugin 1.5 (RLBot boost recorded).
+  golden-capture gate (ADR-0066), plugin 1.5 (RLBot boost recorded), fuzz tapes
+  and the contact-impulse reader (`tools/rb_tape_bot`).
 
 ## Not covered by any recording
 

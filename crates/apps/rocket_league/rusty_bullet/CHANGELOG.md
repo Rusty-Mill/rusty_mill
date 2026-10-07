@@ -5,6 +5,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- Tools: `impulse_fit.py` (a contact's impulse and line of action off a recording),
+  `kstep_regimes.py` (the k-step error by controls and speed), probe scenarios
+  `bs_*` (boost and full steer at low speed), `wj_*` (wall jumps), all agreeing
+  to 0.3 to 2.4 uu; the fuzz holdout (seeds 101 to 124); the scoreboard's
+  random-drive numbers.
 - `rb-verify --scenario` with `RB_STATES=1` also prints the recorded and predicted
   orientation of the first car. RB-RESEARCH-O019 (the suspension damper reads
   the car's velocity in wheel order, not Bullet's order) recorded, not fixed.

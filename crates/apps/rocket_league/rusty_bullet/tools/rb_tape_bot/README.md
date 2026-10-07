@@ -292,11 +292,27 @@ rb-verify --scenario experiments/probe_brake.json --against <capture> --recorded
 
 `--recorded-inputs` (`RB-VERIFY-003-FR-016`) feeds the port what the game
 actually applied instead of the tape, whose start the bot delays by a variable
-one to four ticks; what is left is physics. `fixtures/` holds 24 recordings,
+one to four ticks; what is left is physics. `fixtures/` holds 60 recordings,
 trimmed to their tapes by `make_fixture.py <scenario> <capture>`, and
 `crates/rb_verify_cli/tests/golden_captures.rs` fails `cargo test` if the port
 gets worse on any of them (ADR-0066). After a physics change that improves a
 scenario, lower its bound there; to add a fixture, add its case.
+
+### Beyond the probes: fuzz tapes and contact impulses
+
+`gen_fuzz.py [count [first_seed]]` writes seeded random 6 s tapes
+(`experiments/fuzz_<seed>.json`: driving, boost, handbrake, jumps, dodges, air
+control). Seeds 1 to 24 were used to find gaps; 101 to 124 are a holdout (run them
+with `run_batch.ps1 -Scenarios fuzz_101,...`, about 10 minutes). `fuzz_report.py
+<batch>` scores each tape with the recorded input and says where it first goes
+over 10 uu and what the car was doing; `kstep_regimes.py <k> <captures>` buckets
+the port's `k`-tick-ahead error by controls and speed (medians, so one
+collision does not dominate); `impulse_fit.py <capture> <frame>` reads one
+contact's impulse and line of action off the recording (and `--biggest` finds the
+frames), which pinned `probe_wall_land` to a different facet's normal
+(ADR-0069) and showed a bot's dodge ignores the throttle (ADR-0070).
+`rb-verify --scenario ... --recorded-inputs` with `RB_STATES=1` prints the first
+car's velocity, spin and orientation, recorded against predicted, per tick.
 
 ## Scoring
 

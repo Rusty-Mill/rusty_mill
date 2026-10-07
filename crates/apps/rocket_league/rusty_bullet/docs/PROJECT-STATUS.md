@@ -9,19 +9,21 @@ per-unit status in [ROADMAP.md](./roadmap/ROADMAP.md),
 version: `a245d35`).
 
 - Last verified main commit: the merge of
-  [#257](https://github.com/baileyrd/rusty_bullet/pull/257)
+  [#265](https://github.com/baileyrd/rusty_bullet/pull/265)
 - Verified at: 2026-10-07
 - Current milestone: `PHASE-1-PHYSICS-CORE` (In Progress) — mechanics are
   broad and, since the tape bot (ADR-0059, ADR-0064), measured against the real
   game on controlled recordings: driving, jumps, flips, boost, ball bounces,
-  car-ball hits and car-car bumps and demolitions agree to a few uu; wall
-  climbing, car-body contact from the air, long powerslides and wheels on the
-  ball do not (see
+  car-ball hits, car-car bumps and demolitions, powerslides (also reverse
+  ones), dodges with the throttle held and a car hitting a side wall agree to a
+  few uu; wall climbing, a car on the ceiling, wheels on the ball and
+  long random drives (24 random 6 s tapes held out: mean 140 uu, median 48 uu)
+  do not (see
   [FIDELITY-SCOREBOARD.md](./research/FIDELITY-SCOREBOARD.md)).
   `RB-PHYSICS-001-FR-005` (real-data constant calibration) has not started
   as a unit.
 - Health: green — workspace builds, `fmt`/`clippy`/`test` all pass on `main`;
-  47 real recordings gate `cargo test` (ADR-0066)
+  60 real recordings gate `cargo test` (ADR-0066)
 
 ## Phases
 
@@ -38,6 +40,17 @@ version: `a245d35`).
 | `PHASE-4-POLISH` | Not Started |
 
 ## Recently completed
+
+- 2026-10-07 (autonomous session continued, PRs #258 to #265):
+  `RB-PHYSICS-001-FR-144` (the engine fades with the absolute forward speed:
+  `hb_rev_*` 212 -> 0.2 uu, the reverse powerslides 35 -> 4.8, O013 closed),
+  `FR-145`/`FR-148` (the boost minimum burn: no air throttle, but the wheels see
+  the real throttle), `FR-146` (a box meets a mesh triangle's edge or vertex by
+  the separating-axis test, ADR-0069: `probe_wall_land` 77 -> 4.4),
+  `FR-147` (a dodge's forward part follows the throttle only for keyboard
+  captures, ADR-0070); fuzz tapes, holdout and analysis tools
+  (`gen_fuzz.py`, `fuzz_report.py`, `kstep_regimes.py`, `impulse_fit.py`);
+  `RB-RESEARCH-O019` (suspension damper order, open).
 
 - 2026-10-07 (autonomous session, PRs #246 to #257; evidence in
   [FIDELITY-SCOREBOARD.md](./research/FIDELITY-SCOREBOARD.md)):
