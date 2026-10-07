@@ -135,3 +135,21 @@ add3("probe_roof_drop", "ball dropped on the roof of a stationary car", car((0, 
 add3("probe_nose_hit_glancing", "car clips the ball at a diagonal", car((-300, -3000, 17), vel=(200, 1000, 0), rot=[0, 1.37, 0], boost=0), [st(240, throttle=1)], ball={"location": [0, -1500, 93.15], "velocity": [0, 0, 0]}, settle=0)
 add3("probe_ball_bounce_car_side", "car drives into a rolling ball from the side", car((-2000, -2000, 17), vel=(1000, 0, 0), rot=[0, 0.0, 0], boost=0), [st(240, throttle=1)], ball={"location": [0, -2000, 93.15], "velocity": [0, 400, 0]}, settle=0)
 print(len(names3), "round-3 scenarios")
+
+
+# ---- round 5: wall approaches at five angles and three speeds (O012)
+import math
+
+names5 = []
+for ang in (10, 20, 30, 45, 60):
+    for v in (700, 1200, 1800):
+        a = math.radians(ang)  # angle between the heading and the wall (the side wall at x = 4096)
+        yaw = math.radians(90 - ang)
+        vx, vy = v * math.sin(a), v * math.cos(a)
+        dist = max(150, 0.5 * v)  # reach the ramp's base in about half a second
+        x0 = 3836 - vx / v * dist - 20
+        n = f"wallg_{ang}_{v}"
+        add(n, f"wall approach at {ang} degrees, {v} uu/s",
+            car((x0, -3000, 17), (vx, vy, 0), rot=[-0.0096, yaw, 0], boost=0), [st(420, throttle=1)], settle=0)
+        names5.append(n)
+print(len(names5), "round-5 scenarios")

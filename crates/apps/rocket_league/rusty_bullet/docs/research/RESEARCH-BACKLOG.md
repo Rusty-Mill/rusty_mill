@@ -534,6 +534,26 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
 - **Not run**: the owner's `test2`/`hitjump`/`front`/`side` k = 30 gate, on
   which `PUSHBACK_ERP` 0.1 was calibrated (FR-122); they are not on the
   machine that did this.
+- **Angle dependence (2026-10-07, `batch_20261006-221954`)**: 15 wall
+  approaches (`wallg_<angle>_<speed>`, angles 10, 20, 30, 45, 60 degrees to the
+  wall, speeds 700, 1200, 1800 uu/s, throttle held 3.5 s). Mean error against
+  the port with the recorded input: 45 degrees 2.0 to 5.1 uu (it agrees over
+  the whole climb to the ceiling); 10, 20, 30, 60 degrees 12.9 to 32.4.
+  The climb *direction* on the wall differs by about a degree, symmetrically
+  about 45: game against port, 4.66 / 3.86 degrees at 10, 14.2 / 13.0 at 20,
+  26.2 / 25.5 at 30, 43.2 / 43.1 at 45, 59.4 / 60.1 at 60, so the game's path
+  is pulled toward the diagonal and a degree over a 3 s climb is 50 uu. The
+  error is steady speed along the wall, formed in the floor-to-wall
+  transition (the first 10 uu at tick 120 to 177).
+- **Tried again with the 15 targets**: a joint coordinate descent over
+  `PUSHBACK_ERP`, `STICKY_FORCE_BASE`, suspension stiffness and damping,
+  suspension subtraction and the lateral grip curve's end, scored on these 15
+  and with the 30 one-car recordings as guards: the best set (ERP 0.05,
+  sticky 0.4, stiffness 450, subtraction 3.5, grip end 0.3) takes the 15 from
+  20.9 to 9.2 mean but makes the 45 degree family worse (2.0 -> 3.8, 2.2 ->
+  9.8, 5.1 -> 23.5) and the guards 0.82 -> 1.34: a constant cannot fix an error
+  that changes sign at 45. The auto-roll force and torque (`FR-131`) make no
+  difference (17.24 -> 17.14).
 - **Next**: find what differs in the wall transition itself, with a
   recording that isolates it (a car placed on the ramp with no input, at rest
   and rolling) before touching constants. Compare the wheel ray hits and
