@@ -11,7 +11,9 @@
 
 use std::{
     error::Error,
+    fmt::Write as _,
     fs::{self, File},
+    io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread::sleep,
@@ -22,8 +24,9 @@ use rb_scenario::Scenario;
 use rlbot::{
     flat::{
         ConnectionSettings, CoreMessage, CustomBot, DebugRendering, EnvironmentVariable,
-        ExistingMatchBehavior, GameMode, GamePacket, InitComplete, Launcher, MatchConfiguration,
-        MatchLengthMutator, MutatorSettings, PlayerClass, PlayerConfiguration, StopCommand,
+        ExistingMatchBehavior, FieldInfo, GameMode, GamePacket, InitComplete, Launcher,
+        MatchConfiguration, MatchLengthMutator, MutatorSettings, PlayerClass, PlayerConfiguration,
+        StopCommand,
     },
     RLBotConnection,
 };
@@ -318,17 +321,20 @@ fn pump(
     conn: &mut RLBotConnection,
     timeout: Duration,
     what: &str,
+    mut observe: impl FnMut(&CoreMessage),
     mut done: impl FnMut(&GamePacket) -> bool,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match conn.recv_packet() {
-            Ok(CoreMessage::GamePacket(packet)) => {
-                if done(&packet) {
-                    return Ok(());
+            Ok(message) => {
+                observe(&message);
+                if let CoreMessage::GamePacket(packet) = &message {
+                    if done(packet) {
+                        return Ok(());
+                    }
                 }
             }
-            Ok(_) => {}
             Err(rlbot::RLBotError::Connection(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 sleep(Duration::from_millis(2));
             }
@@ -336,6 +342,95 @@ fn pump(
         }
     }
     Err(format!("timed out after {timeout:?} {what}").into())
+}
+
+/// Boost pad sidecar of a run (`<capture>.pads.jsonl`): one `field` line with
+/// every pad's position and size, then one `pads` line for the first logged
+/// packet (all pads) and one for each later packet in which any pad's
+/// `is_active` flipped, with the first car's position and boost at that
+/// frame. Pad order is the game's (by y, then x). The boost value alone
+/// cannot say when a pad was taken; this can (PARITY-PLAN workstream C).
+struct PadLog {
+    out: File,
+    field_written: bool,
+    last_active: Option<Vec<bool>>,
+}
+
+impl PadLog {
+    fn create(path: &Path) -> Result<Self> {
+        Ok(Self {
+            out: File::create(path)?,
+            field_written: false,
+            last_active: None,
+        })
+    }
+
+    /// Remembers the field description (it arrives once, before the packets).
+    fn field(&mut self, info: &FieldInfo) -> Result<()> {
+        // An empty list is core's answer before any match exists; wait for
+        // the real one.
+        if self.field_written || info.boost_pads.is_empty() {
+            return Ok(());
+        }
+        self.field_written = true;
+        writeln!(self.out, "{}", field_line(info))?;
+        Ok(())
+    }
+
+    /// Logs `packet` when it is the first, or when a pad changed state.
+    fn packet(&mut self, packet: &GamePacket) -> Result<()> {
+        let active: Vec<bool> = packet.boost_pads.iter().map(|pad| pad.is_active).collect();
+        let changed: Vec<usize> = match &self.last_active {
+            None => (0..active.len()).collect(),
+            Some(last) => (0..active.len())
+                .filter(|&i| last.get(i) != Some(&active[i]))
+                .collect(),
+        };
+        self.last_active = Some(active);
+        if changed.is_empty() {
+            return Ok(());
+        }
+        writeln!(self.out, "{}", pads_line(packet, &changed))?;
+        Ok(())
+    }
+}
+
+fn field_line(info: &FieldInfo) -> String {
+    let mut line = String::from(r#"{"field":["#);
+    for (i, pad) in info.boost_pads.iter().enumerate() {
+        if i > 0 {
+            line.push(',');
+        }
+        let l = &pad.location;
+        // Writing to a String cannot fail.
+        let _ = write!(
+            line,
+            r#"{{"x":{},"y":{},"z":{},"big":{}}}"#,
+            l.x, l.y, l.z, pad.is_full_boost
+        );
+    }
+    line.push_str("]}");
+    line
+}
+
+fn pads_line(packet: &GamePacket, changed: &[usize]) -> String {
+    let car = packet.players.first().map_or(String::from("null"), |p| {
+        let l = &p.physics.location;
+        format!("[{},{},{},{}]", l.x, l.y, l.z, p.boost)
+    });
+    let mut line = format!(
+        r#"{{"frame":{},"car":{},"pads":["#,
+        packet.match_info.frame_num, car
+    );
+    for (n, &i) in changed.iter().enumerate() {
+        if n > 0 {
+            line.push(',');
+        }
+        let pad = &packet.boost_pads[i];
+        let _ = write!(line, r#"[{},{},{}]"#, i, pad.is_active, pad.timer);
+    }
+    line.push_str("]}");
+    line
 }
 
 /// Starts the game with the scenario's match when no plugin heartbeat shows
@@ -354,6 +449,7 @@ fn ensure_game_up(dir: &Path, config: &MatchConfiguration) -> Result<()> {
         &mut conn,
         GAME_LAUNCH_TIMEOUT,
         "waiting for the plugin heartbeat (is BakkesMod running and the plugin set to load at game start?)",
+        |_| {},
         |_| heartbeat_fresh(dir),
     )?;
     conn.send_packet(StopCommand {
@@ -362,6 +458,11 @@ fn ensure_game_up(dir: &Path, config: &MatchConfiguration) -> Result<()> {
     // Let the stop land before the real run restarts the match.
     sleep(Duration::from_secs(3));
     Ok(())
+}
+
+/// `<capture>.pads.jsonl` next to `<capture>` (`x_run1.jsonl` -> `x_run1.pads.jsonl`).
+fn pad_log_path(capture: &Path) -> PathBuf {
+    capture.with_extension("pads.jsonl")
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -407,6 +508,7 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
         return Err(format!("plugin could not open {} for writing", capture.display()).into());
     }
 
+    let mut pads = PadLog::create(&pad_log_path(capture))?;
     let mut conn = connect()?;
     conn.send_packet(config)?;
     let mut first_frame = 0u32;
@@ -414,6 +516,13 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
         &mut conn,
         MATCH_START_TIMEOUT,
         "waiting for the bot to set the start state",
+        |m| {
+            if let CoreMessage::FieldInfo(info) = m {
+                if let Err(e) = pads.field(info) {
+                    eprintln!("  pad log: {e}");
+                }
+            }
+        },
         |p| {
             // The bot sets the state within the first few frames of a match; a
             // later frame is the previous match's last packets (pogo ends near
@@ -436,6 +545,19 @@ fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<
         &mut conn,
         Duration::from_secs(tape_secs),
         "waiting for the tape to end",
+        |m| match m {
+            CoreMessage::FieldInfo(info) => {
+                if let Err(e) = pads.field(info) {
+                    eprintln!("  pad log: {e}");
+                }
+            }
+            CoreMessage::GamePacket(p) if p.match_info.frame_num >= first_frame => {
+                if let Err(e) = pads.packet(p) {
+                    eprintln!("  pad log: {e}");
+                }
+            }
+            _ => {}
+        },
         |p| p.match_info.frame_num >= end_frame,
     )?;
 
@@ -490,6 +612,86 @@ mod tests {
     #[test]
     fn distance_is_euclidean() {
         assert!((distance([0.0, 0.0, 0.0], [3.0, 4.0, 0.0]) - 5.0).abs() < 1e-6);
+    }
+
+    fn packet_with_pads(frame: u32, active: &[bool]) -> GamePacket {
+        let mut packet = GamePacket::default();
+        packet.match_info.frame_num = frame;
+        packet.boost_pads = active
+            .iter()
+            .map(|&is_active| rlbot::flat::BoostPadState {
+                is_active,
+                timer: if is_active { 0.0 } else { 1.5 },
+            })
+            .collect();
+        packet
+    }
+
+    fn read_lines(path: &Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .expect("read pad log")
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn pad_log_path_sits_next_to_the_capture() {
+        let path = pad_log_path(Path::new("out/fuzz_501_run2.jsonl"));
+        assert!(path.ends_with("fuzz_501_run2.pads.jsonl"), "{path:?}");
+    }
+
+    #[test]
+    fn pad_log_writes_the_first_packet_then_only_changes() {
+        let path = std::env::temp_dir().join(format!("rb_pad_log_{}.jsonl", std::process::id()));
+        let mut log = PadLog::create(&path).expect("create");
+        log.packet(&packet_with_pads(10, &[true, true, true]))
+            .expect("first");
+        log.packet(&packet_with_pads(11, &[true, true, true]))
+            .expect("same");
+        log.packet(&packet_with_pads(12, &[true, false, true]))
+            .expect("taken");
+        log.packet(&packet_with_pads(13, &[true, false, true]))
+            .expect("same");
+        let lines = read_lines(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains(r#""frame":10"#) && lines[0].contains("[2,true,0]"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains(r#""frame":12"#) && lines[1].contains("[1,false,1.5]"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            !lines[1].contains("[0,"),
+            "unchanged pad logged: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn pad_log_skips_an_empty_field_and_writes_the_first_real_one() {
+        let path = std::env::temp_dir().join(format!("rb_pad_field_{}.jsonl", std::process::id()));
+        let mut log = PadLog::create(&path).expect("create");
+        log.field(&FieldInfo::default()).expect("empty");
+        let mut info = FieldInfo::default();
+        info.boost_pads.push(rlbot::flat::BoostPad {
+            location: rlbot::flat::Vector3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            is_full_boost: true,
+        });
+        log.field(&info).expect("real");
+        log.field(&info).expect("again");
+        let lines = read_lines(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(lines, [r#"{"field":[{"x":1,"y":2,"z":3,"big":true}]}"#]);
     }
 
     #[test]
