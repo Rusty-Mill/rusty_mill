@@ -39,6 +39,7 @@ path = "src/bin/web_bridge.rs"
 required-features = ["web-bridge"]
 
 [dependencies]
+rusty_base64 = { workspace = true }
 rusty_atomic_file = { workspace = true }
 libc = "0.2.186"
 parking_lot = "0.12"

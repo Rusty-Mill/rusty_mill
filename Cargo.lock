@@ -9312,6 +9312,7 @@ dependencies = [
  "platform",
  "platform-mock",
  "platform-parity",
+ "rusty_base64",
 ]
 
 [[package]]
@@ -9322,6 +9323,7 @@ dependencies = [
  "platform",
  "platform-mock",
  "platform-parity",
+ "rusty_base64",
  "rusty_libc",
 ]
 
@@ -10557,6 +10559,7 @@ dependencies = [
  "remind_me_mcp",
  "reqwest 0.13.4",
  "rmcp",
+ "rusty_base64",
  "rusty_oauth",
  "serde",
  "serde_json",
@@ -12501,6 +12504,7 @@ dependencies = [
  "rcgen",
  "redb",
  "rusqlite",
+ "rusty_base64",
  "rusty_fair_play_domain",
  "rusty_http",
  "rusty_libc",
@@ -12724,6 +12728,7 @@ dependencies = [
  "parking_lot",
  "pollster 0.3.0",
  "rusty_atomic_file",
+ "rusty_base64",
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",

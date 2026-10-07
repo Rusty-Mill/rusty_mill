@@ -12,6 +12,9 @@ layer = "platform"
 
 [dependencies]
 platform.workspace = true
+# Certificate bundles are base64 (PEM); zero-dependency, so this crate's
+# dependency set stays first-party.
+rusty_base64.workspace = true
 
 # Kept textually identical to `lib.rs`'s `#![cfg(...)]` — the two must
 # agree or the crate either pulls a dependency it never uses or fails to

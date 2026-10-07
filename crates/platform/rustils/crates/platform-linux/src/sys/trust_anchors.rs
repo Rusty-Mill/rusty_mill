@@ -57,42 +57,10 @@ fn no_anchors(detail: &'static str) -> PlatformError {
 }
 
 /// Decode standard-alphabet base64, ignoring whitespace, stopping at the
-/// first `=` pad. Returns `None` on any character outside the alphabet —
+/// first `=` pad. Returns `None` on any character outside the alphabet --
 /// the caller treats that as "this PEM block is malformed, skip it".
-///
-/// Hand-rolled because this crate's dependency set is `libc` and
-/// `platform`; pulling a base64 crate in to read a certificate bundle
-/// would be a new dependency for thirty lines of arithmetic.
 fn b64_decode(input: &[u8]) -> Option<Vec<u8>> {
-    fn sextet(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-
-    let mut out = Vec::with_capacity(input.len() / 4 * 3);
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &c in input {
-        if c == b'=' {
-            break;
-        }
-        if c.is_ascii_whitespace() {
-            continue;
-        }
-        acc = (acc << 6) | u32::from(sextet(c)?);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
+    rusty_base64::decode_standard_lenient(input).ok()
 }
 
 const BEGIN: &str = "-----BEGIN CERTIFICATE-----";

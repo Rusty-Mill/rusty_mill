@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - base64 copies replaced (pending review)
+
+- **Changed:** six hand-written base64 encoders/decoders now call `rusty_base64`; new `decode_standard_lenient` (+2 tests) covers PEM and terminal payloads.
+- **Known limitation:** `platform-bsd`'s edit compiles only on BSD targets and was not built here; it is the same one-line wrapper as `platform-linux`'s. `rusty_term`'s `gui` feature (encode alias) was not built. Pre-existing: `rusty_term` clippy `-D warnings` fails on unused `Grid::running_command`/`abs_line_text`/`row_text` without the gui feature, also on the untouched baseline.
+
+---
+
 ## 2026-10-07 - One strip_ansi (pending review)
 
 - **Changed:** `rusty_ansi` parses two-byte escapes and string sequences (new `AnsiToken::Escape`); `rp-router` and `rusty_lines`' PTY tests use `rusty_ansi::strip_ansi` instead of private copies. Five new `rusty_ansi` tests; all 43 `rusty_lines` PTY tests pass.

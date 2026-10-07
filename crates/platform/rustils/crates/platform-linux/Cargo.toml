@@ -12,6 +12,9 @@ layer = "platform"
 
 [dependencies]
 platform.workspace = true
+# Certificate bundles are base64 (PEM); zero-dependency, so this crate's
+# dependency set stays first-party.
+rusty_base64.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
