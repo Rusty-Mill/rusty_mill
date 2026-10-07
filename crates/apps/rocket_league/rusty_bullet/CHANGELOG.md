@@ -4,6 +4,11 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `rb-verify --recorded-inputs` finds the start lag (spec 0.28.0); the golden
+  gate holds 30 recordings and runs its cases in parallel (3 s). Round 3 of the
+  mechanics probes (jumps, flips, landings, fast dodges, ball on the car):
+  all within 0.2 to 1.3 uu except `wall_land` (77 uu) and `ceiling` (31 uu).
 ### Added
 - ADR-0066 (`RB-VERIFY-003-FR-017`, spec 0.27.0): a fidelity gate in `cargo test`.
   24 real Rocket League tape-bot recordings (`tools/rb_tape_bot/fixtures/`,

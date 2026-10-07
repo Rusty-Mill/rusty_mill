@@ -361,15 +361,21 @@ pub fn compare_scenario_recorded(
         .collect();
 
     let start = scenario.initial_frame();
-    let run = |offset: usize| -> (Vec<ScenarioRow>, f32) {
-        let inputs: Vec<ControllerInput> = (0..limit)
-            .map(|tick| filled[(tick + offset).min(limit)])
+    // `lag`: recorded tick t is the port's tick t - lag (the state set can
+    // land a tick or two after the frame the recording first shows it);
+    // `offset`: which recorded input fed the step; `ticks` bounds the run.
+    let run = |lag: usize, offset: usize, ticks: usize| -> (Vec<ScenarioRow>, f32) {
+        let inputs: Vec<ControllerInput> = (0..ticks.min(limit))
+            .map(|tick| filled[(tick + lag + offset).min(limit)])
             .collect();
         let predicted = simulate_with_inputs(&start, &inputs);
         let mut rows = Vec::new();
         let mut total = 0.0;
-        for (tick, r) in &recorded_ticks {
-            let (Some(p), Some(car)) = (predicted.get(*tick), r.cars.first()) else {
+        for (recorded_tick, r) in &recorded_ticks {
+            let Some(tick) = recorded_tick.checked_sub(lag) else {
+                continue;
+            };
+            let (Some(p), Some(car)) = (predicted.get(tick), r.cars.first()) else {
                 continue;
             };
             let Some(pc) = p.cars.first() else {
@@ -378,7 +384,7 @@ pub fn compare_scenario_recorded(
             total +=
                 pc.position.distance(&car.position) + p.ball.position.distance(&r.ball.position);
             rows.push(ScenarioRow {
-                tick: *tick,
+                tick,
                 recorded: *car,
                 predicted: *pc,
                 recorded_ball: r.ball.position,
@@ -388,16 +394,24 @@ pub fn compare_scenario_recorded(
         let mean = total / rows.len().max(1) as f32;
         (rows, mean)
     };
-    let (rows0, error0) = run(0);
-    let (rows1, error1) = run(1);
-    let (rows, input_offset) = if error1 < error0 {
-        (rows1, 1)
-    } else {
-        (rows0, 0)
-    };
+    // Lag first (offset 0), then offset at that lag, each on the whole run:
+    // the early trajectory alone mis-picks a falling start (`pogo`).
+    let mut best = (run(0, 0, limit), 0, 0);
+    for lag in 1..=MAX_LAG_TICKS {
+        let trial = run(lag, 0, limit);
+        if trial.1 < (best.0).1 {
+            best = (trial, lag, 0);
+        }
+    }
+    let lag_ticks = best.1;
+    let shifted = run(lag_ticks, 1, limit);
+    if shifted.1 < (best.0).1 {
+        best = (shifted, lag_ticks, 1);
+    }
+    let ((rows, _), _, input_offset) = best;
     Ok(ScenarioComparison {
         start_index,
-        lag_ticks: 0,
+        lag_ticks,
         rows,
         input_mismatches: 0,
         input_offset: Some(input_offset),
@@ -620,6 +634,21 @@ mod tests {
             against_recorded.max_position_error()
         );
         assert!(against_recorded.input_offset.is_some());
+    }
+
+    /// A recording that shows the start state a tick or two late is aligned by
+    /// the recorded-input replay as it is by the tape replay.
+    #[test]
+    fn a_recorded_input_replay_finds_the_start_lag() {
+        let sc = scenario("wavedash_mid");
+        let capture = fake_capture(&sc, 4, 2);
+        let comparison = compare_scenario_recorded(&sc, &capture).unwrap();
+        assert_eq!(comparison.lag_ticks, 2);
+        assert!(
+            comparison.max_position_error() < 0.5,
+            "{}",
+            comparison.max_position_error()
+        );
     }
 
     #[test]

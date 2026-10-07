@@ -107,3 +107,31 @@ add2("probe_boost_air_roll", "jump, roll right, boost 1.25 s", car((0, -4000, 17
 add2("probe_turn_boost_slow", "boosting from 800 uu/s with right steer", car((-2500, -4500, 17), vel=(0, 800, 0)), [st(240, throttle=1, boost=True, steer=1)], settle=0)
 add2("probe_turn_half_boost", "boosting at 1800 uu/s with half right steer", car((-2500, -4500, 17), vel=(0, 1800, 0)), [st(240, throttle=1, boost=True, steer=0.5)], settle=0)
 print(len(names2), "round-2 scenarios")
+
+
+# ---- round 3: jumps, flips, landings, ceiling, fast dodges, ball on the car
+names3 = []
+
+
+def add3(name, *a, **k):
+    _old_add(name, *a, **k)
+    names3.append(name)
+
+
+add3("probe_jump_short", "a one-tick jump press", car((0, -2000, 17), boost=0), [st(1, jump=True), st(120)])
+add3("probe_jump_mid", "jump held 20 ticks", car((0, -2000, 17), boost=0), [st(20, jump=True), st(120)])
+add3("probe_jump_long", "jump held 60 ticks (past the 0.2 s hold limit)", car((0, -2000, 17), boost=0), [st(60, jump=True), st(100)])
+add3("probe_double_jump", "jump, then a second plain press 30 ticks later", car((0, -2000, 17), boost=0), [st(10, jump=True), st(20), st(1, jump=True), st(120)])
+add3("probe_double_jump_moving", "jump at 1200 uu/s, plain second press 25 ticks later", car((0, -4500, 17), vel=(0, 1200, 0), boost=0), [st(10, jump=True), st(15), st(1, jump=True), st(120)], settle=0)
+add3("probe_flip_cancel", "forward dodge cancelled at once with pitch back", car((0, -4500, 17), vel=(0, 1000, 0), boost=0), [st(10, jump=True), st(10), st(1, jump=True, pitch=-1), st(8, pitch=1), st(120)], settle=0)
+add3("probe_flip_air_roll", "dodge back then air roll left", car((0, -4500, 17), vel=(0, 1000, 0), boost=0), [st(10, jump=True), st(10), st(1, jump=True, pitch=1), st(40, roll=-1), st(120)], settle=0)
+add3("probe_dodge_fast_fwd", "1800 uu/s boosting forward dodge", car((0, -4800, 17), vel=(0, 1800, 0)), [st(10, jump=True, boost=True), st(10, boost=True), st(1, jump=True, pitch=-1, boost=True), st(100, boost=True)], settle=0)
+add3("probe_dodge_fast_side", "1800 uu/s side dodge", car((-1000, -4800, 17), vel=(0, 1800, 0), boost=0), [st(10, jump=True), st(10), st(1, jump=True, roll=1), st(100)], settle=0)
+add3("probe_land_wheels", "drop from 500 uu onto the wheels", car((0, -2000, 517), rot=[0, 1.5708, 0], boost=0), [st(240)], settle=0)
+add3("probe_land_tilted", "drop from 400 uu nose-down 30 degrees with spin", car((0, -2000, 417), rot=[-0.52, 1.5708, 0.3], spin=(0.5, 0, 1.0), boost=0), [st(240)], settle=0)
+add3("probe_wall_land", "jump toward the side wall and land on it", car((3600, -2000, 17), vel=(600, 600, 0), rot=[0, 0.7854, 0], boost=0), [st(20, jump=True, throttle=1), st(200, throttle=1)], settle=0)
+add3("probe_ceiling", "boost upward into the ceiling", car((0, -2000, 17)), [st(20, jump=True, boost=True), st(60, boost=True, pitch=-1), st(240, boost=True)], settle=60)
+add3("probe_roof_drop", "ball dropped on the roof of a stationary car", car((0, -2000, 17), boost=0), [st(300)], ball={"location": [0, -2000, 400], "velocity": [0, 0, -1]})
+add3("probe_nose_hit_glancing", "car clips the ball at a diagonal", car((-300, -3000, 17), vel=(200, 1000, 0), rot=[0, 1.37, 0], boost=0), [st(240, throttle=1)], ball={"location": [0, -1500, 93.15], "velocity": [0, 0, 0]}, settle=0)
+add3("probe_ball_bounce_car_side", "car drives into a rolling ball from the side", car((-2000, -2000, 17), vel=(1000, 0, 0), rot=[0, 0.0, 0], boost=0), [st(240, throttle=1)], ball={"location": [0, -2000, 93.15], "velocity": [0, 400, 0]}, settle=0)
+print(len(names3), "round-3 scenarios")
