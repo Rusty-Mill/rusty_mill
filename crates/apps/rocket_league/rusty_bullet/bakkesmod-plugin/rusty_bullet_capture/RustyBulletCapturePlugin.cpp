@@ -4,13 +4,14 @@
 #include "bakkesmod/wrappers/GameObject/CarComponent/BoostWrapper.h"
 
 #include <sstream>
+#include <system_error>
 
 // `PLUGINTYPE` (bakkesmodsdk.h) has no flag for a regular local/offline
 // match at all -- only FREEPLAY, CUSTOM_TRAINING, SPECTATOR, BOTAI, REPLAY,
 // THREADED, THREADEDUNLOAD exist. `PLUGINTYPE_FREEPLAY` is this plugin's
 // primary use case (see README); it doesn't gate loading during a normal
 // match, since there's no bit for one to begin with.
-BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.3", PLUGINTYPE_FREEPLAY)
+BAKKESMOD_PLUGIN(RustyBulletCapturePlugin, "Rusty Bullet capture", "1.4", PLUGINTYPE_FREEPLAY)
 
 namespace
 {
@@ -111,6 +112,49 @@ std::string carJson(int playerId, CarWrapper car, const ControllerInput &input)
 namespace
 {
 const char *VEHICLE_INPUT_EVENT = "Function TAGame.Car_TA.SetVehicleInput";
+
+// Pulls the string value of `"key": "..."` out of a flat JSON object,
+// undoing the escapes a path needs (`\`, `\"`, `\/`). Job files are tiny
+// and written by `rb_run_tapes`, so this is not a general JSON parser.
+bool jsonStringField(const std::string &text, const std::string &key, std::string &out)
+{
+    size_t at = text.find("\"" + key + "\"");
+    if (at == std::string::npos)
+    {
+        return false;
+    }
+    size_t quote = text.find('"', text.find(':', at) + 1);
+    if (quote == std::string::npos)
+    {
+        return false;
+    }
+    out.clear();
+    for (size_t i = quote + 1; i < text.size(); ++i)
+    {
+        if (text[i] == '"')
+        {
+            return true;
+        }
+        if (text[i] == '\\' && i + 1 < text.size())
+        {
+            ++i;
+        }
+        out += text[i];
+    }
+    return false;
+}
+
+// True when the object has `"key": true`.
+bool jsonTrueField(const std::string &text, const std::string &key)
+{
+    size_t at = text.find("\"" + key + "\"");
+    if (at == std::string::npos)
+    {
+        return false;
+    }
+    size_t colon = text.find(':', at);
+    return colon != std::string::npos && text.find("true", colon) == text.find_first_not_of(" \t\r\n", colon + 1);
+}
 } // namespace
 
 void RustyBulletCapturePlugin::onLoad()
@@ -130,14 +174,71 @@ void RustyBulletCapturePlugin::onLoad()
         [this](std::vector<std::string> args) { stopCapture(args); },
         "Stop the current Rusty Bullet capture recording, if any",
         PERMISSION_ALL);
+
+    pollJobs(alive_);
 }
 
 void RustyBulletCapturePlugin::onUnload()
 {
+    *alive_ = false;
     // Remove the per-tick hook before this plugin's memory goes away: a
     // hook left behind calls into a freed `this` on the next tick.
     gameWrapper->UnhookEventPost(VEHICLE_INPUT_EVENT);
     stopCapture({});
+}
+
+std::filesystem::path RustyBulletCapturePlugin::jobDir() const
+{
+    return gameWrapper->GetDataFolder() / "rusty_bullet_capture";
+}
+
+void RustyBulletCapturePlugin::pollJobs(std::shared_ptr<bool> alive)
+{
+    if (!*alive)
+    {
+        return;
+    }
+
+    std::error_code ec;
+    std::filesystem::path dir = jobDir();
+    std::filesystem::create_directories(dir, ec);
+    std::filesystem::path job = dir / "job.json";
+    if (std::filesystem::exists(job, ec))
+    {
+        std::ifstream in(job);
+        std::stringstream text;
+        text << in.rdbuf();
+        in.close();
+        runJob(text.str());
+        std::filesystem::remove(job, ec);
+        if (ec)
+        {
+            cvarManager->log("rusty_bullet_capture: could not delete the job file: " + ec.message());
+        }
+    }
+
+    // `capturing=` lets the runner confirm a start took effect.
+    std::ofstream beat(dir / "heartbeat.txt", std::ios::out | std::ios::trunc);
+    beat << "version=1.4\ncapturing=" << (capturing_ ? 1 : 0) << "\n";
+
+    gameWrapper->SetTimeout([this, alive](GameWrapper *) { pollJobs(alive); }, 1.0f);
+}
+
+void RustyBulletCapturePlugin::runJob(const std::string &text)
+{
+    std::string path;
+    if (jsonStringField(text, "start", path))
+    {
+        startCapture({"rb_capture_start", path});
+    }
+    else if (jsonTrueField(text, "stop"))
+    {
+        stopCapture({});
+    }
+    else
+    {
+        cvarManager->log("rusty_bullet_capture: unrecognised job file: " + text);
+    }
 }
 
 void RustyBulletCapturePlugin::startCapture(std::vector<std::string> args)
