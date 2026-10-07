@@ -1,0 +1,14 @@
+[package]
+name = "rusty_dirs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Dependency-free per-user config directory lookup: %APPDATA% on Windows, $XDG_CONFIG_HOME or ~/.config elsewhere."
+license = "MIT OR Apache-2.0"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+[dependencies]
+
+[dev-dependencies]

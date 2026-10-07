@@ -11566,6 +11566,7 @@ dependencies = [
  "rand 0.8.8",
  "rusty_base64",
  "rusty_confined_fs",
+ "rusty_dirs",
  "rusty_hex",
  "rusty_retry",
  "serde",
@@ -12270,6 +12271,10 @@ name = "rusty_diff"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_dirs"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_err"
 version = "0.1.0"
 dependencies = [
@@ -12757,6 +12762,7 @@ dependencies = [
  "pollster 0.3.0",
  "rusty_atomic_file",
  "rusty_base64",
+ "rusty_dirs",
  "rusty_font",
  "rusty_gpu",
  "rusty_gui",

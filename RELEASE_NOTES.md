@@ -13,6 +13,13 @@ to its PR. Bolded inline category tags (`**Added:**` / `**Changed:**` /
 
 ---
 
+## 2026-10-07 - rusty_dirs (pending review)
+
+- **Added:** `rusty_dirs`; `rusty_term` and `rusty-croc` use it.
+- **Known limitation:** only config directories are shared. The other ~6 sites in the audit (`rusty_yirp` state dirs, `rusty_inventory`, `rusty_key` guide, `rusty_provider` `~` expansion, `rush`, `sessionmgr-agents`) resolve different things (state/data dirs, `~` expansion, override variables) and were left alone; `rusty_yirp`'s two path files are duplicated on purpose. Nexus untouched (frozen, deletion not approved).
+
+---
+
 ## 2026-10-07 - rmcp pin and rsi blob writes (pending review)
 
 - **Changed:** `remind_me_remote` uses the workspace `rmcp`; `rsi-runtime` blob writes are now fsynced (slightly slower, durable).

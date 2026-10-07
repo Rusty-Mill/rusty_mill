@@ -88,6 +88,7 @@ members = [
     "crates/foundation/rusty_err/derive",
     "crates/libs/net/rusty_request",
     "crates/foundation/rusty_base64",
+    "crates/foundation/rusty_dirs",
     "crates/foundation/rusty_hex",
     "crates/foundation/rusty_percent",
     "crates/foundation/rusty_rand",
@@ -346,6 +347,7 @@ rusty-db = { path = "crates/libs/storage/rusty_db/rusty_db" }
 rusty-whisper = { path = "crates/libs/ai/rusty_whisper" }
 rusty_audio = { path = "crates/libs/ui/rusty_audio" }
 rusty_base64 = { path = "crates/foundation/rusty_base64" }
+rusty_dirs = { path = "crates/foundation/rusty_dirs" }
 rusty_hex = { path = "crates/foundation/rusty_hex" }
 rusty_percent = { path = "crates/foundation/rusty_percent" }
 rusty_codec = { path = "crates/foundation/rusty_codec" }
