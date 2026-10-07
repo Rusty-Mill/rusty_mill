@@ -4,3 +4,4 @@ section { padding: 1rem 1.25rem; border-right: 1px solid #ddd; }
 h2 { margin: 0 0 .75rem; font-size: 1rem; }
 .empty { color: #777; }
 .chat { min-width: 0; height: 100%; }
+.error { color: #b00020; }
