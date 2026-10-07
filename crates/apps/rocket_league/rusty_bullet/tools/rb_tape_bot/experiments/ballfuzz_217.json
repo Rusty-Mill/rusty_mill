@@ -1,0 +1,50 @@
+{
+  "name": "ballfuzz_217: a seeded random ball launch, 6 s",
+  "settle_ticks": 60,
+  "car": {
+    "location": [
+      3000,
+      4000,
+      17
+    ],
+    "rotation": [
+      -0.0096,
+      0,
+      0
+    ],
+    "velocity": [
+      0,
+      0,
+      0
+    ],
+    "angular_velocity": [
+      0,
+      0,
+      0
+    ],
+    "boost": 0
+  },
+  "ball": {
+    "location": [
+      -652,
+      -2070,
+      527
+    ],
+    "velocity": [
+      1.2,
+      996.7,
+      -113.8
+    ],
+    "angular_velocity": [
+      2.69,
+      -0.76,
+      0.84
+    ]
+  },
+  "steps": [
+    {
+      "ticks": 720,
+      "throttle": 0
+    }
+  ]
+}
