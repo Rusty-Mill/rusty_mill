@@ -81,8 +81,9 @@ Option 3.
   map, not recorded).
 - Repeatability is a proxy (error against the port per run), not a direct
   run-against-run comparison.
-- The first matches showed a private-match-like loading screen and later ones
-  freeplay (owner's observation); the map command was identical in all.
+- The match looks like a training pack (owner's observation), which fits
+  core's freeplay launch (`Playtest` game with the `Freeplay` tag, identical
+  for every match); it was not compared with a GUI-started match.
 
 ## Validation and revisit triggers
 

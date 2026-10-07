@@ -239,7 +239,9 @@ script's own `results.md` is in that folder.
   one launch of the command. The scoring script first failed to parse
   `tick N` in "first over" and reported the proximity of the first table row
   as the start error (18 uu for car_over_ball, which is already in contact).
-- **Not verified:** the loading screen looked like a private match for the
-  first matches and freeplay later (owner's observation); core's map command
-  is the same freeplay one for all of them and the plugin records in every
-  one. Second-monitor focus and `rb_probe` alongside were never run.
+- **Match type:** the owner first reported the match looking like a private
+  match, then corrected it: it looked like a training pack. That fits core's
+  freeplay launch (`Open Stadium_P?game=TAGame.GameInfo_Soccar_TA?Playtest?GameTags=PlayerCount8,Freeplay,UnlimitedTime`,
+  the same for every match) and the plugin, which is a freeplay-type plugin,
+  recorded in every one. Not compared against a GUI-started match.
+- **Not verified:** Second-monitor focus and `rb_probe` alongside were never run.
