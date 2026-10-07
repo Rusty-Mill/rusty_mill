@@ -549,7 +549,11 @@ pub fn apply_driven_forces(
         // owner's captures show the brake cancelling that push's in-plane
         // part on the press tick (a jump from rest stays put), while a car
         // on throttle keeps it (`test2.jsonl`, 4.133 s: +2.9 uu/s forward).
-        if jump_pressed {
+        // RB-PHYSICS-001-FR-139: not while the jump record is still held. A
+        // press in the few ticks after a jump, while the wheels still touch,
+        // does nothing in the game (28 `jumpgap` captures: presses 1 to 6
+        // ticks after the first press are ignored, no second jump).
+        if jump_pressed && !state.jump_clock.has_jumped() {
             jump::ground_jump(car, &mut state.jump_hold_time_remaining, dt);
         }
         ground::apply_ground_control(
@@ -599,7 +603,10 @@ pub fn apply_driven_forces(
         // ticks (RB-PHYSICS-001-FR-094: the capture's 4.317 s flip torque
         // lasts 79 ticks, one past the press-tick clock's 78).
         let flip_before_press = state.flip;
-        if jump_pressed {
+        // RB-PHYSICS-001-FR-139: the step after the wheels let go still
+        // counts as grounded for the press as well (the `jumpgap` captures:
+        // a press 6 ticks after the first is ignored, 7 flips).
+        if jump_pressed && !state.was_on_ground {
             jump::airborne_jump_press(
                 car,
                 input,
