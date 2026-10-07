@@ -229,8 +229,14 @@ pub fn compare_scenario(
             .iter()
             .filter(|(tick, _)| *tick >= lag && *tick - lag < LAG_WINDOW_TICKS)
             .filter_map(|(tick, r)| {
-                let p = predicted.get(*tick - lag)?.cars.first()?;
-                Some(p.position.distance(&r.cars.first()?.position))
+                let frame = predicted.get(*tick - lag)?;
+                let p = frame.cars.first()?;
+                // Car and ball both: a scenario whose car stands still (a
+                // ball-only probe) would otherwise pick its lag at random.
+                Some(
+                    p.position.distance(&r.cars.first()?.position)
+                        + frame.ball.position.distance(&r.ball.position),
+                )
             })
             .collect();
         if errors.is_empty() {
@@ -490,6 +496,25 @@ mod tests {
         assert_eq!(comparison.input_mismatches, 0);
         assert_eq!(comparison.first_position_error_over(1.0), None);
         assert_eq!(comparison.rows.len() as u64, sc.total_ticks() + 2);
+    }
+
+    /// `RB-VERIFY-003-FR-015`: a ball-only scenario (the car stands still) is
+    /// lined up by its ball, not by an arbitrary lag.
+    #[test]
+    fn a_ball_only_scenario_is_aligned_by_the_ball() {
+        let sc = Scenario::from_json(
+            r#"{ "name": "ball only", "settle_ticks": 0,
+                 "car": { "location": [-3500, -4000, 17], "rotation": [0, 1.5708, 0] },
+                 "ball": { "location": [-2000, 0, 500], "velocity": [3500, 500, 200] },
+                 "steps": [ { "ticks": 90 } ] }"#,
+        )
+        .unwrap();
+        for lag in 0..=2 {
+            let capture = fake_capture(&sc, 3, lag);
+            let comparison = compare_scenario(&sc, &capture).unwrap();
+            assert_eq!(comparison.lag_ticks, lag, "lag {lag}");
+            assert!(comparison.max_ball_error() < 1.0, "lag {lag}");
+        }
     }
 
     /// `RB-VERIFY-003-FR-015`: the ball is scored beside the car.

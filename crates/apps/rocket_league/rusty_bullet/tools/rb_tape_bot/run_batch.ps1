@@ -71,6 +71,7 @@ function Get-RunScore([string]$scenario, [string]$capture) {
         $p = $row.cars[0].position
         $tick0 = "{0:N1}" -f [math]::Sqrt([math]::Pow($p.x - $loc[0], 2) + [math]::Pow($p.y - $loc[1], 2) + [math]::Pow($p.z - $loc[2], 2))
     }
+    $ball = [regex]::Match($text, 'ball error: mean ([0-9.]+) uu, max ([0-9.]+) uu')
     $stats = Get-CaptureStats $capture
     if (-not $err.Success) {
         return [pscustomobject]@{ Ok = $false; Note = ($text -split "`n" | Select-Object -First 3) -join " | " }
@@ -78,6 +79,8 @@ function Get-RunScore([string]$scenario, [string]$capture) {
     [pscustomobject]@{
         Ok = $true; Lag = $lag; Mean = [double]$err.Groups[1].Value; Max = [double]$err.Groups[2].Value
         Over10 = $err.Groups[3].Value -replace '^tick ', ''; Over100 = $err.Groups[4].Value -replace '^tick ', ''
+        BallMean = if ($ball.Success) { [double]$ball.Groups[1].Value } else { 0.0 }
+        BallMax = if ($ball.Success) { [double]$ball.Groups[2].Value } else { 0.0 }
         Start = $tick0; Frames = $stats.Frames; Gap = $stats.Gap
     }
 }
@@ -93,7 +96,7 @@ foreach ($name in $names) {
         $runs += Get-RunScore $(if (Test-Path (Join-Path $scenarioDir "$name.json")) { Join-Path $scenarioDir "$name.json" } else { Join-Path $experimentDir "$name.json" }) $capture.FullName
     }
     $good = @($runs | Where-Object { $_.Ok })
-    if ($good.Count -eq 0) { $rows += "| $name | scoring failed: $($runs[0].Note) |||||||"; continue }
+    if ($good.Count -eq 0) { $rows += "| $name | scoring failed: $($runs[0].Note) ||||||||"; continue }
     $join = { param($f) ($good | ForEach-Object { $_.$f }) -join "; " }
     $repeatable = "n/a (1 run)"
     if ($good.Count -ge 2) {
@@ -107,7 +110,7 @@ foreach ($name in $names) {
         $repeatable = "{0} (spread of {1} runs: mean {2:N1}, max {3:N1})" -f $verdict, $good.Count, $dMean, $dMax
     }
     $gap = "{0:N3}" -f (($good | Measure-Object Gap -Maximum).Maximum)
-    $rows += "| $name | $(& $join 'Lag') | $(($good | ForEach-Object { '{0:N1} / {1:N1}' -f $_.Mean, $_.Max }) -join '; ') | $(($good | ForEach-Object { '{0} / {1}' -f $_.Over10, $_.Over100 }) -join '; ') | $(& $join 'Frames') | $gap | $(& $join 'Start') | $repeatable |"
+    $rows += "| $name | $(& $join 'Lag') | $(($good | ForEach-Object { '{0:N1} / {1:N1}' -f $_.Mean, $_.Max }) -join '; ') | $(($good | ForEach-Object { '{0:N1} / {1:N1}' -f $_.BallMean, $_.BallMax }) -join '; ') | $(($good | ForEach-Object { '{0} / {1}' -f $_.Over10, $_.Over100 }) -join '; ') | $(& $join 'Frames') | $gap | $(& $join 'Start') | $repeatable |"
 }
 
 $md = @(
@@ -115,8 +118,8 @@ $md = @(
     "",
     "Port (``rb-verify --scenario ... --against``) against each capture. Per-run values are separated by `;`, run 1 first; mean / max pairs use `/`.",
     "",
-    "| Scenario | Lag (ticks) | Pos. error mean / max (uu) per run | First tick over 10 / 100 uu | Frames | Largest gap (s) | Start-frame error (uu) | Repeatable |",
-    "|---|---|---|---|---|---|---|---|"
+    "| Scenario | Lag (ticks) | Car error mean / max (uu) per run | Ball error mean / max (uu) | First tick over 10 / 100 uu | Frames | Largest gap (s) | Start-frame error (uu) | Repeatable |",
+    "|---|---|---|---|---|---|---|---|---|"
 ) + $rows + @(
     "",
     "Start-frame error is the distance of the capture's first aligned frame from the scenario's start location (acceptance: under 5 uu). ``Repeatable`` compares the two runs' error against the port, a proxy for run-to-run noise (session 1 floor: 2.8 uu mean, 13.8 uu max). Every capture is known to have one 5-tick hole (about 0.042 s, RB-RESEARCH-O009); it shows in the largest gap, it is not hidden."

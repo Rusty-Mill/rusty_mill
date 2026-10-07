@@ -342,6 +342,11 @@ them.
   uu: ..`. Why: the first ball-only scenarios (bounces off the floor, walls
   and ceiling) have no car trajectory to judge. Test
   `a_wrong_ball_shows_up_as_ball_error_and_not_car_error`.
+  The lag is now chosen on car and ball together, and each printed row also
+  carries the ball's recorded and predicted position: a ball-only probe (the
+  car stands still) otherwise picked its lag at random and shifted the ball by
+  up to 3 ticks (a 65 uu mean error that was 2.2 uu once aligned). Test
+  `a_ball_only_scenario_is_aligned_by_the_ball`.
 
 - `RB-VERIFY-003-FR-014` (implemented): car-ball hit sweeps, the second
   caller of `rb_env::Env` (ADR-0060, ADR-0061). `rb-verify --sweep-hit <k>
