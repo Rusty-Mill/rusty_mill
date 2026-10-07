@@ -32,11 +32,17 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const CORE_ADDR: &str = "127.0.0.1:23234";
 /// Distance (uu) from the scenario's start location that counts as "the bot
-/// has set the start state". Loose because a falling start (wavedash, pogo)
-/// has moved a few uu by the first packet that shows it.
-const START_TOLERANCE_UU: f32 = 40.0;
+/// has set the start state". Loose on purpose: a fast start (the nose landing
+/// falls at 1600 uu/s) is at the exact start for one tick only and 50 uu away
+/// the next, and the first ticks after a state set can be missing (O009).
+/// Kickoff spawns are all more than 800 uu from every start except
+/// `speed_flip`'s, which is a spawn point; that one is detected a few frames
+/// early, which `TAIL_FRAMES` absorbs.
+const START_TOLERANCE_UU: f32 = 300.0;
 /// Frames to keep recording after the tape's last tick.
-const TAIL_FRAMES: u32 = 120;
+const TAIL_FRAMES: u32 = 180;
+/// Latest physics frame of a new match at which the start state can be set.
+const MAX_START_FRAME: u32 = 300;
 const HEARTBEAT_FRESH: Duration = Duration::from_secs(5);
 const GAME_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const MATCH_START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -330,6 +336,25 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 /// One capture of one scenario into `capture`.
 fn run_one(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<()> {
+    let result = run_one_inner(dir, name, path, capture);
+    if result.is_err() {
+        // Do not leave a capture recording or a match running after a failure.
+        if let Err(e) = abort_run(dir) {
+            eprintln!("  cleanup after the failure also failed: {e}");
+        }
+    }
+    result
+}
+
+fn abort_run(dir: &Path) -> Result<()> {
+    send_job(dir, r#"{"stop": true}"#)?;
+    connect()?.send_packet(StopCommand {
+        shutdown_server: false,
+    })?;
+    Ok(())
+}
+
+fn run_one_inner(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<()> {
     let scenario = Scenario::from_json(&fs::read_to_string(path)?)?;
     let start = scenario
         .car
@@ -352,10 +377,14 @@ fn run_one(dir: &Path, name: &str, path: &Path, capture: &Path) -> Result<()> {
         MATCH_START_TIMEOUT,
         "waiting for the bot to set the start state",
         |p| {
-            let near = p.players.first().is_some_and(|car| {
-                let l = &car.physics.location;
-                distance([l.x, l.y, l.z], start) < START_TOLERANCE_UU
-            });
+            // The bot sets the state within the first few frames of a match; a
+            // later frame is the previous match's last packets (pogo ends near
+            // prompt_dodge's start).
+            let near = p.match_info.frame_num < MAX_START_FRAME
+                && p.players.first().is_some_and(|car| {
+                    let l = &car.physics.location;
+                    distance([l.x, l.y, l.z], start) < START_TOLERANCE_UU
+                });
             if near {
                 first_frame = p.match_info.frame_num;
             }

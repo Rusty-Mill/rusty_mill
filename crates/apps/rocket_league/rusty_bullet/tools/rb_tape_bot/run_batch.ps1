@@ -58,18 +58,24 @@ function Get-CaptureStats([string]$path) {
 function Get-RunScore([string]$scenario, [string]$capture) {
     $text = (& $verify --scenario $scenario --against $capture 2>&1) -join "`n"
     $lag = [regex]::Match($text, 'lag (\d+) ticks').Groups[1].Value
-    $err = [regex]::Match($text, 'position error: mean ([0-9.]+) uu, max ([0-9.]+) uu; first over 10 uu: (\S+); first over 100 uu: (\S+)')
-    # First table row (tick 0, or the first tick kept after a capture hole):
-    # position error of the capture's start frame against the scenario's start.
-    $tick0 = [regex]::Match($text, '(?m)^\s*\d+\s+([0-9.]+)\s+[0-9.]+\s+[0-9.]+\s+\(').Groups[1].Value
-    if (-not $tick0) { $tick0 = "n/a" }
+    $err = [regex]::Match($text, 'position error: mean ([0-9.]+) uu, max ([0-9.]+) uu; first over 10 uu: (never|tick \d+); first over 100 uu: (never|tick \d+)')
+    # Distance of the capture frame rb-verify aligned as the start from the
+    # scenario's start location (acceptance: under 5 uu).
+    $tick0 = "n/a"
+    $startRow = [regex]::Match($text, 'capture frame (\d+)')
+    if ($startRow.Success) {
+        $loc = (Get-Content $scenario -Raw | ConvertFrom-Json).car.location
+        $row = [System.IO.File]::ReadLines($capture) | Select-Object -Skip ([int]$startRow.Groups[1].Value) -First 1 | ConvertFrom-Json
+        $p = $row.cars[0].position
+        $tick0 = "{0:N1}" -f [math]::Sqrt([math]::Pow($p.x - $loc[0], 2) + [math]::Pow($p.y - $loc[1], 2) + [math]::Pow($p.z - $loc[2], 2))
+    }
     $stats = Get-CaptureStats $capture
     if (-not $err.Success) {
         return [pscustomobject]@{ Ok = $false; Note = ($text -split "`n" | Select-Object -First 3) -join " | " }
     }
     [pscustomobject]@{
         Ok = $true; Lag = $lag; Mean = [double]$err.Groups[1].Value; Max = [double]$err.Groups[2].Value
-        Over10 = $err.Groups[3].Value.TrimEnd(';'); Over100 = $err.Groups[4].Value
+        Over10 = $err.Groups[3].Value -replace '^tick ', ''; Over100 = $err.Groups[4].Value -replace '^tick ', ''
         Start = $tick0; Frames = $stats.Frames; Gap = $stats.Gap
     }
 }

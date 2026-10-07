@@ -435,7 +435,29 @@ remains genuinely open. Status vocabulary matches the rest of the repo:
   pinned against the floor, versus the port's single impulse.
 - **Status**: Open. **Owner**: baileyrd.
 
+### RB-RESEARCH-O011 — corner_slide is not repeatable run to run
+
+- **Evidence (2026-10-06)**: the same `corner_slide` tape, start state and
+  inputs captured five times: position error against the port 100.3 / 177.6
+  (session 1), 19.5 / 33.1 and 100.5 / 177.6, 27.7 / 45.0 and 79.7 / 146.3
+  uu (mean / max; two unattended batches, `BOT-RUN-SHEET.md` session 2). The
+  cars' speeds differ from tick 12 (1160 vs 1233 uu/s) at the first corner
+  contact. Every other scenario repeats to under 4 uu mean.
+- **Effect**: the 100 uu "corner climb miss" of session 1 is one draw of a
+  distribution the game itself spans (19 to 100 uu mean); the port cannot be
+  judged to 100 uu on one capture, and a fit to it could chase noise.
+- **Next**: capture it 10+ times (`run_batch.ps1 -Repeat 10 -Scenarios
+  corner_slide`), compare run against run (not against the port), and find
+  the source (the sub-tick phase of the state set against the physics tick;
+  a start state a few ticks before the wall, so the contact is not the
+  first thing that happens).
+- **Status**: Open. **Owner**: baileyrd.
+
 ## Change history
+
+- 2026-10-06: Added RB-RESEARCH-O011 (corner_slide not repeatable);
+  RB-RESEARCH-O008 fixed (plugin 1.3, verified). Largest capture hole in the
+  22-capture batch 0.075 s (O009 unchanged).
 
 - 2026-10-05: Added RB-RESEARCH-O007 (long term, RLBot in Rust over this
   engine) from the owner's note; reading B recommended, nothing scheduled.

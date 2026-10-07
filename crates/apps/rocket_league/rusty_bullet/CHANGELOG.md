@@ -4,6 +4,14 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- ADR-0064: unattended tape runs. Capture plugin 1.4 polls a job file
+  (`{"start": path}` / `{"stop": true}`, plus a heartbeat file);
+  `tools/rb_tape_bot` gets `rb_run_tapes` (starts a freeplay match with the
+  tape bot over core's socket, no GUI) and `run_batch.ps1` (runs it, scores
+  every capture with `rb-verify`, writes `results.md`). All eleven scenarios
+  twice in about five minutes, nobody touching the machine; ten repeat to
+  under 4 uu, `corner_slide` does not (RB-RESEARCH-O011).
 ### Fixed
 - Plugin 1.3 verified on four bot-driven tapes (inputs recorded, match the
   tape); focus claim corrected: tapes ran with the game minimised and unfocused

@@ -180,3 +180,66 @@ state-set teleports into `v13_run1..4.jsonl`.
   mismatches), the same one-tick jitter as the session-1 noise floor. The
   five `bakkesmod.log` diagnostic lines show all-zero from both sources
   because they are logged before the tape starts; they do not test the fix.
+
+## Session 2, stage 2 (2026-10-06): unattended batch of all eleven scenarios
+
+One command from the repository root, nobody touching the machine:
+`powershell -File tools\rb_tape_bot\run_batch.ps1` (ADR-0064). Plugin 1.4
+(job-file trigger) installed with the 1.3 DLL kept as `.1.3.dll.bak`, and
+`plugin load rusty_bullet_capture` added to BakkesMod's `plugins.cfg`
+(backup `plugins.cfg.bak`). Final batch `replays/batch_20261006-195814/`
+(gitignored), eleven scenarios, two runs each, results table below; the
+script's own `results.md` is in that folder.
+
+| Scenario | Lag | Pos. error mean / max (uu), run 1; run 2 | First over 10 / 100 uu | Frames | Largest gap (s) | Repeatable |
+|---|---|---|---|---|---|---|
+| car_over_ball | 1; 1 | 155.7 / 290.5; 155.7 / 290.5 | 2 / 71 | 470; 471 | 0.050 | yes |
+| corner_slide | 1; 0 | 27.7 / 45.0; 79.7 / 146.3 | 2 / never; 45 / 118 | 471; 470 | 0.050 | **no** |
+| half_flip | 0; 0 | 4.3 / 13.9; 4.3 / 13.9 | 320 / never | 590; 591 | 0.067 | yes |
+| hard_landing_nose_first | 0; 0 | 7.4 / 13.8; 11.3 / 23.1 | 170 / never; 109 / never | 470; 470 | 0.058 | yes (d mean 3.9) |
+| late_dodge | 2; 2 | 1.8 / 4.7; 1.8 / 4.7 | never / never | 950; 952 | 0.075 | yes |
+| pogo | 0; 0 | 2.4 / 4.3; 2.4 / 4.3 | never / never | 591; 590 | 0.050 | yes |
+| prompt_dodge | 3; 3 | 4.0 / 10.7; 4.0 / 10.7 | 452 / never | 832; 833 | 0.050 | yes |
+| speed_flip | 2; 3 | 87.4 / 273.7; 85.2 / 266.8 | 219 / 238; 209 / 239 | 591; 592 | 0.050 | yes (d mean 2.2) |
+| wavedash_early | 0; 0 | 14.2 / 25.3; 14.3 / 25.3 | 98 / never | 469; 471 | 0.058 | yes |
+| wavedash_late | 0; 0 | 4.1 / 5.1; 4.1 / 5.1 | never / never | 469; 471 | 0.067 | yes |
+| wavedash_mid | 0; 0 | 4.1 / 5.1; 4.1 / 5.1 | never / never | 470; 471 | 0.050 | yes |
+
+- **Acceptance:** one command, eleven rows, and in all 22 captures the
+  frame `rb-verify` aligns as the start is 0.0 uu from the scenario's start
+  location. The capture also holds a few frames before that (the match's
+  kickoff spawn), so "first frame of the file" is the spawn, not the start.
+- **Repeatability:** ten of eleven agree between two runs to under 4 uu mean:
+  eight to 0.1 uu or better (car_over_ball, pogo, the three wavedashes,
+  half_flip, late_dodge, prompt_dodge), speed_flip to 2.2, hard_landing to 3.9. **corner_slide is not repeatable:** the same tape from
+  the same start gave 27.7 / 45.0 and 79.7 / 146.3 uu against the port in
+  this batch, 19.5 / 33.1 and 100.5 / 177.6 in an earlier batch the same
+  day (session 1: 100.3 / 177.6). The cars differ from tick 12 (speed 1160 vs
+  1233 uu/s), i.e. at the first corner-wall contact, so the corner hit is
+  sensitive to something the tape and start state do not fix (sub-tick
+  phase of the state set). One capture of it is therefore not a ground truth
+  at the 100 uu level. RB-RESEARCH-O011.
+- **Session 1's three divergences stand:** car_over_ball (155.7 mean against
+  156.2), speed_flip (85 to 87 against 94.4) and the higher corner_slide runs
+  (79.7 to 100.5 against 100.3) reproduce, so they stay the physics targets
+  (corner_slide with O011's caveat).
+- **Lag** varies 0 to 3 ticks between scenarios and, for prompt_dodge, from
+  1 (session 1) to 3 (this batch) with the same tape, with identical error
+  between its two runs here; the aligner absorbs it.
+- **Capture holes (O009):** every capture still has holes, the largest
+  0.075 s (9 ticks, late_dodge), most 0.050 to 0.067 s. Reported, not
+  hidden; `rb-verify` skips them.
+- **Failures on the way** (each cost a run): the first runner version
+  detected the bot's start by distance under 40 uu, which a car starting at
+  1600 uu/s leaves in one tick (`hard_landing_nose_first` timed out after
+  120 s; the tolerance is now 300 uu); detection also fired on the previous
+  match's last packets when it ended near the next start (pogo then
+  prompt_dodge), recording 24 s instead of 5 s, so it now only accepts the
+  match's first 300 frames; a log file left open by an earlier shell killed
+  one launch of the command. The scoring script first failed to parse
+  `tick N` in "first over" and reported the proximity of the first table row
+  as the start error (18 uu for car_over_ball, which is already in contact).
+- **Not verified:** the loading screen looked like a private match for the
+  first matches and freeplay later (owner's observation); core's map command
+  is the same freeplay one for all of them and the plugin records in every
+  one. Second-monitor focus and `rb_probe` alongside were never run.
